@@ -10957,7 +10957,7 @@ layer_c1bm_cargo_test_pico_failfast() {
         wz_test_args wz-capi-pico "$suite"
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         out="$(cd crates && cargo test -p wz-capi-pico \
-            $tokio_args "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || {
+            $tokio_args --features object-pool "${WZ_TEST_ARGS[@]}" --quiet 2>&1)" || {
             echo "  C1bm FAIL: $suite did not pass under transport-link-$link" >&2
             echo "$out" >&2
             return 1
@@ -10972,7 +10972,7 @@ layer_c1bm_cargo_test_pico_failfast() {
         total=$((total + passed))
         # shellcheck disable=SC2086 # the cargo arguments are words on purpose
         (cd crates && cargo clippy -p wz-capi-pico --all-targets \
-            $tokio_args --quiet -- -D warnings) || return 1
+            $tokio_args --features object-pool --quiet -- -D warnings) || return 1
     done
     _runci_lane_did C1bm "$total" "fail-fast listen test(s) over 2 link(s), each clippy-gated"
 }
@@ -10989,15 +10989,20 @@ layer_c1bm_cargo_test_pico_failfast() {
 layer_c1pc_capi_pico_engines() {
     local tokio_args
     tokio_args="$(pico_tokio_args)" || return 1
+    # Each run names `object-pool`: the merged test executable `it` requires the pools' door, its
+    # harness reserving through it the share of the programs it runs in one process
+    # (`crates/wz-capi-pico/Cargo.toml`), and cargo leaves a target whose features a run lacks out
+    # of `--tests`, `--all-targets` and a whole-crate run without a word.
     _runci_guarded_test "C1pc wz-capi-pico, the cooperative engine (default)" + \
-        cargo test -p wz-capi-pico --no-fail-fast || return 1
-    (cd crates && cargo clippy -p wz-capi-pico --all-targets --quiet -- -D warnings) || return 1
+        cargo test -p wz-capi-pico --features object-pool --no-fail-fast || return 1
+    (cd crates && cargo clippy -p wz-capi-pico --all-targets --features object-pool --quiet \
+        -- -D warnings) || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
     _runci_guarded_test "C1pc wz-capi-pico, the tokio engine (removed in P5)" + \
-        cargo test -p wz-capi-pico $tokio_args --no-fail-fast || return 1
+        cargo test -p wz-capi-pico $tokio_args --features object-pool --no-fail-fast || return 1
     # shellcheck disable=SC2086 # the cargo arguments are words on purpose
-    (cd crates && cargo clippy -p wz-capi-pico --all-targets $tokio_args --quiet \
-        -- -D warnings) || return 1
+    (cd crates && cargo clippy -p wz-capi-pico --all-targets $tokio_args --features object-pool \
+        --quiet -- -D warnings) || return 1
     _runci_lane_did C1pc 2 "test run(s) of wz-capi-pico, one per engine, each clippy-gated"
 }
 
@@ -13167,7 +13172,7 @@ layer_c1co_pico_client_dials_a_listener() {
                 _runci_guarded_test "C1co ${engine}${answering} on a ${listener_engine} listener" "$expect" \
                     env WZ_PICO_LISTENER_BIN="$listener" \
                     cargo test -p wz-capi-pico --no-default-features \
-                    --features "${engine},link-udp,query${answering}${admin},liveliness-get,unstable-api,connectivity,local-subscriber,local-queryable" \
+                    --features "${engine},link-udp,query${answering}${admin},liveliness-get,unstable-api,connectivity,local-subscriber,local-queryable,object-pool" \
                     "${WZ_TEST_ARGS[@]}" || return 1
             done
         done
@@ -13182,7 +13187,7 @@ layer_c1co_pico_client_dials_a_listener() {
             _runci_guarded_test "C1co ${engine} advanced on a ${listener_engine} listener" 11 \
                 env WZ_PICO_LISTENER_BIN="$listener" \
                 cargo test -p wz-capi-pico --no-default-features \
-                --features "${engine},link-udp,query,queryable,liveliness,liveliness-get,advanced,unstable-api,connectivity,local-subscriber,local-queryable" \
+                --features "${engine},link-udp,query,queryable,liveliness,liveliness-get,advanced,unstable-api,connectivity,local-subscriber,local-queryable,object-pool" \
                 "${WZ_TEST_ARGS[@]}" || return 1
         done
     done
@@ -13215,7 +13220,7 @@ layer_c1co_pico_client_dials_a_listener() {
     wz_test_args wz-capi-pico mutual_dial
     _runci_guarded_test "C1co engine-coop mutual dial" 2 \
         cargo test -p wz-capi-pico --no-default-features \
-        --features "engine-coop,peer,multi-thread,link-udp,connectivity" \
+        --features "engine-coop,peer,multi-thread,link-udp,connectivity,object-pool" \
         "${WZ_TEST_ARGS[@]}" || return 1
     # The `tls/` link on the cooperative engine, reached through the exported `z_*` symbols (step
     # T4 of L6, `crates/wz-capi-pico/tests/tls_coop_roundtrip.rs`): a listener presents a chain and
@@ -13226,7 +13231,7 @@ layer_c1co_pico_client_dials_a_listener() {
     wz_test_args wz-capi-pico tls_coop_roundtrip
     _runci_guarded_test "C1co tls engine-coop" 2 \
         cargo test -p wz-capi-pico --no-default-features \
-        --features "tls-mbedtls,peer,multi-thread,link-udp" \
+        --features "tls-mbedtls,peer,multi-thread,link-udp,object-pool" \
         "${WZ_TEST_ARGS[@]}" || return 1
     # The same listener tells the node's event log when it ends a connection without a stream
     # (`crates/wz-capi-pico/tests/tls_handshake_drop_event.rs`): a client that is not speaking TLS
@@ -13246,7 +13251,7 @@ layer_c1co_pico_client_dials_a_listener() {
     wz_test_args wz-capi-pico open_scouts_for_a_locator
     _runci_guarded_test "C1co scout engine-coop" 1 \
         cargo test -p wz-capi-pico --no-default-features \
-        --features "engine-coop,link-udp,scout" \
+        --features "engine-coop,link-udp,scout,object-pool" \
         "${WZ_TEST_ARGS[@]}" || return 1
     # A sixth: the observation plane's instruments hosted by the cooperative engine with no task
     # and no tokio engine in the build (the supervision instrument). The supervisor and the
@@ -13334,7 +13339,8 @@ layer_c1p32_pico_i686() {
     wz_test_args wz-capi-pico mutual_dial
     _runci_leg coop-mutual-dial -- _runci_guarded_test "C1p32 engine-coop mutual dial" 2 \
         cargo test -p wz-capi-pico --target "$target" --no-default-features \
-        --features "engine-coop,peer,multi-thread,link-udp,connectivity" "${WZ_TEST_ARGS[@]}"
+        --features "engine-coop,peer,multi-thread,link-udp,connectivity,object-pool" \
+        "${WZ_TEST_ARGS[@]}"
     _runci_leg linked-crates -- _runci_guarded_test "C1p32 the crates the library links" + \
         cargo test --target "$target" --lib --no-fail-fast -p wz-abi-stamp -p wz-app-frame -p wz-app-schema -p wz-capi-core \
         -p wz-capi-coop -p wz-capi-port -p wz-codecs -p wz-ext-pubsub -p wz-host-net \
@@ -13356,7 +13362,8 @@ _c1p32_pico_profile_tests() {
     fi
     read -r -a args <<<"$resolved"
     _runci_guarded_test "C1p32 pico host-peer-ext (the profile's engine)" + \
-        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --tests --no-fail-fast
+        cargo test -p wz-capi-pico --target "$target" "${args[@]}" --features object-pool --tests \
+        --no-fail-fast
 }
 
 # ─── Layer C1nh — what the pico C ABI allocates after a session opens ──────
@@ -22640,7 +22647,8 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     # default build (the first needs `peer`, which the default selects).
     wz_test_args wz-capi-pico connect_group_roundtrip
     _runci_guarded_test "M a pico C ABI session joins the group its connect names" 2 \
-        cargo test -p wz-capi-pico "${WZ_TEST_ARGS[@]}" -- --ignored --test-threads=1 || return 1
+        cargo test -p wz-capi-pico --features object-pool "${WZ_TEST_ARGS[@]}" \
+        -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and
     # prints the Hello it hears. It needs a multicast route and nothing else.

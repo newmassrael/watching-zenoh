@@ -2179,6 +2179,17 @@ leg_feats() { local f="${1}"; echo "${f//[[:space:]]/}"; }
 # `env` is handed before cargo; one that is not a `WZ_` word set to a value fails, so a typo is no
 # leg built in the default environment. Every other token is a feature name. One function for the
 # run and the census, so the two cannot build a leg two ways.
+# The cargo words a package's tests need whatever a leg's features, in `LEG_PACKAGE_ARGS`:
+# wz-capi-pico's merged test executable `it` requires `object-pool`, whose door its harness
+# reserves the share of the programs it runs in one process through (its `Cargo.toml`), and cargo
+# leaves a target whose features a run lacks out of a whole-crate or filtered run without a word.
+leg_package_args() {
+    LEG_PACKAGE_ARGS=()
+    case "$1" in
+        wz-capi-pico) LEG_PACKAGE_ARGS=(--features object-pool) ;;
+    esac
+}
+
 leg_feature_args() {
     local feats="$1" f
     local -a parts=() names=()
@@ -2288,7 +2299,8 @@ if [[ "${1:-}" == "--list" ]]; then
     for leg in "${LEGS[@]}"; do
         IFS='|' read -r pkg scope feats filter handoff <<<"$leg"
         leg_feature_args "$(leg_feats "$feats")" || exit 1
-        echo "  [$scope] ${LEG_ENV[*]+${LEG_ENV[*]} }$pkg ${LEG_FEATURE_ARGS[*]} ${filter:-<whole crate>}"
+        leg_package_args "$pkg"
+        echo "  [$scope] ${LEG_ENV[*]+${LEG_ENV[*]} }$pkg ${LEG_FEATURE_ARGS[*]}${LEG_PACKAGE_ARGS[*]+ ${LEG_PACKAGE_ARGS[*]}} ${filter:-<whole crate>}"
         [[ -n "$handoff" ]] && echo "          hands off to another leg: $handoff"
     done
     for row in "${SKIPS[@]}"; do
@@ -2365,6 +2377,8 @@ if [[ "${1:-}" == "--census" ]]; then
             leg_feature_args "$feats" || return 1
             argv+=(${LEG_FEATURE_ARGS[@]+"${LEG_FEATURE_ARGS[@]}"})
         fi
+        leg_package_args "$pkg"
+        argv+=(${LEG_PACKAGE_ARGS[@]+"${LEG_PACKAGE_ARGS[@]}"})
         leg_filter_args "$pkg" "$filter" || return 1
         argv+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
         if ! out="$(cd "$repo/crates" &&
@@ -2784,7 +2798,9 @@ for leg in "${LEGS[@]}"; do
     fi
 
     leg_feature_args "$feats" || { rc=1; continue; }
+    leg_package_args "$pkg"
     cargo_args=(test -p "$pkg" ${LEG_FEATURE_ARGS[@]+"${LEG_FEATURE_ARGS[@]}"})
+    cargo_args+=(${LEG_PACKAGE_ARGS[@]+"${LEG_PACKAGE_ARGS[@]}"})
     leg_filter_args "$pkg" "$filter" || { rc=1; continue; }
     cargo_args+=(${LEG_FILTER_ARGS[@]+"${LEG_FILTER_ARGS[@]}"})
     cargo_args+=(--quiet)

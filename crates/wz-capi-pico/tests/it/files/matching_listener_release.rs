@@ -12,7 +12,8 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread --test it files::matching_listener_release::
+//!     --features engine-coop,peer,multi-thread,object-pool \
+//!     --test it files::matching_listener_release::
 //! ```
 #![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
 
