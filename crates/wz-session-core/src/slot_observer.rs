@@ -392,13 +392,22 @@ impl OtherPeers for NoOtherPeers {
     }
 }
 
-/// What the caller of the planes beside the subscribers' side of an event took of it itself, in
-/// the order of the event's records: the answers to the pending gets and snapshots, and the
-/// peer's queries, each then left alone by its plane.
+/// What the caller of a dispatch of an event took of its records itself, ahead of the dispatch and
+/// in their order: each part then left alone by its plane. A caller that took nothing names the
+/// default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TakenAhead {
+    /// Every peer's query, handed to the queryables and owed its Final by the caller
+    /// (`QueryPeer::pin_request`).
+    pub queries: bool,
+}
+
+/// [`TakenAhead`] with what the entry point itself says of the answers to the pending gets and
+/// snapshots, taken ahead by a caller of the planes beside the subscribers.
 #[derive(Clone, Copy)]
-struct TakenAhead {
+struct Taken {
     replies: bool,
-    queries: bool,
+    ahead: TakenAhead,
 }
 
 /// What the application registered, shared by every session of the process. See
@@ -1354,14 +1363,20 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
     ) {
-        self.dispatch_event_among(cx, peers, requesters, event, &NoOtherPeers, false);
+        self.dispatch_event_among(
+            cx,
+            peers,
+            requesters,
+            event,
+            &NoOtherPeers,
+            TakenAhead::default(),
+        );
     }
 
     /// [`Self::dispatch_event`] for a session that holds other faces: `others` is what their
-    /// peers declare, counted by the matching verdicts beside this face's own. A caller that hands
-    /// every peer's query to the queryables itself, before this, and owes its Final
-    /// (`QueryPeer::pin_request`), says so with `queries_taken`, and the queries' plane takes
-    /// nothing.
+    /// peers declare, counted by the matching verdicts beside this face's own. What the caller took
+    /// of the event's records itself, before this, it says with `taken`, and the planes of those
+    /// parts take nothing of them.
     // Each plane's fan below is a function of its own and not inlined here: inlined, the
     // temporaries of every plane (the views and records each decodes) are laid out in this one
     // frame, which the compiler does not overlap reliably, and the frame is held on every event
@@ -1375,14 +1390,14 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
-        queries_taken: bool,
+        taken: TakenAhead,
     ) {
         peers
             .subscribers
             .dispatch_iteration_event(&mut self.tables, cx, event);
-        let taken = TakenAhead {
+        let taken = Taken {
             replies: false,
-            queries: queries_taken,
+            ahead: taken,
         };
         self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
@@ -1392,9 +1407,8 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
     /// event's records and handed each answer to its get itself, in their order, before this
     /// (`SubscriberPeer::take_record`, `RequesterTables::dispatch_finals_of`): the planes below
     /// then resolve through the aliases the subscribers' side bound, as they do after it in
-    /// [`Self::dispatch_event_among`], and a Final ends its get after its answers. A caller that
-    /// handed each peer's query to the queryables itself too (`QueryPeer::pin_request`), and
-    /// owed its Final, says so with `queries_taken`, and the queries' plane takes nothing.
+    /// [`Self::dispatch_event_among`], and a Final ends its get after its answers. What else the
+    /// caller took itself it says with `taken`, as there.
     #[inline(never)]
     pub fn dispatch_event_beside_subscribers<Q: RequesterTables, O: OtherPeers, T: Storage>(
         &mut self,
@@ -1403,11 +1417,11 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
-        queries_taken: bool,
+        taken: TakenAhead,
     ) {
-        let taken = TakenAhead {
+        let taken = Taken {
             replies: true,
-            queries: queries_taken,
+            ahead: taken,
         };
         self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
@@ -1423,12 +1437,12 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         requesters: &mut Q,
         event: IterationEvent<'_, '_>,
         others: &O,
-        taken: TakenAhead,
+        taken: Taken,
     ) {
         // A peer's query is resolved through both id spaces while the queryables are asked, so
         // the tables lend the two apart.
         #[cfg(feature = "query-queryable")]
-        if !taken.queries {
+        if !taken.ahead.queries {
             let (own, queryables) = self.tables.queries_mut();
             let spaces = peers.subscribers.mapping_spaces_over(own);
             match queryables {
@@ -1589,7 +1603,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         let _ = (&requesters, taken.replies);
         // Read only by the queries' plane, which a build with no queryable lacks.
         #[cfg(not(feature = "query-queryable"))]
-        let _ = taken.queries;
+        let _ = taken.ahead.queries;
         let _ = (&peers, &cx, event, others);
     }
 
@@ -2511,9 +2525,9 @@ mod tests {
     }
 
     /// The planes beside the subscribers' side of a frame leave a peer's query to a caller that
-    /// handed it to the queryables itself (`queries_taken`): no row is asked and no Final is
-    /// owed. A caller that did not have it dispatched there, its row asked and its Final owed, as
-    /// the whole fan does. Turned red by a queries' plane that runs for a query the caller took,
+    /// handed it to the queryables itself (`TakenAhead::queries`): no row is asked and no Final
+    /// is owed. A caller that did not have it dispatched there, its row asked and its Final owed,
+    /// as the whole fan does. Turned red by a queries' plane that runs for a query the caller took,
     /// or one that skips a query it did not.
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
     #[test]
@@ -2535,7 +2549,7 @@ mod tests {
                     &mut requesters,
                     event,
                     &NoOtherPeers,
-                    taken,
+                    TakenAhead { queries: taken },
                 )
             });
             if taken {
@@ -2559,8 +2573,8 @@ mod tests {
     }
 
     /// The whole fan leaves a peer's query to a caller that handed it to the queryables itself
-    /// (`queries_taken`), as the planes beside the subscribers do: no row is asked and no Final is
-    /// owed. The CONTROL is a caller that did not, its row asked and its Final owed. Turned red by
+    /// (`TakenAhead::queries`), as the planes beside the subscribers do: no row is asked and no
+    /// Final is owed. The CONTROL is a caller that did not, its row asked and its Final owed. Turned red by
     /// a whole fan that runs the queries' plane for a query the caller took.
     #[cfg(all(feature = "query-queryable", feature = "alloc"))]
     #[test]
@@ -2582,7 +2596,7 @@ mod tests {
                     &mut requesters,
                     event,
                     &NoOtherPeers,
-                    taken,
+                    TakenAhead { queries: taken },
                 )
             });
             if taken {

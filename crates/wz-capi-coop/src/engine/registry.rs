@@ -67,7 +67,7 @@ use wz_session_core::slot_observer::NoSink;
 use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, SlotObserverOf, TakenAhead};
 
 #[cfg(feature = "query")]
 use super::{LegHold, LegSink};
@@ -440,17 +440,19 @@ type BuildHolders = held::OneHolder;
 /// The application layer of one session, as the build holds its faces.
 pub(super) type Registry = RegistryOf<BuildHolders>;
 
-/// Whether the read hands every query of a link to the queryables itself (`queries`), so the
-/// queries' plane of a face's dispatch takes none: a build with queryables whose read steps its
-/// one link itself. One without leaves them to the queries' plane, which owes each its Final.
-const READ_TAKES_QUERIES: bool = cfg!(all(
-    feature = "queryable",
-    not(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
-    ))
-));
+/// What the read takes of a face's records itself, ahead of the face's dispatch: every query of
+/// the link, handed to the queryables (`queries`), in a build with queryables whose read steps
+/// its one link itself. One without leaves them to the queries' plane, which owes each its Final.
+const READ_TAKES: TakenAhead = TakenAhead {
+    queries: cfg!(all(
+        feature = "queryable",
+        not(any(
+            feature = "threads",
+            feature = "listen",
+            feature = "group"
+        ))
+    )),
+};
 
 /// The planes of the application layer a dispatch of a face's event reaches.
 #[derive(Clone, Copy)]
@@ -1040,7 +1042,7 @@ impl<H: Holders> RegistryOf<H> {
                     &mut set.gets,
                     event,
                     &others,
-                    READ_TAKES_QUERIES,
+                    READ_TAKES,
                 ),
                 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
                 Planes::BesideSubscribers => app.dispatch_event_beside_subscribers(
@@ -1049,7 +1051,7 @@ impl<H: Holders> RegistryOf<H> {
                     &mut set.gets,
                     event,
                     &others,
-                    READ_TAKES_QUERIES,
+                    READ_TAKES,
                 ),
             }
         }
