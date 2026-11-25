@@ -3249,11 +3249,24 @@ pub trait ArenaMemory: Sync {
     /// Never asked for zero bytes.
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>>;
 
-    /// Give back what [`Self::reserve`] gave.
+    /// [`Self::reserve`], every byte of the block zero: what an open reserves its arena by, whose
+    /// rows are empty as all-zero bytes, so the open writes none of them and a page no row of the
+    /// session uses stays unwritten, and on a host with paging not resident. Provided as a
+    /// reservation written over with zeros, as `GlobalAlloc::alloc_zeroed` is; a memory that has
+    /// pages already zero (the allocator's fresh pages, a static region not used before) answers
+    /// without the write.
+    fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
+        let base = self.reserve(layout)?;
+        // SAFETY: `reserve` gave `layout.size()` bytes at `base` to this call alone.
+        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, layout.size()) };
+        Some(base)
+    }
+
+    /// Give back what [`Self::reserve`] or [`Self::reserve_zeroed`] gave.
     ///
     /// # Safety
-    /// `base` is what [`Self::reserve`] gave for `layout`, it is given back once, and nothing
-    /// uses it after.
+    /// `base` is what [`Self::reserve`] or [`Self::reserve_zeroed`] gave for `layout`, it is
+    /// given back once, and nothing uses it after.
     unsafe fn release(&self, base: NonNull<u8>, layout: Layout);
 }
 
@@ -3267,6 +3280,14 @@ impl ArenaMemory for AllocatorMemory {
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
         // SAFETY: the layout is not of zero bytes, which the trait's contract rules out.
         NonNull::new(unsafe { alloc::alloc::alloc(layout) })
+    }
+
+    /// The allocator's zeroed block: the C library's `calloc` on a host without `std`, `std`'s
+    /// on one with it (`HeapAlloc` with `HEAP_ZERO_MEMORY` on Windows), which hand fresh pages
+    /// without writing them.
+    fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
+        // SAFETY: the layout is not of zero bytes, which the trait's contract rules out.
+        NonNull::new(unsafe { alloc::alloc::alloc_zeroed(layout) })
     }
 
     unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
@@ -3497,9 +3518,11 @@ impl SessionArena {
     }
 
     /// An arena of `bytes` reserved from `memory` after a head of `head`'s layout, every byte of
-    /// the head zero, and where the block starts: the head's place. One body for an arena alone
-    /// (a head of no bytes) and for one beside a region. Refused, having taken nothing, when the
-    /// block is past the address space or the memory has none to give.
+    /// the block zero, and where the block starts: the head's place. One body for an arena alone
+    /// (a head of no bytes) and for one beside a region. The block is asked of the memory zeroed
+    /// ([`ArenaMemory::reserve_zeroed`]) and written by none of this, so its pages are written
+    /// only by the rows the session uses. Refused, having taken nothing, when the block is past the
+    /// address space or the memory has none to give.
     fn of_bytes_after(
         head: Layout,
         bytes: usize,
@@ -3509,17 +3532,17 @@ impl SessionArena {
         let (layout, offset) = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
             .and_then(|tail| head.extend(tail))
             .map_err(|_| ArenaRefused::TooLarge)?;
-        let base = memory.reserve(layout).ok_or(ArenaRefused::NoMemory {
-            bytes: offset.saturating_add(bytes),
-        })?;
-        // SAFETY: the memory gave `layout` to this call alone: the head's `head.size()` bytes at
-        // its start are inside it, and its arena starts `offset` bytes in, aligned to
+        let base = memory
+            .reserve_zeroed(layout)
+            .ok_or(ArenaRefused::NoMemory {
+                bytes: offset.saturating_add(bytes),
+            })?;
+        // SAFETY: the memory gave `layout` to this call alone, every byte of it zero: the head's
+        // bytes at its start are inside it, and its arena starts `offset` bytes in, aligned to
         // `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long, used by nothing else until the
         // block is given back (`Drop`, or the last count of `Self::keep`).
-        let arena = unsafe {
-            base.as_ptr().write_bytes(0, head.size());
-            Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes)
-        };
+        let arena =
+            unsafe { Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes) };
         Ok((
             Self {
                 arena,
@@ -3654,6 +3677,143 @@ mod tests {
             // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
             unsafe { AllocatorMemory.release(base, layout) }
         }
+    }
+
+    /// The byte [`Marked`] writes over what it gives.
+    const MARK: u8 = 0x5a;
+
+    /// A memory that gives only zeroed reservations and breaks their contract on purpose: each is
+    /// written over with [`MARK`], so a byte the arena's owner writes after the reservation is a
+    /// byte that is no longer the mark. It refuses a reservation not asked zeroed. Only the raw
+    /// bytes of what it gives are read, never a value laid over them.
+    struct Marked;
+
+    impl ArenaMemory for Marked {
+        fn reserve(&self, _layout: Layout) -> Option<NonNull<u8>> {
+            None
+        }
+
+        fn reserve_zeroed(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = AllocatorMemory.reserve(layout)?;
+            // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+            unsafe { core::ptr::write_bytes(base.as_ptr(), MARK, layout.size()) };
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
+    }
+
+    /// Whether every byte of the block `arena` was reserved in is still [`MARK`].
+    fn still_marked(arena: &SessionArena) -> bool {
+        // SAFETY: the block is the arena's, `layout.size()` bytes from `base`, read while the
+        // arena holds it and lends nothing.
+        unsafe { core::slice::from_raw_parts(arena.base.as_ptr(), arena.layout.size()) }
+            .iter()
+            .all(|byte| *byte == MARK)
+    }
+
+    /// The block of a region's head and its arena is asked of the memory zeroed, and its owner
+    /// writes none of it: every byte is as the memory gave it. The CONTROL is the provided
+    /// `reserve_zeroed` of a memory with only `reserve`, whose marked block it writes over with
+    /// zeros. Turned red by a reservation asked with `reserve` (refused by this memory), or by
+    /// the head or the arena written over at the reservation.
+    #[test]
+    fn an_arena_is_reserved_zeroed_and_its_owner_writes_none_of_it() {
+        let head = Layout::new::<[u8; 41]>();
+        let (arena, base) =
+            SessionArena::of_bytes_after(head, 256, &Marked).expect("a zeroed reservation");
+        assert_eq!(base, arena.base, "the head is the block's start");
+        assert!(still_marked(&arena), "the reservation wrote a byte");
+        drop(arena);
+
+        struct Plain;
+        impl ArenaMemory for Plain {
+            fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+                let base = AllocatorMemory.reserve(layout)?;
+                // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+                unsafe { core::ptr::write_bytes(base.as_ptr(), MARK, layout.size()) };
+                Some(base)
+            }
+
+            unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+                // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
+                unsafe { AllocatorMemory.release(base, layout) }
+            }
+        }
+        let (control, _) =
+            SessionArena::of_bytes_after(head, 256, &Plain).expect("the allocator answers");
+        // SAFETY: as `still_marked`.
+        let zero =
+            unsafe { core::slice::from_raw_parts(control.base.as_ptr(), control.layout.size()) }
+                .iter()
+                .all(|byte| *byte == 0);
+        assert!(zero, "CONTROL: the provided zeroed reservation is zero");
+    }
+
+    /// Whether each 4 KiB page of the `len` bytes at `at` is present in this process, read from
+    /// `/proc/self/pagemap` (bit 63 of a page's entry), which tells an unprivileged reader whether
+    /// a page is present though not where.
+    #[cfg(all(
+        feature = "std",
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "x86_64"
+    ))]
+    fn present_pages(at: usize, len: usize) -> std::vec::Vec<bool> {
+        use std::io::{Read, Seek, SeekFrom};
+        const PAGE: usize = 4096;
+        let (first, end) = (at / PAGE, (at + len).div_ceil(PAGE));
+        let mut map = std::fs::File::open("/proc/self/pagemap").expect("the kernel's page map");
+        map.seek(SeekFrom::Start(first as u64 * 8))
+            .expect("the first page's entry");
+        let mut entries = std::vec![0_u8; (end - first) * 8];
+        map.read_exact(&mut entries)
+            .expect("an entry for each page");
+        entries
+            .chunks_exact(8)
+            .map(|entry| {
+                let word = u64::from_le_bytes(entry.try_into().expect("eight bytes"));
+                word >> 63 == 1
+            })
+            .collect()
+    }
+
+    /// An arena the allocator reserves is not resident past what its owner wrote: of an arena of
+    /// 128 MiB, past glibc's largest mmap threshold and the most its trim leaves at the top of a
+    /// heap, so the allocator maps it fresh, no page past its first 4 MiB (the allocator's header
+    /// and a huge page around it) is present after the reservation. The CONTROL is a page of that
+    /// span written once, which is then present. Turned red by the arena reserved with `reserve`
+    /// and written over with zeros, or by an `AllocatorMemory` whose zeroed reservation writes
+    /// its block.
+    #[cfg(all(
+        feature = "std",
+        target_os = "linux",
+        target_env = "gnu",
+        target_arch = "x86_64"
+    ))]
+    #[test]
+    fn an_arena_the_allocator_reserves_is_not_resident_until_written() {
+        const BYTES: usize = 128 << 20;
+        const SKIPPED: usize = 4 << 20;
+        let arena = SessionArena::of_bytes(BYTES, &AllocatorMemory).expect("the host has it");
+        let start = arena.base.as_ptr() as usize + SKIPPED;
+        let len = BYTES - SKIPPED;
+        let present = present_pages(start, len);
+        assert_eq!(present.len(), len / 4096, "an entry for each page");
+        let resident = present.iter().filter(|page| **page).count();
+        assert_eq!(resident, 0, "pages of the arena no row wrote are resident");
+
+        let written = start + len / 2;
+        // SAFETY: the byte is inside the arena's block, which lends nothing and is the test's.
+        unsafe { (written as *mut u8).write_volatile(1) };
+        assert_eq!(
+            present_pages(written, 1),
+            [true],
+            "CONTROL: a written page is present"
+        );
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
