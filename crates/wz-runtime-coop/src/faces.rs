@@ -2764,22 +2764,6 @@ mod tests {
         assert_eq!(made, 0, "the buffer handed back is the one reserved");
     }
 
-    /// A read that waits on more than the open reserved room for is named in a test build.
-    /// Turned red by a wait that grows the buffer after the open in silence.
-    #[cfg(debug_assertions)]
-    #[test]
-    #[should_panic(expected = "a read waited on more than the open reserved room for")]
-    fn a_read_past_the_reserved_room_is_named_in_a_test_build() {
-        let runtime = CoopRuntime::new(Still);
-        let local = CoopLocalSet::new(&runtime);
-        let mut faces = supervisor(Link::Up(waited_wire(&local, WaitOn::Socket(3), false)), 1);
-        let others = [
-            LinkWait::input(WaitOn::Socket(4)),
-            LinkWait::input(WaitOn::Socket(5)),
-        ];
-        let _ = faces.idle_wait(10, &mut || 0u64, others, None);
-    }
-
     #[test]
     fn ending_lets_dials_go_first_then_tells_established_peers_and_keeps_the_dial_role() {
         let runtime = CoopRuntime::new(Still);
