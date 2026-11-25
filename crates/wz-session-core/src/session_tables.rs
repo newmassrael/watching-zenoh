@@ -1821,6 +1821,12 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         self.next_entity = next;
     }
 
+    /// Mint key expression ids from `next` on, past the last to 1 as every mint goes on: for a
+    /// test that reaches the wrap of the space without spending it.
+    pub fn expr_ids_from(&mut self, next: ExprId) {
+        self.next_expr = next;
+    }
+
     /// `key` as the wire carries it: by the declaration its form names where it still stands,
     /// whole otherwise.
     pub fn wire_of<'k>(&self, key: &'k EntityKey<P::Key>) -> WireForm<'k> {
