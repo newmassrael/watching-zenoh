@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# The cargo configuration of the pico C ABI's host library without `std` (`wz-capi-pico`'s
-# `os-posix` and `os-windows`, profile `capi-nostd`), named on the command line and used with
-# the host's own target, from `crates/`:
+# The cargo configuration of the pico C ABI's host library without `std` (`wz-capi-pico-lib`
+# over `wz-capi-pico`'s `os-host`, profile `capi-nostd`), named on the command line and used
+# with the host's own target, from `crates/`:
 #
-#   cargo build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
+#   cargo build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
 #       --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-unknown-linux-gnu
-#   cargo build -p wz-capi-pico --no-default-features --features os-windows,link-udp \
+#   cargo build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
 #       --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-pc-windows-msvc
 #
 # A library that never unwinds needs no unwind tables, and a cargo profile cannot carry a code

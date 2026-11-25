@@ -139,7 +139,7 @@ std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # program that calls one session from two threads at once orders those calls itself, as it does
 # on zenoh-pico's single-threaded arm.
 threads = []
-# The host without `std` (the pico C ABI's `os-posix` and `os-windows`): the port's `os` and the
+# The host without `std` (the pico C ABI's `os-host`, a POSIX host or Windows): the port's `os` and the
 # runtime's critical sections made of the host's own calls (`os-sys`, `host-lock-sys`), so a host
 # library built without `std` runs the read task and holds the locks as one with `std` does, and
 # links no `critical-section` implementation, which it would export beside its C ABI.
