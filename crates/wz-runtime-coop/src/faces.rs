@@ -416,16 +416,16 @@ impl<D> Dial<D> {
 pub type DialAnswer<P> = Option<Result<OpenedLink<P>, LinkOpenError>>;
 
 /// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): its role, where its
-/// link stands, what it did since, and the answer of its dial, kept for the link it made.
-pub struct FaceRead<P> {
+/// link stands, and what it did since. The answer of its dial, kept for the link it made, is
+/// written where the reader asked for it, so a step that reads an established face moves no
+/// room for a link it does not have.
+pub struct FaceRead {
     /// Which face it is: the dial role's, or one taken besides.
     pub role: FaceRole,
     /// Where the face's link stands.
     pub phase: Phase,
     /// What the link did since the face was last read.
     pub signals: Signals,
-    /// The answer of the face's dial, when one was under way.
-    pub answer: DialAnswer<P>,
 }
 
 /// Why the handshake of a face ended ([`LinkSupervisor::handshake_end`]).
@@ -966,15 +966,20 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             .any(|face| face.link().wire().is_some_and(Wire::holds_input))
     }
 
-    /// What the face at `at`, numbered `id`, holds: its role, where its link stands, what it did
-    /// since (`Signals`), and the answer of a dial under way, which is asked here and kept for the
-    /// link it made. A face past the table reads as one taken besides the dial role's that waits
+    /// What the face at `at`, numbered `id`, holds: its role, where its link stands and what it
+    /// did since (`Signals`); the answer of a dial under way is asked here and written to `answer`,
+    /// kept there for the link it made, which is left as it was for a face with no dial. A face past the table reads as one taken besides the dial role's that waits
     /// with no time to dial again. The role is the place's: the first is the dial role's, placed
     /// by [`Self::new`] and never taken out ([`Self::take_face`]). A table of the dial role's face
     /// alone reads every place in that role, and holds no other face to hold a node.
     // Out of line, so its caller reads the role as a value and takes one path for either role.
     #[inline(never)]
-    pub fn read_face(&mut self, at: usize, id: FaceId) -> FaceRead<L::Pump> {
+    pub fn read_face(
+        &mut self,
+        at: usize,
+        id: FaceId,
+        answer: &mut DialAnswer<L::Pump>,
+    ) -> FaceRead {
         // A session that takes no face besides its dial has the dial role alone: a place past the
         // first holds a departed face's tomb there, which never moves.
         #[cfg(feature = "listen")]
@@ -991,10 +996,9 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
                 face.link().phase()
             });
         let mut signals = Signals::default();
-        let mut answer = None;
         match self.face_mut(at).map(|face| face.link_mut()) {
             Some(Link::Dialing { dial, .. }) => {
-                answer = dial.answer();
+                *answer = dial.answer();
                 signals.dial = answer.as_ref().map(Result::is_ok);
             }
             // An established link and one in its handshake read their wire's end by one look; only
@@ -1018,7 +1022,6 @@ impl<L: SessionLinks, F: FaceRecord<Pump = L::Pump, Dial = L::Dial>, P: FacePlac
             role,
             phase,
             signals,
-            answer,
         }
     }
 
@@ -1645,11 +1648,13 @@ mod tests {
             ),
             2,
         );
-        let read = faces.read_face(0, 100);
-        assert!(matches!(read.answer, Some(Err(LinkOpenError::Refused))));
+        let mut answer = None;
+        let read = faces.read_face(0, 100, &mut answer);
+        assert!(matches!(answer, Some(Err(LinkOpenError::Refused))));
         assert_eq!(read.signals.dial, Some(false));
-        let again = faces.read_face(0, 100);
-        assert!(again.answer.is_none(), "a dial is asked once");
+        let mut again_answer = None;
+        let again = faces.read_face(0, 100, &mut again_answer);
+        assert!(again_answer.is_none(), "a dial is asked once");
         assert_eq!(again.signals.dial, None);
 
         let node = [7u8, 1];
@@ -1662,7 +1667,8 @@ mod tests {
             },
         };
         assert!(faces.place_face(1, opening).is_ok());
-        let read = faces.read_face(1, 1);
+        let mut answer = None;
+        let read = faces.read_face(1, 1, &mut answer);
         assert_eq!(
             read.phase,
             Phase::Opening {
@@ -1672,14 +1678,14 @@ mod tests {
         );
         assert!(read.signals.established);
         assert!(!read.signals.ended);
-        assert!(read.answer.is_none());
+        assert!(answer.is_none(), "a handshake's face writes no answer");
         // An established link reads its wire's end and reports no establishment: only a
         // handshake's link has one to report.
         faces.put_link(
             1,
             Link::Up(wire(&local, session(true, Some(&node)), false, false)),
         );
-        let up = faces.read_face(1, 1);
+        let up = faces.read_face(1, 1, &mut None);
         assert_eq!(up.phase, Phase::Up);
         assert!(!up.signals.established);
         assert!(!up.signals.ended);
@@ -1687,17 +1693,18 @@ mod tests {
         #[cfg(feature = "listen")]
         {
             faces.put_link(0, Link::Held { zid: held_node() });
-            assert!(faces.read_face(0, 100).signals.node_held);
+            assert!(faces.read_face(0, 100, &mut None).signals.node_held);
             assert!(
-                !faces.read_face(0, 1).signals.node_held,
+                !faces.read_face(0, 1, &mut None).signals.node_held,
                 "a face does not hold the node for itself"
             );
         }
 
-        let past = faces.read_face(9, 9);
+        let mut answer = None;
+        let past = faces.read_face(9, 9, &mut answer);
         assert_eq!(past.phase, Phase::Waiting { at_us: u64::MAX });
         assert_eq!(past.signals, Signals::default());
-        assert!(past.answer.is_none());
+        assert!(answer.is_none());
     }
 
     /// A face is read in the role of its row: the first, which the table never lets go of, is the
@@ -1711,18 +1718,18 @@ mod tests {
             link: Link::Waiting { at_us: 0 },
         };
         assert!(faces.place_face(1, taken).is_ok());
-        assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
+        assert_eq!(faces.read_face(0, 100, &mut None).role, FaceRole::Dial);
         #[cfg(feature = "listen")]
         {
-            assert_eq!(faces.read_face(1, 1).role, FaceRole::Taken);
-            assert_eq!(faces.read_face(9, 9).role, FaceRole::Taken);
+            assert_eq!(faces.read_face(1, 1, &mut None).role, FaceRole::Taken);
+            assert_eq!(faces.read_face(9, 9, &mut None).role, FaceRole::Taken);
         }
         // Without `listen` no face is taken besides the dial: a place past the first holds only a
         // departed face's tomb, read in the one role there is.
         #[cfg(not(feature = "listen"))]
         {
-            assert_eq!(faces.read_face(1, 1).role, FaceRole::Dial);
-            assert_eq!(faces.read_face(9, 9).role, FaceRole::Dial);
+            assert_eq!(faces.read_face(1, 1, &mut None).role, FaceRole::Dial);
+            assert_eq!(faces.read_face(9, 9, &mut None).role, FaceRole::Dial);
         }
     }
 
@@ -1744,10 +1751,10 @@ mod tests {
             supervisor(Link::Waiting { at_us: 0 }, 2).takes_faces(),
             "CONTROL: a table of many faces takes them"
         );
-        assert_eq!(faces.read_face(0, 100).role, FaceRole::Dial);
-        assert_eq!(faces.read_face(1, 1).role, FaceRole::Dial);
+        assert_eq!(faces.read_face(0, 100, &mut None).role, FaceRole::Dial);
+        assert_eq!(faces.read_face(1, 1, &mut None).role, FaceRole::Dial);
         #[cfg(feature = "listen")]
-        assert!(!faces.read_face(0, 100).signals.node_held);
+        assert!(!faces.read_face(0, 100, &mut None).signals.node_held);
     }
 
     /// A dial that is over is let go of and hands over the endpoint it dialled, its own text
