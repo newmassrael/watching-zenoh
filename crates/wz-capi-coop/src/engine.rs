@@ -7444,23 +7444,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Declined> {
-        // A closed session declares nothing, and takes no id for what it does not declare; what
-        // the key holds goes back with the refusal.
-        let Some(mut guard) = self.live() else {
-            drop(wire);
-            return Err(Declined::Closed);
+        // A closed session declares nothing, and takes no id for what it does not declare. The
+        // subscriber is one row of the session's tables, numbered by the id they hand out next: a
+        // full table, a key the session cannot hold or no id left refuses it before anything is
+        // sent. What the key holds and the sink go back with either refusal, let go of after the
+        // session in the one place both are. The row holds the key expression declaration its
+        // key is named by for as long as it stands.
+        let live = self.live().map(|guard| {
+            let next = tables(&guard.0.session.registry).next_entity_id();
+            (guard, next)
+        });
+        let (mut guard, id) = match live {
+            Some((guard, Some(id))) => (guard, id),
+            refused => {
+                let why = match refused {
+                    Some(_) => Declined::NoEntityId,
+                    None => Declined::Closed,
+                };
+                drop(refused);
+                drop(wire);
+                drop(sink);
+                return Err(why);
+            }
         };
         let core = &mut guard.0;
-        // The subscriber is one row of the session's tables, numbered by the id they hand out
-        // next: a full table, a key the session cannot hold or no id left refuses it before
-        // anything is sent, and the sink goes with the refusal. The row holds the key expression
-        // declaration its key is named by for as long as it stands.
-        let next = tables(&core.session.registry).next_entity_id();
-        let Some(id) = next else {
-            drop(guard);
-            drop(wire);
-            return Err(Declined::NoEntityId);
-        };
         let form = core
             .session
             .key_form(
