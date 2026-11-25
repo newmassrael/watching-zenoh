@@ -131,6 +131,94 @@ pub struct RequesterRows {
     pub liveliness_gets: usize,
 }
 
+/// The rows of a [`Requesters`] of the region policy, which a region lays out beside it: each
+/// registry's, at the build's bounds.
+pub struct RequesterRegionRows<R: ReplySink, G: ReplySink> {
+    replies: crate::reply::ReplyRegistryRows<R>,
+    #[cfg(feature = "liveliness-get")]
+    liveliness_gets: crate::declare::liveliness_get::LivelinessGetRows<G>,
+    _gets: core::marker::PhantomData<G>,
+}
+
+// SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`) or no bytes, holding no value until
+// placed.
+unsafe impl<R: ReplySink, G: ReplySink> crate::bounded::ZeroEmpty for RequesterRegionRows<R, G> {}
+
+/// The lines a region's description holds for one [`Requesters`] of the region policy, at most:
+/// the pending queries' and, with `liveliness-get`, the pending snapshots' and their markers'.
+pub const REQUESTER_LINES: usize = crate::reply::REPLY_REGISTRY_LINES + 2;
+
+impl<R: ReplySink, G: ReplySink> Requesters<R, G, crate::bounded::Region> {
+    /// The description of requesters of the region policy at `at` in a region and their
+    /// [`RequesterRegionRows`] at `rows`: each registry's lines, and the queries' handle to the
+    /// region's key arena. The registries are written as [`Default`] makes them before the region
+    /// is placed, and held to the session's limits after ([`Self::limit_to`]).
+    pub const fn places(at: usize, rows: usize) -> crate::bounded::RegionLines<REQUESTER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY.with(
+            &ReplyRegistry::<R, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, replies)),
+                rows.wrapping_add(core::mem::offset_of!(RequesterRegionRows<R, G>, replies)),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-get")]
+        let lines = lines.with(
+            &LivelinessGetRegistry::<G, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, liveliness_gets)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    RequesterRegionRows<R, G>,
+                    liveliness_gets
+                )),
+            ),
+            0,
+        );
+        lines
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod requester_region_tests {
+    use super::{RequesterRegionRows, Requesters, REQUESTER_LINES};
+    use crate::bounded::Region;
+    use crate::caps;
+    use crate::reply_sink::BoxedReplySink;
+
+    type RegionRequesters = Requesters<BoxedReplySink, BoxedReplySink, Region>;
+
+    /// The requesters' description names the pending queries' rows at the build's bound, the
+    /// snapshots' two tables where the build keeps them, and one handle to the key arena, each
+    /// row line inside the rows laid out for them. Turned red by a line of the wrong bound, a
+    /// missing table, or rows placed outside `RequesterRegionRows`.
+    #[test]
+    fn region_requesters_describe_each_registrys_rows_inside_their_rows() {
+        const AT: usize = 64;
+        const ROWS: usize = AT + core::mem::size_of::<RegionRequesters>();
+        let lines = RegionRequesters::places(AT, ROWS);
+        let seqs = lines.seq_lines();
+        let snapshots = cfg!(feature = "liveliness-get");
+        assert_eq!(seqs.len(), 1 + 2 * usize::from(snapshots));
+        assert!(seqs.len() <= REQUESTER_LINES);
+        assert_eq!(seqs[0].room as usize, caps::MAX_PENDING_QUERIES);
+        if snapshots {
+            assert_eq!(seqs[1].room as usize, caps::MAX_PENDING_LIVELINESS_GETS);
+            assert_eq!(seqs[2].room as usize, caps::MAX_PENDING_LIVELINESS_GETS);
+        }
+        assert_eq!(lines.key_lines().len(), 1);
+        let end =
+            ROWS + core::mem::size_of::<RequesterRegionRows<BoxedReplySink, BoxedReplySink>>();
+        for line in seqs {
+            assert!(
+                (AT..ROWS).contains(&line.seq),
+                "a table lies in the requesters"
+            );
+            assert!(
+                (ROWS..end).contains(&line.rows),
+                "its rows lie in their rows"
+            );
+        }
+    }
+}
+
 impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
     /// No query pending, each registry's rows lent from `arena` as `rows` states, the keyexpr
     /// each query was asked under kept in `keys`, the session's key arena, and held to `limits`

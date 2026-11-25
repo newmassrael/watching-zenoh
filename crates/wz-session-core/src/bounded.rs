@@ -1437,6 +1437,30 @@ unsafe fn drop_row<T>(row: *mut u8) {
 // `PhantomData`: all zero bytes are a table lent no rows and holding no value, which drops nothing.
 unsafe impl<T> ZeroEmpty for LentSeq<T> {}
 
+impl<T, const N: usize> BoundedVec<T, N, Region> {
+    /// Count the first `len` rows of a table a region placed as holding values: rows its owner
+    /// wrote where they lie before the table was placed over them, so a value too large for a frame
+    /// is never one (a region's sets of face tables, each written field by field in its row). A
+    /// count past the rows placed is held to them.
+    ///
+    /// # Safety
+    /// The table holds no value yet, and each of its first `len` rows (at most the rows placed)
+    /// holds a value of `T` that nothing else owns or drops.
+    pub unsafe fn assume_held(&mut self, len: usize) {
+        debug_assert_eq!(
+            self.inner.len, 0,
+            "a table counts rows it was placed over once"
+        );
+        let held = if len < self.inner.room() {
+            len
+        } else {
+            self.inner.room()
+        };
+        // At most the room, which is a `u32`.
+        self.inner.len = held as u32;
+    }
+}
+
 /// Where a region the build lays out keeps the rows of one table of the [`Lent`] shape: a line of
 /// the region's own description, which [`place_seqs`] reads. Offsets are bytes from the region's
 /// start, so the description is a constant of the region's type (`core::mem::offset_of!`).
@@ -3453,5 +3477,64 @@ mod tests {
         assert_eq!(buffer.as_str(), "");
         assert!(buffer.push_str("demo/key").is_ok());
         assert_eq!(buffer.as_str(), "demo/key");
+    }
+}
+
+#[cfg(test)]
+mod region_held_tests {
+    use super::{place_seqs, BoundedVec, Region, SeqPlace};
+    use core::mem::{offset_of, MaybeUninit};
+    use core::ptr::NonNull;
+
+    #[repr(C)]
+    struct OneTable {
+        table: BoundedVec<u32, 4, Region>,
+        rows: [MaybeUninit<u32>; 3],
+    }
+
+    /// Rows written before their table was placed over them are the table's values once counted,
+    /// and a count past the rows placed is held to them; the table then refuses past its room.
+    /// Turned red by `assume_held` counting past the room, or by a placed table that counts no row.
+    #[test]
+    fn a_region_table_counts_the_rows_written_before_it_was_placed() {
+        let mut one = OneTable {
+            table: BoundedVec::default(),
+            rows: [MaybeUninit::uninit(); 3],
+        };
+        one.rows[0].write(7);
+        one.rows[1].write(9);
+        let base = NonNull::from(&mut one).cast::<u8>();
+        let line = SeqPlace::of::<u32>(offset_of!(OneTable, table), offset_of!(OneTable, rows), 3);
+        // SAFETY: the line names the table and its three rows in `one`, aligned, which only the
+        // table reaches from here.
+        unsafe { place_seqs(base, &[line]) };
+        assert_eq!(
+            one.table.len(),
+            0,
+            "a placed table holds nothing until counted"
+        );
+        // SAFETY: the first two rows hold values nothing else owns.
+        unsafe { one.table.assume_held(2) };
+        assert!(one.table.iter().copied().eq([7, 9]));
+        assert!(one.table.push(11).is_ok());
+        assert!(one.table.push(13).is_err(), "three rows were placed");
+        let mut other = OneTable {
+            table: BoundedVec::default(),
+            rows: [
+                MaybeUninit::new(1),
+                MaybeUninit::new(2),
+                MaybeUninit::new(3),
+            ],
+        };
+        let base = NonNull::from(&mut other).cast::<u8>();
+        // SAFETY: as above.
+        unsafe { place_seqs(base, &[line]) };
+        // SAFETY: every row placed holds a value.
+        unsafe { other.table.assume_held(8) };
+        assert_eq!(
+            other.table.len(),
+            3,
+            "a count past the rows is held to them"
+        );
     }
 }

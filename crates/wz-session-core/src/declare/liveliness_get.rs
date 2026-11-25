@@ -210,6 +210,41 @@ impl<C: ReplySink> LivelinessGetRegistry<C, Lent> {
     }
 }
 
+/// The rows of a [`LivelinessGetRegistry`] of the region policy, which a region lays out beside
+/// it: its pending gets' and the markers they leave, each at the build's bound.
+pub struct LivelinessGetRows<C: ReplySink> {
+    pending: [core::mem::MaybeUninit<PendingGet<C>>; caps::MAX_PENDING_LIVELINESS_GETS],
+    finalized: [core::mem::MaybeUninit<u64>; caps::MAX_PENDING_LIVELINESS_GETS],
+}
+
+// SAFETY: both tables' rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl<C: ReplySink> crate::bounded::ZeroEmpty for LivelinessGetRows<C> {}
+
+/// The lines a region's description holds for one [`LivelinessGetRegistry`] of the region
+/// policy: its two tables' rows.
+pub const LIVELINESS_GET_LINES: usize = 2;
+
+impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::Region> {
+    /// The description of a registry of the region policy at `at` in a region and its
+    /// [`LivelinessGetRows`] at `rows`: the lines of its pending gets' rows and of their markers'.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<LIVELINESS_GET_LINES> {
+        crate::bounded::RegionLines::EMPTY
+            .seq(crate::bounded::SeqPlace::of::<PendingGet<C>>(
+                at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
+                caps::MAX_PENDING_LIVELINESS_GETS,
+            ))
+            .seq(crate::bounded::SeqPlace::of::<u64>(
+                at.wrapping_add(core::mem::offset_of!(Self, finalized)),
+                rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
+                caps::MAX_PENDING_LIVELINESS_GETS,
+            ))
+    }
+}
+
 impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
     /// The bytes one pending get takes in the registry's storage: its row, and the marker it leaves
     /// in the finalized ids when it ends, which the same count bounds.
