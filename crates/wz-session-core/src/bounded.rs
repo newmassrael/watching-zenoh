@@ -3471,9 +3471,10 @@ mod tests {
     #[cfg(feature = "storage-profile")]
     #[test]
     fn an_inline_room_composes_in_its_own_row() {
-        use crate::wireexpr_resolve::{ComposeInline, ComposeRoom, KeyexprOut};
+        use crate::wireexpr_resolve::{ComposeInline, ComposeRoom};
         let mut room = zeroed::<ComposeInline>();
-        let buffer = room.buffer(&mut ());
+        let mut nothing = ();
+        let buffer = room.buffer(&mut nothing);
         assert_eq!(buffer.as_str(), "");
         assert!(buffer.push_str("demo/key").is_ok());
         assert_eq!(buffer.as_str(), "demo/key");

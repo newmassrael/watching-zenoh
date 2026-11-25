@@ -218,7 +218,8 @@ impl FaceTables {
 }
 
 /// The bytes of one set of face tables, a row of the arena's table of them
-/// (`crate::arena::ArenaPlan`).
+/// (`crate::arena::ArenaPlan`), where the arena lends them (`runtime-plan`).
+#[cfg(feature = "runtime-plan")]
 pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 
 /// The bytes of one entry of the index of held sets, a row of the arena's table of them: kept by a

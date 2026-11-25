@@ -121,7 +121,9 @@ use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
-use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
+#[cfg(any(feature = "runtime-plan", feature = "query"))]
+use wz_session_core::bounded::Lent;
+use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
 #[cfg(feature = "runtime-plan")]
@@ -129,7 +131,9 @@ use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
-use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::peer_tables::PeerTables;
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, SHARES_ROWS};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::policy::HeldPublishDrop;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
@@ -138,9 +142,11 @@ use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::HeapSinks;
+use wz_session_core::slot_observer::RequesterRows;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{RequesterRows, SlotObserverOf};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::SlotObserverOf;
 
 #[cfg(feature = "query")]
 use crate::engine::LegHold;

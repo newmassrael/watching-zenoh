@@ -234,6 +234,7 @@ pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 // The values the state owns and its tasks reach by handles, as fields of the region.
 #[cfg(not(feature = "runtime-plan"))]
 mod state_places;
+#[cfg(feature = "runtime-plan")]
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
 pub(crate) use registry::HELD_SET_BYTES;
@@ -781,6 +782,10 @@ impl SessionRows {
     /// The session's plain tables, lent by `lend` in the order the plan laid them out, each key
     /// at most `longest` bytes. A count past the address space is a table the lender refuses.
     fn lent_from(&self, lend: &mut TableLender<'_>) -> StateTables {
+        // A build that asks and answers no query and caches no sample lends the state no plain
+        // table: its lender is asked nothing.
+        #[cfg(not(any(feature = "query", feature = "queryable", feature = "advanced-cache")))]
+        let _ = lend;
         #[cfg(feature = "query")]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
@@ -1445,11 +1450,12 @@ struct RoomTable {
 }
 
 /// The places of the table of rooms, one for each set of face tables the open lent
-/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena with them.
+/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena in every build, so of
+/// the arena's policy whichever policy the registry's rows are of.
 pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
     Option<RoomPlace>,
     { crate::arena::MAX_FACE_SETS },
-    RowPolicy,
+    wz_session_core::bounded::Lent,
 >;
 
 /// The bytes of one place of the table of rooms, as the plan lays the places out.
@@ -7200,7 +7206,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// after the lock hands it: after a step that wrote the faces' tables, and after each
     /// declaration of the session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
-        let registry = &core.session.registry;
+        // The registry itself, not its holder: the tables' walk reads it as what the peers declare.
+        let registry: &Registry = &core.session.registry;
         core.session.matching.read_at(registry.faces_written());
         let mut cursor = 0;
         while registry
@@ -7285,7 +7292,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(handle) = row_of(id) else {
             return false;
         };
-        let registry = &core.session.registry;
+        // The registry itself, not its holder: the filter reads it as what the peers declare.
+        let registry: &Registry = &core.session.registry;
         // What the peers answered is kept by the filter's row until a face's tables are written.
         let open = registry.app.tables.write_filter_open(handle, registry);
         open.is_some_and(|open| !open)
@@ -9386,7 +9394,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             return FilteredPut::Sent(Ok(0));
         };
         let core = &core.0;
-        let registry = &core.session.registry;
+        // The registry itself, not its holder: the filter reads it as what the peers declare.
+        let registry: &Registry = &core.session.registry;
         // The filter's row is looked up once, for its answer and for the plain way it keeps.
         let row = row_of(filter).and_then(|handle| tables(registry).write_filters().get(handle));
         if !Self::filters_left_unasked(core)
