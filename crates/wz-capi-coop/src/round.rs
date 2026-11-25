@@ -11,12 +11,27 @@ use core::cell::Cell;
 
 #[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
+#[cfg(any(
+    test,
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "liveliness"
+))]
 use wz_session_core::limit_binding::Quota;
+#[cfg(any(
+    test,
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "liveliness"
+))]
 use wz_session_core::limits::SessionLimits;
 #[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::link::{LostCause, RxFrame};
 #[cfg(test)]
 use wz_session_core::placed::Placed;
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::placed::PlacedRef;
 use wz_session_core::plane_lock::LockFamily;
 use wz_session_core::round::{PlaneCalls, RoundCall, RoundCalls, SampleCall};
@@ -43,7 +58,15 @@ use wz_session_core::declare::liveliness_sample::LivelinessSample;
 pub(crate) use wz_session_core::round::AnswersQueries;
 #[cfg(feature = "query")]
 pub(crate) use wz_session_core::round::LegHolders;
-pub(crate) use wz_session_core::round::{ReadRoom, RoundRows};
+#[cfg(any(
+    test,
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "liveliness"
+))]
+pub(crate) use wz_session_core::round::ReadRoom;
+pub(crate) use wz_session_core::round::RoundRows;
 pub use wz_session_core::round::{RoundCounts, RoundRowCounts};
 
 /// The engine's round of deliveries.
@@ -74,6 +97,7 @@ const _: () = assert!(core::mem::size_of::<SubscriberCall>() <= core::mem::size_
 /// The most subscribers one record of a session reaches: a sample's, of the `subscribers` it
 /// holds, or a token's, of the `liveliness` subscribers it holds (none in a build without
 /// liveliness), whichever is more.
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 const fn most_subscribers(subscribers: usize, liveliness: usize) -> usize {
     let liveliness = if cfg!(feature = "liveliness") {
         liveliness
@@ -105,6 +129,7 @@ pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLi
 
 /// The declaration watches the session's `limits` admit, under the build's: what a record of what a
 /// peer declared owes a callback to at most. None in a build without the watch.
+#[cfg(any(test, feature = "threads", feature = "listen", feature = "group"))]
 fn session_watches(limits: &SessionLimits) -> usize {
     #[cfg(any(
         feature = "remote-declaration-watch",
@@ -130,6 +155,13 @@ fn session_watches(limits: &SessionLimits) -> usize {
 /// over it counts as the build's, which the open refuses. What a record of a token owes a callback
 /// to at most, and so what the round's callbacks are asked for ([`read_room`]) and a retraction
 /// asks of them.
+#[cfg(any(
+    test,
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "liveliness"
+))]
 pub(crate) fn session_liveliness<const LIVE: usize>(limits: &SessionLimits) -> usize {
     limits
         .max_liveliness_subscriptions()

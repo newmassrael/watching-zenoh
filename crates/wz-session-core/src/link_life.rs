@@ -406,9 +406,9 @@ impl UnicastLink {
                     self.data.has_been_up = true;
                     Some(UnicastLinkEvent::HandshakeDone)
                 }
-                LinkInput::Ended => Some(self.walk(self.data.row + 1, now_us, &FROM_HANDSHAKING)),
+                LinkInput::Ended => Some(self.walk_on(now_us, &FROM_HANDSHAKING)),
                 _ if now_us >= self.data.deadline_us => {
-                    Some(self.walk(self.data.row + 1, now_us, &FROM_HANDSHAKING))
+                    Some(self.walk_on(now_us, &FROM_HANDSHAKING))
                 }
                 _ => None,
             },
@@ -460,15 +460,15 @@ impl UnicastLink {
                 Some(UnicastLinkEvent::HandshakeBegun)
             }
             LinkInput::DialRefused if stage != DialStage::Made => {
-                Some(self.walk(self.data.row + 1, now_us, &FROM_DIALING))
+                Some(self.walk_on(now_us, &FROM_DIALING))
             }
             LinkInput::HandshakeRefused(why) if stage == DialStage::Made => Some(match why {
-                Refused::Endpoint => self.walk(self.data.row + 1, now_us, &FROM_DIALING),
+                Refused::Endpoint => self.walk_on(now_us, &FROM_DIALING),
                 Refused::Task => self.walk(self.data.endpoints, now_us, &FROM_DIALING),
                 Refused::Fatal => UnicastLinkEvent::DialEnded,
             }),
             _ if stage == DialStage::Pending && now_us >= self.data.deadline_us => {
-                Some(self.walk(self.data.row + 1, now_us, &FROM_DIALING))
+                Some(self.walk_on(now_us, &FROM_DIALING))
             }
             _ => None,
         }
@@ -499,6 +499,13 @@ impl UnicastLink {
             }
             _ => from.ended,
         }
+    }
+
+    /// The event that takes the walk on past the endpoint dialled now ([`Self::walk`]).
+    fn walk_on(&mut self, now_us: u64, from: &WalkEvents) -> UnicastLinkEvent {
+        // Only a row below `endpoints`, itself a `usize`, is dialled, so the next one never
+        // saturates; a saturated row would still lie past the last endpoint.
+        self.walk(self.data.row.saturating_add(1), now_us, from)
     }
 
     /// The event an established link that ended comes to: dialled again at once from the first
