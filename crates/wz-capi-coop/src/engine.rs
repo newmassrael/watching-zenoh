@@ -3539,6 +3539,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return None;
         }
         let links = &self.transport.links;
+        #[cfg(feature = "listen")]
         if links.ports_to_ask() {
             return None;
         }

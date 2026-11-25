@@ -530,10 +530,15 @@ impl<T: TransportFaces> TransportState<T> {
         if !self.groups.is_empty() {
             return true;
         }
-        self.ups().next().is_some() || self.listens()
+        #[cfg(feature = "listen")]
+        if self.listens() {
+            return true;
+        }
+        self.ups().next().is_some()
     }
 
     /// Whether the session listens on any port.
+    #[cfg(feature = "listen")]
     pub fn listens(&self) -> bool {
         self.links.listens()
     }
