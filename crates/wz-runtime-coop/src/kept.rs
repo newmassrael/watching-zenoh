@@ -20,6 +20,25 @@ use crate::atomic::{AtomicUsize, Ordering};
 /// rather than wrapped to no holder while one is still held.
 const MOST_HOLDERS: usize = isize::MAX as usize;
 
+/// `value` in memory of the heap, or `value` handed back when the heap refuses it: a `Box` whose
+/// making a full heap does not end the program.
+pub(crate) fn try_box<T>(value: T) -> Result<Box<T>, T> {
+    let layout = Layout::new::<T>();
+    if layout.size() == 0 {
+        return Ok(Box::new(value));
+    }
+    // SAFETY: the layout's size is not zero.
+    let Some(at) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }.cast::<T>()) else {
+        return Err(value);
+    };
+    // SAFETY: `at` was allocated for a `T` by the global allocator, as a `Box<T>`'s memory is,
+    // and is written once here before the box owns it.
+    unsafe {
+        at.as_ptr().write(value);
+        Ok(Box::from_raw(at.as_ptr()))
+    }
+}
+
 /// A count of the holders of something, and what the last of them does when it lets go.
 pub struct Kept {
     count: AtomicUsize,
@@ -105,6 +124,21 @@ impl<T> Shared<T> {
         });
         Self {
             at: NonNull::from(Box::leak(held)),
+        }
+    }
+
+    /// [`Self::boxed`], or `value` handed back when the heap refuses its memory.
+    pub(crate) fn try_boxed(value: T) -> Result<Self, T> {
+        let held = Held {
+            kept: Kept::new(Self::last_boxed),
+            memory: None,
+            value,
+        };
+        match try_box(held) {
+            Ok(held) => Ok(Self {
+                at: NonNull::from(Box::leak(held)),
+            }),
+            Err(held) => Err(held.value),
         }
     }
 

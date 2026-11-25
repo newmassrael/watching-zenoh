@@ -396,9 +396,11 @@ impl<C: ClockSource> CoopRuntime<C> {
     /// The runtime [`Self::reserved`], [`Self::reserved_for_one`] or [`Self::opening`] makes,
     /// as `form` says, with its state, its task table and its timer table placed in `place`
     /// rather than on the heap, and its local set, whose shared owner lies there too: nothing
-    /// allocates, and the memory of the span is kept until the runtime's last holder lets go. `None`, having placed nothing, for a span shorter than
-    /// [`Self::placed_layout`] or not on its alignment. Always inlined, as the other makings: a
-    /// maker that states its form and its timers as constants links only the making of those.
+    /// allocates, and the memory of the span is kept until the runtime's last holder lets go.
+    /// `None`, having placed nothing, for a span shorter than [`Self::placed_layout`] or not on
+    /// its alignment, and for an open that adds cells ([`RuntimeForm::Opening`]) whose table of
+    /// them the heap refuses. Always inlined, as the other makings: a maker that states its form
+    /// and its timers as constants links only the making of those.
     #[inline(always)]
     pub fn placed(
         clock: C,
@@ -430,11 +432,13 @@ impl<C: ClockSource> CoopRuntime<C> {
                 store_block,
                 place.memory,
             )
-        };
+        }?;
+        // An open that adds cells takes their table of the heap: one the heap refuses places no
+        // runtime, the span's count given back with the store.
         let executor = match form {
             RuntimeForm::Reserved => ExecutorState::reserved_in(store),
             RuntimeForm::ForOne => ExecutorState::reserved_one_in(store),
-            RuntimeForm::Opening { added } => ExecutorState::opening_in(store, added),
+            RuntimeForm::Opening { added } => ExecutorState::opening_in(store, added)?,
         };
         let timers = if rows.timers == 0 {
             TimerQueue::of_rows(0)
