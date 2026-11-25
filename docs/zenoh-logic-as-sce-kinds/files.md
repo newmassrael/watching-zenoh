@@ -255,6 +255,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-core/src/engine_port.rs` | S7 | |
 | `crates/wz-capi-core/src/faces.rs` | S7 | |
 | `crates/wz-capi-core/src/faces/multicast.rs` | S7 | |
+| `crates/wz-capi-core/src/faces/send_deferral.rs` | S7 | |
 | `crates/wz-capi-core/src/fan_undo.rs` | S7 | |
 | `crates/wz-capi-core/src/gossip.rs` | S7 | |
 | `crates/wz-capi-core/src/group.rs` | S7 | |
@@ -975,12 +976,14 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/scouting_message_parity.rs` | excluded: test | Parity tests of Scout and Hello against their documents, compiled only under `#[cfg(all(test, ...))]` (`lib.rs:1139`). |
 | `crates/wz-session-core/src/selector_params.rs` | S2 | |
 | `crates/wz-session-core/src/send_declare_error.rs` | S3 | |
+| `crates/wz-session-core/src/send_deferral.rs` | S1 | |
 | `crates/wz-session-core/src/send_gate.rs` | S1 | |
 | `crates/wz-session-core/src/send_wire_error.rs` | S3 | |
 | `crates/wz-session-core/src/serde_codec.rs` | S3 | |
 | `crates/wz-session-core/src/serial_link.rs` | S1 | |
 | `crates/wz-session-core/src/session_actions.rs` | S1 | |
 | `crates/wz-session-core/src/session_actions/bundle_tests.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-session-core/src/session_actions/send_deferral.rs` | S1 | |
 | `crates/wz-session-core/src/session_init_params.rs` | S1 | |
 | `crates/wz-session-core/src/session_memory.rs` | S10 | |
 | `crates/wz-session-core/src/session_slot.rs` | S1 | |
