@@ -236,7 +236,7 @@ use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 
 mod replay;
-use replay::{Replay, SendTo, TurnEnd};
+use replay::{Replay, Retract, SendTo, TurnEnd};
 
 #[cfg(feature = "listen")]
 mod faces_added;
@@ -309,7 +309,6 @@ mod liveliness;
 pub(crate) use liveliness::{LivelinessCall, LivelinessRow};
 #[cfg(feature = "liveliness")]
 use {
-    liveliness::retract_token,
     registry::HistoryCursor,
     wz_capi_port::{LivelinessSink, TokenId},
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
@@ -2745,8 +2744,6 @@ fn counts_own(plane: FilterPlane, count_local: bool) -> bool {
     delivers_locally && count_local
 }
 
-/// What tells a link that the key expression declaration `mapping_id` is retracted: one closure type
-/// for every caller that sends it, so its body and its call through `&dyn TellTo` are made once.
 /// Whether the batch window of the link of `actions` took `step`. Out of line, so the walk over
 /// the links that asks each is one loop: with the step's match inlined in it, the compiler writes
 /// the walk out once per step.
@@ -2758,16 +2755,6 @@ fn batch_link<C: ClockSource + 'static>(actions: &LinkActions<C>, step: BatchSte
         BatchStep::Stop => actions.batch_stop(),
     }
     .is_ok()
-}
-
-fn undeclare_kexpr<C: ClockSource + 'static>(mapping_id: ExprId) -> impl Fn(&LinkActions<C>) {
-    move |actions| actions.send_undeclare_kexpr(mapping_id)
-}
-
-/// What tells a link that the Interest `id` ends, one closure type for every caller as
-/// [`undeclare_kexpr`] is.
-fn interest_final<C: ClockSource + 'static>(id: u64) -> impl Fn(&LinkActions<C>) {
-    move |actions| actions.send_interest_final(id)
 }
 
 /// What a get answers when its session closes while its legs are issued: the legs issued so far,
@@ -4427,7 +4414,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let (Some(place), Some(mapping_id)) = (place, mapping_id) else {
             return;
         };
-        self.retract_at(place, &undeclare_kexpr::<C>(mapping_id));
+        self.retract_at(place, Some(Retract::Keyexpr(mapping_id)));
         #[cfg(feature = "group")]
         for group in &self.transport.groups {
             group.retract_keyexpr(mapping_id);
@@ -8091,7 +8078,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let undeclared =
                 tables_mut(&mut core.session.registry).undeclare_liveliness_subscriber(handle)?;
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &interest_final::<C>(u64::from(id)));
+            core.retract_at(place, Some(Retract::Interest(u64::from(id))));
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             Some((handle, undeclared.taken))
         });
@@ -8144,10 +8131,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let undeclared = tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
             let row = undeclared.taken;
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions: &LinkActions<C>| {
-                let names = retraction.as_ref().map(|(names, key)| names.names(key));
-                SubscriberRow::retract(id, names, actions);
-            });
+            let names = retraction.as_ref().map(|(names, key)| names.names(key));
+            core.retract_at(place, Some(Retract::Subscriber { id, names }));
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             core.retract_keyexpr(named_place, undeclared.named);
             // One that counted it may now match no more.
@@ -8204,7 +8189,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let taken = core.announce_or_undo_at(
             place,
             &|actions: &LinkActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
-            &undeclare_kexpr::<C>(id),
+            Retract::Keyexpr(id),
         );
         if !taken {
             tables_mut(&mut core.session.registry).undeclare_keyexpr(declared.handle);
@@ -9057,10 +9042,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let undeclared = tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
             let row = undeclared.taken;
             // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &|actions: &LinkActions<C>| {
-                let names = retraction.as_ref().map(|(names, key)| names.names(key));
-                QueryableRow::retract(id, names, actions);
-            });
+            let names = retraction.as_ref().map(|(names, key)| names.names(key));
+            core.retract_at(place, Some(Retract::Queryable { id, names }));
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             core.retract_keyexpr(named_place, undeclared.named);
             // One that counted it may now match no more.
@@ -9155,11 +9138,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         core.transport.retract_from_groups(id);
         // The rows went before the links are told: a send never finds the tables borrowed.
         let key = undeclared.taken.as_ref().map(|row| row.key().as_str());
-        core.retract_at(token_place, &|actions: &LinkActions<C>| {
-            if let Some(key) = key {
-                retract_token(actions, id, names.map(|names| names.names(key)));
-            }
+        let retract = key.map(|key| Retract::Token {
+            id,
+            names: names.map(|names| names.names(key)),
         });
+        core.retract_at(token_place, retract);
         core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
     }
 

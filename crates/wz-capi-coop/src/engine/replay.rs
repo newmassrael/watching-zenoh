@@ -98,19 +98,6 @@ impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>) -> bool> SendTo<C> for F {
     }
 }
 
-/// What a retraction or an undoing tells a link, handed by reference as [`SendTo`] is: a send
-/// whose refusal changes nothing.
-pub(super) trait TellTo<C: ClockSource + 'static> {
-    /// Tell it over `actions`.
-    fn tell_to(&self, actions: &LinkActions<C>);
-}
-
-impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>)> TellTo<C> for F {
-    fn tell_to(&self, actions: &LinkActions<C>) {
-        self(actions);
-    }
-}
-
 /// Where the replay of the current link stands; its pace is the session's
 /// (`SessionState::replay_pacing`).
 pub(super) struct Replay {
@@ -350,8 +337,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         place: usize,
         on_refusal: OnRefusal,
-        send: &dyn SendTo<C>,
-        undo: &dyn TellTo<C>,
+        send: &(dyn SendTo<C> + Sync),
+        undo: Option<Retract<'_>>,
     ) -> bool {
         announce_on(
             self.transport.links.places_mut(),
@@ -375,7 +362,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             place,
             OnRefusal::Forget,
             &|actions: &LinkActions<C>| tell.is_none_or(|tell| tell.send(actions)),
-            &undo_nothing::<C>,
+            None,
         );
     }
 
@@ -386,18 +373,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     pub(super) fn announce_or_undo_at(
         &mut self,
         place: usize,
-        send: &dyn SendTo<C>,
-        undo: &dyn TellTo<C>,
+        send: &(dyn SendTo<C> + Sync),
+        undo: Retract<'_>,
     ) -> bool {
-        self.announce_with(place, OnRefusal::Undo, send, undo)
+        self.announce_with(place, OnRefusal::Undo, send, Some(undo))
     }
 
-    /// The declaration at `index` of `table`'s slot order was removed: retract it with `send`
+    /// The declaration at `index` of `table`'s slot order was removed: tell `retract`
     /// ([`Self::retract_at`]). `index` is where it lay, and the tables before it in the replay's
     /// order are as they were.
-    pub(super) fn retract(&mut self, table: DeclaredTable, index: usize, send: &dyn TellTo<C>) {
+    pub(super) fn retract(&mut self, table: DeclaredTable, index: usize, retract: Retract<'_>) {
         let place = self.place(table, index);
-        self.retract_at(place, send);
+        self.retract_at(place, Some(retract));
     }
 
     /// The Interest `interest`, which a write filter or a matching listener held last, ended:
@@ -410,34 +397,31 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.retract(
                 DeclaredTable::Interests,
                 at,
-                &super::interest_final::<C>(u64::from(interest)),
+                Retract::Interest(u64::from(interest)),
             );
         }
     }
 
-    /// The declaration that lay at `place` in the replay's order was removed: tell, with `send`,
-    /// each face that is up and whose peer was told of it, and move every face's replay past it.
-    /// Call it once, after the row went, with the place read while it stood: a send then finds
-    /// none of the session's tables borrowed, and nothing is kept to send later.
+    /// The declaration that lay at `place` in the replay's order was removed: tell `retract`,
+    /// when there is one, to each face that is up and whose peer was told of it, and move every
+    /// face's replay past it. Call it once, after the row went, with the place read while it
+    /// stood: a send then finds none of the session's tables borrowed, and nothing is kept to send
+    /// later.
     #[inline(never)]
-    pub(super) fn retract_at(&mut self, place: usize, send: &dyn TellTo<C>) {
+    pub(super) fn retract_at(&mut self, place: usize, retract: Option<Retract<'_>>) {
         for face in self.transport.links.faces_mut() {
             let Link::Up(wire) = &face.link else {
                 continue;
             };
             // A build that reaches no pace told the peer everything when its link came up.
-            if !ReplayPacing::REACHABLE
-                || matches!(face.replay.cursor.removed(place), Removal::Retract)
-            {
-                send.tell_to(&wire.actions);
+            let told = !ReplayPacing::REACHABLE
+                || matches!(face.replay.cursor.removed(place), Removal::Retract);
+            if let Some(retract) = retract.filter(|_| told) {
+                tell_retract(wire, retract);
             }
         }
     }
 }
-
-/// The undoing of a declaration that is kept whatever a link makes of it: nothing. One function
-/// for every such caller, so its call through `&dyn TellTo` is made once.
-fn undo_nothing<C: ClockSource + 'static>(_actions: &LinkActions<C>) {}
 
 /// How many declarations the session holds in the tables before `end` in the replay's order, or
 /// in every table when `end` is `None`: the place of `end`'s first declaration, or the length
@@ -576,6 +560,57 @@ impl<'a> Tell<'a> {
     }
 }
 
+/// A retraction as a link is told it: the id of what went and, for an entity whose declaration
+/// asked to be retracted by its key, the declaration and the rest of the key it names, read before
+/// its row went. It borrows nothing of the session's tables, so it is told once the rows went,
+/// over a link lent apart from the session's state ([`tell_retract`]).
+#[derive(Clone, Copy)]
+pub(super) enum Retract<'a> {
+    /// The key expression declaration of this mapping id.
+    Keyexpr(ExprId),
+    /// The Interest of this id ends.
+    Interest(u64),
+    Subscriber {
+        id: super::SubId,
+        names: Option<(ExprId, &'a str)>,
+    },
+    #[cfg(feature = "queryable")]
+    Queryable {
+        id: super::QblId,
+        names: Option<(ExprId, &'a str)>,
+    },
+    #[cfg(feature = "liveliness")]
+    Token {
+        id: super::TokenId,
+        names: Option<(ExprId, &'a str)>,
+    },
+}
+
+impl Retract<'_> {
+    /// Tell it over `actions`.
+    fn tell<C: ClockSource + 'static>(self, actions: &LinkActions<C>) {
+        match self {
+            Self::Keyexpr(id) => actions.send_undeclare_kexpr(id),
+            Self::Interest(id) => actions.send_interest_final(id),
+            Self::Subscriber { id, names } => super::SubscriberRow::retract(id, names, actions),
+            #[cfg(feature = "queryable")]
+            Self::Queryable { id, names } => super::QueryableRow::retract(id, names, actions),
+            #[cfg(feature = "liveliness")]
+            Self::Token { id, names } => super::liveliness::retract_token(actions, id, names),
+        }
+    }
+}
+
+/// Tell `retract` over the link `wire` holds, as every send of the session on a face is made
+/// ([`super::send_on`]). It leaves the face owed nothing: a replay tells only declarations that
+/// stand, so a retraction is told as it is made or not at all.
+fn tell_retract<C: ClockSource + 'static>(wire: &super::Wire<C>, retract: Retract<'_>) {
+    let _ = super::send_on(wire, 0, &|actions: &LinkActions<C>| {
+        retract.tell(actions);
+        true
+    });
+}
+
 /// [`Core::announce_with`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written. One body for every
 /// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
@@ -589,8 +624,8 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     faces: &mut impl FacePlaces<Face<C, L>>,
     place: usize,
     on_refusal: OnRefusal,
-    send: &dyn SendTo<C>,
-    undo: &dyn TellTo<C>,
+    send: &(dyn SendTo<C> + Sync),
+    undo: Option<Retract<'_>>,
 ) -> bool {
     // Whether the replay of `face` is past the declaration, so its link is told it now: always,
     // in a build that reaches no pace, whose replay ended with the lap its link came up with.
@@ -606,16 +641,19 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
         let Link::Up(wire) = &face.link else {
             continue;
         };
-        if emits_now(face) && !send.send_to(&wire.actions) && on_refusal == OnRefusal::Undo {
+        if emits_now(face)
+            && super::send_on(wire, 0, send) == Some(false)
+            && on_refusal == OnRefusal::Undo
+        {
             refused_at = Some(at);
             break;
         }
     }
     if let Some(refused) = refused_at {
         for (_, face) in faces.placed().take_while(|(at, _)| *at < refused) {
-            if let Link::Up(wire) = &face.link {
+            if let (Link::Up(wire), Some(undo)) = (&face.link, undo) {
                 if emits_now(face) {
-                    undo.tell_to(&wire.actions);
+                    tell_retract(wire, undo);
                 }
             }
         }
