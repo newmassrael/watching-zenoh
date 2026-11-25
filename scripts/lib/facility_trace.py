@@ -44,6 +44,11 @@ Usage:
         profile's package `PROFILE_SCENARIOS`) and judges each run against the artifact's own
         manifest entry; an artifact with none is reported NOT JUDGED, and so is a run denied a
         facility on a library built without the door its configuration is held to.
+    facility_trace.py --judge-doors PACKAGE_DIR
+        The same for a package whose libraries were built with their drivers' doors
+        (`wz_package.py --capability`): every run of a driver, the denied ones among them, held
+        to the build's bound and to its configuration's requirement. A library without its
+        driver's door is a finding; a program's own runs are left to `--judge`.
 """
 
 from __future__ import annotations
@@ -786,10 +791,31 @@ def _run(scenario: Scenario, binary: pathlib.Path, package: pathlib.Path, env: d
                 p.wait()
 
 
-def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
+def scenario_plan(scenario: Scenario, features: list[str], doors: bool) -> tuple[str, str]:
+    """Whether a package runs `scenario` ("run"), leaves it to the other judgement ("skip") or
+    cannot run it ("finding"), with the words of the line that says so. `features` is the build
+    fact of the library. A package judged for its doors (`doors`) runs every run of a driver and
+    needs each driver's door, so the runs are held to their configuration's requirement too; the
+    package a deployer receives runs what needs no door and leaves a denied run, which is held to
+    its configuration's door alone, to the package built with it."""
+    door = has_door(scenario.driver, features)
+    if doors:
+        if scenario.driver is None:
+            return "skip", ("not run here: the package is judged for its libraries' doors, and this run "
+                            "is a program's own")
+        if not door:
+            return "finding", f"the package is judged for its doors, and the build has no `{scenario.driver.door}`"
+        return "run", ""
+    if scenario.deny and scenario.driver is not None and not door:
+        return "skip", (f"NOT JUDGED here, a denied run is held to its configuration's door and the build "
+                        f"has no `{scenario.driver.door}`; --judge-doors judges it on a package built with it")
+    return "run", ""
+
+
+def judge_package(directory: pathlib.Path, doors: bool = False) -> tuple[list[str], list[str]]:
     """Every artifact of a package that has scenarios, run and judged against its own manifest
     entry: (findings, a line per judgement). A manifest written before the split judges its whole
-    bound as `may_require`."""
+    bound as `may_require`. Which runs a package takes is `scenario_plan`'s."""
     manifest = json.loads((directory / "wz-target-manifest.json").read_text(encoding="utf-8"))
     findings: list[str] = []
     report: list[str] = []
@@ -809,18 +835,23 @@ def judge_package(directory: pathlib.Path) -> tuple[list[str], list[str]]:
         may = art.get("may_require", art["device_requires"]) if "requires" in art else art["device_requires"]
         features = art.get("features", [])
         for scenario in scenarios:
-            door = has_door(scenario.driver, features)
-            # A denied run is held to its configuration's door alone: the build's bound cannot say
-            # whether a run denied a facility it may ask for has to fail.
-            if scenario.deny and scenario.driver is not None and not door:
-                report.append(f"{art['id']} ({scenario.name}): NOT JUDGED, a denied run is held to its "
-                              f"configuration's door, and the build has no `{scenario.driver.door}`")
+            plan, why = scenario_plan(scenario, features, doors)
+            if plan == "skip":
+                report.append(f"{art['id']} ({scenario.name}): {why}")
                 continue
-            seen = run_scenario(scenario, directory / art["path"], directory, door)
+            if plan == "finding":
+                findings.append(f"{art['id']} ({scenario.name}): {why}")
+                continue
+            seen = run_scenario(scenario, directory / art["path"], directory,
+                                has_door(scenario.driver, features))
             stated = stated_requirement(seen.stated) if seen.stated else configuration_requirement(seen.stdout)
+            # A run that states no requirement where its door is built failed before its open, at
+            # the door: a finding of this run, and the package's other runs are still judged.
             if scenario.deny and stated is None:
-                raise ValueError(f"{scenario.name}: a run denied a facility is held to its configuration's "
-                                 "door, and this run states none")
+                findings.append(f"{art['id']} ({scenario.name}): a run denied a facility is held to its "
+                                f"configuration's door, and this run states none: "
+                                f"{seen.stderr_tail.strip() or 'it wrote nothing to stderr'}")
+                continue
             # A run denied a facility its configuration requires is expected to fail: what it asked for
             # before failing stands for no whole run, under the build's bound as under its own.
             fails = stated is not None and bool(set(scenario.deny) & set(stated[0]))
@@ -1073,6 +1104,18 @@ def _selftest() -> int:
            and unguarded_door_calls(f"#ifdef {DOOR_MACRO}\nrc = door(x);\n#endif\n", "door") == []
            and unguarded_door_calls("#if 1\n#ifdef OTHER\nrc = door(x);\n#endif\n#endif\n", "door") == [3]
            and unguarded_door_calls(f"#ifdef {DOOR_MACRO}\n#else\nrc = door(x);\n#endif\n", "door") == [3])
+    denied = Scenario("d", ("{bin}",), driver=PICO_DRIVER, deny=("name-resolution",))
+    allowed = Scenario("a", ("{bin}",), driver=PICO_DRIVER)
+    program = Scenario("p", ("{bin}",))
+    door = ["device-requires"]
+    expect("the package a deployer receives runs what needs no door and leaves a denied run to the "
+           "package built with the door",
+           scenario_plan(denied, [], False)[0] == "skip" and scenario_plan(allowed, [], False)[0] == "run"
+           and scenario_plan(program, [], False)[0] == "run" and scenario_plan(denied, door, False)[0] == "run")
+    expect("a package judged for its doors runs every run of a driver, needs the door, and leaves a "
+           "program's own runs",
+           scenario_plan(denied, door, True)[0] == "run" and scenario_plan(allowed, door, True)[0] == "run"
+           and scenario_plan(allowed, [], True)[0] == "finding" and scenario_plan(program, door, True)[0] == "skip")
     for drv in (PICO_DRIVER, C_DRIVER):
         source = (DRIVERS / drv.source).read_text(encoding="utf-8")
         expect(f"{drv.source} calls its door {drv.door_call} only under {DOOR_MACRO}",
@@ -1195,12 +1238,12 @@ def main(argv: list[str]) -> int:
             return 2
         print(json.dumps(observe(rest[1:], seconds).as_json(), indent=2))
         return 0
-    if len(argv) == 2 and argv[0] == "--judge":
+    if len(argv) == 2 and argv[0] in ("--judge", "--judge-doors"):
         missing = missing_tools()
         if missing:
             print(f"facility-trace: FAIL -- {' and '.join(missing)} absent, so no run can be judged", file=sys.stderr)
             return 1
-        findings, report = judge_package(pathlib.Path(argv[1]))
+        findings, report = judge_package(pathlib.Path(argv[1]), doors=argv[0] == "--judge-doors")
         for line in report:
             print(f"  facility-trace: {line}")
         for finding in findings:
