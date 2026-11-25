@@ -377,12 +377,12 @@ use {
 
 #[cfg(feature = "query")]
 mod get;
-#[cfg(all(feature = "query", wz_round))]
-use crate::round::LegHolders;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
 pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
+#[cfg(feature = "query")]
+use wz_session_core::round::LegHolders;
 #[cfg(feature = "query")]
 use {
     get::{EndedLegs, GetKind, GetPlane, LegRows},
