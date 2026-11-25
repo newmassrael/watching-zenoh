@@ -3704,42 +3704,56 @@ mod place_tests {
         closure
     }
 
-    /// A background listener and one with a handle, on a session of `engine`'s, each in a place:
-    /// the handle's listener.
-    fn declare_both(
+    /// Run `declare`, a declare of one transport listener on `engine`'s session, and check that it
+    /// took one of the session's places.
+    fn taking_a_place(engine: &Arc<Engine>, declare: impl FnOnce() -> ZResult) {
+        let places = free(engine, Kind::TransportEventsListener);
+        assert_eq!(declare(), Z_OK);
+        assert_eq!(
+            Some(free(engine, Kind::TransportEventsListener)),
+            places.checked_sub(1),
+            "the listener holds a place"
+        );
+    }
+
+    /// A background listener on a session of `engine`'s, in a place of its own.
+    fn declare_background(
+        session: &z_owned_session_t,
+        engine: &Arc<Engine>,
+        drops: &'static AtomicUsize,
+    ) {
+        let mut closure = counting(drops);
+        taking_a_place(engine, || {
+            // SAFETY: a live session and a local closure, consumed by the declare.
+            unsafe {
+                z_declare_background_transport_events_listener(
+                    z_session_loan(session),
+                    z_closure_transport_event_move(&mut closure),
+                    core::ptr::null(),
+                )
+            }
+        });
+    }
+
+    /// A listener with a handle on a session of `engine`'s, in a place of its own: the handle.
+    fn declare_handled(
         session: &z_owned_session_t,
         engine: &Arc<Engine>,
         drops: &'static AtomicUsize,
     ) -> z_owned_transport_events_listener_t {
-        let places = free(engine, Kind::TransportEventsListener);
-        let mut background = counting(drops);
-        let mut handled = counting(drops);
+        let mut closure = counting(drops);
         let mut listener = z_owned_transport_events_listener_t::null_value();
-        // SAFETY: a live session and local closures, each consumed by its declare.
-        unsafe {
-            assert_eq!(
-                z_declare_background_transport_events_listener(
-                    z_session_loan(session),
-                    z_closure_transport_event_move(&mut background),
-                    core::ptr::null(),
-                ),
-                Z_OK
-            );
-            assert_eq!(
+        taking_a_place(engine, || {
+            // SAFETY: a live session, a local handle and a local closure, consumed by the declare.
+            unsafe {
                 z_declare_transport_events_listener(
                     z_session_loan(session),
                     &mut listener,
-                    z_closure_transport_event_move(&mut handled),
+                    z_closure_transport_event_move(&mut closure),
                     core::ptr::null(),
-                ),
-                Z_OK
-            );
-        }
-        assert_eq!(
-            free(engine, Kind::TransportEventsListener),
-            places - 2,
-            "each listener holds a place"
-        );
+                )
+            }
+        });
         listener
     }
 
@@ -3750,23 +3764,53 @@ mod place_tests {
         engine_held(handle.expect("an open session has its handle")).clone()
     }
 
-    /// Closing the session lets go of both listeners' closures and of the background listener's
-    /// place, with no lock of the session held, and the handle's undeclare after the close lets
-    /// go of its place. Turned red, in a debug build, by a close that gives a place back under the
-    /// session's lock.
+    /// Closing a session lets go of its listener's closure with no lock of the session held: a
+    /// background listener's place with it, and a handle's listener's place at the handle's
+    /// undeclare after the close. Each on a session of its own, as a session opens under the pico
+    /// preset, whose `MAX_TRANSPORT_EVENTS_LISTENERS` admits one listener. Turned red, in a debug
+    /// build, by a close that gives a place back under the session's lock.
     #[test]
     fn closing_a_session_lets_its_listeners_go_with_no_lock_held() {
         static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let kind = Kind::TransportEventsListener;
+
         let mut session = listening_on_loopback();
         let engine = engine_of_session(&session);
-        let mut listener = declare_both(&session, &engine, &DROPS);
+        let places = free(&engine, kind);
+        declare_background(&session, &engine, &DROPS);
+        // SAFETY: the session is live and owned here.
+        let closed = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
+        assert_eq!(closed, Z_OK);
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "the close released the background listener's context"
+        );
+        assert_eq!(
+            free(&engine, kind),
+            places,
+            "the close gave the background listener's place back"
+        );
+        drop(engine);
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+
+        let mut session = listening_on_loopback();
+        let engine = engine_of_session(&session);
+        let places = free(&engine, kind);
+        let mut listener = declare_handled(&session, &engine, &DROPS);
         // SAFETY: the session is live and owned here.
         let closed = unsafe { z_close(z_session_loan_mut(&mut session), core::ptr::null()) };
         assert_eq!(closed, Z_OK);
         assert_eq!(
             DROPS.load(Ordering::SeqCst),
             2,
-            "the close released both contexts"
+            "the close released the handle's listener's context"
+        );
+        assert_eq!(
+            Some(free(&engine, kind)),
+            places.checked_sub(1),
+            "the handle holds its place past the close"
         );
         // SAFETY: the handle written by the declare above, let go of once.
         let undeclared = unsafe {
@@ -3775,20 +3819,27 @@ mod place_tests {
         assert_eq!(undeclared, Z_OK);
         assert!(listener.handle.is_null());
         assert_eq!(DROPS.load(Ordering::SeqCst), 2, "nothing is released twice");
+        assert_eq!(
+            free(&engine, kind),
+            places,
+            "the undeclare gave the place back"
+        );
         drop(engine);
         // SAFETY: the session is owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
-    /// Dropping the session with no close lets go of the listeners as the session goes, with no
-    /// lock of the session held. Turned red, in a debug build, by a drop that gives a place back
-    /// under the session's lock.
+    /// Dropping the session with no close lets go of its listener as the session goes, with no
+    /// lock of the session held; a listener undeclared by its handle before gives its place back
+    /// to the next. Turned red, in a debug build, by a drop that gives a place back under the
+    /// session's lock.
     #[test]
     fn dropping_a_session_lets_its_listeners_go_with_no_lock_held() {
         static DROPS: AtomicUsize = AtomicUsize::new(0);
         let mut session = listening_on_loopback();
         let engine = engine_of_session(&session);
-        let mut listener = declare_both(&session, &engine, &DROPS);
+        let places = free(&engine, Kind::TransportEventsListener);
+        let mut listener = declare_handled(&session, &engine, &DROPS);
         // SAFETY: the handle written by the declare above, let go of once.
         let undeclared = unsafe {
             z_undeclare_transport_events_listener(z_transport_events_listener_move(&mut listener))
@@ -3799,6 +3850,12 @@ mod place_tests {
             1,
             "the undeclare released its context"
         );
+        assert_eq!(
+            free(&engine, Kind::TransportEventsListener),
+            places,
+            "the undeclare gave its place back"
+        );
+        declare_background(&session, &engine, &DROPS);
         drop(engine);
         // SAFETY: the session is owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };
@@ -3806,6 +3863,47 @@ mod place_tests {
             DROPS.load(Ordering::SeqCst),
             2,
             "the session's end released the background listener's context"
+        );
+    }
+
+    /// A session holds as many transport listeners as its places, and one more is refused with
+    /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, nothing declared and its context released. Turned red by a
+    /// declare that holds a listener past the session's places, or keeps a refused closure.
+    #[test]
+    fn a_listener_past_the_sessions_places_is_refused_and_released() {
+        static DROPS: AtomicUsize = AtomicUsize::new(0);
+        let mut session = listening_on_loopback();
+        let engine = engine_of_session(&session);
+        let places = free(&engine, Kind::TransportEventsListener);
+        assert!(places > 0, "the session lays transport listener places out");
+        for _ in 0..places {
+            declare_background(&session, &engine, &DROPS);
+        }
+        let mut closure = counting(&DROPS);
+        let mut listener = z_owned_transport_events_listener_t::null_value();
+        // SAFETY: a live session, a local handle and a local closure, consumed by the declare.
+        let refused = unsafe {
+            z_declare_transport_events_listener(
+                z_session_loan(&session),
+                &mut listener,
+                z_closure_transport_event_move(&mut closure),
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(refused, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        assert!(listener.handle.is_null(), "nothing is declared");
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "the refused closure is released"
+        );
+        drop(engine);
+        // SAFETY: the session is owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+        assert_eq!(
+            Some(DROPS.load(Ordering::SeqCst)),
+            places.checked_add(1),
+            "the session's end released every background listener's context"
         );
     }
 

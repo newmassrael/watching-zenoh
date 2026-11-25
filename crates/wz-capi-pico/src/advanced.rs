@@ -36,7 +36,7 @@
 //! `ze_advanced_subscriber_declare_sample_miss_listener` second, and any number
 //! of listeners may follow. The C subscriber is one wz subscriber PER FACE, so
 //! each face's wz subscriber reports into one set that belongs to the C handle
-//! ([`MissRooms`]), and each C listener takes one room of it.
+//! (`MissRooms`), and each C listener takes one room of it.
 //!
 //! R2814 — that set replaced a single slot a listener "installed into": a
 //! second listener replaced the first, and dropping the first then silenced

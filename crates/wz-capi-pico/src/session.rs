@@ -499,7 +499,7 @@ pub(crate) fn tls_files_named(_cfg: &ConfigState) -> Vec<String> {
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
 /// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries the place of our
-/// [`PicoSessionHandle`]: on the tokio engine an object of its own, on the cooperative engine a
+/// `PicoSessionHandle`: on the tokio engine an object of its own, on the cooperative engine a
 /// place in the session's arena (`crate::session_place`); `_cnt` is unused.
 #[repr(C)]
 pub struct z_owned_session_t {
@@ -3083,7 +3083,7 @@ const _: () = {
 const _: () = assert!(
     core::mem::offset_of!(z_open_options_t, auto_start_admin_space)
         == if cfg!(feature = "multi-thread") {
-            2 * core::mem::size_of::<*mut c_void>()
+            core::mem::size_of::<[*mut c_void; 2]>()
         } else {
             0
         }
@@ -3705,6 +3705,15 @@ mod read_task_start_codes {
 /// node. Its owner lets go of it with `z_session_drop`.
 #[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
 pub(crate) fn listening_on_loopback() -> z_owned_session_t {
+    listening_on_loopback_with(|_| {})
+}
+
+/// [`listening_on_loopback`] from a config `amend` wrote to before the open, as a program states
+/// what its session opens under, its limits among them.
+#[cfg(all(test, not(feature = "engine-tokio"), feature = "peer"))]
+pub(crate) fn listening_on_loopback_with(
+    amend: impl FnOnce(*mut crate::abi::z_loaned_config_t),
+) -> z_owned_session_t {
     use crate::config::{z_config_default, z_config_loan_mut, z_config_move, zp_config_insert};
     // SAFETY: every pointer is to a live owned value of this frame, and the open consumes the
     // config.
@@ -3719,6 +3728,7 @@ pub(crate) fn listening_on_loopback() -> z_owned_session_t {
             ),
             Z_OK
         );
+        amend(z_config_loan_mut(&mut config));
         let mut session = z_owned_session_t::null_value();
         assert_eq!(
             z_open(&mut session, z_config_move(&mut config), core::ptr::null()),

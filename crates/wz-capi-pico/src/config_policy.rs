@@ -26,9 +26,10 @@
 //!    ([`policy_document::Origin::Document`]);
 //! 4. the statements of `wz_ext_config_policy` ([`policy_document::Origin::Api`]).
 //!
-//! The `wz/limits` of the document are resolved in the same resolution, over the build defaults
-//! of a session's limits: a pico session holds no runtime's limits, so a runtime's limit the
-//! document states is refused, as a limit the build does not have is.
+//! The `wz/limits` of the document are resolved in the same resolution, over the limits a session
+//! of this ABI opens under (`crate::session::opening_limits`, zenoh-pico's): a pico session holds
+//! no runtime's limits, so a runtime's limit the document states is refused, as a limit the build
+//! does not have is.
 //!
 //! The runtime is the process's (`wz_capi_port::runtime_limits`): its limits are stated by
 //! `wz_ext_runtime_limits_document`, from the `wz/limits` of a document of their own, before the
@@ -38,6 +39,11 @@
 //! refuse is refused when it is made, with `Z_ERR_CONFIG_INVALID_VALUE`, and leaves the config as
 //! it was. The document is the zenoh JSON5 document the zenoh-c ABI reads, of which only the `wz`
 //! member is read here, so one document gives both ABIs the same policies.
+//!
+//! [`policy_document::resolve_document_under`]: wz_session_core::policy_document::resolve_document_under
+//! [`policy_document::resolve_under`]: wz_session_core::policy_document::resolve_under
+//! [`policy_document::Origin::Document`]: wz_session_core::policy_document::Origin::Document
+//! [`policy_document::Origin::Api`]: wz_session_core::policy_document::Origin::Api
 
 #[cfg(feature = "config-policy")]
 use core::ffi::{c_char, CStr};
@@ -862,6 +868,26 @@ mod tests {
             .then_some(upstream)
     }
 
+    /// What a config that states nothing resolves: the build's policies, each from the build
+    /// defaults, over the limits every session of this ABI opens under
+    /// (`crate::session::opening_limits`), not the build's.
+    fn stating_nothing() -> Resolved {
+        let mut resolved = Resolved::unchanged(SessionPolicy::defaults());
+        resolved.limits.session = crate::session::opening_limits();
+        resolved
+    }
+
+    /// What the resolution of a session of this ABI starts from: the build's policies and the
+    /// limits a session opens under, with no runtime's limits, which a pico session does not hold.
+    #[cfg(feature = "config-document")]
+    fn opening_base() -> policy_document::Base {
+        policy_document::Base {
+            policy: SessionPolicy::defaults(),
+            session_limits: crate::session::opening_limits(),
+            runtime_limits: None,
+        }
+    }
+
     #[cfg(feature = "config-document")]
     fn policies_document(statements: &[(&str, &str)]) -> String {
         let members: Vec<String> = statements
@@ -879,8 +905,7 @@ mod tests {
     /// red by a resolution that starts from the build's limits instead.
     #[test]
     fn a_config_that_states_nothing_opens_under_the_opening_limits() {
-        let mut expected = Resolved::unchanged(SessionPolicy::defaults());
-        expected.limits.session = crate::session::opening_limits();
+        let expected = stating_nothing();
         let config = Config::new();
         assert_eq!(config.resolved(), expected);
         assert_eq!(resolve_policy(&PolicyStatements::none()), Ok(expected));
@@ -1114,10 +1139,7 @@ mod tests {
             ),
             Z_ERR_CONFIG_INVALID_VALUE
         );
-        assert_eq!(
-            config.resolved(),
-            Resolved::unchanged(SessionPolicy::defaults())
-        );
+        assert_eq!(config.resolved(), stating_nothing());
     }
 
     /// The door reads `wz/key-ids` where it lies, into the rows of its entries, as the tree reader
@@ -1160,18 +1182,16 @@ mod tests {
         );
     }
 
-    /// A document with no `wz` member, or a `wz: null`, states nothing.
+    /// A document with no `wz` member, or a `wz: null`, states nothing: the config resolves as one
+    /// handed no document, over the limits a session of this ABI opens under. Turned red by a door
+    /// that keeps such a document as a layer, or resolves it over the build's limits.
     #[cfg(feature = "config-document")]
     #[test]
     fn a_document_without_a_wz_member_states_nothing() {
         for text in ["{ mode: \"peer\" }", "{ mode: \"peer\", wz: null }"] {
             let mut config = Config::new();
             assert_eq!(config.document(text), Z_OK, "{text}");
-            assert_eq!(
-                config.resolved(),
-                Resolved::unchanged(SessionPolicy::defaults()),
-                "{text}"
-            );
+            assert_eq!(config.resolved(), stating_nothing(), "{text}");
         }
     }
 
@@ -1363,8 +1383,11 @@ mod tests {
             .all(|(_, origin)| origin == Origin::Profile("upstream")));
     }
 
-    /// One document, through this door and through the reader of the zenoh document, resolves to
-    /// one snapshot with one provenance.
+    /// One document, through this door and through the reader of the zenoh document over the
+    /// limits a session of this ABI opens under, resolves to one snapshot with one provenance; the
+    /// zenoh-c ABI's reader of the same document gives the same policies from the same layers, each
+    /// ABI keeping the limits it opens under. Turned red by a door that resolves over other limits
+    /// than the open's, or reads the policies apart from the zenoh reader.
     #[cfg(feature = "config-document")]
     #[test]
     fn one_document_resolves_as_the_zenoh_reader_resolves_it() {
@@ -1387,21 +1410,25 @@ mod tests {
         let tree = json5::parse(&text).expect("JSON5");
         assert_eq!(
             Ok(through_door),
-            policy_document::resolve_document(SessionPolicy::defaults(), &tree)
+            policy_document::resolve_document(opening_base(), &tree)
         );
         assert_eq!(entry.value_in(&through_door.policy), value);
         #[cfg(all(feature = "engine-tokio", feature = "scout"))]
         {
+            // A node of the zenoh-c ABI opens under the build's limits and a session of this one
+            // under zenoh-pico's, so the limits are compared above, over this ABI's own.
             let zenoh = wz_capi_core::runtime::zenoh_config::ZenohNodeConfig::from_json5(&text)
                 .expect("the zenoh reader takes the document");
-            assert_eq!(zenoh.config.policies, through_door);
+            assert_eq!(zenoh.config.policies.policy, through_door.policy);
+            assert_eq!(zenoh.config.policies.provenance, through_door.provenance);
         }
     }
 
     /// The document door reads each member of the corpus every door is held to as the reader of a
     /// document does for a creator that holds a session's limits: the open composes the limits a
-    /// taken member selects, and a refused member is refused with the doors' code and leaves the
-    /// config as it was.
+    /// taken member selects over the limits a session of this ABI opens under, and a refused member
+    /// is refused with the doors' code and leaves the config as it was. Turned red by a door that
+    /// selects a limit the member does not state, or resolves over the build's limits.
     #[cfg(feature = "config-document")]
     #[test]
     fn the_document_door_reads_each_limits_member_of_the_corpus_as_a_session_does() {
@@ -1415,7 +1442,10 @@ mod tests {
                 Expected::Selected(selected) => {
                     assert_eq!(code, Z_OK, "{}", case.name);
                     let resolved = config.resolved();
-                    if let Err(why) = case.session.check_session(&resolved.limits.session) {
+                    if let Err(why) = case.session.check_session_over(
+                        &crate::session::opening_limits(),
+                        &resolved.limits.session,
+                    ) {
                         panic!("{}: {why}", case.name);
                     }
                     for (limit, _) in selected {
@@ -1429,19 +1459,14 @@ mod tests {
                     let tree = json5::parse(&text).expect("JSON5");
                     assert_eq!(
                         Ok(resolved),
-                        policy_document::resolve_document(SessionPolicy::defaults(), &tree),
+                        policy_document::resolve_document(opening_base(), &tree),
                         "{}",
                         case.name
                     );
                 }
                 Expected::Refused(_) => {
                     assert_eq!(code, Z_ERR_CONFIG_INVALID_VALUE, "{}", case.name);
-                    assert_eq!(
-                        config.resolved(),
-                        Resolved::unchanged(SessionPolicy::defaults()),
-                        "{}",
-                        case.name
-                    );
+                    assert_eq!(config.resolved(), stating_nothing(), "{}", case.name);
                 }
             }
         }
