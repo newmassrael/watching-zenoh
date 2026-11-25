@@ -1319,8 +1319,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> DerefMut for CoreGuard
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + 'static> Drop for CoreGuard<'_, L, C> {
-    // Out of line: every hold of the session is let go through it.
-    #[inline(never)]
+    // Out of line where the body marks the arena, in a debug build: every hold of the session is
+    // let go through it. A release build's body is empty, and a call to it would be all it costs.
+    #[cfg_attr(debug_assertions, inline(never))]
     fn drop(&mut self) {
         // Before the lock is let go of, which the guard's own drop does after this body.
         self.guard.0.session.keys.owner_lock_released();
