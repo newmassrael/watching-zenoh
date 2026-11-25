@@ -85,18 +85,8 @@ pub unsafe fn mutex_in<T>(
     place: core::ptr::NonNull<Mutex<T>>,
     make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
 ) {
-    #[cfg(any(feature = "std", feature = "os-sys"))]
-    {
-        // SAFETY: `place` is valid for writes of a `Mutex<T>` (the caller's contract), which a
-        // `MaybeUninit` of it has the layout of.
-        let place = unsafe { &mut *place.as_ptr().cast::<core::mem::MaybeUninit<Mutex<T>>>() };
-        Mutex::new_in(place, make);
-    }
-    #[cfg(all(not(feature = "std"), not(feature = "os-sys")))]
-    {
-        // SAFETY: the caller's contract is `init_in`'s.
-        unsafe { Mutex::init_in(place, make) };
-    }
+    // SAFETY: the caller's contract is `init_at`'s, the host's and the kernel's alike.
+    unsafe { Mutex::init_at(place, make) }
 }
 
 /// A condition variable no thread waits on, made in `place`, as [`mutex_in`] makes a mutex.
@@ -348,7 +338,7 @@ mod kernel {
         /// `place` is valid for writes of a `Self` and aligned for it, and what it held is
         /// overwritten without being dropped. The mutex is not moved from `place` until it is
         /// dropped there.
-        pub(super) unsafe fn init_in(
+        pub(super) unsafe fn init_at(
             place: NonNull<Self>,
             make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
         ) {
@@ -494,7 +484,7 @@ mod kernel {
         /// A condition variable no thread waits on, made in `place`.
         ///
         /// # Safety
-        /// As for [`Mutex::init_in`].
+        /// As for [`Mutex::init_at`].
         pub(super) unsafe fn init_in(place: NonNull<Self>) {
             // SAFETY: `place` is valid for writes of a `Self` and stays (the caller's
             // contract); the kernel writes its object there.
@@ -849,10 +839,18 @@ mod tests {
     #[test]
     fn a_mutex_made_in_its_place_holds_what_its_maker_wrote() {
         let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
-        let mutex = Mutex::new_in(&mut place, |value| value.write(7));
+        // SAFETY: the place is this frame's, unmoved until it is dropped below.
+        unsafe {
+            mutex_in(
+                core::ptr::NonNull::from(&mut place).cast::<Mutex<u32>>(),
+                |value| value.write(7),
+            );
+        }
+        // SAFETY: made above.
+        let mutex = unsafe { place.assume_init_ref() };
         *mutex.lock() += 1;
         assert_eq!(*mutex.lock(), 8);
-        // SAFETY: `new_in` wrote the whole mutex into `place`, and it is dropped once.
+        // SAFETY: `mutex_in` wrote the whole mutex into `place`, and it is dropped once.
         unsafe { place.assume_init_drop() };
     }
 
@@ -862,7 +860,13 @@ mod tests {
     fn a_maker_that_lends_back_another_place_is_refused() {
         let elsewhere: &'static mut u32 = std::boxed::Box::leak(std::boxed::Box::new(1));
         let mut place = core::mem::MaybeUninit::<Mutex<u32>>::uninit();
-        Mutex::new_in(&mut place, |_| elsewhere);
+        // SAFETY: the place is this frame's; the panic leaves it unwritten and undropped.
+        unsafe {
+            mutex_in(
+                core::ptr::NonNull::from(&mut place).cast::<Mutex<u32>>(),
+                |_| elsewhere,
+            );
+        }
     }
 
     /// A mutex and a condition variable made in their places hold what their maker wrote and are
