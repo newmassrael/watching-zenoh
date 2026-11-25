@@ -363,10 +363,10 @@ pub(crate) fn resolve_open(
     cfg: &ConfigState,
 ) -> Result<(SessionPolicy, crate::config_limits::Stated), ZResult> {
     let (policy, limits) = resolve_snapshots(&cfg.policies)?;
-    let mut stated = crate::config_limits::Stated::over(limits);
-    if let Some(text) = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY) {
-        crate::config_limits::state_over(text, &mut stated)?;
-    }
+    let stated = match cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY) {
+        Some(text) => crate::config_limits::state_over(text, &limits)?,
+        None => crate::config_limits::Stated::over(limits),
+    };
     Ok((policy, stated))
 }
 

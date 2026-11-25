@@ -347,13 +347,13 @@ impl Held {
         Self(counts)
     };
 
-    /// Set the count of the limit `id` to `count`: `None` when `id` names none of these,
-    /// `Some(false)` with nothing set for a count past the build's value of it.
-    pub(crate) fn select(&mut self, id: &str, count: usize) -> Option<bool> {
+    /// Set the count of the limit `name` spells to `count`: `None` when `name` spells none of
+    /// these, `Some(false)` with nothing set for a count past the build's value of it.
+    pub(crate) fn select(&mut self, name: &[u8], count: usize) -> Option<bool> {
         let (row, held) = HELD_ROWS
             .iter()
             .zip(self.0.iter_mut())
-            .find(|(row, _)| row.id == id)?;
+            .find(|(row, _)| crate::config_limits::names(row.id, name))?;
         if count > row.build {
             return Some(false);
         }
@@ -3213,7 +3213,7 @@ mod tests {
     fn the_first_open_reserves_the_held_values_its_config_states() {
         let stated = caps::HELD_SAMPLES.min(3);
         let mut held = Held::BUILD;
-        assert_eq!(held.select("HELD_SAMPLES", stated), Some(true));
+        assert_eq!(held.select(b"HELD_SAMPLES", stated), Some(true));
         let asked = opened_with(&held);
         assert_eq!(asked.samples, stated);
         let mut reserved = Reserved::NONE;
@@ -3246,7 +3246,7 @@ mod tests {
         }
         let mut fewer = Held::BUILD;
         assert_eq!(
-            fewer.select("HELD_SAMPLES", caps::HELD_SAMPLES - 1),
+            fewer.select(b"HELD_SAMPLES", caps::HELD_SAMPLES - 1),
             Some(true)
         );
         let first = opened_with(&fewer);
@@ -3336,14 +3336,14 @@ mod tests {
                 "{id}"
             );
             let mut held = Held::BUILD;
-            assert_eq!(held.select(id, 0), Some(true), "{id}");
+            assert_eq!(held.select(id.as_bytes(), 0), Some(true), "{id}");
             let mut past = Held::BUILD;
-            assert_eq!(past.select(id, bound + 1), Some(false), "{id}");
+            assert_eq!(past.select(id.as_bytes(), bound + 1), Some(false), "{id}");
             assert_eq!(past, Held::BUILD, "{id}: nothing set");
         }
         let mut held = Held::BUILD;
-        assert_eq!(held.select("HELD_CONFIGS", 1), None);
-        assert_eq!(held.select("MAX_SUBSCRIPTIONS", 1), None);
+        assert_eq!(held.select(b"HELD_CONFIGS", 1), None);
+        assert_eq!(held.select(b"MAX_SUBSCRIPTIONS", 1), None);
         assert_eq!(held, Held::BUILD);
     }
 
