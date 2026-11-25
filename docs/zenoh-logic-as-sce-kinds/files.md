@@ -170,6 +170,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/engine.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/deliveries.rs` | S7 | |
+| `crates/wz-capi-coop/src/engine/direct.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/faces_added.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/get.rs` | S7 | |
 | `crates/wz-capi-coop/src/engine/group.rs` | S7 | |
