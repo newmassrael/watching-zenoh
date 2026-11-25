@@ -228,11 +228,6 @@ mod entries {
         /// Keeps `value` under `key`, in place of the value the key held, or
         /// `Z_ERR_CONFIG_FAILED_INSERT` when a new key finds no row or the value no room, the
         /// table then as it was.
-        ///
-        /// Inlined: `zp_config_insert` is its one caller in a library build, whose frame holds no
-        /// statement of the limits key (`crate::config_limits::judged` holds that in its own), so
-        /// the door's frame stays small and the insert pays no call and no frame of its own.
-        #[inline(always)]
         pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
             // Every refusal is taken before anything is written, so a refused insert leaves the
             // table as it was; each index is read checked, so no refusal of the config's is a
@@ -336,7 +331,9 @@ impl ConfigState {
     /// enters a config, so no door records one unjudged.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
         if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
-            if let Err(code) = crate::config_limits::judged(value) {
+            // Judged over a copy of what an open composes from, which the judgement drops.
+            let mut probe = crate::config_limits::Stated::OPENING;
+            if let Err(code) = crate::config_limits::state_over(Some(value), &mut probe) {
                 return code;
             }
         }
