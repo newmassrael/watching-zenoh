@@ -1644,10 +1644,10 @@ def selftest() -> int:
         pass
     expect("the name carries version, profile, host, width and ten digits of the commit",
            package_name("0.1.0", "host-peer-ext", "x64", "0123456789abcdef")
-           == "wz-capi-pico-0.1.0-host-peer-ext-windows-x64-0123456789")
+           == "wz-capi-pico-0.1.0-host-peer-ext-windows-x64-nostd-0123456789")
     expect("the two widths make two names",
            package_name("0.1.0", "host-peer-ext", "x86", "0123456789abcdef")
-           == "wz-capi-pico-0.1.0-host-peer-ext-windows-x86-0123456789")
+           == "wz-capi-pico-0.1.0-host-peer-ext-windows-x86-nostd-0123456789")
     expect("each width is built for its own target and compiled against with its own compiler",
            ARCHES == {"x64": ("x86_64-pc-windows-msvc", "x64"), "x86": ("i686-pc-windows-msvc", "x86")})
     expect("a manifest's target names its width",
@@ -2136,7 +2136,7 @@ def selftest() -> int:
                 built = {"commit": differs.get("commit", commit), "tree_clean": differs.get("clean", True)}
                 version = differs.get("version", "0.1.0")
                 stdlib = differs.get("stdlib", STDLIBS[0])
-                name = package_name(version, "p", arch, built["commit"], form)
+                name = differs.get("name") or package_name(version, "p", arch, built["commit"], form)
                 stage = pathlib.Path(tempfile.mkdtemp(dir=tmp)) / name
                 stage.mkdir()
                 (stage / "README.md").write_text("r\n", encoding="utf-8")
@@ -2205,7 +2205,10 @@ def selftest() -> int:
                any(f.startswith(f"{copy_name}: its manifest makes it") for f in findings)
                and any(": a second package of " in f for f in findings))
         for arch, form, differs, word in (
-                ("x64", "single", {"stdlib": "std"}, "`std` is the standard library of no package (nostd)"),
+                # A DLL built with `std` was named without the standard library's word, so it lands
+                # beside the release's package of its width and form, not over it.
+                ("x64", "single", {"stdlib": "std", "name": "wz-capi-pico-0.1.0-p-windows-x64-0123456789"},
+                 "`std` is the standard library of no package (nostd)"),
                 ("x86", "split", {}, "the split form, which no release carries (single)")):
             findings, _ = release_findings(release_dir(every + [(arch, form, differs)]), commit, "v0.1.0")
             expect(f"a package of {arch} {form} {differs} beside a full release is a finding ({findings})",
