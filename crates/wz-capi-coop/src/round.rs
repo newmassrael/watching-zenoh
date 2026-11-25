@@ -241,6 +241,18 @@ impl PlaneCalls for CoopCalls {
     type LocalAnswers = wz_session_core::session_tables::Present;
     #[cfg(not(feature = "local-queryable"))]
     type LocalAnswers = wz_session_core::session_tables::Absent;
+    // The read that hands each record out as it is read hands a peer's reply to its get itself
+    // (`engine::replies`).
+    #[cfg(any(
+        feature = "local-queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    type Captures = wz_session_core::session_tables::Present;
+    #[cfg(not(any(
+        feature = "local-queryable",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    )))]
+    type Captures = wz_session_core::session_tables::Absent;
     type Queues = crate::engine::CoopLocks;
 }
 

@@ -43,9 +43,9 @@ use wz_codecs::encoding::Encoding;
 use wz_codecs::push::{PushView, PushViewVariant};
 use wz_codecs::timestamp::Timestamp;
 
-use super::{LocalSubscribers, PeerDelivery, SubscriberPeer};
+use super::{InPlaceFallbacks, LocalSubscribers, PeerDelivery, PeerNaming, SubscriberPeer};
 use crate::bounded::Storage;
-use crate::driver_loop::InPlaceRecord;
+use crate::driver_loop::{InPlaceRecord, OwedToProjection};
 use crate::reliability::Reliability;
 use crate::sample::{QosLevel, SourceInfo};
 use crate::sample_kind::SampleKind;
@@ -80,6 +80,44 @@ enum Fallback {
     /// It carries a timestamp stack, which the delivering node adds to.
     #[cfg(feature = "pubsub-ts-stack")]
     Instrumented,
+}
+
+impl Fallback {
+    /// Count this fallback in `counts`, by why.
+    fn count_in(&self, counts: &mut InPlaceFallbacks) {
+        let count = match self {
+            #[cfg(feature = "pubsub-put")]
+            Self::Sliced => &mut counts.sliced,
+            Self::KeyexprPastBound => &mut counts.keyexpr_past_bound,
+            #[cfg(feature = "pubsub-ts-stack")]
+            Self::Instrumented => &mut counts.instrumented,
+        };
+        *count = count.saturating_add(1);
+    }
+}
+
+/// What a Push the in-place receive path lent comes to before anyone is handed it
+/// ([`SubscriberPeer::lend_in_place`]): the sample to hand to each subscriber its key reaches
+/// from a peer; `None` for nothing to hand anyone (a record that is not a Push, a body or a key
+/// the delivery drops, the session's own sample echoed back); [`OwedToProjection`] for a Push
+/// the lent form does not represent, which its owned projection delivers.
+pub type LentPush<'s> = Result<Option<SampleRef<'s>>, OwedToProjection>;
+
+/// What a lent Push's sample borrows beside the frame and the peer's table: the buffer a key is
+/// composed in where the policy composes in the delivering call's frame, and the source info read
+/// off the body. Held by whoever hands the sample out, for as long as it does.
+pub struct LentRoom<Q: Storage> {
+    frame: <Q::Compose as ComposeRoom>::Frame,
+    source_info: Option<SourceInfo>,
+}
+
+impl<Q: Storage> Default for LentRoom<Q> {
+    fn default() -> Self {
+        Self {
+            frame: Default::default(),
+            source_info: None,
+        }
+    }
 }
 
 /// The body of `push` as a lent sample delivers it, `Ok(None)` for a body the
@@ -184,35 +222,84 @@ impl<Q: Storage> SubscriberPeer<Q> {
         };
         let reliability = Reliability::from_reliable_bool(record.reliable());
         let sender = record.sender();
-        match self.deliver_lent(subs, cx, push, reliability, sender) {
-            Ok(()) => {}
-            // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
-            #[cfg(feature = "pubsub-put")]
-            Err(Fallback::Sliced) => {
-                self.in_place_fallbacks.sliced = self.in_place_fallbacks.sliced.saturating_add(1);
-                #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
-            }
-            Err(Fallback::KeyexprPastBound) => {
-                self.in_place_fallbacks.keyexpr_past_bound =
-                    self.in_place_fallbacks.keyexpr_past_bound.saturating_add(1);
-                #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
-            }
-            #[cfg(feature = "pubsub-ts-stack")]
-            Err(Fallback::Instrumented) => {
-                self.in_place_fallbacks.instrumented =
-                    self.in_place_fallbacks.instrumented.saturating_add(1);
-                #[cfg(not(feature = "rx-lent-only"))]
-                self.dispatch_owned_projection(subs, cx, push, reliability, sender);
-            }
+        // Each is counted; a build that lends only (`rx-lent-only`) delivers none of them.
+        if let Err(why) = self.deliver_lent(subs, cx, push, reliability, sender) {
+            why.count_in(&mut self.in_place_fallbacks);
+            #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
+            self.dispatch_owned_projection(subs, cx, push, reliability, sender);
+        }
+    }
+
+    /// Lend a Push the in-place receive path read: the sample its subscribers are handed, over the
+    /// frame, this side's table and `room`, for a caller that walks the subscribers itself, one
+    /// row at a time (`SessionTables::pin_next_subscriber`). `subs` are the subscriptions the
+    /// sample is delivered to, read for our own id space alone. What the sample borrows of this
+    /// side (the peer's literal, the room a key is composed in) is written only by the reading of
+    /// this peer's records, so it holds for as long as the caller reads no other.
+    ///
+    /// A Push the lent form does not represent is counted, as the dispatch counts it, and is
+    /// [`OwedToProjection`]: the caller hands out its owned projection
+    /// ([`Self::project_in_place`]).
+    pub fn lend_in_place<'s, 'a: 's, L: LocalSubscribers>(
+        &'s mut self,
+        subs: &L,
+        record: &InPlaceRecord<'a, '_>,
+        room: &'s mut LentRoom<Q>,
+    ) -> LentPush<'s> {
+        // A lent Request or Response is the queryables' or the pending gets'.
+        let Some(push) = record.push() else {
+            return Ok(None);
+        };
+        let reliability = Reliability::from_reliable_bool(record.reliable());
+        let SubscriberPeer {
+            naming,
+            compose,
+            in_place_fallbacks,
+            ..
+        } = self;
+        Self::lend_sample(
+            naming,
+            compose,
+            subs,
+            push,
+            reliability,
+            record.sender(),
+            room,
+        )
+        .map_err(|why| {
+            why.count_in(in_place_fallbacks);
+            OwedToProjection
+        })
+    }
+
+    /// The owned projection of the Push `record` lends, which the lent form does not represent
+    /// ([`OwedToProjection`]): the sample the copying receive delivers for it, owned, so whoever
+    /// hands it out holds nothing of this side. `None` for a record that is no Push, one the
+    /// projection drops, and every one in a build that lends only (`rx-lent-only`).
+    #[cfg(feature = "alloc")]
+    pub fn project_in_place<L: LocalSubscribers>(
+        &mut self,
+        subs: &L,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<crate::sample::Sample> {
+        #[cfg(not(feature = "rx-lent-only"))]
+        {
+            let push = record.push()?;
+            let reliability = Reliability::from_reliable_bool(record.reliable());
+            // The wire profile is unbounded (`Heap`, or the AP's shared frame ranges), so this
+            // projection cannot refuse a Push its view read.
+            let owned = crate::wire::push_of_view(push).ok()?;
+            self.project_push(subs, &owned, reliability, true, record.sender())
+        }
+        #[cfg(feature = "rx-lent-only")]
+        {
+            let _ = (subs, record);
+            None
         }
     }
 
     /// The lent delivery itself: nothing on the heap for a Put whose keyexpr
-    /// fits, short of a timestamp or encoding hint a subscriber asks for. A keyexpr that has to
-    /// be composed is composed in the side's room ([`Storage::Compose`]): on the lent policy the
-    /// row lent at open, which refuses one past it.
+    /// fits, short of a timestamp or encoding hint a subscriber asks for.
     fn deliver_lent<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
         &mut self,
         subs: &mut L,
@@ -221,8 +308,60 @@ impl<Q: Storage> SubscriberPeer<Q> {
         reliability: Reliability,
         sender: u64,
     ) -> Result<(), Fallback> {
-        let Some(body) = lent_body(push)? else {
+        let SubscriberPeer {
+            naming,
+            compose,
+            class,
+            ..
+        } = self;
+        let mut room = LentRoom::default();
+        let Some(sample) = Self::lend_sample(
+            naming,
+            compose,
+            &*subs,
+            push,
+            reliability,
+            sender,
+            &mut room,
+        )?
+        else {
             return Ok(());
+        };
+        // Through the key gate and, for a key of a closed set, the selection: the one delivery of
+        // a message from a peer, as the copying receive takes it. The rows it reaches are handed
+        // it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
+        subs.deliver_from_peer(
+            sample.keyexpr,
+            *class,
+            PeerDelivery {
+                no_allocation: true,
+                ..PeerDelivery::default()
+            },
+            |id, row| {
+                cx.deliver_ref(id, row, &sample, turn);
+                turn = FanOut::later();
+            },
+        );
+        Ok(())
+    }
+
+    /// The sample of `push`, over the frame, the peer's table (`naming`) and `room`; `None`
+    /// for a Push the owned path drops too, or the session's own sample echoed back. A keyexpr
+    /// that has to be composed is composed in the side's room (`compose`, [`Storage::Compose`]):
+    /// on the lent policy the row lent at open, which refuses one past it; elsewhere `room`'s
+    /// buffer. Handed the side's fields alone, so a caller counts a fallback in another.
+    fn lend_sample<'s, L: LocalSubscribers>(
+        naming: &'s PeerNaming<Q>,
+        compose: &'s mut Q::Compose,
+        subs: &L,
+        push: &'s PushView<'_>,
+        reliability: Reliability,
+        sender: u64,
+        room: &'s mut LentRoom<Q>,
+    ) -> Result<Option<SampleRef<'s>>, Fallback> {
+        let Some(body) = lent_body(push)? else {
+            return Ok(None);
         };
         // The Push's own chain is walked where it lies, once for each field that reads it.
         // A message the nodes record on is delivered with a stack of its own to add to.
@@ -235,30 +374,24 @@ impl<Q: Storage> SubscriberPeer<Q> {
         {
             return Err(Fallback::Instrumented);
         }
-        // The keyexpr may be the peer table's own literal, so the table stays
-        // borrowed through the delivery; the subscriptions are another value
-        // (`subs`). A composed keyexpr lies in the side's room, a field apart from the
-        // table, or in `frame` where the policy composes in this call's frame.
-        let SubscriberPeer {
-            naming,
-            compose,
-            class,
-            ..
-        } = self;
-        let mut frame = Default::default();
+        // The keyexpr may be the peer table's own literal, so the table stays borrowed through
+        // the delivery; the subscriptions are another value (`subs`). A composed keyexpr lies in
+        // the side's room, a field apart from the table, or in `room` where the policy composes
+        // in the delivering call's frame.
+        let LentRoom { frame, source_info } = room;
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
         // of it into the room before the delivery writes it.
         let (keyexpr, held) = match resolve_wireexpr_viewed_held_over(
             &push.keyexpr.body,
             naming.spaces().from_sender(sender),
             subs.own_space(),
-            ComposeRoom::buffer(compose, &mut frame),
+            ComposeRoom::buffer(compose, frame),
         ) {
             Ok(Some(resolved)) => resolved,
             // The empty keyexpr, or an id the space does not hold: dropped, as
             // the owned path drops it. A sliced Put never reaches here, so
             // there are no shared-memory slices to settle.
-            Ok(None) => return Ok(()),
+            Ok(None) => return Ok(None),
             Err(KeyexprPastBound) => return Err(Fallback::KeyexprPastBound),
         };
         #[cfg(feature = "pubsub-qos")]
@@ -266,6 +399,8 @@ impl<Q: Storage> SubscriberPeer<Q> {
             crate::sample::extract_qos_in(crate::ext_view::walked(push.extensions.as_ref()));
         #[cfg(not(feature = "pubsub-qos"))]
         let qos: Option<QosLevel> = None;
+        *source_info = body.source_info;
+        let source_info: &'s Option<SourceInfo> = source_info;
         // Every field a range of the frame or a value read off it, valid for the delivery call. The
         // hints own heap fields (a schema's bytes), so they are built only when a subscriber asks
         // for them. The attachment and the payload are the link's, lent for the call: a subscriber
@@ -285,7 +420,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 )
             }),
             timestamp: body.timestamp.map(|ts| (ts.time, ts.zid.into_inner())),
-            source_info: body.source_info.as_ref(),
+            source_info: source_info.as_ref(),
             // A message is read in place only off a link, so it was routed to this node.
             #[cfg(feature = "pubsub-ts-stack")]
             routed: true,
@@ -299,26 +434,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
         if let (Some(own), Some(info)) = (naming.own_zid.held(), sample.source_info) {
             let prefix = info.zid_prefix();
             if !prefix.is_empty() && prefix == own {
-                return Ok(());
+                return Ok(None);
             }
         }
-        // Through the key gate and, for a key of a closed set, the selection: the one delivery of
-        // a message from a peer, as the copying receive takes it. The rows it reaches are handed
-        // it in one fan-out, each told its turn.
-        let mut turn = FanOut::begin();
-        subs.deliver_from_peer(
-            sample.keyexpr,
-            *class,
-            PeerDelivery {
-                no_allocation: true,
-                ..PeerDelivery::default()
-            },
-            |id, row| {
-                cx.deliver_ref(id, row, &sample, turn);
-                turn = FanOut::later();
-            },
-        );
-        Ok(())
+        Ok(Some(sample))
     }
 
     /// The fallback: the owned projection of `push`, delivered by the path the
@@ -361,74 +480,15 @@ impl<Q: Storage> SubscriberPeer<Q> {
         puts: &[crate::plain_push::PlainPut],
     ) {
         let reliability = Reliability::from_reliable_bool(reliable);
-        let spaces = self.mapping_spaces();
-        // The text of the suffix just read, which the next record of a stream repeats: its
-        // bytes are compared with the last ones instead of being checked as UTF-8 again.
-        let mut last_suffix: Option<(&[u8], &str)> = None;
-        let frame_bytes = frame.as_slice();
-        // The key of the record just delivered, kept as text. The reader says when a record
-        // names the same key as the one before it ([`PlainPut::repeats_key`]), and then that
-        // text is the key: it is not composed again, and the sample is marked as repeating so
-        // that the match against the subscribers and a sink's list of keys are not redone
-        // either. `current_is_set` is false until a record has been delivered, and after one
-        // that was dropped, so a repeat never rests on a key that was not.
-        let mut current = alloc::string::String::new();
-        let mut current_is_set = false;
+        let mut keys = PlainPutKeys::new(frame);
         for put in puts {
-            let repeats = put.repeats_key && current_is_set;
-            if !repeats {
-                current_is_set = false;
-                let suffix = match put.suffix {
-                    Some((from, to)) => {
-                        // The reader took the range from this frame; one that is not in it is
-                        // dropped, as a frame that changed under the reader is below.
-                        let Some(bytes) = frame_bytes.get(from as usize..to as usize) else {
-                            continue;
-                        };
-                        match last_suffix {
-                            Some((held, text)) if held == bytes => Some(text),
-                            _ => match core::str::from_utf8(bytes) {
-                                Ok(text) => {
-                                    last_suffix = Some((bytes, text));
-                                    Some(text)
-                                }
-                                // The reader validated it; a frame that changed under it is
-                                // dropped.
-                                Err(_) => continue,
-                            },
-                        }
-                    }
-                    None => None,
-                };
-                let mut composed = KeyexprBuf::new();
-                let keyexpr = match resolve_plain_parts_over(
-                    put.sender_mapping,
-                    put.id,
-                    suffix,
-                    spaces,
-                    subs.own_space(),
-                    &mut composed,
-                ) {
-                    Ok(Some(keyexpr)) => keyexpr,
-                    // Undeclared id or empty key; the growable backing never answers past-bound.
-                    Ok(None) | Err(KeyexprPastBound) => continue,
-                };
-                current.clear();
-                current.push_str(keyexpr);
-                current_is_set = true;
-            }
-            #[cfg(feature = "pubsub-qos")]
-            let qos = put.qos.map(QosLevel::from_raw);
-            #[cfg(not(feature = "pubsub-qos"))]
-            let qos: Option<QosLevel> = None;
-            let mut sample =
-                crate::sink::PlainSample::new(&current, frame, put.payload, reliability, qos);
-            if repeats {
-                sample = sample.repeating_the_previous_key();
-            }
+            let Some(repeats) = self.plain_put_key(&*subs, &mut keys, put) else {
+                continue;
+            };
+            let sample = keys.sample(put, reliability, repeats);
             let mut turn = FanOut::begin();
             subs.deliver_from_peer(
-                &current,
+                keys.key(),
                 self.class,
                 PeerDelivery {
                     repeats_previous: repeats,
@@ -442,6 +502,116 @@ impl<Q: Storage> SubscriberPeer<Q> {
         }
         // The frame is done with this table: a sink that gathered its samples hands over.
         subs.end_plain_frame(cx);
+    }
+
+    /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against this peer's
+    /// aliases and `subs`' own: whether it names the key of the record read before it, the key
+    /// then being [`PlainPutKeys::key`] either way; `None` for a record that is dropped (a key the
+    /// peer never declared, the empty key, a range not in the frame), as the owned path drops it.
+    /// One record's key never affects another's.
+    pub fn plain_put_key<L: LocalSubscribers>(
+        &self,
+        subs: &L,
+        keys: &mut PlainPutKeys<'_>,
+        put: &crate::plain_push::PlainPut,
+    ) -> Option<bool> {
+        // The reader says when a record names the same key as the one before it
+        // ([`PlainPut::repeats_key`](crate::plain_push::PlainPut::repeats_key)), and then the key
+        // read last is the key: it is not composed again.
+        if put.repeats_key && keys.current_is_set {
+            return Some(true);
+        }
+        keys.current_is_set = false;
+        let suffix = match put.suffix {
+            Some((from, to)) => {
+                // The reader took the range and validated its text from this frame; one that is
+                // not in it, or not text, is a frame that changed under the reader, dropped.
+                let frame = keys.frame;
+                let bytes = frame.as_slice().get(from as usize..to as usize)?;
+                match keys.last_suffix {
+                    Some((held, text)) if held == bytes => Some(text),
+                    _ => {
+                        let text = core::str::from_utf8(bytes).ok()?;
+                        keys.last_suffix = Some((bytes, text));
+                        Some(text)
+                    }
+                }
+            }
+            None => None,
+        };
+        let mut composed = KeyexprBuf::new();
+        let keyexpr = match resolve_plain_parts_over(
+            put.sender_mapping,
+            put.id,
+            suffix,
+            self.mapping_spaces(),
+            subs.own_space(),
+            &mut composed,
+        ) {
+            Ok(Some(keyexpr)) => keyexpr,
+            // Undeclared id or empty key; the growable backing never answers past-bound.
+            Ok(None) | Err(KeyexprPastBound) => return None,
+        };
+        keys.current.clear();
+        keys.current.push_str(keyexpr);
+        keys.current_is_set = true;
+        Some(false)
+    }
+}
+
+/// The keys of a frame's plain `Put`s, read one record at a time in their order against the
+/// sending peer's aliases ([`SubscriberPeer::plain_put_key`]): what the delivery of each names,
+/// whether the frame's dispatch hands the records out or a walk of one subscriber at a time does.
+/// It keeps the key of the record read last as text, which the next record of a stream repeats.
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+pub struct PlainPutKeys<'f> {
+    frame: &'f crate::link::RxBytes,
+    /// The text of the suffix just read, which the next record of a stream repeats: its bytes are
+    /// compared with the last ones instead of being checked as UTF-8 again.
+    last_suffix: Option<(&'f [u8], &'f str)>,
+    /// The key of the record read last.
+    current: alloc::string::String,
+    /// Whether `current` is the key of the record read last: not until a record's key was read,
+    /// nor after a record that was dropped, so a repeat never rests on a key that was not.
+    current_is_set: bool,
+}
+
+#[cfg(all(feature = "alloc", feature = "pubsub-put"))]
+impl<'f> PlainPutKeys<'f> {
+    /// The keys of the plain `Put`s of `frame`, none read yet.
+    pub fn new(frame: &'f crate::link::RxBytes) -> Self {
+        Self {
+            frame,
+            last_suffix: None,
+            current: alloc::string::String::new(),
+            current_is_set: false,
+        }
+    }
+
+    /// The key of the record read last ([`SubscriberPeer::plain_put_key`]).
+    pub fn key(&self) -> &str {
+        &self.current
+    }
+
+    /// The sample of `put`, the record whose key was read last, over the frame: marked as
+    /// repeating the key of the record before it when `repeats`, as the read of its key said.
+    pub fn sample(
+        &self,
+        put: &crate::plain_push::PlainPut,
+        reliability: Reliability,
+        repeats: bool,
+    ) -> crate::sink::PlainSample<'_> {
+        #[cfg(feature = "pubsub-qos")]
+        let qos = put.qos.map(QosLevel::from_raw);
+        #[cfg(not(feature = "pubsub-qos"))]
+        let qos: Option<QosLevel> = None;
+        let sample =
+            crate::sink::PlainSample::new(&self.current, self.frame, put.payload, reliability, qos);
+        if repeats {
+            sample.repeating_the_previous_key()
+        } else {
+            sample
+        }
     }
 }
 
@@ -1065,5 +1235,55 @@ mod tests {
         };
         let (lent, owned, _) = both_ways(&push, "demo/a", own);
         assert_eq!((lent.len(), owned.len()), (0, 0));
+    }
+
+    /// A Push lent to a caller that walks the subscribers itself is the sample the fan-out would
+    /// hand: an `M=0` key composed whole in the row lent at open. A key past that row is owed to
+    /// the owned projection and counted once, as the dispatch counts it; the projection holds the
+    /// key whole where the build has the copying path. Turned red by a lend that answers a key the
+    /// delivery refuses, or one that counts the fallback other than once.
+    #[test]
+    fn a_lent_push_is_the_sample_the_fan_out_hands_and_a_key_past_the_row_is_owed() {
+        let wire = own_space_wire();
+        let push = own_space_push(&wire);
+        let record = InPlaceRecord::push_of_frame(&push, false, 7, crate::qos::Priority::DEFAULT);
+        let (mut registry, _) = recording("**");
+        let (table, _) = registry.split_mut();
+
+        let mut side = lent_side("mine/", true);
+        let mut room = LentRoom::default();
+        let key = match side.lend_in_place(&*table, &record, &mut room) {
+            Ok(Some(sample)) => sample.keyexpr.to_string(),
+            Ok(None) => panic!("a Push the side resolves lent nothing"),
+            Err(OwedToProjection) => panic!("a key that fits the row was owed to the projection"),
+        };
+        assert_eq!(key, "mine/x");
+        assert_eq!(side.in_place_fallbacks(), InPlaceFallbacks::default());
+
+        let literal = alloc::format!("{}/", "a".repeat(crate::caps::MAX_KEYEXPR_BYTES - 1));
+        let mut past = lent_side(&literal, true);
+        let mut room = LentRoom::default();
+        assert!(
+            matches!(
+                past.lend_in_place(&*table, &record, &mut room),
+                Err(OwedToProjection)
+            ),
+            "a key past the row was lent"
+        );
+        assert_eq!(
+            past.in_place_fallbacks(),
+            InPlaceFallbacks {
+                keyexpr_past_bound: 1,
+                ..InPlaceFallbacks::default()
+            },
+            "the fallback counted other than once"
+        );
+        let projected = past
+            .project_in_place(&*table, &record)
+            .map(|sample| sample.keyexpr().to_string());
+        #[cfg(not(feature = "rx-lent-only"))]
+        assert_eq!(projected, Some(alloc::format!("{literal}x")));
+        #[cfg(feature = "rx-lent-only")]
+        assert_eq!(projected, None, "a build that lends only projects nothing");
     }
 }

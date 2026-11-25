@@ -1028,6 +1028,12 @@ const _: () = assert!(
     "an outcome holds owned records exactly where the tables read them"
 );
 
+/// A record the in-place receive path lent whose lent form does not represent it (a sliced
+/// payload, a key past the room it is composed in, a timestamp stack): the caller delivers its
+/// owned projection instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwedToProjection;
+
 /// One record of an inbound `Frame` decoded where the frame lies, with the
 /// frame's own reliability, SN and priority: what [`IterationEvent::InPlace`]
 /// carries.

@@ -39,6 +39,8 @@ use super::decl_watch::WatchObserver;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
 use wz_session_core::bounded::{Arena, BoundedVec, LendRefused};
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use wz_session_core::driver_loop::InPlaceRecord;
 
 use crate::RowPolicy;
 use wz_session_core::driver_loop::IterationEvent;
@@ -49,6 +51,8 @@ use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+use wz_session_core::pubsub::LentPush;
 #[cfg(feature = "query")]
 use wz_session_core::reply_sink::ConsolidatingSink;
 #[cfg(feature = "queryable")]
@@ -115,6 +119,11 @@ pub(super) type Gets = NoRequesters;
 /// What a face's peer writes and is owed. The rows are lent from the session's arena at its open,
 /// one set for each face the session may hold at once (`crate::arena::FacePeers`).
 pub(super) type Peer = PeerTables<RowPolicy>;
+
+/// What a lent Push's sample borrows beside the frame and the face's peer, held by the walk that
+/// hands it out (`pinned`).
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+pub(super) type PeerRoom = wz_session_core::pubsub::LentRoom<RowPolicy>;
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
@@ -438,6 +447,18 @@ type BuildHolders = held::OneHolder;
 /// The application layer of one session, as the build holds its faces.
 pub(super) type Registry = RegistryOf<BuildHolders>;
 
+/// The planes of the application layer a dispatch of a face's event reaches.
+#[derive(Clone, Copy)]
+pub(super) enum Planes {
+    /// Every plane.
+    All,
+    /// Every plane but the subscribers' and the pending gets' replies, whose side of each of the
+    /// event's records the caller took itself, in their order
+    /// (`RegistryOf::take_subscriber_record`, `RegistryOf::take_reply`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    BesideSubscribers,
+}
+
 /// The application layer of one session, its faces held as `H` holds them. See the module
 /// documentation.
 pub(super) struct RegistryOf<H: Holders> {
@@ -502,10 +523,10 @@ pub(super) struct RegistryOf<H: Holders> {
     /// How many sets the walks over the faces read: what a test of the cost of a walk counts.
     #[cfg(test)]
     set_reads: core::cell::Cell<usize>,
-    /// The lent Pushes handed to the subscribers' plane alone ([`Self::dispatch_push`]), the
-    /// face lookups their dispatches made with the drains after them, and the lent Pushes that
-    /// reached the fan over every plane instead ([`Self::dispatch_event`]): what a test of the
-    /// cost of one received sample counts.
+    /// The lent Pushes handed to the subscribers' plane alone (`Self::dispatch_push`, or
+    /// `Self::lend_push`), the face lookups their dispatches made with the drains after them, and
+    /// the lent Pushes that reached the fan over every plane instead ([`Self::dispatch_event_to`]):
+    /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
     /// How often a run of Pushes was drained before a later record of its own frame
@@ -695,7 +716,7 @@ impl<H: Holders> RegistryOf<H> {
     /// One more lent Push handed to the subscribers' plane alone, the face lookups since
     /// `looked` its own.
     #[cfg(all(test, feature = "std"))]
-    fn counted_push(&mut self, looked: u64) {
+    pub(super) fn counted_push(&mut self, looked: u64) {
         let lookups = usize::try_from(self.face_lookups.wrapping_sub(looked)).unwrap_or(usize::MAX);
         self.pushes.0 += 1;
         self.pushes.1 += lookups;
@@ -998,7 +1019,22 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Fan one iteration's event of face `id` into the application layer, against that face's
     /// tables. A face the session no longer holds hears nothing.
+    #[cfg(all(
+        feature = "queryable",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn dispatch_event(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
+        self.dispatch_event_to(face, event, Planes::All);
+    }
+
+    /// Fan one iteration's event of face `face` into the planes `planes` names, against that
+    /// face's tables. A face the session no longer holds hears nothing.
+    pub(super) fn dispatch_event_to(
+        &mut self,
+        face: HeldFace,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
         #[cfg(all(test, feature = "std"))]
         if super::lent_push(&event) {
             self.pushes.2 += 1;
@@ -1012,7 +1048,19 @@ impl<H: Holders> RegistryOf<H> {
             others,
         }) = self.split(self.place(face))
         {
-            app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others);
+            match planes {
+                Planes::All => {
+                    app.dispatch_event_among(delivery, &mut set.peer, &mut set.gets, event, &others)
+                }
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                Planes::BesideSubscribers => app.dispatch_event_beside_subscribers(
+                    delivery,
+                    &mut set.peer,
+                    &mut set.gets,
+                    event,
+                    &others,
+                ),
+            }
         }
         #[cfg(feature = "declarations-synced-event")]
         if !was_final && self.declarations_final(face) {
@@ -1030,7 +1078,10 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Hand `sample`, which the session itself published, to each of its subscribers that hears
     /// the session's own messages: how many.
-    #[cfg(feature = "local-subscriber")]
+    #[cfg(all(
+        feature = "local-subscriber",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn local_publish(
         &mut self,
         sample: &dyn wz_session_core::sink::SampleView,
@@ -1073,7 +1124,7 @@ impl<H: Holders> RegistryOf<H> {
             .is_some_and(|face| face.peer.remote_subscribers.initial_declarations_final())
     }
 
-    /// The next [`Self::dispatch_event`] is of a link whose peer's zid `peer` reads: what the
+    /// The next [`Self::dispatch_event_to`] is of a link whose peer's zid `peer` reads: what the
     /// watches are told of it is held as that peer's events (`DeclWatches::hear_link`). A group's
     /// dispatch says nothing, and what it tells is held for no one.
     #[cfg(any(
@@ -1103,7 +1154,7 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// Drain what the last [`Self::dispatch_event`] of face `id` staged, EXCEPT the `Final`s the
+    /// Drain what the last [`Self::dispatch_event_to`] of face `id` staged, EXCEPT the `Final`s the
     /// queries owe: the replies, the answers to the peer's interests and the terminated-get
     /// prunes leave through `actions`. The `Final`s are taken with
     /// [`Self::take_pending_final_rids`].
@@ -1132,11 +1183,13 @@ impl<H: Holders> RegistryOf<H> {
 
     /// A Push of face `id` lent where its frame lies ([`super::lent_push`]), handed to the
     /// subscribers' plane alone, which is the one plane that reads a Push: the fan over every
-    /// plane ([`Self::dispatch_event`]) is spared, and so are the watches' staging, which a Push
+    /// plane ([`Self::dispatch_event_to`]) is spared, and so are the watches' staging, which a Push
     /// stages nothing into. What follows the dispatch of a record is put off to the end of the run
     /// of Pushes it is one of ([`Self::settle`]): a Push stages nothing for it to drain, so
     /// it is done once for the run and not once for each. A face the session no longer holds hears
-    /// nothing.
+    /// nothing. A session whose read steps its one link itself hands a lent Push out one
+    /// subscriber at a time instead (`Self::lend_push`).
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     pub(super) fn dispatch_push(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
         #[cfg(all(test, feature = "std"))]
         let looked = self.face_lookups;
@@ -1155,12 +1208,247 @@ impl<H: Holders> RegistryOf<H> {
         self.counted_push(looked);
     }
 
+    /// A Push of face `face` lent where its frame lies, read into the sample its subscribers are
+    /// handed, over the frame, the face's peer and `room` (`SubscriberPeer::lend_in_place`), for
+    /// a walk that hands it to one subscriber at a time with the session let go of (`pinned`).
+    /// A face the session no longer holds lends nothing.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn lend_push<'s, 'a: 's>(
+        &'s mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'a, '_>,
+        room: &'s mut PeerRoom,
+    ) -> LentPush<'s> {
+        match self.split_unwritten(self.place(face)) {
+            Some(Split { app, face, .. }) => {
+                face.peer
+                    .subscribers
+                    .lend_in_place(&app.tables, record, room)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The subscribers' side of `message`, one owned record of a frame of face `face`, taken
+    /// ahead of the frame's other planes (`Planes::BesideSubscribers`): a Push's projection, which
+    /// the caller hands out one subscriber at a time, and any other record taken as the frame's
+    /// dispatch takes it (`SubscriberPeer::take_record`). A face the session no longer holds
+    /// takes nothing.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn take_subscriber_record(
+        &mut self,
+        face: HeldFace,
+        message: &wz_session_core::network_message::NetworkMessage,
+        reliability: wz_session_core::sample::Reliability,
+    ) -> Option<wz_session_core::sample::Sample> {
+        let Split {
+            app,
+            delivery,
+            face,
+            ..
+        } = self.split(self.place(face))?;
+        face.peer
+            .subscribers
+            .take_record(&mut app.tables, delivery, message, reliability)
+    }
+
+    /// Read the key of `put`, the next plain `Put` of the frame `keys` reads, against the aliases
+    /// of face `face`'s peer (`SubscriberPeer::plain_put_key`): whether it names the key read
+    /// before it, the key then `keys`' own; `None` for a record that is dropped. A face the
+    /// session no longer holds reads none.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn plain_put_key(
+        &mut self,
+        face: HeldFace,
+        keys: &mut wz_session_core::pubsub::PlainPutKeys<'_>,
+        put: &wz_session_core::plain_push::PlainPut,
+    ) -> Option<bool> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        face.peer.subscribers.plain_put_key(&app.tables, keys, put)
+    }
+
+    /// The owned projection of the Push of face `face` that `record` lends, which the lent form
+    /// does not represent (`OwedToProjection`): the sample the copying receive delivers for it.
+    /// A face the session no longer holds projects nothing.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(super) fn project_push(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<wz_session_core::sample::Sample> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        face.peer.subscribers.project_in_place(&app.tables, record)
+    }
+
+    /// The reply of the Response of face `face` that `record` lends, read over the frame, the
+    /// face's peer and `room` as the face's dispatch reads it
+    /// (`wz_session_core::reply::lend_response`), for a read that hands it to the get it
+    /// answers with the session let go of (`replies`). A record that is no Response, and a face
+    /// the session no longer holds, lend nothing.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn lend_reply<'s, 'a: 's, 'f>(
+        &'s mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'a, 'f>,
+        room: &'s mut wz_session_core::reply::ReplyRoom,
+    ) -> wz_session_core::reply::LentResponse<'s, 'f> {
+        let Some(response) = record.response() else {
+            return Ok(None);
+        };
+        match self.split_unwritten(self.place(face)) {
+            Some(Split { app, face, .. }) => {
+                let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+                let spaces = face
+                    .peer
+                    .subscribers
+                    .mapping_spaces_over(own)
+                    .from_sender(record.sender());
+                wz_session_core::reply::lend_response(response, spaces, room)
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// The owned projection of the Response of face `face` that `record` lends, which the lent
+    /// form does not represent (`OwedToProjection`): the reply the copying receive delivers
+    /// for it. A face the session no longer holds projects nothing.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn project_reply(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+    ) -> Option<wz_session_core::reply::InboundReply> {
+        let response = record.response()?;
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face
+            .peer
+            .subscribers
+            .mapping_spaces_over(own)
+            .from_sender(record.sender());
+        face.gets.replies.project_response(response, spaces)
+    }
+
+    /// The reply `response`, a record of a frame of face `face` the copying receive decoded, is
+    /// delivered as (`ReplyRegistry::take_response`), for a read that hands it to the get it
+    /// answers with the session let go of (`replies`), the frame's other planes told the rest of
+    /// it after (`Planes::BesideSubscribers`). A face the session no longer holds takes nothing.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn take_reply(
+        &mut self,
+        face: HeldFace,
+        response: &wz_session_core::wire::ResponseOwned,
+    ) -> Option<wz_session_core::reply::InboundReply> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.gets.replies.take_response(response, spaces)
+    }
+
+    /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
+    /// the pending gets of face `face` it answers, as the face's dispatch hands a Response to
+    /// them. A face the session no longer holds hands it to none.
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn fire_reply(
+        &mut self,
+        face: HeldFace,
+        reply: &dyn wz_session_core::reply_sink::ReplyView,
+    ) {
+        if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
+            face.gets.replies.dispatch_borrowed(reply);
+        }
+    }
+
+    /// The alive token `declare`, a record of a frame of face `face` the copying receive decoded,
+    /// answers a pending liveliness get with: its key written into `room` and the interest id it
+    /// answers (`LivelinessGetRegistry::claim_token`), for a read that hands it to the get with
+    /// the session let go of (`replies`). A declaration that answers no pending get, and a face
+    /// the session no longer holds, claim nothing.
+    #[cfg(all(
+        feature = "liveliness-get",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn claim_token(
+        &mut self,
+        face: HeldFace,
+        declare: &wz_session_core::transport_profile::owned::DeclareOwned,
+        room: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face.peer.subscribers.mapping_spaces_over(own);
+        face.gets.liveliness_gets.claim_token(declare, spaces, room)
+    }
+
+    /// [`Self::claim_token`] for the Declare `record` lends where its frame lies. A record that is
+    /// no Declare claims nothing.
+    #[cfg(all(
+        feature = "liveliness-get",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn claim_lent_token(
+        &mut self,
+        face: HeldFace,
+        record: &InPlaceRecord<'_, '_>,
+        room: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+    ) -> Option<u64> {
+        let declare = record.declare()?;
+        let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
+        let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
+        let spaces = face
+            .peer
+            .subscribers
+            .mapping_spaces_over(own)
+            .from_sender(record.sender());
+        face.gets
+            .liveliness_gets
+            .claim_token_view(declare, spaces, room)
+    }
+
+    /// Hand the alive token at `keyexpr` to the pending liveliness get `interest_id` of face
+    /// `face` (`Self::claim_token`), as the face's dispatch hands it. A face the session no longer
+    /// holds hands it to none.
+    #[cfg(all(
+        feature = "liveliness-get",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn fire_token(&mut self, face: HeldFace, interest_id: u64, keyexpr: &str) {
+        if let Some(Split { face, .. }) = self.split_unwritten(self.place(face)) {
+            face.gets
+                .liveliness_gets
+                .dispatch_reply_borrowed(interest_id, keyexpr);
+        }
+    }
+
+    /// How often a face's tables were looked up since the open: what a lent Push's count of its
+    /// lookups starts from ([`Self::counted_push`]).
+    #[cfg(all(
+        test,
+        feature = "std",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(super) fn lookups(&self) -> u64 {
+        self.face_lookups
+    }
+
     /// What face `id`'s peer is owed outside the dispatch of a record that drains it, under one
     /// lookup of the face: the subscribers' tables reconciled with what the application registered
     /// since, what anything staged drained through `actions` ([`Self::flush_pending_replies`]).
-    /// Settled once after a run of lent Pushes ([`Self::dispatch_push`]), and after the
-    /// application declares or undeclares a subscriber, which no record of the peer's need follow.
-    /// A face the session no longer holds owes nothing.
+    /// Settled once after a run of lent Pushes (`Self::dispatch_push`, or `Self::lend_push`), and
+    /// after the application declares or undeclares a subscriber, which no record of the peer's
+    /// need follow. A face the session no longer holds owes nothing.
     #[cfg(feature = "queryable")]
     pub(super) fn settle<S>(&mut self, face: HeldFace, actions: &S)
     where
@@ -1180,12 +1468,30 @@ impl<H: Holders> RegistryOf<H> {
 
     /// Fan and drain in one call, the `Final`s with the rest: what a session with no queryable
     /// to wait for does with each event.
-    #[cfg(not(feature = "queryable"))]
+    #[cfg(all(
+        not(feature = "queryable"),
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(super) fn dispatch<S>(&mut self, face: HeldFace, event: IterationEvent<'_, '_>, actions: &S)
     where
         S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
     {
-        self.dispatch_event(face, event);
+        self.dispatch_to(face, event, Planes::All, actions);
+    }
+
+    /// Fan and drain one event of face `face` into the planes `planes` names, the `Final`s with
+    /// the rest.
+    #[cfg(not(feature = "queryable"))]
+    pub(super) fn dispatch_to<S>(
+        &mut self,
+        face: HeldFace,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+        actions: &S,
+    ) where
+        S: ResponseSink + DeclareReplySink + LivelinessGetPrune,
+    {
+        self.dispatch_event_to(face, event, planes);
         #[cfg(feature = "interest-answer")]
         self.reconcile_subscribers(face);
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
@@ -1194,8 +1500,9 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// What face `id`'s peer is owed outside the dispatch of a record, drained under one lookup of
-    /// the face, as [`Self::dispatch`] drains after every other record: after a run of lent Pushes
-    /// ([`Self::dispatch_push`]), and after the application declares or undeclares a subscriber.
+    /// the face, as `dispatch_to` drains after every other record: after a run of lent Pushes
+    /// (`Self::dispatch_push`, or `Self::lend_push`), and after the application declares or
+    /// undeclares a subscriber.
     #[cfg(not(feature = "queryable"))]
     pub(super) fn settle<S>(&mut self, face: HeldFace, actions: &S)
     where

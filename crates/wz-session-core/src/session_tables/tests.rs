@@ -3460,6 +3460,46 @@ fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
     );
 }
 
+/// The walk of a message the session itself published reaches the rows its own loopback reaches,
+/// in its order: a row whose locality hears only peers is passed, and one that hears only the
+/// session is reached. Turned red by a walk of the session's own message that matches the rows by
+/// a peer's origin.
+#[test]
+fn the_pinned_walk_of_the_sessions_own_message_reaches_the_rows_its_loopback_reaches() {
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = latched_tables();
+    let mut declared = Vec::new();
+    for (n, key, origin) in [
+        (1, "a/b", Locality::Any),
+        (2, "a/*", Locality::Remote),
+        (3, "c", Locality::Any),
+        (4, "a/**", Locality::SessionLocal),
+        (5, "a/b", Locality::Any),
+    ] {
+        let row = tables
+            .declare_subscriber(key, origin, KeyForm::default(), latched(n))
+            .unwrap();
+        declared.push((row.handle, n));
+    }
+    let mut fanned = Vec::new();
+    tables.fire_matching("a/b", true, false, |id, _| {
+        fanned.extend(
+            declared
+                .iter()
+                .filter(|(handle, _)| *handle == id)
+                .map(|(_, n)| *n),
+        );
+    });
+    assert_eq!(fanned, std::vec![1, 4, 5], "CONTROL: the loopback's rows");
+    let mut fan = PinnedFanOut::local("a/b");
+    assert_eq!(pinned_in_turn(&tables, &mut fan), fanned);
+    assert_eq!(
+        pinned_in_turn(&tables, &mut PinnedFanOut::new("a/b")),
+        std::vec![1, 2, 5],
+        "CONTROL: a peer's message on the same key reaches the rows that hear peers"
+    );
+}
+
 /// A row undeclared while a call pinned before it runs begins no call, so the walk passes it; a
 /// row undeclared while its own call runs keeps its slot until that call ends, which says so and
 /// lets the drained walk take it. Turned red by a walk that pins a retired row, or by a pin that

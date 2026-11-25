@@ -1291,6 +1291,8 @@ impl<C: ReplySink, P: Storage> Default for ReplyRegistry<C, P> {
 /// path lends ([`IterationEvent::InPlace`]).
 #[cfg(all(feature = "storage-profile", feature = "codec-response"))]
 mod in_place;
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+pub use in_place::{lend_response, LentReply, LentResponse, ReplyRoom};
 
 impl<C: ReplySink> ReplyRegistry<C, Profile> {
     /// New empty registry over an explicit sink backing `C`. Pending
@@ -1574,6 +1576,32 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
         read: Option<crate::link::RxBytes>,
     ) {
+        if let Some(inbound) = self.inbound_reply(response, peer_keyexpr_table, read) {
+            self.fire_replies_for(&inbound, true);
+        }
+    }
+
+    /// The reply `response`, a record of a frame the copying receive decoded, is delivered as, for
+    /// a caller that hands it to the pending gets itself ([`Self::dispatch_borrowed`]): what they
+    /// are then handed is what [`Self::dispatch_response`] hands them. `None` for one it drops.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    pub fn take_response<'a, PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
+    ) -> Option<InboundReply> {
+        self.inbound_reply(response, peer_keyexpr_table.into(), None)
+    }
+
+    /// The reply a `Response` is delivered as, its Put value being `read` when the caller read it
+    /// and the response's own otherwise; `None` for one that is dropped.
+    #[cfg(all(feature = "codec-response", feature = "alloc"))]
+    fn inbound_reply<PS: Storage, OS: Storage>(
+        &mut self,
+        response: &ResponseOwned,
+        peer_keyexpr_table: MappingSpaces<'_, PS, OS>,
+        read: Option<crate::link::RxBytes>,
+    ) -> Option<InboundReply> {
         // A build that reads no Put reply has nothing to put a read value in.
         #[cfg(not(any(feature = "pubsub-put", feature = "query-reply")))]
         let _ = &read;
@@ -1600,7 +1628,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 if read.is_none() {
                     self.settle_unrouted_reply(response);
                 }
-                return;
+                return None;
             }
         };
         // R311cc — pubsub-put / pubsub-delete gate the inbound Reply
@@ -1628,10 +1656,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     // caller read already is delivered as it was read.
                     payload: match read {
                         Some(bytes) => bytes,
-                        None => match self.reply_put_payload(put, response) {
-                            Some(bytes) => bytes,
-                            None => return,
-                        },
+                        None => self.reply_put_payload(put, response)?,
                     },
                     attachment: put_reply_attachment(put),
                     encoding: put_reply_encoding(put),
@@ -1655,7 +1680,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 // dispatch treats this as a wire-spec violation; the
                 // AP MVP path mirrors that by dropping silently. cfg-off
                 // pubsub-put / -delete arms also fall through here.
-                _ => return,
+                _ => return None,
             },
             ResponseOwnedVariant::CodecZenohErr(err) => {
                 let encoding = err.encoding.as_ref().map(|e| {
@@ -1672,10 +1697,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 }
             }
             // See ResponseVariant::Default rationale on Reply arm.
-            ResponseOwnedVariant::Default { .. } => return,
+            ResponseOwnedVariant::Default { .. } => return None,
         };
         let extensions = response.extensions.entries().unwrap_or(&[]);
-        let inbound = InboundReply {
+        Some(InboundReply {
             rid: response.request_id,
             keyexpr_literal: resolved,
             body,
@@ -1683,8 +1708,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             qos: crate::sample::extract_qos(extensions),
             // The timestamp stack the Response carries, and that it came in over a link.
             stamp: ReplyStamp::received(extensions),
-        };
-        self.fire_replies_for(&inbound, true);
+        })
     }
 
     /// The bytes a Reply's Put delivers. A Put in the inline layout is read as it
@@ -2079,6 +2103,24 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 _ => {}
             }
         }
+    }
+
+    /// [`Self::dispatch_iteration_event`] to the `ResponseFinal`s of a frame the copying receive
+    /// decoded alone, for a caller that took each of its Responses itself
+    /// ([`Self::take_response`]), in their order, before this: a `Final` then ends its get after
+    /// every reply the frame carried. Any other event is a no-op.
+    #[cfg(feature = "storage-profile")]
+    pub fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>) {
+        #[cfg(all(feature = "alloc", feature = "codec-response-final"))]
+        if let IterationEvent::Poll(DriverLoopOutcome::FramePayload { messages, .. }) = event {
+            for message in crate::driver_loop::owned_records(messages).unwrap_or_default() {
+                if let NetworkMessage::ResponseFinal(response_final) = message {
+                    self.dispatch_response_final(response_final);
+                }
+            }
+        }
+        #[cfg(not(all(feature = "alloc", feature = "codec-response-final")))]
+        let _ = event;
     }
 
     /// Convenience adapter that pulls the `FramePayload.messages` out
@@ -4020,6 +4062,85 @@ mod tests {
             reg.is_empty(),
             "Final at end of batch removed the pending entry"
         );
+    }
+
+    /// A frame whose Responses a caller took itself, one at a time, is told its `ResponseFinal`s
+    /// alone after them: each reply reaches its get once, and the Final ends the get after them.
+    /// Turned red by a dispatch of the frame's Finals that hands its replies a second time, or
+    /// that drops the Final.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_frame_whose_responses_were_taken_ends_its_get_after_them() {
+        if !crate::driver_loop::OWNED_RECORDS {
+            return;
+        }
+        let mut reg = ReplyRegistry::new();
+        let reply_count = Arc::new(AtomicUsize::new(0));
+        let final_count = Arc::new(AtomicUsize::new(0));
+        let r = reply_count.clone();
+        let f = final_count.clone();
+        reg.register(
+            42,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_| {
+                r.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("no quota is stated on this table");
+        let messages = vec![
+            NetworkMessage::Response(Box::new(response_reply_put(
+                42,
+                0,
+                Some("home/temp"),
+                b"21.0",
+            ))),
+            NetworkMessage::Response(Box::new(response_reply_put(
+                42,
+                0,
+                Some("home/temp"),
+                b"21.5",
+            ))),
+            NetworkMessage::ResponseFinal(response_final_for(42)),
+        ];
+        for message in &messages {
+            if let NetworkMessage::Response(response) = message {
+                let reply = reg
+                    .take_response(response, &HashMap::new())
+                    .expect("a reply the dispatch delivers");
+                assert_eq!(reg.dispatch_borrowed(&reply), 1, "one get is pending");
+            }
+        }
+        assert_eq!(reply_count.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            0,
+            "CONTROL: no Final before the frame's"
+        );
+        let outcome = DriverLoopOutcome::FramePayload {
+            reliable: true,
+            sn: 0,
+            messages: crate::driver_loop::frame_records(messages),
+            has_ext: false,
+            extensions: Vec::new(),
+            priority: crate::qos::Priority::DEFAULT,
+        };
+        reg.dispatch_finals_of(IterationEvent::Poll(&outcome));
+        assert_eq!(
+            reply_count.load(Ordering::SeqCst),
+            2,
+            "the frame's replies were handed again"
+        );
+        assert_eq!(
+            final_count.load(Ordering::SeqCst),
+            1,
+            "the Final was dropped"
+        );
+        assert!(reg.is_empty(), "the Final left its get pending");
     }
 
     #[test]

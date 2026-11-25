@@ -708,6 +708,13 @@ pub struct SubInterestRefusals {
     any(feature = "pubsub-put", feature = "pubsub-delete")
 ))]
 mod in_place;
+#[cfg(all(feature = "storage-profile", feature = "alloc", feature = "pubsub-put"))]
+pub use in_place::PlainPutKeys;
+#[cfg(all(
+    feature = "storage-profile",
+    any(feature = "pubsub-put", feature = "pubsub-delete")
+))]
+pub use in_place::{LentPush, LentRoom};
 
 /// R3040 (transport-shm) -- the priority band a received Push was sent at: the
 /// shared [`priority_band`](crate::put_payload::priority_band) over the push's own
@@ -1572,6 +1579,44 @@ impl<Q: Storage> SubscriberPeer<Q> {
         is_remote: bool,
         sender: u64,
     ) {
+        let Some(sample) = self.project_push(&*subs, push, reliability, is_remote, sender) else {
+            return;
+        };
+        // The rows this sample reaches are handed it in one fan-out, each told its turn.
+        let mut turn = FanOut::begin();
+        if is_remote {
+            subs.deliver_from_peer(
+                sample.keyexpr(),
+                self.class,
+                PeerDelivery::default(),
+                |id, row| {
+                    cx.deliver(id, row, &sample, turn);
+                    turn = FanOut::later();
+                },
+            );
+        } else {
+            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
+                cx.deliver(id, row, &sample, turn);
+                turn = FanOut::later();
+            });
+        }
+    }
+
+    /// The projection of `push` into the [`Sample`] its subscribers are handed, by
+    /// [`Self::dispatch_push`]'s rules: its key resolved against both id spaces, its body's
+    /// fields, the outer QoS and the reliability; `None` for a Push nobody is handed (a key that
+    /// does not resolve, a body this build does not deliver, the session's own sample echoed
+    /// back from a peer). The sample is owned, so whoever hands it out holds nothing of this side.
+    #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+    #[cfg(feature = "alloc")]
+    fn project_push<L: LocalSubscribers>(
+        &mut self,
+        subs: &L,
+        push: &PushOwned,
+        reliability: Reliability,
+        is_remote: bool,
+        sender: u64,
+    ) -> Option<Sample> {
         // R121d / R311gl CLEANUP-2 — resolve the Push's keyexpr against
         // the peer mapping table via the shared `resolve_wireexpr` SSOT
         // (the same resolver the four remote-declare registries + the
@@ -1603,7 +1648,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                 // every such buffer, confirmed, until the transport ends.
                 #[cfg(all(feature = "transport-shm", feature = "pubsub-put"))]
                 self.settle_unrouted_shm(push);
-                return;
+                return None;
             }
         };
 
@@ -1696,7 +1741,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     let put_payload = if crate::put_payload::is_sliced(put) {
                         match self.unswap_shm_payload(push, put) {
                             Some(bytes) => bytes,
-                            None => return,
+                            None => return None,
                         }
                     } else {
                         // The inline layout never fails: no slice, no descriptor.
@@ -1711,7 +1756,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                     let put_payload = match crate::put_payload::collect_wire_payload(put, |_| None)
                     {
                         Ok(bytes) => bytes,
-                        Err(_) => return,
+                        Err(_) => return None,
                     };
                     (
                         SampleKind::Put,
@@ -1761,7 +1806,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
                         body_source_info,
                     )
                 }
-                _ => return,
+                _ => return None,
             };
         let outer_exts: &[crate::wire::parts::ExtEntryOwned] =
             push.extensions.entries().unwrap_or(&[]);
@@ -1842,29 +1887,12 @@ impl<Q: Storage> SubscriberPeer<Q> {
             if let (Some(own), Some(info)) = (self.own_zid(), sample.source_info.as_ref()) {
                 let prefix = info.zid_prefix();
                 if !prefix.is_empty() && prefix == own {
-                    return;
+                    return None;
                 }
             }
         }
 
-        // The rows this sample reaches are handed it in one fan-out, each told its turn.
-        let mut turn = FanOut::begin();
-        if is_remote {
-            subs.deliver_from_peer(
-                sample.keyexpr(),
-                self.class,
-                PeerDelivery::default(),
-                |id, row| {
-                    cx.deliver(id, row, &sample, turn);
-                    turn = FanOut::later();
-                },
-            );
-        } else {
-            subs.fire_matching(sample.keyexpr(), true, false, |id, row| {
-                cx.deliver(id, row, &sample, turn);
-                turn = FanOut::later();
-            });
-        }
+        Some(sample)
     }
 }
 
@@ -2056,6 +2084,28 @@ impl<Q: Storage> SubscriberPeer<Q> {
         // `subs` and `cx` are read by the arms that exist; with none compiled in they are
         // not, and the signature is the same in every subset.
         let _ = (&subs, &cx);
+    }
+
+    /// The subscribers' side of `message`, one owned record of a frame, for a delivery that hands
+    /// each sample out itself, one subscriber at a time: a Push is projected into the sample its
+    /// subscribers are handed (`project_push`; `None` for one nobody is handed), and any other
+    /// record is taken as [`Self::dispatch`] takes it, which hands nothing out.
+    #[cfg(feature = "alloc")]
+    pub fn take_record<L: LocalSubscribers, X: SampleDelivery<L::Sink, L::RowId>>(
+        &mut self,
+        subs: &mut L,
+        cx: &mut X,
+        message: &NetworkMessage,
+        reliability: Reliability,
+    ) -> Option<crate::sample::Sample> {
+        match message {
+            #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
+            NetworkMessage::Push(push) => self.project_push(&*subs, push, reliability, true, 0),
+            other => {
+                self.dispatch(subs, cx, other, reliability);
+                None
+            }
+        }
     }
 
     /// A peer's subscriber Interest, in a build that answers none (`interest-answer` off): no row
@@ -5119,6 +5169,63 @@ mod tests {
         );
     }
 
+    /// A record taken alone, for a delivery that hands each sample out itself: a Push is
+    /// projected into the sample its subscribers are handed and handed to none of them by the
+    /// take, and a Push whose key names an alias the peer never declared projects nothing. The
+    /// CONTROL is the dispatch of the same Push, which hands it out. Turned red by a take that
+    /// hands the sample through its context, or projects a key that does not resolve.
+    #[test]
+    fn a_push_taken_alone_is_projected_and_handed_to_no_subscriber() {
+        let mut registry = SubscriberRegistry::new();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counted = counter.clone();
+        let _id = registry
+            .register("topic/a", move |_push| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            })
+            .expect("no quota is stated on this table");
+        let push = NetworkMessage::Push(Box::new(push_with_keyexpr("topic/a")));
+        let unknown = NetworkMessage::Push(Box::new(
+            Push {
+                keyexpr: Wireexpr {
+                    body: WireexprVariant::WireexprLocal(wz_codecs::lent::WireexprLocal {
+                        id: 7,
+                        suffix_len: None,
+                        suffix: None,
+                    }),
+                },
+                ..Push::default()
+            }
+            .try_into_owned_in::<crate::wire::WireStorage>()
+            .unwrap(),
+        ));
+        {
+            let SubscriberRegistry { table, peer } = &mut registry;
+            let taken = peer.take_record(table, &mut (), &push, Reliability::Reliable);
+            assert_eq!(
+                taken.map(|sample| sample.keyexpr),
+                Some("topic/a".to_string()),
+                "the Push's sample, its key resolved"
+            );
+            assert!(
+                peer.take_record(table, &mut (), &unknown, Reliability::Reliable)
+                    .is_none(),
+                "a key that does not resolve projects nothing"
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            0,
+            "the take handed the sample to a subscriber"
+        );
+        registry.dispatch(&push, Reliability::Reliable);
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "CONTROL: the dispatch of the same Push hands it out"
+        );
+    }
+
     /// A peer's push reaches the session's one table set by the same receive path: the peer's
     /// side resolves the key and the table set matches it.
     #[test]
@@ -7021,6 +7128,82 @@ mod tests {
             );
             assert_eq!(got, want, "reliable={reliable}");
         }
+    }
+
+    /// The keys of a frame's plain Puts read one record at a time, as a walk that hands each to
+    /// one subscriber at a time reads them: an alias, a record that repeats it, a literal, and
+    /// an id nobody declared, which reads nothing and leaves no key for the record after it to
+    /// repeat. The CONTROL is the reader's own flag on the repeating records. Turned red by a read
+    /// that lets a repeat rest on a dropped record, or composes a key other than the owned path's.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn the_keys_of_plain_puts_read_one_at_a_time_as_the_frame_names_them() {
+        let puts: [(crate::wire_id::ExprId, Option<&str>, &[u8]); 5] = [
+            (7, None, b"one"),
+            (7, None, b"two"),
+            (0, Some("demo/literal"), b"three"),
+            (9, None, b"nobody declared 9"),
+            (9, None, b"nor here"),
+        ];
+        let mut batch = Vec::new();
+        for (id, suffix, payload) in puts {
+            let push = crate::lent_push::put_with_qos(
+                id,
+                suffix,
+                payload,
+                crate::sample::QosLevel::from_raw(0x05),
+            )
+            .unwrap();
+            let mut one = Vec::new();
+            push.encode(&mut sce_forge_runtime::codec::VecSink::new(&mut one))
+                .unwrap();
+            batch.extend_from_slice(&one);
+        }
+        let mut registry: SubscriberRegistry<BoxedSink> = SubscriberRegistry::new();
+        registry.dispatch(
+            &NetworkMessage::Declare(Box::new(declare_kexpr_literal(7, "demo/alias"))),
+            Reliability::Reliable,
+        );
+        let frame = crate::link::RxBytes::from(batch);
+        let read = crate::plain_push::read_plain_puts(&frame).expect("every record is plain");
+        assert_eq!(
+            read.iter().map(|put| put.repeats_key).collect::<Vec<_>>(),
+            vec![false, true, false, false, true],
+            "CONTROL: the reader marks the records that repeat the key before them"
+        );
+        let SubscriberRegistry { table, peer } = &mut registry;
+        let mut keys = super::in_place::PlainPutKeys::new(&frame);
+        let mut got = Vec::new();
+        for put in &read {
+            let repeats = peer.plain_put_key(&*table, &mut keys, put);
+            let named = repeats.map(|repeats| {
+                let sample = keys.sample(put, Reliability::Reliable, repeats);
+                (
+                    keys.key().to_string(),
+                    crate::sink::SampleView::payload(&sample).to_vec(),
+                )
+            });
+            got.push((repeats, named));
+        }
+        assert_eq!(
+            got,
+            vec![
+                (
+                    Some(false),
+                    Some(("demo/alias".to_string(), b"one".to_vec()))
+                ),
+                (
+                    Some(true),
+                    Some(("demo/alias".to_string(), b"two".to_vec()))
+                ),
+                (
+                    Some(false),
+                    Some(("demo/literal".to_string(), b"three".to_vec()))
+                ),
+                (None, None),
+                (None, None),
+            ]
+        );
     }
 
     /// Records that repeat the key before them are delivered as the owned path delivers

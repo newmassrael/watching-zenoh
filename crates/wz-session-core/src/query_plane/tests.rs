@@ -70,6 +70,7 @@ impl RoundCalls for Local {
 
 impl PlaneCalls for Local {
     type LocalAnswers = Present;
+    type Captures = Present;
     type Queues = StdLocks;
 }
 
@@ -96,6 +97,7 @@ impl RoundCalls for Linked {
 
 impl PlaneCalls for Linked {
     type LocalAnswers = Absent;
+    type Captures = Absent;
     type Queues = StdLocks;
 }
 

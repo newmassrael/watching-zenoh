@@ -25,7 +25,10 @@ use core::sync::atomic::AtomicBool;
 
 use wz_runtime_coop::faces::{Dial, LinkEnd, DIAL_LOOK_MS};
 use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
+use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, LinkTimes, Refused, UnicastLink};
+
+use super::registry::Planes;
 
 /// The pump of the session's one link, which the read steps itself.
 type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink>>;
@@ -100,10 +103,27 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
 }
 
 impl<C: ClockSource + 'static> FaceRecords<C> {
-    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the face's
-    /// tables in `registry`, and send what it staged.
+    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
+    /// `planes` names of the face's tables in `registry`, the held session's, and send what it
+    /// staged. The round is told where the link lends the datagram for the length of the dispatch
+    /// alone: the walks that hand a Push's sample out (`pinned`) read it in the event itself, so a
+    /// record the planes offer the round is the one the link tells it of.
+    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
+        // SAFETY: `registry` is borrowed from the held session, so the session's lock is held.
+        unsafe { self.link.lend_to(&self.lane) };
+        self.dispatch_records(registry, event, planes);
+        // SAFETY: as above.
+        unsafe { self.lane.set_lending(None) };
+    }
+
+    /// [`Self::dispatch`], the round told already.
     #[cfg(feature = "queryable")]
-    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>) {
+    fn dispatch_records(
+        &self,
+        registry: &mut Registry,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
         let face = self.face;
         let actions = &*self.actions;
         let (plane, generation) = (&self.plane, self.generation);
@@ -118,7 +138,7 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
             feature = "declarations-synced-event"
         ))]
         registry.hear_decl_link(|| actions.peer_session_zid());
-        registry.dispatch_event(face, event);
+        registry.dispatch_event_to(face, event, planes);
         registry.flush_pending_replies(face, actions);
         for (rid, qos) in registry.take_pending_final_rids(face) {
             if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
@@ -127,10 +147,14 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         }
     }
 
-    /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the face's
-    /// tables in `registry`, and send what it staged.
+    /// [`Self::dispatch`], the round told already.
     #[cfg(not(feature = "queryable"))]
-    fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>) {
+    fn dispatch_records(
+        &self,
+        registry: &mut Registry,
+        event: IterationEvent<'_, '_>,
+        planes: Planes,
+    ) {
         let actions = &*self.actions;
         // What the declaration watches are told of this frame is this link's peer's.
         #[cfg(any(
@@ -138,7 +162,7 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
             feature = "declarations-synced-event"
         ))]
         registry.hear_decl_link(|| actions.peer_session_zid());
-        registry.dispatch(self.face, event, actions);
+        registry.dispatch_to(self.face, event, planes, actions);
     }
 }
 
@@ -184,24 +208,70 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> EventSink
         if !push {
             self.drain_pushes(true);
         }
-        {
-            let Some(mut held) = self.engine.live() else {
-                return;
-            };
-            // The round reads the record's parts where the link lends them, so it is told where
-            // that is for the length of the record's dispatch, as a gate of a build whose links
-            // are tasks tells it for the length of the datagram's.
-            // SAFETY: the session's lock is held (`held`).
-            unsafe { self.records.link.lend_to(&self.records.lane) };
-            let registry = &mut held.0.session.registry;
-            if push {
-                registry.dispatch_push(self.records.face, event);
+        match event {
+            // Handed to its subscribers one at a time (`pinned`), none of it into the round.
+            IterationEvent::InPlace(ref record) if push => {
+                self.engine.hand_lent_push(self.records.face, record);
                 self.records.after_pushes = true;
-            } else {
-                self.records.dispatch(registry, event);
             }
-            // SAFETY: as above.
-            unsafe { self.records.lane.set_lending(None) };
+            // Handed to the get it answers with the session let go of (`replies`), none of it
+            // into the round.
+            #[cfg(feature = "query")]
+            IterationEvent::InPlace(ref record) if record.response().is_some() => {
+                self.engine.hand_lent_reply(self.records.face, record);
+            }
+            // An alive token answering a pending liveliness get is handed to it as a reply is;
+            // any other declaration of an interest is dispatched as every record is.
+            #[cfg(feature = "liveliness-get")]
+            IterationEvent::InPlace(ref record)
+                if record
+                    .declare()
+                    .is_some_and(|declare| declare.interest_id.is_some()) =>
+            {
+                if let Some(mut held) = self.engine.hand_lent_token(self.records.face, record) {
+                    self.records
+                        .dispatch(&mut held.0.session.registry, event, Planes::All);
+                }
+            }
+            // The subscribers' side of each record first, a Push's sample handed out one row at a
+            // time, then the other planes', as the dispatch of the whole frame orders them.
+            IterationEvent::Poll(DriverLoopOutcome::FramePayload {
+                messages, reliable, ..
+            }) => {
+                if let Some(messages) = wz_session_core::driver_loop::owned_records(messages) {
+                    self.engine
+                        .hand_copied_records(self.records.face, messages, *reliable);
+                }
+                let Some(mut held) = self.engine.live() else {
+                    return;
+                };
+                self.records.dispatch(
+                    &mut held.0.session.registry,
+                    event,
+                    Planes::BesideSubscribers,
+                );
+            }
+            // A frame of plain Puts is the subscribers' alone, handed out one row at a time; what
+            // follows it is put off as what follows a lent Push is.
+            IterationEvent::Poll(DriverLoopOutcome::FramePlainPuts {
+                reliable,
+                payload,
+                puts,
+                ..
+            }) => {
+                if wz_session_core::driver_loop::OWNED_RECORDS {
+                    self.engine
+                        .hand_plain_puts(self.records.face, payload, puts, *reliable);
+                }
+                self.records.after_pushes = true;
+            }
+            event => {
+                let Some(mut held) = self.engine.live() else {
+                    return;
+                };
+                self.records
+                    .dispatch(&mut held.0.session.registry, event, Planes::All);
+            }
         }
         self.engine.deliver();
     }
@@ -485,10 +555,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// The read of a session whose read steps its one link itself: the wait for the link's input
     /// or the next deadline, a look at the link's life and the session's bookkeeping when they are
     /// owed, then the pump stepped with nothing of the session held, each record handed out as it
-    /// is read. A read from a callback of a record reads nothing: the read under way holds the
-    /// link.
+    /// is read. A read from a callback reads nothing: the read under way holds the link, and any
+    /// other delivery marks the thread as delivering.
     pub(super) fn read_direct(&self) -> Result<(), SessionClosed> {
-        let Some(mut held) = <CoopForm as LockForm>::try_lock(&self.direct.slot) else {
+        // A callback reads nothing either while a delivery other than a read's runs it (a put to
+        // the session's own subscribers): a record read here would be handed to a callback inside
+        // another.
+        let held = if self.deliveries.delivers_here() {
+            None
+        } else {
+            <CoopForm as LockForm>::try_lock(&self.direct.slot)
+        };
+        let Some(mut held) = held else {
             return if self.closed.load(Ordering::Acquire) {
                 Err(SessionClosed)
             } else {

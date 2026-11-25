@@ -2946,7 +2946,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// the call is made with once they are let go, `None` when no row at or after `fan`'s place is
     /// reached. The rows are walked in the table's order from the place after the last one pinned,
     /// matched by the rule every walk of the subscribers keeps (`row_reaches`), so a message is
-    /// handed to the rows a fan-out from a peer reaches, in its order, one call at a time; a row
+    /// handed to the rows a fan-out from its origin reaches, in its order, one call at a time; a row
     /// undeclared while an earlier call ran is retired and begins no call. End each call with
     /// [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let the row go
     /// with [`Self::release_drained_subscriber`].
@@ -2971,7 +2971,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                     facts: row.facts,
                     origin: row.origin,
                 };
-                if !row_reaches(&found, fan.key, fan.facts, true) {
+                if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
                     return None;
                 }
                 row.callback.begin().map(|call| (place, call))
@@ -3673,13 +3673,16 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
     }
 }
 
-/// A peer's message's walk of the subscribers it reaches, one row pinned at a time
-/// ([`SessionTables::pin_next_subscriber`]): the key, read once, and the place the next row is
-/// looked for from. Held by whoever delivers the message, beside the key, across the calls it makes
-/// with the tables let go, so the tables keep nothing of a delivery under way.
+/// A message's walk of the subscribers it reaches, one row pinned at a time
+/// ([`SessionTables::pin_next_subscriber`]): the key, read once, where the message came from, and
+/// the place the next row is looked for from. Held by whoever delivers the message, beside the key,
+/// across the calls it makes with the tables let go, so the tables keep nothing of a delivery under
+/// way.
 pub struct PinnedFanOut<'k> {
     key: &'k str,
     facts: KeyFacts,
+    /// The message is a peer's, not the session's own: which origins of the rows admit it.
+    remote: bool,
     /// Deeper than the matcher's bound: the message reaches no row.
     past_depth: bool,
     /// The place the next row is looked for from: the one after the row pinned last.
@@ -3689,10 +3692,21 @@ pub struct PinnedFanOut<'k> {
 impl<'k> PinnedFanOut<'k> {
     /// The walk of the subscribers a peer's message on `key` reaches, from the table's first row.
     pub fn new(key: &'k str) -> Self {
+        Self::from_origin(key, true)
+    }
+
+    /// The walk of the subscribers a message the session itself published on `key` reaches, from
+    /// the table's first row: the rows whose origin admits the session's own messages.
+    pub fn local(key: &'k str) -> Self {
+        Self::from_origin(key, false)
+    }
+
+    fn from_origin(key: &'k str, remote: bool) -> Self {
         let facts = KeyFacts::of(key);
         Self {
             key,
             facts,
+            remote,
             past_depth: past_matcher_depth(key, facts),
             next: 0,
         }

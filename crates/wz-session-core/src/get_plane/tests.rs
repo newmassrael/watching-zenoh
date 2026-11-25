@@ -66,6 +66,7 @@ impl RoundCalls for Asking {
 
 impl PlaneCalls for Asking {
     type LocalAnswers = Present;
+    type Captures = Present;
     type Queues = StdLocks;
 }
 
@@ -102,10 +103,49 @@ impl RoundCalls for Remote {
 
 impl PlaneCalls for Remote {
     type LocalAnswers = Absent;
+    type Captures = Absent;
     type Queues = StdLocks;
 }
 
 impl GetCalls for Remote {
+    fn call(callback: &Counted, _reply: &dyn ReplyView) {
+        callback.0.calls.fetch_add(1, SeqCst);
+    }
+
+    fn holds_a_session() -> bool {
+        false
+    }
+}
+
+/// A session whose gets only its links answer, whose read hands each record out as it is read: its
+/// plane captures the peer's reply for the read.
+enum Stepped {}
+
+impl RoundCalls for Stepped {
+    type Subscriber = Infallible;
+    type Liveliness = Infallible;
+    type Queryable = Infallible;
+    type Watch = core::convert::Infallible;
+    type Leg = LegId;
+    type ReplyCallback = Counted;
+    type Tokens = Absent;
+    type Replies = Present;
+    type Queries = Absent;
+    type Watches = Absent;
+    type Capture = Absent;
+    type Group = Absent;
+    type Locks = StdLocks;
+    type Tally = ();
+    type Form = crate::row_callback::Threads;
+}
+
+impl PlaneCalls for Stepped {
+    type LocalAnswers = Absent;
+    type Captures = Present;
+    type Queues = StdLocks;
+}
+
+impl GetCalls for Stepped {
     fn call(callback: &Counted, _reply: &dyn ReplyView) {
         callback.0.calls.fetch_add(1, SeqCst);
     }
@@ -420,6 +460,39 @@ fn a_plane_whose_session_answers_none_of_its_gets_captures_nothing() {
         0,
         "the payload was read where it lies"
     );
+}
+
+/// A plane that keeps a capture though its session answers none of its own gets captures a peer's
+/// reply for the read that hands it out: the leg comes back with a count of its row, and nothing is
+/// held in the round.
+#[test]
+fn a_plane_whose_read_hands_each_record_captures_a_peers_reply() {
+    let plane = plane::<Stepped>(2, 1);
+    let mut round = round::<Stepped>();
+    let legs: NonNull<dyn LegHolders<Stepped>> = NonNull::from(&*plane);
+    // SAFETY: the plane is dropped after the round, which is declared after it.
+    unsafe { round.get_mut().calls_legs_of(legs) };
+    let seen = Arc::new(Seen::default());
+    let row = plane
+        .open_leg(&mut || Counted(seen.clone()), true)
+        .expect("a row");
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is, and the
+    // sink, made after the round, is dropped before it.
+    let mut sink = unsafe { LegSink::new(3, row, plane.share(), round.share()) };
+    lend_reply(&round);
+    plane.capture();
+    sink.on_reply(&REPLY);
+    assert_eq!(plane.captured(), Some(row));
+    // SAFETY: as above.
+    unsafe { round.seal() };
+    assert!(!round.deliver(), "the captured reply was not held");
+    plane.call(row, &REPLY);
+    assert_eq!(seen.calls(), 1, "the reader hands it once");
+    assert!(plane.release(row).is_none(), "the capture's count");
+    drop(sink);
+    let end = plane.take_end().expect("the sink's drop is the leg's end");
+    drop(plane.release(end.row()));
+    assert_eq!(seen.drops(), 1);
 }
 
 /// A sink's drop is its leg's end, with the timeout it was told of; while the sink lives no end

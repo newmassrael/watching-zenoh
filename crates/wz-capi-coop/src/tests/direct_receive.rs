@@ -24,6 +24,59 @@ use crate::{CoopConfig, EngineHold};
 /// The samples of a batch of `COUNT` the router sends on `demo/in`.
 const COUNT: u8 = 3;
 
+/// A peer's reply is handed to the get it answers by the read itself, with the session free and
+/// nothing of it held in the round. Turned red by a reply offered to the round (the read counts
+/// none) or handed out while the read holds the session.
+#[cfg(all(
+    feature = "query",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
+    use wz_capi_port::ReplyCallback;
+    use wz_session_core::reply_sink::ReplyView;
+
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    super::get::settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
+    let seen: Arc<Mutex<Vec<(bool, Vec<u8>)>>> = Arc::default();
+    let mut session = Some(EngineHold::downgrade(&engine));
+    let issued = engine.get_on_wire(
+        "demo/g/a",
+        &WireKey::literal(),
+        &super::get::remote_get(),
+        None,
+        &mut || {
+            let seen = seen.clone();
+            let session = session.take();
+            ReplyCallback::shared(move |view: &dyn ReplyView| {
+                let free = session
+                    .as_ref()
+                    .and_then(|session| session.upgrade())
+                    .is_some_and(|engine| engine.session_is_free());
+                seen.lock().unwrap().push((free, view.payload().to_vec()));
+            })
+        },
+    );
+    assert!(matches!(issued, Ok(1)), "one leg: the link's peer");
+    assert_eq!(
+        engine.replies_handed_by_the_read(),
+        0,
+        "CONTROL: nothing is handed before a step"
+    );
+    until(&engine, "the reply", || !seen.lock().unwrap().is_empty());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(true, b"r".to_vec())],
+        "the reply's callback found the session held"
+    );
+    assert_eq!(
+        engine.replies_handed_by_the_read(),
+        1,
+        "the reply was held in the round"
+    );
+}
+
 /// Each sample of one frame is handed to its callback with the session's state free: a callback
 /// that takes the session (a put, a declaration) never waits on the read that called it. Turned
 /// red by a read that hands a record out while it holds the session.
@@ -270,6 +323,146 @@ fn a_close_from_a_callback_ends_the_read_and_lets_the_link_go_once() {
         engine.links_let_go(),
         1,
         "a second close let the links go again"
+    );
+}
+
+/// A callback that closes its session reads the key it was handed until it returns: the key, named
+/// by an id the router declared, is the literal the session's table of the router's ids keeps,
+/// which the close leaves where it lies until the read that stepped the link has returned. No
+/// callback runs after the close. Turned red by a close that lets the router's ids go while the
+/// callback that closed holds a key read off them.
+#[test]
+fn a_callback_that_closes_its_session_reads_its_key_until_it_returns() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let keys: Arc<Mutex<Vec<String>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/named", WireKey::literal(), Locality::Any, None, {
+            let keys = keys.clone();
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    SessionDrive::close(&*engine);
+                }
+                keys.lock().unwrap().push(sample.keyexpr().to_string());
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::DeclarePushKeepAlivePush(
+        12,
+        "demo/named",
+        b"first",
+        b"second",
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while keys.lock().unwrap().is_empty() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for the sample"
+        );
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        *keys.lock().unwrap(),
+        ["demo/named"],
+        "the key read after the close, or a callback after it"
+    );
+}
+
+/// A read from a callback that the session's own put runs reads nothing and takes nothing of the
+/// session: a record it read would be handed to a callback inside another. The CONTROL is the
+/// put, which reaches the subscriber. Turned red by a read that steps the link from inside a
+/// delivery other than a read's.
+#[cfg(all(
+    feature = "local-subscriber",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let reads: Arc<Mutex<Vec<(bool, usize)>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
+            let reads = reads.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    let before = engine.takes.core.load(Ordering::SeqCst);
+                    let open = SessionDrive::read(&*engine, false).is_ok();
+                    let took = engine.takes.core.load(Ordering::SeqCst) - before;
+                    reads.lock().unwrap().push((open, took));
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    let own = PublishOptions::put().with_locality(Locality::SessionLocal);
+    assert_eq!(
+        engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
+        Ok(1),
+        "CONTROL: the put reached the subscriber"
+    );
+    assert_eq!(
+        *reads.lock().unwrap(),
+        [(true, 0)],
+        "the read from the callback took the session, or answered it closed"
+    );
+}
+
+/// A put of the session's own hands each subscriber it reaches the sample with the session free,
+/// one row at a time: a row the first callback undeclared before the put reached it is handed
+/// nothing, and the put counts the first alone. The CONTROL is the first subscriber, handed the
+/// sample. Turned red by a put that begins a call on every row it reaches under one lock before
+/// the first callback runs.
+#[cfg(all(
+    feature = "local-subscriber",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
+    let later: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
+            let (seen, later) = (seen.clone(), later.clone());
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    seen.lock().unwrap().push((1, engine.session_is_free()));
+                    let id = later.lock().unwrap().take();
+                    if let Some(id) = id {
+                        engine.undeclare_subscriber(id);
+                    }
+                }
+            })
+        })
+        .expect("the session declares the first subscriber");
+    let id = engine
+        .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
+            let seen = seen.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                seen.lock().unwrap().push((2, true));
+            })
+        })
+        .expect("the session declares the second subscriber");
+    *later.lock().unwrap() = Some(id);
+    let own = PublishOptions::put().with_locality(Locality::SessionLocal);
+    assert_eq!(
+        engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
+        Ok(1),
+        "the put reached the row undeclared before it got there"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, true)],
+        "the first callback ran with the session held, or the undeclared row was handed the put"
     );
 }
 

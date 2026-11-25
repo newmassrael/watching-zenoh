@@ -265,14 +265,21 @@ impl RecordForm for crate::row_callback::OneThread {
 }
 
 /// What the session's planes are made of in an engine's own types beyond what its round owes:
-/// whether the session's own queryables answer its gets, and the locks the planes keep their state
-/// and their queues under. The get plane ([`crate::get_plane`]) and the query plane
-/// ([`crate::query_plane`]) read both.
+/// whether the session's own queryables answer its gets, whether a thread that holds the session's
+/// lock may take the callback a reply reaches, and the locks the planes keep their state and their
+/// queues under. The get plane ([`crate::get_plane`]) and the query plane
+/// ([`crate::query_plane`]) read them.
 pub trait PlaneCalls: RoundCalls {
     /// Whether the session's own queryables answer a get of the session on the thread that holds
-    /// the session's lock: the get plane captures the callback the answer reaches, and the query
-    /// plane notes the calls the get begins.
+    /// the session's lock: the query plane notes the calls the get begins, and the get plane
+    /// captures the callback the answer reaches, which [`Self::Captures`] keeps.
     type LocalAnswers: Presence;
+    /// Whether the get plane keeps a capture ([`crate::get_plane::GetPlane::capture`]): the
+    /// callback a reply handed to the sinks reaches is taken out for the thread that holds the
+    /// session's lock, to hand it the reply itself once it lets go. Present where the session's
+    /// own queryables answer its gets, and where the session's read hands each record out as it is
+    /// read, so a peer's reply is handed by the read and not held in the round.
+    type Captures: Presence;
     /// The locks of the planes' state and of the queues every delivery looks at
     /// ([`Queued`](crate::plane_lock::Queued)).
     type Queues: LockFamily;

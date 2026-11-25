@@ -224,6 +224,14 @@ use ledger::{Ledger, Seen};
 // steps the one link's session itself (`direct`).
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 mod direct;
+// The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+mod pinned;
+#[cfg(all(
+    feature = "query",
+    not(any(feature = "threads", feature = "listen", feature = "group"))
+))]
+mod replies;
 
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
@@ -1195,6 +1203,19 @@ pub(crate) struct Takes {
     /// (`direct`).
     #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     pub(crate) pump_reads: core::sync::atomic::AtomicUsize,
+    /// The received samples a walk handed to its subscribers one row at a time (`pinned`), each
+    /// counted once however many rows it reached.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) pinned_samples: core::sync::atomic::AtomicUsize,
+    /// Of the samples handed one row at a time, those read where their frame lies.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    pub(crate) pinned_lent: core::sync::atomic::AtomicUsize,
+    /// The peers' replies the read handed to the get each answers itself (`replies`).
+    #[cfg(all(
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) pinned_replies: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
@@ -5552,18 +5573,39 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.links_let_go.get()
     }
 
-    /// How many rounds of deliveries were handed out since the open: what a test of the cost of
-    /// one received sample counts.
+    /// How many samples the session handed to its subscribers' callbacks since the open, each
+    /// counted once however many callbacks it reached, whichever way it was delivered: what a
+    /// test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn rounds_handed(&self) -> usize {
-        self.samples.tally().rounds()
+    pub(crate) fn samples_handed(&self) -> usize {
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let pinned = self.takes.pinned_samples.load(Ordering::Relaxed);
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        let pinned = 0;
+        self.samples.tally().samples() + pinned
     }
 
-    /// How many samples the rounds handed to their callbacks where their datagram lies since the
-    /// open: what a test of the cost of one received sample counts.
+    /// Of the samples [`Self::samples_handed`] counts, how many were handed where their datagram
+    /// lies.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn samples_lent(&self) -> usize {
-        self.samples.tally().lent()
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        let pinned = self.takes.pinned_lent.load(Ordering::Relaxed);
+        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        let pinned = 0;
+        self.samples.tally().lent() + pinned
+    }
+
+    /// How many peers' replies the read handed to the get each answers itself, with nothing of
+    /// them held in the round (`replies`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "query",
+        not(any(feature = "threads", feature = "listen", feature = "group"))
+    ))]
+    pub(crate) fn replies_handed_by_the_read(&self) -> usize {
+        self.takes.pinned_replies.load(Ordering::Relaxed)
     }
 
     /// How often the list of the threads delivering beside the first was taken since the open
@@ -6526,7 +6568,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// the putting thread is inside of is called again from inside itself, as pico's is, so a put a
     /// callback makes on its own subscriber's key reaches it at once, at any depth.
     /// The number of subscribers reached.
-    #[cfg(feature = "local-subscriber")]
+    #[cfg(all(
+        feature = "local-subscriber",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     fn publish_to_subscribers(
         &self,
         keyexpr: &str,

@@ -1357,22 +1357,27 @@ fn the_sessions_step_ends_a_chain_past_its_deadline() {
 }
 
 /// The samples a read takes from a link that leaves its datagram where it lies are handed to the
-/// subscriber's callback where they lie: the samples of each datagram are handed on through the
-/// delivery lane, which has no lock, as one record, its payloads read in the datagram, which is
-/// held back only until the last callback returns. A read that finds nothing hands nothing out.
-/// One thread delivers, so the list of the threads delivering beside it is never taken. The
-/// CONTROL is the count of the samples handed to the subscriber.
+/// subscriber's callback where they lie, each once, with the session free: their payloads are
+/// read in the datagram, which is held back only until the last callback returns. A read that
+/// finds nothing hands nothing out. One thread delivers, so the list of the threads delivering
+/// beside it is never taken. The CONTROL is the count of the samples handed to the subscriber.
 #[test]
 fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
+    let free: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);
     engine
         .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, {
             let count = count.clone();
+            let free = free.clone();
             SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    free.lock().unwrap().push(engine.session_is_free());
+                }
                 count.fetch_add(1, Ordering::SeqCst);
             })
         })
@@ -1384,7 +1389,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         engine.declarations_synced()
     });
     let (handed, lent, list) = (
-        engine.rounds_handed(),
+        engine.samples_handed(),
         engine.samples_lent(),
         engine.delivery_list_takes(),
     );
@@ -1392,7 +1397,7 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         let _ = SessionDrive::read(&*engine, false);
     }
     assert_eq!(
-        (engine.rounds_handed(), engine.samples_lent()),
+        (engine.samples_handed(), engine.samples_lent()),
         (handed, lent),
         "a read with nothing to read handed something out"
     );
@@ -1405,14 +1410,19 @@ fn a_received_sample_is_handed_where_it_lies_and_an_empty_read_hands_nothing() {
         received.load(Ordering::SeqCst) == SAMPLES
     });
     assert_eq!(
+        engine.samples_handed() - handed,
+        SAMPLES,
+        "each sample handed once"
+    );
+    assert_eq!(
         engine.samples_lent() - lent,
         SAMPLES,
-        "each sample handed where its datagram lies, none copied into the lane"
+        "each sample handed where its datagram lies, none copied"
     );
-    let records = engine.rounds_handed() - handed;
-    assert!(
-        (1..=SAMPLES).contains(&records),
-        "{records} records handed on: one for each datagram the samples came in"
+    assert_eq!(
+        *free.lock().unwrap(),
+        [true; SAMPLES],
+        "a callback found the session held"
     );
     assert_eq!(
         engine.delivery_list_takes(),
@@ -1721,7 +1731,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     router.send(Command::PushBatch("demo/batch", SAMPLES));
     // Nothing steps the session meanwhile, so the datagram lies in its socket before the read.
     std::thread::sleep(Duration::from_millis(300));
-    let rounds = engine.rounds_handed();
+    let samples = engine.samples_handed();
     let polls = engine.link_polls();
     let task_clock_reads = engine.task_clock_reads();
     #[cfg(any(feature = "listen", feature = "group"))]
@@ -1733,9 +1743,10 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
         sent,
         "every sample, in order, by the one read"
     );
-    assert!(
-        engine.rounds_handed() - rounds >= usize::from(SAMPLES) / RECORDS,
-        "the datagram was read in more steps than one, a round each"
+    assert_eq!(
+        engine.samples_handed() - samples,
+        usize::from(SAMPLES),
+        "each sample of the datagram handed once"
     );
     assert!(
         engine.link_polls() - polls <= 1,
