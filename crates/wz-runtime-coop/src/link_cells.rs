@@ -20,12 +20,13 @@
 
 use alloc::alloc::{alloc, dealloc, handle_alloc_error};
 use core::alloc::Layout;
-use core::cell::Cell;
 use core::marker::PhantomData;
 use core::mem::{size_of, MaybeUninit};
 use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use portable_atomic::AtomicUsize as CountWord;
 
 use wz_session_core::bounded::ARENA_ALIGN;
 use wz_session_core::byte_cells::{ByteBuf, LentByteCells};
@@ -43,9 +44,62 @@ struct CellHead {
     /// A clone may name a value of no cell, so nothing bounds the count but the word: one held at
     /// its most keeps its value for good, and the clone past it is counted
     /// ([`held_past_count`]).
-    word: Cell<usize>,
+    word: CountWord,
     owner: Owner,
     whole: DropWhole,
+}
+
+/// How the handles of a cell are counted. A cell's word is written by one kind's handles alone, so
+/// a kind is a type argument of the handle ([`CellRc`]) and never a choice made at run time.
+pub trait CountKind: 'static {
+    /// The word as it stands.
+    fn read(word: &CountWord) -> usize;
+
+    /// Write `f`'s answer over the word it is handed, when it answers one, and answer the word
+    /// `f` was handed.
+    fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize;
+}
+
+/// Counted as an `Rc` is: the handles of a cell are held by one task at a time, so the word is
+/// read and written with plain loads and stores, no read-modify-write. What a session of one
+/// thread, or one confined to its engine's lock, holds its links by.
+pub enum OneTask {}
+
+impl CountKind for OneTask {
+    #[inline]
+    fn read(word: &CountWord) -> usize {
+        word.load(Ordering::Relaxed)
+    }
+
+    #[inline]
+    fn update(word: &CountWord, mut f: impl FnMut(usize) -> Option<usize>) -> usize {
+        let was = word.load(Ordering::Relaxed);
+        if let Some(now) = f(was) {
+            word.store(now, Ordering::Relaxed);
+        }
+        was
+    }
+}
+
+/// Counted as an `Arc` is: handles of one cell may be cloned and let go of on several threads at
+/// once, so each change of the word is one read-modify-write, and the last handle's let go is
+/// ordered after every other handle's. A cell of this kind lies on the heap alone
+/// ([`CellRc::shared`]), whose block any thread may give back; a table's cell is given back
+/// through its claim's flag, which its table reads without a lock, so a table lends no cell to it.
+pub enum Atomic {}
+
+impl CountKind for Atomic {
+    #[inline]
+    fn read(word: &CountWord) -> usize {
+        word.load(Ordering::Acquire)
+    }
+
+    #[inline]
+    fn update(word: &CountWord, f: impl FnMut(usize) -> Option<usize>) -> usize {
+        match word.fetch_update(Ordering::AcqRel, Ordering::Acquire, f) {
+            Ok(was) | Err(was) => was,
+        }
+    }
 }
 
 /// The bits of a head's word below its count: the base-2 logarithm of the alignment of the value
@@ -114,12 +168,23 @@ impl<K> Slot<K> {
 
 /// A handle on the value a cell holds, counted as an `Rc` is: a clone names the same value, and
 /// the last handle to go drops it and gives the cell back. `T` is the value's type or a trait
-/// object of it ([`Self::unsize`]). Not `Send`: the cells belong to the session's one task.
-pub struct CellRc<T: ?Sized> {
+/// object of it ([`Self::unsize`]). `N` is how its handles are counted ([`CountKind`]): one
+/// task's ([`OneTask`], not `Send`) or several threads' ([`Atomic`]).
+pub struct CellRc<T: ?Sized, N: CountKind = OneTask> {
     head: NonNull<CellHead>,
     value: NonNull<T>,
     _owns: PhantomData<T>,
+    _count: PhantomData<fn() -> N>,
 }
+
+// SAFETY: a handle of the atomic kind counts its cell with read-modify-writes ordered as an
+// `Arc`'s are, so clones and let gos on several threads keep one count, and the last handle drops
+// the value after every other handle let go. Its cell is the heap's alone (`CellRc::shared`), which
+// any thread gives back. The value is reached through shared references only, so sending a
+// handle or sharing one needs the value to be `Send` and `Sync`, as `Arc` asks.
+unsafe impl<T: ?Sized + Send + Sync> Send for CellRc<T, Atomic> {}
+// SAFETY: as for `Send` above.
+unsafe impl<T: ?Sized + Send + Sync> Sync for CellRc<T, Atomic> {}
 
 /// A cell for a slot of `layout`, its head written with one handle, `whole` and `place`, its
 /// value not yet: a claimed cell of `cells` when a table is lent, `None` when every cell is taken
@@ -193,7 +258,7 @@ unsafe fn write_head(
     // head, aligned for it.
     unsafe {
         head.as_ptr().write(CellHead {
-            word: Cell::new(ONE_HANDLE | place),
+            word: CountWord::new(ONE_HANDLE | place),
             owner,
             whole,
         });
@@ -226,18 +291,20 @@ unsafe fn give_back(head: NonNull<CellHead>) {
 /// `head` heads a cell whose value was placed and not dropped, named by a handle that is let go
 /// of here and not used after.
 #[inline(never)]
-unsafe fn let_go(head: NonNull<CellHead>) {
+unsafe fn let_go<N: CountKind>(head: NonNull<CellHead>) {
     // SAFETY: the caller's contract: a handle names the cell, so its head is live.
     let cell = unsafe { head.as_ref() };
-    let word = cell.word.get();
     // A count held at its most was passed by a clone it did not count, so it no longer says when
-    // the last handle goes: the value is kept for good.
+    // the last handle goes: the value is kept for good. Otherwise the handle let go of is
+    // counted, so the count is one at least.
+    let word = N::update(&cell.word, |word| {
+        word.checked_add(ONE_HANDLE)
+            .map(|_| word.wrapping_sub(ONE_HANDLE))
+    });
     if word.checked_add(ONE_HANDLE).is_none() {
         return;
     }
-    // The handle let go of is counted, so the count is one at least.
     let left = word.wrapping_sub(ONE_HANDLE);
-    cell.word.set(left);
     if left < ONE_HANDLE {
         let (whole, at) = (cell.whole, value_at(left & PLACE_MASK));
         // SAFETY: this was the last handle, so nothing names the value or the cell after this,
@@ -257,6 +324,50 @@ const fn fits_layout(size: usize, layout: Layout) -> bool {
     layout.size() <= size
         && layout.align() <= ARENA_ALIGN
         && matches!(size.checked_rem(ARENA_ALIGN), Some(0))
+}
+
+impl<K, N: CountKind> CellRc<K, N> {
+    /// `value` in a cell of its own on the heap. A heap that refuses the cell ends the program, as
+    /// a `Box` of the value would.
+    fn heap(value: K) -> Self {
+        let layout = Layout::new::<Slot<K>>();
+        let Some(head) = heap_head(layout, Slot::<K>::WHOLE, Slot::<K>::PLACE) else {
+            handle_alloc_error(layout)
+        };
+        // SAFETY: the head heads a cell of `Slot<K>`'s layout, written with one handle, whose
+        // value this writes.
+        unsafe { Self::fill(head, value) }
+    }
+
+    /// The handle of the cell `head` heads, its value written from `value`.
+    ///
+    /// # Safety
+    /// `head` heads a cell laid out for `Slot<K>`, its head written with one handle, its value not
+    /// written, and no handle names it yet.
+    unsafe fn fill(head: NonNull<CellHead>, value: K) -> Self {
+        let slot = head.cast::<Slot<K>>().as_ptr();
+        // SAFETY: the caller's contract: the cell is a slot of `K` that only this call reaches, so
+        // its value's place is aligned for `K`, written once here, and never null.
+        unsafe {
+            let at = core::ptr::addr_of_mut!((*slot).value);
+            at.write(value);
+            Self {
+                head,
+                value: NonNull::new_unchecked(at),
+                _owns: PhantomData,
+                _count: PhantomData,
+            }
+        }
+    }
+}
+
+impl<K> CellRc<K, Atomic> {
+    /// `value` in a cell of its own on the heap, its handles counted as an `Arc`'s are: the
+    /// handle of a value several threads hold. Only the heap lends a cell of this kind
+    /// ([`Atomic`]).
+    pub fn shared(value: K) -> Self {
+        Self::heap(value)
+    }
 }
 
 impl<K> CellRc<K> {
@@ -306,32 +417,7 @@ impl<K> CellRc<K> {
     /// `value` in a cell of its own on the heap: the handle of a link lent no table. A heap that
     /// refuses the cell ends the program, as a `Box` of the value would.
     pub fn boxed(value: K) -> Self {
-        let layout = Layout::new::<Slot<K>>();
-        let Some(head) = heap_head(layout, Slot::<K>::WHOLE, Slot::<K>::PLACE) else {
-            handle_alloc_error(layout)
-        };
-        // SAFETY: as in `Self::in_cells`.
-        unsafe { Self::fill(head, value) }
-    }
-
-    /// The handle of the cell `head` heads, its value written from `value`.
-    ///
-    /// # Safety
-    /// `head` heads a cell laid out for `Slot<K>`, its head written with one handle, its value not
-    /// written, and no handle names it yet.
-    unsafe fn fill(head: NonNull<CellHead>, value: K) -> Self {
-        let slot = head.cast::<Slot<K>>().as_ptr();
-        // SAFETY: the caller's contract: the cell is a slot of `K` that only this call reaches, so
-        // its value's place is aligned for `K`, written once here, and never null.
-        unsafe {
-            let at = core::ptr::addr_of_mut!((*slot).value);
-            at.write(value);
-            Self {
-                head,
-                value: NonNull::new_unchecked(at),
-                _owns: PhantomData,
-            }
-        }
+        Self::heap(value)
     }
 
     /// Whether a value of `K` fits a cell of `size` bytes of a table, whose cells start on an
@@ -385,6 +471,7 @@ impl<K> CellClaim<K> {
             // SAFETY: the place of a cell's value, which is never null.
             value: unsafe { NonNull::new_unchecked(at) },
             _owns: PhantomData,
+            _count: PhantomData,
         })
     }
 }
@@ -444,6 +531,7 @@ impl<A, B> CellRc<(A, B)> {
                 head,
                 value: NonNull::new_unchecked(at),
                 _owns: PhantomData,
+                _count: PhantomData,
             }
         };
         Some(pair.into_halves())
@@ -468,18 +556,19 @@ impl<A, B> CellRc<(A, B)> {
     }
 }
 
-impl<T: ?Sized> CellRc<T> {
+impl<T: ?Sized, N: CountKind> CellRc<T, N> {
     /// This handle as one on a part of its value, `as_part` answering where the part lies.
     ///
     /// # Safety
     /// `as_part` answers a pointer to a value that lives as long as the value it is handed: the
     /// last handle drops the whole value placed, through the cell's `whole`, never the part.
-    unsafe fn part<U>(self, as_part: impl FnOnce(NonNull<T>) -> NonNull<U>) -> CellRc<U> {
+    unsafe fn part<U>(self, as_part: impl FnOnce(NonNull<T>) -> NonNull<U>) -> CellRc<U, N> {
         let this = core::mem::ManuallyDrop::new(self);
         CellRc {
             head: this.head,
             value: as_part(this.value),
             _owns: PhantomData,
+            _count: PhantomData,
         }
     }
 
@@ -492,18 +581,19 @@ impl<T: ?Sized> CellRc<T> {
     pub unsafe fn unsize<U: ?Sized>(
         self,
         as_u: impl FnOnce(NonNull<T>) -> NonNull<U>,
-    ) -> CellRc<U> {
+    ) -> CellRc<U, N> {
         let this = core::mem::ManuallyDrop::new(self);
         CellRc {
             head: this.head,
             value: as_u(this.value),
             _owns: PhantomData,
+            _count: PhantomData,
         }
     }
 
     /// How many handles name the value `this` names, `this` among them.
     pub fn handles(this: &Self) -> usize {
-        this.head().word.get().wrapping_shr(PLACE_BITS)
+        N::read(&this.head().word).wrapping_shr(PLACE_BITS)
     }
 
     /// The value `this` names, as an address: two live handles name one value exactly when
@@ -541,7 +631,7 @@ pub fn heap_sink<K: BoxedLinkDriver + 'static>(driver: K) -> CellRc<dyn BoxedLin
     CellRc::boxed(driver).into_sink()
 }
 
-impl<T: ?Sized> Deref for CellRc<T> {
+impl<T: ?Sized, N: CountKind> Deref for CellRc<T, N> {
     type Target = T;
 
     fn deref(&self) -> &T {
@@ -562,37 +652,38 @@ pub fn held_past_count() -> usize {
 /// there, which keeps the value for good ([`let_go`]), and count the clone
 /// ([`held_past_count`]). Out of line: the one body of every handle's clone.
 #[inline(never)]
-fn hold(head: &CellHead) {
-    let more = head.word.get().checked_add(ONE_HANDLE);
+fn hold<N: CountKind>(head: &CellHead) {
+    let was = N::update(&head.word, |word| word.checked_add(ONE_HANDLE));
+    let past = was.checked_add(ONE_HANDLE).is_none();
     debug_assert!(
-        more.is_some(),
+        !past,
         "a cell was held by more handles than its count holds"
     );
-    match more {
-        Some(more) => head.word.set(more),
-        None => HELD_PAST_COUNT.store(
+    if past {
+        HELD_PAST_COUNT.store(
             HELD_PAST_COUNT.load(Ordering::Relaxed).saturating_add(1),
             Ordering::Relaxed,
-        ),
+        );
     }
 }
 
-impl<T: ?Sized> Clone for CellRc<T> {
+impl<T: ?Sized, N: CountKind> Clone for CellRc<T, N> {
     fn clone(&self) -> Self {
-        hold(self.head());
+        hold::<N>(self.head());
         Self {
             head: self.head,
             value: self.value,
             _owns: PhantomData,
+            _count: PhantomData,
         }
     }
 }
 
-impl<T: ?Sized> Drop for CellRc<T> {
+impl<T: ?Sized, N: CountKind> Drop for CellRc<T, N> {
     fn drop(&mut self) {
         // SAFETY: the handle names its cell, whose value was placed and not dropped, and is let
         // go of here once.
-        unsafe { let_go(self.head) }
+        unsafe { let_go::<N>(self.head) }
     }
 }
 
@@ -601,6 +692,7 @@ mod tests {
     use super::*;
     use alloc::boxed::Box;
     use alloc::rc::Rc;
+    use core::cell::Cell;
 
     /// A value that counts its drops.
     struct Counted(Rc<Cell<u32>>);
@@ -988,14 +1080,64 @@ mod tests {
         assert!(value_at(Slot::<Wide>::PLACE) > size_of::<CellHead>());
         assert_eq!(
             size_of::<CellHead>(),
-            size_of::<(Cell<usize>, Owner, DropWhole)>()
+            size_of::<(CountWord, Owner, DropWhole)>()
+        );
+    }
+
+    /// A value of several threads that counts its drops.
+    struct DropsOnce(alloc::sync::Arc<AtomicUsize>);
+
+    impl Drop for DropsOnce {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Handles counted as an `Arc`'s are may cross threads, as handles counted for one task may
+    /// not. Turned red by an atomic handle that is not `Send` or not `Sync`.
+    #[test]
+    fn an_atomic_handle_crosses_threads() {
+        fn crosses<T: Send + Sync>() {}
+        crosses::<CellRc<u32, Atomic>>();
+        crosses::<CellRc<dyn Fn() + Send + Sync, Atomic>>();
+    }
+
+    /// Clones of one atomic handle made and let go of on several threads at once keep one count:
+    /// the value is dropped once, by the last handle, and not before. Turned red by a count
+    /// changed with a load and a store, which loses a clone or a let go when two threads race.
+    #[test]
+    fn atomic_handles_let_go_on_several_threads_drop_the_value_once() {
+        extern crate std;
+        let drops = alloc::sync::Arc::new(AtomicUsize::new(0));
+        let handle = CellRc::shared(DropsOnce(drops.clone()));
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let mine = handle.clone();
+                scope.spawn(move || {
+                    for _ in 0..1000 {
+                        drop(mine.clone());
+                    }
+                    drop(mine);
+                });
+            }
+        });
+        assert_eq!(drops.load(Ordering::SeqCst), 0, "one handle is left");
+        assert_eq!(CellRc::handles(&handle), 1);
+        drop(handle);
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            1,
+            "the last handle dropped it once"
         );
     }
 
     /// The count of `handle`'s cell set to the most its word holds, its place kept.
     fn count_at_its_most<T: ?Sized>(handle: &CellRc<T>) {
         let word = &handle.head().word;
-        word.set(!PLACE_MASK | (word.get() & PLACE_MASK));
+        word.store(
+            !PLACE_MASK | (word.load(Ordering::Relaxed) & PLACE_MASK),
+            Ordering::Relaxed,
+        );
     }
 
     /// A count held at its most keeps its value for good: a handle let go of then does not count
