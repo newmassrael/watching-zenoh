@@ -499,7 +499,7 @@ pub(crate) fn tls_files_named(_cfg: &ConfigState) -> Vec<String> {
 // --- ABI structs (session owned = pico rc `{ void* _val; void* _cnt }`) ----
 
 /// Owned session (pico `z_owned_session_t`, 16 B rc). `_val` carries the place of our
-/// [`PicoSessionHandle`]: on the tokio engine an object of its own, on the cooperative engine a
+/// `PicoSessionHandle`: on the tokio engine an object of its own, on the cooperative engine a
 /// place in the session's arena (`crate::session_place`); `_cnt` is unused.
 #[repr(C)]
 pub struct z_owned_session_t {
