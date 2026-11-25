@@ -542,6 +542,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn life_turn(&self, slot: &mut DirectSlot<L, C>, wait: IdleWait) -> Option<LinkTurn> {
         let mut held = self.live()?;
         let core = &mut held.0;
+        // The read's last step of the link, made with nothing of the session held, may have ended
+        // its session: the face no longer stands from here on.
+        core.end_closed_facts();
         core.transport.links.waited(wait);
         // What a lost link's peer is still owed comes before anything the link brings now.
         #[cfg(feature = "liveliness")]
@@ -717,7 +720,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     .transport
                     .links
                     .face(0)
-                    .and_then(Face::facts)
+                    .and_then(|face| face.facts.as_ref())
                     .and_then(|facts| facts.peer);
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());

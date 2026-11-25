@@ -2107,24 +2107,33 @@ struct Face<C: ClockSource + 'static, L: CoopLinks> {
 }
 
 impl<C: ClockSource + 'static, L: CoopLinks> Face<C, L> {
-    /// What the face's link said of its peer when it came up, while the link is up.
+    /// What the face's link said of its peer when it came up, while the link is up and its
+    /// session stands: what is read of a face that stands.
     fn facts(&self) -> Option<&UpFacts> {
         self.facts
             .as_ref()
             .filter(|_| matches!(self.link, Link::Up(_)))
+            .and_then(UpFacts::standing)
     }
 }
 
 /// What a face's link said of its peer when it came up, copied into the face's record by the one
 /// holder of the link then (`bring_up`): none of it changes while the link lives, and a read of
-/// it under the session's lock must not lend the link, which the face's own read may hold.
+/// it under the session's lock must not lend the link, which the face's own read may hold. Kept
+/// until the link is lost, so the loss is told by it, and read as standing until the step that
+/// ended the link's session is seen (`Core::end_closed_facts`).
 struct UpFacts {
     /// The zid the link's peer announced.
     peer: Option<SessionZid>,
+    /// Whether a step of the link was seen to end its session: the face no longer stands.
+    ended: bool,
     /// The face's first row as its watchers are told it (`FaceLinkRow::each_of_actions`): a
     /// face of this engine holds one link, so it is the face's one row.
     #[cfg(feature = "connectivity")]
     row: Option<FaceLinkRow>,
+    /// What the link's snapshot says beyond its row.
+    #[cfg(feature = "connectivity")]
+    link: LinkFacts,
 }
 
 impl UpFacts {
@@ -2142,15 +2151,33 @@ impl UpFacts {
         };
         Self {
             peer: session.actions.peer_session_zid(),
+            ended: false,
             #[cfg(feature = "connectivity")]
             row,
+            #[cfg(feature = "connectivity")]
+            link: LinkFacts::of_actions(&*session.actions),
         }
+    }
+
+    /// These facts, while the session they were read off stands.
+    fn standing(&self) -> Option<&Self> {
+        (!self.ended).then_some(self)
     }
 
     /// The face's row among the faces that stand: one whose link names its ends.
     #[cfg(feature = "connectivity")]
     fn standing_row(&self) -> Option<&FaceLinkRow> {
         self.row.as_ref().filter(|row| row.links != 0)
+    }
+
+    /// The face's snapshot, as `FaceSnapshot::of_actions` read it off the link as it came up.
+    #[cfg(feature = "connectivity")]
+    fn snapshot(&self) -> Option<FaceSnapshot> {
+        let row = self.row.as_ref()?;
+        let mut face = FaceSnapshot::of_face_row(row);
+        face.links
+            .extend(LinkSnapshot::of_row_with(row, &self.link));
+        Some(face)
     }
 }
 
@@ -4052,7 +4079,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     fn lose_face_link(&mut self, at: usize, id: FaceId, now_us: u64) {
         // The face is read before its facts go: what it was is what a watcher is told, its row
         // queued now and handed out once the session is let go of.
-        let facts = self.transport.links.face(at).and_then(Face::facts);
+        // Read whether or not the link's session was seen to end before the loss.
+        let facts = self
+            .transport
+            .links
+            .face(at)
+            .and_then(|face| face.facts.as_ref());
         #[cfg(feature = "connectivity")]
         if let Some(row) = facts
             .and_then(|facts| facts.row.clone())
@@ -4078,6 +4110,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         self.rooms.forget(at);
         self.lose_link(id);
+    }
+
+    /// Read each face whose link's session a step of it ended as a face that no longer stands
+    /// (`UpFacts`): called by whoever stepped the links, under the session's lock and before it
+    /// lets go of it, so a face stands for a reader of the session exactly while its link's
+    /// session does. Its facts stay until the loss is taken, which is told by them.
+    fn end_closed_facts(&mut self) {
+        for face in self.transport.links.faces_mut() {
+            let ended = !face.link.wire().is_some_and(|wire| wire.established());
+            if let Some(facts) = face.facts.as_mut().filter(|_| ended) {
+                facts.ended = true;
+            }
+        }
     }
 
     /// Tell the peer of every face whose link is up everything the session holds again, as a link
@@ -4470,7 +4515,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     return None;
                 }
                 // A link in its handshake names no peer yet: its facts come with it up.
-                let peer = decl_watch::named(|| face.facts().and_then(|facts| facts.peer));
+                let up = matches!(face.link, Link::Up(_));
+                let peer = decl_watch::named(|| {
+                    face.facts
+                        .as_ref()
+                        .filter(|_| up)
+                        .and_then(|facts| facts.peer)
+                });
                 Some((registry.tables_of(face.id)?, peer))
             })
         };
@@ -4642,6 +4693,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         registry_lend.lend_for(&mut session.registry, || {
             lend.lend_for(router, || local.run_ready(due_at))
         });
+        // The pass stepped the links' sessions: one it ended no longer stands.
+        self.end_closed_facts();
     }
 
     /// [`Self::run_tasks`] where the read steps the one link itself: no link's session is a
@@ -9983,24 +10036,27 @@ mod sending_on_tests {
 mod up_facts_tests {
     //! What a face's record keeps of its link as it came up, read without a lend of the link.
     use super::UpFacts;
-    use alloc::vec::Vec;
-    use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+    use alloc::string::String;
+    use wz_session_core::face::{FaceLinkRow, FaceSnapshot, LinkFacts, LinkSnapshot};
 
-    /// The facts of a face whose peer is `zid`, its row naming `links` links.
-    fn facts(zid: u8, links: usize) -> UpFacts {
+    /// The facts of a face whose peer is `zid`, its row naming `links` links, its link
+    /// described beyond the row by `link`.
+    fn facts(zid: u8, links: usize, link: LinkFacts) -> UpFacts {
         let face = FaceSnapshot {
             zid: [zid; 16],
             whatami: 1,
-            is_qos: false,
+            is_qos: true,
             is_multicast: false,
             is_shm: false,
-            links: Vec::new(),
+            links: alloc::vec![LinkSnapshot::unicast("tls/a:1", "tls/b:2", None, 512)],
         };
-        let mut row = FaceLinkRow::of_face_alone(&face);
+        let mut row = FaceLinkRow::of_snapshot(&face, 0).expect("the face's one link");
         row.links = links;
         UpFacts {
             peer: None,
+            ended: false,
             row: Some(row),
+            link,
         }
     }
 
@@ -10009,13 +10065,59 @@ mod up_facts_tests {
     /// keeps the row of a face alone, which `face_link_at` would hand out as a link with no ends.
     #[test]
     fn only_a_row_that_names_its_link_stands() {
-        let up = facts(7, 1);
+        let up = facts(7, 1, LinkFacts::default());
         assert_eq!(up.standing_row().map(|row| row.zid), Some([7; 16]));
-        assert!(facts(7, 0).standing_row().is_none(), "a face alone");
+        let alone = facts(7, 0, LinkFacts::default());
+        assert!(alone.standing_row().is_none(), "a face alone");
+        assert_eq!(
+            alone.snapshot().map(|face| face.links.len()),
+            Some(0),
+            "a face alone stands with no link, as its snapshot read off the link did"
+        );
         let none = UpFacts {
-            peer: None,
             row: None,
+            ..facts(7, 1, LinkFacts::default())
         };
         assert!(none.standing_row().is_none(), "a half-open face");
+        assert!(none.snapshot().is_none(), "a half-open face");
+    }
+
+    /// The snapshot of a face read from its facts carries what its link said beyond its row as
+    /// it came up: the band and the class its QoS extension negotiated, the name on the peer's
+    /// certificate and the NICs. Turned red by a snapshot built from the row alone
+    /// (`LinkSnapshot::of_row`), which reads each of them as not known.
+    #[test]
+    fn a_snapshot_from_the_facts_keeps_what_the_link_said_beyond_its_row() {
+        let said = LinkFacts {
+            interfaces: Some(alloc::vec![String::from("eth0")]),
+            cert_common_name: Some(String::from("router.example")),
+            priorities: Some((2, 5)),
+            reliable: Some(false),
+        };
+        let face = facts(3, 1, said.clone())
+            .snapshot()
+            .expect("a face that stands");
+        assert_eq!(face.zid, [3; 16]);
+        assert!(face.is_qos);
+        let links = face.links.as_slice();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].priorities, said.priorities);
+        assert_eq!(links[0].reliable, said.reliable);
+        assert_eq!(links[0].cert_common_name, said.cert_common_name);
+        assert_eq!(links[0].interfaces, said.interfaces);
+        assert_eq!(links[0].dst, "tls/b:2");
+        assert_eq!(links[0].mtu, 512);
+    }
+
+    /// Facts whose link's session a step was seen to end stand for nothing, and are kept for the
+    /// loss to be told by. Turned red by a `standing` that reads past `ended`, under which a
+    /// face would stand after its session ended.
+    #[test]
+    fn facts_of_an_ended_session_no_longer_stand() {
+        let mut up = facts(4, 1, LinkFacts::default());
+        assert!(up.standing().is_some());
+        up.ended = true;
+        assert!(up.standing().is_none(), "its session ended");
+        assert!(up.row.is_some(), "kept for the loss");
     }
 }

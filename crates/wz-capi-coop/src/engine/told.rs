@@ -22,7 +22,6 @@
 use super::*;
 use wz_capi_port::told::{ToldBits, ToldKey, ToldPlane};
 use wz_runtime_coop::faces::FacePlaces;
-use wz_session_core::face::LinkSnapshot;
 
 /// A row of a face that went, as its listeners were told it, and those still to be told it left.
 pub(super) struct Tomb {
@@ -188,20 +187,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         None
     }
 
-    /// The faces that stand (`SessionEngine::face_snapshots`): each face's from the row its link
-    /// said as it came up, then each member of a group the session joined, a transport of its own
-    /// as both upstreams report it (`group`). What a row does not hold reads as not known.
+    /// The faces that stand (`SessionEngine::face_snapshots`): each face's as its link said it
+    /// came up, then each member of a group the session joined, a transport of its own as both
+    /// upstreams report it (`group`).
     pub(super) fn standing_faces(&self) -> Vec<FaceSnapshot> {
         let faces = self
             .transport
             .links
             .faces()
-            .filter_map(|face| face.facts()?.standing_row())
-            .map(|row| {
-                let mut face = FaceSnapshot::of_face_row(row);
-                face.links.extend(LinkSnapshot::of_row(row));
-                face
-            });
+            .filter_map(|face| face.facts()?.snapshot());
         #[cfg(feature = "group")]
         let faces = faces.chain(
             self.transport
@@ -305,7 +299,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if face.told.bits.is_empty() {
             return;
         }
-        let row = face.facts().and_then(|facts| facts.row.clone());
+        // The row it was told as, whether or not its session was seen to end before the loss.
+        let row = face.facts.as_ref().and_then(|facts| facts.row.clone());
         let Some(apart) = face.told.went(row) else {
             return;
         };
