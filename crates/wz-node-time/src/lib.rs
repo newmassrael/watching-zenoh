@@ -31,6 +31,22 @@ compile_error!(
      for a build without it"
 );
 
+// The clock registry, the event log and the time base hold process-wide state under the host's lock
+// and read its clocks: `std`'s build of `wz-host-sync`, or its own calls' (`host-sync`). None of them
+// is an MCU image's, and a build with neither is refused by name.
+#[cfg(all(
+    any(
+        feature = "clock-source",
+        feature = "event-ring",
+        feature = "time-base"
+    ),
+    not(any(feature = "std", feature = "host-sync"))
+))]
+compile_error!(
+    "wz-node-time: `clock-source`, `event-ring` and `time-base` take the host's lock: name `std`, \
+     or `host-sync` for a build without it"
+);
+
 #[cfg(feature = "clock-source")]
 pub mod clock_registry;
 #[cfg(feature = "event-ring")]

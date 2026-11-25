@@ -22,10 +22,12 @@
 //! shared lock. A source may be registered or removed while nodes run: a node reads the registry
 //! afresh each time, so the order of `register` and the node's construction does not matter.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-use wz_host_sync::RwLock;
+use alloc::boxed::Box;
+use alloc::vec::Vec;
+
+use wz_host_sync::{OnceLock, RwLock};
 
 use wz_session_core::epoch::{EpochSource, EpochUnavailable, SinceEpoch};
 
