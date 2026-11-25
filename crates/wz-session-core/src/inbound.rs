@@ -910,10 +910,18 @@ impl ReadChain<'_> {
 /// What the one walk of a handshake chain read where it lies answers for the readers every build
 /// links (`ext_chain::read_handshake_chain`), found while the walk judges the chain: of each
 /// extension the first entry, as the readers of a held chain take the first.
+// Built only by the walk of a handshake chain (`ext_chain::read_handshake_chain`), so it is
+// compiled where that walk is.
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
 ))]
 #[derive(Clone, Copy)]
 pub(crate) struct ChainAnswers<'a> {
@@ -933,7 +941,13 @@ pub(crate) struct ChainAnswers<'a> {
 #[cfg(all(
     feature = "alloc",
     feature = "codec-frame",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    any(
+        feature = "codec-init-body",
+        feature = "codec-open-body",
+        feature = "codec-close",
+        feature = "codec-keep-alive"
+    )
 ))]
 impl<'a> ChainAnswers<'a> {
     /// The answers of a chain with no entry.
