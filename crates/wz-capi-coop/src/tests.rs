@@ -1341,6 +1341,37 @@ fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue
     );
 }
 
+/// A subscriber's undeclaration holds the session once: the one hold looks for its row in the
+/// liveliness subscribers' table, which the port's one id space numbers it in too, and then in the
+/// subscribers'. The CONTROL is its declaration, which holds the session once as well. Turned red
+/// by an undeclaration that looks for a liveliness subscriber under a hold of its own (a build
+/// with `liveliness`).
+#[test]
+fn a_subscriber_is_undeclared_in_one_hold_of_the_session() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/a",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
+        )
+        .expect("the session declares the subscriber")
+        .id;
+    let declared = takes();
+    assert_eq!(
+        declared - before,
+        1,
+        "CONTROL: one hold for the declaration"
+    );
+    engine.undeclare_subscriber(id);
+    assert_eq!(takes() - declared, 1, "one hold for the undeclaration");
+}
+
 /// Each operation lets the session go as it ends, its round sealed and its lock let go in the one
 /// drop of its hold: the same operation on another thread right after takes the session at once.
 /// Turned red by a hold whose drop seals the round and leaves the lock held, where the other
