@@ -42,7 +42,7 @@ use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
 
 use crate::abi::z_loaned_keyexpr_t;
 use crate::ffi::{guard_val, guarded};
-use crate::keyexpr::{declared_of, outbound_keyexpr, DeclaredKeyexpr};
+use crate::keyexpr::{declared_of, outbound_keyexpr, DeclaredKeyexpr, EntityKey};
 // The engine's operations, which a build of the cooperative engine reaches as its own type; a
 // build that reaches it as the port's object calls them on that object.
 #[cfg(not(feature = "engine-tokio"))]
@@ -138,14 +138,10 @@ impl TokenState {
         keyexpr: &str,
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
-        let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
+        let key = EntityKey::whole(&session.engine, keyexpr, existing)?;
         let id = session
             .engine
-            .declare_liveliness_token_on_wire(
-                keyexpr,
-                key.wire(crate::session::EngineHold::as_ref(&session.engine)),
-                Some(key.retraction_key(crate::session::EngineHold::as_ref(&session.engine))),
-            )
+            .declare_liveliness_token_on_wire(keyexpr, key.wire(), Some(key.retraction_key()))
             .map_err(|refused| refusal_code(refused, Door::Token))?;
         // The session's record holds the declaration from here on: the door's hold goes.
         drop(key);
@@ -430,10 +426,9 @@ pub(crate) unsafe fn declare_liveliness_subscriber_in(
     // session's hold after it.
     let sink = liveliness_sink(closure, session);
     let state = fill_subscriber_place(slot, engine);
-    let declared = DeclaredKeyexpr::declare(engine, keyexpr, existing).and_then(|key| {
-        let wire = key.wire(crate::session::EngineHold::as_ref(engine));
+    let declared = EntityKey::whole(engine, keyexpr, existing).and_then(|key| {
         engine
-            .declare_liveliness_subscriber_on_wire(keyexpr, wire, history, sink)
+            .declare_liveliness_subscriber_on_wire(keyexpr, key.wire(), history, sink)
             // The session's record holds the declaration the key is announced on from here on:
             // the door's hold goes with `key`, and the key is lent from the record.
             .map(DeclaredSubscriber::new)

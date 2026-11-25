@@ -3382,9 +3382,9 @@ pub unsafe extern "C" fn z_closure_sample_drop(closure: *mut z_moved_closure_sam
 unsafe fn subscriber_wire(
     keyexpr: *const z_loaned_keyexpr_t,
     shared: &Engine,
-    key: &DeclaredKeyexpr,
+    key: &crate::keyexpr::EntityKey<'_>,
 ) -> WireKey {
-    wire_key_of(keyexpr, shared).with_own(key.declaration_id(shared))
+    wire_key_of(keyexpr, shared).with_own(key.declaration_id())
 }
 
 /// The traffic a subscriber declared with `options` admits: its `allowed_origin` with
@@ -3538,16 +3538,13 @@ unsafe fn declare_subscriber_in(
     // `_Z_CLEAN_RETURN_IF_ERR(_z_declared_keyexpr_declare_non_wild_prefix(zn, &s._key, keyexpr),`);
     // the `DeclSubscriber` is then announced on the CALLER's key, a literal for a view
     // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(engine, ke, declared_of(keyexpr))?;
+    let key = crate::keyexpr::EntityKey::non_wild_prefix(engine, ke, declared_of(keyexpr))?;
     let wire = subscriber_wire(keyexpr, crate::session::EngineHold::as_ref(engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
     // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's key
     // the announce went out on. A background subscriber's record holds that declaration
     // (`WireKey::with_own`), so the id it names stays declared as long as it can retract.
-    let retraction = key.retraction_naming_in(
-        crate::write_filter::session_mode(handle),
-        crate::session::EngineHold::as_ref(engine),
-    );
+    let retraction = key.retraction_naming_in(crate::write_filter::session_mode(handle));
     // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
     // the closure's drop has run.
     let id = engine

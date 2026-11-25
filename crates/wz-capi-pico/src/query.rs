@@ -1557,19 +1557,16 @@ pub(crate) fn declare_queryable_on(
     allowed_origin: wz_session_core::locality::Locality,
     sink: QueryableSink,
 ) -> Result<QblId, ZResult> {
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, keyexpr, existing)?;
+    let key = crate::keyexpr::EntityKey::non_wild_prefix(&session.engine, keyexpr, existing)?;
     let id = wz_capi_port::SessionEngine::declare_queryable_on_wire(
         &*session.engine,
         keyexpr,
-        key.wire(crate::session::EngineHold::as_ref(&session.engine)),
+        key.wire(),
         complete,
         allowed_origin,
         // A peer or router-hat session retracts the queryable naming its key
         // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-        key.retraction_naming_in(
-            session.mode,
-            crate::session::EngineHold::as_ref(&session.engine),
-        ),
+        key.retraction_naming_in(session.mode),
         sink,
     )
     .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;

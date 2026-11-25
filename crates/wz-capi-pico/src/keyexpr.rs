@@ -538,9 +538,10 @@ fn refusal_of(why: KeyNotHeld) -> Option<ZResult> {
     }
 }
 
-/// Behind a `z_owned_keyexpr_t` handle, and held by every entity for its own
-/// key: the OWNED literal plus the declaration that covers a prefix of it, if
-/// any — pico's `_z_declared_keyexpr_t` (`{ _declaration, _inner }`).
+/// Behind a `z_owned_keyexpr_t` handle, and kept by a composite that names its entities' keys
+/// itself (an advanced entity's carriers): the OWNED literal plus the declaration that covers a
+/// prefix of it, if any — pico's `_z_declared_keyexpr_t` (`{ _declaration, _inner }`). An entity
+/// the session records keeps none: the record keeps its key ([`EntityKey`]).
 ///
 /// Owned, not borrowed, and that is the difference between this and the view
 /// type. pico's `z_declare_keyexpr` produces a value that outlives the string
@@ -672,14 +673,6 @@ impl DeclaredKeyexpr {
         })
     }
 
-    /// The id of the declaration that covers a prefix of the key, when it is `shared`'s, `0`
-    /// otherwise: what an entity declared on this key states as its own key's declaration, which
-    /// the session's record of it holds (`WireKey::with_own`).
-    pub(crate) fn declaration_id(&self, shared: &Engine) -> wz_session_core::wire_id::ExprId {
-        self.declared_on(shared)
-            .map_or(0, WireDeclaration::mapping_id)
-    }
-
     fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
         self.declaration.as_ref().filter(|d| d.is_on(shared))
     }
@@ -718,7 +711,9 @@ impl DeclaredKeyexpr {
     }
 
     /// The declaration that is `shared`'s and the remainder of the key past it. One body out of
-    /// line: every way a key is named on the wire, for a put, an entity or a record, reads it.
+    /// line: an advanced entity's form reads it for the key it is announced on and for the key its
+    /// retraction names.
+    #[cfg(feature = "advanced")]
     #[inline(never)]
     fn declared_rest(&self, shared: &Engine) -> Option<(&WireDeclaration, &str)> {
         // Every constructor keeps the declared prefix at the front of the
@@ -736,7 +731,9 @@ impl DeclaredKeyexpr {
     /// pico names the entity's OWN key in every mode but client (`vendor/zenoh-pico/src/net/primitives.c`
     /// @ `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&s)->_key, zn);`),
     /// and that key is the one this is called on: for a subscriber it is not
-    /// the key the subscription was announced on, which is the caller's.
+    /// the key the subscription was announced on, which is the caller's. Its declaration and the
+    /// rest of the key, or the literal when nothing covers it.
+    #[cfg(feature = "advanced")]
     pub(crate) fn retraction_naming_in(
         &self,
         mode: WhatAmI,
@@ -745,18 +742,10 @@ impl DeclaredKeyexpr {
         if mode == WhatAmI::Client {
             return None;
         }
-        Some(self.retraction_key(shared))
-    }
-
-    /// This key as a retraction names it: its declaration and the rest of the key, or the
-    /// literal when nothing covers it. A token's retraction names it in every mode
-    /// (`vendor/zenoh-pico/src/net/liveliness.c` @
-    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
-    pub(crate) fn retraction_key(&self, shared: &Engine) -> RetractionKey {
-        match self.declared_rest(shared) {
+        Some(match self.declared_rest(shared) {
             Some((d, rest)) => RetractionKey::declared(d.mapping_id(), rest),
             None => RetractionKey::literal(),
-        }
+        })
     }
 
     /// pico `_z_declared_keyexpr_declare`: a key whose declaration covers ALL
@@ -771,6 +760,10 @@ impl DeclaredKeyexpr {
 
     /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering
     /// only the part of the key before its first wild chunk.
+    #[cfg(any(
+        feature = "advanced",
+        all(test, not(feature = "engine-tokio"), feature = "peer")
+    ))]
     pub(crate) fn declare_non_wild_prefix(
         shared: &crate::session::EngineHold,
         literal: &str,
@@ -825,6 +818,149 @@ impl DeclaredKeyexpr {
             literal: text,
             declaration: Some(WireDeclaration::taken(shared, hold, prefix_len)),
         })
+    }
+}
+
+/// The declaration a door holds of an entity's own key while it declares the entity: pico's
+/// `_z_declared_keyexpr_declare` / `_declare_non_wild_prefix` of the entity's `_key`, whose copy
+/// pico's entity keeps. Here the session's record of the entity is that copy: it keeps the key in
+/// its row and takes its own hold of the declaration the wire and the retraction name, so the door
+/// keeps no text of the key, and its hold goes with this once the record stands or the entity is
+/// refused.
+///
+/// The key is the caller's, read where it lies for the call.
+pub(crate) struct EntityKey<'a> {
+    engine: &'a crate::session::EngineHold,
+    literal: &'a str,
+    /// The declaration's id, `0` when no declaration covers the key.
+    mapping: wz_session_core::wire_id::ExprId,
+    /// The row the declaration lies in.
+    row: Option<wz_session_core::session_tables::KeyexprHandle>,
+    /// How many bytes of the key the declaration covers.
+    prefix_len: usize,
+    /// The door's own hold of the declaration, given back by the drop; `None` when the caller's
+    /// key holds it on this session for the call, or nothing is declared.
+    taken: Option<KeyHold>,
+}
+
+impl<'a> EntityKey<'a> {
+    /// pico `_z_declared_keyexpr_declare`: a declaration of the whole key on `engine`, the caller's
+    /// `existing` one when it is that declaration on this session already.
+    pub(crate) fn whole(
+        engine: &'a crate::session::EngineHold,
+        literal: &'a str,
+        existing: Option<&DeclaredKeyexpr>,
+    ) -> Result<Self, ZResult> {
+        Self::up_to(engine, literal, existing, literal)
+    }
+
+    /// pico `_z_declared_keyexpr_declare_non_wild_prefix`: the same, covering only the part of
+    /// the key before its first wild chunk.
+    pub(crate) fn non_wild_prefix(
+        engine: &'a crate::session::EngineHold,
+        literal: &'a str,
+        existing: Option<&DeclaredKeyexpr>,
+    ) -> Result<Self, ZResult> {
+        Self::up_to(engine, literal, existing, non_wild_prefix(literal))
+    }
+
+    /// `literal` declared on `engine` up to `prefix`, a prefix of it. Refused, holding nothing,
+    /// as [`DeclaredKeyexpr::declare`] refuses a key the session's tables cannot hold and a
+    /// declaration the session refuses. Out of line: the publisher's and the querier's, the
+    /// subscriber's, the liveliness subscriber's and token's and the queryable's declarations each
+    /// carried a copy of it.
+    #[inline(never)]
+    fn up_to(
+        engine: &'a crate::session::EngineHold,
+        literal: &'a str,
+        existing: Option<&DeclaredKeyexpr>,
+        prefix: &str,
+    ) -> Result<Self, ZResult> {
+        if !fits(literal) {
+            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        }
+        let prefix_len = prefix.len();
+        let unheld = |mapping, row| Self {
+            engine,
+            literal,
+            mapping,
+            row,
+            prefix_len,
+            taken: None,
+        };
+        // pico `_z_keyexpr_declare_prefix`: an empty prefix declares nothing.
+        if prefix_len == 0 {
+            return Ok(unheld(0, None));
+        }
+        // Already declared on THIS session to exactly this prefix: the caller's key holds it
+        // through the call, and the record takes its own hold (pico's
+        // `_z_declared_keyexpr_is_fully_optimized` / `_is_non_wild_prefix_optimized` arm).
+        if let Some(d) = existing
+            .and_then(|existing| existing.declared_on(crate::session::EngineHold::as_ref(engine)))
+            .filter(|d| d.prefix_len == prefix_len)
+        {
+            return Ok(unheld(d.mapping_id(), d.hold.row()));
+        }
+        // A refused declaration sent nothing, and answers pico's code for its cause.
+        let hold = engine.acquire_keyexpr(prefix).map_err(|refused| {
+            crate::refusal::refusal_code(refused, crate::refusal::Door::Keyexpr)
+        })?;
+        Ok(Self {
+            engine,
+            literal,
+            mapping: hold.mapping_id(),
+            row: hold.row(),
+            prefix_len,
+            taken: Some(hold),
+        })
+    }
+
+    /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the rest of the key, the
+    /// literal when nothing covers it. It holds nothing, and names the rest by its length, read
+    /// against the key's text ([`WireKey::names_in`]).
+    pub(crate) fn wire(&self) -> WireKey {
+        match self.literal.len().checked_sub(self.prefix_len) {
+            Some(rest) if self.mapping != 0 => {
+                WireKey::aliased_tail(self.mapping, rest).at_row(self.row)
+            }
+            _ => WireKey::literal(),
+        }
+    }
+
+    /// The id of the declaration, `0` for none: what an entity announced on another key states
+    /// as its own key's declaration, which the session's record of it holds
+    /// (`WireKey::with_own`).
+    pub(crate) fn declaration_id(&self) -> wz_session_core::wire_id::ExprId {
+        self.mapping
+    }
+
+    /// This key as a retraction names it: its declaration and the rest of the key, or the
+    /// literal when nothing covers it. A token's retraction names it in every mode
+    /// (`vendor/zenoh-pico/src/net/liveliness.c` @
+    /// `_z_declaration_t declaration = _z_make_undecl_token(id, &wireexpr);`).
+    pub(crate) fn retraction_key(&self) -> RetractionKey {
+        match self.literal.get(self.prefix_len..) {
+            Some(rest) if self.mapping != 0 => RetractionKey::declared(self.mapping, rest),
+            _ => RetractionKey::literal(),
+        }
+    }
+
+    /// What an entity on this key names when it retracts itself on a session whose role is
+    /// `mode`, or `None` when it retracts by id alone. pico names the entity's OWN key in every
+    /// mode but client (`vendor/zenoh-pico/src/net/primitives.c` @
+    /// `_z_wireexpr_t expr = _z_declared_keyexpr_alias_to_wire(&_Z_RC_IN_VAL(&s)->_key, zn);`):
+    /// for a subscriber that is not the key the subscription was announced on, which is the
+    /// caller's.
+    pub(crate) fn retraction_naming_in(&self, mode: WhatAmI) -> Option<RetractionKey> {
+        (mode != WhatAmI::Client).then(|| self.retraction_key())
+    }
+}
+
+impl Drop for EntityKey<'_> {
+    fn drop(&mut self) {
+        if let Some(hold) = self.taken.take() {
+            hold.release(crate::session::EngineHold::as_ref(self.engine));
+        }
     }
 }
 
@@ -2346,27 +2482,50 @@ mod tests {
 
     /// R2959 — the wire form: the declaration's id plus the remainder of the
     /// key, and the literal on a session that did not make the declaration.
+    ///
+    /// Turned red by an entity's key that keeps its hold past the door (the declarations left), or
+    /// a wire that names the whole key by the prefix's id.
     #[test]
     fn a_prefix_declaration_names_the_rest_of_the_key_as_suffix() {
         let shared = session();
         let engine = shared.as_engine();
-        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/qbl/*/x", None)
-            .expect("declared");
+        let text = "demo/kd/qbl/*/x";
+        let key = EntityKey::non_wild_prefix(&engine, text, None).expect("declared");
         let declarations = shared.keyexpr_declarations();
         assert_eq!(declarations.len(), 1);
         assert_eq!(declarations[0].1, "demo/kd/qbl");
-        let wire = key.wire(Arc::as_ref(&engine));
-        assert_eq!(
-            wire.names_in(key.literal()),
-            (declarations[0].0, Some("/*/x"))
+        assert_eq!(key.declaration_id(), declarations[0].0);
+        assert_eq!(key.wire().names_in(text), (declarations[0].0, Some("/*/x")));
+        drop(key);
+        assert!(
+            shared.keyexpr_declarations().is_empty(),
+            "the door's hold went with its key"
         );
 
+        let program = DeclaredKeyexpr::declare(&engine, "demo/kd/qbl", None).expect("declared");
         let other = session().as_engine();
         assert_eq!(
-            key.wire(&*other).mapping_id,
+            program.wire(&*other).mapping_id,
             0,
             "another session's id is not ours"
         );
+    }
+
+    /// An entity's key that opens wild declares nothing and is named whole, on the wire and in
+    /// its retraction; a client names no key in a retraction. Turned red by a declaration of an
+    /// empty prefix, or a retraction a client names.
+    #[test]
+    fn an_entity_key_that_opens_wild_is_named_whole() {
+        let shared = session();
+        let engine = shared.as_engine();
+        let text = "**/x";
+        let key = EntityKey::non_wild_prefix(&engine, text, None).expect("nothing to declare");
+        assert!(shared.keyexpr_declarations().is_empty(), "nothing declared");
+        assert_eq!(key.declaration_id(), 0);
+        assert!(key.wire().is_literal());
+        assert_eq!(key.retraction_key().names(text), (0, text));
+        assert!(key.retraction_naming_in(WhatAmI::Client).is_none());
+        assert!(key.retraction_naming_in(WhatAmI::Peer).is_some());
     }
 
     /// What a retraction names is the declaration and the length of the rest of the key, read
@@ -2381,21 +2540,16 @@ mod tests {
     fn a_retraction_names_the_rest_of_its_own_key_and_takes_no_memory() {
         let shared = session();
         let engine = shared.as_engine();
-        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/ret/**", None)
-            .expect("declared");
+        let text = "demo/kd/ret/**";
+        let key = EntityKey::non_wild_prefix(&engine, text, None).expect("declared");
         let declared = shared.keyexpr_declarations()[0].0;
         let mut named = None;
         let taken = crate::connectivity::tests::allocations(|| {
-            named = Some(key.retraction_key(Arc::as_ref(&engine)));
+            named = Some(key.retraction_key());
         });
         assert_eq!(taken, 0, "a retraction copies nothing of the key");
         let named = named.expect("the retraction was made");
-        assert_eq!(named.names(key.literal()), (declared, "/**"));
-        let other = session().as_engine();
-        assert_eq!(
-            key.retraction_key(&*other).names(key.literal()),
-            (0, "demo/kd/ret/**")
-        );
+        assert_eq!(named.names(text), (declared, "/**"));
     }
 
     /// A wire key names the rest of its key by its length, read against the key's literal, so
@@ -2410,16 +2564,16 @@ mod tests {
     fn a_wire_key_names_the_rest_of_its_key_and_takes_no_memory() {
         let shared = session();
         let engine = shared.as_engine();
-        let key = DeclaredKeyexpr::declare_non_wild_prefix(&engine, "demo/kd/wire/*/x", None)
-            .expect("declared");
+        let text = "demo/kd/wire/*/x";
+        let key = EntityKey::non_wild_prefix(&engine, text, None).expect("declared");
         let declared = shared.keyexpr_declarations()[0].0;
         let mut plain = None;
         let taken = crate::connectivity::tests::allocations(|| {
-            plain = Some(key.wire(Arc::as_ref(&engine)));
+            plain = Some(key.wire());
         });
         assert_eq!(taken, 0, "a wire key copies nothing of the key");
         let plain = plain.expect("the plain key was made");
-        assert_eq!(plain.names_in(key.literal()), (declared, Some("/*/x")));
+        assert_eq!(plain.names_in(text), (declared, Some("/*/x")));
     }
 }
 
@@ -3291,6 +3445,55 @@ mod arena_key_tests {
             Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         drop((base, extended));
+        close(session);
+    }
+
+    /// An entity's key a door declares keeps no text of its own in the session's key arena, holds
+    /// the declaration while the door has it and gives it back with its drop, and takes no hold of
+    /// the caller's key when that is the declaration already; a key past the session's bound is
+    /// refused.
+    ///
+    /// Turned red by a door's key that keeps a block of the arena beside its declaration's row
+    /// (the first declaration, refused), one that takes a hold of the caller's declaration (the
+    /// count), or one that keeps its hold past its drop (the room after it).
+    #[test]
+    fn an_entity_key_keeps_no_text_and_holds_only_while_the_door_does() {
+        use wz_session_core::session_tables::KeyexprCount;
+
+        let (session, engine) = listening();
+        let held = fill_leaving(&engine, 10, 1);
+        let key = EntityKey::non_wild_prefix(&engine, "demo/ek/**", None)
+            .expect("the prefix's row takes the one block");
+        assert!(!room_for(&engine, 10), "the prefix's row holds the block");
+        drop(key);
+        assert!(
+            room_for(&engine, 10),
+            "the declaration went with the door's key"
+        );
+
+        let program = DeclaredKeyexpr::declare(&engine, "demo/ek", None).expect("the block");
+        // SAFETY: the declaration's row stands while `program` holds it, to the end of the test.
+        let count = unsafe { &*(program.row_address() as *const KeyexprCount) };
+        let holds = count.holds();
+        let entity = EntityKey::non_wild_prefix(&engine, "demo/ek/**", Some(&program))
+            .expect("the caller's declaration");
+        assert_eq!(count.holds(), holds, "no hold of the caller's declaration");
+        assert_eq!(
+            entity.declaration_id(),
+            program
+                .wire(crate::session::EngineHold::as_ref(&engine))
+                .mapping_id
+        );
+        drop(entity);
+        assert_eq!(count.holds(), holds, "and none given back");
+
+        let longest = wz_session_core::caps::MAX_KEYEXPR_BYTES;
+        assert_eq!(
+            EntityKey::whole(&engine, &"k".repeat(longest + 1), None).err(),
+            Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
+        );
+        drop(program);
+        give_back(&engine, held);
         close(session);
     }
 

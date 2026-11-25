@@ -43,7 +43,7 @@
 //! What IS reproduced, and is what a peer's mode changes on the wire: whether it
 //! asks at all (above), and that its subscriber and queryable retractions name
 //! the key they were held on, which a client's do not
-//! (`DeclaredKeyexpr::retraction_naming_in`).
+//! (`EntityKey::retraction_naming_in`).
 
 use wz_capi_port::{
     FilterId, FilterPlane, FilteredPut, KeyView, MatchId, MatchingSink, OwnKey, Refusal, WireKey,
@@ -149,7 +149,7 @@ impl WriteFilter {
     /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
     /// `_z_write_filter_session_register`).
     ///
-    /// `wire` is the key as the entity names it on the wire (`DeclaredKeyexpr::wire`): its own
+    /// `wire` is the key as the entity names it on the wire (`EntityKey::wire`): its own
     /// declaration's id and the rest of the key, or the literal when nothing covers it. The
     /// entity makes it once and keeps it for what it sends. The session's record of the filter
     /// keeps the key and holds that declaration from here on.
@@ -305,13 +305,13 @@ impl FilteredKey {
         existing: Option<&DeclaredKeyexpr>,
         count_local: bool,
     ) -> Result<(), ZResult> {
-        let key = DeclaredKeyexpr::declare(&session.engine, keyexpr, existing)?;
+        let key = crate::keyexpr::EntityKey::whole(&session.engine, keyexpr, existing)?;
         let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // The record of the filter holds the declaration: the wire form holds nothing.
-        let wire = key.wire(crate::session::EngineHold::as_ref(&session.engine));
-        let filter = WriteFilter::declare(session, plane, key.literal(), &wire, count_local)?;
+        let wire = key.wire();
+        let filter = WriteFilter::declare(session, plane, keyexpr, &wire, count_local)?;
         // The door's hold goes with `key`, the record's standing; the key is lent from the record,
         // and an engine that keeps none refuses the entity, its filter undeclared.
         drop(key);
