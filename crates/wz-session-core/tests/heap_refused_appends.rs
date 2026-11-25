@@ -14,6 +14,7 @@ use std::cell::Cell;
 use wz_session_core::bounded::{
     heap_copy, push_heap_bytes, push_heap_text, CapacityFull, TextBacking,
 };
+use wz_session_core::encoding_hint::try_parts_to_bytes;
 use wz_session_core::keyexpr_canon::{check_outbound_keyexpr_pico_safe, OutboundKeyexprError};
 
 thread_local! {
@@ -124,5 +125,23 @@ fn a_refused_keyexpr_is_refused_on_a_full_heap_with_no_quote() {
     assert_eq!(
         refused(|| check_outbound_keyexpr_pico_safe("home/temp")),
         Ok(())
+    );
+}
+
+/// An encoding the heap has no room to render is none, and one that renders to nothing takes no
+/// room; with room it is rendered. Turned red by `try_parts_to_bytes` growing its buffer with
+/// `extend_from_slice`, which ends the process on the refusal.
+#[test]
+fn an_encoding_the_heap_has_no_room_to_render_is_none() {
+    let schema = Some(&b"utf8"[..]);
+    assert_eq!(refused(|| try_parts_to_bytes((4 << 1) | 1, schema)), None);
+    assert_eq!(
+        refused(|| try_parts_to_bytes(1000 << 1, None)),
+        Some(Vec::new()),
+        "an id of no name and no schema renders to nothing"
+    );
+    assert_eq!(
+        try_parts_to_bytes((4 << 1) | 1, schema),
+        Some(b"text/plain;utf8".to_vec())
     );
 }
