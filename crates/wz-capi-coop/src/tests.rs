@@ -3656,17 +3656,16 @@ mod timestamps;
 mod tx_pool;
 
 /// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
-/// build script): a build whose read runs beside the program's calls, or one with a kind the read
-/// that hands each record out as it is read still queues. A build that keeps none compiles no
-/// `crate::round`, so this is read here, where every build reads it. A feature added to one list
-/// and not the other turns this red.
+/// build script): a build whose read runs beside the program's calls. The read that hands each
+/// record out as it is read queues none, a get's reply included. A build that keeps none compiles
+/// no `crate::round`, so this is read here, where every build reads it. A feature added to one
+/// list and not the other turns this red.
 #[test]
 fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
     let queues = cfg!(any(
         feature = "threads",
         feature = "listen",
-        feature = "group",
-        feature = "query"
+        feature = "group"
     ));
     assert_eq!(cfg!(wz_round), queues);
 }

@@ -115,9 +115,9 @@ compile_error!(
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;
-// The calls the engine's rows are made through, as the round and the query planes name them: only
-// a build that keeps one of them names them.
-#[cfg(any(wz_round, feature = "queryable"))]
+// The calls the engine's rows are made through, as the round, the queries' plane and the gets'
+// plane name them: only a build that keeps one of them names them.
+#[cfg(any(wz_round, feature = "query", feature = "queryable"))]
 mod calls;
 mod engine;
 // How the engine's calls stand to its threads, and the locks that choice decides.

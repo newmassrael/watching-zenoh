@@ -12,8 +12,8 @@
 //! What the entry's sink and hold do with what they are handed, and how a leg's end and its
 //! callback reach the deliveries, is the session core's get plane
 //! ([`wz_session_core::get_plane`]); this module names it in the engine's types: the port's reply
-//! callback, its locks, and whether the session's own queryables answer its gets
-//! (`local-queryable`).
+//! callback, its locks, whether the session's own queryables answer its gets
+//! (`local-queryable`), and where a sink hands a reply no thread captured.
 
 use wz_capi_port::cancellation::FanKey;
 use wz_capi_port::sync::SessionHeld;
@@ -33,8 +33,17 @@ pub(super) type LegRows = wz_session_core::get_plane::LegRows<CoopCalls>;
 /// What the get plane shares between the session's state, the observer's reply sinks and the
 /// deliveries.
 pub(super) type GetPlane = wz_session_core::get_plane::GetPlane<CoopCalls>;
+/// Where a leg's sink hands a reply no thread captured: the session's round of deliveries, in a
+/// build whose read runs beside the program's calls.
+#[cfg(wz_round)]
+pub(crate) type Uncaptured = wz_session_core::placed::PlacedRef<crate::round::Round>;
+/// Nowhere: the read that hands each record out as it is read captures each peer's reply it hands
+/// a get (`replies`), and the thread that answers a get of the session's own queryables the answer
+/// it makes, so no sink holds a round and the build keeps none.
+#[cfg(not(wz_round))]
+pub(crate) type Uncaptured = wz_session_core::get_plane::EveryReplyCaptured;
 /// The sink of a leg's pending entry.
-pub(crate) type LegSink = wz_session_core::get_plane::LegSink<CoopCalls>;
+pub(crate) type LegSink = wz_session_core::get_plane::LegSink<CoopCalls, Uncaptured>;
 /// What a consolidating get holds of its replies until its Final.
 pub(crate) type LegHold = wz_session_core::get_plane::LegHold<CoopCalls>;
 

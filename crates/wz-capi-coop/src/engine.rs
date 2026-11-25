@@ -55,11 +55,6 @@ use crate::arena::{
 };
 use crate::form::{CoopForm, Latch};
 use crate::form::{LockForm, StateGuard, StateLock};
-#[cfg(all(
-    not(any(feature = "threads", feature = "listen", feature = "group")),
-    wz_round
-))]
-use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
 #[cfg(wz_round)]
@@ -350,13 +345,14 @@ use {
 
 #[cfg(feature = "query")]
 mod get;
+#[cfg(all(feature = "query", wz_round))]
+use crate::round::LegHolders;
 /// What a face's table of pending gets holds for each leg ([`get::LegSink`]). A build that asks no
 /// query keeps no such table (`registry::Gets`), so it names no leg.
 #[cfg(feature = "query")]
 pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
 #[cfg(feature = "query")]
 use {
-    crate::round::LegHolders,
     get::{EndedLegs, GetKind, GetPlane, LegRows},
     wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
@@ -2825,10 +2821,20 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// the deliveries drain sit behind: the planes' of the engine's calls (`PlaneCalls::Queues`, every
 /// build that names them, `crate::calls`), the faces' watchers (`connectivity`) and the gets'
 /// queues (`query`).
-#[cfg(any(wz_round, feature = "queryable", feature = "connectivity"))]
+#[cfg(any(
+    wz_round,
+    feature = "query",
+    feature = "queryable",
+    feature = "connectivity"
+))]
 pub(crate) enum CoopLocks {}
 
-#[cfg(any(wz_round, feature = "queryable", feature = "connectivity"))]
+#[cfg(any(
+    wz_round,
+    feature = "query",
+    feature = "queryable",
+    feature = "connectivity"
+))]
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
@@ -3066,7 +3072,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
 /// The gates a link's pump runs behind on this engine, for a session on the clock `C`, which the
 /// session places in the link's cell of its table (`TransportState::gate_cells`): the round's, and with
 /// `listen` the admission's under it, which carries the clock; where the read hands each record
-/// out as it is read, the link alone, which tells the round where the datagram it lends lies.
+/// out as it is read, the link alone.
 trait LinkGates {
     /// The gates.
     type Gate;
@@ -3078,18 +3084,9 @@ impl<C: ClockSource + 'static> LinkGates for C {
     #[cfg(all(not(feature = "listen"), any(feature = "threads", feature = "group")))]
     type Gate = RoundGate<CellRc<dyn SessionDatagramLink>>;
     // The read steps the one link itself and hands each record out as it is read, so nothing
-    // holds the link back from its session; the read tells the round where the datagram it lends
-    // lies, which the round reads each record's parts in (`direct`).
-    #[cfg(all(
-        not(any(feature = "threads", feature = "listen", feature = "group")),
-        wz_round
-    ))]
-    type Gate = LendingLink<CellRc<dyn SessionDatagramLink>>;
-    // A build that puts nothing in the round (`wz_round`) tells it nothing: the link is the pump.
-    #[cfg(all(
-        not(any(feature = "threads", feature = "listen", feature = "group")),
-        not(wz_round)
-    ))]
+    // holds the link back from its session, and it keeps no round to tell where the datagram it
+    // lends lies (`direct`): the link is the pump.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     type Gate = CellRc<dyn SessionDatagramLink>;
 }
 
@@ -3403,21 +3400,9 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let _ = key_form;
     }
 
-    #[cfg(all(
-        not(any(feature = "threads", feature = "listen", feature = "group")),
-        wz_round
-    ))]
-    fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
-        // Each record is handed out as it is read, so nothing holds the link back; where the
-        // datagram it lends lies is kept for the read to tell the round.
-        LendingLink::new(pump)
-    }
-
-    // A build that puts nothing in the round (`wz_round`) tells it nothing: the link is the pump.
-    #[cfg(all(
-        not(any(feature = "threads", feature = "listen", feature = "group")),
-        not(wz_round)
-    ))]
+    // Each record is handed out as it is read, so nothing holds the link back: the link is the
+    // pump.
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     fn gate(&self, pump: CellRc<dyn SessionDatagramLink>, _actions: &LinkHandle<C>) -> LinkGate<C> {
         pump
     }
@@ -3488,9 +3473,6 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
         let dispatch = direct::FaceRecords {
             // The registry holds the face before its link is made (`Registry::add_face`).
             face: self.session.registry.held(face),
-            // What the read tells the round of the datagram a record of it lies in.
-            #[cfg(wz_round)]
-            link: gate.clone(),
             actions: actions.clone(),
             // SAFETY: the records are held beside the link's session in the engine's face, which
             // lets them go before the session's state, which owns the plane.
@@ -3498,17 +3480,10 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
             plane: unsafe { self.session.plane.share() },
             #[cfg(feature = "queryable")]
             generation,
-            // SAFETY: as the plane's: the engine's face lets the records go before the state,
-            // whose round's owner changes it no more.
-            #[cfg(wz_round)]
-            lane: unsafe { self.session.lane.share() },
             after_pushes: false,
         };
-        // A read that tells no round where a datagram lies keeps no handle on the link.
-        #[cfg(all(
-            not(any(feature = "threads", feature = "listen", feature = "group")),
-            not(wz_round)
-        ))]
+        // The read keeps no handle on the link beside its pump's.
+        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
         let _ = gate;
         // The wire keeps a handle on the gates to admit the link through them, and to tell them
         // what each wait found in the link's stack.
@@ -6013,7 +5988,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // closure's `drop(context)`). A round another delivery still hands out may hold a reply
         // of one of them: that delivery tells the ends once it is through.
         #[cfg(feature = "query")]
-        while self.gets.ends_pending() && self.samples.is_idle() {
+        while self.gets.ends_pending() && self.round_owes_no_reply() {
             let Some(ended) = self.gets.take_end() else {
                 break;
             };
@@ -6959,6 +6934,33 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
+    /// Where a leg's sink hands a reply no thread captured (`get::Uncaptured`): the session's
+    /// round of deliveries.
+    #[cfg(all(feature = "query", wz_round))]
+    fn uncaptured(&self) -> get::Uncaptured {
+        self.samples
+    }
+
+    /// Where a leg's sink hands a reply no thread captured (`get::Uncaptured`): nowhere, as the
+    /// read captures each reply it hands a get.
+    #[cfg(all(feature = "query", not(wz_round)))]
+    fn uncaptured(&self) -> get::Uncaptured {
+        wz_session_core::get_plane::EveryReplyCaptured
+    }
+
+    /// Whether no delivery is handing out a round that may still hold a reply of a leg that
+    /// ended, so the leg's end may follow it.
+    #[cfg(all(feature = "query", wz_round))]
+    fn round_owes_no_reply(&self) -> bool {
+        self.samples.is_idle()
+    }
+
+    /// See the build that keeps a round: one that keeps none holds no reply in one.
+    #[cfg(all(feature = "query", not(wz_round)))]
+    fn round_owes_no_reply(&self) -> bool {
+        true
+    }
+
     /// Hold one leg of a get pending under `entry`: the leg's callback minted in a row of the
     /// plane's, and its sink registered with the deadline and the accepted key the get states.
     /// Out of line where a get issues more than one kind of leg (to groups, or to the session
@@ -6995,9 +6997,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         };
         // SAFETY: the sink goes into a table of pending gets, which the session
         // reaches under its lock alone, and is handed its replies there; the table is the
-        // registry's, dropped before the owners of the round and of the plane, the session
-        // state's fields after the registry's.
-        let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.samples) };
+        // registry's, dropped before the owners of the plane and of the round where the build
+        // keeps one, the session state's fields after the registry's.
+        let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
         let sink = ConsolidatingSink::with_hold(
             ask.opts.resolved_consolidation(),
             leg_sink,
@@ -9015,9 +9017,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             };
             // SAFETY: the sink goes into a table of pending gets, which the session
             // reaches under its lock alone, and is handed its replies there; the table is the
-            // registry's, dropped before the owners of the round and of the plane, the session
-            // state's fields after the registry's.
-            let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.samples) };
+            // registry's, dropped before the owners of the plane and of the round where the build
+            // keeps one, the session state's fields after the registry's.
+            let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
             // One DeclFinal: the face's peer's. Registered before the Interest goes out, so no
             // answer can arrive before its entry.
             let registered = core

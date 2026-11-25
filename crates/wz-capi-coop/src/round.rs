@@ -3,15 +3,12 @@
 
 //! The engine's round of deliveries ([`wz_session_core::round`]), of the calls and kinds of record
 //! the engine's build names (`crate::calls`): the room one record a session is handed can take of
-//! it, and the gates that hold each link back while the round has not that room (decision Q4), or,
-//! where the read hands each record out as it is read, that tell the round where the datagram a
-//! link lends lies.
+//! it, and the gates that hold each link back while the round has not that room (decision Q4).
 
-#[cfg(any(feature = "listen", feature = "group", not(feature = "threads")))]
+#[cfg(any(feature = "listen", feature = "group"))]
 use core::cell::Cell;
 
-// What a link is gated or lent through: the round's gate, and the lending link of a read that
-// tells the round where a datagram lies.
+// What a link is gated through: the round's gate.
 use wz_runtime_coop::session_drive::{SessionDatagramLink, WaitOn};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_session_core::limit_binding::Quota;
@@ -460,115 +457,6 @@ impl<P: SessionDatagramLink> SessionDatagramLink for RoundGate<P> {
     }
 
     // The gate holds back input only: what the session sends goes out while the round is full.
-    fn room_wait(&self) -> Option<WaitOn> {
-        self.pump.room_wait()
-    }
-}
-
-/// The link of a session whose read hands each record out as it is read (`engine::direct`): no
-/// gate holds it back, as each record's callbacks have returned before the next record is read.
-/// The round reads a record's parts only where a link it was told of lends them, and keeps no area
-/// to copy them into, so the link keeps where the datagram it lends lies for as long as it lends
-/// it, and the read tells the round under the session's lock as it dispatches each record of it
-/// ([`Self::lend_to`]): the link's receive runs with nothing of the session held.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-pub(crate) struct LendingLink<P> {
-    pump: P,
-    /// The first byte and the length of the datagram the link lends now: set for the length of
-    /// the `f` of its receive alone, and only for a link that leaves the bytes where they lie until
-    /// it is next asked to receive.
-    lent: Cell<Option<(*const u8, usize)>>,
-}
-
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-impl<P> LendingLink<P> {
-    /// `pump`, lending nothing yet.
-    pub(crate) fn new(pump: P) -> Self {
-        Self {
-            pump,
-            lent: Cell::new(None),
-        }
-    }
-
-    /// Tell `round` where the datagram the link lends now lies, or that it lends none.
-    ///
-    /// # Safety
-    /// The caller holds the session's lock.
-    pub(crate) unsafe fn lend_to(&self, round: &Round) {
-        let lent = self.lent.get().map(|(at, len)| {
-            // SAFETY: `lent` names a datagram only inside the `f` of the link's receive, while
-            // the link lends the bytes where they lie (`Self::recv_with`).
-            unsafe { core::slice::from_raw_parts(at, len) }
-        });
-        // SAFETY: the caller's contract.
-        unsafe { round.set_lending(lent) };
-    }
-}
-
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-impl<P: SessionDatagramLink> SessionDatagramLink for LendingLink<P> {
-    fn service(&self) {
-        self.pump.service()
-    }
-
-    fn service_within(&self, max_wait_ms: u64) {
-        self.pump.service_within(max_wait_ms)
-    }
-
-    fn uses_wake_budget(&self) -> bool {
-        self.pump.uses_wake_budget()
-    }
-
-    fn try_recv(&self) -> Option<RxFrame> {
-        self.pump.try_recv()
-    }
-
-    /// The datagram is lent to the session's read; a link that leaves it where it lies until it
-    /// is next asked to receive keeps where it lies while it is lent, so a record of it may be
-    /// read there.
-    fn recv_with(&self, f: &mut dyn FnMut(&[u8])) -> bool {
-        if !self.pump.lends_until_next_receive() {
-            return self.pump.recv_with(f);
-        }
-        self.pump.recv_with(&mut |datagram: &[u8]| {
-            self.lent.set(Some((datagram.as_ptr(), datagram.len())));
-            f(datagram);
-            self.lent.set(None);
-        })
-    }
-
-    fn lost(&self) -> Option<LostCause> {
-        self.pump.lost()
-    }
-
-    fn holds_input(&self) -> bool {
-        self.pump.holds_input()
-    }
-
-    fn owes_write(&self) -> bool {
-        self.pump.owes_write()
-    }
-
-    fn takes_input(&self) -> bool {
-        self.pump.takes_input()
-    }
-
-    fn keeps_input(&self) -> bool {
-        self.pump.keeps_input()
-    }
-
-    fn keep(&self) {
-        self.pump.keep()
-    }
-
-    fn lends_until_next_receive(&self) -> bool {
-        self.pump.lends_until_next_receive()
-    }
-
-    fn input_wait(&self) -> Option<WaitOn> {
-        self.pump.input_wait()
-    }
-
     fn room_wait(&self) -> Option<WaitOn> {
         self.pump.room_wait()
     }
