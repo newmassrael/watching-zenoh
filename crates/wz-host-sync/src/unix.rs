@@ -499,10 +499,15 @@ pub(crate) unsafe fn detach(thread: Thread) {
     libc::pthread_detach(thread);
 }
 
-/// `nanosleep`, slept again for what is left when a signal cuts it short, as the standard
-/// library's sleep does.
 pub(crate) fn sleep_ms(ms: u64) {
-    let mut ask = timespec_of(ms.saturating_mul(1_000_000));
+    sleep_us(ms.saturating_mul(1_000));
+}
+
+/// `nanosleep`, slept again for what is left when a signal cuts it short, as the standard
+/// library's sleep does. Out of line: the millisecond sleep is this body too.
+#[inline(never)]
+pub(crate) fn sleep_us(us: u64) {
+    let mut ask = timespec_of(us.saturating_mul(1_000));
     let mut left = libc::timespec {
         tv_sec: 0,
         tv_nsec: 0,

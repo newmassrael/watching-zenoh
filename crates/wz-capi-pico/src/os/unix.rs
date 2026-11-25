@@ -82,26 +82,6 @@ fn split_seconds(count: c_ulong, unit: Unit) -> (c_ulong, c_ulong) {
     (whole, left.wrapping_mul(scale))
 }
 
-/// Sleep at least `time` of `unit`, as pico's `usleep` and `sleep` do: `nanosleep`, slept again for
-/// what is left when a signal cuts it short, where `usleep` would report the interruption.
-pub fn sleep(unit: Unit, time: usize) {
-    // A Unix `unsigned long` is as wide as a `usize`.
-    let (secs, nanos) = split_seconds(time as c_ulong, unit);
-    let mut ask = libc::timespec {
-        tv_sec: libc::time_t::try_from(secs).unwrap_or(libc::time_t::MAX),
-        // Below a second, which a `long` of any width holds.
-        tv_nsec: nanos as libc::c_long,
-    };
-    let mut left = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: both are live locals the call reads and writes.
-    while unsafe { libc::nanosleep(&ask, &mut left) } != 0 {
-        ask = left;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Monotonic clock
 // ---------------------------------------------------------------------------
