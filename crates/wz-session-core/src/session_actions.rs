@@ -3101,6 +3101,12 @@ pub struct LinkState<R: SessionRuntime> {
     /// at every step of the link. Reached through [`Self::stamps()`], the `fact_*` doors and
     /// the deadlines' read while their duty is armed.
     stamps: StampWords<R::Word>,
+    /// How many writes may have brought this link's lease or keep-alive deadline earlier: a stamp
+    /// changed through a door or cleared, a lease adopted, the watch of the peer's declarations
+    /// begun. The session's timers keep the deadlines they read and read them again only once one
+    /// falls due or this count moves (`TransportTimers::fire_due`), so what moves a deadline only
+    /// later (a receipt, a frame sent, a tick ended) costs a step no reading of them.
+    deadlines_moved: R::Word,
     /// F2 — is the transport currently accepting data sends? `false` at
     /// construction: data leaves only over an established link, as upstream's
     /// transport exists only once the Open exchange is over
@@ -3543,7 +3549,8 @@ impl<W: crate::runtime_cell::WordCell> StampWords<W> {
 
 /// One door per time stamp the link keeps ([`LinkStamps`]): the stamp, lent to `f` for the length
 /// of the call and written back when `f` changed it. A caller names the stamp and not the word that
-/// holds it.
+/// holds it. A stamp a door changed may stand earlier than it did, so the door counts a move of the
+/// link's deadlines; the receive's stamp, which only moves later, takes `note_received_at`.
 macro_rules! link_stamp_doors {
     ($( $door:ident => $field:ident, )*) => {
         impl<R: SessionRuntime> LinkState<R> {
@@ -3551,7 +3558,17 @@ macro_rules! link_stamp_doors {
                 #[doc = concat!("The link's `", stringify!($field), "`, lent to `f`.")]
                 #[inline]
                 pub fn $door<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
-                    StampWords::<R::Word>::lend(&self.stamps.$field, f)
+                    let mut changed = false;
+                    let answer = StampWords::<R::Word>::lend(&self.stamps.$field, |stamp| {
+                        let before = *stamp;
+                        let answer = f(stamp);
+                        changed = *stamp != before;
+                        answer
+                    });
+                    if changed {
+                        self.note_deadlines_moved();
+                    }
+                    answer
                 }
             )*
 
@@ -3610,6 +3627,40 @@ impl<R: SessionRuntime, T: TimeSource> SessionCore<R, T> {
 }
 
 impl<R: SessionRuntime> LinkState<R> {
+    /// Count a write that may have brought a deadline of this link earlier, once it is written: a
+    /// reader that sees the count sees the write.
+    #[inline]
+    pub(crate) fn note_deadlines_moved(&self) {
+        crate::runtime_cell::WordCell::fetch_add(
+            &self.deadlines_moved,
+            1,
+            core::sync::atomic::Ordering::AcqRel,
+        );
+    }
+
+    /// The count of writes that may have brought a deadline of this link earlier: the timers read
+    /// the deadlines again when it is not the count they last read them under.
+    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    #[inline]
+    pub(crate) fn deadlines_moved(&self) -> u64 {
+        crate::runtime_cell::WordCell::load(
+            &self.deadlines_moved,
+            core::sync::atomic::Ordering::Acquire,
+        )
+    }
+
+    /// Stamp the receipt of a transport message at `now_ms`, with one store. A receipt moves the
+    /// lease's deadline only later, so it counts no move: the timers find the later deadline when
+    /// the one they hold falls due.
+    #[inline]
+    pub(crate) fn note_received_at(&self, now_ms: u64) {
+        crate::runtime_cell::WordCell::store(
+            &self.stamps.last_inbound_at,
+            stamp_word(Some(now_ms)),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
     /// Start this link's keepalive worker. Its first tick counts from the establishment, and
     /// nothing the link sent before (the handshake) is speech in it.
     #[cfg(feature = "transport-keepalive")]
@@ -5558,6 +5609,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 #[cfg(feature = "alloc")]
                 pending_batch: R::new_mutex(None::<crate::link::RxBytes>),
                 stamps: StampWords::new(),
+                deadlines_moved: <R::Word as crate::runtime_cell::WordCell>::new(0),
                 transport_available: crate::send_gate::SendGate::new(false),
                 #[cfg(any(
                     feature = "codec-push",
@@ -12092,6 +12144,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // OpenSyn arrival (unicast/transport.c:269), which on its accept path
             // is after the cookie is judged.
             self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
+            // A shorter lease adopted brings both deadlines earlier.
+            self.link.note_deadlines_moved();
         });
     }
 
@@ -12231,6 +12285,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
             // unicast/transport.c:193).
             self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
+            // A shorter lease adopted brings both deadlines earlier.
+            self.link.note_deadlines_moved();
             OpenAckAdmission::Taken
         })
     }
@@ -12467,8 +12523,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     // were copied into each.
     #[inline(never)]
     pub(crate) fn stamp_rx_activity(&self) {
-        let now = self.clock.now_monotonic_ms();
-        self.link.fact_last_inbound_at(|slot| *slot = Some(now));
+        self.link.note_received_at(self.clock.now_monotonic_ms());
     }
 
     /// R311y632 (§17) — park the undispatched remainder of a framing unit.
@@ -19984,6 +20039,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // initializes `_transmitted = 0`, unicast/transport.c:65). Cleared after the duties
             // that read them are lowered (`StampWords`).
             self.link.stamps.clear();
+            self.link.note_deadlines_moved();
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
@@ -20111,16 +20167,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         if progress.initial_scope {
             self.peer_sync_bits.fetch_or(SYNC_BEGUN, Ordering::AcqRel);
         }
-        if progress.declared {
+        // The first event begins the watch, which gives the lease a deadline it did not have;
+        // a later one moves the watch only later.
+        let begun = if progress.declared {
             self.peer_declaration_progress_ms
-                .store(self.clock.now_monotonic_ms(), Ordering::Release);
+                .swap(self.clock.now_monotonic_ms(), Ordering::AcqRel)
+                == u64::MAX
         } else {
-            let _ = self.peer_declaration_progress_ms.compare_exchange(
-                u64::MAX,
-                0,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            );
+            self.peer_declaration_progress_ms
+                .compare_exchange(u64::MAX, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        };
+        if begun {
+            self.link.note_deadlines_moved();
         }
     }
 

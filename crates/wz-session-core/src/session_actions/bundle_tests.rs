@@ -2037,6 +2037,191 @@ mod link_stamps {
         );
     }
 
+    /// The bundle the timers are handed, and the machine over it.
+    type Actions = super::SessionLinkActions<super::PlainRuntime, super::StillClock>;
+    type Machine = crate::drive::SessionEngine<super::PlainRuntime, super::StillClock>;
+
+    /// The session's machine over `actions`, entered in its initial state.
+    fn machine(actions: &alloc::sync::Arc<Actions>) -> Machine {
+        let mut engine = crate::drive::new_session_engine::<super::PlainRuntime, super::StillClock>(
+            actions,
+            super::NoEntropy,
+        );
+        engine.initialize().unwrap_or_else(|never| match never {});
+        engine
+    }
+
+    /// The lease's checks a step of `timers` at `now_ms` raises.
+    fn lease_checks(
+        timers: &mut crate::transport_timers::TransportTimers,
+        engine: &mut Machine,
+        actions: &Actions,
+        now_ms: u64,
+    ) -> alloc::vec::Vec<crate::lease::LeaseCheckOutcome> {
+        use crate::driver_loop::IterationEvent;
+        let mut seen = alloc::vec::Vec::new();
+        let mut sink = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::Lease(outcome) = event {
+                seen.push(outcome);
+            }
+        };
+        timers.fire_due(engine, actions, now_ms, &mut sink);
+        seen
+    }
+
+    /// Timers that read the deadlines keep them: a step before the first of them falls due reads
+    /// no stamp and no lease. Turned red by timers that read the deadlines at every step.
+    #[test]
+    fn a_step_before_the_deadlines_fall_due_reads_none_of_them() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        assert!(
+            101 < 100 + actions.adopted_lease_ms(),
+            "CONTROL: 101 is before the expiry"
+        );
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        let mut checks = alloc::vec::Vec::new();
+        let first = holds_in(|| checks = step(100));
+        assert_eq!(first, 1, "CONTROL: the first step reads the peer's lease");
+        let later = holds_in(|| checks = step(101));
+        assert_eq!(later, 0, "a step before the expiry reads nothing");
+        assert!(checks.is_empty(), "and judges nothing");
+    }
+
+    /// A receipt moves the lease's deadline later with one store and no count: the timers find the
+    /// later deadline when the one they held comes, and judge the lease at the later one. Turned
+    /// red by timers that judge the deadline they held without reading it again.
+    #[test]
+    fn a_receipt_moves_the_lease_later_and_the_timers_find_it_when_the_old_deadline_comes() {
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let lease = actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(step(100).is_empty());
+        let moved = actions.link.deadlines_moved();
+        actions.link.note_received_at(250);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            moved,
+            "a receipt counts no move"
+        );
+        assert!(
+            step(100 + lease).is_empty(),
+            "the deadline held comes, and the lease read again runs on"
+        );
+        assert!(step(250 + lease - 1).is_empty());
+        assert_eq!(
+            step(250 + lease),
+            [LeaseCheckOutcome::Expired],
+            "the lease ends a window after the receipt"
+        );
+    }
+
+    /// A stamp changed through its door may bring a deadline earlier, so the timers read the
+    /// deadlines again at the next step; a door only read counts nothing. Turned red by a door that
+    /// counts no move when it changes its stamp (the earlier expiry missed), or one that counts a
+    /// read.
+    #[test]
+    fn a_stamp_changed_through_its_door_has_the_timers_read_again() {
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(900));
+        let lease = actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(step(900).is_empty());
+        let moved = actions.link.deadlines_moved();
+        let _ = actions.link.fact_established_at(|slot| *slot);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            moved,
+            "a door only read counts nothing"
+        );
+        actions.link.fact_established_at(|slot| *slot = Some(10));
+        assert_ne!(
+            actions.link.deadlines_moved(),
+            moved,
+            "a door written counts"
+        );
+        assert_eq!(
+            step(10 + lease),
+            [LeaseCheckOutcome::Expired],
+            "the earlier expiry is judged at its time"
+        );
+    }
+
+    /// A duty armed after the timers read the deadlines without it is read at the next step, though
+    /// it was armed by a store that counts nothing. Turned red by timers that compare the count
+    /// alone.
+    #[test]
+    fn a_duty_armed_after_a_read_has_the_timers_read_again() {
+        use crate::lease::LeaseCheckOutcome;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let lease = actions.adopted_lease_ms();
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(
+            step(100).is_empty(),
+            "CONTROL: no lease while the monitor is not running"
+        );
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        assert_eq!(step(100 + lease), [LeaseCheckOutcome::Expired]);
+    }
+
+    /// The first event of the peer's declarations begins their watch, which gives the lease a
+    /// deadline it did not have, and counts a move; a later one moves the watch only later and
+    /// counts nothing. Turned red by a first event that counts no move, or a later one that does.
+    #[test]
+    fn the_first_event_of_the_peers_declarations_counts_a_move() {
+        use crate::driver_loop::IterationEvent;
+        let (actions, _link) = bundle();
+        let before = actions.link.deadlines_moved();
+        actions.note_declaration_progress(IterationEvent::AppWake);
+        let begun = actions.link.deadlines_moved();
+        assert_ne!(begun, before, "the watch begun");
+        actions.note_declaration_progress(IterationEvent::AppWake);
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            begun,
+            "a later event moves the watch only later"
+        );
+    }
+
     /// The keepalive deadline counts from the later of the establishment and the tick's start, and
     /// reads them under no lock. Turned red by a deadline that takes a lock to read a stamp.
     #[cfg(feature = "transport-keepalive")]
@@ -2255,6 +2440,46 @@ mod link_stamps {
             2 * interval < actions.adopted_lease_ms(),
             "two silent intervals are inside the lease"
         );
+    }
+
+    /// The keep-alive's checks a step of `timers` at `now_ms` raises.
+    #[cfg(feature = "transport-keepalive")]
+    fn keepalive_checks(
+        timers: &mut crate::transport_timers::TransportTimers,
+        engine: &mut Machine,
+        actions: &Actions,
+        now_ms: u64,
+    ) -> alloc::vec::Vec<crate::lease::KeepAliveCheckOutcome> {
+        use crate::driver_loop::IterationEvent;
+        let mut seen = alloc::vec::Vec::new();
+        let mut sink = |event: IterationEvent<'_, '_>| {
+            if let IterationEvent::KeepAlive(outcome) = event {
+                seen.push(outcome);
+            }
+        };
+        timers.fire_due(engine, actions, now_ms, &mut sink);
+        seen
+    }
+
+    /// The timers send the keepalive at the end of each tick they read, and read the next tick
+    /// after the judge that ended one. Turned red by timers that keep the deadline they held after
+    /// judging it (no second keepalive), or that send before the tick ends.
+    #[cfg(feature = "transport-keepalive")]
+    #[test]
+    fn the_timers_send_a_keepalive_at_the_end_of_every_silent_tick() {
+        use crate::lease::KeepAliveCheckOutcome as K;
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link, interval) = keeping_alive();
+        let mut engine = machine(&actions);
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        let mut step = |now_ms| keepalive_checks(&mut timers, &mut engine, &actions, now_ms);
+        assert!(step(0).is_empty(), "the first tick runs");
+        assert!(step(interval - 1).is_empty(), "nothing before it ends");
+        assert_eq!(step(interval), [K::Emitted], "the first tick was silent");
+        assert!(step(interval + 1).is_empty(), "the next tick runs");
+        assert_eq!(step(2 * interval), [K::Emitted], "and the next");
     }
 
     /// Two judges that read the same deadlines (the tokio pacer beside the drive loop) end the
