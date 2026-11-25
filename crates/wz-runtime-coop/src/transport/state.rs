@@ -13,15 +13,13 @@
 
 #[cfg(feature = "group")]
 use alloc::boxed::Box;
-#[cfg(any(feature = "group", feature = "connectivity"))]
+#[cfg(feature = "group")]
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
 
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
-#[cfg(feature = "connectivity")]
-use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
 use wz_session_core::link::BoxedLinkDriver;
@@ -1072,65 +1070,5 @@ where
             }
             _ => None,
         })
-    }
-
-    /// The row at cursor `at` of the links of the faces that stand, in the order
-    /// [`Self::standing_faces`] lists them, read in place: a unicast face's ends and a group
-    /// member's are written into the row with nothing allocated.
-    #[cfg(feature = "connectivity")]
-    pub fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
-        let mut at = at;
-        for face in self.links.faces() {
-            let Link::Up(wire) = face.link() else {
-                continue;
-            };
-            if !wire.actions().is_established() {
-                continue;
-            }
-            // Past this face's links the cursor moves on by them; within them it is the row.
-            match at.checked_sub(FaceLinkRow::links_of(&**wire.actions())) {
-                Some(rest) => at = rest,
-                None => return FaceLinkRow::of_actions(&**wire.actions(), at),
-            }
-        }
-        #[cfg(feature = "group")]
-        for group in &self.groups {
-            match at.checked_sub(group.member_rows()) {
-                Some(rest) => at = rest,
-                None => return group.member_row(at),
-            }
-        }
-        None
-    }
-
-    /// The faces that stand: those whose links have completed their handshakes.
-    #[cfg(feature = "connectivity")]
-    pub fn standing_faces(&self) -> Vec<FaceSnapshot> {
-        let links = self.links.faces().filter_map(|face| match face.link() {
-            Link::Up(wire) if wire.actions().is_established() => {
-                FaceSnapshot::of_actions(&**wire.actions())
-            }
-            _ => None,
-        });
-        // And each member of a group the session joined, a transport of its own as both
-        // upstreams report it (`group`).
-        #[cfg(feature = "group")]
-        let links = links.chain(self.groups.iter().flat_map(GroupRecord::member_snapshots));
-        links.collect()
-    }
-
-    /// End the chains the peer of the face at `at` has under way in the session's Router, as its
-    /// link is lost: the Router the session's links share would otherwise splice the fragments of
-    /// the peer's next link onto them.
-    pub fn end_peer_chains(&mut self, at: usize) {
-        let peer = self
-            .links
-            .face(at)
-            .and_then(|face| face.link().wire())
-            // Read in place: a loss is taken after the open, where nothing is copied to the heap.
-            .and_then(|wire| wire.actions().peer_session_zid());
-        if let Some(zid) = peer {
-            self.router.abort_peer_chains(zid.as_slice());
-        }
     }
 }

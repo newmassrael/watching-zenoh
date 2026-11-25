@@ -717,8 +717,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     .transport
                     .links
                     .face(0)
-                    .and_then(|face| face.link.wire())
-                    .and_then(|wire| wire.actions.peer_session_zid());
+                    .and_then(Face::facts)
+                    .and_then(|facts| facts.peer);
                 if let Some(zid) = peer {
                     let _ended = slot.router.abort_peer(zid.as_slice());
                 }

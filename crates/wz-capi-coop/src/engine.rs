@@ -134,7 +134,7 @@ use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::transport::{DialWalk, FaceStep};
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
-    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
+    LinkCalls, TransportFaces, TransportRefusal, TransportRouter, TransportSession, WireMaking,
 };
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
@@ -286,9 +286,8 @@ pub(crate) fn face_event_rows(max_faces: usize, groups: usize) -> usize {
 }
 #[cfg(feature = "connectivity")]
 mod told;
-use wz_session_core::face::{FaceEventKind, FaceLinkRow};
 #[cfg(feature = "connectivity")]
-use wz_session_core::face::{FaceEventSink, FaceRowSink, FaceSnapshot};
+use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 #[cfg(feature = "connectivity")]
@@ -2099,10 +2098,60 @@ struct Face<C: ClockSource + 'static, L: CoopLinks> {
     id: FaceId,
     link: Link<Wire<C>, L::Dial>,
     replay: Replay,
+    /// What the link said of its peer when it came up, while it is up (`bring_up`).
+    facts: Option<UpFacts>,
     /// What the connectivity listeners whose history is being replayed were told of the face, and
     /// the tomb of a row of it that went (`told`).
     #[cfg(feature = "connectivity")]
     told: FaceTold,
+}
+
+impl<C: ClockSource + 'static, L: CoopLinks> Face<C, L> {
+    /// What the face's link said of its peer when it came up, while the link is up.
+    fn facts(&self) -> Option<&UpFacts> {
+        self.facts
+            .as_ref()
+            .filter(|_| matches!(self.link, Link::Up(_)))
+    }
+}
+
+/// What a face's link said of its peer when it came up, copied into the face's record by the one
+/// holder of the link then (`bring_up`): none of it changes while the link lives, and a read of
+/// it under the session's lock must not lend the link, which the face's own read may hold.
+struct UpFacts {
+    /// The zid the link's peer announced.
+    peer: Option<SessionZid>,
+    /// The face's first row as its watchers are told it (`FaceLinkRow::each_of_actions`): a
+    /// face of this engine holds one link, so it is the face's one row.
+    #[cfg(feature = "connectivity")]
+    row: Option<FaceLinkRow>,
+}
+
+impl UpFacts {
+    /// What `session`, whose handshake completed, says of its peer.
+    fn of<C: ClockSource + 'static>(session: &LinkSession<C>) -> Self {
+        #[cfg(feature = "connectivity")]
+        let row = {
+            let mut first = None;
+            FaceLinkRow::each_of_actions(&*session.actions, |row| {
+                if first.is_none() {
+                    first = Some(row);
+                }
+            });
+            first
+        };
+        Self {
+            peer: session.actions.peer_session_zid(),
+            #[cfg(feature = "connectivity")]
+            row,
+        }
+    }
+
+    /// The face's row among the faces that stand: one whose link names its ends.
+    #[cfg(feature = "connectivity")]
+    fn standing_row(&self) -> Option<&FaceLinkRow> {
+        self.row.as_ref().filter(|row| row.links != 0)
+    }
 }
 
 impl<C: ClockSource + 'static, L: CoopLinks> FaceRecord<LinkCount> for Face<C, L> {
@@ -4001,20 +4050,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// What a lost link of the face at `at`, numbered `id`, takes with it at `now_us`: its
     /// peer's chains, its room, what its peer declared, and the face's watchers are told it went.
     fn lose_face_link(&mut self, at: usize, id: FaceId, now_us: u64) {
-        // The face is read before the wire goes: what it was is what a watcher is told, its rows
+        // The face is read before its facts go: what it was is what a watcher is told, its row
         // queued now and handed out once the session is let go of.
-        let lost = self
-            .transport
-            .links
-            .face(at)
-            .and_then(|face| face.link.wire());
-        if let Some(wire) = lost.filter(|_| self.session.faces_watched()) {
-            FaceLinkRow::each_of_actions(&*wire.actions, |row| {
-                self.session.report_face_row(FaceEventKind::Down, row);
-            });
+        let facts = self.transport.links.face(at).and_then(Face::facts);
+        #[cfg(feature = "connectivity")]
+        if let Some(row) = facts
+            .and_then(|facts| facts.row.clone())
+            .filter(|_| self.session.faces_watched())
+        {
+            self.session.report_face_row(FaceEventKind::Down, row);
         }
-        self.transport.end_peer_chains(at);
-        // What a replaying listener was told of the face is read while its link is held.
+        // The lost peer's chains end with its link: the next link's fragments would be spliced
+        // onto them.
+        if let Some(zid) = facts.and_then(|facts| facts.peer) {
+            self.transport.router.abort_peer_chains(zid.as_slice());
+        }
+        // What a replaying listener was told of the face is read while its facts are held.
         #[cfg(feature = "connectivity")]
         self.face_went(at);
         self.transport
@@ -4023,6 +4074,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // What the lost link's peer was told went with it: the next link's peer holds nothing.
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.discard();
+            face.facts = None;
         }
         self.rooms.forget(at);
         self.lose_link(id);
@@ -4079,14 +4131,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             self.rooms.hold(at, on);
         }
         let actions = wire.actions.clone();
+        let facts = UpFacts::of(wire);
+        #[cfg(feature = "connectivity")]
+        let told = facts.row.clone().filter(|_| self.session.faces_watched());
+        if let Some(face) = self.transport.links.face_mut(at) {
+            face.facts = Some(facts);
+        }
         if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
         self.transport.links.establish(at);
-        if self.session.faces_watched() {
-            FaceLinkRow::each_of_actions(&*actions, |row| {
-                self.session.report_face_row(FaceEventKind::Up, row);
-            });
+        #[cfg(feature = "connectivity")]
+        if let Some(row) = told {
+            self.session.report_face_row(FaceEventKind::Up, row);
         }
     }
 
@@ -4409,10 +4466,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
+                if face.link.wire().is_none() {
                     return None;
-                };
-                let peer = decl_watch::named(|| wire.actions.peer_session_zid());
+                }
+                // A link in its handshake names no peer yet: its facts come with it up.
+                let peer = decl_watch::named(|| face.facts().and_then(|facts| facts.peer));
                 Some((registry.tables_of(face.id)?, peer))
             })
         };
@@ -4891,6 +4949,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 id: DIAL_FACE,
                 link: Link::Waiting { at_us: u64::MAX },
                 replay: Replay::idle(),
+                facts: None,
                 #[cfg(feature = "connectivity")]
                 told: FaceTold::default(),
             },
@@ -5344,8 +5403,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.live().map_or(0, |core| {
             core.0
                 .transport
-                .ups()
-                .filter(|actions| actions.is_established())
+                .links
+                .faces()
+                .filter(|face| face.facts().is_some())
                 .count()
         })
     }
@@ -7653,13 +7713,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     #[cfg(feature = "connectivity")]
     fn face_snapshots(&self) -> Vec<FaceSnapshot> {
         self.live()
-            .map_or_else(Vec::new, |core| core.0.transport.standing_faces())
+            .map_or_else(Vec::new, |core| core.0.standing_faces())
     }
 
     #[cfg(feature = "connectivity")]
     fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
-        self.live()
-            .and_then(|core| core.0.transport.face_link_at(at))
+        self.live().and_then(|core| core.0.face_link_at(at))
     }
 
     // The told bits live on the session's own face rows (`told`), not in a ledger.
@@ -9917,5 +9976,46 @@ mod sending_on_tests {
             );
         }
         assert_eq!(mark.load(Ordering::Relaxed), NOT_SENDING);
+    }
+}
+
+#[cfg(all(test, feature = "connectivity"))]
+mod up_facts_tests {
+    //! What a face's record keeps of its link as it came up, read without a lend of the link.
+    use super::UpFacts;
+    use alloc::vec::Vec;
+    use wz_session_core::face::{FaceLinkRow, FaceSnapshot};
+
+    /// The facts of a face whose peer is `zid`, its row naming `links` links.
+    fn facts(zid: u8, links: usize) -> UpFacts {
+        let face = FaceSnapshot {
+            zid: [zid; 16],
+            whatami: 1,
+            is_qos: false,
+            is_multicast: false,
+            is_shm: false,
+            links: Vec::new(),
+        };
+        let mut row = FaceLinkRow::of_face_alone(&face);
+        row.links = links;
+        UpFacts {
+            peer: None,
+            row: Some(row),
+        }
+    }
+
+    /// A face whose row names its link stands with that row; the row of a face alone, which
+    /// names no link, and no row at all stand for nothing. Turned red by a standing row that
+    /// keeps the row of a face alone, which `face_link_at` would hand out as a link with no ends.
+    #[test]
+    fn only_a_row_that_names_its_link_stands() {
+        let up = facts(7, 1);
+        assert_eq!(up.standing_row().map(|row| row.zid), Some([7; 16]));
+        assert!(facts(7, 0).standing_row().is_none(), "a face alone");
+        let none = UpFacts {
+            peer: None,
+            row: None,
+        };
+        assert!(none.standing_row().is_none(), "a half-open face");
     }
 }

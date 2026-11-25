@@ -22,6 +22,7 @@
 use super::*;
 use wz_capi_port::told::{ToldBits, ToldKey, ToldPlane};
 use wz_runtime_coop::faces::FacePlaces;
+use wz_session_core::face::LinkSnapshot;
 
 /// A row of a face that went, as its listeners were told it, and those still to be told it left.
 pub(super) struct Tomb {
@@ -125,20 +126,12 @@ impl FaceTold {
     }
 }
 
-/// The key of the face whose link `wire` is, when its row stands as `Core::face_link_at` reads
-/// it: the link is up, its handshake done, and its peer's zid and role known.
-fn standing_key<C: ClockSource + 'static>(wire: &Wire<C>) -> Option<ToldKey> {
-    if !wire.actions.is_established() || FaceLinkRow::links_of(&*wire.actions) == 0 {
-        return None;
-    }
-    let peer = wire.actions.peer_session_zid()?;
-    let mut zid = [0u8; 16];
-    // The first sixteen bytes at most, as the face's row holds them.
-    for (into, byte) in zid.iter_mut().zip(peer.as_slice()) {
-        *into = *byte;
-    }
+/// The key of `face` when its row stands as `Core::face_link_at` reads it: its link is up and
+/// its row names the link's ends.
+fn standing_key<C: ClockSource + 'static, L: CoopLinks>(face: &Face<C, L>) -> Option<ToldKey> {
+    let row = face.facts()?.standing_row()?;
     Some(ToldKey {
-        zid,
+        zid: row.zid,
         is_multicast: false,
         link: 0,
     })
@@ -161,14 +154,62 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .any(|group| group.tell_came(plane, listener, key));
         }
         for face in self.transport.links.faces_mut() {
-            let Link::Up(wire) = &face.link else {
-                continue;
-            };
-            if standing_key(wire) == Some(*key) {
+            if standing_key(face) == Some(*key) {
                 return face.told.bits.set(plane, listener);
             }
         }
         false
+    }
+
+    /// The row at cursor `at` of the links of the faces that stand (`SessionEngine::face_link_at`),
+    /// in the order [`Self::standing_faces`] lists them: each face's from what its link said as it
+    /// came up, then each group member's, copied into the row with nothing allocated.
+    pub(super) fn face_link_at(&self, at: usize) -> Option<FaceLinkRow> {
+        let mut at = at;
+        let rows = self
+            .transport
+            .links
+            .faces()
+            .filter_map(|face| face.facts()?.standing_row());
+        for row in rows {
+            // A face holds one link, the row its facts keep: past it the cursor moves on by one.
+            match at.checked_sub(1) {
+                Some(rest) => at = rest,
+                None => return Some(row.clone()),
+            }
+        }
+        #[cfg(feature = "group")]
+        for group in &self.transport.groups {
+            match at.checked_sub(group.member_rows()) {
+                Some(rest) => at = rest,
+                None => return group.member_row(at),
+            }
+        }
+        None
+    }
+
+    /// The faces that stand (`SessionEngine::face_snapshots`): each face's from the row its link
+    /// said as it came up, then each member of a group the session joined, a transport of its own
+    /// as both upstreams report it (`group`). What a row does not hold reads as not known.
+    pub(super) fn standing_faces(&self) -> Vec<FaceSnapshot> {
+        let faces = self
+            .transport
+            .links
+            .faces()
+            .filter_map(|face| face.facts()?.standing_row())
+            .map(|row| {
+                let mut face = FaceSnapshot::of_face_row(row);
+                face.links.extend(LinkSnapshot::of_row(row));
+                face
+            });
+        #[cfg(feature = "group")]
+        let faces = faces.chain(
+            self.transport
+                .groups
+                .iter()
+                .flat_map(|group| group.member_snapshots()),
+        );
+        faces.collect()
     }
 
     /// Whether `listener` of `plane` is still to be told the row of `key` left.
@@ -264,10 +305,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if face.told.bits.is_empty() {
             return;
         }
-        let row = face
-            .link
-            .wire()
-            .and_then(|wire| FaceLinkRow::of_actions(&*wire.actions, 0));
+        let row = face.facts().and_then(|facts| facts.row.clone());
         let Some(apart) = face.told.went(row) else {
             return;
         };
@@ -279,6 +317,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             id,
             link: Link::Waiting { at_us: u64::MAX },
             replay: Replay::idle(),
+            facts: None,
             told: FaceTold::departed(apart),
         };
         if self.transport.links.place_face(place, departed).is_ok() {

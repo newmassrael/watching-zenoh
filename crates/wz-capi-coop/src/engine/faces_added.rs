@@ -77,6 +77,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             id: held.id(),
             link,
             replay: Replay::idle(),
+            facts: None,
             #[cfg(feature = "connectivity")]
             told: FaceTold::default(),
         };
