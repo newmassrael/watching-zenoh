@@ -18,6 +18,13 @@
 //! length below the message's own, so a lent slot that does not hold a handshake
 //! message is a refusal the sender can count, never a message cut short.
 //!
+//! The inputs are the ones the build admits, read from its own bounds rather than
+//! chosen here, so a build that moves a bound moves the inputs with it: the widest
+//! zid (`ZID_MAX`), the longest cookie a session keeps (`COOKIE_MAX`), and chains
+//! up to the longest a session stages (`STAGED_CHAIN_MAX`) with one entry past it,
+//! which each form refuses unwritten where the build bounds the chain
+//! (`HANDSHAKE_CHAIN_MAX`) and writes where it does not.
+//!
 //! Compiles empty without the lend-only profile and the three message codecs,
 //! so no other leg of this crate's suite counts it.
 #![cfg(all(
@@ -40,10 +47,10 @@ use wz_session_core::accept_cookie::{
 use wz_session_core::accept_state::NegotiatedExtensions;
 use wz_session_core::handshake_encode::{
     encode_close, encode_close_into, encode_init, encode_init_into, encode_open, encode_open_into,
-    ChainRef, InitCaps,
+    ChainRef, InitCaps, HANDSHAKE_CHAIN_MAX, STAGED_CHAIN_MAX,
 };
 use wz_session_core::session_init_params::{
-    session_bytes, LinkRxConf, SessionInitParams, TxQueueConf, COOKIE_MAX,
+    session_bytes, LinkRxConf, SessionInitParams, TxQueueConf, COOKIE_MAX, ZID_MAX,
 };
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::signing_key::SigningKey;
@@ -73,18 +80,31 @@ fn params(zid: &[u8], cookie: &[u8]) -> SessionInitParams {
     }
 }
 
-/// Three entries with different headers and bodies: the patch announcement (a
-/// z64) and two units.
-fn chain() -> Vec<ExtEntryOwned> {
+/// A chain one entry longer than the longest a session of this build stages,
+/// whose prefixes are the chains the encoders are handed: the patch announcement
+/// (a z64) first, then units whose headers differ from their neighbours', so every
+/// prefix of two or more entries carries both body forms.
+fn chain_past_the_staged() -> Vec<ExtEntryOwned> {
     let unit = |header: u8| ExtEntryOwned {
         header,
         body: ExtEntryOwnedVariant::CodecZenohExtUnit(wz_codecs::ext_unit::ExtUnit {}),
     };
-    vec![
-        wz_session_core::extpatch::encode_patch_ext(),
-        unit(0x05),
-        unit(0x01),
-    ]
+    core::iter::once(wz_session_core::extpatch::encode_patch_ext())
+        .chain((0x01..=0x06u8).cycle().map(unit))
+        .take(STAGED_CHAIN_MAX + 1)
+        .collect()
+}
+
+/// The chains each encoder is handed: the longest a session stages, one entry,
+/// none, and one entry past the longest.
+fn chains(past: &[ExtEntryOwned]) -> [&[ExtEntryOwned]; 4] {
+    [&past[..STAGED_CHAIN_MAX], &past[..1], &[], past]
+}
+
+/// Whether the build writes a chain of `len` entries, as it states it
+/// (`HANDSHAKE_CHAIN_MAX`).
+fn admitted(len: usize) -> bool {
+    HANDSHAKE_CHAIN_MAX.is_none_or(|max| len <= max)
 }
 
 /// The chain as the heap encoders built it: each entry's own encoding, the
@@ -185,6 +205,27 @@ fn into_fixed(
     Ok(buf.as_slice().to_vec())
 }
 
+/// A chain past the build's bound is refused with `CapacityExceeded` by the
+/// buffer form before a byte is written, even into a buffer as long as the
+/// message it would make: the refusal is the chain's, not the room's.
+fn assert_refuses_the_chain_unwritten(
+    what: &str,
+    expected: &[u8],
+    write: impl FnOnce(&mut SliceTxBuf<'_>) -> Result<(), CodecError>,
+) {
+    let mut storage = vec![0u8; expected.len()];
+    let mut buf = SliceTxBuf::new(&mut storage);
+    assert_eq!(
+        write(&mut buf),
+        Err(CodecError::CapacityExceeded),
+        "{what}: a chain past the build's bound is refused"
+    );
+    assert!(
+        buf.as_slice().is_empty(),
+        "{what}: nothing is written before the refusal"
+    );
+}
+
 /// Every buffer shorter than the message refuses it, and the one exactly its
 /// length holds it.
 fn assert_refuses_every_shorter_buffer(
@@ -209,16 +250,16 @@ fn assert_refuses_every_shorter_buffer(
 
 #[test]
 fn an_init_message_written_into_a_buffer_is_the_message_the_heap_encoder_builds() {
-    let entries = chain();
+    let past = chain_past_the_staged();
     for (zid, cookie) in [
-        (&[0xA1u8][..], &[][..]),
-        (&[0xB2; 4][..], &[0x11; 16][..]),
-        (&[0xC3; 16][..], &[0x22; 100][..]),
+        (vec![0xA1u8], vec![]),
+        (vec![0xB2; 4], vec![0x11; 16]),
+        (vec![0xC3; ZID_MAX], vec![0x22; COOKIE_MAX]),
     ] {
-        let p = params(zid, cookie);
+        let p = params(&zid, &cookie);
         let caps = InitCaps::of(&p);
         for is_ack in [false, true] {
-            for exts in [&entries[..], &entries[..1], &[][..]] {
+            for exts in chains(&past) {
                 for override_cookie in [None, Some(&[0x33u8; 40][..])] {
                     let expected = oracle_init(
                         &p,
@@ -233,6 +274,17 @@ fn an_init_message_written_into_a_buffer_is_the_message_the_heap_encoder_builds(
                         exts.len(),
                         override_cookie.is_some()
                     );
+                    if !admitted(exts.len()) {
+                        assert_eq!(
+                            encode_init(&p, is_ack, exts, override_cookie),
+                            Err(CodecError::CapacityExceeded),
+                            "{what}: the heap form refuses a chain past the build's bound"
+                        );
+                        assert_refuses_the_chain_unwritten(&what, &expected, |buf| {
+                            encode_init_into(buf, &p, caps, is_ack, exts.into(), override_cookie)
+                        });
+                        continue;
+                    }
                     assert_eq!(
                         encode_init(&p, is_ack, exts, override_cookie).expect("heap"),
                         expected,
@@ -271,13 +323,13 @@ fn an_ack_advertises_the_sizes_it_is_given_and_never_the_unset_sentinel() {
 
 #[test]
 fn an_open_message_written_into_a_buffer_is_the_message_the_heap_encoder_builds() {
-    let entries = chain();
+    let past = chain_past_the_staged();
     let echoed = [0x55u8; 50];
     for lease_ms in [10_000u64, 1_500] {
         let mut p = params(&[0xA1; 4], &[0x66; 8]);
         p.lease_ms = lease_ms;
         for is_ack in [false, true] {
-            for exts in [&entries[..], &[][..]] {
+            for exts in chains(&past) {
                 for cookie in [None, Some(&echoed[..])] {
                     let expected = oracle_open(&p, 1234, is_ack, cookie, exts);
                     let what = format!(
@@ -289,6 +341,17 @@ fn an_open_message_written_into_a_buffer_is_the_message_the_heap_encoder_builds(
                     // parameters, so it is given a copy that says 1234.
                     let mut heap = p.clone();
                     heap.initial_sn = 1234;
+                    if !admitted(exts.len()) {
+                        assert_eq!(
+                            encode_open(&heap, is_ack, cookie, exts),
+                            Err(CodecError::CapacityExceeded),
+                            "{what}: the heap form refuses a chain past the build's bound"
+                        );
+                        assert_refuses_the_chain_unwritten(&what, &expected, |buf| {
+                            encode_open_into(buf, &p, 1234, is_ack, cookie, exts.into())
+                        });
+                        continue;
+                    }
                     assert_eq!(
                         encode_open(&heap, is_ack, cookie, exts).expect("heap"),
                         expected,

@@ -387,19 +387,38 @@ const EMPTY_PARTS: ExtEntryParts<'static> = ExtEntryParts {
     body: wz_codecs::ext_entry::ExtEntryPartsBody::CodecZenohExtUnit(&NO_BODY),
 };
 
-/// How many held entries are presented from holders on the stack: as many as a chain a session
-/// stages holds, one entry per kind of extension the build stages (a staged chain has one place
-/// per kind, so it is that long at most). A longer chain is refused where the store does not
-/// grow, and presented from holders on the heap where it does. The holders of the parts have
-/// one place more, for the region name an Init writes after its chain.
+/// The longest extension chain a handshake encoder presents from holders on the stack: as many
+/// entries as a chain a session stages holds, one per kind of extension the build stages (a
+/// staged chain has one place per kind, so it is that long at most). The patch level and the
+/// remote bound are the two kinds every build with the handshake counts; each other kind counts
+/// where its feature is on. Every chain a session sends is at most this long, so a handshake it
+/// sends costs the heap nothing in either storage profile; what a longer chain meets is
+/// [`HANDSHAKE_CHAIN_MAX`]. The holders of the parts have one place more, for the region name
+/// an Init writes after its chain.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
-const STACK_PARTS: usize = 2
+pub const STAGED_CHAIN_MAX: usize = 2
     + cfg!(feature = "transport-qos") as usize
     + cfg!(feature = "transport-lowlatency") as usize
     + cfg!(feature = "session-extcompression") as usize
     + cfg!(feature = "session-extshm") as usize
     + cfg!(feature = "session-extauth") as usize
     + cfg!(feature = "transport-multilink") as usize;
+
+/// The longest extension chain the handshake encoders write at all: [`STAGED_CHAIN_MAX`] where
+/// the store does not grow (no allocator, or the session's storage fixed at its open), a longer
+/// chain being refused with `CodecError::CapacityExceeded` before a byte is written, and no bound
+/// where it does, a longer chain being presented from holders on the heap. Only a caller of the
+/// public encoders hands in a chain past [`STAGED_CHAIN_MAX`]; this is the bound it is held to,
+/// stated where a caller reads it, and `with_parts` is compiled by the same condition.
+#[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
+pub const HANDSHAKE_CHAIN_MAX: Option<usize> = if cfg!(any(
+    not(feature = "alloc"),
+    feature = "session-fixed-storage"
+)) {
+    Some(STAGED_CHAIN_MAX)
+} else {
+    None
+};
 
 /// Present `entries` as parts in the holders the caller gives, then `tail` after them, and
 /// answer the parts that were filled. Out of line and not generic, so the projection is compiled
@@ -431,20 +450,21 @@ fn project_parts<'b, 'p>(
 /// holders on the stack for any chain a session stages, so a handshake a lend-only session sends
 /// costs the heap nothing in either storage profile. A longer chain, which only a caller of the
 /// public encoders can hand in, is refused where the store does not grow and presented from
-/// holders of its own length on the heap where it does. `write` is called at one place, so each
-/// caller's writer is compiled once.
+/// holders of its own length on the heap where it does ([`HANDSHAKE_CHAIN_MAX`] states which, by
+/// this function's own condition). `write` is called at one place, so each caller's writer is
+/// compiled once.
 #[cfg(any(feature = "codec-init-body", feature = "codec-open-body"))]
 fn with_parts<R>(
     entries: ChainRef<'_>,
     tail: Option<ExtEntryParts<'_>>,
     write: impl FnOnce(&[ExtEntryParts<'_>]) -> Result<R, CodecError>,
 ) -> Result<R, CodecError> {
-    let mut stack_bodies = [HeldBody::Unit; STACK_PARTS];
-    let mut stack_parts = [EMPTY_PARTS; STACK_PARTS + 1];
+    let mut stack_bodies = [HeldBody::Unit; STAGED_CHAIN_MAX];
+    let mut stack_parts = [EMPTY_PARTS; STAGED_CHAIN_MAX + 1];
     #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
     let (mut long_bodies, mut long_parts) = (alloc::vec::Vec::new(), alloc::vec::Vec::new());
     let (bodies, parts): (&mut [HeldBody<'_>], &mut [ExtEntryParts<'_>]) =
-        if entries.len() <= STACK_PARTS {
+        if entries.len() <= STAGED_CHAIN_MAX {
             (&mut stack_bodies[..], &mut stack_parts[..])
         } else {
             #[cfg(all(feature = "alloc", not(feature = "session-fixed-storage")))]
@@ -1221,10 +1241,10 @@ mod tests {
         use crate::extpatch::{encode_patch_ext_at, PATCH_EXT_ID};
         let params = open_params(10_000);
         let entry_header = PATCH_EXT_ID | crate::ext_header::EXT_ENC_Z64;
-        let longest = u8::try_from(super::STACK_PARTS).expect("a handful of kinds");
+        let longest = u8::try_from(super::STAGED_CHAIN_MAX).expect("a handful of kinds");
         let chain: alloc::vec::Vec<_> = (0..=longest).map(encode_patch_ext_at).collect();
 
-        let staged = super::encode_init(&params, false, &chain[..super::STACK_PARTS], None)
+        let staged = super::encode_init(&params, false, &chain[..super::STAGED_CHAIN_MAX], None)
             .expect("a chain as long as a session stages");
         assert_eq!(
             &staged[staged.len() - 2..],
