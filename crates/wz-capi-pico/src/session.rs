@@ -1910,16 +1910,41 @@ fn write_unicast_endpoints(
         feature = "multicast-transport"
     ))
 ))]
-static PRESET_REGION: wz_capi_coop::arena::ArenaRegion = match wz_capi_coop::arena::ArenaRegion::of(
-    wz_capi_coop::arena::PlanShape::dial_only(
-        wz_session_core::caps::MAX_STATIC_CONNECT,
-        pico_unicast_batch(&opening_limits()),
-    ),
-    opening_limits(),
-) {
-    Ok(region) => region,
-    Err(_) => panic!("the pico preset lays out no arena under this build's limits"),
-};
+const PRESET: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::ArenaRefused> =
+    wz_capi_coop::arena::ArenaRegion::of(
+        wz_capi_coop::arena::PlanShape::dial_only(
+            wz_session_core::caps::MAX_STATIC_CONNECT,
+            pico_unicast_batch(&opening_limits()),
+        ),
+        opening_limits(),
+    );
+
+// A build whose limits lay the preset out no arena is refused when it is compiled, not at every
+// open.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+const _: () = assert!(
+    PRESET.is_ok(),
+    "the pico preset lays out no arena under this build's limits"
+);
+
+/// The preset's rows where an open refers to them.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+static PRESET_REGION: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::ArenaRefused> =
+    PRESET;
 
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
@@ -2145,7 +2170,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         feature = "peer",
         feature = "multicast-transport"
     )))]
-    let plan = wz_capi_coop::arena::PlanFrom::Region(&PRESET_REGION);
+    let plan = match &PRESET_REGION {
+        Ok(region) => wz_capi_coop::arena::PlanFrom::Region(region),
+        Err(refused) => return coop_open_refusal(&wz_capi_coop::OpenError::Arena(*refused)),
+    };
     #[cfg(any(
         feature = "config-policy",
         feature = "peer",
