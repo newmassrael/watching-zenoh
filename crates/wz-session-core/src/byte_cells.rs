@@ -30,10 +30,57 @@
 //! are NOT cleared when it is lent or returned: a user writes what it reads back, and a link
 //! tracks the length of what it has put in.
 //!
+//! A table in memory a session reserved names the form of its flags ([`CellFlag`]): a cell
+//! where one task claims and releases, as above, or an atomic where the last holder of what lies
+//! in a cell may let it go on another thread than the one that claims, which a runtime of several
+//! threads asks of the cells its shared handles are placed in.
+//!
 //! [`LentByteCells`]: crate::byte_cells::LentByteCells
 
 use core::cell::{Cell, UnsafeCell};
 use core::ptr::NonNull;
+#[cfg(target_has_atomic = "8")]
+use core::sync::atomic::AtomicBool;
+use core::sync::atomic::Ordering;
+
+use crate::runtime_cell::FlagCell;
+
+/// The flag that says a cell of a [`LentByteCells`] table is lent, in the form the table's
+/// holders need: `Cell<bool>` where one task claims and releases, `AtomicBool` where a release
+/// may come from any thread while a claim is made, so a claim takes the flag in one step and a
+/// release is ordered after every use of the bytes it gives back.
+pub trait CellFlag: FlagCell + 'static {
+    /// Take the flag when it is free: `true` when this call took it, `false` when it was taken.
+    fn take(&self) -> bool;
+}
+
+impl CellFlag for Cell<bool> {
+    #[inline]
+    fn take(&self) -> bool {
+        if self.get() {
+            return false;
+        }
+        self.set(true);
+        true
+    }
+}
+
+#[cfg(target_has_atomic = "8")]
+impl CellFlag for AtomicBool {
+    #[inline]
+    fn take(&self) -> bool {
+        self.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+}
+
+// An arena lays a table's flags out as bytes with no alignment of their own
+// (`LentByteCells::FLAG_BYTES`), whichever form they take.
+#[cfg(target_has_atomic = "8")]
+const _: () = assert!(
+    core::mem::size_of::<AtomicBool>() == core::mem::size_of::<Cell<bool>>()
+        && core::mem::align_of::<AtomicBool>() == core::mem::align_of::<Cell<bool>>()
+);
 
 /// One cell of a table.
 struct ByteCell<const SIZE: usize> {
@@ -112,21 +159,42 @@ impl<const SIZE: usize, const N: usize> ByteSource for ByteCells<SIZE, N> {
 /// A handle: a copy names the same table, which is how the stack that opens a session's links
 /// holds it while the arena that owns the memory stays with the session. The memory outlives every
 /// claim and every copy (the contract of `LentByteCells::over`), and the table keeps the
-/// profile's rule of [`ByteCells`]: one task claims and releases, so a claim is a plain load and
-/// store.
-#[derive(Clone, Copy, Debug)]
-pub struct LentByteCells {
-    taken: NonNull<Cell<bool>>,
+/// profile's rule of [`ByteCells`] by its flags' form `F` ([`CellFlag`]): with cells, one task
+/// claims and releases, so a claim is a plain load and store; with atomics, a buffer may be given
+/// back on any thread.
+#[derive(Debug)]
+pub struct LentByteCells<F: CellFlag = Cell<bool>> {
+    taken: NonNull<F>,
     bytes: NonNull<u8>,
     size: usize,
     count: usize,
 }
 
+impl<F: CellFlag> Clone for LentByteCells<F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: CellFlag> Copy for LentByteCells<F> {}
+
+// SAFETY: a table of atomic flags is claimed by a read-modify-write of a flag and given back by an
+// ordered store of it, so threads that claim and release through copies of the handle keep one
+// account of which cell is lent; a cell's bytes are reached only through the one claim that took
+// it, and the memory outlives every copy and every claim (`Self::over`).
+#[cfg(target_has_atomic = "8")]
+unsafe impl Send for LentByteCells<AtomicBool> {}
+// SAFETY: as `Send` above; a shared handle claims and reads flags only.
+#[cfg(target_has_atomic = "8")]
+unsafe impl Sync for LentByteCells<AtomicBool> {}
+
 impl LentByteCells {
     /// The bytes of the flag that says a cell is lent: an arena lays `count` of them out in front
-    /// of the cells' bytes.
+    /// of the cells' bytes. The same for every form of the flag (asserted beside [`CellFlag`]).
     pub const FLAG_BYTES: usize = core::mem::size_of::<Cell<bool>>();
+}
 
+impl<F: CellFlag> LentByteCells<F> {
     /// A table of no buffer: what a lend refused hands its table ([`crate::bounded::TableLender`]),
     /// which lends nothing and reads no byte.
     pub(crate) const fn unlent() -> Self {
@@ -143,7 +211,7 @@ impl LentByteCells {
     /// bytes; both are valid for reads and writes, used by nothing but this table, and stay so for
     /// as long as any copy of the table or any buffer it lends lives.
     pub(crate) const unsafe fn over(
-        taken: NonNull<Cell<bool>>,
+        taken: NonNull<F>,
         bytes: NonNull<u8>,
         size: usize,
         count: usize,
@@ -157,16 +225,15 @@ impl LentByteCells {
     }
 
     /// The flag of cell `at`, below the table's count.
-    fn flag(&self, at: usize) -> &Cell<bool> {
+    fn flag(&self, at: usize) -> &F {
         // SAFETY: `at` is below `count`, so the flag is one of the table's, alive for as long as
         // the table is (`Self::over`).
         unsafe { &*self.taken.as_ptr().add(at) }
     }
 
     /// Lend a free buffer, or `None` when every one is out.
-    pub fn claim(&self) -> Option<ByteBuf> {
-        let at = (0..self.count).find(|&at| !self.flag(at).get())?;
-        self.flag(at).set(true);
+    pub fn claim(&self) -> Option<ByteBuf<F>> {
+        let at = (0..self.count).find(|&at| self.flag(at).take())?;
         // SAFETY: `at` is below `count`, so the flag and the cell's bytes are inside the table's
         // spans (`Self::over`).
         let (taken, base) = unsafe {
@@ -195,7 +262,9 @@ impl LentByteCells {
 
     /// How many buffers are lent.
     pub fn in_use(&self) -> usize {
-        (0..self.count).filter(|&at| self.flag(at).get()).count()
+        (0..self.count)
+            .filter(|&at| self.flag(at).load(Ordering::Relaxed))
+            .count()
     }
 
     /// Take back the buffer that starts at `base`, whose claim its holder kept past the claim's
@@ -212,24 +281,34 @@ impl LentByteCells {
         let Some(at) = offset.checked_div(self.size) else {
             return false;
         };
-        if at >= self.count || at.checked_mul(self.size) != Some(offset) || !self.flag(at).get() {
+        if at >= self.count
+            || at.checked_mul(self.size) != Some(offset)
+            || !self.flag(at).load(Ordering::Acquire)
+        {
             return false;
         }
-        self.flag(at).set(false);
+        self.flag(at).store(false, Ordering::Release);
         true
     }
 }
 
-/// A buffer lent by a [`ByteCells`] table or a [`LentByteCells`] one, until it is dropped. Not
-/// `Send`: it belongs to the task that claimed it.
-pub struct ByteBuf {
+/// A buffer lent by a [`ByteCells`] table or a [`LentByteCells`] one, until it is dropped. Of a
+/// table of cells it is not `Send`: it belongs to the task that claimed it. Of a table of atomic
+/// flags it may be given back on another thread.
+pub struct ByteBuf<F: CellFlag = Cell<bool>> {
     /// The flag of the cell it was lent, which the table's memory holds for longer than the claim.
-    taken: NonNull<Cell<bool>>,
+    taken: NonNull<F>,
     base: *mut u8,
     len: usize,
 }
 
-impl ByteBuf {
+// SAFETY: the bytes are reached only through this claim, which moves with them, and the flag is
+// given back by an ordered store that the table's claims read atomically, so the thread that drops
+// the claim need not be the one that took it.
+#[cfg(target_has_atomic = "8")]
+unsafe impl Send for ByteBuf<AtomicBool> {}
+
+impl<F: CellFlag> ByteBuf<F> {
     /// The buffer's bytes, mutably. The claim is the only way to them, so there is no other
     /// reference to alias.
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
@@ -251,17 +330,17 @@ impl ByteBuf {
     }
 }
 
-impl AsMut<[u8]> for ByteBuf {
+impl<F: CellFlag> AsMut<[u8]> for ByteBuf<F> {
     fn as_mut(&mut self) -> &mut [u8] {
         self.as_mut_slice()
     }
 }
 
-impl Drop for ByteBuf {
+impl<F: CellFlag> Drop for ByteBuf<F> {
     fn drop(&mut self) {
         // SAFETY: the flag is the claimed cell's, in a table whose memory outlives every claim (a
         // `'static` table, or a lent one by the contract of `LentByteCells::over`).
-        unsafe { self.taken.as_ref() }.set(false);
+        unsafe { self.taken.as_ref() }.store(false, Ordering::Release);
     }
 }
 
@@ -399,6 +478,41 @@ mod tests {
             assert!(!table.release_at(base), "a cell not lent is refused");
         }
         drop(first);
+        assert_eq!(table.in_use(), 0);
+    }
+
+    /// A table of atomic flags lends each cell to one claim, and a claim dropped on another thread
+    /// gives its cell back to the table's next claim. Turned red by a claim that does not take
+    /// the flag (a second claim of the same cell) or a drop that does not clear it.
+    #[cfg(target_has_atomic = "8")]
+    #[test]
+    fn an_atomic_table_takes_back_a_cell_given_back_on_another_thread() {
+        let flags = [AtomicBool::new(false), AtomicBool::new(false)];
+        let mut bytes = [0u8; 8];
+        // SAFETY: two flags, each false, and two cells of four bytes, all in this frame, which
+        // outlives the table, every claim of it and the scope's threads.
+        let table = unsafe {
+            LentByteCells::over(
+                NonNull::from(&flags).cast::<AtomicBool>(),
+                NonNull::from(&mut bytes).cast::<u8>(),
+                4,
+                2,
+            )
+        };
+        let a = table.claim().expect("first");
+        let b = table.claim().expect("second");
+        assert_ne!(a.raw().0, b.raw().0, "two claims, two cells");
+        assert!(table.claim().is_none(), "a third claim is refused");
+        std::thread::scope(|scope| {
+            scope.spawn(move || drop(b));
+        });
+        assert_eq!(table.in_use(), 1);
+        let again = table
+            .claim()
+            .expect("the cell given back on the other thread");
+        assert_eq!(table.in_use(), 2);
+        drop(again);
+        drop(a);
         assert_eq!(table.in_use(), 0);
     }
 
