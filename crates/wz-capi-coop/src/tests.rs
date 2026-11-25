@@ -3514,6 +3514,9 @@ mod program_clock;
 mod queryable;
 pub(crate) mod redial_heap;
 mod redial_wait;
+// The state of a session whose shape the build fixes: a build that plans at the open has none.
+#[cfg(not(feature = "runtime-plan"))]
+mod region;
 mod replay;
 mod round;
 // The cells a link's task takes: a build whose read steps its one link itself runs none.
