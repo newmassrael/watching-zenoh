@@ -85,15 +85,19 @@ fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
 }
 
 /// [`vle`] for a number that is not one byte, or a buffer that ends.
+///
+/// The loop ends on the bytes it reads, not on a count, so it is one loop in the image and not
+/// nine copies of its body.
 #[inline(never)]
 fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
     let mut value: u64 = 0;
-    // Seven times the step, so at most 56: every shift is below the width of a `u64`.
+    // Seven bits a byte, so the ninth byte is the one at a shift of 56, which is below the width
+    // of a `u64` as every shift here is.
     let mut shift: u32 = 0;
-    for step in 0..9 {
+    loop {
         let byte = *buf.get(*at)?;
         *at = at.saturating_add(1);
-        if step == 8 {
+        if shift == 56 {
             return Some(value | u64::from(byte).wrapping_shl(shift));
         }
         value |= u64::from(byte & 0x7f).wrapping_shl(shift);
@@ -102,7 +106,6 @@ fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
         }
         shift = shift.saturating_add(7);
     }
-    None
 }
 
 /// Read a key's id at `*at`, advancing it: a VLE of an `ExprId` in at most three
@@ -141,7 +144,7 @@ fn vle_expr_id(buf: &[u8], at: &mut usize) -> Option<crate::wire_id::ExprId> {
 /// decides whether it is one.
 #[inline]
 pub fn read_plain_put(buf: &[u8], at: usize) -> Option<(PlainPut, usize)> {
-    let read = read_plain_put_after(buf, at, None)?;
+    let (read, _) = read_plain_put_after(buf, at, None)?;
     Some((read.put, read.end))
 }
 
@@ -159,6 +162,10 @@ struct Read {
     /// extension. What follows is the payload's length and the payload.
     #[cfg(feature = "alloc")]
     prefix_end: usize,
+    /// Where the extension chain starts (the QoS extension's header), when there is one: read
+    /// only by the reader that builds the codec's view.
+    #[cfg(feature = "codec-push")]
+    chain: Option<usize>,
 }
 
 /// [`read_plain_put`] for a record that follows one whose suffix bytes were `known_utf8`:
@@ -169,10 +176,20 @@ struct Read {
 /// The third value is whether the record's suffix IS those bytes (false when it has none),
 /// which is the comparison the check above makes, handed on so the caller does not make it
 /// again to tell whether the key repeats.
+///
+/// Beside the reading, the suffix as the text the check found it to be: `None` when there is
+/// no suffix, and when it is the bytes of `known_utf8`, which were checked before.
 #[inline]
-fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Option<Read> {
+fn read_plain_put_after<'b>(
+    buf: &'b [u8],
+    at: usize,
+    known_utf8: Option<&[u8]>,
+) -> Option<(Read, Option<&'b str>)> {
     #[cfg(feature = "alloc")]
     let mut same_suffix = false;
+    #[cfg(feature = "codec-push")]
+    let mut chain = None;
+    let mut text = None;
     let mut cursor = at;
     let header = *buf.get(cursor)?;
     // Each step past a byte that was read stays within the buffer's length.
@@ -183,12 +200,17 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     let id = vle_expr_id(buf, &mut cursor)?;
     let suffix = if header & FLAG_N != 0 {
         let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
+        // The codec refuses a suffix longer than a key holds (`LengthOutOfRange`); this reader
+        // does not accept it.
+        if length > usize::from(u16::MAX) {
+            return None;
+        }
         let end = cursor.checked_add(length)?;
         let bytes = buf.get(cursor..end)?;
         // The codec refuses a suffix that is not UTF-8; this reader does not accept it.
         let same = known_utf8 == Some(bytes);
         if !same {
-            core::str::from_utf8(bytes).ok()?;
+            text = Some(core::str::from_utf8(bytes).ok()?);
         }
         #[cfg(feature = "alloc")]
         {
@@ -204,6 +226,10 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
         if *buf.get(cursor)? != QOS_EXT_HEADER {
             return None;
         }
+        #[cfg(feature = "codec-push")]
+        {
+            chain = Some(cursor);
+        }
         cursor = cursor.saturating_add(1);
         let value = vle(buf, &mut cursor)?;
         // The QoS byte is the low byte of the extension's value, as `extract_qos` reads it.
@@ -218,7 +244,7 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     #[cfg(feature = "alloc")]
     let prefix_end = cursor;
     let (end, payload) = read_payload(buf, cursor)?;
-    Some(Read {
+    let read = Read {
         put: PlainPut {
             id,
             sender_mapping: header & FLAG_M != 0,
@@ -232,7 +258,76 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
         same_suffix,
         #[cfg(feature = "alloc")]
         prefix_end,
-    })
+        #[cfg(feature = "codec-push")]
+        chain,
+    };
+    Some((read, text))
+}
+
+/// The plain `Put` that starts at `buf[at]` as the view the generated codec decodes it to
+/// (`PushView::decode` over `buf[at..]`, field for field), and where it ends; `None` for any
+/// record [`read_plain_put`] does not accept, which the caller decodes with the codec.
+///
+/// What a receive that lends each record as its view reads a stream's record with: the codec's
+/// decode of the same bytes walks the key, the extension chain and the Put's body through
+/// their generic readers, and this reads the one shape and fills the view from where its parts
+/// lie. `buf` is to run to the end of the frame, as the codec's cursor does: the view's
+/// extension list is held, as the codec holds it, as the bytes from its first entry on.
+#[cfg(feature = "codec-push")]
+#[inline]
+pub fn read_plain_push_view(
+    buf: &[u8],
+    at: usize,
+) -> Option<(wz_codecs::push::PushView<'_>, usize)> {
+    use sce_forge_runtime::codec::{Bounded, ListView};
+    use wz_codecs::wireexpr::WireexprViewVariant;
+    let (read, text) = read_plain_put_after(buf, at, None)?;
+    let put = read.put;
+    // Checked here, with nothing known before it, so a suffix is always text.
+    if put.suffix.is_some() != text.is_some() {
+        return None;
+    }
+    let suffix = match text {
+        Some(text) => Some(Bounded::new(text)?),
+        None => None,
+    };
+    let suffix_len = text.map(|text| text.len() as u64);
+    // The `M` flag picks the arm, as the codec's dispatch on it does.
+    let keyexpr = if put.sender_mapping {
+        WireexprViewVariant::WireexprLocal(wz_codecs::wireexpr_local::WireexprLocal {
+            id: put.id,
+            suffix_len,
+            suffix,
+        })
+    } else {
+        WireexprViewVariant::WireexprNonlocal(wz_codecs::wireexpr_nonlocal::WireexprNonlocal {
+            id: put.id,
+            suffix_len,
+            suffix,
+        })
+    };
+    let extensions = match read.chain {
+        Some(chain) => Some(Bounded::new(ListView::new(buf.get(chain..)?, 1, []))?),
+        None => None,
+    };
+    let payload = buf.get(put.payload.0 as usize..put.payload.1 as usize)?;
+    let view = wz_codecs::push::PushView {
+        header: *buf.get(at)?,
+        keyexpr: wz_codecs::wireexpr::WireexprView { body: keyexpr },
+        extensions,
+        body: wz_codecs::push::PushViewVariant::CodecZenohMsgPut(wz_codecs::msg_put::MsgPutView {
+            header: PLAIN_PUT_HEADER,
+            timestamp: None,
+            encoding: None,
+            extensions_has_0x12: wz_codecs::msg_put::MsgPutExtensionsHas0x12::NotHas0x12 {
+                extensions: None,
+                payload: Bounded::new(payload)?,
+            },
+            payload_len: Some(payload.len() as u64),
+            slice_count: None,
+        }),
+    };
+    Some((view, read.end))
 }
 
 /// Whether two slices of one length hold the same bytes, for the few bytes a record's prefix
@@ -334,7 +429,7 @@ pub fn read_plain_puts(buf: &[u8]) -> Option<alloc::vec::Vec<PlainPut>> {
                 continue;
             }
         }
-        let read = read_plain_put_after(buf, at, previous)?;
+        let (read, _) = read_plain_put_after(buf, at, previous)?;
         let mut put = read.put;
         // With a suffix on both, `previous` is the record before's own suffix, so `same_suffix`
         // is the comparison with it.
@@ -570,6 +665,137 @@ mod tests {
         let truncated = &plain[..plain.len() - 1];
         assert!(read_plain_put(truncated, 0).is_none());
         assert!(read_plain_put(&[], 0).is_none());
+    }
+
+    /// A suffix as long as a key holds reads, and one byte longer is declined here as the codec
+    /// refuses it (`LengthOutOfRange`): a reader that took it would hand on a key the codec
+    /// never delivers.
+    #[test]
+    fn a_suffix_longer_than_a_key_holds_is_declined_as_the_codec_refuses_it() {
+        let record = |length: usize, vle: &[u8]| {
+            // Push with `N`: the literal key, whole in the suffix.
+            let mut out = alloc::vec![0x3du8, 0];
+            out.extend_from_slice(vle);
+            out.resize(out.len() + length, b'a');
+            out.extend_from_slice(&[PLAIN_PUT_HEADER, 1, b'x']);
+            out
+        };
+        let longest = record(65_535, &[0xff, 0xff, 0x03]);
+        let (plain, end) = read_plain_put(&longest, 0).expect("the longest suffix reads");
+        assert_eq!((plain.suffix, end), (Some((5, 5 + 65_535)), longest.len()));
+        assert!(through_the_codec(&longest).is_some());
+
+        let longer = record(65_536, &[0x80, 0x80, 0x04]);
+        assert!(read_plain_put(&longer, 0).is_none());
+        assert!(read_plain_push_view(&longer, 0).is_none());
+        assert!(through_the_codec(&longer).is_none());
+    }
+
+    /// The codec's view of the record at `buf[at]`, read with the rest of the buffer behind it as
+    /// a frame holds it, and where it ends.
+    fn view_through_the_codec(
+        buf: &[u8],
+        at: usize,
+    ) -> Option<(wz_codecs::push::PushView<'_>, usize)> {
+        let rest = buf.get(at..)?;
+        let mut cursor = SceCursor::new(rest);
+        let view = wz_codecs::push::PushView::decode(&mut cursor).ok()?;
+        Some((view, at + rest.len() - cursor.remaining()))
+    }
+
+    /// Where it accepts a record, the view it builds is the view the generated codec decodes the
+    /// same bytes to, field for field (the extension list by its entries, walked from the bytes
+    /// each view holds), and it ends where the codec's cursor ends: over the shapes a stream has,
+    /// each with another record behind it as a frame holds them, the key in either mapping, and
+    /// over every damaged byte of a few records.
+    #[test]
+    fn the_view_it_builds_is_the_view_the_codec_decodes() {
+        let qos = crate::sample::QosLevel::from_raw;
+        let behind = encode(
+            &crate::lent_push::put_with_qos(9, None, b"next", qos(0x1a))
+                .expect("within the bounds"),
+        );
+        let mut records: alloc::vec::Vec<alloc::vec::Vec<u8>> = alloc::vec![
+            // Push with `Z`, id 3 in our mapping, the QoS extension, a Put of three bytes.
+            alloc::vec![
+                0x9du8,
+                3,
+                QOS_EXT_HEADER,
+                0x1a,
+                PLAIN_PUT_HEADER,
+                3,
+                b'a',
+                b'b',
+                b'c'
+            ],
+            // The same in the sender's mapping (`M`).
+            alloc::vec![0xddu8, 5, QOS_EXT_HEADER, 0x05, PLAIN_PUT_HEADER, 1, b'x'],
+            // The sender's mapping with a suffix (`M`, `N`), no extension, an empty payload.
+            alloc::vec![0x7du8, 5, 2, b'a', b'b', PLAIN_PUT_HEADER, 0],
+        ];
+        for id in [0u16, 1, 127, 128, 16_384, 65_535] {
+            for suffix in [None, Some("a"), Some("test/thr")] {
+                if id == 0 && suffix.is_none() {
+                    continue;
+                }
+                for level in [crate::sample::QosLevel::DEFAULT, qos(0x1a), qos(0xff)] {
+                    for payload in [&b""[..], &b"12345678"[..], &[9u8; 300][..]] {
+                        records.push(encode(
+                            &crate::lent_push::put_with_qos(id, suffix, payload, level)
+                                .expect("within the bounds"),
+                        ));
+                    }
+                }
+            }
+        }
+        for record in &records {
+            let frame = [&record[..], &behind[..]].concat();
+            let built = read_plain_push_view(&frame, 0)
+                .unwrap_or_else(|| panic!("a plain record is read: {record:02x?}"));
+            assert_eq!(Some(&built), view_through_the_codec(&frame, 0).as_ref());
+            assert_eq!(built.1, record.len());
+            let second = read_plain_push_view(&frame, record.len());
+            assert_eq!(second, view_through_the_codec(&frame, record.len()));
+            assert_eq!(second.map(|(_, end)| end), Some(frame.len()));
+        }
+
+        let mut agreed = 0usize;
+        for seed in records
+            .iter()
+            .take(3)
+            .chain(records.iter().skip(40).step_by(40))
+        {
+            for position in 0..seed.len() {
+                for value in 0..=255u8 {
+                    let mut bytes = seed.clone();
+                    bytes[position] = value;
+                    if let Some(built) = read_plain_push_view(&bytes, 0) {
+                        assert_eq!(
+                            Some(built),
+                            view_through_the_codec(&bytes, 0),
+                            "byte {position} = {value:#04x}"
+                        );
+                        agreed += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            agreed > 100,
+            "the damaged corpus exercised the reader: {agreed}"
+        );
+    }
+
+    /// The one extension a plain Put carries is one a participant takes whatever it says: what
+    /// lets the receive that lends a plain Put hand it over without judging its chain.
+    #[test]
+    fn the_extension_a_plain_put_carries_is_never_refused() {
+        use crate::ext_admit::{judge_ext_chain, ExtCarrier, NetworkEnvelope};
+        assert!(
+            judge_ext_chain(ExtCarrier::Network(NetworkEnvelope::Push), [QOS_EXT_HEADER])
+                .refusal()
+                .is_none()
+        );
     }
 
     /// The widest id an `ExprId` holds reads, and the next one is declined here and refused

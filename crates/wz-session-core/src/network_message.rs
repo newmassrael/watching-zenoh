@@ -1984,6 +1984,21 @@ fn lend_push<'f>(
     cursor: &mut SceCursor<'f>,
     each: &mut dyn EachRecord<'f>,
 ) -> Result<bool, crate::parse_error::InboundParseError> {
+    // A plain Put, the record a stream is made of, is read first by the strict reader, which fills
+    // the view the codec would from where the record's parts lie, without the codec's generic walk
+    // of the key, the chain and the body. Its one extension is the QoS, which no participant
+    // refuses (it is not mandatory and its encoding is not the reserved one), so it has no chain
+    // to judge. Any record that reader does not accept is the codec's, as it always was.
+    if let Some((plain, end)) = cursor
+        .peek_slice(cursor.remaining())
+        .ok()
+        .and_then(|rest| crate::plain_push::read_plain_push_view(rest, 0))
+    {
+        cursor
+            .advance(end)
+            .map_err(crate::parse_error::InboundParseError::Codec)?;
+        return each.take_record(WalkedRecord::Push(&plain));
+    }
     // Read as its view, as `lend_request` reads its record: a few words and the bytes its chains
     // occupy. The lent record holds each chain inline at the node's capacity, so it was filled from
     // a template of that size for every record and refused a chain past it, which the protocol
@@ -2819,6 +2834,46 @@ mod chain_saturation_tests {
             assert_eq!(seen[1].1, expected.1, "{count} extensions");
             assert_eq!(seen[2].0.len(), depth, "the walk goes on after it");
         }
+    }
+
+    /// A walk that lends hands a plain Put over as the view the codec decodes it to, and goes on
+    /// where the codec's cursor goes on: a frame of plain Puts (with and without the QoS
+    /// extension, with a suffix, in either mapping) around a Put the plain reader declines, each
+    /// lent record equal to the codec's decode of the same bytes in turn.
+    #[test]
+    fn the_lent_walk_hands_a_plain_put_over_as_the_codec_reads_it() {
+        let ours = [0x9du8, 3, 0x21, 0x1a, 0x01, 3, b'a', b'b', b'c'];
+        let theirs = [0xddu8, 5, 0x21, 0x05, 0x01, 1, b'x'];
+        let suffixed = [0x7du8, 5, 2, b'a', b'b', 0x01, 0];
+        let declined = push_with_put_exts(2);
+        let wire = [
+            &ours[..],
+            &declined[..],
+            &theirs[..],
+            &suffixed[..],
+            &ours[..],
+        ]
+        .concat();
+        let mut expected = Vec::new();
+        let mut cursor = sce_forge_runtime::codec::SceCursor::new(&wire);
+        while cursor.remaining() > 0 {
+            expected.push(
+                wz_codecs::push::PushView::decode(&mut cursor)
+                    .expect("the codec reads each record"),
+            );
+        }
+        assert_eq!(expected.len(), 5);
+        let mut record = new_record_buf();
+        let mut seen = Vec::new();
+        let result = for_each_record(&wire, &mut record, RecordForm::Lent, |one| {
+            if let WalkedRecord::Push(push) = one {
+                seen.push(push.clone());
+            } else {
+                panic!("only Pushes were encoded, and each is lent");
+            }
+        });
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(seen, expected);
     }
 
     /// The slot profile's walk holds no owned form of a record, and lends a Push
