@@ -2679,7 +2679,20 @@ struct Face<C: ClockSource + 'static, L: CoopLinks + 'static> {
 
 impl<C: ClockSource + 'static, L: CoopLinks + 'static> Face<C, L> {
     /// What the face's link said of its peer when it came up, while the link is up and its
-    /// session stands: what is read of a face that stands.
+    /// session stands: what is read of a face that stands. The record holds the link's session
+    /// here, under the session's lock with the reader, so whether it stands is read off it as it
+    /// is asked, and no pass of the links' tasks walks the faces to mark it.
+    #[cfg(wz_round)]
+    fn facts(&self) -> Option<&UpFacts> {
+        let wire = self.up()?;
+        self.facts.as_ref()?.standing_while(wire.established())
+    }
+
+    /// What the face's link said of its peer when it came up, while the link is up and its
+    /// session stands: what is read of a face that stands. The read that steps the one link
+    /// itself marks a session it saw end as it looks (`Core::end_closed_facts`), as the session
+    /// lies in a place that read may hold.
+    #[cfg(not(wz_round))]
     fn facts(&self) -> Option<&UpFacts> {
         self.facts
             .as_ref()
@@ -2737,6 +2750,12 @@ impl UpFacts {
     /// These facts, while the session they were read off stands.
     fn standing(&self) -> Option<&Self> {
         (!self.ended).then_some(self)
+    }
+
+    /// [`Self::standing`], for a link whose session is `established` as it is read.
+    #[cfg(wz_round)]
+    fn standing_while(&self, established: bool) -> Option<&Self> {
+        self.standing().filter(|_| established)
     }
 
     /// The face's row among the faces that stand: one whose link names its ends.
@@ -5026,9 +5045,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Read each face whose link's session a step of it ended as a face that no longer stands
-    /// (`UpFacts`): called by whoever stepped the links, under the session's lock and before it
-    /// lets go of it, so a face stands for a reader of the session exactly while its link's
-    /// session does. Its facts stay until the loss is taken, which is told by them.
+    /// (`UpFacts`): called by the read that stepped the one link, under the session's lock and
+    /// before it lets go of it, so a face stands for a reader of the session exactly while its
+    /// link's session does. Its facts stay until the loss is taken, which is told by them.
+    #[cfg(not(wz_round))]
     fn end_closed_facts(&mut self) {
         // Looked at in place first: a face reached to be written counts as a move of the links,
         // which a pass that ended no session must not make.
@@ -5804,8 +5824,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         registry_lend.lend_for(&mut session.registry, || {
             lend.lend_for(router, || local.run_ready(due_at))
         });
-        // The pass stepped the links' sessions: one it ended no longer stands.
-        self.end_closed_facts();
     }
 
     /// End every face's link, whatever it is doing, telling an established peer so. The dial
@@ -11800,6 +11818,26 @@ mod up_facts_tests {
         up.ended = true;
         assert!(up.standing().is_none(), "its session ended");
         assert!(up.row.is_some(), "kept for the loss");
+    }
+
+    /// Where the record holds the link's session, facts stand while that session is established
+    /// as they are read, with no mark made by a pass of the links. Turned red by a
+    /// `standing_while` that reads past a session that is no longer established (`Face::facts`
+    /// would then stand a face whose session a pass ended), or past `ended`.
+    #[cfg(wz_round)]
+    #[test]
+    fn facts_stand_while_their_session_is_established() {
+        let mut up = facts(4, 1);
+        assert!(
+            up.standing_while(true).is_some(),
+            "CONTROL: an established session"
+        );
+        assert!(
+            up.standing_while(false).is_none(),
+            "a session no longer established"
+        );
+        up.ended = true;
+        assert!(up.standing_while(true).is_none(), "a session seen to end");
     }
 }
 
