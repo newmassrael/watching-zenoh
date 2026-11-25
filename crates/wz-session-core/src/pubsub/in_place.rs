@@ -124,8 +124,8 @@ impl<Q: Storage> Default for LentRoom<Q> {
 /// owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
 ///
-/// Each chain is walked where it lies, once for each field that reads it, so the bytes those
-/// fields hand out stay in the frame.
+/// The body's chain is walked where it lies, once for the fields that read it
+/// ([`attachment_and_source`]), so the bytes those fields hand out stay in the frame.
 fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>, Fallback> {
     match &push.body {
         #[cfg(feature = "pubsub-put")]
@@ -142,8 +142,8 @@ fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>,
                     .into_iter()
                     .flatten()
             };
-            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
-            let _ = exts;
+            let (attachment, source_info) =
+                attachment_and_source(exts, crate::ext_header::body_eid::PUT_ATTACHMENT);
             Ok(Some(LentBody {
                 kind: SampleKind::Put,
                 payload: payload.into_inner(),
@@ -155,24 +155,15 @@ fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>,
                 encoding: put.encoding.as_ref(),
                 #[cfg(not(feature = "pubsub-encoding"))]
                 encoding: None,
-                #[cfg(feature = "pubsub-attachment")]
-                attachment: crate::attachment::decode_attachment_ext_in(
-                    exts(),
-                    crate::attachment::ATTACHMENT_EXT_ID_PUSH,
-                ),
-                #[cfg(not(feature = "pubsub-attachment"))]
-                attachment: None,
-                #[cfg(feature = "pubsub-source-info")]
-                source_info: crate::sample::extract_source_info_in(exts()),
-                #[cfg(not(feature = "pubsub-source-info"))]
-                source_info: None,
+                attachment,
+                source_info,
             }))
         }
         #[cfg(feature = "pubsub-delete")]
         PushViewVariant::CodecZenohMsgDel(del) => {
             let exts = || crate::ext_view::walked(del.extensions.as_ref());
-            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
-            let _ = exts;
+            let (attachment, source_info) =
+                attachment_and_source(exts, crate::ext_header::body_eid::DEL_ATTACHMENT);
             Ok(Some(LentBody {
                 kind: SampleKind::Del,
                 payload: &[],
@@ -182,23 +173,59 @@ fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>,
                 timestamp: None,
                 // Encoding is Put-only on the wire.
                 encoding: None,
-                #[cfg(feature = "pubsub-attachment")]
-                attachment: crate::attachment::decode_attachment_ext_in(
-                    exts(),
-                    crate::attachment::ATTACHMENT_EXT_ID_DEL,
-                ),
-                #[cfg(not(feature = "pubsub-attachment"))]
-                attachment: None,
-                #[cfg(feature = "pubsub-source-info")]
-                source_info: crate::sample::extract_source_info_in(exts()),
-                #[cfg(not(feature = "pubsub-source-info"))]
-                source_info: None,
+                attachment,
+                source_info,
             }))
         }
         // An unknown body tag is neither a confirmed Put nor a confirmed Del,
         // and a kind this build does not deliver is dropped, as the owned path
         // drops both.
         _ => Ok(None),
+    }
+}
+
+/// The attachment (the entry whose identity is `attachment_eid`) and the source info of a body's
+/// extension chain, each where the build delivers it. A chain read where its frame lies decodes
+/// each entry again at every walk, and a later entry of an identity supersedes an earlier one, so
+/// a walk goes to the chain's end: the two are read in one walk, not one each.
+fn attachment_and_source<'c, I>(
+    exts: impl Fn() -> I,
+    attachment_eid: u8,
+) -> (Option<&'c [u8]>, Option<SourceInfo>)
+where
+    I: IntoIterator,
+    I::Item: crate::ext_view::ExtEntryBytes<'c>,
+{
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+    {
+        let [attachment, source] = crate::ext_view::last_of_each_in(
+            exts(),
+            [attachment_eid, crate::ext_header::body_eid::SOURCE_INFO],
+        );
+        (
+            attachment.and_then(|ext| crate::ext_view::ExtEntryBytes::plain_zbuf_in(&ext)),
+            source
+                .and_then(|ext| crate::ext_view::ExtEntryBytes::plain_zbuf_in(&ext))
+                .and_then(crate::sample::decode_source_info_payload),
+        )
+    }
+    #[cfg(all(feature = "pubsub-attachment", not(feature = "pubsub-source-info")))]
+    {
+        let attachment = crate::ext_view::last_by_eid_in(exts(), attachment_eid);
+        (
+            attachment.and_then(|ext| crate::ext_view::ExtEntryBytes::plain_zbuf_in(&ext)),
+            None,
+        )
+    }
+    #[cfg(all(not(feature = "pubsub-attachment"), feature = "pubsub-source-info"))]
+    {
+        let _ = attachment_eid;
+        (None, crate::sample::extract_source_info_in(exts()))
+    }
+    #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
+    {
+        let _ = (exts, attachment_eid);
+        (None, None)
     }
 }
 
@@ -1285,5 +1312,52 @@ mod tests {
         assert_eq!(projected, Some(alloc::format!("{literal}x")));
         #[cfg(feature = "rx-lent-only")]
         assert_eq!(projected, None, "a build that lends only projects nothing");
+    }
+
+    /// A body's attachment and source info, read in one walk of its chain, are what a walk of each
+    /// reads: the last attachment of the carrier's identity supersedes an earlier one, the other
+    /// carrier's attachment is not it, and a chain with neither answers neither. Turned red by a
+    /// walk that keeps the first entry of an identity, or that reads one identity for the other.
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+    #[test]
+    fn one_walk_reads_the_attachment_and_the_source_info_as_two_walks_do() {
+        use crate::attachment::{
+            decode_attachment_ext_in, encode_attachment_ext, ATTACHMENT_EXT_ID_DEL,
+            ATTACHMENT_EXT_ID_PUSH,
+        };
+        use crate::ext_header::body_eid;
+        use crate::wire::WireStorage;
+        let attachment = |id: u8, bytes: &[u8]| {
+            encode_attachment_ext::<WireStorage>(id, bytes).expect("an attachment entry")
+        };
+        let zid = [0x51, 0x52, 0x53, 0x54];
+        let source =
+            crate::source_info_ext::encode_source_info_ext_entry::<WireStorage>(&zid, 9, 41)
+                .expect("a source info entry");
+        let chain = [
+            attachment(ATTACHMENT_EXT_ID_PUSH, &[1]),
+            source,
+            attachment(ATTACHMENT_EXT_ID_DEL, &[7]),
+            attachment(ATTACHMENT_EXT_ID_PUSH, &[2, 3]),
+        ];
+        let info = Some(SourceInfo::new(&zid, 9, 41));
+
+        let put = attachment_and_source(|| chain.iter(), body_eid::PUT_ATTACHMENT);
+        assert_eq!(put, (Some(&[2u8, 3][..]), info.clone()));
+        assert_eq!(
+            put,
+            (
+                decode_attachment_ext_in(chain.iter(), ATTACHMENT_EXT_ID_PUSH),
+                crate::sample::extract_source_info_in(chain.iter()),
+            )
+        );
+        let del = attachment_and_source(|| chain.iter(), body_eid::DEL_ATTACHMENT);
+        assert_eq!(del, (Some(&[7u8][..]), info));
+
+        let empty = &chain[..0];
+        assert_eq!(
+            attachment_and_source(|| empty.iter(), body_eid::PUT_ATTACHMENT),
+            (None, None)
+        );
     }
 }

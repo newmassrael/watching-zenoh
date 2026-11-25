@@ -1311,7 +1311,7 @@ pub fn extract_source_info_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
 /// [`SourceInfo`]. Exposed `pub(crate)` so the dispatcher can call it
 /// directly when it already holds the slice; external callers route
 /// through [`extract_source_info`].
-fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
+pub(crate) fn decode_source_info_payload(bytes: &[u8]) -> Option<SourceInfo> {
     let (&header, body) = bytes.split_first()?;
     // zidlen ranges 1..=16 because the header's high nibble is 4 bits.
     let zidlen = usize::from(header >> 4).saturating_add(1);
