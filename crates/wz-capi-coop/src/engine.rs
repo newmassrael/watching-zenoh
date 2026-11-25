@@ -3205,7 +3205,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// at its first step (its link did not open); a build without `group` answers every group so.
     fn join_groups(&mut self) -> Result<(), OpenError> {
         #[cfg(feature = "group")]
-        for join in self.config.groups.clone() {
+        for (nth, join) in self.config.groups.clone().into_iter().enumerate() {
+            // The open planned a task cell, a receive buffer and a face set for each group the
+            // task cells hold (`RuntimeTables::of`), so a group past them is refused as its spawn
+            // would be, before any of its rows is asked for: no task cell is left for it, whichever
+            // of the rows a `max_faces` left over would have lent it.
+            if nth >= caps::MAX_TASKS {
+                return Err(OpenError::NoTask(SpawnRefusal::NoTaskCell));
+            }
             let id = self.transport.links.next_face_id();
             // The tables first: the group's task dispatches to them from its first step. They are
             // the face's for as long as the session holds the group, across its joins, and answer
@@ -4072,7 +4079,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
     /// for a session whose plan laid out no such table.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_halves_in_use(&self) -> Option<usize> {
         self.core
             .lock()
@@ -4098,13 +4105,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// How many places of `kind` the ABI holds now, and how many the session's arena lends at
     /// most.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn place_counts(&self, kind: EntityKind) -> (usize, usize) {
         self.core.lock().0.places.counts(kind)
     }
 
     /// Run `f` while this thread holds the session's lock, as a drop made under it would.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn under_the_lock<R>(&self, f: impl FnOnce() -> R) -> R {
         let _held = self.core.lock();
         f()
@@ -7637,7 +7644,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender fo
 }
 
 /// The ring the session's arena laid out at its open for its advanced publishers' caches
-/// ([`CacheSpan`]), lent under a lock of its own: a cache's put and its queryable's answer take
+/// (`CacheSpan`), lent under a lock of its own: a cache's put and its queryable's answer take
 /// it, from whatever thread, and neither takes the session's lock with it.
 #[cfg(feature = "advanced-cache")]
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::CacheBytes

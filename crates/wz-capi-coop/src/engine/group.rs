@@ -535,8 +535,10 @@ pub(super) struct GroupFace<W> {
     /// framed and numbered, and which the face writes after each push and its task at each step.
     tx: GroupTxStage,
     /// The group's transport, which the task opens, reads and lets go of, and which the face
-    /// writes the stage on ([`Self::write_staged`]).
-    link: GroupLink<Watched>,
+    /// writes the stage on ([`Self::write_staged`]); `None` once the session's end was read
+    /// ([`Self::take_outcome`]), the transport then dropped with what it holds of the session's
+    /// (its receive buffer, one of the groups' table), so a join of the group again finds it free.
+    link: Option<GroupLink<Watched>>,
     /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
     /// The waits of the session's stack, which the group's socket is waited on with.
@@ -682,7 +684,7 @@ impl<W: LinkWaits> GroupFace<W> {
             #[cfg(feature = "query")]
             next_request: Cell::new(0),
             tx,
-            link,
+            link: Some(link),
             pace,
             waits,
             room,
@@ -732,7 +734,9 @@ impl<W: LinkWaits> GroupFace<W> {
     /// own step is written so, by the thread that put it: a read already waiting on the group's
     /// socket is not woken by a push, and would hold it until that wait ends.
     pub(super) fn write_staged(&self) {
-        self.link.write_staged(&self.tx);
+        if let Some(link) = &self.link {
+            link.write_staged(&self.tx);
+        }
     }
 
     /// Open the group's batch window (zenoh-pico `zp_batch_start` on its multicast transport):
@@ -897,7 +901,9 @@ impl<W: LinkWaits> GroupFace<W> {
     }
 
     /// How the group's session ended, read once: `None` while it runs, and after it was read.
-    /// The members it held go with it.
+    /// The members it held go with it, and so does its transport, whose last holder the face is
+    /// once the task's output is taken: the group's receive buffer goes back to the session before
+    /// the group is joined again, which takes one of the same table.
     pub(super) fn take_outcome<C: ClockSource + 'static>(
         &mut self,
         local: &CoopLocalSet<C>,
@@ -919,7 +925,9 @@ impl<W: LinkWaits> GroupFace<W> {
         #[cfg(not(feature = "connectivity"))]
         let _ = gone;
         // A finished task's output is taken without stepping anything.
-        local.block_on_local(task).ok()
+        let outcome = local.block_on_local(task).ok();
+        self.link = None;
+        outcome
     }
 
     /// Join the group again at `at_us`, on the session's clock.
