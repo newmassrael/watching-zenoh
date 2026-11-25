@@ -3440,6 +3440,9 @@ struct SessionEnds;
 
 /// When a handshake begun now is given up, in microseconds on `clock`: `open_timeout_ms` past
 /// the clock's reading. A free function so a dial reads it while the transport holds the session.
+/// A build whose read steps its one link itself keeps the handshake's deadline in the link's life
+/// (`direct`).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 fn open_deadline_on<C: ClockSource>(clock: &C, open_timeout_ms: u64) -> u64 {
     clock
         .now_us()

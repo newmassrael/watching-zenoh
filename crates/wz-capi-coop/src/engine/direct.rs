@@ -831,13 +831,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         slot.records = Some(dispatch);
         // A pump not stepped yet is due at once: the read that placed it sends its first frame.
         slot.pump_due_us = 0;
-        let deadline_us = open_deadline_on(&core.clock, core.config.open_timeout_ms);
+        // The life gives the handshake up at its own deadline, which bounds each read's wait
+        // (`UnicastLink::wake_at`): a second one kept on the face would only be read for the
+        // same wait.
         core.transport.links.put_link(
             0,
             Link::Opening {
                 wire,
                 next,
-                deadline_us,
+                deadline_us: u64::MAX,
             },
         );
         Ok(())
