@@ -2175,7 +2175,9 @@ impl SubscriberRow {
             return;
         }
         let hidden;
-        let sample = if self.expose {
+        // A sample that carries no timestamp has none to hide: it is handed as it lies, with no
+        // copy made of it for each call.
+        let sample = if self.expose || sample.timestamp.is_none() {
             sample
         } else {
             hidden = sample.without_timestamp();
