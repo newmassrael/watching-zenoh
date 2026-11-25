@@ -656,6 +656,11 @@ impl DeclaredKeyexpr {
     /// The new literal is kept where this key's is ([`KeyText::beside`]), and refused as that
     /// refuses it.
     pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
+        // The key's own text, as a copy names it (`z_keyexpr_clone`): one more holder of the
+        // text and of the declaration, which a share is.
+        if core::ptr::eq(literal, self.literal()) {
+            return self.share();
+        }
         // The text is kept first: a refusal then has no hold of the declaration to let go of.
         let kept = self.literal.beside(literal)?;
         let declaration = self
@@ -1589,14 +1594,9 @@ pub unsafe extern "C" fn z_keyexpr_clone(
         let Some(text) = keyexpr_str(src) else {
             return Z_ERR_NULL;
         };
-        // A copy its declaration's count or the heap has no room for is refused, and `dst` stays
-        // null.
-        let key = match lent_of(src) {
-            LentKey::Kept(declared) => declared.share(),
-            LentKey::Record(session, own) => DeclaredKeyexpr::of_record(session, own, text, text),
-            LentKey::View => DeclaredKeyexpr::literal_only(text),
-        };
-        match key {
+        // A copy is the key extended by nothing. One its declaration's count or the heap has no
+        // room for is refused, and `dst` stays null.
+        match extended_from(src, text) {
             Ok(key) => store_owned_keyexpr(dst, key),
             Err(code) => code,
         }
@@ -1688,8 +1688,12 @@ pub unsafe extern "C" fn z_keyexpr_concat(
 /// `left` is a declared key (pico `_z_declared_keyexpr_concat` / `_join`), a
 /// plain literal otherwise. Refused as [`DeclaredKeyexpr::extended`] refuses.
 ///
+/// Out of line: the clone door and the canonizing body both end here, and each carried its own
+/// read of the kinds of a loan and its own copy of a record's key ([`DeclaredKeyexpr::of_record`]).
+///
 /// # Safety
 /// `left` must be null or a live loaned keyexpr.
+#[inline(never)]
 unsafe fn extended_from(
     left: *const z_loaned_keyexpr_t,
     literal: &str,
@@ -3445,6 +3449,41 @@ mod arena_key_tests {
             Some(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
         drop((base, extended));
+        close(session);
+    }
+
+    /// A key extended to its own text, as a copy of it is, is one more holder of its block and of
+    /// its declaration. Turned red by an extension that drops the declaration (the count, the row)
+    /// or keeps the text anywhere but the key's block.
+    #[test]
+    fn a_key_extended_to_its_own_text_is_a_share() {
+        use wz_session_core::session_tables::KeyexprCount;
+
+        let (session, engine) = listening();
+        let key = DeclaredKeyexpr::declare(&engine, "demo/ext/own", None).expect("room");
+        // SAFETY: the declaration's row stands while `key` holds it, to the end of the test.
+        let count = unsafe { &*(key.row_address() as *const KeyexprCount) };
+        let holds = count.holds();
+        let copy = key.extended(key.literal()).expect("a share");
+        assert!(copy.literal.is_session());
+        assert_eq!(
+            copy.literal().as_ptr(),
+            key.literal().as_ptr(),
+            "the key's block"
+        );
+        assert_eq!(
+            copy.row_address(),
+            key.row_address(),
+            "at the declaration's row"
+        );
+        assert_eq!(
+            Some(count.holds()),
+            holds.checked_add(1),
+            "the copy holds the declaration"
+        );
+        drop(copy);
+        assert_eq!(count.holds(), holds, "the copy gave its hold back");
+        drop(key);
         close(session);
     }
 
