@@ -695,12 +695,6 @@ pub fn parse_locator(locator: &str) -> Result<ParsedLocator, LocatorParseError> 
     })
 }
 
-/// The `key=value` list grammar SHARED by the metadata and config spans
-/// (zenoh routes both through one `parameters` module —
-/// `zenoh-protocol/src/core/parameters.rs:32-33`).
-const LOCATOR_PARAM_LIST_SEPARATOR: char = ';';
-const LOCATOR_PARAM_FIELD_SEPARATOR: char = '=';
-
 /// zenoh `BIND_INTERFACE` config key (`io/zenoh-link-commons/src/lib.rs:52`).
 const LOCATOR_IFACE_KEY: &str = "iface";
 
@@ -842,25 +836,16 @@ enum LocatorReliability {
 /// and config spans share this grammar in zenoh (one `parameters` module serves
 /// both, parameters.rs:32-33), so they share it here too. Unknown keys are
 /// ignored — forward-compat with zenoh's richer vocabulary.
+/// The span's grammar is the locator grammar's, which the no-heap leaves read too.
 fn lookup_param<'a>(params: &'a str, key: &'a str) -> Option<&'a str> {
-    lookup_param_all(params, key).next()
+    crate::locator_grammar::config_value(params, key)
 }
 
-/// R311y832 — EVERY value for `key`, in written order. zenoh has both reads and
-/// they are not interchangeable: `Parameters::get` takes the first
-/// (`parameters.rs`) and `Parameters::values` takes them all, and the UDP link
-/// deliberately uses `values` for `join` (`multicast.rs:316`) so one socket can
-/// carry several group memberships. Using the singular read there would join
-/// the first group and silently drop the rest — a config that looks accepted
-/// and half works.
 /// R2592 — every KEY a `key=value` span names, in written order, with the
 /// same grammar the private `lookup_param` reads. A consumer that accepts only a fixed key
 /// set checks the span against it with this rather than re-splitting it.
 pub fn config_span_keys(params: &str) -> impl Iterator<Item = &str> {
-    params
-        .split(LOCATOR_PARAM_LIST_SEPARATOR)
-        .filter_map(|pair| pair.split_once(LOCATOR_PARAM_FIELD_SEPARATOR))
-        .map(|(key, _)| key)
+    crate::locator_grammar::config_keys(params)
 }
 
 /// The value a `key=value` span gives `key`: the first one, as the private `lookup_param` reads
@@ -868,14 +853,6 @@ pub fn config_span_keys(params: &str) -> impl Iterator<Item = &str> {
 /// states asks this rather than re-splitting the span.
 pub fn config_span_value<'a>(params: &'a str, key: &'a str) -> Option<&'a str> {
     lookup_param(params, key)
-}
-
-fn lookup_param_all<'a>(params: &'a str, key: &'a str) -> impl Iterator<Item = &'a str> {
-    params
-        .split(LOCATOR_PARAM_LIST_SEPARATOR)
-        .filter_map(|pair| pair.split_once(LOCATOR_PARAM_FIELD_SEPARATOR))
-        .filter(move |(k, _)| *k == key)
-        .map(|(_, value)| value)
 }
 
 /// R311y236 — extract the optional `iface=<name>` interface-binding name from

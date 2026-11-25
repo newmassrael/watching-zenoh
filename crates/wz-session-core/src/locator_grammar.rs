@@ -493,6 +493,15 @@ pub fn config_value<'a>(config: &'a str, key: &'a str) -> Option<&'a str> {
     config_values(config, key).next()
 }
 
+/// Every key a `key=value;...` span names, in the order written: a pair with no `=` names none.
+/// Read by the heap profile's locator (`crate::locator`), which checks a span's keys against a set.
+#[cfg(feature = "alloc")]
+pub(crate) fn config_keys(config: &str) -> impl Iterator<Item = &str> {
+    split_byte(config, PAIR_SEPARATOR)
+        .filter_map(|pair| split_once_byte(pair, KEY_SEPARATOR))
+        .map(|(key, _)| key)
+}
+
 /// Every value a `key=value;...` span gives `key`, in the order written, as upstream's
 /// `Parameters::values` reads them: a key a link reads more than once (`join`) takes them all.
 pub(crate) fn config_values<'a>(
