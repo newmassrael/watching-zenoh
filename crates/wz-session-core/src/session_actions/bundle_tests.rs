@@ -1055,6 +1055,61 @@ mod lent_frame_refusal {
         );
     }
 
+    /// A put written from the head its publisher's plain way made leaves as the frame its parts
+    /// make, for a QoS byte that rides and the one that does not; and a head that does not name the
+    /// key (another declaration) is not written, so the frame is still the key's own. Turned red by
+    /// a head written for a key it does not name, or by a head whose bytes differ from the writer's.
+    #[test]
+    fn a_put_written_from_its_head_is_the_frame_its_parts_make() {
+        let send = super::super::SendAs {
+            reliable: true,
+            express: false,
+            priority: Priority::DEFAULT,
+        };
+        let id = crate::wire_key::MappedId::new(7).expect("not zero");
+        let key = crate::named_key::NamedKey::under(
+            "home/head",
+            crate::named_key::Prefix::of(id, "home/head"),
+        )
+        .expect("a key under its declaration");
+        // The one frame a fresh session sends for `put`.
+        let frame = |put: &dyn Fn(
+            &SessionLinkActions<PlainRuntime, StillClock>,
+        ) -> Option<Result<(), SendWireError>>| {
+            let link = DryLink::of_width(512, true);
+            let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+            let actions = SessionLinkActions::<PlainRuntime, StillClock>::new_generic(
+                sink,
+                params(),
+                StillClock,
+            );
+            assert_eq!(put(&actions), Some(Ok(())));
+            let mut sent = link.sent.lock().expect("the sends");
+            assert_eq!(sent.len(), 1, "one frame");
+            sent.remove(0)
+        };
+        for qos in [
+            crate::sample::QosLevel::DEFAULT,
+            crate::sample::QosLevel::from_raw(0x1a),
+        ] {
+            let parts = frame(&|actions| actions.send_plain_put_qos(key, b"v", Some(qos), send));
+            let own = crate::lent_push::PutHead::new(7, qos).expect("a declared id");
+            assert_eq!(
+                frame(&|actions| actions.send_put_with_head(key, b"v", &own, send)),
+                parts,
+                "the head of the key, qos {:#04x}",
+                qos.raw
+            );
+            let other = crate::lent_push::PutHead::new(8, qos).expect("a declared id");
+            assert_eq!(
+                frame(&|actions| actions.send_put_with_head(key, b"v", &other, send)),
+                parts,
+                "the head of another declaration is not written, qos {:#04x}",
+                qos.raw
+            );
+        }
+    }
+
     /// A frame sent whole asks its link for the whole batch budget, as a window does: nothing
     /// measures the message before it is written into the slot. Turned red by a send that asks
     /// for a size it counted first (`open_frame_lent` asking for anything but `emit.mtu`).

@@ -881,6 +881,10 @@ pub struct PlainWay {
     pub params: crate::publish_options::PlainPutParams,
     /// The declaration that names the entity's key.
     pub key: KeyexprRef,
+    /// The Put's bytes up to its payload's length, written once here for the declaration and the
+    /// QoS: `None` for a key the declaration does not name by an id.
+    #[cfg(feature = "codec-push")]
+    pub head: Option<crate::lent_push::PutHead>,
 }
 
 /// A key expression declaration as its holder names it: the id the wire names it by, `0` for
@@ -2574,6 +2578,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 id: key.id,
                 row: self.keyexpr_at(key),
             },
+            #[cfg(feature = "codec-push")]
+            head: crate::lent_push::PutHead::new(
+                key.id,
+                params.qos.unwrap_or(crate::sample::QosLevel::DEFAULT),
+            ),
         }));
     }
 

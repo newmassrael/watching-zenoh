@@ -16034,6 +16034,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// message. That is a fact about the session and not the build, as the receive side's
     /// [`Self::plain_put_lane_open`] is: a build that can carry a namespace keeps this send for
     /// every session that has none.
+    ///
+    /// `head` is the Put's head its publisher's plain way wrote at its declare
+    /// ([`crate::lent_push::PutHead`]): the Put is written from it when it is the head of this
+    /// Put, the key's declaration alone with the same QoS byte, and from its parts otherwise.
     #[cfg(all(feature = "codec-push", feature = "alloc"))]
     fn send_plain_put_at(
         &self,
@@ -16042,6 +16046,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         value: &[u8],
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
+        head: Option<&crate::lent_push::PutHead>,
     ) -> Option<Result<Dispatched, SendWireError>> {
         let SendAs {
             reliable,
@@ -16059,6 +16064,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             crate::sample::QosLevel::DEFAULT
         };
         let (mapping_id, suffix) = (key.wire().id(), key.wire().suffix());
+        let head = head.filter(|head| head.names(key.wire()) && head.qos() == qos);
         #[cfg(feature = "transport-stats")]
         let class = self.stats_keys_of(
             crate::network_message::named_put_stats_class(key.text(), value.len()),
@@ -16070,15 +16076,19 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // payload's bound is a u32 length), and the link lends a slot of this size, which the
         // writer below fills in its one pass. A Put the writer refuses is zero, and the encoder
         // below refuses it with the same error, which the dispatch reports.
-        let size = size_hint(|| crate::lent_push::plain_put_len(mapping_id, suffix, value, qos));
+        let size = size_hint(|| match head {
+            Some(head) => head.len_with(value),
+            None => crate::lent_push::plain_put_len(mapping_id, suffix, value, qos),
+        });
         let sent = self.dispatch_network_message_at(
             stage,
             Conduit { priority, reliable },
             qos,
             size,
             class,
-            as_encoder(&|sink| {
-                crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos)
+            as_encoder(&|sink| match head {
+                Some(head) => head.write(sink, value),
+                None => crate::lent_push::write_plain_put(sink, mapping_id, suffix, value, qos),
             }),
         );
         let sent = match sent {
@@ -16104,8 +16114,32 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
     ) -> Option<Result<(), SendWireError>> {
-        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+        self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send, None)
             .map(|sent| sent.map(|_| ()))
+    }
+
+    /// [`Self::send_plain_put_qos`] of a Put whose head its publisher's plain way wrote at its
+    /// declare ([`crate::lent_push::PutHead`]), with the QoS byte the head carries: the Put is the
+    /// head, the payload's length and the payload, with nothing of it written again. A key the
+    /// head does not name is written from its parts, so the bytes on the wire are the same either
+    /// way.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    pub fn send_put_with_head(
+        &self,
+        key: crate::named_key::NamedKey<'_>,
+        value: &[u8],
+        head: &crate::lent_push::PutHead,
+        send: SendAs,
+    ) -> Option<Result<(), SendWireError>> {
+        self.send_plain_put_at(
+            DispatchStage::Fresh,
+            key,
+            value,
+            Some(head.qos()),
+            send,
+            Some(head),
+        )
+        .map(|sent| sent.map(|_| ()))
     }
 
     /// [`Self::send_plain_put_qos`] that does not wait for a slot: a link whose pool has none for
@@ -16120,12 +16154,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         qos: Option<crate::sample::QosLevel>,
         send: SendAs,
     ) -> Option<Result<Probed, SendWireError>> {
-        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send);
+        let probed = self.send_plain_put_at(DispatchStage::Probe, key, value, qos, send, None);
         // No room for a reason the link's own stack answers is the caller's own send, which waits
         // for that stack as the queue profile says; only a pool with no slot is left the caller's.
         let probed = match probed {
             Some(Ok(Dispatched::NoRoom)) if self.tx_slot_claimable() => {
-                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send)
+                self.send_plain_put_at(DispatchStage::Fresh, key, value, qos, send, None)
             }
             other => other,
         };
