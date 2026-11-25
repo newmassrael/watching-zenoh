@@ -3138,12 +3138,14 @@ mod kept_query_tests {
     }
 
     /// A query cloned inside its callback is answered while its session is open, and outlives the
-    /// session: once the session is closed and let go of, the copy still reads its key and its
-    /// parameters, a reply on it is refused as on a closed session, and the session's engine,
-    /// with the arena it lies in, is gone though the copy is still held. Cloning, replying and
-    /// letting the copy go allocate nothing. The CONTROL is the reply that reaches the asking
-    /// session while the listener is open. Turned red by a copy that holds its session strongly
-    /// (the engine stays), or that reads its texts where the session kept them.
+    /// session: the close leaves the copy's reach of its session reaching nothing at once; once
+    /// the session is let go of, the test's own hold of the engine is the last, so the engine,
+    /// with the arena it lies in, goes with it though the copy is still held; the copy still reads
+    /// its key and its parameters, and a reply on it is refused as on a closed session. Cloning,
+    /// replying and letting the copy go allocate nothing. The CONTROL is the reply that reaches
+    /// the asking session while the listener is open. Turned red by a copy that holds its session
+    /// strongly (a second holder stays), a close that leaves the session reached, or a copy that
+    /// reads its texts where the session kept them.
     #[test]
     fn a_kept_query_owns_its_texts_and_holds_none_of_its_session() {
         let seen = Seen::default();
@@ -3163,7 +3165,6 @@ mod kept_query_tests {
                 .next()
                 .expect("the listener is bound");
             let locator = CString::new(locator).expect("a locator");
-            drop(engine);
 
             let mut key: z_view_keyexpr_t = core::mem::zeroed();
             assert_eq!(z_view_keyexpr_from_str(&mut key, KEY.as_ptr()), Z_OK);
@@ -3259,11 +3260,16 @@ mod kept_query_tests {
                 z_close(z_session_loan_mut(&mut listener), core::ptr::null()),
                 Z_OK
             );
+            assert!(
+                session.upgrade().is_none(),
+                "closed, the session is reached by nothing"
+            );
             z_session_drop(z_session_move(&mut listener));
             assert!(
-                within_ten_seconds(|| session.upgrade().is_none()),
+                within_ten_seconds(|| crate::session::EngineHold::holders(&engine) == 1),
                 "the copy holds nothing of its session"
             );
+            drop(engine);
 
             assert_eq!(
                 keyexpr_str(z_query_keyexpr(query)),
