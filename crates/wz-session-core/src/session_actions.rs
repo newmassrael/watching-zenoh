@@ -3605,6 +3605,27 @@ pub struct SessionLinkActions<R: SessionRuntime, T: TimeSource> {
     /// profile never builds, and its runtimes have no second thread to hand to.
     #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub block_first_handoff: R::Mutex<Option<BlockFirstHandoff>>,
+    /// The sends this session's owner deferred, and the deferral that decides which
+    /// ([`SessionLinkActions::install_send_deferral`]). A build with no dispatch arm sends no
+    /// network message, so it has nothing to defer.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
+        not(feature = "no_std"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    deferred_sends: send_deferral::DeferredSends<R>,
 }
 
 /// R2952 (open-debt item 835) — one block-first message whose slot the core
@@ -4255,6 +4276,14 @@ where
 /// the session it lives in is shared across the runtime's threads.
 #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
 pub type BlockFirstHandoff = alloc::boxed::Box<dyn Fn(BlockFirstJob) + Send + Sync>;
+
+/// The sends a session's owner defers while it holds a lock of its own, and the order they leave
+/// in ([`SessionLinkActions::install_send_deferral`]). The heap profile's, as the block-first
+/// hand-off is: a deferred send owns a copy of its message's body.
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+mod send_deferral;
+#[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+pub use send_deferral::SendDeferral;
 
 /// The §5.16 egress verdict a session hands its action bundle for the replies it sends: `true`
 /// admits the `Response`, or the `Declare` that answers a peer's Interest. See
@@ -5272,6 +5301,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "tx-lend-only"),
+                not(feature = "no_std"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            deferred_sends: send_deferral::DeferredSends::new(),
         })
     }
 
@@ -5297,6 +5344,25 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // R2952 — installed by the runtime's `wrap_actions` when it has one.
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             core::ptr::addr_of_mut!((*at).block_first_handoff).write(R::new_mutex(None));
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "tx-lend-only"),
+                not(feature = "no_std"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            core::ptr::addr_of_mut!((*at).deferred_sends)
+                .write(send_deferral::DeferredSends::new());
         }
     }
 
@@ -5693,6 +5759,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link,
             #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
             block_first_handoff: R::new_mutex(None),
+            #[cfg(all(
+                feature = "alloc",
+                not(feature = "tx-lend-only"),
+                not(feature = "no_std"),
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token",
+                )
+            ))]
+            deferred_sends: send_deferral::DeferredSends::new(),
         })
     }
 }
@@ -7154,6 +7238,195 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
     pub fn install_block_first_handoff(&self, handoff: BlockFirstHandoff) {
         R::with_mutex_mut(&self.block_first_handoff, |slot| *slot = Some(handoff));
+    }
+
+    /// Give this session its owner's [`SendDeferral`]: from now on, a send the calling thread
+    /// makes while the deferral says it defers is queued and not written, and is written by the
+    /// thread's [`Self::flush_deferred_sends`]; a send of a thread that does not defer leaves
+    /// after whatever is queued (see the `send_deferral` module). Installed by an owner that
+    /// sends to this session under a lock of its own, before it sends anything under that lock.
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+    pub fn install_send_deferral(&self, deferral: alloc::boxed::Box<dyn SendDeferral>) {
+        #[cfg(all(
+            not(feature = "no_std"),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            )
+        ))]
+        self.deferred_sends.install(deferral);
+        #[cfg(not(all(
+            not(feature = "no_std"),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            )
+        )))]
+        drop(deferral);
+    }
+
+    /// Write what the calling thread's deferral queued on this session, in the order it was
+    /// queued, waiting for room as each send would have: the flush an owner owes once the thread
+    /// holds none of the locks its deferral stands for ([`SendDeferral::deferred`]). Whatever
+    /// another thread queued meanwhile goes out with it, in its turn. Nothing to do when nothing
+    /// is queued.
+    ///
+    /// A thread that still defers may not flush: its flush would wait for room under the lock
+    /// the deferral exists to keep free of that wait, which a debug build refuses.
+    #[cfg(all(feature = "alloc", not(feature = "tx-lend-only")))]
+    pub fn flush_deferred_sends(&self) {
+        #[cfg(all(
+            not(feature = "no_std"),
+            any(
+                feature = "codec-push",
+                feature = "codec-request",
+                feature = "codec-response",
+                feature = "codec-response-final",
+                feature = "declare-keyexpr",
+                feature = "declare-subscriber",
+                feature = "declare-queryable",
+                feature = "declare-token",
+                feature = "declare-interest",
+                feature = "liveliness-token",
+            )
+        ))]
+        if !self.deferred_sends.is_idle() {
+            debug_assert!(
+                !self.deferred_sends.defers_here(),
+                "a thread flushed its deferred sends while it still defers them"
+            );
+            self.deferred_sends
+                .in_order(|| self.send_deferred_in_order());
+        }
+    }
+
+    /// [`Self::dispatch_network_message_in`] for a send of the caller's own on a session whose
+    /// owner installed a [`SendDeferral`].
+    ///
+    /// A thread that defers has the message encoded, as a block-first job is, and queued; it is
+    /// answered as a send handed to the link, and the link is asked nothing, so the thread
+    /// waits for no room. A thread that does not defer sends at once when nothing is queued,
+    /// and otherwise sends what is queued first and then its own message, as the one sender of
+    /// the session's ordered sends: a message decided after one still queued leaves after it.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
+        not(feature = "no_std"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    #[inline(never)]
+    fn dispatch_deferrable<P>(
+        &self,
+        conduit: Conduit,
+        qos: crate::sample::QosLevel,
+        worst_case_payload: SizeHint,
+        stats_class: crate::stats::NetworkStatsClass,
+        encode_body: &P,
+    ) -> Result<Dispatched, SendWireError>
+    where
+        P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
+            + ?Sized,
+    {
+        let sends = &self.deferred_sends;
+        if sends.defers_here() {
+            let mut body = Vec::with_capacity(worst_case_payload);
+            {
+                let mut sink = crate::tx_buf::TxSink::new(&mut body);
+                encode_body(&mut sink)?;
+            }
+            sends.defer(send_deferral::DeferredSend {
+                conduit,
+                qos,
+                stats_class,
+                body,
+            });
+            return Ok(Dispatched::Sent);
+        }
+        let send = || {
+            self.dispatch_network_message_in::<true, P>(
+                DispatchStage::Fresh,
+                conduit,
+                qos,
+                worst_case_payload,
+                stats_class,
+                encode_body,
+            )
+        };
+        if sends.is_idle() {
+            return send();
+        }
+        sends.in_order(|| {
+            self.send_deferred_in_order();
+            send()
+        })
+    }
+
+    /// Send what is queued, oldest first, each as the send its thread deferred would have been
+    /// sent: it waits for room, and a failure has no caller to reach, as a block-first job's has
+    /// none. Called under `DeferredSends::in_order`.
+    #[cfg(all(
+        feature = "alloc",
+        not(feature = "tx-lend-only"),
+        not(feature = "no_std"),
+        any(
+            feature = "codec-push",
+            feature = "codec-request",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            feature = "declare-keyexpr",
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "declare-token",
+            feature = "declare-interest",
+            feature = "liveliness-token",
+        )
+    ))]
+    fn send_deferred_in_order(&self) {
+        while let Some(deferred) = self.deferred_sends.next() {
+            let send_deferral::DeferredSend {
+                conduit,
+                qos,
+                stats_class,
+                body,
+            } = deferred;
+            let _ = self.dispatch_network_message_in::<true, _>(
+                DispatchStage::Fresh,
+                conduit,
+                qos,
+                body.len(),
+                stats_class,
+                as_encoder(&|sink: &mut crate::tx_buf::TxSink<'_>| {
+                    sce_forge_runtime::codec::SceSink::write_bytes(sink, &body)
+                }),
+            );
+        }
     }
 
     /// R311kw — the one wire-emit seam: stamp [`LinkState::fact_last_outbound_at`]
@@ -12708,6 +12981,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         P: Fn(&mut crate::tx_buf::TxSink<'_>) -> Result<(), sce_forge_runtime::codec::CodecError>
             + ?Sized,
     {
+        // A send of its caller's own on a session whose owner defers some of its sends: deferred,
+        // or held behind what was, by [`Self::dispatch_deferrable`]. Every other stage continues a
+        // send that passed here already (a block-first job, a send under room its sender
+        // reserved) or is a probe, which waits for nothing.
+        #[cfg(all(
+            feature = "alloc",
+            not(feature = "tx-lend-only"),
+            not(feature = "no_std")
+        ))]
+        if !STAGED && self.deferred_sends.engaged() {
+            return self.dispatch_deferrable(
+                conduit,
+                qos,
+                worst_case_payload,
+                _stats_class,
+                encode_body,
+            );
+        }
         // Nothing of a lend-only build reads it: every frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
         let SizeHint = worst_case_payload;
