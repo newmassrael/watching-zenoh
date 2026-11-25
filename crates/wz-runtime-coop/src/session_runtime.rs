@@ -42,9 +42,6 @@
 //! lets the MCU session stack — handshake + reassembly consumer — reach
 //! ARMv6-M, the no-alloc M0 session reach the AP `Arc` blocked.
 
-#[cfg(not(feature = "session-slot"))]
-use alloc::rc::Rc;
-
 use wz_runtime_core::TimeSource;
 use wz_session_core::entropy::EntropySource;
 #[cfg(not(feature = "session-slot"))]
@@ -227,15 +224,36 @@ pub type SessionHandle<C, D = dyn BoxedLinkDriver, K = crate::sync::Shared> =
 /// draw) is refused as no entropy, the fail-closed answer.
 #[cfg(not(feature = "session-slot"))]
 #[derive(Clone)]
-pub struct SessionEntropy(Rc<core::cell::RefCell<dyn EntropySource>>);
+pub struct SessionEntropy(crate::link_cells::CellRc<core::cell::RefCell<dyn EntropySource>>);
 
 #[cfg(not(feature = "session-slot"))]
 impl SessionEntropy {
-    /// The handle on `source`, the session's one source.
+    /// The handle on `source`, the session's one source. A heap that refuses its cell ends the
+    /// program; an open that answers a full heap makes it with [`Self::try_new`].
     pub fn new(source: impl EntropySource + 'static) -> Self {
-        let source: Rc<core::cell::RefCell<dyn EntropySource>> =
-            Rc::new(core::cell::RefCell::new(source));
-        Self(source)
+        Self::of_cell(crate::link_cells::CellRc::boxed(core::cell::RefCell::new(
+            source,
+        )))
+    }
+
+    /// [`Self::new`], or the bytes of the cell the heap refused, `source` let go of.
+    pub fn try_new<E: EntropySource + 'static>(source: E) -> Result<Self, usize> {
+        type SourceCell<S> = crate::link_cells::CellRc<core::cell::RefCell<S>>;
+        SourceCell::<E>::in_cells(None, core::cell::RefCell::new(source))
+            .map(Self::of_cell)
+            .map_err(|_| SourceCell::<E>::cell_bytes())
+    }
+
+    /// The handle on the source `cell` holds.
+    fn of_cell<E: EntropySource + 'static>(
+        cell: crate::link_cells::CellRc<core::cell::RefCell<E>>,
+    ) -> Self {
+        // SAFETY: the closure is the unsizing coercion of the pointer it is handed.
+        Self(unsafe {
+            cell.unsize(
+                |value| -> core::ptr::NonNull<core::cell::RefCell<dyn EntropySource>> { value },
+            )
+        })
     }
 }
 
@@ -476,6 +494,21 @@ mod cookie_nonce_draw_tests {
             (a.cookie_nonce(), b.cookie_nonce()),
             (Some(first), Some(second))
         );
+    }
+
+    /// A source whose cell the heap has no room for is no handle, and with room it is the handle
+    /// a session draws from. Turned red by `try_new` made through `CellRc::boxed`, which ends the
+    /// process on the refusal.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_source_the_heap_has_no_room_for_is_no_handle() {
+        assert!(crate::table_tests::refused(|| SessionEntropy::try_new(Counting(0))).is_err());
+        let mut probe = Counting(0);
+        let expected = probe.try_next_u64().unwrap();
+        let actions = build();
+        let mut entropy = SessionEntropy::try_new(Counting(0)).expect("room for the cell");
+        assert!(actions.draw_cookie_nonce(&mut entropy));
+        assert_eq!(actions.cookie_nonce(), Some(expected));
     }
 
     #[test]
