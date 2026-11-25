@@ -61,16 +61,12 @@ impl<T> Lent<T> {
 
     /// The place `bytes` names, for a `T`: [`NoPlace`], the place given back at once, when it
     /// is smaller or less aligned than a `T`'s lodging ([`Self::LAYOUT`]).
+    #[inline]
     pub fn of_bytes(bytes: LentBytes) -> Result<Self, NoPlace> {
-        if bytes.layout.size() < Self::LAYOUT.size() || bytes.layout.align() < Self::LAYOUT.align()
-        {
-            return Err(NoPlace);
-        }
-        // The place is this lent one's from here, given back by its give-back and not by the
-        // bytes' drop.
-        let bytes = ManuallyDrop::new(bytes);
+        // The check is one body for every `T`; what is a `T`'s is the cast alone.
+        let bytes = bytes.fitting(Self::LAYOUT)?;
         // SAFETY: `LentBytes::new`'s, for a place at least as large and as aligned as a `T`'s
-        // lodging, checked above.
+        // lodging (`LentBytes::fitting`).
         Ok(unsafe { Self::new(bytes.place.cast(), bytes.give_back, bytes.context) })
     }
 
@@ -148,6 +144,16 @@ impl LentBytes {
     /// The layout the place holds.
     pub fn layout(&self) -> Layout {
         self.layout
+    }
+
+    /// These bytes, to be given back by what a lodging there names and no longer by their drop,
+    /// when they hold at least `layout`; [`NoPlace`], the place given back at once, when they are
+    /// smaller or less aligned.
+    fn fitting(self, layout: Layout) -> Result<ManuallyDrop<Self>, NoPlace> {
+        if self.layout.size() < layout.size() || self.layout.align() < layout.align() {
+            return Err(NoPlace);
+        }
+        Ok(ManuallyDrop::new(self))
     }
 }
 

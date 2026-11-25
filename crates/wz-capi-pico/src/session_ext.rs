@@ -242,6 +242,7 @@ pub(crate) const fn held_lodgings(
 /// A place for a `T` the session's state lodges, in the session's arena, which laid one out for
 /// it at the open ([`held_lodgings`]): `None` when it holds none free.
 #[cfg(all(feature = "connectivity", not(feature = "engine-tokio")))]
+#[inline]
 fn lodging_place<T>(engine: &EngineHold) -> Option<Lent<T>> {
     // The cooperative engine lends places itself, reached as its own type.
     let bytes = wz_capi_port::PlaceLender::lend_lodging(
