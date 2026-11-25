@@ -543,7 +543,10 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         assert_eq!(row(&plan, "face tables").count, plan.peers().sets());
         #[cfg(not(feature = "runtime-plan"))]
         assert!(plan.rows().all(|laid| laid.part() != "face tables"));
+        #[cfg(feature = "runtime-plan")]
         assert_eq!(row(&plan, "room places").count, plan.peers().sets());
+        #[cfg(not(feature = "runtime-plan"))]
+        assert!(plan.rows().all(|laid| laid.part() != "room places"));
         // The index of held sets is a row of a build that takes faces beside the dial role's.
         if crate::arena::TAKES_FACES {
             assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
@@ -865,11 +868,17 @@ fn the_plan_lays_out_the_faces_rooms_and_their_places() {
         ..client_config()
     };
     let limits = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    let places = row(&limits, "room places");
-    assert_eq!(
-        (places.count, places.entry_bytes),
-        (limits.peers().sets(), crate::engine::ROOM_PLACE_BYTES)
-    );
+    // A build of the region's form keeps its one set's place in its region (`StatePlaces::rooms`).
+    #[cfg(feature = "runtime-plan")]
+    {
+        let places = row(&limits, "room places");
+        assert_eq!(
+            (places.count, places.entry_bytes),
+            (limits.peers().sets(), crate::engine::ROOM_PLACE_BYTES)
+        );
+    }
+    #[cfg(not(feature = "runtime-plan"))]
+    assert!(limits.rows().all(|laid| laid.part() != "room places"));
     assert!(
         limits.rows().all(|laid| laid.part() != "link rooms"),
         "the limits alone do not know the rooms' size"

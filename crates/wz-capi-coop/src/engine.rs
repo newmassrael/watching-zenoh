@@ -875,6 +875,7 @@ fn lend_session(
         handle,
         entities: places,
     } = plan.places().lent_from(&mut lend, plan.entities());
+    #[cfg(feature = "runtime-plan")]
     let room_places: RoomPlaces = lend.table(plan.peers().sets());
     #[cfg(feature = "runtime-plan")]
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
@@ -917,6 +918,10 @@ fn lend_session(
         #[cfg(feature = "queryable")]
         refused_finals,
     } = unsafe { StatePlaces::tables(region_places, plan.session()) };
+    // SAFETY: as above, for the rooms' places: the table is held by the rooms, which the session's
+    // state drops before the block.
+    #[cfg(not(feature = "runtime-plan"))]
+    let room_places = unsafe { StatePlaces::rooms(region_places, plan.peers().sets()) };
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
@@ -1487,15 +1492,17 @@ struct RoomTable {
 }
 
 /// The places of the table of rooms, one for each set of face tables the open lent
-/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena in every build, so of
-/// the arena's policy whichever policy the registry's rows are of.
+/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena or laid in its region
+/// (`StatePlaces::rooms`), so of the lent policy whichever policy the registry's rows are of.
 pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
     Option<RoomPlace>,
     { crate::arena::MAX_FACE_SETS },
     wz_session_core::bounded::Lent,
 >;
 
-/// The bytes of one place of the table of rooms, as the plan lays the places out.
+/// The bytes of one place of the table of rooms, as the plan lays the places out where the arena
+/// lends them.
+#[cfg(feature = "runtime-plan")]
 pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
 
 /// The bytes of the rooms of a session over `links`, which the open places in the session's

@@ -40,7 +40,7 @@ use crate::engine::{LegHold, LegSink};
 use crate::region::RegionField;
 
 /// The sets of face tables a region holds: the dial role's face's alone.
-const FACE_SETS: usize = 1;
+pub(in crate::engine) const FACE_SETS: usize = 1;
 
 /// The requesters' rows of one face, or of the session's own gets.
 #[cfg(feature = "query")]

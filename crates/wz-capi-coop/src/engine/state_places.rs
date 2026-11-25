@@ -12,9 +12,7 @@
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
-#[cfg(any(feature = "query", feature = "queryable"))]
-use wz_session_core::bounded::BoundedVec;
-use wz_session_core::bounded::ZeroEmpty;
+use wz_session_core::bounded::{BoundedVec, ZeroEmpty};
 #[cfg(any(feature = "query", feature = "queryable"))]
 use wz_session_core::caps;
 use wz_session_core::placed::Placed;
@@ -23,6 +21,7 @@ use wz_session_core::reply_hold::{HeldReplies, HeldReplyPlaces};
 use wz_session_core::round::RoundRowPlaces;
 use wz_session_core::step_lend::LendCell;
 
+use super::registry::placed::FACE_SETS;
 #[cfg(feature = "connectivity")]
 use super::FacePlane;
 #[cfg(feature = "query")]
@@ -35,7 +34,7 @@ use super::Registry;
 use super::{query, FinalHold, RefusedFinal};
 #[cfg(feature = "query")]
 use super::{Ended, LegRow, PendingGet, Rows};
-use super::{SessionReassembly, StepPlaces};
+use super::{RoomPlace, RoomPlaces, SessionReassembly, StepPlaces};
 #[cfg(any(feature = "query", feature = "queryable"))]
 use crate::arena::SessionRows;
 use crate::round::{CoopCalls, Round, RoundRowCounts, RoundRows};
@@ -88,6 +87,9 @@ pub(crate) struct StatePlaces {
     queries: MaybeUninit<QueryPlane>,
     #[cfg(feature = "connectivity")]
     faces: MaybeUninit<FacePlane>,
+    /// What the face holding each set names for a wait for its room, a place for each set the
+    /// region holds.
+    room_places: [MaybeUninit<Option<RoomPlace>>; FACE_SETS],
     /// The rows of the session's plain tables, each table's at the build's bound: the ends of the
     /// legs, their callbacks, the session's note of each leg pending and the replies the gets that
     /// consolidate hold, and the Finals the queryables' plane holds and the requests it refused.
@@ -214,6 +216,23 @@ impl StatePlaces {
         }
     }
 
+    /// The table of the places of the faces' rooms over its field of the places at `at`, `sets`
+    /// of them, at most the sets the region holds.
+    ///
+    /// # Safety
+    /// As [`Self::steps`], for the rooms' field: it is reached by the one table placed over it
+    /// here.
+    pub(super) unsafe fn rooms(at: NonNull<Self>, sets: usize) -> RoomPlaces {
+        // SAFETY: the caller's contract; the field holds no value, and a field of a value at a
+        // pointer that is not null is not null either.
+        unsafe {
+            BoundedVec::placed_over(
+                NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).room_places)),
+                sets,
+            )
+        }
+    }
+
     /// The gets' `plane`, written in its field of the places at `at`.
     ///
     /// # Safety
@@ -257,16 +276,44 @@ impl StatePlaces {
     }
 }
 
-#[cfg(all(test, feature = "std", any(feature = "query", feature = "queryable")))]
+#[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
     use crate::arena::{ArenaPlan, PlanShape};
     use wz_session_core::limits::SessionLimits;
 
+    /// The table of the rooms' places placed over a region's places takes the sets asked, at most
+    /// the sets the region holds, and lies in the places. Turned red by a field of fewer places
+    /// than the sets the build's plan counts, or by a table placed anywhere but the places.
+    #[test]
+    fn the_rooms_places_take_the_regions_sets_at_most() {
+        let plan = ArenaPlan::planned(PlanShape::dial_only(1, 1024), &SessionLimits::BUILD)
+            .expect("the build's client");
+        let sets = plan.peers().sets();
+        assert!(
+            sets <= FACE_SETS,
+            "the region holds every set the plan counts"
+        );
+        let mut places = std::boxed::Box::new(MaybeUninit::<StatePlaces>::uninit());
+        let at = NonNull::from(&mut *places).cast::<StatePlaces>();
+        let start = at.as_ptr() as usize;
+        // SAFETY: the places are this test's box, holding no value and reached by the table alone,
+        // which is dropped before the next one is placed and before the box.
+        let rooms = unsafe { StatePlaces::rooms(at, sets) };
+        assert_eq!(rooms.free_slots(), sets);
+        assert!((start..=start + core::mem::size_of::<StatePlaces>())
+            .contains(&(rooms.as_ptr() as usize)));
+        drop(rooms);
+        // SAFETY: as above; the table before is gone.
+        let past = unsafe { StatePlaces::rooms(at, FACE_SETS + 1) };
+        assert_eq!(past.free_slots(), FACE_SETS, "held to the region's sets");
+    }
+
     /// The plain tables placed over a region's places take the rows the build's plan counts, which
     /// the region keeps every one of, and lie in the places. Turned red by a field of fewer rows
     /// than the plan counts (`LEG_ROWS`), by a table held to other counts than the plan's, or by
     /// one placed anywhere but the places.
+    #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
     fn the_plain_tables_take_the_plans_rows_in_the_places() {
         let shape = PlanShape::dial_only(1, 1024);

@@ -162,6 +162,7 @@ use crate::engine::HELD_SET_BYTES;
     any(feature = "threads", feature = "listen", feature = "group")
 ))]
 use crate::engine::REGISTRY_LEND_BYTES;
+#[cfg(feature = "runtime-plan")]
 use crate::engine::ROOM_PLACE_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
@@ -516,8 +517,9 @@ const GET_ROWS: usize = 5 * cfg!(all(feature = "query", feature = "runtime-plan"
 /// alone knows it holds the first set.
 const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES as usize;
 /// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
-/// for each set of face tables.
-const ROOM_ROWS: usize = 2;
+/// for each set of face tables, where the arena lends them (`runtime-plan`); a region holds its
+/// one set's place otherwise.
+const ROOM_ROWS: usize = 1 + cfg!(feature = "runtime-plan") as usize;
 /// The peers' tables, and the pools their rows lie in where the faces share them, where the arena
 /// lends them (`runtime-plan`).
 const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 3 * SHARES_ROWS as usize);
@@ -1991,7 +1993,9 @@ impl ArenaPlan {
             HELD_SET_BYTES,
         );
         // What the face holding each set names for a wait for its room, a place for each set
-        // (`crate::engine::LinkRooms`).
+        // (`crate::engine::LinkRooms`); a build of the region's form holds its one set's place in
+        // its region (`crate::engine::StatePlaces`).
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::RoomPlaces,
             self.session.peers.sets(),
