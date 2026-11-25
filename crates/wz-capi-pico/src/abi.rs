@@ -1054,9 +1054,9 @@ mod tests {
     /// the family asserts when it is compiled.
     #[test]
     fn only_bytes_is_borrowable() {
-        assert!(<z_owned_bytes_t as HandleOwnership>::BORROWABLE);
-        assert!(!<z_owned_config_t as HandleOwnership>::BORROWABLE);
-        assert!(!<crate::encoding::z_owned_encoding_t as HandleOwnership>::BORROWABLE);
+        const { assert!(<z_owned_bytes_t as HandleOwnership>::BORROWABLE) };
+        const { assert!(!<z_owned_config_t as HandleOwnership>::BORROWABLE) };
+        const { assert!(!<crate::encoding::z_owned_encoding_t as HandleOwnership>::BORROWABLE) };
     }
 
     /// Through the exports: a config's family is the shared bodies over the config's facts, its

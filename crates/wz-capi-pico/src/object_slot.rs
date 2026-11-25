@@ -22,6 +22,8 @@
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
+// `Box` places an object only where no pool does; the tests make their objects with it too.
+#[cfg(any(not(wz_process_pools), test))]
 use crate::prelude::*;
 
 /// Which object a place is for. With the pools reserved each kind has a pool of its own, so the
