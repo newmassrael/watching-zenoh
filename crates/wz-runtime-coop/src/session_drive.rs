@@ -1067,22 +1067,27 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// for that reason, as `Bind::IPV6` is on the slot profile.
     const IPV6: bool = true;
 
-    /// Whether the stack's network answers a host name with its addresses ([`Self::resolve`]).
-    /// `false`, the default, for a network without a resolver: the dial of a name over it is
-    /// refused before any link is begun (`crate::locator_text::DialRefused::NoResolver`).
+    /// Whether the stack's network answers a host name with its addresses
+    /// ([`Self::begin_named`]). `false`, the default, for a network without a resolver: the dial
+    /// of a name over it is refused before any link is begun
+    /// (`crate::locator_text::DialRefused::NoResolver`).
     const RESOLVES: bool = false;
 
-    /// The addresses the host `name` stands for on the stack's network, each at its port, written
-    /// to the front of `found` in the order its resolver answers them: how many, `0` for none
-    /// (`crate::udp_link::DatagramSocket::resolve`). Blocks for as long as the resolver takes,
-    /// so it is asked as a dial begins and never on a link's way. The default answers none.
-    fn resolve(
+    /// Begin a dial of the host `name`, answered later as a dial of an address is
+    /// ([`Self::begin_initiator`]): the platform's dial resolves the name, begins a connection to
+    /// its first address and, when the other end refuses one, at once or later, passes to the
+    /// next itself, answering one refusal once none is left, as zenoh-pico's open walks the
+    /// resolver's answer (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @
+    /// `it = it->ai_next`). Whoever asks the dial sees one dial and its one answer, and holds no
+    /// address of the host. The resolver blocks for as long as the network's name service takes,
+    /// so the name is resolved as the dial begins and never on a link's way. The default, a stack
+    /// with no resolver, refuses it as a link it does not carry.
+    fn begin_named(
         &self,
         name: &crate::locator_text::NamedHost<'_>,
-        found: &mut [core::net::SocketAddr],
-    ) -> usize {
-        let _ = (name, found);
-        0
+    ) -> Result<Self::Dial, LinkOpenError> {
+        let _ = name;
+        Err(LinkOpenError::Unsupported)
     }
 
     /// The waits of this stack's links ([`LinkWaits`]): what every handle its links, ports and

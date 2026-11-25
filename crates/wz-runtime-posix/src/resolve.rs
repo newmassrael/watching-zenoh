@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What a host's resolver is handed, the same on every host (`net::resolve` over `getaddrinfo`,
-//! `windows::resolve` over Winsock's): the name with its terminator, in the caller's frame.
+//! What a host's resolver is handed, the same on every host (`net::Resolved` over
+//! `getaddrinfo`, `windows::Resolved` over Winsock's): the name with its terminator, in the
+//! caller's frame.
 
 use wz_runtime_coop::locator_text::{NamedHost, HOST_NAME_MAX};
 

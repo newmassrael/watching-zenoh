@@ -763,53 +763,104 @@ pub(crate) unsafe fn socket_addr_at(
     }
 }
 
-/// The addresses the host's resolver (`getaddrinfo`) answers for the host `name`, each at its
-/// port, written to the front of `found` in its order: how many, `0` when it answers none or
-/// fails. Asked as zenoh-pico asks it for a locator's host, of every family the host has and of
-/// the stream kind alone (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @
-/// `hints.ai_family = PF_UNSPEC`), so that each address of a record is answered once and not
-/// once for each kind; the answer is walked as that open walks it, in its order, each address
-/// read in place.
-pub(crate) fn resolve(name: &NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
-    let text = crate::resolve::terminated(name);
-    // SAFETY: an all-zero `addrinfo` is a valid value of it: no flags, no family, null pointers.
-    let mut hints: libc::addrinfo = unsafe { core::mem::zeroed() };
-    hints.ai_family = libc::AF_UNSPEC;
-    hints.ai_socktype = libc::SOCK_STREAM;
-    let mut answers: *mut libc::addrinfo = core::ptr::null_mut();
-    // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
-    // `answers`, which is freed below once read.
-    let failed = unsafe {
-        libc::getaddrinfo(
-            text.as_ptr().cast(),
-            core::ptr::null(),
-            &hints,
-            &mut answers,
-        )
-    } != 0;
-    if failed {
-        return 0;
-    }
-    let mut count: usize = 0;
-    let mut next = answers.cast_const();
-    // SAFETY: each answer of the list is the resolver's, live until the list is freed.
-    while let (Some(answer), Some(place)) = (unsafe { next.as_ref() }, found.get_mut(count)) {
-        next = answer.ai_next.cast_const();
-        if answer.ai_addr.is_null() {
-            continue;
+/// The addresses the host's resolver (`getaddrinfo`) answered for a host name that a dial has
+/// not tried yet, in the resolver's order: its own list, held only while the dial is made and
+/// freed once, when the dial is made or let go of. Asked as zenoh-pico asks it for a locator's
+/// host, of every family the host has and of the stream kind alone
+/// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `hints.ai_family = PF_UNSPEC`), so
+/// that each address of a record is answered once and not once for each kind, and walked as that
+/// open walks it (`it = it->ai_next`), each address read in place.
+pub(crate) struct Resolved {
+    /// The list the resolver made, freed when this is dropped; null for none.
+    list: *mut libc::addrinfo,
+    /// The answer of the list to try next; null once none is left.
+    next: *const libc::addrinfo,
+}
+
+// SAFETY: the list is the resolver's heap memory, reached through this value alone, so it may be
+// walked and freed on any thread.
+unsafe impl Send for Resolved {}
+// SAFETY: as for `Send`; and no method that takes `&self` reads through the pointers.
+unsafe impl Sync for Resolved {}
+
+impl Resolved {
+    /// No address: what a dial of an address, an accepted connection and a connection made hold.
+    pub(crate) const NONE: Self = Self {
+        list: core::ptr::null_mut(),
+        next: core::ptr::null(),
+    };
+
+    /// The addresses the resolver answers for the host `name`; none when it answers none or
+    /// fails. Out of line: a `tcp/` dial and a `udp/` one of a host share it.
+    #[inline(never)]
+    pub(crate) fn of(name: &NamedHost<'_>) -> Self {
+        let text = crate::resolve::terminated(name);
+        // SAFETY: an all-zero `addrinfo` is a valid value of it: no flags, no family, null
+        // pointers.
+        let mut hints: libc::addrinfo = unsafe { core::mem::zeroed() };
+        hints.ai_family = libc::AF_UNSPEC;
+        hints.ai_socktype = libc::SOCK_STREAM;
+        let mut list: *mut libc::addrinfo = core::ptr::null_mut();
+        // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
+        // `list`, which the value made of it frees.
+        let failed = unsafe {
+            libc::getaddrinfo(text.as_ptr().cast(), core::ptr::null(), &hints, &mut list)
+        } != 0;
+        if failed {
+            return Self::NONE;
         }
-        // SAFETY: a non-null `ai_addr` is the resolver's address of `ai_addrlen` bytes, in the
-        // form of its family and aligned for it.
-        if let Some(mut at) = unsafe { socket_addr_at(answer.ai_addr, answer.ai_addrlen) } {
-            at.set_port(name.port());
-            *place = at;
-            // `count` names a place of `found`, so the sum does not wrap.
-            count = count.wrapping_add(1);
+        Self {
+            list,
+            next: list.cast_const(),
         }
     }
-    // SAFETY: `answers` is the list the call made, freed once, and nothing read of it is held.
-    unsafe { libc::freeaddrinfo(answers) };
-    count
+
+    /// The next address of the list, at `port`, past each answer of a family other than the two:
+    /// `None` once none is left. The resolver was asked for no service, so an answer names no
+    /// port, and the one the name is dialled at is written in.
+    #[inline(never)]
+    pub(crate) fn next_at(&mut self, port: u16) -> Option<SocketAddr> {
+        // SAFETY: `next` is null or an answer of the list, live until the list is freed.
+        while let Some(answer) = unsafe { self.next.as_ref() } {
+            self.next = answer.ai_next.cast_const();
+            if answer.ai_addr.is_null() {
+                continue;
+            }
+            // SAFETY: a non-null `ai_addr` is the resolver's address of `ai_addrlen` bytes, in
+            // the form of its family and aligned for it.
+            if let Some(mut at) = unsafe { socket_addr_at(answer.ai_addr, answer.ai_addrlen) } {
+                at.set_port(port);
+                return Some(at);
+            }
+        }
+        None
+    }
+
+    /// A walk of the answers from `first` on, which this value does not free: for a test of a
+    /// walk over addresses the test chose.
+    ///
+    /// # Safety
+    ///
+    /// `first` is null or the first of a list of answers linked by `ai_next`, each with a null
+    /// `ai_addr` or one of `ai_addrlen` bytes in its family's form, all live while this value is
+    /// walked.
+    #[cfg(test)]
+    pub(crate) unsafe fn walking(first: *const libc::addrinfo) -> Self {
+        Self {
+            list: core::ptr::null_mut(),
+            next: first,
+        }
+    }
+}
+
+impl Drop for Resolved {
+    fn drop(&mut self) {
+        if !self.list.is_null() {
+            // SAFETY: `list` is the list the resolver made, freed once, here, and nothing read of
+            // it is held.
+            unsafe { libc::freeaddrinfo(self.list) };
+        }
+    }
 }
 
 /// Bind or connect `fd` to `at`: `call` is `libc::bind` or `libc::connect`, handed `at` in the
@@ -1097,8 +1148,8 @@ impl DatagramSocket for PosixUdpSocket {
 
     const RESOLVES: bool = true;
 
-    fn resolve(name: &NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
-        resolve(name, found)
+    fn resolve(name: &NamedHost<'_>) -> Option<SocketAddr> {
+        Resolved::of(name).next_at(name.port())
     }
 
     fn bind(at: SocketAddr) -> Result<Self, PosixNetError> {
@@ -1199,25 +1250,53 @@ mod tests {
     use super::*;
 
     /// The host's resolver answers `localhost` with its loopback addresses, each at the port the
-    /// name is dialled at, and the answer is cut at the room it is given; an answer given no room
-    /// is none. Turned red by an address answered at the wrong port or past the room, or by a
-    /// resolver not asked.
+    /// name is dialled at, walked to its end; none is left after the last, and a dial of an
+    /// address holds none. Turned red by an address answered at the wrong port, by a walk that
+    /// never ends, or by a resolver not asked.
     #[test]
     fn the_host_resolver_answers_a_name_with_its_addresses() {
         let name = crate::resolve::named("tcp/localhost:7447");
-        let unset = SocketAddr::from(([0, 0, 0, 0], 0));
-        let mut found = [unset; 4];
-        let count = resolve(&name, &mut found);
-        assert!(count >= 1, "localhost resolves");
-        let answered = found.get(..count).expect("the count is within the room");
-        for at in answered {
+        let mut resolved = Resolved::of(&name);
+        let mut answered = 0;
+        while let Some(at) = resolved.next_at(name.port()) {
             assert!(at.ip().is_loopback(), "{at}");
             assert_eq!(at.port(), 7447, "{at}");
+            answered += 1;
+            assert!(answered <= 64, "the walk ends");
         }
-        let mut one = [unset; 1];
-        assert_eq!(resolve(&name, &mut one), 1);
-        assert_eq!(one.first().map(SocketAddr::port), Some(7447));
-        assert_eq!(resolve(&name, &mut []), 0);
+        assert!(answered >= 1, "localhost resolves");
+        assert_eq!(resolved.next_at(name.port()), None, "none after the last");
+        let mut none = Resolved::NONE;
+        assert_eq!(none.next_at(7447), None, "an address's dial holds none");
+    }
+
+    /// A walk passes over an answer without an address and one of a family other than the two,
+    /// and answers the address after them at the port it is asked for. Turned red by a walk that
+    /// stops at the first answer it cannot read, or keeps the answer's own port.
+    #[test]
+    fn a_walk_passes_over_an_answer_it_cannot_read() {
+        let v4 = RawAddr::of(SocketAddr::from(([192, 168, 1, 50], 9)));
+        // SAFETY: an all-zero `sockaddr_storage` is a valid value of it, an unspecified family.
+        let unspecified: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
+        // SAFETY: an all-zero `addrinfo` is a valid value of it: null pointers.
+        let mut answers: [libc::addrinfo; 3] = unsafe { core::mem::zeroed() };
+        let [no_address, other_family, address] = &mut answers;
+        other_family.ai_addr = (&unspecified as *const libc::sockaddr_storage)
+            .cast::<libc::sockaddr>()
+            .cast_mut();
+        other_family.ai_addrlen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        address.ai_addr = v4.as_ptr().cast_mut();
+        address.ai_addrlen = v4.size();
+        other_family.ai_next = address;
+        no_address.ai_next = other_family;
+        let first: *const libc::addrinfo = &*no_address;
+        // SAFETY: the answers and the addresses they name outlive the walk, which frees none.
+        let mut walk = unsafe { Resolved::walking(first) };
+        assert_eq!(
+            walk.next_at(7447),
+            Some(SocketAddr::from(([192, 168, 1, 50], 7447)))
+        );
+        assert_eq!(walk.next_at(7447), None);
     }
 
     /// Only `fe80::/10` is a unicast link-local address, the one a source needs its zone for;

@@ -139,8 +139,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         // The dial is begun here and asked at each step, as the dial role's is: the session is
         // held here, and a connection is not waited for while it is.
-        let begun = match core.transport.begin_dial(endpoint) {
-            Ok(begun) => begun,
+        let pending = match core.transport.begin_dial(endpoint) {
+            Ok(pending) => pending,
             Err(refused) => {
                 core.session.registry.remove_face(held);
                 return Err(refused.into());
@@ -152,7 +152,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // its answer is asked at the steps that follow.
         if core.push_face(
             held,
-            Link::Dialing(Dial::begun(DialEndpoint::Named(named), begun)),
+            Link::Dialing(Dial::new(DialEndpoint::Named(named), pending)),
             1,
         ) {
             let now_us = core.now_us();

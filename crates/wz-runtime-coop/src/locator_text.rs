@@ -89,8 +89,8 @@ pub struct NamedHost<'a> {
     link: NamedLink,
 }
 
-/// The link a dial of a [`NamedHost`] opens at each address the host resolves to: what a dial
-/// keeps of the host to pass to its next address when the network refuses one.
+/// The link a dial of a [`NamedHost`] opens at each address the host resolves to, which names
+/// the platform dial that resolves it (`SessionLinks::begin_named`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NamedLink {
     /// A link of the IP scheme.

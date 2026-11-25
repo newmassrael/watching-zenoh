@@ -556,3 +556,39 @@ fn an_open_whose_source_writes_the_texts_allocates_nothing_for_each_endpoint() {
         "CONTROL: a config that holds the texts allocates one for each endpoint"
     );
 }
+
+/// Links without a resolver refuse a host name before any dial, by the locator's reason, so the
+/// open reports what the build lacks and not a link the other end refused; the links are never
+/// asked. Turned red by a name over links without a resolver dialled, or refused as a link.
+#[test]
+fn links_without_a_resolver_refuse_a_host_name_before_any_dial() {
+    use crate::{EndpointRefusal, Refusal};
+    use wz_runtime_coop::locator_text::DialRefused;
+
+    let dials = Arc::new(AtomicUsize::new(0));
+    let links = Refusals {
+        inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
+        refusing: Arc::new(AtomicBool::new(true)),
+        dials: dials.clone(),
+    };
+    assert!(!<Refusals as SessionLinks<LinkCount>>::RESOLVES);
+    let endpoint = "tcp/router.example:7447";
+    let refused = CoopEngine::open(
+        links,
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            endpoints: vec![endpoint.into()],
+            ..client_config()
+        },
+    )
+    .err();
+    assert_eq!(
+        refused,
+        Some(OpenError::Unreachable(EndpointRefusal::new(
+            endpoint,
+            Refusal::Locator(DialRefused::NoResolver)
+        )))
+    );
+    assert_eq!(dials.load(Ordering::SeqCst), 0, "no dial was asked");
+}

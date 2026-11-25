@@ -707,16 +707,37 @@ where
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
-    // The platform whose sockets these are resolves a name for each of its links, as its waits
-    // wait on each of them.
-    const RESOLVES: bool = U::RESOLVES;
+    // A name is resolved by the platform's dial of the link it opens: its stream dial's for a
+    // `tcp/` host, its datagram sockets' for a `udp/` one.
+    const RESOLVES: bool = U::RESOLVES || D::RESOLVES;
 
-    fn resolve(
+    /// A `tcp/` host is the platform's stream dial of the name, begun as a dial of an address is
+    /// and holding the buffers the same way (`StreamDial::dial_named`): the stream itself
+    /// passes from a refused address to the next. A `udp/` host opens its link at the first
+    /// address the platform resolves it to, a datagram link having no connection to refuse. A
+    /// `tls/` host is refused as a link these links do not carry: a channel verifies the peer
+    /// it is handed by the address it dials.
+    fn begin_named(
         &self,
         name: &crate::locator_text::NamedHost<'_>,
-        found: &mut [SocketAddr],
-    ) -> usize {
-        U::resolve(name, found)
+    ) -> Result<Self::Dial, LinkOpenError> {
+        match name.link() {
+            crate::locator_text::NamedLink::Ip(LinkProto::Tcp) if D::CARRIED && D::RESOLVES => {
+                let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
+                let socket = self.dial.dial_named(name)?;
+                Ok(IpDial(IpDialing::Tcp(PendingStream {
+                    socket: Some(socket),
+                    buffers: Some(buffers),
+                    place: self.shape.place,
+                })))
+            }
+            crate::locator_text::NamedLink::Ip(LinkProto::Udp) if U::CARRIED && U::RESOLVES => {
+                // No address answered is the network's answer, which a later dial may not meet.
+                let at = U::resolve(name).ok_or(LinkOpenError::Refused)?;
+                self.dial(name.locator(at)).map(IpDial::from)
+            }
+            _ => Err(LinkOpenError::Unsupported),
+        }
     }
 
     // The waits of the platform whose sockets these are: its streams, the secure channels over
@@ -2304,6 +2325,72 @@ mod tests {
             v4_only.open_initiator(Locator::udp(ROUTER)).is_ok(),
             "the family it has still dials"
         );
+    }
+
+    /// A `tcp/` host is the stream dial's own dial of the name, begun and made as a dial of an
+    /// address is, at the address that dial reached; a name the dial answers no address for is
+    /// its refusal. Links whose stream dial has no resolver refuse a `tcp/` host as a link they
+    /// do not carry, links whose datagram sockets have none a `udp/` host, and a `tls/` host is
+    /// refused even over a channel. Turned red by a name dialled at an address of its own, by a
+    /// stack without a resolver that answers one, or by a `tls/` host handed to the channel.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_named_dial_is_the_stream_dials_and_names_it_has_no_dial_for_are_refused() {
+        use crate::locator_text::{read_dial_target, DialTarget, NamedHost};
+
+        /// A dial that reaches a named host at the router's address, at the name's port.
+        #[derive(Clone, Copy)]
+        struct NamedDial;
+
+        impl StreamDial for NamedDial {
+            type Stream = Stream;
+            const RESOLVES: bool = true;
+            fn dial(&self, to: SocketAddr) -> Result<Stream, LinkOpenError> {
+                Dial.dial(to)
+            }
+            fn dial_named(&self, name: &NamedHost<'_>) -> Result<Stream, LinkOpenError> {
+                Dial.dial(SocketAddr::new(ROUTER.ip(), name.port()))
+            }
+        }
+
+        let host = |text: &'static str| match read_dial_target(text) {
+            Ok(DialTarget::Named(name)) => name,
+            other => panic!("{text} names a host: {other:?}"),
+        };
+        let named = IpLinks::<Datagrams, NamedDial>::new(NODE, NamedDial);
+        assert!(<IpLinks<Datagrams, NamedDial> as SessionLinks>::RESOLVES);
+        let tcp = named
+            .begin_named(&host("tcp/router.example:7447"))
+            .expect("the dial begins")
+            .poll()
+            .expect("the dial answered")
+            .expect("a stream link")
+            .sink;
+        assert_eq!(
+            tcp.link_endpoints().as_ref().map(|ends| ends.dst.as_str()),
+            Some("tcp/10.0.0.1:7447")
+        );
+        assert!(matches!(
+            named.begin_named(&host("tcp/router.example:9")),
+            Err(LinkOpenError::Refused)
+        ));
+        assert!(matches!(
+            named.begin_named(&host("udp/router.example:7447")),
+            Err(LinkOpenError::Unsupported)
+        ));
+        assert!(matches!(
+            named
+                .with_tls(ChannelDial)
+                .begin_named(&host("tls/router.example:7447")),
+            Err(LinkOpenError::Unsupported)
+        ));
+
+        let plain = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
+        assert!(!<IpLinks<Datagrams, Dial> as SessionLinks>::RESOLVES);
+        assert!(matches!(
+            plain.begin_named(&host("tcp/router.example:7447")),
+            Err(LinkOpenError::Unsupported)
+        ));
     }
 
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]

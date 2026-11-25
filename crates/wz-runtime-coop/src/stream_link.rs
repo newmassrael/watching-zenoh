@@ -195,6 +195,26 @@ pub trait StreamDial {
         self.dial(to)
     }
 
+    /// Whether the dial reaches a host by its name ([`Self::dial_named`]): `false`, the default,
+    /// for a platform with no resolver.
+    const RESOLVES: bool = false;
+
+    /// Begin a connection to the host `name` without waiting for it, as [`Self::dial_started`]
+    /// begins one to an address: the platform's resolver is asked for the host's addresses, the
+    /// first one a connection is begun to is the stream's, and the stream passes to the next
+    /// itself when the other end refuses the one it is being made to, so
+    /// [`StreamSocket::connected`] answers one refusal, once none is left. The addresses not
+    /// tried are the stream's only while it is being made. [`LinkOpenError::Refused`] when the
+    /// name answers no address a connection begins to, as a later dial may not find. The default,
+    /// a dial with no resolver ([`Self::RESOLVES`]), refuses it as a protocol it does not carry.
+    fn dial_named(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+    ) -> Result<Self::Stream, LinkOpenError> {
+        let _ = name;
+        Err(LinkOpenError::Unsupported)
+    }
+
     /// Whether the dial opens streams at all. A stack asks before it claims any buffer, so a
     /// protocol it does not carry is [`LinkOpenError::Unsupported`] (permanent) and never
     /// [`LinkOpenError::Exhausted`] (retried) when its tables happen to be full.

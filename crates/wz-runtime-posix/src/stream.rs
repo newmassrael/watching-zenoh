@@ -7,7 +7,9 @@
 //! ([`StreamSocket`]), and [`PosixTcpDial`] the dial a stack opens it with ([`StreamDial`]); the
 //! session's link over it is that module's `StreamDriver`. [`PosixTcpListener`] is the other
 //! direction ([`StreamListen`]): the port a node accepts connections on, yielding the same
-//! socket. Nothing here allocates: the socket is a file descriptor and its two ends.
+//! socket. Nothing here allocates: the socket is a file descriptor and its two ends, and the
+//! resolver's list of a named host's addresses (`net::Resolved`) is the C library's, held only
+//! while the connection to that host is made.
 //!
 //! The socket blocks on a write and never on a read: a write returns once the kernel has taken
 //! every byte (a length and its batch go out in one `sendmsg`), and a read is `MSG_DONTWAIT`, the
@@ -18,6 +20,7 @@
 use core::ffi::c_int;
 use core::net::SocketAddr;
 
+use wz_runtime_coop::locator_text::NamedHost;
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 // Compiled where the runtime declares the heap profile's seams (`with_heap_link_seams!`), as every
 // implementation of them below is.
@@ -31,7 +34,7 @@ use wz_runtime_coop::ClockSource;
 use crate::net::set_no_sigpipe;
 use crate::net::{
     call_at, errno, family_of, name_of, open_socket, poll_writable, set_close_on_exec, set_flag,
-    set_nonblocking, PosixNetError,
+    set_nonblocking, PosixNetError, Resolved,
 };
 
 /// One connected TCP socket on the host, of the family of the address it connected to.
@@ -39,6 +42,10 @@ pub struct PosixTcpSocket {
     fd: c_int,
     local: SocketAddr,
     peer: SocketAddr,
+    /// The addresses of a named host a connection being made passes to when the one it is made
+    /// to is refused ([`StreamSocket::connected`]): none once it is made, and none for a dial of
+    /// an address or an accepted connection.
+    then: Resolved,
 }
 
 /// A TCP socket of `at`'s family: the descriptor, or the `errno` of the refusal.
@@ -77,6 +84,7 @@ impl PosixTcpSocket {
             fd,
             local: to,
             peer: to,
+            then: Resolved::NONE,
         };
         set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).map_err(PosixNetError::NoDelay)?;
         call_at(fd, to, libc::connect).map_err(PosixNetError::Connect)?;
@@ -97,6 +105,8 @@ impl PosixTcpSocket {
     /// Begin a connection to `to` and return without waiting for it: the socket is non-blocking
     /// until [`StreamSocket::connected`] finds the connection made, and blocking from then on, as
     /// a socket [`Self::connect`] made is. A refusal the kernel knows at once is the error here.
+    /// Out of line: a dial of an address and each address of a named host's dial begin here.
+    #[inline(never)]
     pub fn connect_started(to: SocketAddr) -> Result<Self, PosixNetError> {
         let fd = stream_socket(&to)?;
         // Owned from here, so an early return closes it.
@@ -104,6 +114,7 @@ impl PosixTcpSocket {
             fd,
             local: to,
             peer: to,
+            then: Resolved::NONE,
         };
         set_flag(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY).map_err(PosixNetError::NoDelay)?;
         set_nonblocking(fd, true).map_err(PosixNetError::NonBlocking)?;
@@ -134,6 +145,47 @@ impl PosixTcpSocket {
         }
         Ok(error)
     }
+
+    /// Begin a connection to the host `name` at the first of the addresses the host's resolver
+    /// answers for it that a connection begins to, as zenoh-pico's open tries each in turn
+    /// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `it = it->ai_next`); `None`
+    /// when none does.
+    fn connect_named(name: &NamedHost<'_>) -> Option<Self> {
+        Self::connect_next(Resolved::of(name), name.port())
+    }
+
+    /// Begin a connection to the first of `then`'s addresses, at `port`, that one begins to
+    /// ([`Self::connect_started`]), passing over each the kernel refuses at once: the stream,
+    /// holding the addresses after it to pass to when this one is refused later, or `None` once
+    /// none is left, the list let go of. Out of line: the dial of a host and the pass from a
+    /// refused address share this one walk.
+    #[inline(never)]
+    fn connect_next(mut then: Resolved, port: u16) -> Option<Self> {
+        while let Some(at) = then.next_at(port) {
+            if let Ok(mut stream) = Self::connect_started(at) {
+                stream.then = then;
+                return Some(stream);
+            }
+        }
+        None
+    }
+
+    /// The connection being made was refused (`refused`): one to the host's next address begun
+    /// in its place and under way (`Ok(false)`), or the refusal once none is left, which a dial
+    /// of an address always is.
+    fn pass_on(&mut self, refused: PosixNetError) -> Result<bool, PosixNetError> {
+        let then = core::mem::replace(&mut self.then, Resolved::NONE);
+        // While a connection is being made its peer is the address it is made to, at the port
+        // of every address of the host.
+        match Self::connect_next(then, self.peer.port()) {
+            Some(next) => {
+                // The refused descriptor is closed as the next is put in its place.
+                *self = next;
+                Ok(false)
+            }
+            None => Err(refused),
+        }
+    }
 }
 
 /// The host's TCP connect as a stack's dial: the stream a `tcp/` link runs over is a plain
@@ -150,6 +202,14 @@ impl StreamDial for PosixTcpDial {
 
     fn dial_started(&self, to: SocketAddr) -> Result<PosixTcpSocket, LinkOpenError> {
         PosixTcpSocket::connect_started(to).map_err(open_refused)
+    }
+
+    const RESOLVES: bool = true;
+
+    // A name that answers no address, or one refused at once at each, is the network's answer,
+    // which a later dial may not meet.
+    fn dial_named(&self, name: &NamedHost<'_>) -> Result<PosixTcpSocket, LinkOpenError> {
+        PosixTcpSocket::connect_named(name).ok_or(LinkOpenError::Refused)
     }
 
     wz_runtime_coop::with_heap_link_seams! {
@@ -256,6 +316,7 @@ impl StreamListen for PosixTcpListener {
             fd,
             local: self.local,
             peer: self.local,
+            then: Resolved::NONE,
         };
         // A connection reset between the accept and these calls is one that gave up: nothing to
         // take, and the close above is the answer its peer already has. The accepted socket is
@@ -328,14 +389,17 @@ impl StreamSocket for PosixTcpSocket {
     }
 
     // A connect under way reports room once it ends, made or refused, and `SO_ERROR` says which.
+    // A refused one passes to the named host's next address while one is left.
     fn connected(&mut self) -> Result<bool, PosixNetError> {
         if !poll_writable(self.fd, 0) {
             return Ok(false);
         }
         match self.connect_error()? {
             0 => {}
-            refused => return Err(PosixNetError::Connect(refused)),
+            refused => return self.pass_on(PosixNetError::Connect(refused)),
         }
+        // Made: the addresses not tried are let go of.
+        self.then = Resolved::NONE;
         set_nonblocking(self.fd, false).map_err(PosixNetError::NonBlocking)?;
         self.learn_ends()?;
         Ok(true)
@@ -804,6 +868,112 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The resolver's answers over `raws`, linked in their order as a resolver links them: a list
+    /// the test holds, which the walk frees none of. The list's own buffer is not moved after it
+    /// is linked, so each answer's link stays good while the returned value lives.
+    fn answers(raws: &[crate::net::RawAddr]) -> std::vec::Vec<libc::addrinfo> {
+        let mut list: std::vec::Vec<libc::addrinfo> = raws
+            .iter()
+            .map(|raw| {
+                // SAFETY: an all-zero `addrinfo` is a valid value of it: null pointers.
+                let mut answer: libc::addrinfo = unsafe { core::mem::zeroed() };
+                answer.ai_addr = raw.as_ptr().cast_mut();
+                answer.ai_addrlen = raw.size();
+                answer
+            })
+            .collect();
+        let first = list.as_mut_ptr();
+        for next in 1..list.len() {
+            // SAFETY: `next - 1` and `next` are answers of the list, whose buffer is live.
+            unsafe { (*first.add(next - 1)).ai_next = first.add(next) };
+        }
+        list
+    }
+
+    /// Poll `stream` until its connection is made or refused, for at most five seconds.
+    fn made_or_refused(stream: &mut PosixTcpSocket) -> Result<(), PosixNetError> {
+        use std::time::{Duration, Instant};
+        let until = Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream.connected() {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    assert!(Instant::now() < until, "the connect never ended");
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(refused) => return Err(refused),
+            }
+        }
+    }
+
+    /// A dial of a host whose first address refuses the connection passes to the next address
+    /// itself, at once or once the refusal comes, and is made there: the stream answers no
+    /// refusal and its peer is the second address. The first is the IPv6 loopback at the port the
+    /// IPv4 listener holds, where nothing listens (or where a host without IPv6 refuses at once).
+    /// Turned red by a refused address answered as the dial's refusal while another is left
+    /// (`pass_on`), or by a walk that stops at the first address.
+    #[test]
+    fn a_named_dial_refused_at_one_address_is_made_at_the_next() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let port = listener.local_addr().expect("its port").port();
+        let raws = [
+            crate::net::RawAddr::of(SocketAddr::from((Ipv6Addr::LOCALHOST, port))),
+            crate::net::RawAddr::of(at(port)),
+        ];
+        let list = answers(&raws);
+        // SAFETY: the answers and the addresses they name outlive the stream, dropped first.
+        let then = unsafe { Resolved::walking(list.as_ptr()) };
+        let mut near = PosixTcpSocket::connect_next(then, port).expect("a connect begun");
+        made_or_refused(&mut near).expect("the refused address passes to the next");
+        assert_eq!(ip_ends(&near).1, at(port), "made at the second address");
+        let (far, _) = listener.accept().expect("the far end");
+        assert_eq!(ip_ends(&near).0, far.peer_addr().unwrap());
+    }
+
+    /// A dial of a host every address of which refuses the connection answers one refusal, at
+    /// the last address, each tried in turn; a list with no address a connection begins to is no
+    /// stream. Turned red by the refusal of the first address answered while the second is left,
+    /// or by a dial begun with no address.
+    #[test]
+    fn a_named_dial_whose_every_address_refuses_answers_one_refusal() {
+        let held = RefusingPort::hold();
+        let raws = [
+            crate::net::RawAddr::of(SocketAddr::from((Ipv6Addr::LOCALHOST, held.port))),
+            crate::net::RawAddr::of(at(held.port)),
+        ];
+        let list = answers(&raws);
+        // SAFETY: the answers and the addresses they name outlive the stream, dropped first.
+        let then = unsafe { Resolved::walking(list.as_ptr()) };
+        // Each refused at once leaves no stream, which is the dial's one refusal too.
+        if let Some(mut near) = PosixTcpSocket::connect_next(then, held.port) {
+            match made_or_refused(&mut near) {
+                Err(PosixNetError::Connect(e)) => assert_eq!(e, libc::ECONNREFUSED),
+                other => panic!("a host nobody listens at: {other:?}"),
+            }
+            assert_eq!(
+                ip_ends(&near).1,
+                at(held.port),
+                "refused at the last address"
+            );
+        }
+        assert!(PosixTcpSocket::connect_next(Resolved::NONE, 7447).is_none());
+    }
+
+    /// A dial of `localhost` through the host's resolver is made to a listener on the IPv4
+    /// loopback, whichever loopback the resolver answers first. Turned red by a name the dial
+    /// refuses, or one connected anywhere but the loopback.
+    #[test]
+    fn a_dial_of_localhost_is_made_to_a_loopback_listener() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
+        let port = listener.local_addr().expect("its port").port();
+        let text = std::format!("tcp/localhost:{port}");
+        let name = crate::resolve::named(&text);
+        let mut near = PosixTcpDial.dial_named(&name).expect("a connect begun");
+        made_or_refused(&mut near).expect("localhost reaches the listener");
+        assert_eq!(ip_ends(&near).1, at(port));
+        listener.accept().expect("the far end");
     }
 
     #[test]

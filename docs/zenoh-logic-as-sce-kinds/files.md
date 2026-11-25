@@ -542,6 +542,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/multicast.rs` | S9 | |
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
 | `crates/wz-runtime-posix/src/raweth.rs` | S9 | |
+| `crates/wz-runtime-posix/src/resolve.rs` | S9 | |
 | `crates/wz-runtime-posix/src/scouting.rs` | S9 | |
 | `crates/wz-runtime-posix/src/serial.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |

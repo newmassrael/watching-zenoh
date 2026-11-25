@@ -7,7 +7,8 @@
 //! ([`StreamSocket`]), and [`WindowsTcpDial`] the dial a stack opens it with ([`StreamDial`]);
 //! [`WindowsTcpListener`] is the other direction ([`StreamListen`]), the port a node accepts
 //! connections on, yielding the same socket. Nothing here allocates: the socket is a handle and
-//! its two ends.
+//! its two ends, and the resolver's list of a named host's addresses (`Resolved`) is Winsock's,
+//! held only while the connection to that host is made.
 //!
 //! The socket is non-blocking from its connect on, so a write does not wait
 //! ([`StreamSocket::WRITES_NOW`]: one `WSASend`, and `WSAEWOULDBLOCK` is nothing taken), which
@@ -23,13 +24,14 @@ use core::ffi::c_int;
 use core::net::SocketAddr;
 
 use windows_sys::Win32::Networking::WinSock as ws;
+use wz_runtime_coop::locator_text::NamedHost;
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkProto};
 use wz_runtime_coop::stream_link::{StreamDial, StreamEnds, StreamListen, StreamSocket};
 use wz_runtime_coop::ClockSource;
 
 use super::{
     close, keep_from_children, last_error, name_of, open_socket, poll_readable, poll_writable,
-    set_flag, set_nonblocking, RawAddr, WindowsNetError,
+    set_flag, set_nonblocking, RawAddr, Resolved, WindowsNetError,
 };
 
 /// One connected TCP socket on the host, of the family of the address it connected to.
@@ -37,6 +39,10 @@ pub struct WindowsTcpSocket {
     socket: ws::SOCKET,
     local: SocketAddr,
     peer: SocketAddr,
+    /// The addresses of a named host a connection being made passes to when the one it is made
+    /// to is refused ([`StreamSocket::connected`]): none once it is made, and none for a dial of
+    /// an address or an accepted connection.
+    then: Resolved,
 }
 
 /// A failed open of a stream socket as the stack's refusal of the link: a family the system has
@@ -61,6 +67,7 @@ impl WindowsTcpSocket {
             socket,
             local: to,
             peer: to,
+            then: Resolved::NONE,
         };
         set_flag(socket, ws::IPPROTO_TCP, ws::TCP_NODELAY).map_err(WindowsNetError::NoDelay)?;
         let peer = RawAddr::of(to);
@@ -79,7 +86,9 @@ impl WindowsTcpSocket {
     /// Begin a connection to `to` and return without waiting for it: the socket is non-blocking
     /// from here on, as a socket [`Self::connect`] made is once connected, and
     /// [`StreamSocket::connected`] tells when the connection is made. A refusal Winsock knows at
-    /// once is the error here.
+    /// once is the error here. Out of line: a dial of an address and each address of a named
+    /// host's dial begin here.
+    #[inline(never)]
     pub fn connect_started(to: SocketAddr) -> Result<Self, WindowsNetError> {
         let socket = open_socket(&to, ws::SOCK_STREAM, ws::IPPROTO_TCP)?;
         // Owned from here, so an early return closes it.
@@ -87,6 +96,7 @@ impl WindowsTcpSocket {
             socket,
             local: to,
             peer: to,
+            then: Resolved::NONE,
         };
         set_flag(socket, ws::IPPROTO_TCP, ws::TCP_NODELAY).map_err(WindowsNetError::NoDelay)?;
         set_nonblocking(socket, true).map_err(WindowsNetError::NonBlocking)?;
@@ -148,6 +158,46 @@ impl WindowsTcpSocket {
         }
         Ok(error)
     }
+
+    /// Begin a connection to the host `name` at the first of the addresses Winsock's resolver
+    /// answers for it that a connection begins to, as zenoh-pico's open tries each in turn
+    /// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @ `it = it->ai_next`); `None`
+    /// when none does.
+    fn connect_named(name: &NamedHost<'_>) -> Option<Self> {
+        Self::connect_next(Resolved::of(name), name.port())
+    }
+
+    /// Begin a connection to the first of `then`'s addresses, at `port`, that one begins to
+    /// ([`Self::connect_started`]), passing over each Winsock refuses at once: the stream,
+    /// holding the addresses after it to pass to when this one is refused later, or `None` once
+    /// none is left, the list let go of. Out of line, as the POSIX half's is.
+    #[inline(never)]
+    fn connect_next(mut then: Resolved, port: u16) -> Option<Self> {
+        while let Some(at) = then.next_at(port) {
+            if let Ok(mut stream) = Self::connect_started(at) {
+                stream.then = then;
+                return Some(stream);
+            }
+        }
+        None
+    }
+
+    /// The connection being made was refused (`refused`): one to the host's next address begun
+    /// in its place and under way (`Ok(false)`), or the refusal once none is left, which a dial
+    /// of an address always is.
+    fn pass_on(&mut self, refused: WindowsNetError) -> Result<bool, WindowsNetError> {
+        let then = core::mem::replace(&mut self.then, Resolved::NONE);
+        // While a connection is being made its peer is the address it is made to, at the port
+        // of every address of the host.
+        match Self::connect_next(then, self.peer.port()) {
+            Some(next) => {
+                // The refused socket is closed as the next is put in its place.
+                *self = next;
+                Ok(false)
+            }
+            None => Err(refused),
+        }
+    }
 }
 
 /// The host's TCP connect as a stack's dial: the stream a `tcp/` link runs over is a plain
@@ -164,6 +214,14 @@ impl StreamDial for WindowsTcpDial {
 
     fn dial_started(&self, to: SocketAddr) -> Result<WindowsTcpSocket, LinkOpenError> {
         WindowsTcpSocket::connect_started(to).map_err(open_refused)
+    }
+
+    const RESOLVES: bool = true;
+
+    // A name that answers no address, or one refused at once at each, is the network's answer,
+    // which a later dial may not meet.
+    fn dial_named(&self, name: &NamedHost<'_>) -> Result<WindowsTcpSocket, LinkOpenError> {
+        WindowsTcpSocket::connect_named(name).ok_or(LinkOpenError::Refused)
     }
 
     wz_runtime_coop::with_heap_link_seams! {
@@ -270,6 +328,7 @@ impl StreamListen for WindowsTcpListener {
             socket,
             local: self.local,
             peer: self.local,
+            then: Resolved::NONE,
         };
         // A connection reset between the accept and these calls is one that gave up: nothing to
         // take, and the close above is the answer its peer already has. An accepted socket
@@ -356,9 +415,10 @@ impl StreamSocket for WindowsTcpSocket {
 
     fn connected(&mut self) -> Result<bool, WindowsNetError> {
         match self.connect_ended() {
+            // A refused one passes to the named host's next address while one is left.
             (_, true) => {
                 let error = self.connect_error()?;
-                Err(WindowsNetError::Connect(if error == 0 {
+                self.pass_on(WindowsNetError::Connect(if error == 0 {
                     ws::WSAECONNREFUSED
                 } else {
                     error
@@ -366,6 +426,8 @@ impl StreamSocket for WindowsTcpSocket {
             }
             (false, false) => Ok(false),
             (true, false) => {
+                // Made: the addresses not tried are let go of.
+                self.then = Resolved::NONE;
                 self.local =
                     name_of(self.socket, ws::getsockname).map_err(WindowsNetError::SockName)?;
                 self.peer =

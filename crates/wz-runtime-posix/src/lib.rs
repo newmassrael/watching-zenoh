@@ -185,10 +185,10 @@ pub mod net;
 /// Linux.
 #[cfg(all(feature = "raweth", not(feature = "session-slot")))]
 pub mod raweth;
-// The host's ttys as the lines of the cooperative engine's serial links, on Linux and Android
-// (documented from inside, so its links resolve in the module).
 // A host name as the host's resolver is handed it, for `net` and `windows`.
 mod resolve;
+// The host's ttys as the lines of the cooperative engine's serial links, on Linux and Android
+// (documented from inside, so its links resolve in the module).
 #[cfg(feature = "serial")]
 pub mod serial;
 #[cfg(feature = "session-slot")]
