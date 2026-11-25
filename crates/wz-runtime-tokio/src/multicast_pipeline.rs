@@ -28,6 +28,15 @@
 //! when the link goes. A push while nothing is attached is dropped, as
 //! upstream drops one while the transport has no link; a group face that
 //! rejoins attaches a new pipeline to the same producer.
+//!
+//! A push may wait for room, so an owner that pushes onto the group under a
+//! lock of its own (a node's registry, which announces its declarations on
+//! every group it joined) gives the producer a deferral
+//! ([`MulticastTxProducer::install_send_deferral`]): a push its thread makes
+//! while it holds that lock is queued in front of the pipeline, in the order
+//! it was made, and pushed by the thread once it has let go of the lock; a push
+//! of any other thread leaves after what is queued
+//! ([`wz_session_core::send_deferral`], the structure a unicast session keeps).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
@@ -35,6 +44,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use wz_session_core::multicast_params::MulticastParams;
 use wz_session_core::multicast_tx::MulticastTxItem;
 use wz_session_core::qos::Priority;
+use wz_session_core::send_deferral::{DeferredSender, DeferredSends, SendDeferral};
 use wz_session_core::sn::{self, MulticastTxConduits};
 
 use crate::multicast_glue::{MulticastDatagramSender, MulticastLinkDriver, MulticastStatsRecorder};
@@ -198,6 +208,10 @@ struct Shared {
     /// lock, which is what lets the window's close flush every conduit with nothing left open
     /// behind it (see [`MulticastTxProducer::batch_stop`]).
     window_open: std::sync::atomic::AtomicBool,
+    /// The pushes the group's owner deferred, and the deferral that decides which
+    /// ([`MulticastTxProducer::install_send_deferral`]): the producer's, not the link's, so what
+    /// was deferred while the group had no link is pushed onto the link it has at the flush.
+    deferred: DeferredSends<crate::runtime_impl::TokioRuntime, MulticastTxItem>,
 }
 
 /// What a group's loop runs right after it queues a JOIN, on the loop's own thread
@@ -252,6 +266,7 @@ impl MulticastTxProducer {
                 join_now: tokio::sync::Notify::new(),
                 after_join: RwLock::new(None),
                 window_open: std::sync::atomic::AtomicBool::new(false),
+                deferred: DeferredSends::new(),
             }),
         }
     }
@@ -366,6 +381,11 @@ impl MulticastTxProducer {
     /// conduit for room within the message's deadline, and only then mint and
     /// enqueue. `Ok(Congested)` is a message that found no room, which a
     /// multicast transport drops and counts, blocking or not.
+    ///
+    /// Under an owner's deferral ([`Self::install_send_deferral`]), a push of a thread that
+    /// defers is queued in front of the pipeline and answered `Ok(Pushed)`, asking the link for
+    /// nothing, so the thread waits for no room; a push of a thread that does not defer is pushed
+    /// after what is queued.
     #[cfg(any(
         feature = "codec-push",
         feature = "codec-response",
@@ -376,22 +396,31 @@ impl MulticastTxProducer {
         &self,
         item: MulticastTxItem,
     ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
-        // Read the link, clone the pipeline out, and let the read go before
-        // pushing, as upstream's schedule does: a producer waiting for room
-        // must not hold off the loop attaching or detaching.
-        let link = self
-            .shared
-            .link
-            .read()
-            .expect("multicast producer poisoned")
-            .clone();
-        match link {
-            Some(link) => link.push(item, &self.shared.window_open),
-            None => {
-                log::trace!("multicast message dropped: the group has no link");
-                Err(MulticastTxRefused::Unlinked)
-            }
-        }
+        self.shared.push(item)
+    }
+
+    /// Give the group its owner's deferral, in place of any it had: from now on a push the
+    /// calling thread makes while the deferral says it defers is queued, in the order it was
+    /// made, and pushed by that thread's [`Self::flush_deferred_sends`]; a push of a thread that
+    /// does not defer leaves after whatever is queued ([`wz_session_core::send_deferral`]).
+    /// Installed by an owner that pushes onto the group under a lock of its own, before it
+    /// pushes anything under that lock. Every clone of the producer shares it.
+    pub fn install_send_deferral(&self, deferral: Box<dyn SendDeferral>) {
+        self.shared.deferred.install(deferral);
+    }
+
+    /// Push what the calling thread's deferral queued on the group, in the order it was queued,
+    /// each waiting for room as its push would have: the flush the owner owes once the thread
+    /// holds none of the locks its deferral stands for ([`SendDeferral::deferred`]).
+    pub fn flush_deferred_sends(&self) {
+        DeferredSender::flush_deferred_sends(&*self.shared);
+    }
+
+    /// The group as a sender its owner may owe a flush to, held weakly: an owner that holds it
+    /// keeps no group alive, and a group gone meanwhile is owed nothing.
+    pub fn deferred_sender(&self) -> std::sync::Weak<dyn DeferredSender> {
+        let shared: Arc<dyn DeferredSender> = self.shared.clone();
+        Arc::downgrade(&shared)
     }
 
     /// No TX body codec: [`MulticastTxItem`] is uninhabited, so nothing can be
@@ -437,6 +466,96 @@ impl MulticastTxProducer {
             drop(slot);
             self.shared.linked.send_replace(false);
         }
+    }
+}
+
+/// The producer's own sends, one implementation for every clone of the handle.
+impl Shared {
+    /// [`MulticastTxProducer::push`].
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    fn push(
+        &self,
+        item: MulticastTxItem,
+    ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
+        let sends = &self.deferred;
+        if !sends.engaged() {
+            return self.push_now(item);
+        }
+        if sends.defers_here() {
+            sends.defer(item);
+            return Ok(wz_session_core::tx_deadline::PushOutcome::Pushed);
+        }
+        sends.after_queued(
+            |deferred| {
+                let _ = self.push_now(deferred);
+            },
+            || self.push_now(item),
+        )
+    }
+
+    /// Push `item` onto the attached pipeline now, on the caller's thread.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        any(feature = "liveliness-token", feature = "declare-subscriber")
+    ))]
+    fn push_now(
+        &self,
+        item: MulticastTxItem,
+    ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
+        // Read the link, clone the pipeline out, and let the read go before
+        // pushing, as upstream's schedule does: a producer waiting for room
+        // must not hold off the loop attaching or detaching.
+        let link = self
+            .link
+            .read()
+            .expect("multicast producer poisoned")
+            .clone();
+        match link {
+            Some(link) => link.push(item, &self.window_open),
+            None => {
+                log::trace!("multicast message dropped: the group has no link");
+                Err(MulticastTxRefused::Unlinked)
+            }
+        }
+    }
+}
+
+/// A group is a sender its owner may owe a flush to, beside the unicast sessions it defers sends
+/// on (`wz_session_core::send_deferral`).
+///
+/// A deferred push's outcome reaches no caller, and none needs it. A group closes nothing for
+/// want of room: a push that finds none is dropped and counted, blocking or not, and is counted
+/// here, by the push the flush makes, as at the call (`Link::push` hands the plane its tally).
+/// What a push may answer its sender beside `Ok` is the message's own (its body refused, its
+/// namespaced key past the codec) or the pico profile's drop behind another push, and the one
+/// owner that defers pushes, a node's registry, discards every answer of the pushes it makes
+/// under its lock: what it tells a group is best effort, as a group's put is.
+impl DeferredSender for Shared {
+    fn flush_deferred_sends(&self) {
+        #[cfg(any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        ))]
+        self.deferred.flush(|deferred| {
+            let _ = self.push_now(deferred);
+        });
+        // No TX body codec: nothing can be pushed, so nothing was deferred.
+        #[cfg(not(any(
+            feature = "codec-push",
+            feature = "codec-response",
+            feature = "codec-response-final",
+            any(feature = "liveliness-token", feature = "declare-subscriber")
+        )))]
+        self.deferred.flush(|deferred| match deferred {});
     }
 }
 
@@ -1085,6 +1204,8 @@ impl MulticastTxPlane {
 /// transport counts are the drive loop's, and there is none.
 pub struct MulticastTxTap {
     lanes: crate::writer_queue::OutboundRx,
+    /// The producers' side of the same lanes, for [`Self::hold_full`] to promise their room away.
+    room: crate::writer_queue::OutboundTx,
     /// The stages' records of what they queued, consumed as the tap reads, as
     /// a transmit task's reports consume them.
     stages: Arc<Stages>,
@@ -1127,6 +1248,7 @@ impl MulticastTxTap {
         ));
         let mask = sn::mask_from_res(params.seq_num_res);
         let stages = new_stages(mask);
+        let room = lanes.clone();
         producer.attach(Arc::new(Link {
             #[cfg(any(
                 feature = "codec-push",
@@ -1164,6 +1286,7 @@ impl MulticastTxTap {
             producer,
             Self {
                 lanes: rx,
+                room,
                 stages,
                 unsettled: [0; Priority::NUM],
             },
@@ -1206,6 +1329,30 @@ impl MulticastTxTap {
         }
     }
 
+    /// Hold `band`'s lane full until the returned hold is dropped, as a transmit task that has
+    /// stopped writing holds it: all its room is promised away, and nothing is queued or refused
+    /// for it, so the lane is not marked congested and a push that asks it for room waits for
+    /// room, up to the push's own deadline, as it waits on a link whose writer has not emptied
+    /// it. Dropping the hold gives the room back and wakes whoever waits for it.
+    pub fn hold_full(&self, band: Priority) -> LaneHeldFull {
+        let mut promised = Vec::new();
+        while let Ok(permit) = self.room.try_reserve(band) {
+            promised.push(permit);
+        }
+        LaneHeldFull {
+            _promised: promised,
+        }
+    }
+
+    /// Return once a push waits for room on this tap's lanes (a lane [`Self::hold_full`] holds,
+    /// say). It reads the lanes' count of waiting senders, which a sender raises under the lanes'
+    /// lock before its wait lets the lock go, until the count is raised: no clock is read.
+    pub fn await_a_waiting_push(&self) {
+        while self.lanes.room_waiters() == 0 {
+            std::thread::yield_now();
+        }
+    }
+
     /// R3264 — the holder has written `datagram` out, as a transmit task does:
     /// its slot goes home through the completion edge, counted as written.
     pub fn written(&self, mut datagram: crate::writer_queue::WireFrame) {
@@ -1219,6 +1366,13 @@ impl MulticastTxTap {
     pub fn tx_pool_stats(&self) -> Option<(crate::link_tx_pool::TxPoolStats, usize, usize)> {
         self.lanes.tx_pool_stats()
     }
+}
+
+/// A lane of a [`MulticastTxTap`] held full ([`MulticastTxTap::hold_full`]) until this is
+/// dropped.
+#[must_use = "a lane is held full only while the hold lives"]
+pub struct LaneHeldFull {
+    _promised: Vec<crate::writer_queue::Permit>,
 }
 
 impl Drop for MulticastTxPlane {
@@ -1855,6 +2009,174 @@ mod tests {
             (Priority::DEFAULT, Priority::Control),
             "the control datagram was queued last and leaves last"
         );
+    }
+
+    /// A deferral the test turns on and off, counting the pushes it was told were deferred.
+    struct TestDeferral {
+        defers: Arc<std::sync::atomic::AtomicBool>,
+        deferred: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl SendDeferral for TestDeferral {
+        fn defers(&self) -> bool {
+            self.defers.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn deferred(&self) {
+            self.deferred
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// Install a [`TestDeferral`] on `producer`, deferring from now on, and hand back its two
+    /// handles: whether it defers, and how many pushes it was told were deferred.
+    fn deferring(
+        producer: &MulticastTxProducer,
+    ) -> (
+        Arc<std::sync::atomic::AtomicBool>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let defers = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let deferred = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        producer.install_send_deferral(Box::new(TestDeferral {
+            defers: Arc::clone(&defers),
+            deferred: Arc::clone(&deferred),
+        }));
+        (defers, deferred)
+    }
+
+    /// The `ResponseFinal` for `request_id`, on the Data band, which may not be dropped.
+    fn final_of(request_id: wz_session_core::wire_id::RequestId) -> MulticastTxItem {
+        MulticastTxItem::ResponseFinal {
+            request_id,
+            qos: QosLevel::from_parts(Priority::DEFAULT, CongestionControl::Block, false),
+        }
+    }
+
+    /// The request id each `ResponseFinal` the tap holds ends, in the order the tap gives them.
+    fn finals_read(tap: &mut MulticastTxTap) -> Vec<wz_session_core::wire_id::RequestId> {
+        let mut finals = Vec::new();
+        while let Some(datagram) = tap.try_next() {
+            let wz_session_core::inbound::InboundFrame::Frame { payload, .. } =
+                wz_session_core::inbound::parse_inbound(&datagram).expect("a frame")
+            else {
+                panic!("the datagram is a T_MID_FRAME");
+            };
+            for message in wz_session_core::network_message::parse_frame_payload(&payload)
+                .expect("its messages")
+            {
+                if let wz_session_core::network_message::NetworkMessage::ResponseFinal(done) =
+                    message
+                {
+                    finals.push(done.request_id);
+                }
+            }
+        }
+        finals
+    }
+
+    /// A push made while its thread defers puts nothing on the pipeline, so it asks the lane for
+    /// no room and its thread waits for none however full the lane is; it is pushed by the flush
+    /// the thread owes once it defers no more.
+    #[test]
+    fn a_push_its_thread_defers_reaches_no_lane_until_the_flush() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        let (defers, deferred) = deferring(&producer);
+        assert_eq!(
+            producer.push(final_of(1)),
+            Ok(PushOutcome::Pushed),
+            "a deferred push is accepted"
+        );
+        assert!(
+            finals_read(&mut tap).is_empty(),
+            "nothing reached the lanes"
+        );
+        assert_eq!(
+            deferred.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the owner is told the thread owes a flush"
+        );
+
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        producer.flush_deferred_sends();
+        assert_eq!(finals_read(&mut tap), [1], "the flush pushed it");
+        producer.flush_deferred_sends();
+        assert!(
+            finals_read(&mut tap).is_empty(),
+            "and a second finds nothing"
+        );
+    }
+
+    /// A push of a thread that does not defer leaves after what is queued: a message decided after
+    /// one still deferred can never reach the group first. The flush owed for the deferred one
+    /// then finds nothing left.
+    #[test]
+    fn a_push_made_after_a_deferred_one_leaves_after_it() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        let (defers, _) = deferring(&producer);
+        assert_eq!(producer.push(final_of(1)), Ok(PushOutcome::Pushed));
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(producer.push(final_of(2)), Ok(PushOutcome::Pushed));
+        assert_eq!(
+            finals_read(&mut tap),
+            [1, 2],
+            "the deferred push leaves first, the later one after it"
+        );
+        producer.flush_deferred_sends();
+        assert!(
+            finals_read(&mut tap).is_empty(),
+            "the owed flush finds nothing left"
+        );
+    }
+
+    /// The flush of a deferred push waits for room on a full lane as the push would have, under
+    /// the lock that orders the group's queued pushes: a lock held across a wait for an event,
+    /// under which the lock-order check of a debug build lets a thread wait for room (under any
+    /// other lock it refuses the wait). The lane is held full until the flush waits on it, so the
+    /// order of the two threads is fixed and no clock is read.
+    #[test]
+    fn a_flush_waits_for_room_on_a_full_lane_and_pushes_once_there_is_some() {
+        let mut long = params(false);
+        long.tx_queue.wait_before_close_us = 3_600_000_000;
+        let (producer, mut tap) = MulticastTxTap::attach(&long);
+        let (defers, _) = deferring(&producer);
+        assert_eq!(producer.push(final_of(1)), Ok(PushOutcome::Pushed));
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        let full = tap.hold_full(Priority::DEFAULT);
+        let flushing = producer.clone();
+        let flushed = std::thread::spawn(move || flushing.flush_deferred_sends());
+        tap.await_a_waiting_push();
+        assert!(finals_read(&mut tap).is_empty(), "nothing was pushed yet");
+        drop(full);
+        flushed
+            .join()
+            .expect("the flush waited for room, holding no lock a wait is refused under");
+        assert_eq!(
+            finals_read(&mut tap),
+            [1],
+            "the flush pushed it once the lane was let go"
+        );
+    }
+
+    /// A lane the tap holds full holds a push that may not be dropped until the hold goes, and the
+    /// tap reads that the push waits without reading a clock: what a test of a sender held by a
+    /// full group stands on.
+    #[test]
+    fn a_lane_held_full_holds_a_push_until_it_is_let_go() {
+        let mut long = params(false);
+        long.tx_queue.wait_before_close_us = 3_600_000_000;
+        let (producer, mut tap) = MulticastTxTap::attach(&long);
+        let full = tap.hold_full(Priority::DEFAULT);
+        let pushing = producer.clone();
+        let pushed = std::thread::spawn(move || pushing.push(final_of(1)));
+        tap.await_a_waiting_push();
+        assert!(finals_read(&mut tap).is_empty(), "nothing was queued yet");
+        drop(full);
+        assert_eq!(
+            pushed.join().expect("the pushing thread ends"),
+            Ok(PushOutcome::Pushed),
+            "the push found room once the lane was let go"
+        );
+        assert_eq!(finals_read(&mut tap), [1]);
     }
 
     /// Nothing attached: a push is dropped as unlinked, as upstream drops one

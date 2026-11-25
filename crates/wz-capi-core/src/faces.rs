@@ -2007,7 +2007,7 @@ impl TransportsCell {
 /// A hold of the registry's lock and this thread's mark of it, let go of together.
 ///
 /// The fields are dropped in the order they are declared, so the lock is released before either
-/// mark goes. What the thread sent its faces while it held the lock was queued on each face
+/// mark goes. What the thread sent its faces and groups while it held the lock was queued on each
 /// (`send_deferral`) and is written when `_sends` goes, last: no send waits for room under the
 /// registry's lock.
 struct InnerGuard<'a> {
@@ -3347,9 +3347,9 @@ impl SharedSession {
     /// drop made under it that reaches the session again) fails a debug build there instead of
     /// waiting on itself.
     ///
-    /// It counts the hold for the faces' sends too (`send_deferral::RegistryHold`): a face's send
-    /// made under the lock is queued on the face, and the thread writes it once it has let go of
-    /// the lock.
+    /// It counts the hold for the faces' and the groups' sends too (`send_deferral::RegistryHold`):
+    /// a send made under the lock is queued on its face or group, and the thread writes it once it
+    /// has let go of the lock.
     fn lock(&self) -> InnerGuard<'_> {
         let sends = send_deferral::RegistryHold::enter();
         let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(&self.inner).cast());
@@ -11098,7 +11098,8 @@ mod aggregation_tests {
     }
 }
 
-/// No send a face waits for room for is made under the registry's lock (`send_deferral`).
+/// No send a face or a group waits for room for is made under the registry's lock
+/// (`send_deferral`).
 #[cfg(test)]
 mod send_deferral_tests {
     use super::*;
@@ -11295,6 +11296,152 @@ mod send_deferral_tests {
             ),
             (1, 1),
             "once there is room, each face is sent the declaration"
+        );
+    }
+
+    /// The parameters of a group whose announcements wait for room as long as a test holds its
+    /// lane full: an hour, which no run reaches, in place of the milliseconds of a real group.
+    #[cfg(feature = "multicast-transport")]
+    fn patient_group() -> wz_session_core::multicast_params::MulticastParams {
+        use wz_session_core::session_init_params::TxQueueConf;
+        const AN_HOUR_US: u64 = 3_600_000_000;
+        wz_session_core::multicast_params::MulticastParams {
+            whatami: wz_session_core::WhatAmI::Peer,
+            zid: [0x21; 16].into(),
+            lease_ms: 10_000,
+            join_interval_ms: 100,
+            seq_num_res: 0x02,
+            req_id_res: 0x02,
+            batch_size: 2_048,
+            is_qos: false,
+            compression: false,
+            tx_queue: TxQueueConf {
+                wait_before_drop_us: AN_HOUR_US,
+                wait_before_close_us: AN_HOUR_US,
+                ..TxQueueConf::of_snapshot(&SessionPolicy::defaults(), &SessionLimits::BUILD)
+            },
+            link_rx: Default::default(),
+            join_rule: wz_session_core::multicast_params::GroupJoinRule::Zenoh,
+            max_sessions: None,
+            policy: SessionPolicy::defaults(),
+            limits: SessionLimits::BUILD,
+        }
+    }
+
+    /// How many declarations the group's tap holds.
+    #[cfg(feature = "multicast-transport")]
+    fn declarations_on(tap: &mut wz_runtime_tokio::multicast_glue::MulticastTxTap) -> usize {
+        let mut declarations = 0;
+        while let Some(datagram) = tap.try_next() {
+            let Ok(InboundFrame::Frame { payload, .. }) =
+                wz_session_core::inbound::parse_inbound(&datagram)
+            else {
+                continue;
+            };
+            declarations += parse_frame_payload(&payload)
+                .expect("the frame decodes")
+                .iter()
+                .filter(|message| matches!(message, NetworkMessage::Declare(_)))
+                .count();
+        }
+        declarations
+    }
+
+    /// While an announcement waits for room on a group, nothing waits for it that reads the
+    /// registry: the registry's lock is free, a face's drive reads the registry (its deadline and
+    /// its wake), and a get chooses its faces and its groups. Once the group has room the
+    /// announcement goes out, and the face is told too.
+    ///
+    /// The group's lane is held full until the test lets it go, and the test reads the registry
+    /// only once the declaring thread waits for that lane, so the order of the two threads is
+    /// fixed and no clock is read. Before the group's pushes were deferred, the declaring thread
+    /// waited for the room with the registry's lock held, and the lock was found taken.
+    #[cfg(feature = "multicast-transport")]
+    #[tokio::test]
+    async fn a_group_with_no_room_holds_up_no_reader_of_the_registry() {
+        use wz_runtime_tokio::multicast_glue::{McastGroupMembership, MulticastTxTap};
+        let free = establish_capability_pair_between(0x03, 0x04, false, false, |_| {}).await;
+        let shared = Arc::new(
+            SharedSession::new(
+                TokioTime::new(),
+                [0x11; 16].into(),
+                SessionPolicy::defaults(),
+            )
+            .expect("test host entropy"),
+        );
+        let free_face = LISTENER_FACE_STRIDE + 1;
+        assert!(shared.face_up(free_face, &free.resp_actions, false));
+        let (producer, mut tap) = MulticastTxTap::attach(&patient_group());
+        let membership = McastGroupMembership::new();
+        let group = shared.new_mcast_face_session(producer.clone(), &membership, false);
+        let revised = Arc::new(Notify::new());
+        #[cfg(feature = "resource-snapshot")]
+        let messages = Arc::new(wz_session_core::interval_meter::BuildIntervalMeter::new());
+        shared.mcast_face_up(
+            LISTENER_FACE_STRIDE + 2,
+            McastFaceParts {
+                session: &group,
+                revised: &revised,
+                membership: &membership,
+                producer: &producer,
+                endpoint: "udp/224.0.0.224:7447",
+                is_shm: false,
+                // Each subscriber declared while the group is up is announced on it.
+                declarations: crate::drive::GroupDeclarations::Subscribers,
+                #[cfg(feature = "resource-snapshot")]
+                messages: &messages,
+            },
+        );
+        assert_eq!(
+            declarations_on(&mut tap),
+            0,
+            "the group came up told of nothing"
+        );
+        let free_before = free.resp_driver.snapshot().sends.len();
+
+        let full = tap.hold_full(Priority::DEFAULT);
+        let declarer = {
+            let shared = Arc::clone(&shared);
+            let runtime = tokio::runtime::Handle::current();
+            std::thread::spawn(move || {
+                let _runtime = runtime.enter();
+                let sink: SubscriberSink = Arc::new(|| Box::new(|_sample: &dyn SampleView| {}));
+                shared.declare_subscriber("wz/group/sub".to_owned(), Locality::Any, sink)
+            })
+        };
+        tap.await_a_waiting_push();
+
+        assert!(
+            shared.inner.try_lock().is_ok(),
+            "the registry's lock is free while an announcement waits for room on a group"
+        );
+        let _ = shared.next_reply_deadline_ms(free_face);
+        assert!(
+            shared.deadline_revised(free_face).is_some(),
+            "a face's drive reads the registry"
+        );
+        let targets = shared.query_targets();
+        assert_eq!(
+            (targets.faces.len(), targets.groups.len()),
+            (1, 1),
+            "a get chooses its faces and its groups"
+        );
+        assert_eq!(
+            declarations_on(&mut tap),
+            0,
+            "the group was sent nothing yet"
+        );
+
+        drop(full);
+        let declared = declarer.join().expect("the declaring thread ends");
+        assert!(declared.is_some(), "the subscriber is declared");
+        assert_eq!(
+            (
+                declarations_on(&mut tap),
+                declarations_since(&free, free_before)
+            ),
+            (1, 1),
+            "once the group has room, the group and the face are each told of the subscriber"
         );
     }
 }

@@ -6474,7 +6474,7 @@ mod link_congestion_tests {
         deferred: Arc<std::sync::atomic::AtomicUsize>,
     }
 
-    impl wz_session_core::session_actions::SendDeferral for TestDeferral {
+    impl wz_session_core::send_deferral::SendDeferral for TestDeferral {
         fn defers(&self) -> bool {
             self.defers.load(std::sync::atomic::Ordering::SeqCst)
         }
