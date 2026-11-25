@@ -33,9 +33,9 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use sce_rust_runtime::helpers::hierarchy::BoundedVec;
 use sce_rust_runtime::{
-    state_scratch, state_words, DocumentTables, Engine, EventId, Hal, HistoryId, NoHistory,
-    RunStore, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId, TransitionRow,
-    Workspace,
+    state_scratch, state_words, CurrentEventData, DocumentTables, Engine, EventId, Hal, HistoryId,
+    NoHistory, RunStore, StateId, StateKind, StatePolicy, StateRow, Target, TransitionId,
+    TransitionRow, Workspace,
 };
 use wz_runtime_tokio_test_support::{
     test_hal_advance_ticks, test_hal_now_ticks, test_hal_set_ticks, TestHal,
@@ -102,6 +102,8 @@ impl StatePolicy for TimerProbePolicy {
     type State = St;
     type Event = Ev;
     type Payload = ();
+    // Its events carry no data, so its hooks are handed none.
+    type EventData<'e> = ();
     type Hal = TestHal;
     // The document declares no `<history>`, so no target list can name one.
     type History = NoHistory;
@@ -212,26 +214,42 @@ impl StatePolicy for TimerProbePolicy {
         }
     }
 
+    fn event_data<'a>(_held: &'a CurrentEventData<'_, Self>) -> Self::EventData<'a> {}
+
     // Appendix D selection: the one state has no transitions, so none is ever
     // enabled, whatever the event. The probe only schedules and fires timers.
     fn first_enabled_transition(
         &mut self,
         _state: StateId,
         _event: EventId,
+        _event_data: Self::EventData<'_>,
         _eng: &mut Engine<Self>,
     ) -> Option<TransitionId> {
         None
     }
-    fn execute_transition_content(&mut self, _t: TransitionId, _eng: &mut Engine<Self>) {}
+    fn execute_transition_content(
+        &mut self,
+        _t: TransitionId,
+        _event_data: Self::EventData<'_>,
+        _eng: &mut Engine<Self>,
+    ) {
+    }
     // The fixture is a single flat state with no entry or exit actions at all.
     fn execute_entry_actions(
         &mut self,
         _s: StateId,
+        _event_data: Self::EventData<'_>,
         _eng: &mut Engine<Self>,
         _is_default_entry: bool,
     ) {
     }
-    fn execute_exit_actions(&mut self, _s: StateId, _eng: &mut Engine<Self>) {}
+    fn execute_exit_actions(
+        &mut self,
+        _s: StateId,
+        _event_data: Self::EventData<'_>,
+        _eng: &mut Engine<Self>,
+    ) {
+    }
 }
 
 // ─────────────────────────────────────────────────────────────
