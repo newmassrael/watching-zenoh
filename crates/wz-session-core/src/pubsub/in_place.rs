@@ -124,8 +124,8 @@ impl<Q: Storage> Default for LentRoom<Q> {
 /// owned path drops too (an unknown body tag, or a kind this build does not
 /// deliver), and the fallback for a Put whose payload is sliced.
 ///
-/// Each chain is walked where it lies, once for each field that reads it, so the bytes those
-/// fields hand out stay in the frame.
+/// The body's chain is walked where it lies, once for both fields that read it, so the bytes those
+/// fields hand out stay in the frame and no entry is decoded twice.
 fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>, Fallback> {
     match &push.body {
         #[cfg(feature = "pubsub-put")]
@@ -136,14 +136,21 @@ fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>,
                 return Err(Fallback::Sliced);
             };
             // The whole chain of an inline Put: it carries no shared-memory marker.
-            let exts = || {
-                crate::put_payload::view_chain(put)
-                    .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest))
-                    .into_iter()
-                    .flatten()
-            };
-            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
-            let _ = exts;
+            #[cfg(any(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+            let [attachment, source_info] = crate::ext_view::last_of_each_in(
+                crate::ext_view::walked_from(
+                    crate::put_payload::view_chain(put)
+                        .map(|(rest, _)| sce_forge_runtime::codec::Entries::entries(rest)),
+                ),
+                [
+                    crate::ext_header::body_eid::PUT_ATTACHMENT,
+                    crate::ext_header::body_eid::SOURCE_INFO,
+                ],
+            );
+            #[cfg(all(feature = "pubsub-source-info", not(feature = "pubsub-attachment")))]
+            let _ = attachment;
+            #[cfg(all(feature = "pubsub-attachment", not(feature = "pubsub-source-info")))]
+            let _ = source_info;
             Ok(Some(LentBody {
                 kind: SampleKind::Put,
                 payload: payload.into_inner(),
@@ -157,22 +164,38 @@ fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>,
                 encoding: None,
                 #[cfg(feature = "pubsub-attachment")]
                 attachment: crate::attachment::decode_attachment_ext_in(
-                    exts(),
+                    attachment,
                     crate::attachment::ATTACHMENT_EXT_ID_PUSH,
                 ),
                 #[cfg(not(feature = "pubsub-attachment"))]
                 attachment: None,
                 #[cfg(feature = "pubsub-source-info")]
-                source_info: crate::sample::extract_source_info_in(exts()),
+                source_info: crate::sample::extract_source_info_in(source_info),
                 #[cfg(not(feature = "pubsub-source-info"))]
                 source_info: None,
             }))
         }
         #[cfg(feature = "pubsub-delete")]
         PushViewVariant::CodecZenohMsgDel(del) => {
-            let exts = || crate::ext_view::walked(del.extensions.as_ref());
-            #[cfg(not(any(feature = "pubsub-attachment", feature = "pubsub-source-info")))]
-            let _ = exts;
+            #[cfg(any(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+            let [attachment, source_info] = crate::ext_view::last_of_each_in(
+                crate::ext_view::walked(del.extensions.as_ref()),
+                [
+                    crate::ext_header::body_eid::DEL_ATTACHMENT,
+                    crate::ext_header::body_eid::SOURCE_INFO,
+                ],
+            );
+            #[cfg(all(feature = "pubsub-source-info", not(feature = "pubsub-attachment")))]
+            let _ = attachment;
+            #[cfg(all(feature = "pubsub-attachment", not(feature = "pubsub-source-info")))]
+            let _ = source_info;
+            // A build that reads none of the Del's fields reads only its kind.
+            #[cfg(not(any(
+                feature = "pubsub-timestamp",
+                feature = "pubsub-attachment",
+                feature = "pubsub-source-info"
+            )))]
+            let _ = del;
             Ok(Some(LentBody {
                 kind: SampleKind::Del,
                 payload: &[],
@@ -184,13 +207,13 @@ fn lent_body<'s, 'f>(push: &'s PushView<'f>) -> Result<Option<LentBody<'s, 'f>>,
                 encoding: None,
                 #[cfg(feature = "pubsub-attachment")]
                 attachment: crate::attachment::decode_attachment_ext_in(
-                    exts(),
+                    attachment,
                     crate::attachment::ATTACHMENT_EXT_ID_DEL,
                 ),
                 #[cfg(not(feature = "pubsub-attachment"))]
                 attachment: None,
                 #[cfg(feature = "pubsub-source-info")]
-                source_info: crate::sample::extract_source_info_in(exts()),
+                source_info: crate::sample::extract_source_info_in(source_info),
                 #[cfg(not(feature = "pubsub-source-info"))]
                 source_info: None,
             }))
@@ -882,6 +905,102 @@ mod tests {
         assert_eq!(owned.len(), 1);
         assert_eq!(lent, owned);
         assert_eq!(lent[0].kind, SampleKind::Del);
+    }
+
+    /// `push`, whose body's chain carries the attachment and the source info twice each, is
+    /// delivered lent as the owned path delivers it, each field read by its LAST entry: the
+    /// attachment `last` and the source info of the zid `[0xA0, 2]`, where the first entries
+    /// read `first` and `[0xA0, 1]`.
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+    fn assert_reads_the_last_of_each(push: &PushView<'_>, kind: SampleKind) {
+        let (lent, owned, fallbacks) = both_ways(push, "demo/a", |_| {});
+        assert_eq!(owned.len(), 1, "the owned path delivers it");
+        assert_eq!(lent, owned, "the lent delivery is the owned one");
+        assert_eq!(lent[0].kind, kind);
+        assert_eq!(lent[0].attachment.as_deref(), Some(&b"last"[..]));
+        assert_eq!(
+            lent[0].source_info,
+            Some(SourceInfo::new(&[0xA0, 2], 2, 2)),
+            "the source info of the last entry"
+        );
+        assert_eq!(fallbacks, InPlaceFallbacks::default(), "nothing fell back");
+    }
+
+    /// The source-info entry naming the zid `[0xA0, n]`, entity `n` and sequence number `n`.
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+    fn source_info_entry(n: u8) -> wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage> {
+        crate::source_info_ext::encode_source_info_ext_entry(&[0xA0, n], u32::from(n), u32::from(n))
+            .expect("a two-byte zid is a zid")
+    }
+
+    /// The attachment entry of the body whose attachment id is `ext_id`, holding `bytes`.
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+    fn attachment_entry(
+        ext_id: u8,
+        bytes: &[u8],
+    ) -> wz_codecs::ext_entry::ExtEntryOwned<crate::wire::WireStorage> {
+        crate::attachment::encode_attachment_ext(ext_id, bytes).expect("the heap holds it")
+    }
+
+    /// A Put whose chain carries the attachment and the source info twice each is delivered lent
+    /// with the last entry of each, from the one walk both are read in. Turned red by a walk that
+    /// keeps the first entry of an identity, or one that looks for the Put's attachment by the
+    /// Del's identity (`body_eid::DEL_ATTACHMENT`), which finds none.
+    #[cfg(all(feature = "pubsub-attachment", feature = "pubsub-source-info"))]
+    #[test]
+    fn a_puts_repeated_attachment_and_source_info_are_read_lent_by_their_last_entries() {
+        use crate::attachment::ATTACHMENT_EXT_ID_PUSH as PUT;
+        let mut built = crate::push_build::build_push_literal("demo/a", b"v").expect("build");
+        match &mut built.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgPut(put) => {
+                crate::put_payload::set_chain(
+                    put,
+                    [
+                        source_info_entry(1),
+                        attachment_entry(PUT, b"first"),
+                        source_info_entry(2),
+                        attachment_entry(PUT, b"last"),
+                    ],
+                )
+                .expect("an inline Put holds a chain of four entries");
+            }
+            _ => panic!("a literal put carries a Put"),
+        }
+        let wire = wire_of(&built);
+        assert_reads_the_last_of_each(&view_of(&wire), SampleKind::Put);
+    }
+
+    /// A Del whose chain carries the attachment and the source info twice each, and a Put's
+    /// attachment after them, is delivered lent with the last entry of each and not the Put's
+    /// attachment. Turned red by a walk that keeps the first entry of an identity, or one that
+    /// looks for the Del's attachment by the Put's identity (`body_eid::PUT_ATTACHMENT`).
+    #[cfg(all(
+        feature = "pubsub-delete",
+        feature = "pubsub-attachment",
+        feature = "pubsub-source-info"
+    ))]
+    #[test]
+    fn a_dels_repeated_attachment_and_source_info_are_read_lent_by_their_last_entries() {
+        use crate::attachment::{ATTACHMENT_EXT_ID_DEL as DEL, ATTACHMENT_EXT_ID_PUSH as PUT};
+        let mut built = crate::push_build::build_push_del_literal("demo/a").expect("build");
+        match &mut built.body {
+            crate::wire::PushOwnedVariant::CodecZenohMsgDel(del) => {
+                del.extensions = Some(
+                    crate::held_list::held(alloc::vec![
+                        source_info_entry(1),
+                        attachment_entry(DEL, b"first"),
+                        source_info_entry(2),
+                        attachment_entry(DEL, b"last"),
+                        attachment_entry(PUT, b"put"),
+                    ])
+                    .expect("a chain of five entries is within its bound"),
+                );
+                crate::ext_nodeid::sync_header_z(&mut del.header, true);
+            }
+            _ => panic!("a literal del carries a Del"),
+        }
+        let wire = wire_of(&built);
+        assert_reads_the_last_of_each(&view_of(&wire), SampleKind::Del);
     }
 
     /// An `M=1` alias is the peer's literal, lent from its table when there is

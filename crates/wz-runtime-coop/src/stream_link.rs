@@ -848,6 +848,9 @@ struct RxHalf<B> {
     /// The bytes the receive moved within its buffer, which the tests count.
     #[cfg(test)]
     moved: Cell<usize>,
+    /// How many times the receive moved bytes within its buffer, which the tests count.
+    #[cfg(test)]
+    moves: Cell<usize>,
     /// Whether the session asked, while a batch is lent, to keep it
     /// ([`SessionDatagramLink::keep`]): it then stays at the front, lent again by the next receive.
     keeping: Cell<bool>,
@@ -912,6 +915,8 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                 ready: Cell::new(false),
                 #[cfg(test)]
                 moved: Cell::new(0),
+                #[cfg(test)]
+                moves: Cell::new(0),
                 keeping: Cell::new(false),
                 #[cfg(feature = "alloc")]
                 drops: crate::link_storage::RxDrops::new(),
@@ -1027,12 +1032,17 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
                     // Nothing before the part of a batch is lent any more: it moves to the front,
                     // so the rest is read behind it and the whole batch fits where it lies.
                     if start > 0 {
-                        // `start <= part.len()` is the one check `copy_within` makes of a range
-                        // from `start` to a front it moves to, so it is decided here.
-                        if let Some(part) = bytes.get_mut(..held) {
-                            if start <= part.len() {
+                        // A buffer handed over whole has nothing behind its spent bytes, and
+                        // starts over at its front with no move: what a stream that cuts its
+                        // batches where they end finds at every read.
+                        if start < held {
+                            // `start < part.len()` is the one check `copy_within` makes of a
+                            // range from `start` to a front it moves to, so it is decided here.
+                            if let Some(part) = bytes.get_mut(..held) {
                                 part.copy_within(start.., 0);
                             }
+                            #[cfg(test)]
+                            self.rx.moves.set(self.rx.moves.get() + 1);
                         }
                         #[cfg(test)]
                         self.rx.moved.set(self.rx.moved.get() + (held - start));
@@ -2080,6 +2090,29 @@ mod tests {
             3,
             "the part of the third batch, moved once before the read"
         );
+        assert_eq!(link.rx.moves.get(), 1, "in one move");
+    }
+
+    /// A receive that finds every byte its buffer holds handed over already starts the buffer over
+    /// at its front and moves nothing: the next batch is read and lent where the one before it
+    /// was. Turned red by a move of the empty rest before the read.
+    #[test]
+    fn a_buffer_handed_over_whole_starts_over_with_no_move() {
+        let link = link();
+        queue(&link, &batch(b"one"));
+        let mut first: *const u8 = core::ptr::null();
+        assert!(link.recv_with(&mut |bytes| first = bytes.as_ptr()));
+        queue(&link, &batch(b"two"));
+        let mut second: *const u8 = core::ptr::null();
+        let mut got = None;
+        assert!(link.recv_with(&mut |bytes| {
+            second = bytes.as_ptr();
+            got = Some(bytes.to_vec());
+        }));
+        assert_eq!(got.as_deref(), Some(&b"two"[..]));
+        assert_eq!(second, first, "read and lent at the front again");
+        assert_eq!(link.rx.moves.get(), 0, "nothing was left to move");
+        assert_eq!(link.rx.moved.get(), 0);
     }
 
     /// A receive says whether a whole batch lies behind what it lent, from the one reading of the

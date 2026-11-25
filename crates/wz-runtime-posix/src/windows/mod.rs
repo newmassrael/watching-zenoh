@@ -526,14 +526,21 @@ pub struct WindowsWaits;
 // The entries of a wait set are marked one bit each of a word (`poll_on`'s wakes).
 const _: () = assert!(crate::WAIT_SET_SOCKETS <= u64::BITS as usize);
 
-/// One `WSAPoll` over what `on` names, in `fds`, for at most `timeout_ms`: how many entries of
-/// `fds` it filled, in the order of `on`, and whether the poll answered. A wake the poll found
-/// ready is made quiet; one it did not look at, or found quiet, is not read, as on a POSIX host.
-fn poll_on(
+/// The `WSAPoll` entries of one wait, on the waiting thread's stack, none written before the wait
+/// names it, as on a POSIX host: writing the set whole would copy every entry of it on every wait.
+type WaitSet = [core::mem::MaybeUninit<ws::WSAPOLLFD>; crate::WAIT_SET_SOCKETS];
+
+/// A set of `WSAPoll` entries none of which is written yet.
+const NO_FDS: WaitSet = [core::mem::MaybeUninit::uninit(); crate::WAIT_SET_SOCKETS];
+
+/// One `WSAPoll` over what `on` names, in `fds`, for at most `timeout_ms`: the entries of `fds`
+/// it wrote, in the order of `on`, and whether the poll answered. A wake the poll found ready is
+/// made quiet; one it did not look at, or found quiet, is not read, as on a POSIX host.
+fn poll_on<'s>(
     on: &[wz_runtime_coop::session_drive::LinkWait],
     timeout_ms: u32,
-    fds: &mut [ws::WSAPOLLFD; crate::WAIT_SET_SOCKETS],
-) -> (usize, bool) {
+    fds: &'s mut WaitSet,
+) -> (&'s [ws::WSAPOLLFD], bool) {
     use wz_runtime_coop::session_drive::WaitOn;
     let mut count = 0;
     let mut look = false;
@@ -543,11 +550,11 @@ fn poll_on(
     for wait in on {
         match (wait.on, fds.get_mut(count)) {
             (WaitOn::Socket(socket), Some(entry)) => {
-                *entry = wait_entry(socket, wait.room);
+                entry.write(wait_entry(socket, wait.room));
                 count += 1;
             }
             (WaitOn::Wake(socket), Some(entry)) => {
-                *entry = wait_entry(socket, false);
+                entry.write(wait_entry(socket, false));
                 // Below the set's length, at most the bits of the word (asserted above).
                 wakes |= 1u64 << count;
                 count += 1;
@@ -562,13 +569,17 @@ fn poll_on(
         // `WSAPoll` refuses an empty set: the look is a sleep.
         // SAFETY: a plain system call with a value argument.
         unsafe { windows_sys::Win32::System::Threading::Sleep(timeout_ms) };
-        return (0, true);
+        return (&[], true);
     }
-    // SAFETY: the first `count` entries of `fds` are written and live for the call, and the
-    // timeout bounds the wait. A failed wait is a quiet link: the step that follows reads and
-    // reports the error.
+    // SAFETY: the loop above wrote the first `count` entries of `fds`, one place each in order,
+    // and `count` never passes the set's length; `MaybeUninit<T>` is laid out as `T`.
+    let polled: &'s mut [ws::WSAPOLLFD] = unsafe {
+        core::slice::from_raw_parts_mut(fds.as_mut_ptr().cast::<ws::WSAPOLLFD>(), count)
+    };
+    // SAFETY: the entries are written and live for the call, and the timeout bounds the wait. A
+    // failed wait is a quiet link: the step that follows reads and reports the error.
     let answered =
-        unsafe { ws::WSAPoll(fds.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) } >= 0;
+        unsafe { ws::WSAPoll(polled.as_mut_ptr(), count as u32, wait_ms(timeout_ms)) } >= 0;
     // A wake found ready is made quiet, so the next wait waits for the next word.
     if answered {
         let mut left = wakes;
@@ -576,12 +587,12 @@ fn poll_on(
             let at = left.trailing_zeros() as usize;
             // The lowest bit, which the line above read, is cleared.
             left &= left - 1;
-            if let Some(entry) = fds.get(at).filter(|entry| entry.revents != 0) {
+            if let Some(entry) = polled.get(at).filter(|entry| entry.revents != 0) {
                 net::drain_wake(entry.fd);
             }
         }
     }
-    (count, answered)
+    (polled, answered)
 }
 
 impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
@@ -589,7 +600,7 @@ impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
         if on.is_empty() {
             return;
         }
-        let mut fds = [wait_entry(ws::INVALID_SOCKET, false); crate::WAIT_SET_SOCKETS];
+        let mut fds = NO_FDS;
         let _ = poll_on(on, timeout_ms, &mut fds);
     }
 
@@ -605,19 +616,19 @@ impl wz_runtime_coop::session_drive::LinkWaits for WindowsWaits {
         if on.is_empty() {
             return 0;
         }
-        let mut fds = [wait_entry(ws::INVALID_SOCKET, false); crate::WAIT_SET_SOCKETS];
-        let (count, answered) = poll_on(on, timeout_ms, &mut fds);
+        let mut fds = NO_FDS;
+        let (polled, answered) = poll_on(on, timeout_ms, &mut fds);
         if !answered {
             return on.len();
         }
-        // The entries are walked in the order `poll_on` filled `fds` in, so the next entry it
-        // named is the next of `fds`.
+        // The entries are walked in the order `poll_on` wrote `polled` in, so the next entry it
+        // named is the next of `polled`.
         let mut named = 0;
         crate::front_the_ready(on, |wait| match wait.on {
-            WaitOn::Socket(_) | WaitOn::Wake(_) if named < count => {
-                let polled = fds.get(named).is_some_and(|entry| entry.revents != 0);
+            WaitOn::Socket(_) | WaitOn::Wake(_) if named < polled.len() => {
+                let ready = polled.get(named).is_some_and(|entry| entry.revents != 0);
                 named += 1;
-                polled
+                ready
             }
             _ => true,
         })

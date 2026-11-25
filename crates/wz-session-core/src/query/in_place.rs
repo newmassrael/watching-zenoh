@@ -82,19 +82,49 @@ fn read_envelope_extensions(
     )
 }
 
-/// Whether a Query's chain carries its value as a list of slices: the shape the
-/// owned path un-swaps before routing (`QueryPeer::unswap_query_value`
-/// reads the value, the last entry of its identity, when it has slices).
-fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bool {
-    crate::ext_view::last_by_eid_in(exts, crate::ext_header::body_eid::QUERY_VALUE).is_some_and(
-        |ext| {
+/// The entries of a Query's chain its lent dispatch reads, each the last of its identity, as every
+/// reader of a received chain picks one ([`crate::ext_view::last_by_eid`]): found in ONE walk of
+/// the chain, since a chain read where its frame lies decodes every entry again at every walk.
+struct QueryExts<'f> {
+    /// The attachment's entry (`body_eid::QUERY_ATTACHMENT`).
+    attachment: Option<QueryExtEntryView<'f>>,
+    /// The source info's entry (`body_eid::SOURCE_INFO`).
+    source_info: Option<QueryExtEntryView<'f>>,
+    /// The value's entry (`body_eid::QUERY_VALUE`).
+    value: Option<QueryExtEntryView<'f>>,
+}
+
+impl<'f> QueryExts<'f> {
+    /// The entries `query`'s chain carries.
+    fn of(query: &QueryView<'f>) -> Self {
+        use crate::ext_header::body_eid;
+        let [attachment, source_info, value] = crate::ext_view::last_of_each_in(
+            walked(query.extensions.as_deref()),
+            [
+                body_eid::QUERY_ATTACHMENT,
+                body_eid::SOURCE_INFO,
+                body_eid::QUERY_VALUE,
+            ],
+        );
+        Self {
+            attachment,
+            source_info,
+            value,
+        }
+    }
+
+    /// Whether the Query carries its value as a list of slices: the shape the owned path un-swaps
+    /// before routing (`QueryPeer::unswap_query_value` reads the value, the last entry of its
+    /// identity, when it has slices).
+    fn has_sliced_value(&self) -> bool {
+        self.value.as_ref().is_some_and(|ext| {
             matches!(
                 &ext.body,
                 QueryExtEntryViewVariant::CodecZenohQueryValueZbuf(z)
                     if wz_codecs::query_value_zbuf::QueryValueZbufWire::input_after_shm(z)
             )
-        },
-    )
+        })
+    }
 }
 
 /// What a queryable is shown of `query` read in place, each field under the
@@ -102,22 +132,30 @@ fn has_sliced_value<'a>(exts: impl Iterator<Item = QueryExtEntryView<'a>>) -> bo
 /// the bytes are the link's, lent for the call, and a queryable that keeps them
 /// copies them.
 ///
-/// The Query's chain is walked where it lies, once for each field that reads it: the attachment,
-/// the source info and the value each scan it for their own extension, as they scanned the held
-/// chain, and the bytes they hand out stay in the frame.
+/// The attachment, the source info and the value are read off the entries `exts` found in the
+/// Query's one walk of its chain, each by the reader the held chain is read by, and the bytes they
+/// hand out stay in the frame.
 ///
 /// The timestamp stack is the Request's, read off its chain by the caller as the owned path reads
 /// it, so an instrumented query is dispatched where it lies in every build.
 fn lent_projection<'q, 'f: 'q>(
     query: &'q QueryView<'f>,
+    exts: QueryExts<'f>,
     #[cfg(feature = "pubsub-ts-stack")] ts_stack: Option<&'q crate::ts_stack::TsStack>,
 ) -> QueryProjection<'q> {
-    #[cfg(not(any(
-        feature = "query-attachment",
-        feature = "query-source-info",
-        feature = "query-value"
-    )))]
-    let _ = query.extensions;
+    let QueryExts {
+        attachment,
+        source_info,
+        value,
+    } = exts;
+    #[cfg(not(feature = "query-selector-parameters"))]
+    let _ = query;
+    #[cfg(not(feature = "query-attachment"))]
+    let _ = attachment;
+    #[cfg(not(feature = "query-source-info"))]
+    let _ = source_info;
+    #[cfg(not(all(feature = "alloc", feature = "query-value")))]
+    let _ = value;
     QueryProjection {
         #[cfg(feature = "query-selector-parameters")]
         parameters: query.parameters.map(|parameters| parameters.into_inner()),
@@ -125,21 +163,19 @@ fn lent_projection<'q, 'f: 'q>(
         parameters: None,
         #[cfg(feature = "query-attachment")]
         attachment: crate::attachment::decode_attachment_ext_in(
-            walked(query.extensions.as_deref()),
+            attachment,
             crate::attachment::ATTACHMENT_EXT_ID_QUERY,
         ),
         #[cfg(not(feature = "query-attachment"))]
         attachment: None,
         #[cfg(feature = "query-source-info")]
-        source_info: crate::sample::extract_source_info_in(walked(query.extensions.as_deref())),
+        source_info: crate::sample::extract_source_info_in(source_info),
         #[cfg(not(feature = "query-source-info"))]
         source_info: None,
         // A build with no heap does not project a query's value (its encoding is an
         // owned hint), nor a value or attachment held as shareable bytes.
         #[cfg(all(feature = "alloc", feature = "query-value"))]
-        plain_value: crate::query_value_ext::decode_query_value_ext_parts_in(walked(
-            query.extensions.as_deref(),
-        )),
+        plain_value: crate::query_value_ext::decode_query_value_ext_parts_in(value),
         #[cfg(all(feature = "alloc", not(feature = "query-value")))]
         plain_value: None,
         #[cfg(feature = "alloc")]
@@ -254,7 +290,8 @@ impl QueryPeer {
             return Ok(None);
         }
         let (target, qos) = read_envelope_extensions(request);
-        if has_sliced_value(walked(query.extensions.as_deref())) {
+        let exts = QueryExts::of(query);
+        if exts.has_sliced_value() {
             return lent_form_refused(request.rid, qos, pending_final_rids);
         }
         let spaces = MappingSpaces::from_sender(peer_keyexpr_table.into(), record.sender());
@@ -274,6 +311,7 @@ impl QueryPeer {
         let ts_stack = crate::ts_stack::read_ts_stack(walked(request.extensions.as_ref()));
         let projection = lent_projection(
             query,
+            exts,
             #[cfg(feature = "pubsub-ts-stack")]
             None,
         );
@@ -355,7 +393,8 @@ impl QueryPeer {
         let RequestViewVariant::CodecZenohQuery(query) = &request.body else {
             return Ok(DispatchOutcome::NOT_DISPATCHED);
         };
-        if has_sliced_value(walked(query.extensions.as_deref())) {
+        let exts = QueryExts::of(query);
+        if exts.has_sliced_value() {
             return Err(Fallback::SlicedValue);
         }
         // The stack the nodes recorded on the Request, decoded off its chain into a value of its
@@ -373,6 +412,7 @@ impl QueryPeer {
         };
         let projection = lent_projection(
             query,
+            exts,
             #[cfg(feature = "pubsub-ts-stack")]
             ts_stack.as_ref(),
         );
@@ -680,6 +720,82 @@ mod tests {
             finals += owned.2.len();
         }
         assert_eq!(finals, cases.len() - 1, "every case but the unroutable one");
+    }
+
+    /// A Query whose chain carries its source info, its value and its attachment twice each is
+    /// shown each by its LAST entry, as the owned path shows it, from the one walk of the chain the
+    /// lent dispatch makes. Turned red by a walk that keeps the first entry of an identity, or by
+    /// an identity `QueryExts::of` asks for that names another extension.
+    #[cfg(all(
+        feature = "query-attachment",
+        feature = "query-source-info",
+        feature = "query-value"
+    ))]
+    #[test]
+    fn a_querys_repeated_extensions_are_shown_lent_by_their_last_entries() {
+        use crate::ext_header::body_eid::{QUERY_ATTACHMENT, QUERY_VALUE, SOURCE_INFO};
+        use crate::wire::WireStorage;
+        use sce_forge_runtime::codec::Bounded;
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
+
+        // A ZBuf entry of `header` holding `bytes`, as a Query's chain holds it.
+        let entry = |header: u8, bytes: &[u8]| {
+            let value = Bounded::new(bytes)
+                .expect("a test value is within the protocol's bound")
+                .store::<WireStorage, ExtZbufValueField>()
+                .expect("the heap holds a test value");
+            crate::ext_view::query_ext_from_generic(ExtEntryOwned::<WireStorage> {
+                header,
+                body: ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
+                    value_len: bytes.len() as u64,
+                    value,
+                }),
+            })
+        };
+        let source_info = |n: u8| {
+            crate::source_info_ext::encode_source_info_ext_body(
+                &[0xA0, n],
+                u32::from(n),
+                u32::from(n),
+            )
+            .expect("a two-byte zid is a zid")
+        };
+        // A value is its encoding (0: none, no schema) and its payload.
+        let (value_first, value_last) = ([0x00, b'a'], [0x00, b'b', b'b']);
+        let mut request = crate::request_build::build_request_query(
+            19,
+            crate::wire_key::WireKey::literal("demo/repeated").expect("a literal key"),
+        )
+        .expect("a query request");
+        match &mut request.body {
+            crate::wire::RequestOwnedVariant::CodecZenohQuery(query) => {
+                query.extensions = Some(
+                    crate::held_list::lawful(
+                        crate::held_list::held(alloc::vec![
+                            entry(SOURCE_INFO, &source_info(1)),
+                            entry(QUERY_VALUE, &value_first),
+                            entry(QUERY_ATTACHMENT, b"first"),
+                            entry(SOURCE_INFO, &source_info(2)),
+                            entry(QUERY_VALUE, &value_last),
+                            entry(QUERY_ATTACHMENT, b"last"),
+                        ])
+                        .expect("a chain of six entries is within its bound"),
+                    )
+                    .expect("a chain with no shared-memory marker follows its law"),
+                );
+                crate::ext_nodeid::sync_header_z(&mut query.header, true);
+            }
+            _ => panic!("a query request carries a Query"),
+        }
+        let (owned, lent) = both(&request);
+        assert_eq!(lent, owned, "the lent dispatch is the owned one");
+        let [seen] = lent.0.as_slice() else {
+            panic!("one queryable shown the query: {:?}", lent.0);
+        };
+        assert_eq!(seen.attachment.as_deref(), Some(&b"last"[..]));
+        assert_eq!(seen.payload.as_deref(), Some(&b"bb"[..]));
+        assert_eq!(seen.source_info, Some(SourceInfo::new(&[0xA0, 2], 2, 2)));
     }
 
     /// What a queryable is shown of `view`, as owned values: what `recording` notes.
