@@ -1094,6 +1094,19 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     this: Weak<Self>,
 }
 
+/// What a step of the session came to ([`CoopEngine::step`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stepped {
+    /// The session ended.
+    Closed,
+    /// A step of one thread read a record of a batch the link holds the rest of, and left the
+    /// links, the clock and the gets as they stood: the step that reads the batch's last record
+    /// moves them.
+    Read,
+    /// The step moved the links on by this reading of the session's clock, in microseconds.
+    Moved(u64),
+}
+
 /// How often the session's lock ([`CoopEngine::live`], and a droppable publish's try of it) and its
 /// queue of handed legs were taken: what a test of the cost of one message counts.
 #[cfg(test)]
@@ -1848,6 +1861,9 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// tests count.
     #[cfg(test)]
     clock_reads: core::cell::Cell<usize>,
+    /// How often the links were moved on ([`Self::poll_links`]), which the tests count.
+    #[cfg(test)]
+    link_polls: core::cell::Cell<usize>,
     /// The periodic jobs the program started on the session ([`wz_capi_port::Tickers::start_ticker`]).
     #[cfg(feature = "ticker")]
     tickers: Tickers,
@@ -3260,6 +3276,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
     /// role's face can bring about.
     fn poll_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
+        #[cfg(test)]
+        self.link_polls.set(self.link_polls.get() + 1);
         // The connections that arrived come first, so their handshakes are moved on in this pass.
         #[cfg(feature = "listen")]
         self.accept_links();
@@ -4346,6 +4364,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             policy,
             #[cfg(test)]
             clock_reads: core::cell::Cell::new(0),
+            #[cfg(test)]
+            link_polls: core::cell::Cell::new(0),
             #[cfg(feature = "ticker")]
             tickers: Tickers::reserved(caps::MAX_TICKERS),
             session_time,
@@ -4718,6 +4738,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn clock_reads(&self) -> usize {
         self.core.lock().0.clock_reads.get()
+    }
+
+    /// How often the session moved its links on since the open ([`Core::poll_links`]): what a
+    /// test of the cost of a batch counts. Read under the lock, uncounted as a take.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn link_polls(&self) -> usize {
+        self.core.lock().0.link_polls.get()
     }
 
     /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains
@@ -6152,14 +6179,29 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
     /// Step the session until it has nothing more to do, move its link on, and notice a session
     /// that ended. The step reads the clock once, after its tasks ran, and measures everything it
-    /// does by that reading, which it returns; `None` once the session ended.
-    fn step(&self, core: &mut Core<L, C>) -> Option<u64> {
+    /// does by that reading, which it returns ([`Stepped`]). A step of one thread that read a
+    /// record of a batch the link holds the rest of reads no clock and moves nothing.
+    fn step(&self, core: &mut Core<L, C>) -> Stepped {
         // What a lost link's peer is still owed comes before anything the links bring now.
         #[cfg(feature = "liveliness")]
         if self.samples.owes() {
             core.retract_owed();
         }
+        let was_idle = self.samples.is_idle();
         core.run_tasks();
+        // One thread's round takes one record a step (`Round::has_room`), so a batch is read a
+        // step a record, each after the callbacks of the one before returned. The links are moved
+        // once, by the step that reads the batch's last record: a move a record would look at every
+        // port and turn every face's replay once a message, and batching would save nothing. A
+        // round that was not empty took no record (a step from inside a callback), and that step
+        // moves the links as any other.
+        if !<CoopForm as ThreadForm>::OTHER_THREADS
+            && was_idle
+            && !self.samples.is_idle()
+            && core.transport.holds_input()
+        {
+            return Stepped::Read;
+        }
         let now_us = core.now_us();
         // A link's receive sweeps nothing, so the session ends the chains of its one reassembly
         // Router past their deadline here, once a step and by its reading, whichever link's task
@@ -6187,7 +6229,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let redial_ms = core.config.redial_ms;
         if core.poll_links(redial_ms, now_us).is_err() {
             self.closed.store(true, Ordering::Release);
-            return None;
+            return Stepped::Closed;
         }
         // A group told the session's keyexprs that came up, at the open or joined again, asks
         // for its members' with the session's next entity id, as the tokio engine's group asks
@@ -6207,7 +6249,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if core.session.matching.moved(written) {
             self.read_matching(core);
         }
-        Some(now_us)
+        Stepped::Moved(now_us)
     }
 
     /// One take of the session for a step after `wait`: its links, what publishes handed to it,
@@ -6227,14 +6269,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             self.hand_back.handed_back();
         }
         let stepped = self.step(&mut core.0);
-        self.input_held.store(
-            stepped.is_some() && core.0.transport.holds_input(),
-            Ordering::Relaxed,
-        );
-        let jobs_due_ms = stepped.and_then(|now_us| core.0.jobs_due_at(now_us));
+        let open = stepped != Stepped::Closed;
+        self.input_held
+            .store(open && core.0.transport.holds_input(), Ordering::Relaxed);
+        let jobs_due_ms = match stepped {
+            Stepped::Moved(now_us) => core.0.jobs_due_at(now_us),
+            Stepped::Read | Stepped::Closed => None,
+        };
+        // What was handed to the session leaves with the step that moves the links, after the
+        // batch's last record.
         #[cfg(any(feature = "listen", feature = "group"))]
-        self.send_handed_now(&mut core.0);
-        (stepped.is_some(), jobs_due_ms)
+        if stepped != Stepped::Read {
+            self.send_handed_now(&mut core.0);
+        }
+        (open, jobs_due_ms)
     }
 
     /// The id of something the session holds and never names to a peer (`next_local`).
@@ -8344,17 +8392,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         wait.wait(self.rooms.waits(), sleep_ms);
         // One pass of the session's task reads what its link holds, a batch at a time, and does
         // what is due: `single` asks for one message, and a pass is the least this engine reads.
-        let (mut stepped, jobs_due_ms) = self.step_after(wait);
+        let (mut stepped, mut jobs_due_ms) = self.step_after(wait);
         let mut handed = self.deliver();
         // One thread: the round took one record of what the links hold (`Round::has_room`), so
         // the step goes on in this read, each record read once the callbacks of the one before
-        // returned, until the links hold nothing more or a step hands nothing out.
+        // returned, until the links hold nothing more or a step hands nothing out. The step that
+        // reads the last record moves the links and finds the jobs due (`Stepped`).
         while !<CoopForm as ThreadForm>::OTHER_THREADS
             && handed
             && stepped
             && self.input_held.load(Ordering::Relaxed)
         {
-            stepped = self.step_after(IdleWait::None).0;
+            let (open, due) = self.step_after(IdleWait::None);
+            stepped = open;
+            jobs_due_ms = jobs_due_ms.or(due);
             handed = self.deliver();
         }
         if let Some(started_ms) = jobs_due_ms {

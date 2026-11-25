@@ -1447,6 +1447,70 @@ fn the_samples_of_one_batch_are_handed_in_the_read_that_hands_the_first() {
     );
 }
 
+/// The read that hands a batch moves the session's links once, after the batch's last record, and
+/// looks at the queue of handed publishes once, in a build of one thread as in one of threads: the
+/// steps of one thread that each read a record while the link holds the rest of the batch leave
+/// the links where they stood. Turned red by a step that moves the links after every record it
+/// reads (the `Stepped::Read` return taken out of `CoopEngine::step`), which moves them once a
+/// sample in a build of one thread.
+#[test]
+fn the_read_that_hands_a_batch_moves_the_links_once() {
+    const SAMPLES: u8 = 8;
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let into = got.clone();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire(
+            "demo/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |sample: &dyn SampleView| {
+                into.lock().unwrap().push(sample.payload().to_vec());
+            }),
+        )
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushBatch("demo/batch", SAMPLES));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // The counts before the read that hands the batch, which the reads before it moved.
+    let mut polls;
+    #[cfg(any(feature = "listen", feature = "group"))]
+    let mut handed;
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for the batch");
+        polls = engine.link_polls();
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            handed = engine.takes.handed.load(Ordering::SeqCst);
+        }
+        let _ = SessionDrive::read(&*engine, false);
+        if !got.lock().unwrap().is_empty() {
+            break;
+        }
+    }
+    assert_eq!(
+        got.lock().unwrap().len(),
+        usize::from(SAMPLES),
+        "CONTROL: the read handed the whole batch"
+    );
+    assert_eq!(
+        engine.link_polls() - polls,
+        1,
+        "one move of the links for the batch"
+    );
+    #[cfg(any(feature = "listen", feature = "group"))]
+    assert_eq!(
+        engine.takes.handed.load(Ordering::SeqCst) - handed,
+        1,
+        "one look at the handed publishes for the batch"
+    );
+}
+
 /// A peer's sample that reaches three subscribers is handed to each of them once, in the same order
 /// for every sample, each sample after the one before it, with the session's lock let go: one
 /// callback steps the session and publishes from inside itself, and the router receives what it
