@@ -2940,7 +2940,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> Copy for Holding<'_, L, C
 /// face's leg (`leg`) folded in: the first leg's answer decides, the counts of the faces sent add
 /// up and the last failure is kept. A leg after the first that sends nothing (the filter's row
 /// went meanwhile) leaves the answer as it was: that face is sent nothing.
-#[cfg(not(wz_round))]
+#[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
 fn fold_filtered(before: Option<FilteredPut>, leg: FilteredPut) -> FilteredPut {
     match (before, leg) {
         (Some(FilteredPut::Sent(Ok(sent))), FilteredPut::Sent(Ok(more))) => {
@@ -11115,8 +11115,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> FilteredPut {
         // Each face's place is taken before the session, as every send on it takes them, one
         // face at a time: the first face's leg decides the put, and each leg after it sends as
-        // that leg decided.
-        #[cfg(not(wz_round))]
+        // that leg decided. Where the dial role's face is the only face, the one hold below is
+        // that face's leg, and the put's body is not split from it.
+        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
         {
             let mut answer: Option<FilteredPut> = None;
             let _ = self.on_faces(|tx| {
@@ -11142,7 +11143,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 return answer;
             }
         }
-        // No face holds a link: the session alone decides, and a put a subscriber of the session
+        // No face holds a link, or the dial role's is the only face: the session decides with
+        // that face's place held when it holds a link, and a put a subscriber of the session
         // wants is still answered as one the general publish delivers.
         self.live_on_link(|core, tx| {
             let on = Holding {
@@ -11759,7 +11761,7 @@ mod up_facts_tests {
     }
 }
 
-#[cfg(all(test, not(wz_round)))]
+#[cfg(all(test, not(wz_round), any(feature = "listen", feature = "group")))]
 mod fold_filtered_tests {
     use super::{fold_filtered, FanoutError, FilteredPut};
 
