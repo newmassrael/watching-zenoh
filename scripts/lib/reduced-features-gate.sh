@@ -81,7 +81,9 @@ excluded="wz-ap-demo"
 # `wz-capi-pico` joined when its session got two engines: a build that names neither is refused
 # (no `z_open` to give), and `os-host` (the cooperative engine on the host's own calls) is the
 # smaller one, so it is the minimal profile.
-profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory wz-runtime-posix:session-slot wz-capi-pico:os-host"
+# `wz-capi-pico-lib` is that crate's C library, which names its engine through its dependency on
+# it (`abi/`), so its minimal profile is the same engine named that way.
+profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-session-acceptor:fixed-memory wz-runtime-zephyr:session-slot wz-mcu-multicast-e2e:fixed-memory wz-runtime-posix:session-slot wz-capi-pico:os-host wz-capi-pico-lib:abi/os-host"
 
 # The minimal profile feature of $1, or nothing when the crate is not in tier 4.
 profile_of() {
