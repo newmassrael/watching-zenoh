@@ -169,7 +169,8 @@ impl<K: LockFamily> FacePlane<K> {
                 // SAFETY: the lock of `events` is held (`Self::row_at`); the row is the one past
                 // the last waiting, within the room, so it holds no value.
                 unsafe { at.cast::<Event>().write((kind, row)) };
-                waiting.len += 1;
+                // Below the room, so one more is still within it.
+                waiting.len = waiting.len.saturating_add(1);
             } else if let Some(last) = waiting.len.checked_sub(1) {
                 let at = self.row_at(Self::ring(waiting.first, last));
                 // SAFETY: the lock of `events` is held; the row is the last waiting, which holds a
@@ -186,12 +187,10 @@ impl<K: LockFamily> FacePlane<K> {
             return None;
         }
         self.events.with(|waiting| {
-            if waiting.len == 0 {
-                return None;
-            }
+            let left = waiting.len.checked_sub(1)?;
             let at = self.row_at(waiting.first);
             waiting.first = Self::ring(waiting.first, 1);
-            waiting.len -= 1;
+            waiting.len = left;
             // SAFETY: the lock of `events` is held; the row was the first waiting, so it holds a
             // value, read out once here and no longer counted as waiting.
             Some(unsafe { at.cast::<Event>().read() })
