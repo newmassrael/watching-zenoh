@@ -1723,55 +1723,21 @@ impl<
     /// `session_task` runs INSIDE the executor — pumping from there would
     /// have the session drive the pool that is currently polling it, which
     /// is precisely the inversion [`CoopLocalSet`] exists to remove.
+    ///
+    /// One iteration is [`Self::service_due`]'s work around [`Self::take_input_now`]'s, in the
+    /// order a task that is polled once a pass needs: the timers are handed the time after the
+    /// unit is taken, so the lease is judged after what the peer sent last.
     pub fn step<F>(&mut self, on_event: &mut F) -> Option<DriverOutcome>
     where
         F: EventSink,
     {
-        // The role's activation, deferred from the pump's making (`session-slot`).
-        #[cfg(feature = "session-slot")]
-        if let Some(role) = self.pending_role.take() {
-            for event in role.activation() {
-                self.engine.process_event(*event);
-            }
+        match self.open_step() {
+            Opened::Ended(outcome) => return Some(outcome),
+            Opened::Raised => return None,
+            Opened::Ready => {}
         }
-        if self.engine.is_in_final_state() {
-            return Some(DriverOutcome::Terminated);
-        }
-        if let Some(limit) = self.max_iters {
-            if self.iter >= limit {
-                return Some(DriverOutcome::IterationLimit);
-            }
-            // Below the limit, so one more is still a count.
-            self.iter = self.iter.saturating_add(1);
-        }
-
-        // R2922 — raise what the session was asked from OUTSIDE the loop (a
-        // rail close) before servicing the link. This loop polls every
-        // iteration, so it needs no wake of its own.
-        if wz_session_core::drive::check_out_of_band(&self.actions, &mut self.engine) {
-            return None;
-        }
-
-        if self.link.uses_wake_budget() {
-            let wake_budget_ms = self.wake_budget_ms();
-            self.link.service_within(wake_budget_ms);
-        } else {
-            self.link.service();
-        }
-
         let now_ms = self.clock.now_monotonic_ms();
-        // The application layer's own deadline (a pending query's, a query left for it), if it
-        // has come due: the layer's work is not a datagram or the lease, so no other event says
-        // so. Raised before the inbound datagram is read and without ending the step, so a stream
-        // of datagrams cannot hold it off and it does not cost one.
-        if self.actions.take_app_wake_due(now_ms) {
-            on_event.event(IterationEvent::AppWake);
-        }
-        // Sweep expired reassembly chains and surface the eviction count as
-        // an `IterationEvent::ReassemblyTimeout` (the shared SSOT — the AP
-        // loop calls the same primitive). A stalled chain whose continuation
-        // never arrives is reclaimed here once `now_ms` crosses its deadline.
-        self.rx.sweep(now_ms, &mut *on_event);
+        self.raise_before_input(now_ms, on_event);
 
         // A Router lent to the receive only for its session's step (`RxReassembly::ready`): outside
         // the lend the step takes no input, which the link keeps for a step that can stage it.
@@ -1779,15 +1745,10 @@ impl<
             return None;
         }
 
-        // One unit of input at most a step. Nothing left to read and the link is gone (a stream
-        // whose peer closed it): the session is told, after everything queued before the end has
-        // been read. The next step finds the engine final.
-        if !self.take_input(now_ms, on_event) {
-            if let Some(cause) = self.link.lost() {
-                let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
-                on_event.event(IterationEvent::Poll(&outcome));
-                return None;
-            }
+        // One unit of input at most a step. A link that is gone ends the step once the session is
+        // told: the next step finds the engine final.
+        if matches!(self.take_or_lose(now_ms, on_event), Input::Lost) {
+            return None;
         }
 
         // The session's timers are handed the time whether or not a unit was taken: a peer that
@@ -1799,6 +1760,123 @@ impl<
             .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
 
         None
+    }
+
+    /// The session's bookkeeping at `now_ms`, with no input taken: the role's deferred
+    /// activation, the end of a finished session, what was asked of it from outside the loop, the
+    /// link's own service, the application layer's wake, the reassembly sweep and the timers.
+    /// What a driver that holds the pump itself calls when something of the session is due
+    /// ([`Self::due_ms`], [`Self::owes_out_of_band`]) and not at every unit of input.
+    /// `Some(outcome)` once the session is finished.
+    pub fn service_due<F: EventSink>(
+        &mut self,
+        now_ms: u64,
+        on_event: &mut F,
+    ) -> Option<DriverOutcome> {
+        match self.open_step() {
+            Opened::Ended(outcome) => return Some(outcome),
+            Opened::Raised => return None,
+            Opened::Ready => {}
+        }
+        self.raise_before_input(now_ms, on_event);
+        self.timers
+            .fire_due(&mut self.engine, &self.actions, now_ms, on_event);
+        None
+    }
+
+    /// One unit of the link's input handed to the session at `now_ms`, with none of the
+    /// bookkeeping of [`Self::service_due`]: whether a unit was taken. None is taken while the
+    /// Router is not lent to the receive, when the link holds nothing, or when the link is gone,
+    /// which the session is then told.
+    pub fn take_input_now<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> bool {
+        self.rx.ready() && matches!(self.take_or_lose(now_ms, on_event), Input::Taken)
+    }
+
+    /// The first instant, in the session's monotonic milliseconds, at which this session's
+    /// bookkeeping falls due ([`Self::service_due`]): its timers' deadlines (the handshake's, the
+    /// lease's, the keep-alive's and the application layer's) and the runtime's next timer. A
+    /// Router this pump is lent keeps the deadline of its chains with its owner, which sweeps it.
+    /// `None` when nothing is armed.
+    pub fn due_ms(&mut self, now_ms: u64) -> Option<u64> {
+        let timers = self.timers.next_due_ms(&self.engine, &self.actions, now_ms);
+        let runtime = self
+            .runtime
+            .time_to_next_timer_us()
+            .map(|timer_us| now_ms.saturating_add(timer_us.div_ceil(1000)));
+        match (timers, runtime) {
+            (Some(timers), Some(runtime)) => Some(timers.min(runtime)),
+            (due, None) | (None, due) => due,
+        }
+    }
+
+    /// Whether something was asked of the session from outside its loop (a close, an exhausted
+    /// congestion wait, the transport deleted on another link) that [`Self::service_due`]
+    /// raises. Read only: the request stays for the service to take.
+    pub fn owes_out_of_band(&self) -> bool {
+        self.actions.out_of_band_owed()
+    }
+
+    /// The part of an iteration before the clock is read: the role's deferred activation, the end
+    /// of a finished session or of the test iteration cap, a request from outside the loop, which
+    /// ends the iteration once raised, and the link's own service.
+    fn open_step(&mut self) -> Opened {
+        // The role's activation, deferred from the pump's making (`session-slot`).
+        #[cfg(feature = "session-slot")]
+        if let Some(role) = self.pending_role.take() {
+            for event in role.activation() {
+                self.engine.process_event(*event);
+            }
+        }
+        if self.engine.is_in_final_state() {
+            return Opened::Ended(DriverOutcome::Terminated);
+        }
+        if let Some(limit) = self.max_iters {
+            if self.iter >= limit {
+                return Opened::Ended(DriverOutcome::IterationLimit);
+            }
+            // Below the limit, so one more is still a count.
+            self.iter = self.iter.saturating_add(1);
+        }
+
+        // R2922 — raise what the session was asked from OUTSIDE the loop (a
+        // rail close) before servicing the link. This loop polls every
+        // iteration, so it needs no wake of its own.
+        if wz_session_core::drive::check_out_of_band(&self.actions, &mut self.engine) {
+            return Opened::Raised;
+        }
+
+        if self.link.uses_wake_budget() {
+            let wake_budget_ms = self.wake_budget_ms();
+            self.link.service_within(wake_budget_ms);
+        } else {
+            self.link.service();
+        }
+        Opened::Ready
+    }
+
+    /// What is raised at `now_ms` before the input is read, so a stream of input cannot hold it
+    /// off: the application layer's own deadline (a pending query's, a query left for it), which
+    /// is not a datagram or the lease, and the end of the reassembly chains past theirs, told as
+    /// `IterationEvent::ReassemblyTimeout` (the shared SSOT the AP loop calls too).
+    fn raise_before_input<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) {
+        if self.actions.take_app_wake_due(now_ms) {
+            on_event.event(IterationEvent::AppWake);
+        }
+        self.rx.sweep(now_ms, &mut *on_event);
+    }
+
+    /// Hand the session one unit of input, and when the link had none and is gone (a stream
+    /// whose peer closed it), tell the session, after everything queued before the end was read.
+    fn take_or_lose<F: EventSink>(&mut self, now_ms: u64, on_event: &mut F) -> Input {
+        if self.take_input(now_ms, on_event) {
+            return Input::Taken;
+        }
+        if let Some(cause) = self.link.lost() {
+            let outcome = wz_session_core::drive::dispatch_link_lost(&mut self.engine, cause);
+            on_event.event(IterationEvent::Poll(&outcome));
+            return Input::Lost;
+        }
+        Input::Empty
     }
 
     /// Hand the session one unit of input, when the link has one: the parked remainder of the
@@ -1883,6 +1961,26 @@ impl<
     fn take_input<F: EventSink>(&mut self, _now_ms: u64, _on_event: &mut F) -> bool {
         false
     }
+}
+
+/// How the part of a pump's iteration before its clock reading ended ([`SessionPump::step`]).
+enum Opened {
+    /// The session is finished.
+    Ended(DriverOutcome),
+    /// A request from outside the loop was raised, which ends the iteration.
+    Raised,
+    /// The iteration goes on.
+    Ready,
+}
+
+/// What a pump's take of one unit of input came to.
+enum Input {
+    /// A unit was handed to the session.
+    Taken,
+    /// The link holds nothing.
+    Empty,
+    /// The link is gone, and the session was told.
+    Lost,
 }
 
 /// The MCU session AS A TASK — the `!Send` future that
@@ -2036,6 +2134,32 @@ where
         core::ptr::addr_of_mut!((*at)._pinned).write(core::marker::PhantomPinned);
         Ok(task.start_in())
     }
+}
+
+/// [`spawn_session_with_router`] with no task: the session's pump built in `place`, its Router
+/// written by `make_router` in the pump's own field, for a driver that holds the pump and steps
+/// it itself ([`SessionPump::service_due`], [`SessionPump::take_input_now`]). The place is the
+/// caller's (a field of the session's region, or a span of its arena), and the caller drops the
+/// pump in it once no step of it is under way. `None` when the maker did not build the Router in
+/// its place, with what the pump was to be made of dropped.
+/// Out of line, as the task's future is: the pump is built in its place, apart from the caller's
+/// frame.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+#[inline(never)]
+pub fn place_session_with_router<'p, C, L, R, M, K>(
+    place: &'p mut MaybeUninit<SessionPump<C, L, dyn BoxedLinkDriver, R, K>>,
+    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
+    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+    make_router: M,
+) -> Option<&'p mut SessionPump<C, L, dyn BoxedLinkDriver, R, K>>
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    R: RxReassembly + 'static,
+    M: MakeRouter<R>,
+    K: LockKind,
+{
+    SessionPump::with_router_in(place, runtime, fields, |router| make_router.make_in(router))
 }
 
 /// The task a session runs as on the heap profile ([`spawn_session_with_router`]): a future of a
@@ -2950,6 +3074,90 @@ mod wake_budget_tests {
         assert_eq!(raised(None), (0, None), "none stated: no event");
     }
 
+    /// An acceptor pump over a link that is never read from and the session's actions, its clock
+    /// standing still: what the tests of the parts of a step drive.
+    fn still_pump() -> (
+        SessionPump<Stopped, Rc<Recording>>,
+        SessionHandle<Stopped>,
+        u64,
+    ) {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
+        let now_ms = clock.now_monotonic_ms();
+        let config = SessionDriveConfig {
+            timeouts: SessionTimeouts::from_build(),
+            role: SessionRole::Acceptor,
+            max_iters: None,
+        };
+        let link = Rc::new(Recording::default());
+        let pump = SessionPump::new(runtime, link, actions.clone(), entropy, clock, config);
+        (pump, actions, now_ms)
+    }
+
+    /// The service raises the application layer's deadline that came due, and the take of input
+    /// raises none: a driver that takes input at every unit and services only when something is
+    /// due leaves the deadline to the service. Turned red by a take of input that does the
+    /// bookkeeping of a step, or by a service that skips it.
+    #[test]
+    fn the_service_raises_what_is_due_and_the_take_of_input_raises_nothing() {
+        let (mut pump, actions, now_ms) = still_pump();
+        actions.set_app_wake_deadline_ms(Some(now_ms));
+        let mut wakes = 0;
+        let taken = pump.take_input_now(now_ms, &mut |event: IterationEvent<'_, '_>| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        });
+        assert!(!taken, "a link with nothing gave a unit");
+        assert_eq!(wakes, 0, "the take of input raised the deadline");
+        assert!(
+            actions.app_wake_deadline_ms().is_some(),
+            "the take of input spent the deadline"
+        );
+        let _ = pump.service_due(now_ms, &mut |event: IterationEvent<'_, '_>| {
+            if matches!(event, IterationEvent::AppWake) {
+                wakes += 1;
+            }
+        });
+        assert_eq!(
+            wakes, 1,
+            "the service raised the deadline that came due once"
+        );
+        assert_eq!(actions.app_wake_deadline_ms(), None, "and spent it");
+    }
+
+    /// The pump's next due instant names the application layer's deadline: a driver that sleeps
+    /// until it wakes for it. Turned red by a due instant that leaves the deadline out.
+    #[test]
+    fn the_pump_is_due_by_the_application_layers_deadline() {
+        let (mut pump, actions, now_ms) = still_pump();
+        actions.set_app_wake_deadline_ms(Some(now_ms + 5));
+        assert!(
+            pump.due_ms(now_ms)
+                .is_some_and(|due_ms| due_ms <= now_ms + 5),
+            "the pump is due after the deadline it was given"
+        );
+    }
+
+    /// A request from outside the loop is read as owed until the service takes it, however often
+    /// it is read. Turned red by a read that takes the request, or by a service that leaves it.
+    #[test]
+    fn a_request_from_outside_the_loop_is_owed_until_the_service_takes_it() {
+        let (mut pump, actions, now_ms) = still_pump();
+        assert!(
+            !pump.owes_out_of_band(),
+            "CONTROL: nothing is asked of a new session"
+        );
+        actions.request_congestion_close();
+        assert!(pump.owes_out_of_band(), "the request is owed");
+        assert!(pump.owes_out_of_band(), "and still owed once read");
+        let _ = pump.service_due(now_ms, &mut |_event: IterationEvent<'_, '_>| {});
+        assert!(!pump.owes_out_of_band(), "the service took the request");
+    }
+
     /// A stream whose peer closed it: the loop tells the session, which ends, and the pump stops
     /// on the next step. A link that is not gone raises nothing of the kind.
     ///
@@ -3072,6 +3280,69 @@ mod wake_budget_tests {
             crate::link_cells::CellRc::handles(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
+    }
+
+    /// A session placed with no task builds its Router once, as it is placed, and is stepped by
+    /// its holder through the parts of a step; the holder drops it in its place, and the handle to
+    /// the session it held goes with it. Turned red by a placed pump that builds no Router, or
+    /// whose drop keeps the handle.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_session_placed_with_no_task_is_stepped_by_its_holder_and_dropped_in_its_place() {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
+        let link = Rc::new(Recording::default());
+        let made = Rc::new(core::cell::Cell::new(0u32));
+        let before = crate::link_cells::CellRc::handles(&actions);
+        let now_ms = clock.now_monotonic_ms();
+        let mut place = alloc::boxed::Box::new(MaybeUninit::uninit());
+        let pump = place_session_with_router(
+            &mut *place,
+            runtime,
+            PumpFields {
+                link: Rc::clone(&link),
+                actions: actions.clone(),
+                entropy,
+                clock,
+                config: SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
+            },
+            CountedRouter {
+                made: Rc::clone(&made),
+                policy: wz_session_core::policy::SessionPolicy::defaults(),
+            },
+        )
+        .expect("the maker builds the Router in its place");
+        assert_eq!(
+            made.get(),
+            1,
+            "the Router is made once, as the pump is placed"
+        );
+        let _ = pump.service_due(now_ms, &mut |_event: IterationEvent<'_, '_>| {});
+        assert!(
+            !link.budgets.borrow().is_empty(),
+            "the holder's service stepped the link"
+        );
+        assert!(
+            !pump.take_input_now(now_ms, &mut |_event: IterationEvent<'_, '_>| {}),
+            "a link with nothing gave a unit"
+        );
+        let running = crate::link_cells::CellRc::handles(&actions);
+        assert!(running > before, "the pump holds the handle to its session");
+        // SAFETY: the pump was written in the place by `place_session_with_router`, and the
+        // borrow of it it handed back is not used again.
+        unsafe { place.assume_init_drop() };
+        assert!(
+            crate::link_cells::CellRc::handles(&actions) < running,
+            "the pump, and the handle it held, went with its place"
+        );
+        assert_eq!(made.get(), 1, "a dropped pump makes nothing more");
     }
 
     /// A session over the Router its session lends it reads its link inside the lend alone: a
