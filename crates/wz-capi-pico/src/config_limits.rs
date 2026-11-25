@@ -94,8 +94,10 @@ pub(crate) fn state_over(text: Option<&str>, limits: &SessionLimits) -> Result<S
         let (Some(name), Some(count)) = (halves.next(), halves.next()) else {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         };
-        let count = count_of(count.trim_ascii()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        if !next.select(name.trim_ascii(), count) {
+        // The item is trimmed at both ends, so a name has spaces only before the `=` and a count
+        // only after it.
+        let count = count_of(count.trim_ascii_start()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
+        if !next.select(name.trim_ascii_end(), count) {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
     }
@@ -244,6 +246,33 @@ mod tests {
         }
         assert_eq!(count_of(largest.as_bytes()), Some(usize::MAX));
         assert_eq!(count_of(past.as_bytes()), None);
+    }
+
+    /// Spaces and tabs around a name, its `=` and its count state what the bare item states.
+    /// Turned red by a reading that keeps a space at either side of the `=`.
+    #[test]
+    fn spaces_around_an_items_parts_state_what_the_bare_item_does() {
+        let opening = opening();
+        let limits = &opening.limits;
+        let mut stated_any = false;
+        for (name, count) in [
+            ("MAX_PUBLISHERS", limits.max_publishers().most()),
+            ("MAX_SUBSCRIPTIONS", limits.max_subscriptions().most()),
+            (
+                "MAX_DECLARED_KEYEXPRS",
+                limits.max_declared_keyexprs().most(),
+            ),
+        ] {
+            let Some(count) = count else {
+                continue;
+            };
+            let bare = alloc::format!("{name}={count}");
+            let spaced = alloc::format!(" \t{name} \t=\t {count}\t , ");
+            let stated = state_over(Some(bare.as_str()), limits);
+            stated_any |= stated.is_ok();
+            assert_eq!(state_over(Some(spaced.as_str()), limits), stated, "{name}");
+        }
+        assert!(stated_any, "an opening count of an entity is stated");
     }
 
     /// A text that states nothing, and no text, leave the statement as it is. Turned red by a
