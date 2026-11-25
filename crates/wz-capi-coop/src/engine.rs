@@ -739,8 +739,7 @@ impl SessionRows {
 }
 
 /// Lay out the plan of the session opened with `config` under `policy`, its tables' rows from
-/// `from` (`lay_out_open`, each link's cells `cell_bytes` large, the faces' rooms `rooms` bytes,
-/// the ABI's places `held` and the runtime's span of `runtime_bytes`), reserve its arena in
+/// `from` and after them the rows `holds` names (`lay_out_open`), reserve its arena in
 /// `memory` and lend from it every table of the session. One lender lends each layer its plain
 /// tables from the rows the plan counts for it: the transport's links, cells, reassembly and
 /// endpoints, the state's lane, declarations, keys and legs, and the ABI's places; it gives the
@@ -750,14 +749,11 @@ impl SessionRows {
 /// open's frame never holds or moves it: what the state is sized by is handed back with the tables.
 #[inline(never)]
 fn lend_session(
-    cell_bytes: LinkCells<usize>,
-    rooms: usize,
-    held: &HeldPlaces,
+    holds: &OpenHolds<'_>,
     from: PlanFrom,
     memory: &'static dyn ArenaMemory,
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
-    runtime_bytes: usize,
 ) -> Result<SessionLent, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
     match from {
@@ -765,7 +761,7 @@ fn lend_session(
         #[cfg(any(feature = "runtime-plan", test))]
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
-    lay_out_open(&mut plan, cell_bytes, rooms, held, runtime_bytes)?;
+    lay_out_open(&mut plan, holds)?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
@@ -2486,6 +2482,17 @@ struct LegAsk<'a, 'o> {
     mint: &'a mut dyn FnMut() -> ReplyCallback,
 }
 
+/// Where one leg of a get is held pending (`CoopEngine::hold_leg`): in the table of `face` (a
+/// link's, a group's, or the session's own, `LOCAL_FACE`) under `rid`, the leg's id `leg`, owed
+/// `finals` Finals.
+#[cfg(feature = "query")]
+struct LegEntry {
+    face: FaceId,
+    leg: u64,
+    rid: wz_session_core::wire_id::RequestId,
+    finals: u32,
+}
+
 /// What came of holding a leg of a get pending (`CoopEngine::hold_leg`).
 #[cfg(feature = "query")]
 enum LegHeld {
@@ -2751,23 +2758,32 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) ->
     }
 }
 
-/// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::count`]), the cells `cells` sizes
-/// for each link, the faces' rooms of `rooms` bytes, the ABI's places `held` names and then the
-/// span of `runtime` bytes the session's runtime is placed in, after every other row: the one plan
-/// an open reserves by. Laid out where the plan lies, which
-/// `lend_session` reads in its own frame: a plan handed back by value would be moved again, twice,
-/// by the open that reads it.
+/// What an open lays out after the rows its limits size ([`lay_out_open`]), which the session's
+/// config does not count: what its links and its runtime are made of, and the places the ABI holds.
+pub(crate) struct OpenHolds<'h> {
+    /// The bytes of each link's cells.
+    pub(crate) cells: LinkCells<usize>,
+    /// The bytes of the faces' rooms.
+    pub(crate) rooms: usize,
+    /// The ABI's places.
+    pub(crate) held: &'h HeldPlaces,
+    /// The span the session's runtime is placed in.
+    pub(crate) runtime: usize,
+}
+
+/// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::count`]), the cells
+/// `holds.cells` sizes for each link, the faces' rooms, the ABI's places and then the span the
+/// session's runtime is placed in, after every other row: the one plan an open reserves by. Laid
+/// out where the plan lies, which `lend_session` reads in its own frame: a plan handed back by
+/// value would be moved again, twice, by the open that reads it.
 pub(crate) fn lay_out_open(
     plan: &mut ArenaPlan,
-    cells: LinkCells<usize>,
-    rooms: usize,
-    held: &HeldPlaces,
-    runtime: usize,
+    holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
-    plan.holding_cells(cells)?;
-    plan.holding_rooms(rooms)?;
-    plan.holding(held)?;
-    plan.holding_runtime(runtime)
+    plan.holding_cells(holds.cells)?;
+    plan.holding_rooms(holds.rooms)?;
+    plan.holding(holds.held)?;
+    plan.holding_runtime(holds.runtime)
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -4201,17 +4217,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let runtime_bytes = tables
             .placed_bytes::<C>()
             .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?;
-        let mut lent = lend_session(
-            link_cells::<C>(&links),
-            link_rooms_bytes(&links),
-            &held,
-            from,
-            memory,
-            &config,
-            &policy,
-            runtime_bytes,
-        )
-        .map_err(OpenError::Arena)?;
+        let holds = OpenHolds {
+            cells: link_cells::<C>(&links),
+            rooms: link_rooms_bytes(&links),
+            held: &held,
+            runtime: runtime_bytes,
+        };
+        let mut lent =
+            lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
         // out for it: the session names an endpoint by its row from here, and what the source
         // held goes with its writer, here, before anything is bound or dialled.
@@ -5938,12 +5951,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         }
     }
 
-    /// Hold one leg of a get pending in the table of `face` (a link's, a group's, or the
-    /// session's own, `LOCAL_FACE`) under `rid`, owed `finals` Finals: the leg's callback minted
-    /// in a row of the plane's, and its sink registered with the deadline and the accepted key the
-    /// get states. Out of line where a get issues more than one kind of leg (to groups, or to the
-    /// session itself, besides its links), so those legs are held by one body and not by a copy
-    /// each; a build whose get asks its links alone has one caller, which keeps it inline.
+    /// Hold one leg of a get pending under `entry`: the leg's callback minted in a row of the
+    /// plane's, and its sink registered with the deadline and the accepted key the get states.
+    /// Out of line where a get issues more than one kind of leg (to groups, or to the session
+    /// itself, besides its links), so those legs are held by one body and not by a copy each; a
+    /// build whose get asks its links alone has one caller, which keeps it inline.
     #[cfg(feature = "query")]
     #[cfg_attr(any(feature = "group", feature = "local-queryable"), inline(never))]
     fn hold_leg(
@@ -5951,11 +5963,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         now_us: u64,
         registry: &mut Registry,
         ask: &mut LegAsk<'_, '_>,
-        face: FaceId,
-        leg_id: u64,
-        rid: wz_session_core::wire_id::RequestId,
-        finals: u32,
+        entry: LegEntry,
     ) -> LegHeld {
+        let LegEntry {
+            face,
+            leg: leg_id,
+            rid,
+            finals,
+        } = entry;
         let timeout_ms = ask.opts.effective_timeout_ms();
         // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
         // before its timeout.
@@ -7542,10 +7557,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 core.clock.now_us(),
                 &mut core.session.registry,
                 &mut ask,
-                face,
-                leg_id,
-                rid,
-                1,
+                LegEntry {
+                    face,
+                    leg: leg_id,
+                    rid,
+                    finals: 1,
+                },
             ) {
                 LegHeld::Held => {}
                 LegHeld::Gone => continue,
@@ -7643,10 +7660,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 core.clock.now_us(),
                 &mut core.session.registry,
                 &mut ask,
-                face,
-                leg_id,
-                rid,
-                finals,
+                LegEntry {
+                    face,
+                    leg: leg_id,
+                    rid,
+                    finals,
+                },
             ) {
                 LegHeld::Held => {}
                 LegHeld::Gone => continue,
@@ -7697,10 +7716,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 core.clock.now_us(),
                 &mut core.session.registry,
                 &mut ask,
-                LOCAL_FACE,
-                leg_id,
-                rid,
-                1,
+                LegEntry {
+                    face: LOCAL_FACE,
+                    leg: leg_id,
+                    rid,
+                    finals: 1,
+                },
             ) {
                 LegHeld::Held => {
                     if !core.session.note_pending(PendingGet {

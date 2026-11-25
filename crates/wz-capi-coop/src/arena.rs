@@ -2104,7 +2104,8 @@ impl ArenaPlan {
         if let Some((_, [slot, ..])) = self.rows.split_at_mut_checked(self.len) {
             *slot = row;
         }
-        self.len += 1;
+        // Below `ARENA_ROWS`, checked above.
+        self.len = self.len.saturating_add(1);
         self.reserved = match (self.reserved, row.span()) {
             (Some(sum), Some(span)) => sum.checked_add(span),
             _ => None,
@@ -2198,7 +2199,8 @@ impl ArenaPlan {
         // Read where `held` lies, kind by kind, rather than copied whole into the walk.
         let mut from = 0;
         while let Some((at, place)) = held.next_entity(from) {
-            from = at + 1;
+            // An index of the held places, which never reaches `usize::MAX`.
+            from = at.saturating_add(1);
             if place.align() > ARENA_ALIGN {
                 return Err(ArenaRefused::TooLarge);
             }
