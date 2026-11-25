@@ -7590,6 +7590,22 @@
       "carry_forward_bullets": [
         "The next hosted Platform run on Windows and macOS; the carries of the previous round."
       ]
+    },
+    "Round 4642": {
+      "decision_summary": "Six session-core send tests had been red since 7fa627553 made the data-send gate start closed and open only at establishment: their rigs built a link's action bundle and sent on it without establishing it, so every send answered TransportUnavailable before it reached what the test judged (a key past its bound, a reply gate, a staged reply's writer, a lent frame's slot refusal and SN give-back, the batch budget asked). The rigs now send from an established bundle (established_bundle, through the same enter_established a session runs), and the test of the gate itself still starts from an unestablished one. They were never compiled in the feature sets that ran (codec-push, the lend-only heap set), which is why the change that closed the gate did not see them.",
+      "changes_bullets": [
+        "crates/wz-session-core/src/session_actions/bundle_tests.rs: established_bundle(); reply_egress_gate, staged_replies, the plain put past its key bound and the three lent_frame_refusal tests send from it."
+      ],
+      "verification_bullets": [
+        "Through bx: session_actions::bundle_tests in the lend-only heap set (F1 with session-unicast-accept), in codec-push,codec-response,reply-egress-gate, and in the workspace-unified lib set of wz-capi-core, wz-runtime-tokio, wz-runtime-coop, wz-session-core, wz-capi-coop (3312 passed); clippy -D warnings of wz-session-core in the default, lend-only heap and reply-gate sets. One test stays red: data_leaves_only_an_established_link_with_the_limits_it_was_established_with asserts (0, 0) before establishment where the API answers (0, 127) (an unsettled ring code 0 reads as the 8-bit ring); how an unsettled limit is stated is the owning lane's to decide."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "data_leaves_only_an_established_link...: state an unsettled send limit as a type (Option) rather than a ring code 0; Vmiri: SCE engine with_policy overlapping &mut, taken by scxml-core-engine-52 (split Engine into policy and state); the int-fix branch's table_tests merge conflict (Counted defined twice); the hosted runs on 0cdadfbe8."
+      ]
     }
   },
   "inventory_entries": {
