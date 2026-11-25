@@ -351,7 +351,7 @@ mod tests {
         let r = RawEthLink::new(
             DatagramIo(right),
             RawEthHeader::new(B, A, DEFAULT_ETHTYPE, 0),
-            MacWhitelist::new().allow(A),
+            MacWhitelist::new().allow(A).expect("room for one MAC"),
         );
         l.send(b"blocked").expect("send");
         assert_eq!(r.recv().expect("recv"), RawEthReceive::Filtered { smac: B });
@@ -368,7 +368,7 @@ mod tests {
         let receiver = RawEthLink::new(
             DatagramIo(r2),
             RawEthHeader::new(A, B, DEFAULT_ETHTYPE, 0),
-            MacWhitelist::new().allow(A),
+            MacWhitelist::new().allow(A).expect("room for one MAC"),
         );
         sender.send(b"admitted").expect("send");
         match receiver.recv().expect("recv") {

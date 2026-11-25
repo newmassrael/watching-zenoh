@@ -74,6 +74,42 @@ pub const DEFAULT_DMAC: [u8; MAC_LEN] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
 /// The locator scheme (`RAWETH_SCHEMA`).
 pub const RAWETH_SCHEMA: &str = "reth";
 
+/// The longest `reth/` endpoint a session joins by, which [`parse_reth_locator`] refuses past.
+/// Every row of a [`RethLocator`] is sized from it, so a value that fits the endpoint fits its
+/// row: nothing is allocated and nothing is cut.
+pub const RETH_ENDPOINT_LEN: usize = crate::caps::MAX_RAWETH_ENDPOINT_LEN;
+
+/// The shortest text a config key can follow: the scheme and the config separator, no address.
+const SHORTEST_HEAD: usize = "reth/#".len();
+
+/// Characters of a MAC as a locator writes it.
+const MAC_TEXT_LEN: usize = "00:00:00:00:00:00".len();
+
+/// The shortest mapping entry: no key, a MAC, no tag.
+const SHORTEST_MAPPING_ENTRY: usize = MAC_TEXT_LEN + "##".len();
+
+/// The most mapping entries an endpoint of [`RETH_ENDPOINT_LEN`] bytes can name, and never less
+/// than the one default entry a link that names none sends by. The first entry needs no `,`
+/// before it, hence the one byte added.
+pub const RETH_MAPPING_CAPACITY: usize = at_least(
+    1,
+    (RETH_ENDPOINT_LEN.saturating_sub(SHORTEST_HEAD + "mapping=".len()) + 1)
+        / (SHORTEST_MAPPING_ENTRY + 1),
+);
+
+/// The most source MACs the whitelist of an endpoint of [`RETH_ENDPOINT_LEN`] bytes can name.
+pub const RETH_WHITELIST_CAPACITY: usize =
+    (RETH_ENDPOINT_LEN.saturating_sub(SHORTEST_HEAD + "whitelist=".len()) + 1) / (MAC_TEXT_LEN + 1);
+
+/// `value`, raised to `floor` when it is less.
+const fn at_least(floor: usize, value: usize) -> usize {
+    if value < floor {
+        floor
+    } else {
+        value
+    }
+}
+
 /// What can go wrong framing, deframing, or configuring a raweth link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RawEthError {
@@ -106,6 +142,8 @@ pub enum RawEthError {
     },
     /// A locator that is not `reth/...`.
     NotRawEth,
+    /// An endpoint longer than [`RETH_ENDPOINT_LEN`]: no row of the build holds it.
+    TooLong,
     /// A MAC that is not six colon-separated hex octets.
     MalformedMac,
     /// A config value that is not the hex the key expects.
@@ -132,6 +170,12 @@ impl core::fmt::Display for RawEthError {
                 write!(f, "raweth frame needs {need} bytes, buffer holds {got}")
             }
             RawEthError::NotRawEth => write!(f, "locator scheme is not {RAWETH_SCHEMA}"),
+            RawEthError::TooLong => {
+                write!(
+                    f,
+                    "raweth endpoint is longer than {RETH_ENDPOINT_LEN} bytes"
+                )
+            }
             RawEthError::MalformedMac => write!(f, "MAC is not six colon-separated hex octets"),
             RawEthError::MalformedConfig { pair } => write!(f, "malformed raweth config {pair:?}"),
         }
@@ -336,7 +380,7 @@ pub fn deframe(bytes: &[u8]) -> Result<(RawEthHeader, &[u8]), RawEthError> {
 /// discovered: an unconfigured link is promiscuous, not deaf.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MacWhitelist {
-    entries: Vec<[u8; MAC_LEN]>,
+    entries: heapless::Vec<[u8; MAC_LEN], RETH_WHITELIST_CAPACITY>,
 }
 
 impl MacWhitelist {
@@ -345,10 +389,11 @@ impl MacWhitelist {
         Self::default()
     }
 
-    /// Admit this source MAC.
-    pub fn allow(mut self, mac: [u8; MAC_LEN]) -> Self {
-        self.entries.push(mac);
-        self
+    /// Admit this source MAC; the MAC back, admitted by nothing, when the list already holds
+    /// [`RETH_WHITELIST_CAPACITY`].
+    pub fn allow(mut self, mac: [u8; MAC_LEN]) -> Result<Self, [u8; MAC_LEN]> {
+        self.entries.push(mac)?;
+        Ok(self)
     }
 
     /// `true` when the list is empty (admit all) or names `smac`.
@@ -367,12 +412,13 @@ impl MacWhitelist {
     }
 }
 
-/// One entry of a raweth endpoint's `mapping`: the frames of a message whose key meets
-/// `keyexpr` go to `dmac`, tagged with `vlan` when there is one (`_zp_raweth_mapping_entry_t`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawEthMapping {
+/// One entry of a raweth endpoint's `mapping`, as a link reads it: the frames of a message whose
+/// key meets `keyexpr` go to `dmac`, tagged with `vlan` when there is one
+/// (`_zp_raweth_mapping_entry_t`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawEthMapping<'a> {
     /// The key the entry serves; the default entry's is empty and serves none by name.
-    pub keyexpr: String,
+    pub keyexpr: &'a str,
     /// The destination MAC.
     pub dmac: [u8; MAC_LEN],
     /// The VLAN tag, which selects the 20-byte header; `None` for the 16-byte one.
@@ -380,62 +426,112 @@ pub struct RawEthMapping {
 }
 
 /// `_ZP_RAWETH_DEFAULT_MAPPING`, which a locator with no mapping of its own sends by.
-static DEFAULT_MAPPING: RawEthMapping = RawEthMapping {
-    keyexpr: String::new(),
+const DEFAULT_MAPPING: RawEthMapping<'static> = RawEthMapping {
+    keyexpr: "",
     dmac: DEFAULT_DMAC,
     vlan: None,
 };
 
-impl RawEthMapping {
+impl RawEthMapping<'_> {
     /// `_ZP_RAWETH_DEFAULT_MAPPING`: [`DEFAULT_DMAC`], no VLAN, no key.
-    pub fn default_entry() -> Self {
-        DEFAULT_MAPPING.clone()
+    pub const fn default_entry() -> Self {
+        DEFAULT_MAPPING
     }
+}
+
+/// A mapping entry as a [`RethLocator`] holds it: where its key sits in the locator's text, and
+/// where its frames go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Route {
+    key: (u16, u16),
+    dmac: [u8; MAC_LEN],
+    vlan: Option<u16>,
 }
 
 /// A parsed `reth/` endpoint, as zenoh-pico opens a raweth link from one
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @
 /// `static z_result_t _z_f_link_open_raweth(_z_link_t *self) {`).
+///
+/// The interface name and the key of every mapping entry are substrings of the endpoint, so
+/// together they fit one text of [`RETH_ENDPOINT_LEN`] bytes; holding them end to end there,
+/// rather than each in a row as long as the longest it could be, keeps the value near the size of
+/// a UDP group's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RethLocator {
     /// The SOURCE MAC this link sends from: the endpoint's address. pico takes the address
     /// as the link's own MAC, and the destinations from [`Self::mapping`].
     pub smac: [u8; MAC_LEN],
-    /// `iface=` — the interface to bind, [`DEFAULT_INTERFACE`] when absent.
-    pub interface: String,
     /// `ethtype=` (hex), [`DEFAULT_ETHTYPE`] when absent or not an ethertype.
     pub ethtype: u16,
-    /// `mapping=` — where each message's frames go by its key, the first entry also being
-    /// where a message with no key, or a key no entry meets, goes. Never empty: an absent or
-    /// invalid mapping is the one [`RawEthMapping::default_entry`].
-    pub mapping: Vec<RawEthMapping>,
     /// `whitelist=` — the source MACs a frame is admitted from; empty (admit all) when absent
     /// or invalid.
     pub whitelist: MacWhitelist,
+    /// The interface name, then each mapping entry's key.
+    text: heapless::String<RETH_ENDPOINT_LEN>,
+    /// Where the interface name ends in `text`.
+    iface_end: u16,
+    /// `mapping=`, never empty: an absent or invalid mapping is the one default entry.
+    routes: heapless::Vec<Route, RETH_MAPPING_CAPACITY>,
 }
 
 impl RethLocator {
+    /// `iface=` — the interface to bind, [`DEFAULT_INTERFACE`] when absent.
+    pub fn interface(&self) -> &str {
+        self.text
+            .get(..usize::from(self.iface_end))
+            .unwrap_or_default()
+    }
+
+    /// `mapping=` — where each message's frames go by its key, the first entry also being where
+    /// a message with no key, or a key no entry meets, goes. Never empty: an absent or invalid
+    /// mapping is the one [`RawEthMapping::default_entry`].
+    pub fn mapping(&self) -> impl Iterator<Item = RawEthMapping<'_>> + '_ {
+        self.routes.iter().map(|route| self.entry(route))
+    }
+
+    /// How many entries [`Self::mapping`] gives.
+    pub fn mapping_len(&self) -> usize {
+        self.routes.len()
+    }
+
+    /// The entry at `index` of [`Self::mapping`], the first when there is none there.
+    pub fn mapping_at(&self, index: usize) -> RawEthMapping<'_> {
+        self.routes
+            .get(index)
+            .or_else(|| self.routes.first())
+            .map_or(DEFAULT_MAPPING, |route| self.entry(route))
+    }
+
     /// The mapping entry a message on `keyexpr` is sent by: the first whose key meets it, or the
     /// first entry when none does or the message names no key
     /// (`vendor/zenoh-pico/src/transport/raweth/tx.c` @
     /// `static z_result_t _zp_raweth_set_socket(const _z_keyexpr_t *keyexpr, _z_raweth_socket_t *sock) {`).
-    /// A locator whose `mapping` was emptied after parsing sends by the default entry, as one
-    /// that named none does.
-    pub fn mapping_for(&self, keyexpr: Option<&str>) -> &RawEthMapping {
-        self.mapping
-            .get(self.mapping_index_for(keyexpr))
-            .unwrap_or(&DEFAULT_MAPPING)
+    pub fn mapping_for(&self, keyexpr: Option<&str>) -> RawEthMapping<'_> {
+        self.mapping_at(self.mapping_index_for(keyexpr))
     }
 
     /// The index in [`Self::mapping`] of the entry [`Self::mapping_for`] gives.
     pub fn mapping_index_for(&self, keyexpr: Option<&str>) -> usize {
         keyexpr
             .and_then(|key| {
-                self.mapping.iter().position(|entry| {
-                    crate::keyexpr_match::keyexpr_intersects_text(key, &entry.keyexpr)
+                self.mapping().position(|entry| {
+                    crate::keyexpr_match::keyexpr_intersects_text(key, entry.keyexpr)
                 })
             })
             .unwrap_or(0)
+    }
+
+    /// `route` with its key read out of the text.
+    fn entry(&self, route: &Route) -> RawEthMapping<'_> {
+        let (start, end) = route.key;
+        RawEthMapping {
+            keyexpr: self
+                .text
+                .get(usize::from(start)..usize::from(end))
+                .unwrap_or_default(),
+            dmac: route.dmac,
+            vlan: route.vlan,
+        }
     }
 }
 
@@ -484,12 +580,15 @@ pub fn leading_message_key(payload: &[u8]) -> Option<String> {
 /// and so is this: an address that is not a MAC is [`DEFAULT_SMAC`], an ethertype at or below
 /// `0x600` on the wire is [`DEFAULT_ETHTYPE`], a mapping with one malformed entry is the default
 /// one, a whitelist with one malformed MAC is none, and a key it does not know is ignored. Only
-/// a locator that is not `reth/` is refused.
+/// a locator that is not `reth/`, and one longer than [`RETH_ENDPOINT_LEN`], are refused.
 pub fn parse_reth_locator(locator: &str) -> Result<RethLocator, RawEthError> {
     let rest = locator
         .strip_prefix(RAWETH_SCHEMA)
         .and_then(|r| r.strip_prefix('/'))
         .ok_or(RawEthError::NotRawEth)?;
+    if locator.len() > RETH_ENDPOINT_LEN {
+        return Err(RawEthError::TooLong);
+    }
     let (locator_part, config) = match rest.split_once('#') {
         Some((l, c)) => (l, c),
         None => (rest, ""),
@@ -509,43 +608,88 @@ pub fn parse_reth_locator(locator: &str) -> Result<RethLocator, RawEthError> {
     } else {
         DEFAULT_SMAC
     };
-    let interface = value_of("iface").map_or_else(|| String::from(DEFAULT_INTERFACE), String::from);
+    // The text holds the interface and the mapping keys, substrings of the endpoint, and each row
+    // below what its length lets in, so a push that does not fit is the length check above
+    // missing a case, refused by the same name.
+    let mut text = heapless::String::new();
+    text.push_str(value_of("iface").unwrap_or(DEFAULT_INTERFACE))
+        .map_err(|()| RawEthError::TooLong)?;
+    let iface_end = text_offset(&text)?;
     let ethtype = value_of("ethtype")
         .map(strtol_hex)
         .filter(|ethtype| (*ethtype as u16).to_be() > 0x600)
         .map_or(DEFAULT_ETHTYPE, |ethtype| ethtype as u16);
-    let mapping = value_of("mapping")
-        .and_then(|list| {
-            list.split(',')
-                .filter(|entry| !entry.is_empty())
-                .map(mapping_entry)
-                .collect::<Option<Vec<_>>>()
-        })
-        .filter(|entries| !entries.is_empty())
-        .unwrap_or_else(|| alloc::vec![RawEthMapping::default_entry()]);
+    let mut routes = heapless::Vec::new();
+    if let Some(list) = value_of("mapping") {
+        if !read_routes(list, &mut text, &mut routes)? {
+            text.truncate(usize::from(iface_end));
+            routes.clear();
+        }
+    }
+    if routes.is_empty() {
+        routes
+            .push(Route {
+                key: (iface_end, iface_end),
+                dmac: DEFAULT_DMAC,
+                vlan: None,
+            })
+            .map_err(|_| RawEthError::TooLong)?;
+    }
     let whitelist = value_of("whitelist")
-        .and_then(|list| {
-            list.split(',')
-                .filter(|entry| !entry.is_empty())
-                .map(|mac| {
-                    Some(mac)
-                        .filter(|m| valid_mac(m))
-                        .and_then(|m| parse_mac(m).ok())
-                })
-                .collect::<Option<Vec<_>>>()
-        })
-        .map(|macs| {
-            macs.into_iter()
-                .fold(MacWhitelist::new(), MacWhitelist::allow)
-        })
+        .map(whitelist_entries)
+        .transpose()?
+        .flatten()
         .unwrap_or_default();
     Ok(RethLocator {
         smac,
-        interface,
         ethtype,
-        mapping,
         whitelist,
+        text,
+        iface_end,
+        routes,
     })
+}
+
+/// Where `text` ends, as a [`Route`] holds it.
+fn text_offset(text: &str) -> Result<u16, RawEthError> {
+    u16::try_from(text.len()).map_err(|_| RawEthError::TooLong)
+}
+
+/// Read a `mapping` list into `routes`, each key appended to `text`; `Ok(false)` for a list
+/// with an entry pico refuses, which sends by the default entry.
+fn read_routes(
+    list: &str,
+    text: &mut heapless::String<RETH_ENDPOINT_LEN>,
+    routes: &mut heapless::Vec<Route, RETH_MAPPING_CAPACITY>,
+) -> Result<bool, RawEthError> {
+    for entry in list.split(',').filter(|entry| !entry.is_empty()) {
+        let Some((keyexpr, dmac, vlan)) = mapping_entry(entry) else {
+            return Ok(false);
+        };
+        let start = text_offset(text)?;
+        text.push_str(keyexpr).map_err(|()| RawEthError::TooLong)?;
+        let key = (start, text_offset(text)?);
+        routes
+            .push(Route { key, dmac, vlan })
+            .map_err(|_| RawEthError::TooLong)?;
+    }
+    Ok(true)
+}
+
+/// The MACs of a `whitelist` list, or `Ok(None)` for a list with one malformed MAC, which names
+/// none.
+fn whitelist_entries(list: &str) -> Result<Option<MacWhitelist>, RawEthError> {
+    let mut entries = heapless::Vec::new();
+    for mac in list.split(',').filter(|entry| !entry.is_empty()) {
+        let Some(mac) = Some(mac)
+            .filter(|m| valid_mac(m))
+            .and_then(|m| parse_mac(m).ok())
+        else {
+            return Ok(None);
+        };
+        entries.push(mac).map_err(|_| RawEthError::TooLong)?;
+    }
+    Ok(Some(MacWhitelist { entries }))
 }
 
 /// `strtol(value, NULL, 16)`: the leading hex digits after an optional `0x`, `0` when there
@@ -568,17 +712,14 @@ fn valid_mac(s: &str) -> bool {
 /// (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `static bool _z_valid_mapping_entry(char *entry) {`):
 /// it needs both `#`s and a valid MAC between them. The tag is read when at least two
 /// characters follow the second `#`, as pico's `p_start >= entry_end` test reads it.
-fn mapping_entry(entry: &str) -> Option<RawEthMapping> {
+fn mapping_entry(entry: &str) -> Option<(&str, [u8; MAC_LEN], Option<u16>)> {
     let (keyexpr, rest) = entry.split_once('#')?;
     let (mac, vlan) = rest.split_once('#')?;
     if !valid_mac(mac) {
         return None;
     }
-    Some(RawEthMapping {
-        keyexpr: String::from(keyexpr),
-        dmac: parse_mac(mac).ok()?,
-        vlan: (vlan.len() >= 2).then(|| strtol_hex(vlan) as u16),
-    })
+    let tag = (vlan.len() >= 2).then(|| strtol_hex(vlan) as u16);
+    Some((keyexpr, parse_mac(mac).ok()?, tag))
 }
 
 /// Parse `aa:bb:cc:dd:ee:ff`.
@@ -777,7 +918,9 @@ mod tests {
     #[test]
     fn an_empty_whitelist_admits_everything_and_a_populated_one_does_not() {
         assert!(MacWhitelist::new().accepts(&A));
-        let list = MacWhitelist::new().allow(B);
+        let list = MacWhitelist::new()
+            .allow(B)
+            .expect("a whitelist has room for one MAC");
         assert!(list.accepts(&B));
         assert!(!list.accepts(&A));
         assert_eq!(list.len(), 1);
@@ -789,9 +932,12 @@ mod tests {
     fn a_reth_endpoint_carries_the_defaults_it_does_not_name() {
         let l = parse_reth_locator("reth/01:02:03:04:05:06").unwrap();
         assert_eq!(l.smac, A, "the address is the source MAC");
-        assert_eq!(l.interface, DEFAULT_INTERFACE);
+        assert_eq!(l.interface(), DEFAULT_INTERFACE);
         assert_eq!(l.ethtype, DEFAULT_ETHTYPE);
-        assert_eq!(l.mapping, [RawEthMapping::default_entry()]);
+        assert_eq!(
+            l.mapping().collect::<Vec<_>>(),
+            [RawEthMapping::default_entry()]
+        );
         assert!(l.whitelist.is_empty());
 
         let l = parse_reth_locator(
@@ -800,18 +946,18 @@ mod tests {
              whitelist=11:12:13:14:15:16",
         )
         .unwrap();
-        assert_eq!(l.interface, "eth0");
+        assert_eq!(l.interface(), "eth0");
         assert_eq!(l.ethtype, 0x1234);
         assert_eq!(
-            l.mapping,
+            l.mapping().collect::<Vec<_>>(),
             [
                 RawEthMapping {
-                    keyexpr: String::from("demo/a"),
+                    keyexpr: "demo/a",
                     dmac: B,
                     vlan: None
                 },
                 RawEthMapping {
-                    keyexpr: String::from("demo/b/**"),
+                    keyexpr: "demo/b/**",
                     dmac: A,
                     vlan: Some(0x0102)
                 },
@@ -840,13 +986,95 @@ mod tests {
             "an ethertype pico refuses"
         );
         assert_eq!(
-            lenient.mapping,
+            lenient.mapping().collect::<Vec<_>>(),
             [RawEthMapping::default_entry()],
             "an entry without its second `#`"
         );
+        let rolled_back = parse_reth_locator(
+            "reth/01:02:03:04:05:06#iface=eth0;mapping=demo/a#11:12:13:14:15:16#,bad",
+        )
+        .unwrap();
+        assert_eq!(
+            rolled_back.mapping().collect::<Vec<_>>(),
+            [RawEthMapping::default_entry()],
+            "a list with one entry pico refuses keeps none of the others"
+        );
+        assert_eq!(rolled_back.interface(), "eth0");
         assert!(
             lenient.whitelist.is_empty(),
             "a whitelist with a malformed MAC"
+        );
+    }
+
+    /// An endpoint of `RETH_ENDPOINT_LEN` bytes is read, one byte longer is refused by that name,
+    /// and a whitelist one past its rows is refused, never cut.
+    #[test]
+    fn an_endpoint_past_the_bound_is_refused_by_it() {
+        let fill = |len: usize| {
+            let mut text = String::from("reth/01:02:03:04:05:06#x=");
+            while text.len() < len {
+                text.push('e');
+            }
+            text
+        };
+        assert!(parse_reth_locator(&fill(RETH_ENDPOINT_LEN)).is_ok());
+        assert_eq!(
+            parse_reth_locator(&fill(RETH_ENDPOINT_LEN + 1)),
+            Err(RawEthError::TooLong)
+        );
+
+        let mut full = MacWhitelist::new();
+        for at in 0..RETH_WHITELIST_CAPACITY {
+            full = full.allow([0, 0, 0, 0, 0, at as u8]).expect("a row");
+        }
+        assert_eq!(full.allow(A).err(), Some(A));
+    }
+
+    /// The rows are sized for the longest endpoint the bound lets in: an interface name, a
+    /// mapping key, a list of the shortest mapping entries and a whitelist that each fill it are
+    /// read whole.
+    #[test]
+    fn the_longest_rows_the_bound_lets_in_fit() {
+        let filled = |head: &str, item: &str, sep: &str| {
+            let mut text = String::from(head);
+            text.push_str(item);
+            while text.len() + sep.len() + item.len() <= RETH_ENDPOINT_LEN {
+                text.push_str(sep);
+                text.push_str(item);
+            }
+            text
+        };
+        let mut iface = String::from("reth/#iface=");
+        while iface.len() < RETH_ENDPOINT_LEN {
+            iface.push('e');
+        }
+        assert_eq!(
+            parse_reth_locator(&iface).unwrap().interface().len(),
+            RETH_ENDPOINT_LEN - "reth/#iface=".len()
+        );
+
+        let mut key = String::from("reth/#mapping=");
+        while key.len() + SHORTEST_MAPPING_ENTRY < RETH_ENDPOINT_LEN {
+            key.push('k');
+        }
+        key.push_str("#11:12:13:14:15:16#");
+        let read = parse_reth_locator(&key).unwrap();
+        assert_eq!(
+            read.mapping_at(0).keyexpr.len(),
+            RETH_ENDPOINT_LEN - "reth/#mapping=".len() - SHORTEST_MAPPING_ENTRY
+        );
+        assert_eq!(read.mapping_at(0).dmac, B);
+
+        let entries = filled("reth/#mapping=", "#11:12:13:14:15:16#", ",");
+        assert_eq!(
+            parse_reth_locator(&entries).unwrap().mapping_len(),
+            RETH_MAPPING_CAPACITY
+        );
+
+        let macs = filled("reth/#whitelist=", "11:12:13:14:15:16", ",");
+        assert_eq!(
+            parse_reth_locator(&macs).unwrap().whitelist.len(),
+            RETH_WHITELIST_CAPACITY
         );
     }
 

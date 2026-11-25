@@ -141,7 +141,7 @@ struct FragmentRoutes {
 impl RawEthGroupDriver<AfPacketCarrier> {
     /// Open the link `endpoint` describes on its interface's socket.
     pub fn open_endpoint(endpoint: RethLocator) -> io::Result<Self> {
-        let carrier = AfPacketCarrier::open(&endpoint.interface)?;
+        let carrier = AfPacketCarrier::open(endpoint.interface())?;
         Ok(Self::new(carrier, endpoint))
     }
 }
@@ -222,12 +222,7 @@ impl<C: RawEthCarrier> MulticastLinkDriver for RawEthGroupDriver<C> {
 
     /// The frame less the widest header a mapping entry makes.
     fn frame_budget(&self) -> Option<u16> {
-        let header = if self
-            .endpoint
-            .mapping
-            .iter()
-            .any(|entry| entry.vlan.is_some())
-        {
+        let header = if self.endpoint.mapping().any(|entry| entry.vlan.is_some()) {
             ETH_VLAN_HEADER_LEN
         } else {
             ETH_HEADER_LEN
@@ -254,7 +249,7 @@ impl<C: RawEthCarrier> RawEthGroupSender<C> {
     fn route(&self, datagram: &[u8]) -> usize {
         use wz_session_core::inbound::{parse_inbound, InboundFrame};
         // A mapping of one entry sends everything one way, and the key need not be read.
-        if self.endpoint.mapping.len() < 2 {
+        if self.endpoint.mapping_len() < 2 {
             return 0;
         }
         match parse_inbound(datagram) {
@@ -300,7 +295,7 @@ impl<C: RawEthCarrier> RawEthGroupSender<C> {
 
 impl<C: RawEthCarrier> MulticastDatagramSender for RawEthGroupSender<C> {
     fn send(&self, datagram: &[u8]) -> impl core::future::Future<Output = io::Result<()>> + Send {
-        let entry = &self.endpoint.mapping[self.route(datagram)];
+        let entry = self.endpoint.mapping_at(self.route(datagram));
         let mut header =
             RawEthHeader::new(entry.dmac, self.endpoint.smac, self.endpoint.ethtype, 0);
         if let Some(tag) = entry.vlan {

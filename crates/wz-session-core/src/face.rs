@@ -315,8 +315,23 @@ impl<const N: usize> core::ops::Deref for RowTextOf<N> {
 pub type RowText = RowTextOf<{ crate::caps::MAX_LOCATOR_LEN }>;
 
 /// A group's endpoint as a [`FaceLinkRow`] holds it, its socket keys included: in the row up to
-/// [`crate::caps::MAX_GROUP_ENDPOINT_LEN`] bytes.
-pub type GroupRowText = RowTextOf<{ crate::caps::MAX_GROUP_ENDPOINT_LEN }>;
+/// [`GROUP_ROW_LEN`] bytes.
+pub type GroupRowText = RowTextOf<GROUP_ROW_LEN>;
+
+/// The bytes a group endpoint's row holds: the longest endpoint the build joins a group by,
+/// [`crate::caps::MAX_GROUP_ENDPOINT_LEN`], or a raw Ethernet group's bound where the build has
+/// that transport and its bound is the longer.
+#[cfg(feature = "transport-link-raweth")]
+pub const GROUP_ROW_LEN: usize =
+    if crate::caps::MAX_RAWETH_ENDPOINT_LEN > crate::caps::MAX_GROUP_ENDPOINT_LEN {
+        crate::caps::MAX_RAWETH_ENDPOINT_LEN
+    } else {
+        crate::caps::MAX_GROUP_ENDPOINT_LEN
+    };
+
+/// The bytes a group endpoint's row holds: the longest endpoint the build joins a group by.
+#[cfg(not(feature = "transport-link-raweth"))]
+pub const GROUP_ROW_LEN: usize = crate::caps::MAX_GROUP_ENDPOINT_LEN;
 
 /// One link of an established face, with the face it is under, as a reader takes it out of the
 /// session's lock to hand on: every field is held in the row, so reading the faces one row at a
@@ -865,6 +880,18 @@ mod tests {
     /// rows that hold them in place; a locator past the bound still reads whole, from the heap,
     /// which only a heap engine's link reaches. Turned red by a row that cuts a text short or
     /// blanks it, which would name another peer, or by one that spills a text that fits.
+    /// In a build with the raweth transport a group's row holds a raw Ethernet group's endpoint
+    /// of that bound whole and in place, as it holds a UDP group's. Turned red by a row sized
+    /// from the UDP bound alone.
+    #[test]
+    #[cfg(feature = "transport-link-raweth")]
+    fn a_group_row_holds_a_raweth_endpoint_of_its_bound() {
+        let endpoint = "e".repeat(crate::caps::MAX_RAWETH_ENDPOINT_LEN);
+        let row = GroupRowText::of(&endpoint);
+        assert_eq!(row.as_str(), endpoint);
+        assert!(row.is_inline());
+    }
+
     #[test]
     fn every_text_reads_whole_from_a_row_and_one_that_fits_is_held_in_place() {
         let fits = "t".repeat(crate::caps::MAX_LOCATOR_LEN);

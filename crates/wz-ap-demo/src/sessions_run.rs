@@ -594,6 +594,10 @@ async fn run_group(
     // joined as any other engine's is.
     let read = match parse_group_locator(endpoint) {
         Ok(GroupLocator::Udp(read)) => read,
+        Ok(_) => {
+            eprintln!("wz-ap-demo session {name}: failed: {endpoint} is not a udp group endpoint");
+            return SessionEnd::Failed;
+        }
         Err(e) => {
             eprintln!("wz-ap-demo session {name}: failed: {endpoint} is not a group endpoint: {e}");
             return SessionEnd::Failed;
