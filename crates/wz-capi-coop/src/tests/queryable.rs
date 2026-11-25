@@ -13,6 +13,7 @@ use wz_session_core::locality::Locality;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// Declare a queryable on `keyexpr` whose callback is `answer`, given what the session holds
 /// queries through.
@@ -255,7 +256,7 @@ fn a_query_kept_past_its_session_holds_none_of_it() {
         "CONTROL: the session stands while its handle is held"
     );
 
-    let gone = Arc::downgrade(&engine);
+    let gone = EngineHold::downgrade(&engine);
     SessionDrive::close(&*engine);
     let mut answered = false;
     engine.reply_held(held, "demo/p/a", &mut |_out| answered = true);

@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
-use wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey, TokenRef};
+use wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey, TokenRef};
 use wz_capi_port::{
     BatchStep, FanoutError, FilterId, FilterPlane, FilteredPut, LivelinessSink, MatchId,
     MatchingSink, QblId, Refusal, ReplyCallback, SessionEngine, SubId, SubscriberSink, Tick,
@@ -64,8 +64,8 @@ struct GetRecord {
 /// An engine that records and hands over.
 #[derive(Default)]
 struct Script {
-    /// The script itself, as the fans it is attached to reach it.
-    this: Weak<Script>,
+    /// What the fans it is attached to reach the script by.
+    canceller: Option<&'static ScriptCanceller>,
     next: AtomicU64,
     now: AtomicU64,
     closed: AtomicBool,
@@ -87,7 +87,9 @@ impl Script {
     fn new(legs: usize) -> Arc<Self> {
         Arc::new_cyclic(|this| {
             let script = Self {
-                this: Weak::clone(this),
+                // One for the script's life, left to the process: a fan's canceller stands for
+                // the whole process, and this one reaches nothing once the script is gone.
+                canceller: Some(Box::leak(Box::new(ScriptCanceller(Weak::clone(this))))),
                 ..Self::default()
             };
             *script.legs.lock().unwrap() = legs;
@@ -160,6 +162,17 @@ impl wz_capi_port::Tickers for Script {
     }
     fn stop_ticker(&self, _id: TickerId) {
         self.event("stop ticker");
+    }
+}
+
+/// The script as a fan's canceller reaches it: while it stands.
+struct ScriptCanceller(Weak<Script>);
+
+impl FanCanceller for ScriptCanceller {
+    fn cancel_fan(&self, key: FanKey) {
+        if let Some(script) = self.0.upgrade() {
+            script.cancel_fan(key);
+        }
     }
 }
 
@@ -356,8 +369,8 @@ impl SessionEngine for Script {
         // The script is what ends the legs a cancelled fan tagged, as an engine is.
         let tag = match fan {
             Some(fan) => {
-                let canceller: Weak<dyn FanCanceller> = Weak::<Script>::clone(&self.this);
-                if !fan.attach(&canceller) {
+                let canceller = self.canceller.expect("made by `Script::new`");
+                if !fan.attach(Canceller::Static(canceller)) {
                     return Ok(0);
                 }
                 Some(fan.key())

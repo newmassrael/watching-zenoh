@@ -12,28 +12,27 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use wz_capi_port::SessionEngine;
 use wz_ext_pubsub::advanced_subscriber::{
     AdvancedSubscriberOptions, EngineSubscriber, HistoryConfig, RecoveryConfig,
 };
 use wz_session_core::serde_codec::z_serialize;
 
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// The payloads the subscriber's callback was handed, in order.
 type Delivered = Arc<Mutex<Vec<u8>>>;
 
 /// A subscriber on `demo/data` of the engine, with `options`, and what it is handed.
 fn subscribe(
-    engine: &Arc<Engine>,
+    engine: &EngineHold<Engine>,
     router: &Router,
     options: AdvancedSubscriberOptions,
-) -> (EngineSubscriber, Delivered) {
+) -> (EngineSubscriber<EngineHold<Engine>>, Delivered) {
     let delivered: Delivered = Arc::new(Mutex::new(Vec::new()));
     let into = delivered.clone();
     let declares_before = router.seen(|s| s.declares);
-    let port: Arc<dyn SessionEngine> = engine.clone();
-    let subscriber = EngineSubscriber::declare(&port, "demo/data", options, move |sample| {
+    let subscriber = EngineSubscriber::declare(engine, "demo/data", options, move |sample| {
         into.lock().unwrap().push(sample.view().payload()[0]);
     })
     .expect("the subscriber declares on the cooperative engine");
@@ -45,7 +44,7 @@ fn subscribe(
 
 /// Step the engine until `expected` payloads were delivered, for at most five seconds, and say
 /// what was delivered and what the router was asked when they were not.
-fn wait_for(engine: &Arc<Engine>, router: &Router, delivered: &Delivered, expected: &[u8]) {
+fn wait_for(engine: &EngineHold<Engine>, router: &Router, delivered: &Delivered, expected: &[u8]) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while delivered.lock().unwrap().len() < expected.len() && std::time::Instant::now() < deadline {
         let _ = wz_capi_port::SessionDrive::read(&**engine, false);

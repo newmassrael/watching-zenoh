@@ -5,7 +5,7 @@
 //! reaches the subscriber, and a Response the get that asked for it, from the frame's own bytes,
 //! each record lent for its dispatch, as the copying receive delivers them.
 
-use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limit_binding::Quota;
@@ -15,6 +15,7 @@ use wz_session_core::sink::SampleView;
 use super::entity_tables::{lowered, open_under};
 use super::{open, until, CatchAll, Command, Engine, Router};
 use crate::round::RoundCounts;
+use crate::{EngineHandle, EngineHold};
 
 /// A Push the router sends is read in place and reaches the subscriber with its key and payload.
 #[test]
@@ -56,7 +57,7 @@ fn a_push_read_in_place_reaches_the_subscriber() {
 fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let watched: Arc<OnceLock<Weak<Engine>>> = Arc::default();
+    let watched: Arc<OnceLock<EngineHandle<Engine>>> = Arc::default();
     let got = Arc::new(Mutex::new(Vec::new()));
     let sink = {
         let (watched, got) = (watched.clone(), got.clone());
@@ -64,7 +65,7 @@ fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it()
             // Called with no lock of the session held (decision D8), so the arena can be read.
             let used = watched
                 .get()
-                .and_then(Weak::upgrade)
+                .and_then(EngineHandle::upgrade)
                 .map(|engine| engine.key_counts().used);
             got.lock().unwrap().push((
                 sample.keyexpr().to_owned(),
@@ -73,7 +74,7 @@ fn a_key_named_by_an_alias_the_peer_undeclares_is_read_where_the_alias_kept_it()
             ));
         })
     };
-    let _ = watched.set(Arc::downgrade(&engine));
+    let _ = watched.set(EngineHold::downgrade(&engine));
     engine
         .declare_subscriber_on_wire("demo/**", WireKey::literal(), Locality::Any, None, sink)
         .expect("the session declares the subscriber");

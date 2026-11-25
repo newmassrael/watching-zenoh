@@ -45,8 +45,6 @@
 //! the key they were held on, which a client's do not
 //! (`DeclaredKeyexpr::retraction_naming_in`).
 
-use alloc::sync::Arc;
-
 use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
@@ -306,7 +304,7 @@ impl FilteredKey {
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
         // The entity keeps its key, which holds the declaration: its wire form holds nothing.
-        let wire = key.wire(Arc::as_ref(&session.engine));
+        let wire = key.wire(crate::session::EngineHold::as_ref(&session.engine));
         let filter = WriteFilter::declare(session, plane, &key, &wire, count_local)?;
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
         unsafe {
@@ -326,7 +324,8 @@ impl FilteredKey {
 /// another thread is waited for, as zenoh-pico's undeclare waits for it.
 impl Drop for WriteFilter {
     fn drop(&mut self) {
-        self.listeners.retract_all(Arc::as_ref(&self.shared));
+        self.listeners
+            .retract_all(crate::session::EngineHold::as_ref(&self.shared));
         self.shared.undeclare_write_filter(self.id);
     }
 }
@@ -374,7 +373,7 @@ mod tests {
         );
         let kept = engine_held(handle).clone();
         assert!(
-            Arc::ptr_eq(&PicoSession::of(handle).engine, &kept),
+            crate::session::EngineHold::ptr_eq(&PicoSession::of(handle).engine, &kept),
             "over the session's engine"
         );
         assert!(PicoSession::of(handle).mode == session_mode(handle));

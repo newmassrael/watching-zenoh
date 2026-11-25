@@ -1368,7 +1368,7 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let delivery = unsafe { &*kept_at::<TransportListenerState, TransportKept>(object) };
-            let engine = Arc::as_ref(engine);
+            let engine = crate::session::EngineHold::as_ref(engine);
             let plane = ToldPlane::Transports;
             for row in rows(engine).filter(|row| row.link == 0) {
                 if SessionEngine::tell_came(engine, plane, slot, &ToldKey::of_row(&row)) {
@@ -1431,7 +1431,7 @@ impl Connectivity {
         if history {
             // SAFETY: the owner holds the place for the length of the replay.
             let listener = unsafe { &*kept_at::<LinkListenerState, LinkListener>(object) };
-            let engine = Arc::as_ref(engine);
+            let engine = crate::session::EngineHold::as_ref(engine);
             let plane = ToldPlane::Links;
             for row in rows(engine) {
                 if listener.wants(&transport_of_row(&row))

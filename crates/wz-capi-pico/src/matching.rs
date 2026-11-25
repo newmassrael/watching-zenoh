@@ -55,7 +55,6 @@ use crate::pubsub::{z_closure_drop_callback_t, z_loaned_publisher_t, PublisherSt
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_OK};
 use crate::write_filter::WriteFilter;
-use alloc::sync::Arc;
 
 /// pico `z_matching_status_t` — `{ bool matching }`, 1 B measured, field at
 /// offset 0. Passed to the callback BY POINTER, so its layout is read by C.
@@ -686,7 +685,7 @@ pub(crate) unsafe fn declare_on_filter(
     let object = place
         .fill(Answering::keeping(
             MatchingListenerState {
-                shared: Arc::clone(filter.engine()),
+                shared: crate::session::EngineHold::clone(filter.engine()),
                 id: 0,
             },
             MatchingKept {
@@ -958,7 +957,7 @@ mod tests {
             .expect("a listener's place")
             .fill(Answering::keeping(
                 MatchingListenerState {
-                    shared: Arc::clone(engine),
+                    shared: crate::session::EngineHold::clone(engine),
                     id: 0,
                 },
                 MatchingKept {
@@ -1003,7 +1002,7 @@ mod tests {
             places - 1,
             "the list holds the background one"
         );
-        list.retract_all(Arc::as_ref(&engine));
+        list.retract_all(crate::session::EngineHold::as_ref(&engine));
         assert_eq!(
             free_places(&engine),
             places,
@@ -1106,7 +1105,7 @@ mod tests {
             background,
             "the background listener is left on the list"
         );
-        list.retract_all(Arc::as_ref(&engine));
+        list.retract_all(crate::session::EngineHold::as_ref(&engine));
         assert_eq!(
             free_places(&engine),
             places,

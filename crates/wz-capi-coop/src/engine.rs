@@ -28,7 +28,7 @@
 //! stepped like everything else: a step moves the handshake on and returns, so a program that
 //! steps its session, or its read task, is what brings the link back.
 
-use alloc::sync::{Arc, Weak};
+use alloc::sync::Arc;
 use core::any::Any;
 use core::num::NonZeroU32;
 use core::ops::{Deref, DerefMut};
@@ -48,11 +48,13 @@ use crate::arena::CacheSpan;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::arena::HandedTable;
 use crate::arena::{
-    ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EntityKind, EntityPlace,
-    EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables, PlanFrom,
-    SessionArena, SessionRows, TransportTables,
+    ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EnginePlace, EntityKind,
+    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
+    PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
+use wz_capi_port::reach::{ReachEngine, RowClaim};
+use wz_runtime_coop::kept::Shared;
 use wz_session_core::bounded::{
     Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, TableLender,
 };
@@ -198,6 +200,9 @@ use {
 mod deliveries;
 use deliveries::Deliveries;
 
+mod hold;
+pub use hold::{EngineHandle, EngineHold};
+
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
@@ -296,7 +301,7 @@ pub(crate) use get::{Ended, LegHold, LegId, LegRow, LegSink, PendingGet};
 use {
     crate::round::LegHolders,
     get::{EndedLegs, GetKind, GetPlane, LegRows},
-    wz_capi_port::cancellation::{CancellableFan, FanCanceller, FanKey},
+    wz_capi_port::cancellation::{CancellableFan, Canceller, FanCanceller, FanKey},
     wz_capi_port::ReplyCallback,
     wz_session_core::query_options::QueryOptionsOf,
     wz_session_core::registry_error::RegisterError,
@@ -543,6 +548,10 @@ pub enum OpenError {
     /// build's `sn-resolution` domain leaves out: the build holds no word for its ring. Nothing
     /// was reserved, bound, joined or dialled.
     SnResolution(OutsideDomain<SnResolution>),
+    /// Every row of the process's table of engines (the build's `ENGINE_ROWS`, one for each
+    /// session open at once, [`wz_capi_port::reach`]) holds the engine of a session open now.
+    /// Nothing was reserved, bound, joined or dialled.
+    NoEngineRow,
 }
 
 /// Why the `key-wire-form` a session was opened under cannot be honoured.
@@ -645,6 +654,8 @@ impl OpenKeyIds {
 /// which a publish reaches with the session held by another, and the ring of the advanced
 /// publishers' caches, which the engine locks apart from the state.
 struct LentApart {
+    /// The place the engine is written at.
+    engine: EnginePlace,
     handle_place: Option<HandlePlace>,
     #[cfg(any(feature = "listen", feature = "group"))]
     handed: HandedTable,
@@ -690,6 +701,8 @@ struct SessionLent {
     samples: Placed<Round>,
     /// The span the session's runtime is placed in, and the count of the arena it is kept by.
     runtime: RuntimePlace,
+    /// The place the session's engine is written at, and the count of the arena it is kept by.
+    engine: EnginePlace,
     arena: SessionArena,
 }
 
@@ -758,6 +771,7 @@ fn lend_session(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
     runtime_bytes: usize,
+    engine_bytes: usize,
 ) -> Result<SessionLent, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
     match from {
@@ -765,7 +779,14 @@ fn lend_session(
         #[cfg(any(feature = "runtime-plan", test))]
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
-    lay_out_open(&mut plan, cell_bytes, rooms, held, runtime_bytes)?;
+    lay_out_open(
+        &mut plan,
+        cell_bytes,
+        rooms,
+        held,
+        runtime_bytes,
+        engine_bytes,
+    )?;
     let mut arena = SessionArena::reserve(&plan, memory)?;
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
@@ -867,8 +888,12 @@ fn lend_session(
     let runtime = arena
         .runtime_place(runtime_bytes)
         .map_err(ArenaRefused::Lend)?;
+    let engine = arena
+        .engine_place(engine_bytes)
+        .map_err(ArenaRefused::Lend)?;
     Ok(SessionLent {
         runtime,
+        engine,
         transport,
         room_places,
         steps,
@@ -1090,8 +1115,9 @@ pub struct CoopEngine<L: SessionLinks + 'static, C: ClockSource + Clone + 'stati
     /// The takes of the session's locks on a message's paths, which the tests count.
     #[cfg(test)]
     pub(crate) takes: Takes,
-    #[cfg(any(feature = "query", feature = "queryable", feature = "threads"))]
-    this: Weak<Self>,
+    /// The row of the process's table the engine is reached through without being held
+    /// ([`EngineHandle`]), taken out at the session's close.
+    reach: ReachEngine,
 }
 
 /// How often the session's lock ([`CoopEngine::live`], and a droppable publish's try of it) and its
@@ -1784,7 +1810,7 @@ struct ReadTask {
 /// of a type that can be named, so the start boxes nothing and makes no word for the stop.
 #[cfg(feature = "threads")]
 pub(crate) struct ReaderBody<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    engine: Arc<CoopEngine<L, C>>,
+    engine: EngineHold<CoopEngine<L, C>>,
     run: usize,
 }
 
@@ -2753,8 +2779,8 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl SessionLinks) ->
 
 /// Lay out on `plan`, the rows an open's limits size ([`ArenaPlan::count`]), the cells `cells` sizes
 /// for each link, the faces' rooms of `rooms` bytes, the ABI's places `held` names and then the
-/// span of `runtime` bytes the session's runtime is placed in, after every other row: the one plan
-/// an open reserves by. Laid out where the plan lies, which
+/// span of `runtime` bytes the session's runtime is placed in and the place of `engine` bytes its
+/// engine lies in, after every other row: the one plan an open reserves by. Laid out where the plan lies, which
 /// `lend_session` reads in its own frame: a plan handed back by value would be moved again, twice,
 /// by the open that reads it.
 pub(crate) fn lay_out_open(
@@ -2763,11 +2789,13 @@ pub(crate) fn lay_out_open(
     rooms: usize,
     held: &HeldPlaces,
     runtime: usize,
+    engine: usize,
 ) -> Result<(), ArenaRefused> {
     plan.holding_cells(cells)?;
     plan.holding_rooms(rooms)?;
     plan.holding(held)?;
-    plan.holding_runtime(runtime)
+    plan.holding_runtime(runtime)?;
+    plan.holding_engine(engine)
 }
 
 /// The bytes of the task a link's session runs as on this engine: `RouterSessionTask` over the
@@ -4050,7 +4078,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         clock: C,
         entropy: impl EntropySource + Send + 'static,
         config: CoopConfig,
-    ) -> Result<Arc<Self>, OpenError> {
+    ) -> Result<EngineHold<Self>, OpenError> {
         let policy = resolve_policy(&config);
         Self::open_with_policy(links, clock, entropy, config, policy)
     }
@@ -4066,7 +4094,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         entropy: impl EntropySource + Send + 'static,
         config: CoopConfig,
         policy: SessionPolicy,
-    ) -> Result<Arc<Self>, OpenError> {
+    ) -> Result<EngineHold<Self>, OpenError> {
         Self::open_with_key_ids(links, clock, entropy, config, policy, OpenKeyIds::none())
     }
 
@@ -4090,7 +4118,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         config: CoopConfig,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
-    ) -> Result<Arc<Self>, OpenError> {
+    ) -> Result<EngineHold<Self>, OpenError> {
         Self::open_in(
             links,
             clock,
@@ -4117,7 +4145,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         memory: &'static dyn ArenaMemory,
-    ) -> Result<Arc<Self>, OpenError> {
+    ) -> Result<EngineHold<Self>, OpenError> {
         Self::open_made_in(
             links,
             clock,
@@ -4140,8 +4168,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// let go of before anything is bound or dialled ([`OpenSource`]).
     ///
     /// The open is two frames that never lie on the stack together. The first builds the engine
-    /// where it is kept (the session's state and its arena's tables, in the engine's own
-    /// allocation), and returns; the second binds the ports, joins the groups and dials over the
+    /// where it is kept (the session's state and its arena's tables, in the engine's place in the
+    /// arena), and returns; the second binds the ports, joins the groups and dials over the
     /// engine it built, holding only a handle to it. So no part of the engine, and no copy of the
     /// config, is under the session's first steps. An open that fails once the engine is built
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
@@ -4160,7 +4188,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         storage: OpenStorage,
-    ) -> Result<Arc<Self>, OpenError> {
+    ) -> Result<EngineHold<Self>, OpenError> {
         let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, storage)?;
         engine.open_links()?;
         Ok(engine)
@@ -4175,7 +4203,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// One frame from the config to the state: the links, the config, the entropy and what the
     /// arena lent are each borrowed while the open decides, and a value borrowed once is copied
     /// when it is handed on by value. Made here, each is moved only into the state, which is moved
-    /// once, into the engine's allocation ([`Self::engine_of`]).
+    /// once, into the engine's place ([`Self::engine_of`]).
     #[inline(never)]
     fn assemble(
         mut links: L,
@@ -4185,7 +4213,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         storage: OpenStorage,
-    ) -> Result<Arc<Self>, OpenError> {
+    ) -> Result<EngineHold<Self>, OpenError> {
         let OpenStorage {
             memory,
             held,
@@ -4197,6 +4225,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
         #[cfg(not(feature = "shared-key-ids"))]
         key_ids.admit(&policy)?;
+        // The row the engine is reached through, taken before anything is reserved: a process
+        // whose rows are all held opens no more, and reserves nothing for it.
+        let row = ReachEngine::claim().ok_or(OpenError::NoEngineRow)?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
         let tables = RuntimeTables::of::<C>(&config);
         let runtime_bytes = tables
@@ -4211,6 +4242,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             &config,
             &policy,
             runtime_bytes,
+            Shared::<Self>::layout().size(),
         )
         .map_err(OpenError::Arena)?;
         // The texts of the endpoints, each written once by the source into the row the plan laid
@@ -4364,20 +4396,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             arena: lent.arena,
         };
         let apart = LentApart {
+            engine: lent.engine,
             handle_place: lent.handle_place,
             #[cfg(any(feature = "listen", feature = "group"))]
             handed: lent.transport.handed,
             #[cfg(feature = "advanced-cache")]
             cache: lent.cache,
         };
-        Ok(Self::engine_of(core, apart))
+        Ok(Self::engine_of(core, apart, row))
     }
 
-    /// The engine over `core`, held where its own handle (`this`) reaches it, with what the open
-    /// lent apart from the state (`apart`). Out of line, so the open's measure shows it apart.
+    /// The engine over `core`, written at the place the open lent it in the session's arena and
+    /// counted by its holders there, put in the row `row` the open claimed for it, which reaches
+    /// it without holding it ([`EngineHandle`]), with what the open lent apart from the state
+    /// (`apart`). Out of line, so the open's measure shows it apart.
     #[inline(never)]
-    fn engine_of(core: Core<L, C>, apart: LentApart) -> Arc<Self> {
+    fn engine_of(core: Core<L, C>, apart: LentApart, row: RowClaim) -> EngineHold<Self> {
+        // The place is a span of the arena, aligned as a span starts.
+        const { assert!(Shared::<Self>::layout().align() <= wz_session_core::bounded::ARENA_ALIGN) };
         let LentApart {
+            engine: place,
             handle_place,
             #[cfg(any(feature = "listen", feature = "group"))]
             handed,
@@ -4408,21 +4446,20 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(any(feature = "listen", feature = "group"))]
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
-        // The handle's type is named: the engine's handle coerced for the round would otherwise be
-        // what infers it.
-        Arc::new_cyclic(|this: &Weak<Self>| {
-            // A build with no query, queryable or read task reaches the engine by no handle of
-            // its own: the cyclic handle is offered and not kept.
-            #[cfg(not(any(feature = "query", feature = "queryable", feature = "threads")))]
-            let _ = this;
-            // The round hands the queries it holds to their queryables through the engine, which
-            // sends what they answer.
+        let make = |this: NonNull<Self>| {
+            let reachable: NonNull<dyn wz_capi_port::reach::Reachable> = this;
+            // SAFETY: the engine is taken out of its row at its close and first in its drop,
+            // before its place is given back.
+            let reach = unsafe { row.fill(reachable) };
+            // The round hands the queries it holds to their queryables through the engine,
+            // which sends what they answer.
             #[cfg(feature = "queryable")]
-            if let Some(engine) = NonNull::new(this.as_ptr().cast_mut()) {
+            {
                 let answering: NonNull<dyn crate::round::AnswersQueries<crate::round::CoopCalls>> =
-                    engine;
-                // SAFETY: the engine owns the round and tells it to answer no more first in its
-                // drop, before the round is let go of; the place is the engine's from here on.
+                    this;
+                // SAFETY: the engine owns the round and tells it to answer no more first in
+                // its drop, before the round is let go of; the place is the engine's from here
+                // on.
                 unsafe { samples.answer_queries_with(answering) };
             }
             Self {
@@ -4470,10 +4507,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 cache: Mutex::new(cache),
                 #[cfg(test)]
                 takes: Takes::default(),
-                #[cfg(any(feature = "query", feature = "queryable", feature = "threads"))]
-                this: this.clone(),
+                reach,
             }
-        })
+        };
+        // SAFETY: the place was lent to the engine alone, aligned as asserted above and as large as
+        // `Shared::<Self>::layout`, in the arena `place.memory` keeps; the engine is read through
+        // its place only once it is written.
+        EngineHold::of(unsafe { Shared::placed_with(place.at, place.memory, make) })
     }
 
     /// Open the links of the engine [`Self::assemble`] built: the ports bound and the groups
@@ -4516,6 +4556,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         #[cfg(feature = "group")]
         core.local.runtime().seal();
         Ok(())
+    }
+
+    /// Whether `at` is a byte of the session's arena.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn arena_holds(&self, at: *const u8) -> bool {
+        self.core.lock().0.arena.holds(at)
     }
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
@@ -5181,7 +5227,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             );
             // The queries the callback keeps are held through the session, as the face's holder.
             let holder = CoopHolder {
-                engine: self.this.clone(),
+                engine: EngineHandle::reaching(self.reach),
             };
             call.ask(query, &mut responder, &holder);
         }
@@ -5729,8 +5775,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let Some(fan) = fan else {
             return Ok(None);
         };
-        let canceller: Weak<dyn FanCanceller> = Weak::<Self>::clone(&self.this);
-        if fan.attach(&canceller) {
+        if fan.attach(Canceller::Engine(self.reach)) {
             Ok(Some(fan.key()))
         } else {
             Err(FanCancelled)
@@ -6516,7 +6561,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
             return Ok(());
         }
-        let Some(engine) = self.this.upgrade() else {
+        let Some(engine) = self.hold() else {
             return Ok(());
         };
         // Read under the reader's lock, which every stop moves the run under too.
@@ -8212,6 +8257,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        // No handle reaches the session from here on: a key, a query or a token kept past the
+        // close finds it closed whatever still holds the engine.
+        self.reach.clear();
         let core = &mut guard.0;
         core.end_links();
         // The rows of the session's own declarations, and the callbacks they hold, go after the
@@ -8479,12 +8527,12 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.put_plain_in(core, keyexpr, mapping_id, payload, &params)
     }
 
-    /// This session as the C handle's drive: the engine's own allocation, which the handle holds
-    /// as one of its `Arc`s, so the open makes nothing more for it.
-    pub fn into_drive(self: Arc<Self>) -> CoopDrive<L, C> {
-        let handle_place = self.handle_place;
+    /// The session `engine` holds as the C handle's drive: one of the engine's holders, so the
+    /// open makes nothing more for it.
+    pub fn into_drive(engine: EngineHold<Self>) -> CoopDrive<L, C> {
+        let handle_place = engine.handle_place;
         CoopDrive {
-            engine: self,
+            engine,
             handle_place,
         }
     }
@@ -8492,17 +8540,17 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
 
 /// The C handle's hold on a session of this engine, kept by value in the handle: the engine is
 /// shared with the entities declared on it and with its read task, so the handle holds one of its
-/// `Arc`s. Its operations are the port's [`SessionDrive`] of this engine, called by name, so an
+/// holders ([`EngineHold`]). Its operations are the port's [`SessionDrive`] of this engine, called by name, so an
 /// ABI built over one kind of links reaches its session through no table of functions, and the
 /// engine it hands out is the engine's own type.
 pub struct CoopDrive<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    engine: Arc<CoopEngine<L, C>>,
+    engine: EngineHold<CoopEngine<L, C>>,
     handle_place: Option<HandlePlace>,
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
     /// The engine the session's entities keep.
-    pub fn engine(&self) -> Arc<CoopEngine<L, C>> {
+    pub fn engine(&self) -> EngineHold<CoopEngine<L, C>> {
         self.engine.clone()
     }
 
@@ -8513,7 +8561,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C
 
     /// The session's own hold of the engine, borrowed for the length of one call: a caller that
     /// keeps the engine clones it where it keeps it, and one that only reaches it counts nothing.
-    pub fn engine_hold(&self) -> &Arc<CoopEngine<L, C>> {
+    pub fn engine_hold(&self) -> &EngineHold<CoopEngine<L, C>> {
         &self.engine
     }
 
@@ -8605,6 +8653,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static>
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngine<L, C> {
     fn drop(&mut self) {
+        // No handle reaches the engine once its last holder let go: its row is vacated before its
+        // place is given back, which a session never closed has not done yet.
+        self.reach.clear();
         // The round names this engine to answer its queries: no longer, before anything of the
         // engine goes (`Round::answer_queries_with`).
         #[cfg(feature = "queryable")]

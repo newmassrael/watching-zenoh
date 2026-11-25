@@ -26,6 +26,7 @@ use wz_session_core::sample::SourceInfo;
 
 use super::get::{ask, settle, Leg};
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// What the queryable of `a_get_made_inside_a_queryables_own_callback_reaches_it_there_at_once`
 /// saw of the get it made from inside its callback: whether it was issued, whether the callback had
@@ -430,7 +431,7 @@ fn a_get_made_inside_a_queryables_own_callback_reaches_it_there_at_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let inner: InnerGet = Arc::default();
     let into = inner.clone();
     // Each entry and return of the callback, by the key of the query it was called on.
@@ -651,7 +652,7 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
     let dropped = Arc::new(AtomicUsize::new(0));
     let own: Arc<Mutex<Option<QblId>>> = Arc::default();
     let guard = Dropped(dropped.clone());
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let id = declare(&engine, "demo/lq/self/**", Locality::Any, {
         let own = own.clone();
         move |_, query, out| {

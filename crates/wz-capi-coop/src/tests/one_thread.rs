@@ -11,6 +11,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
+use crate::EngineHold;
 use wz_capi_port::SessionDrive;
 #[cfg(any(feature = "listen", all(feature = "group", feature = "app-transport")))]
 use wz_session_core::sink::SampleView;
@@ -299,7 +300,7 @@ mod shared_key_ids {
 
     /// A session of `config` holding a dictionary of a key and a key below it, which names keys
     /// by their ids on the wire.
-    fn keyed(config: CoopConfig) -> Arc<Engine> {
+    fn keyed(config: CoopConfig) -> EngineHold<Engine> {
         let ids = Arc::new(
             KeyIds::new([(40, "lab/rig"), (41, "lab/rig/alpha")]).expect("a valid dictionary"),
         );

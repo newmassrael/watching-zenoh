@@ -35,6 +35,7 @@
 //! declaration stands for as long as some face still holds an entity on it and
 //! is retracted with the last — which is when pico lets go of a key it counted.
 
+#[cfg(test)]
 use alloc::sync::Arc;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -189,7 +190,7 @@ impl PicoSubscriberForms {
         place: Option<CountIn>,
     ) -> Self {
         Self {
-            shared: Arc::downgrade(&session.engine),
+            shared: crate::session::EngineHold::downgrade(&session.engine),
             mode: session.mode,
             base,
             answered: Mutex::new([None, None, None, None]),
@@ -272,7 +273,10 @@ impl PicoSubscriberForms {
             return EntityForm::literal();
         };
         let kept = Kept::lodged(anchor.clone());
-        let form = match anchor.announced.aliased_parts(Arc::as_ref(&shared)) {
+        let form = match anchor
+            .announced
+            .aliased_parts(crate::session::EngineHold::as_ref(&shared))
+        {
             // SAFETY: the rest lies in the anchor's announced key, which the anchor keeps,
             // unchanged, for as long as a count of it is held, and `kept` is one.
             Some((mapping_id, rest)) => unsafe { EntityForm::aliased_in(mapping_id, rest, kept) },
@@ -282,7 +286,7 @@ impl PicoSubscriberForms {
             Entity::Subscriber | Entity::Heartbeat => form.with_retraction_naming(
                 anchor
                     .key
-                    .retraction_naming_in(self.mode, Arc::as_ref(&shared)),
+                    .retraction_naming_in(self.mode, crate::session::EngineHold::as_ref(&shared)),
             ),
             Entity::LatePublishers => form,
             Entity::Token => form.with_token_retraction_naming_the_key(true),

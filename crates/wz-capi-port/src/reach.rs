@@ -18,6 +18,7 @@ use core::ptr::NonNull;
 
 use wz_session_core::caps;
 
+use crate::cancellation::FanCanceller;
 use crate::sync::Lock;
 
 /// An engine a [`ReachEngine`] reaches: what takes a count of it for the length of a use.
@@ -37,13 +38,21 @@ pub unsafe trait Reachable: Send + Sync {
     /// The count is one [`Self::retain_live`] took, given back once; nothing is read through the
     /// engine after it by the one that gives it back.
     unsafe fn release(&self);
+
+    /// What ends the legs of a get's fan this engine issued, reached through its row
+    /// ([`crate::cancellation::Canceller::Engine`]): `None`, the provided answer, for an engine
+    /// that issues no get a token can cancel.
+    fn canceller(&self) -> Option<&dyn FanCanceller> {
+        None
+    }
 }
 
-/// One row of the table: the generation it is at, and the engine it holds while that engine's
-/// session is open.
+/// One row of the table: the generation it is at, the engine it holds while that engine's
+/// session is open, and whether an open has taken it for the engine it is making.
 struct Row {
     generation: u32,
     engine: Option<NonNull<dyn Reachable>>,
+    claimed: bool,
 }
 
 // SAFETY: the engine a row holds is `Send + Sync` (`Reachable`), and is reached only under the
@@ -55,6 +64,7 @@ static ROWS: [Lock<Row>; caps::ENGINE_ROWS] = [const {
     Lock::new(Row {
         generation: 0,
         engine: None,
+        claimed: false,
     })
 }; caps::ENGINE_ROWS];
 
@@ -67,24 +77,39 @@ pub struct ReachEngine {
 }
 
 impl ReachEngine {
+    /// A reach of no engine: it reaches nothing and clears nothing, as a reach kept past its
+    /// engine's close does. What a holder made with no session holds.
+    pub const fn vacant() -> Self {
+        Self {
+            row: usize::MAX,
+            generation: 0,
+        }
+    }
+
+    /// Take a vacant row for an engine an open is about to make, before it reserves anything for
+    /// it; `None` when every row holds an engine or is taken, which refuses the open of one more
+    /// session. The row is vacant again when the claim is let go of unfilled.
+    pub fn claim() -> Option<RowClaim> {
+        ROWS.iter().enumerate().find_map(|(row, lock)| {
+            lock.with(|held| {
+                if held.engine.is_some() || held.claimed {
+                    return None;
+                }
+                held.claimed = true;
+                Some(RowClaim { row })
+            })
+        })
+    }
+
     /// Put `engine` in a vacant row and answer the reach of it there; `None` when every row holds
-    /// an engine, which refuses the open of one more session.
+    /// an engine ([`Self::claim`]).
     ///
     /// # Safety
     /// `engine` stands until [`Self::clear`] is called on the reach answered.
     pub unsafe fn put(engine: NonNull<dyn Reachable>) -> Option<Self> {
-        ROWS.iter().enumerate().find_map(|(row, lock)| {
-            lock.with(|held| {
-                if held.engine.is_some() {
-                    return None;
-                }
-                held.engine = Some(engine);
-                Some(Self {
-                    row,
-                    generation: held.generation,
-                })
-            })
-        })
+        let claim = Self::claim()?;
+        // SAFETY: the caller's.
+        Some(unsafe { claim.fill(engine) })
     }
 
     /// Take the engine out of its row, at its session's close: no reach of it reaches it from
@@ -114,6 +139,42 @@ impl ReachEngine {
             unsafe { engine.as_ref() }.retain_live().then_some(engine)
         })?;
         Some(Reached { engine })
+    }
+}
+
+/// A row taken for an engine an open is making ([`ReachEngine::claim`]): no other open takes
+/// it, and no reach reaches anything through it, until it is filled; let go of unfilled, it is
+/// vacant again.
+pub struct RowClaim {
+    row: usize,
+}
+
+impl RowClaim {
+    /// Put `engine` in the row and answer the reach of it there.
+    ///
+    /// # Safety
+    /// `engine` stands until [`ReachEngine::clear`] is called on the reach answered.
+    pub unsafe fn fill(self, engine: NonNull<dyn Reachable>) -> ReachEngine {
+        let row = self.row;
+        core::mem::forget(self);
+        ROWS.get(row).map_or_else(ReachEngine::vacant, |lock| {
+            lock.with(|held| {
+                held.claimed = false;
+                held.engine = Some(engine);
+                ReachEngine {
+                    row,
+                    generation: held.generation,
+                }
+            })
+        })
+    }
+}
+
+impl Drop for RowClaim {
+    fn drop(&mut self) {
+        if let Some(lock) = ROWS.get(self.row) {
+            lock.with(|held| held.claimed = false);
+        }
     }
 }
 
@@ -255,6 +316,115 @@ mod tests {
         assert!(reach.reach().is_none());
         assert_eq!(engine.holders(), 0, "no count was taken");
         reach.clear();
+    }
+
+    /// A row claimed for an engine being made is taken by no other open and reaches nothing until
+    /// it is filled; let go of unfilled, it is vacant again. Turned red by a claim another claim
+    /// can take, or one that leaves its row taken when it is let go of.
+    #[test]
+    fn a_claimed_row_is_taken_until_filled_or_let_go_of() {
+        let _serial = SERIAL.lock().unwrap_or_else(|held| held.into_inner());
+        let claims: std::vec::Vec<RowClaim> = core::iter::from_fn(ReachEngine::claim)
+            .take(caps::ENGINE_ROWS + 1)
+            .collect();
+        assert_eq!(claims.len(), caps::ENGINE_ROWS, "every row is claimed once");
+        let engine = Counted::held();
+        assert!(put(&engine).is_none(), "no row is left");
+        drop(claims);
+        let reach = put(&engine).expect("the claims were let go of");
+        assert!(reach.reach().is_some());
+        reach.clear();
+        let claim = ReachEngine::claim().expect("a vacant row");
+        let reachable: &(dyn Reachable + 'static) = &engine;
+        // SAFETY: the engine is cleared out of its row before it goes, below.
+        let filled = unsafe { claim.fill(NonNull::from(reachable)) };
+        assert!(
+            filled.reach().is_some(),
+            "the filled row reaches its engine"
+        );
+        filled.clear();
+    }
+
+    /// A reach of no engine reaches nothing, and its clear takes no engine out of any row.
+    /// Turned red by a vacant reach that names a row of the table.
+    #[test]
+    fn a_vacant_reach_reaches_nothing() {
+        let _serial = SERIAL.lock().unwrap_or_else(|held| held.into_inner());
+        let engine = Counted::held();
+        let reach = put(&engine).expect("a vacant row");
+        let vacant = ReachEngine::vacant();
+        assert!(vacant.reach().is_none());
+        vacant.clear();
+        assert!(reach.reach().is_some(), "the vacant clear took nothing out");
+        assert_eq!(engine.holders(), 1);
+        reach.clear();
+    }
+
+    /// An engine that ends the legs of the fans it issued, counted by its holders.
+    struct Cancels {
+        counted: Counted,
+        cancelled: AtomicUsize,
+    }
+
+    impl crate::cancellation::FanCanceller for Cancels {
+        fn cancel_fan(&self, _key: crate::cancellation::FanKey) {
+            self.cancelled.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    // SAFETY: as `Counted`'s, whose count this one is.
+    unsafe impl Reachable for Cancels {
+        fn retain_live(&self) -> bool {
+            self.counted.retain_live()
+        }
+
+        unsafe fn release(&self) {
+            // SAFETY: the caller's.
+            unsafe { self.counted.release() }
+        }
+
+        fn canceller(&self) -> Option<&dyn FanCanceller> {
+            Some(self)
+        }
+    }
+
+    /// A fan whose engine was attached by its row is cancelled through the engine while the
+    /// engine is open, the count taken for the cancel given back after it; once the engine
+    /// closed, the cancel reaches nothing. Turned red by an engine canceller that ends no leg,
+    /// keeps the count it took, or reaches an engine past its close.
+    #[test]
+    fn a_fan_attached_by_its_engines_row_is_cancelled_only_while_the_engine_is_open() {
+        use crate::cancellation::{CancellableFan, Canceller};
+        let _serial = SERIAL.lock().unwrap_or_else(|held| held.into_inner());
+        let engine = Cancels {
+            counted: Counted::held(),
+            cancelled: AtomicUsize::new(0),
+        };
+        let reachable: &(dyn Reachable + 'static) = &engine;
+        // SAFETY: the engine is cleared out of its row before it goes, below.
+        let reach = unsafe { ReachEngine::put(NonNull::from(reachable)) }.expect("a vacant row");
+        let open = CancellableFan::new();
+        assert!(open.attach(Canceller::Engine(reach)));
+        open.cancel();
+        assert_eq!(
+            engine.cancelled.load(Ordering::SeqCst),
+            1,
+            "the engine ended its legs"
+        );
+        assert_eq!(
+            engine.counted.holders(),
+            1,
+            "the cancel's count was given back"
+        );
+        let closed = CancellableFan::new();
+        assert!(closed.attach(Canceller::Engine(reach)));
+        reach.clear();
+        closed.cancel();
+        assert_eq!(
+            engine.cancelled.load(Ordering::SeqCst),
+            1,
+            "a closed engine is not reached"
+        );
     }
 
     /// With every row holding an engine, one more is refused; a row cleared takes the next.

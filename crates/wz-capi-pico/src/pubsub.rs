@@ -26,6 +26,7 @@
 //!   marshaled sample is opaque to the C code — it only borrows it (valid for
 //!   the duration of `call`) and reads the keyexpr / payload back out.
 
+#[cfg(test)]
 use alloc::sync::Arc;
 use core::ffi::{c_int, c_void};
 
@@ -1771,7 +1772,7 @@ pub(crate) unsafe fn fill_subscriber_place(
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             SubscriberState {
-                shared: Arc::clone(engine),
+                shared: crate::session::EngineHold::clone(engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             },
@@ -3562,14 +3563,14 @@ unsafe fn declare_subscriber_in(
     // the `DeclSubscriber` is then announced on the CALLER's key, a literal for a view
     // (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)` a few lines on).
     let key = DeclaredKeyexpr::declare_non_wild_prefix(engine, ke, declared_of(keyexpr))?;
-    let wire = subscriber_wire(keyexpr, Arc::as_ref(engine), &key);
+    let wire = subscriber_wire(keyexpr, crate::session::EngineHold::as_ref(engine), &key);
     // A peer or router-hat session retracts the subscription naming ITS key
     // (`_z_undeclare_subscriber`), which is the prefix declaration above and not the caller's key
     // the announce went out on. A background subscriber's record holds that declaration
     // (`WireKey::with_own`), so the id it names stays declared as long as it can retract.
     let retraction = key.retraction_naming_in(
         crate::write_filter::session_mode(handle),
-        Arc::as_ref(engine),
+        crate::session::EngineHold::as_ref(engine),
     );
     // A refused subscriber answers pico's code for its cause; the engine dropped the sink, so
     // the closure's drop has run.

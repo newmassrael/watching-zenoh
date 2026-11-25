@@ -61,7 +61,7 @@
 //! - A link kind pico does not have (QUIC, unixpipe, ...) reports its protocol
 //!   name as its `type`, where pico could not encode the document at all.
 
-use std::sync::{Arc, Weak};
+use std::sync::Arc;
 
 use wz_capi_port::{QueryHolder, QueryableSink, SessionEngine};
 use wz_host_sync::{Mutex, MutexGuard};
@@ -160,7 +160,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
             // Weak, as pico's query context is: the queryable lives in the
             // session, and a strong reference would keep the session alive
             // through its own declaration.
-            session: Arc::downgrade(&handle.drive.engine()),
+            session: crate::session::EngineHold::downgrade(&handle.drive.engine()),
             identity,
         });
         let sink = QueryableSink::shared(
@@ -266,7 +266,7 @@ impl TransportLink {
 
 /// The queryable's handler, shared by every face it is declared on.
 struct Answerer {
-    session: Weak<dyn SessionEngine>,
+    session: crate::session::EngineHandle,
     identity: Identity,
 }
 

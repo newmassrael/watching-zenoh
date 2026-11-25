@@ -23,6 +23,7 @@ use wz_session_core::sink::SampleView;
 
 use super::get::remote_get;
 use super::{open, until, CatchAll, Command, Engine, Router};
+use crate::EngineHold;
 
 /// The second router is another node: a session holds one face for each zid, and two routers of
 /// one zid would be the one node dialled twice (`tests::one_face`).
@@ -30,7 +31,7 @@ const SECOND_ROUTER_ZID: u8 = 0xc4;
 
 /// A session opened to `first`, which then dials `second` as a face of its own and waits for both
 /// links to complete their handshakes.
-fn on_two_faces(first: &Router, second: &Router) -> Arc<Engine> {
+fn on_two_faces(first: &Router, second: &Router) -> EngineHold<Engine> {
     let engine = open(first);
     engine
         .attach_face(&second.endpoint())

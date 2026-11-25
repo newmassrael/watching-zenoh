@@ -1390,7 +1390,7 @@ pub(crate) unsafe fn get_inner(
     // The query names the caller's key in its own wire form, as pico's
     // `_z_query` does (`_z_declared_keyexpr_alias_to_wire(keyexpr, ...)`).
     let engine = crate::session::engine_held(handle);
-    let wire = wire_key_of(keyexpr, Arc::as_ref(engine));
+    let wire = wire_key_of(keyexpr, crate::session::EngineHold::as_ref(engine));
     let token = held.token.take().map(TokenRef::shared);
     let ask = held.ask(params_in, shape, None);
     issue_get(engine, ke, wire, &ask, cclosure, token, target_peer)

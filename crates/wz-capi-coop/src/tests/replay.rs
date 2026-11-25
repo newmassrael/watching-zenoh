@@ -4,7 +4,7 @@
 //! replay is not resumed on another link, and an unpaced one is a single turn. Both forms tell a
 //! new peer the same declarations in the same order, in a build of either domain of the policy.
 
-use std::sync::Arc;
+use crate::EngineHold;
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubId, SubscriberSink, WireKey};
@@ -41,7 +41,10 @@ fn told_subscribers(router: &Router) -> Vec<u64> {
 /// A session that holds `keys` as subscribers, whose link is lost and dialled again with the
 /// declarations paced as `pacing` says: the new router, the session, and the subscribers' ids, as
 /// soon as the new link is established and its first turn is sent.
-fn reconnected(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, Arc<Engine>, Vec<SubId>) {
+fn reconnected(
+    keys: &[&str],
+    pacing: Option<ReplayPacing>,
+) -> (Router, EngineHold<Engine>, Vec<SubId>) {
     let (router, engine, ids, _) = reconnected_after(keys, pacing);
     (router, engine, ids)
 }
@@ -51,7 +54,7 @@ fn reconnected(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, Arc<Engi
 fn reconnected_after(
     keys: &[&str],
     pacing: Option<ReplayPacing>,
-) -> (Router, Arc<Engine>, Vec<SubId>, Vec<u64>) {
+) -> (Router, EngineHold<Engine>, Vec<SubId>, Vec<u64>) {
     let first = Router::start(CatchAll::None);
     let port = first.port;
     let engine = open_with(CoopConfig {

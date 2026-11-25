@@ -5,9 +5,9 @@
 //! it with nothing over, and an open whose arena cannot be reserved, or whose limits are over the
 //! build's, dials nothing.
 
+use crate::EngineHold;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{SessionEngine, WireKey};
@@ -92,7 +92,7 @@ fn open_dialling(
     probe: &Probe,
     limits: SessionLimits,
     memory: &'static dyn ArenaMemory,
-) -> Result<Arc<Engine>, OpenError> {
+) -> Result<EngineHold<Engine>, OpenError> {
     Engine::open_in(
         PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,
@@ -240,6 +240,7 @@ fn held_plan(
         crate::engine::link_rooms_bytes(&links),
         held,
         runtime,
+        wz_runtime_coop::kept::Shared::<Engine>::layout().size(),
     )?;
     Ok(plan)
 }
@@ -2605,6 +2606,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .expect("the build's limits lay the places out");
     plan.holding_runtime(64)
         .expect("the build's limits lay the runtime's span out");
+    plan.holding_engine(64)
+        .expect("the build's limits lay the engine's place out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
     let mut parts: Vec<&str> = plan.rows().map(|row| row.part()).collect();
     parts.sort_unstable();
@@ -2916,5 +2919,26 @@ fn a_groups_face_counts_every_members_aliases_in_the_pool() {
     assert_eq!(
         GROUP_FACE_ALIASES,
         caps::MAX_GROUP_MEMBERS * caps::MAX_MEMBER_KEYEXPRS
+    );
+}
+
+/// A session's engine lies in the session's own arena, and is reached through its row while the
+/// session is open and by no handle once it is closed, though a holder still keeps it. Turned red
+/// by an engine written anywhere but the place its plan laid out, or by a close that leaves its row
+/// held.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn a_sessions_engine_lies_in_its_own_arena_and_is_reached_until_it_closes() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert!(engine.arena_holds(EngineHold::as_ptr(&engine).cast()));
+    let handle = EngineHold::downgrade(&engine);
+    assert!(handle
+        .upgrade()
+        .is_some_and(|reached| EngineHold::ptr_eq(&reached, &engine)));
+    wz_capi_port::SessionDrive::close(&*engine);
+    assert!(
+        handle.upgrade().is_none(),
+        "closed, it is reached by no handle"
     );
 }

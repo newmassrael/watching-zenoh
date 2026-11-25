@@ -134,13 +134,13 @@ impl PicoSessionExt {
             let sink = Arc::clone(&connectivity);
             // Weak: the engine holds the watch, and a strong hold in it would keep the engine
             // alive through its own watcher.
-            let faces = Arc::downgrade(engine);
+            let faces = crate::session::EngineHold::downgrade(engine);
             SessionEngine::watch_face_rows(
-                Arc::as_ref(engine),
+                crate::session::EngineHold::as_ref(engine),
                 Arc::new(move |kind, row| {
                     sink.on_face_row(kind, row, |at| {
                         let engine = faces.upgrade()?;
-                        SessionEngine::face_link_at(Arc::as_ref(&engine), at)
+                        SessionEngine::face_link_at(crate::session::EngineHold::as_ref(&engine), at)
                     });
                 }),
             )
@@ -171,7 +171,7 @@ impl PicoSessionExt {
             #[cfg(feature = "connectivity")]
             connectivity,
             #[cfg(feature = "connectivity")]
-            watch: (Arc::clone(engine), watch_id),
+            watch: (crate::session::EngineHold::clone(engine), watch_id),
             #[cfg(feature = "admin-space")]
             admin_space: crate::admin_space::AdminSpaceSlot::new(None),
             #[cfg(feature = "query")]
@@ -232,7 +232,7 @@ impl Drop for PicoSessionExt {
     fn drop(&mut self) {
         let (engine, id) = &self.watch;
         if let Ok(id) = id {
-            SessionEngine::unwatch_faces(Arc::as_ref(engine), *id);
+            SessionEngine::unwatch_faces(crate::session::EngineHold::as_ref(engine), *id);
         }
         self.connectivity.shutdown();
     }

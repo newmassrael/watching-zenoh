@@ -32,6 +32,7 @@ use wz_session_core::WhatAmI;
 use super::get::{count_end, ignore_reply, remote_get};
 use super::listen::{eventually, Stepped};
 use super::{client_config, config_zid, Engine, LOOPBACK};
+use crate::EngineHold;
 use crate::{CoopConfig, KeyWireFormRefused, OpenError, OpenKeyIds};
 
 /// The dictionary both ends hold: a key, a key below it, and a prefix a get names a key under.
@@ -55,7 +56,7 @@ fn open_keyed(
     config: CoopConfig,
     ids: Option<SharedKeyIds>,
     policy: SessionPolicy,
-) -> Result<Arc<Engine>, OpenError> {
+) -> Result<EngineHold<Engine>, OpenError> {
     open_with_keys(
         config,
         ids.map_or_else(OpenKeyIds::none, OpenKeyIds::shared),
@@ -67,7 +68,7 @@ fn open_with_keys(
     config: CoopConfig,
     key_ids: OpenKeyIds,
     policy: SessionPolicy,
-) -> Result<Arc<Engine>, OpenError> {
+) -> Result<EngineHold<Engine>, OpenError> {
     Engine::open_with_key_ids(
         PosixLinks::new(LOOPBACK, PosixTcpDial).waited_by_owner(),
         PosixClock,

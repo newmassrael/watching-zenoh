@@ -39,7 +39,6 @@
 //! the session's: a router that asked on a link since lost will never read the answer, and a new
 //! router never asked.
 
-use alloc::sync::{Arc, Weak};
 use core::ptr::NonNull;
 
 #[allow(unused_imports)]
@@ -470,7 +469,7 @@ impl Drop for Answering {
 
 /// The session as a queryable's callbacks hold queries through ([`QueryHolder`]).
 pub(super) struct CoopHolder<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> {
-    pub(super) engine: Weak<CoopEngine<L, C>>,
+    pub(super) engine: super::EngineHandle<CoopEngine<L, C>>,
 }
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for CoopHolder<L, C> {
@@ -481,7 +480,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder fo
         };
         // Only the query this thread is answering, of this engine, can be kept: a hold taken
         // anywhere else would come after the Final it was meant to keep.
-        if at != Arc::as_ptr(&engine) as usize || rid != view.rid() {
+        if at != super::EngineHold::as_ptr(&engine) as usize || rid != view.rid() {
             return Ok(None);
         }
         engine.keep(generation, view)
@@ -562,6 +561,7 @@ mod round_tests {
     //! with its parts read where they lie, its call ended by the round.
     use super::*;
     use crate::round::AnswersQueries;
+    use alloc::sync::Arc;
     use wz_capi_port::WireKey;
 
     /// What the test's engine stand-in was asked to answer: each query's key, its parameters and

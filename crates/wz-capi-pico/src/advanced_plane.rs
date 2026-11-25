@@ -200,7 +200,9 @@ impl AdvancedPublisherPlane for PicoPlane {
         }
         CacheStore::in_ring(
             config,
-            Box::new(SessionCacheBytes(Arc::clone(&self.session.engine))),
+            Box::new(SessionCacheBytes(crate::session::EngineHold::clone(
+                &self.session.engine,
+            ))),
         )
         .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }

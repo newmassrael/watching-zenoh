@@ -49,7 +49,6 @@
 //! the marshal for the callback's call alone (`QueryMarshal::answer_with`),
 //! the one place a lifetime is erased, and taken back before the borrow ends.
 
-use alloc::sync::Arc;
 use core::cell::Cell;
 use core::ffi::c_void;
 use core::ptr::NonNull;
@@ -1466,14 +1465,14 @@ unsafe fn declare_queryable_in(
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             QueryableState {
-                engine: Arc::clone(&session.engine),
+                engine: crate::session::EngineHold::clone(&session.engine),
                 declared: None,
                 loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             },
             QueryableKept {
                 closure,
                 _session: background.then(|| crate::session::session_count(zs).hold()),
-                engine: Arc::downgrade(&session.engine),
+                engine: crate::session::EngineHold::downgrade(&session.engine),
             },
         ))
         .cast::<QueryableState>();
@@ -1536,12 +1535,15 @@ pub(crate) fn declare_queryable_on(
         .engine
         .declare_queryable_on_wire(
             keyexpr,
-            key.wire(Arc::as_ref(&session.engine)),
+            key.wire(crate::session::EngineHold::as_ref(&session.engine)),
             complete,
             allowed_origin,
             // A peer or router-hat session retracts the queryable naming its key
             // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-            key.retraction_naming_in(session.mode, Arc::as_ref(&session.engine)),
+            key.retraction_naming_in(
+                session.mode,
+                crate::session::EngineHold::as_ref(&session.engine),
+            ),
             sink,
         )
         .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
@@ -2571,7 +2573,7 @@ mod tests {
     /// As the tokio engine's: the cooperative engine's session is a type of its own.
     #[cfg(not(feature = "engine-tokio"))]
     fn no_session() -> EngineHandle {
-        alloc::sync::Weak::new()
+        EngineHandle::vacant()
     }
 
     /// A keep of a query held by a session that is gone.
@@ -2962,7 +2964,7 @@ mod tests {
             .expect("a queryable's place")
             .fill(Answering::keeping(
                 QueryableState {
-                    engine: Arc::clone(&engine),
+                    engine: crate::session::EngineHold::clone(&engine),
                     declared: None,
                     loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 },
@@ -2973,7 +2975,7 @@ mod tests {
                         Some(counted_drop),
                     ),
                     _session: None,
-                    engine: Arc::downgrade(&engine),
+                    engine: crate::session::EngineHold::downgrade(&engine),
                 },
             ))
             .cast::<QueryableState>();
@@ -3154,7 +3156,7 @@ mod kept_query_tests {
                 session_handle(z_session_loan(&listener)).expect("an open session has its handle"),
             )
             .clone();
-            let session = Arc::downgrade(&engine);
+            let session = crate::session::EngineHold::downgrade(&engine);
             let locator = engine
                 .listening()
                 .into_iter()

@@ -19,7 +19,6 @@
 //! An object let go is given back to where it lies: its pool, or the heap for one a constructor
 //! still boxes. What decides is where the object lies, never which build placed it.
 
-use alloc::sync::Arc;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 
@@ -239,10 +238,13 @@ impl Lender {
             return None;
         }
         // The cooperative engine lends places itself, reached as its own type.
-        let place = wz_capi_port::PlaceLender::claim_place(Arc::as_ref(engine), entity)?;
+        let place = wz_capi_port::PlaceLender::claim_place(
+            crate::session::EngineHold::as_ref(engine),
+            entity,
+        )?;
         Some(Self {
             place,
-            engine: Arc::clone(engine),
+            engine: crate::session::EngineHold::clone(engine),
         })
     }
 
@@ -263,7 +265,10 @@ impl Lender {
     fn give_back(self) {
         let Self { place, engine } = self;
         // The engine that lent the place lends places, so it takes it back.
-        let given = wz_capi_port::PlaceLender::give_back_place(Arc::as_ref(&engine), place);
+        let given = wz_capi_port::PlaceLender::give_back_place(
+            crate::session::EngineHold::as_ref(&engine),
+            place,
+        );
         debug_assert!(
             given.is_ok(),
             "a place goes back to the session that lent it"

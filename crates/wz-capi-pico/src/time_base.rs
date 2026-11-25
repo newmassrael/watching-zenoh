@@ -513,10 +513,11 @@ mod tests {
             assert_eq!(wz_ext_time_base_new(&mut time_base, &calls(&program)), Z_OK);
             let session = listening(Some(&time_base));
             let engine = engine_of(&session);
-            let opened = wz_capi_port::SessionEngine::now_ms(std::sync::Arc::as_ref(&engine));
+            let opened =
+                wz_capi_port::SessionEngine::now_ms(crate::session::EngineHold::as_ref(&engine));
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert_eq!(
-                wz_capi_port::SessionEngine::now_ms(std::sync::Arc::as_ref(&engine)),
+                wz_capi_port::SessionEngine::now_ms(crate::session::EngineHold::as_ref(&engine)),
                 opened,
                 "the wall clock moved the session's time"
             );
@@ -526,7 +527,7 @@ mod tests {
                 Z_OK
             );
             assert_eq!(
-                wz_capi_port::SessionEngine::now_ms(std::sync::Arc::as_ref(&engine)),
+                wz_capi_port::SessionEngine::now_ms(crate::session::EngineHold::as_ref(&engine)),
                 opened + 1_500
             );
             drop(engine);
@@ -543,10 +544,11 @@ mod tests {
         unsafe {
             let session = listening(None);
             let engine = engine_of(&session);
-            let opened = wz_capi_port::SessionEngine::now_ms(std::sync::Arc::as_ref(&engine));
+            let opened =
+                wz_capi_port::SessionEngine::now_ms(crate::session::EngineHold::as_ref(&engine));
             std::thread::sleep(std::time::Duration::from_millis(100));
             assert!(
-                wz_capi_port::SessionEngine::now_ms(std::sync::Arc::as_ref(&engine))
+                wz_capi_port::SessionEngine::now_ms(crate::session::EngineHold::as_ref(&engine))
                     >= opened + 100,
                 "the system's clock did not move with the wall clock"
             );

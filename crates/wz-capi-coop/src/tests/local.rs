@@ -18,6 +18,7 @@ use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::sink::SampleView;
 
 use super::{open, until, CatchAll, Engine, Router};
+use crate::EngineHold;
 
 /// What each subscriber of [`subscribe_putting`] was handed: its index and the payload.
 type Handed = Arc<Mutex<Vec<(usize, Vec<u8>)>>>;
@@ -236,7 +237,7 @@ fn a_put_made_inside_a_callback_reaches_it_again_to_depth_three() {
     let engine = open(&router);
     let handed = Arc::new(Mutex::new(Vec::<(usize, Vec<u8>)>::new()));
     let answers = Arc::new(Mutex::new(Vec::new()));
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let (into, said) = (handed.clone(), answers.clone());
     engine
         .declare_subscriber_on_wire(
@@ -322,12 +323,12 @@ fn a_put_made_inside_a_callback_reaches_the_other_subscribers_inside_it() {
 /// first on `demo/l/fan`, the other two on `demo/l/*`. The first, handed `outer`, puts `inner`
 /// on `inner_key` from inside its callback and records the put's answer.
 fn subscribe_putting(
-    engine: &Arc<Engine>,
+    engine: &EngineHold<Engine>,
     handed: &Handed,
     inner: &InnerPut,
     inner_key: &'static str,
 ) {
-    let session = Arc::downgrade(engine);
+    let session = EngineHold::downgrade(engine);
     for subscriber in 0..3usize {
         let handed = handed.clone();
         let inner = inner.clone();
@@ -408,7 +409,7 @@ fn an_undeclare_on_another_thread_waits_for_the_running_call() {
         )
         .expect("declared");
     let putting = {
-        let engine = Arc::clone(&engine);
+        let engine = engine.clone();
         std::thread::spawn(move || put_own(&engine, "demo/wait/a", b"v"))
     };
     inside
@@ -416,11 +417,8 @@ fn an_undeclare_on_another_thread_waits_for_the_running_call() {
         .expect("the put calls the callback");
     let returned = Arc::new(AtomicBool::new(false));
     let undeclaring = {
-        let (engine, returned, dropped) = (
-            Arc::clone(&engine),
-            Arc::clone(&returned),
-            Arc::clone(&dropped),
-        );
+        let (engine, returned, dropped) =
+            (engine.clone(), Arc::clone(&returned), Arc::clone(&dropped));
         std::thread::spawn(move || {
             engine.undeclare_subscriber(id);
             returned.store(true, Ordering::SeqCst);
@@ -465,7 +463,7 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
     let calls = Arc::new(AtomicUsize::new(0));
     let own: Arc<Mutex<Option<SubId>>> = Arc::default();
     let guard = Dropped(dropped.clone());
-    let session = Arc::downgrade(&engine);
+    let session = EngineHold::downgrade(&engine);
     let id = engine
         .declare_subscriber_on_wire("demo/self/**", WireKey::literal(), Locality::Any, None, {
             let (calls, own) = (Arc::clone(&calls), Arc::clone(&own));

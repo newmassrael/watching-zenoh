@@ -1460,7 +1460,7 @@ unsafe fn declare_subscriber_state(
     let state = slot
         .fill(crate::object_slot::Answering::keeping(
             AdvSubState {
-                engine: Arc::clone(engine),
+                engine: crate::session::EngineHold::clone(engine),
                 subscriber: None,
                 loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
                 miss: None,
