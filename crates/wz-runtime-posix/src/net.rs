@@ -567,6 +567,51 @@ pub fn multicast_interface(group: &SocketAddr) -> Option<GroupInterface> {
     found
 }
 
+/// Whether `address` is an IPv6 unicast link-local address (`fe80::/10`), which names an
+/// interface only with its zone.
+fn unicast_link_local(address: &Ipv6Addr) -> bool {
+    let [first, second, ..] = address.octets();
+    first == 0xfe && second & 0xc0 == 0x80
+}
+
+/// The index of the interface that holds `address`, an IPv6 address read back without its zone:
+/// `None` when no interface holds it. Listed by `getifaddrs`, as [`multicast_interface`] lists
+/// them.
+fn zone_of(address: Ipv6Addr) -> Option<u32> {
+    let mut list: *mut libc::ifaddrs = core::ptr::null_mut();
+    // SAFETY: `list` is a live pointer the call fills; it is freed below whenever the call succeeds.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let mut found = None;
+    let mut at = list;
+    while !at.is_null() {
+        // SAFETY: `at` is an entry of the list `getifaddrs` returned, live until `freeifaddrs`.
+        let entry = unsafe { &*at };
+        if !entry.ifa_addr.is_null() && !entry.ifa_name.is_null() {
+            // SAFETY: a non-null `ifa_addr` points at a socket address whose family field is valid.
+            let family = unsafe { (*entry.ifa_addr).sa_family } as c_int;
+            if family == libc::AF_INET6 {
+                // SAFETY: an `AF_INET6` address is a `sockaddr_in6`.
+                let sin6 = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
+                if Ipv6Addr::from(sin6.sin6_addr.s6_addr) == address {
+                    // SAFETY: a non-null `ifa_name` is the interface's NUL-terminated name, live
+                    // until `freeifaddrs`.
+                    let index = unsafe { libc::if_nametoindex(entry.ifa_name) };
+                    if index != 0 {
+                        found = Some(index);
+                        break;
+                    }
+                }
+            }
+        }
+        at = entry.ifa_next;
+    }
+    // SAFETY: `list` is the list `getifaddrs` returned, freed once.
+    unsafe { libc::freeifaddrs(list) };
+    found
+}
+
 /// The kernel's family number of `at`: `AF_INET` or `AF_INET6`.
 pub(crate) fn family_of(at: &SocketAddr) -> c_int {
     match at {
@@ -783,7 +828,16 @@ impl PosixUdpSocket {
     /// socket's multicast interface.
     pub fn source_toward(&self, to: SocketAddr) -> Result<SocketAddr, PosixNetError> {
         call_at(self.fd, to, libc::connect).map_err(PosixNetError::Connect)?;
-        name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)
+        let mut source = name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)?;
+        // A socket bound to no interface reads its link-local source back with no zone (scope 0),
+        // which a bind of that source refuses (EINVAL): the zone is the interface that holds it.
+        if let SocketAddr::V6(v6) = &mut source {
+            if v6.scope_id() == 0 && unicast_link_local(v6.ip()) {
+                let zone = zone_of(*v6.ip()).ok_or(PosixNetError::SockName(libc::EADDRNOTAVAIL))?;
+                v6.set_scope_id(zone);
+            }
+        }
+        Ok(source)
     }
 
     /// Join `group` on `interface`: an IPv4 group through `IP_ADD_MEMBERSHIP` on the interface
@@ -1070,6 +1124,29 @@ impl Drop for PosixUdpSocket {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only `fe80::/10` is a unicast link-local address, the one a source needs its zone for;
+    /// a site-local multicast group, the loopback and a global address are not. Turned red by a
+    /// test of the first byte alone, which takes `fec0::` too.
+    #[test]
+    fn a_link_local_source_is_told_by_its_first_ten_bits() {
+        assert!(unicast_link_local(&Ipv6Addr::new(
+            0xfe80, 0, 0, 0, 0, 0, 0, 1
+        )));
+        assert!(unicast_link_local(&Ipv6Addr::new(
+            0xfebf, 0, 0, 0, 0, 0, 0, 1
+        )));
+        assert!(!unicast_link_local(&Ipv6Addr::new(
+            0xfec0, 0, 0, 0, 0, 0, 0, 1
+        )));
+        assert!(!unicast_link_local(&Ipv6Addr::new(
+            0xff05, 0, 0, 0, 0, 0, 0x7a, 0x7703
+        )));
+        assert!(!unicast_link_local(&Ipv6Addr::LOCALHOST));
+        assert!(!unicast_link_local(&Ipv6Addr::new(
+            0x2001, 0xdb8, 0, 0, 0, 0, 0, 1
+        )));
+    }
 
     /// The IPv4 loopback, on a port the kernel picks.
     const LOOPBACK: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
