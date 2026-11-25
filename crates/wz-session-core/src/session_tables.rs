@@ -2579,11 +2579,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     // ---- Interests, write filters and matching listeners ------------------------------------
 
     /// Open an Interest of `kind` on `key`, handed back to be sent: one for each holder, as
-    /// zenoh-pico adds one for each write filter, whatever is open on the same key already.
+    /// zenoh-pico adds one for each write filter, whatever is open on the same key already. Its
+    /// row keeps `kept`, the holder's own key: one key kept for both rows, not a copy for each.
     fn open_interest(
         &mut self,
         kind: InterestKind,
         key: &str,
+        kept: P::Key,
         name: InterestName<'_>,
     ) -> Result<OpenedInterest, RegisterError> {
         // Tables that keep no write filter hold no Interest of one.
@@ -2598,7 +2600,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             aggregate,
             suffix,
         } = kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
-        let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let id = self.next_entity.take().ok_or(RegisterError::IdsExhausted)?;
         let handle = interests
             .insert(InterestRow {
@@ -2701,7 +2702,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         )?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
         let asked = match ask {
-            Some(name) => Some(self.open_interest(plane.interest_kind(), key, name)?),
+            Some(name) => {
+                Some(self.open_interest(plane.interest_kind(), key, kept.clone(), name)?)
+            }
             None => None,
         };
         let interest = asked.map(|opened| opened.handle);
