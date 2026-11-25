@@ -2136,6 +2136,32 @@ where
     }
 }
 
+/// [`spawn_session_with_router`] with no task: the session's pump built in `place`, its Router
+/// written by `make_router` in the pump's own field, for a driver that holds the pump and steps
+/// it itself ([`SessionPump::service_due`], [`SessionPump::take_input_now`]). The place is the
+/// caller's (a field of the session's region, or a span of its arena), and the caller drops the
+/// pump in it once no step of it is under way. `None` when the maker did not build the Router in
+/// its place, with what the pump was to be made of dropped.
+/// Out of line, as the task's future is: the pump is built in its place, apart from the caller's
+/// frame.
+#[cfg(all(feature = "reassembly", not(feature = "session-slot")))]
+#[inline(never)]
+pub fn place_session_with_router<'p, C, L, R, M, K>(
+    place: &'p mut MaybeUninit<SessionPump<C, L, dyn BoxedLinkDriver, R, K>>,
+    runtime: CoopRuntime<C, dyn BoxedLinkDriver, K>,
+    fields: PumpFields<C, L, dyn BoxedLinkDriver, K>,
+    make_router: M,
+) -> Option<&'p mut SessionPump<C, L, dyn BoxedLinkDriver, R, K>>
+where
+    C: ClockSource + 'static,
+    L: SessionDatagramLink + 'static,
+    R: RxReassembly + 'static,
+    M: MakeRouter<R>,
+    K: LockKind,
+{
+    SessionPump::with_router_in(place, runtime, fields, |router| make_router.make_in(router))
+}
+
 /// The task a session runs as on the heap profile ([`spawn_session_with_router`]): a future of a
 /// type an engine can name, so the bytes of its cell are a constant of the types it is made of
 /// ([`router_session_task_bytes`]) and a runtime can reserve cells of that size before the session
@@ -3254,6 +3280,69 @@ mod wake_budget_tests {
             crate::link_cells::CellRc::handles(&actions) < running,
             "the pump, and the handles it held, went with its task"
         );
+    }
+
+    /// A session placed with no task builds its Router once, as it is placed, and is stepped by
+    /// its holder through the parts of a step; the holder drops it in its place, and the handle to
+    /// the session it held goes with it. Turned red by a placed pump that builds no Router, or
+    /// whose drop keeps the handle.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn a_session_placed_with_no_task_is_stepped_by_its_holder_and_dropped_in_its_place() {
+        let runtime = CoopRuntime::new(Stopped);
+        let clock = CoopTime::new(&runtime);
+        let sink = crate::link_cells::heap_sink(Null);
+        let actions = new_session_actions(sink, params(), clock.clone());
+        let entropy = SessionEntropy::new(Counting(0));
+        let link = Rc::new(Recording::default());
+        let made = Rc::new(core::cell::Cell::new(0u32));
+        let before = crate::link_cells::CellRc::handles(&actions);
+        let now_ms = clock.now_monotonic_ms();
+        let mut place = alloc::boxed::Box::new(MaybeUninit::uninit());
+        let pump = place_session_with_router(
+            &mut *place,
+            runtime,
+            PumpFields {
+                link: Rc::clone(&link),
+                actions: actions.clone(),
+                entropy,
+                clock,
+                config: SessionDriveConfig {
+                    timeouts: SessionTimeouts::from_build(),
+                    role: SessionRole::Acceptor,
+                    max_iters: None,
+                },
+            },
+            CountedRouter {
+                made: Rc::clone(&made),
+                policy: wz_session_core::policy::SessionPolicy::defaults(),
+            },
+        )
+        .expect("the maker builds the Router in its place");
+        assert_eq!(
+            made.get(),
+            1,
+            "the Router is made once, as the pump is placed"
+        );
+        let _ = pump.service_due(now_ms, &mut |_event: IterationEvent<'_, '_>| {});
+        assert!(
+            !link.budgets.borrow().is_empty(),
+            "the holder's service stepped the link"
+        );
+        assert!(
+            !pump.take_input_now(now_ms, &mut |_event: IterationEvent<'_, '_>| {}),
+            "a link with nothing gave a unit"
+        );
+        let running = crate::link_cells::CellRc::handles(&actions);
+        assert!(running > before, "the pump holds the handle to its session");
+        // SAFETY: the pump was written in the place by `place_session_with_router`, and the
+        // borrow of it it handed back is not used again.
+        unsafe { place.assume_init_drop() };
+        assert!(
+            crate::link_cells::CellRc::handles(&actions) < running,
+            "the pump, and the handle it held, went with its place"
+        );
+        assert_eq!(made.get(), 1, "a dropped pump makes nothing more");
     }
 
     /// A session over the Router its session lends it reads its link inside the lend alone: a
