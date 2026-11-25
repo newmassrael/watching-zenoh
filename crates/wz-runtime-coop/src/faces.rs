@@ -511,10 +511,11 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
     /// Pay what is owed through `held`, which the caller holds lent from this site: the one
     /// place a debt is paid, so each is paid once. Every lend pays as it lets go; a holder that
     /// acts on what its parts were paid pays first, so that it acts on the debts owed until then.
+    #[inline]
     pub fn pay(&self, held: &mut FaceHeld<P>) {
         let owed = self.owed.swap(0, Ordering::SeqCst);
         if owed != 0 {
-            held.lend(move |parts| pay_parts(parts, owed));
+            pay_held(held, owed);
         }
     }
 
@@ -598,6 +599,15 @@ impl<K: HoldKind, P: SendParts> Drop for SiteSend<'_, K, P> {
             self.site.pay_after();
         }
     }
+}
+
+/// Pay `owed`, never none, to the parts `held` holds ([`FaceSite::pay`]). Out of line and cold:
+/// a debt is owed only where a send or a close found the place held, so every lend of a site
+/// shares this one body and keeps inline only its look at the debt word.
+#[cold]
+#[inline(never)]
+fn pay_held<P: WireParts>(held: &mut FaceHeld<P>, owed: u32) {
+    held.lend(move |parts| pay_parts(parts, owed));
 }
 
 /// Pay `owed` to `parts`: their own debts, then the close, through their wire when they hold one
