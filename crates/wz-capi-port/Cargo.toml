@@ -39,7 +39,8 @@ crate-type = ["rlib"]
 # critical section an MCU image links (src/sync.rs), and the token waits for the MCU host layer.
 # The lock and the condition variable are `wz-host-sync`'s typed forms in its `std` build: `std`'s
 # where they lie in their own bytes, the in-place ones where `std`'s would box a pthread object the
-# first time each is taken (macOS), so taking one takes no memory on any host (src/os.rs).
+# first time each is taken (macOS), so taking one takes no memory on any host (src/os.rs). The
+# threads are `wz-host-sync`'s in every host build, as without `std`.
 default = ["std"]
 std = ["dep:wz-host-sync", "wz-host-sync/std"]
 # A publish that takes a buffer of shared memory some owner of a segment holds
@@ -65,7 +66,7 @@ time-base = ["std", "dep:wz-node-time", "wz-node-time/time-base"]
 # The port's `os` and its lock made of the host's own calls (`wz-host-sync`: pthreads, or Win32's
 # slim lock) in place of `std`'s and of the critical section an image links, for a host library
 # built without `std`, which runs threads and must export nothing but its C ABI. Beside `std` it
-# changes nothing: `std` answers the same names.
+# changes nothing: a `std` build answers the same names with the same calls.
 os-sys = ["dep:wz-host-sync"]
 
 [dependencies]
