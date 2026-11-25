@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut Engine<Self>` and per-state
+// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -231,14 +231,23 @@ pub type UnicastLinkConfiguration = ::sce_rust_runtime::helpers::hierarchy::Boun
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
+/// `selection` is what enables each written transition (docs/adr/0127): each
+/// state's range of written transitions (`first_written`, one entry past the
+/// last state), and for each transition the list of events that enable it
+/// (`triggers`, a position in `trigger_events`, each list its length first),
+/// as the numbers of `UnicastLinkEvent`. The runtime's one selection
+/// reads them for every machine and asks this machine only whether a guard
+/// holds (`guard_holds`).
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const UNICAST_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
-        Target, TransitionId, TransitionRow,
+        DocumentTables, EntryRow, EntryStep, EventId, HistoryId, HistoryRow, SelectionRows,
+        StateId, StateKind, StateRow, Target, TransitionId, TransitionRow, TriggerEvent,
+        TriggerRow,
     };
     DocumentTables {
         states: &[
@@ -320,11 +329,16 @@ pub const UNICAST_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         default_state: ::sce_rust_runtime::StateId(UnicastLinkState::Idle as u16),
         null_event: ::sce_rust_runtime::EventId(20),
         error_events: &[],
-        walk: &::sce_rust_runtime::ROW_WALK,
-        entry_rows: &[EntryRow::at(0), EntryRow::at(2), EntryRow::at(4), EntryRow::at(4), EntryRow::NONE, EntryRow::at(2), EntryRow::at(0), EntryRow::at(6), EntryRow::at(4), EntryRow::at(4), EntryRow::at(4), EntryRow::at(8), EntryRow::at(0), EntryRow::at(6), EntryRow::at(4), EntryRow::at(4), EntryRow::at(10), EntryRow::at(4), EntryRow::at(0), EntryRow::at(4), EntryRow::at(4), EntryRow::at(4), EntryRow::at(0), EntryRow::at(4), EntryRow::at(0), EntryRow::at(4), EntryRow::at(12)],
-        entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(6), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(5), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
+        walk: &::sce_rust_runtime::NO_WALK,
+        entry_rows: &[],
+        entry_paths: &[],
         history: None,
         parallel: None,
+        selection: Some(SelectionRows {
+            first_written: &[TransitionId(0), TransitionId(4), TransitionId(11), TransitionId(18), TransitionId(22), TransitionId(24), TransitionId(26), TransitionId(26)],
+            triggers: &[TriggerRow::at(0), TriggerRow::at(2), TriggerRow::at(4), TriggerRow::at(6), TriggerRow::at(8), TriggerRow::at(10), TriggerRow::at(12), TriggerRow::at(14), TriggerRow::at(4), TriggerRow::at(16), TriggerRow::at(6), TriggerRow::at(18), TriggerRow::at(20), TriggerRow::at(22), TriggerRow::at(24), TriggerRow::at(26), TriggerRow::at(28), TriggerRow::at(6), TriggerRow::at(30), TriggerRow::at(32), TriggerRow::at(34), TriggerRow::at(6), TriggerRow::at(36), TriggerRow::at(6), TriggerRow::at(38), TriggerRow::at(6), TriggerRow::NONE],
+            trigger_events: &[TriggerEvent::count(1), TriggerEvent::new(EventId(18)), TriggerEvent::count(1), TriggerEvent::new(EventId(19)), TriggerEvent::count(1), TriggerEvent::new(EventId(1)), TriggerEvent::count(1), TriggerEvent::new(EventId(14)), TriggerEvent::count(1), TriggerEvent::new(EventId(4)), TriggerEvent::count(1), TriggerEvent::new(EventId(6)), TriggerEvent::count(1), TriggerEvent::new(EventId(5)), TriggerEvent::count(1), TriggerEvent::new(EventId(2)), TriggerEvent::count(1), TriggerEvent::new(EventId(3)), TriggerEvent::count(1), TriggerEvent::new(EventId(7)), TriggerEvent::count(1), TriggerEvent::new(EventId(12)), TriggerEvent::count(1), TriggerEvent::new(EventId(9)), TriggerEvent::count(1), TriggerEvent::new(EventId(8)), TriggerEvent::count(1), TriggerEvent::new(EventId(10)), TriggerEvent::count(1), TriggerEvent::new(EventId(11)), TriggerEvent::count(1), TriggerEvent::new(EventId(17)), TriggerEvent::count(1), TriggerEvent::new(EventId(15)), TriggerEvent::count(1), TriggerEvent::new(EventId(16)), TriggerEvent::count(1), TriggerEvent::new(EventId(0)), TriggerEvent::count(1), TriggerEvent::new(EventId(13))],
+        }),
     }
 };
 
@@ -505,6 +519,239 @@ impl<A: UnicastLinkActions + 'static> UnicastLinkPolicy<A> {
 
 
 // ======================================================================
+// The document's own step function (docs/adr/0129)
+// ======================================================================
+
+/// This document printed as its own step function: what Appendix D does for
+/// each step of this document, written out when it was built. The engine runs
+/// these arms in place of its shared procedures, and calls the hooks of this
+/// policy from them as it would from those.
+impl<A: UnicastLinkActions + 'static> ::sce_rust_runtime::StepFunction for UnicastLinkPolicy<A> {
+    fn enter_initial_configuration<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+    ) -> ::sce_rust_runtime::Entered {
+        machine.enter(UnicastLinkState::ID_Idle, false);
+        ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Idle), ended_in: None }
+    }
+
+    fn select_transition<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+        event: ::sce_rust_runtime::EventId,
+    ) -> Option<::sce_rust_runtime::TransitionId> {
+        match atomic {
+            UnicastLinkState::ID_Idle => {
+                machine.enabled(UnicastLinkState::ID_Idle, event)
+            }
+            UnicastLinkState::ID_Dialing => {
+                machine.enabled(UnicastLinkState::ID_Dialing, event)
+            }
+            UnicastLinkState::ID_Handshaking => {
+                machine.enabled(UnicastLinkState::ID_Handshaking, event)
+            }
+            UnicastLinkState::ID_Up => {
+                machine.enabled(UnicastLinkState::ID_Up, event)
+            }
+            UnicastLinkState::ID_Backoff => {
+                machine.enabled(UnicastLinkState::ID_Backoff, event)
+            }
+            UnicastLinkState::ID_Held => {
+                machine.enabled(UnicastLinkState::ID_Held, event)
+            }
+            _ => None,
+        }
+    }
+
+    fn microstep<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+        transition: ::sce_rust_runtime::TransitionId,
+    ) -> ::sce_rust_runtime::Entered {
+        match (transition, atomic) {
+            (::sce_rust_runtime::TransitionId(0), UnicastLinkState::ID_Idle) => {
+                machine.exit(UnicastLinkState::ID_Idle);
+                machine.enter(UnicastLinkState::ID_Dialing, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Dialing), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(1), UnicastLinkState::ID_Idle) => {
+                machine.exit(UnicastLinkState::ID_Idle);
+                machine.enter(UnicastLinkState::ID_Handshaking, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Handshaking), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(2), UnicastLinkState::ID_Idle) => {
+                machine.exit(UnicastLinkState::ID_Idle);
+                machine.content(::sce_rust_runtime::TransitionId(2));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(3), UnicastLinkState::ID_Idle) => {
+                machine.exit(UnicastLinkState::ID_Idle);
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(4), _) => {
+                machine.content(::sce_rust_runtime::TransitionId(4));
+                ::sce_rust_runtime::Entered { states: 0, current: None, ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(5), UnicastLinkState::ID_Dialing) => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+                machine.enter(UnicastLinkState::ID_Handshaking, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Handshaking), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(6), UnicastLinkState::ID_Dialing) => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+                machine.enter(UnicastLinkState::ID_Dialing, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Dialing), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(7), UnicastLinkState::ID_Dialing) => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+                machine.enter(UnicastLinkState::ID_Backoff, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Backoff), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(8), UnicastLinkState::ID_Dialing) => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+                machine.content(::sce_rust_runtime::TransitionId(8));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(9), UnicastLinkState::ID_Dialing) => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(10), UnicastLinkState::ID_Dialing) => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+                machine.content(::sce_rust_runtime::TransitionId(10));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(11), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.enter(UnicastLinkState::ID_Up, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Up), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(12), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.content(::sce_rust_runtime::TransitionId(12));
+                machine.enter(UnicastLinkState::ID_Dialing, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Dialing), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(13), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.content(::sce_rust_runtime::TransitionId(13));
+                machine.enter(UnicastLinkState::ID_Backoff, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Backoff), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(14), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.content(::sce_rust_runtime::TransitionId(14));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(15), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.content(::sce_rust_runtime::TransitionId(15));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(16), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.content(::sce_rust_runtime::TransitionId(16));
+                machine.enter(UnicastLinkState::ID_Held, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Held), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(17), UnicastLinkState::ID_Handshaking) => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+                machine.content(::sce_rust_runtime::TransitionId(17));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(18), UnicastLinkState::ID_Up) => {
+                machine.exit(UnicastLinkState::ID_Up);
+                machine.content(::sce_rust_runtime::TransitionId(18));
+                machine.enter(UnicastLinkState::ID_Dialing, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Dialing), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(19), UnicastLinkState::ID_Up) => {
+                machine.exit(UnicastLinkState::ID_Up);
+                machine.content(::sce_rust_runtime::TransitionId(19));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(20), UnicastLinkState::ID_Up) => {
+                machine.exit(UnicastLinkState::ID_Up);
+                machine.content(::sce_rust_runtime::TransitionId(20));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(21), UnicastLinkState::ID_Up) => {
+                machine.exit(UnicastLinkState::ID_Up);
+                machine.content(::sce_rust_runtime::TransitionId(21));
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(22), UnicastLinkState::ID_Backoff) => {
+                machine.exit(UnicastLinkState::ID_Backoff);
+                machine.enter(UnicastLinkState::ID_Dialing, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Dialing), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(23), UnicastLinkState::ID_Backoff) => {
+                machine.exit(UnicastLinkState::ID_Backoff);
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            (::sce_rust_runtime::TransitionId(24), UnicastLinkState::ID_Held) => {
+                machine.exit(UnicastLinkState::ID_Held);
+                machine.enter(UnicastLinkState::ID_Dialing, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Dialing), ended_in: None }
+            }
+            (::sce_rust_runtime::TransitionId(25), UnicastLinkState::ID_Held) => {
+                machine.exit(UnicastLinkState::ID_Held);
+                machine.enter(UnicastLinkState::ID_Closed, false);
+                ::sce_rust_runtime::Entered { states: 1, current: Some(UnicastLinkState::ID_Closed), ended_in: Some(UnicastLinkState::ID_Closed) }
+            }
+            // No other pair is selected: a transition is selected only from
+            // an atomic state below the state it is written in.
+            _ => ::sce_rust_runtime::Entered {
+                states: 0,
+                current: None,
+                ended_in: None,
+            },
+        }
+    }
+
+    fn exit_configuration<M: ::sce_rust_runtime::Steps>(
+        machine: &mut M,
+        atomic: ::sce_rust_runtime::StateId,
+    ) {
+        match atomic {
+            UnicastLinkState::ID_Idle => {
+                machine.exit(UnicastLinkState::ID_Idle);
+            }
+            UnicastLinkState::ID_Dialing => {
+                machine.exit(UnicastLinkState::ID_Dialing);
+            }
+            UnicastLinkState::ID_Handshaking => {
+                machine.exit(UnicastLinkState::ID_Handshaking);
+            }
+            UnicastLinkState::ID_Up => {
+                machine.exit(UnicastLinkState::ID_Up);
+            }
+            UnicastLinkState::ID_Backoff => {
+                machine.exit(UnicastLinkState::ID_Backoff);
+            }
+            UnicastLinkState::ID_Held => {
+                machine.exit(UnicastLinkState::ID_Held);
+            }
+            UnicastLinkState::ID_Closed => {
+                machine.exit(UnicastLinkState::ID_Closed);
+            }
+            _ => {}
+        }
+    }
+}
+
+// ======================================================================
 // StatePolicy trait implementation
 // ======================================================================
 
@@ -625,6 +872,12 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0129: this document is printed as its own step function, the
+    // `StepFunction` above, which the engine runs in place of the shared
+    // interpreter.
+    const STEP_FUNCTION: Option<::sce_rust_runtime::StepFunctionForm<Self>> =
+        Some(::sce_rust_runtime::StepFunctionForm::of());
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -639,9 +892,9 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // headroom. The workspace is a local of the call that runs a macrostep; the
     // run store, the configuration and what each of the 0 `<history>`
     // element(s) recorded, one such set each, is the engine's.
-    // docs/adr/0125: this document's microsteps are walked from the entry rows
-    // of its tables, which builds no set of states and walks no stack, so the
-    // workspace holds the enabled set alone.
+    // docs/adr/0129: this document's microsteps are its step function's, which
+    // takes one transition a microstep and builds no set of states, so the
+    // workspace holds that one transition alone.
     type Workspace = ::sce_rust_runtime::Workspace<0, 1, 0, 0>;
     type RunStore = ::sce_rust_runtime::RunStore<{ ::sce_rust_runtime::state_words(7) }, { ::sce_rust_runtime::record_words(7, 0) }, 0>;
     type Configuration = UnicastLinkConfiguration;
@@ -774,7 +1027,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: unicast_link.scxml:76 :: _machine"]
 // SCE-MAP: unicast_link.scxml:76 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
         match state {
             UnicastLinkState::ID_Backoff => {
                 // SCE-MAP: unicast_link.scxml:159 :: Backoff :: _state_body
@@ -823,7 +1076,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -835,202 +1088,6 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
 
 
 
-
-    // Appendix D selectTransitions, the half only this document can answer:
-    // the first of `state`'s own transitions, in document order, that `event`
-    // enables, as its row of the tables, which holds its targets and its
-    // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
-    // state and the event are the numbers the tables are indexed by
-    // (docs/adr/0123).
-    #[doc = "SCE-MAP: unicast_link.scxml:76 :: _machine"]
-// SCE-MAP: unicast_link.scxml:76 :: _machine
-    fn first_enabled_transition(
-        &mut self,
-        state: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-        sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match state {
-            UnicastLinkState::ID_Backoff => {
-                if event == UnicastLinkEvent::ID_BackoffOver {
-                    {
-                        // Backoff, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(22));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkClose {
-                    {
-                        // Backoff, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(23));
-                    }
-                }
-                None
-            }
-            UnicastLinkState::ID_Dialing => {
-                if event == UnicastLinkEvent::ID_DialMade {
-                    {
-                        // Dialing, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(4));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_HandshakeBegun {
-                    {
-                        // Dialing, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(5));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_DialNext {
-                    {
-                        // Dialing, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(6));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_DialExhausted {
-                    {
-                        // Dialing, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(7));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_DialEnded {
-                    {
-                        // Dialing, transition 4
-                        return Some(::sce_rust_runtime::TransitionId(8));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_DialGone {
-                    {
-                        // Dialing, transition 5
-                        return Some(::sce_rust_runtime::TransitionId(9));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkClose {
-                    {
-                        // Dialing, transition 6
-                        return Some(::sce_rust_runtime::TransitionId(10));
-                    }
-                }
-                None
-            }
-            UnicastLinkState::ID_Handshaking => {
-                if event == UnicastLinkEvent::ID_HandshakeDone {
-                    {
-                        // Handshaking, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(11));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_HandshakeNext {
-                    {
-                        // Handshaking, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(12));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_HandshakeExhausted {
-                    {
-                        // Handshaking, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(13));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_HandshakeEnded {
-                    {
-                        // Handshaking, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(14));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_HandshakeGone {
-                    {
-                        // Handshaking, transition 4
-                        return Some(::sce_rust_runtime::TransitionId(15));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_HandshakeHeld {
-                    {
-                        // Handshaking, transition 5
-                        return Some(::sce_rust_runtime::TransitionId(16));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkClose {
-                    {
-                        // Handshaking, transition 6
-                        return Some(::sce_rust_runtime::TransitionId(17));
-                    }
-                }
-                None
-            }
-            UnicastLinkState::ID_Held => {
-                if event == UnicastLinkEvent::ID_HeldOver {
-                    {
-                        // Held, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(24));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkClose {
-                    {
-                        // Held, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(25));
-                    }
-                }
-                None
-            }
-            UnicastLinkState::ID_Idle => {
-                if event == UnicastLinkEvent::ID_LinkOpen {
-                    {
-                        // Idle, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(0));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkTaken {
-                    {
-                        // Idle, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(1));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_DialEnded {
-                    {
-                        // Idle, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(2));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkClose {
-                    {
-                        // Idle, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(3));
-                    }
-                }
-                None
-            }
-            UnicastLinkState::ID_Up => {
-                if event == UnicastLinkEvent::ID_LinkLost {
-                    {
-                        // Up, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(18));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkEnded {
-                    {
-                        // Up, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(19));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkGone {
-                    {
-                        // Up, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(20));
-                    }
-                }
-                if event == UnicastLinkEvent::ID_LinkClose {
-                    {
-                        // Up, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(21));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -1040,7 +1097,7 @@ impl<A: UnicastLinkActions + 'static> StatePolicy for UnicastLinkPolicy<A> {
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         match transition.0 {
             // Dialing, transition 0
