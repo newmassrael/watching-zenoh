@@ -354,10 +354,7 @@ fn a_plain_publish_of_a_publisher_is_written_from_its_plan() {
     assert!(engine
         .publish_on_wire_all("demo/y", &wire, b"v", &options)
         .is_ok());
-    let attached = PublishOptions {
-        attachment: Some(&b"a"[..]),
-        ..PublishOptions::put()
-    };
+    let attached = PublishOptions::put().with_attachment(b"a");
     assert!(matches!(
         engine.publish_filtered(filter, "demo/y", &wire, b"v", Some(&attached)),
         FilteredPut::Sent(Ok(_))
