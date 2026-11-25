@@ -3860,6 +3860,34 @@ zenoh = "none"
 reason = "No key of upstream's configuration bounds the length of an endpoint, and zenoh-pico keeps an endpoint's text on the heap with no constant; wz bounds it to size the row a group member's link is reported in."
 
 [[limit]]
+id = "MAX_RAWETH_ENDPOINT_LEN"
+kconfig = "WZ_LIMIT_MAX_RAWETH_ENDPOINT_LEN"
+kind = "bound"
+driven = "local"
+default = 160
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "build"
+wire = "none"
+help = '''
+The longest raweth group endpoint, in bytes, a session joins by, its
+interface, ethertype, mapping table and whitelist included (for example
+reth/30:03:8c:c8:00:a2#iface=lo;mapping=a#aa:bb:cc:dd:ee:01#). A longer
+one is refused when the group is joined, never cut short. Apart from
+MAX_GROUP_ENDPOINT_LEN because a raweth endpoint carries a table: the
+rows of its mapping, the length of a mapping key, the addresses of its
+whitelist and its interface name are each sized from this value, so a
+table that fits the endpoint fits its rows. Read only by a build with the
+raweth transport. The default holds an endpoint that states all four keys
+with two mapping entries and one whitelisted address (141 bytes).
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "zenoh-pico reads a raweth endpoint's four keys (`vendor/zenoh-pico/src/transport/raweth/link.c` @ `#define RAWETH_CONFIG_ARGC 4`) off text it keeps on the heap with no bound on its length, and its own raweth test joins by an endpoint of 60 bytes (`vendor/zenoh-pico/tests/raweth.py` @ `whitelist=30:03:8c:c8:00:a1,`); wz bounds the endpoint to size the mapping, whitelist and interface rows of a raweth group."
+
+[[limit]]
 id = "MAX_GROUP_MEMBERS"
 kconfig = "WZ_LIMIT_MAX_GROUP_MEMBERS"
 kind = "bound"
