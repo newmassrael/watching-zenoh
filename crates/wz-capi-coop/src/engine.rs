@@ -54,11 +54,10 @@ use crate::arena::{
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
+use crate::RowPolicy;
 use wz_capi_port::reach::{ReachEngine, RowClaim};
 use wz_runtime_coop::kept::Shared;
-use wz_session_core::bounded::{
-    Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, Lent, TableLender,
-};
+use wz_session_core::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::key_arena::KeyRef;
@@ -1351,8 +1350,11 @@ struct RoomTable {
 
 /// The places of the table of rooms, one for each set of face tables the open lent
 /// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena with them.
-pub(crate) type RoomPlaces =
-    wz_session_core::bounded::BoundedVec<Option<RoomPlace>, { crate::arena::MAX_FACE_SETS }, Lent>;
+pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
+    Option<RoomPlace>,
+    { crate::arena::MAX_FACE_SETS },
+    RowPolicy,
+>;
 
 /// The bytes of one place of the table of rooms, as the plan lays the places out.
 pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
@@ -1767,7 +1769,7 @@ fn plane_of(plane: FilterPlane) -> Plane {
 
 /// The session's one table set, its rows lent from the session's arena: the application's tables
 /// (`Registry::app`), read through [`tables`].
-pub(crate) type CoopTables = SessionTables<CoopRows, Lent>;
+pub(crate) type CoopTables = SessionTables<CoopRows, RowPolicy>;
 
 /// The session's one table set, read where the registry keeps it: the application's tables are the
 /// session's tables (`Registry::app`), so a declaration and the dispatch that reads it hold one
@@ -1884,7 +1886,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, 
 /// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
 /// is refused before anything is taken, registered or sent.
 #[cfg(feature = "query")]
-type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, Lent>;
+type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, RowPolicy>;
 
 /// What a move of the links left settled ([`Core::move_links`]): every face up or waiting for a
 /// time, no port to ask and no group. The links are moved again once a face's link ended, a face
@@ -1989,7 +1991,7 @@ impl SessionParts for CoopSession {
     type Registry = Registry;
     type Faces = Registry;
     type Callbacks = CoopRows;
-    type Storage = Lent;
+    type Storage = RowPolicy;
     /// Where a face coming up or going down is reported (`connectivity`).
     #[cfg(feature = "connectivity")]
     type Watchers = Placed<FacePlane>;
@@ -2224,7 +2226,7 @@ impl SubscriberRow {
 // A call reads its row where it lies, so the rows lie in the session's arena, lent at its open,
 // where no table moves them and the dispatch reads them only through a shared borrow.
 const _: () = assert!(
-    <Lent as wz_session_core::bounded::Storage>::LENT_AT_OPEN,
+    <RowPolicy as wz_session_core::bounded::Storage>::LENT_AT_OPEN,
     "the session's tables lend their rows from its arena and never move one"
 );
 
@@ -6844,7 +6846,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The session's queryables only begin a call and hold the query's Final
         // (`QueryPlane::arrive`), so none stages a reply here: the stage they are handed has no
         // room.
-        let mut staged = ReplyStage::<Lent>::default();
+        let mut staged = ReplyStage::<RowPolicy>::default();
         let registry = &mut core.session.registry;
         if let Some(query) = &query {
             self.plane.asking_locally(|| {
