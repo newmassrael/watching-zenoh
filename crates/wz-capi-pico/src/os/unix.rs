@@ -115,25 +115,38 @@ pub fn clock_now() -> Clock {
 /// a timeout that compares against it would never expire. The Windows layer saturates the same
 /// way (`arith::ticks_elapsed`).
 pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ulong {
-    let (sec_scale, nsec_div): (i64, i64) = match unit {
-        Unit::Micro => (1_000_000, 1_000),
-        Unit::Milli => (1_000, 1_000_000),
-        Unit::Second => (1, 0),
-    };
     // Two readings of one clock differ by far less than an `i64` spans, as their nanoseconds,
     // each below a second, do.
-    let secs = wide(instant.tv_sec).wrapping_sub(wide(epoch.tv_sec));
-    let mut elapsed = secs.saturating_mul(sec_scale);
-    // The seconds unit has no divisor: it drops the sub-second part.
-    let nsecs = wide(instant.tv_nsec).wrapping_sub(wide(epoch.tv_nsec));
-    if let Some(part) = nsecs.checked_div(nsec_div) {
-        elapsed = elapsed.saturating_add(part);
-    }
+    let elapsed = interval(
+        wide(instant.tv_sec).wrapping_sub(wide(epoch.tv_sec)),
+        wide(instant.tv_nsec).wrapping_sub(wide(epoch.tv_nsec)),
+        NANOS_PER_SECOND as i64,
+        unit,
+    );
     if elapsed > 0 {
         c_ulong::try_from(elapsed).unwrap_or(c_ulong::MAX)
     } else {
         0
     }
+}
+
+/// `secs` whole seconds and `parts` more, of which `parts_per_second` make a second, as a count
+/// of `unit`: the one arithmetic of the monotonic and the wall clock's intervals, which differ only
+/// in the part a reading carries (nanoseconds and microseconds) and in what they make of a negative
+/// count. Saturating, the parts truncated toward zero; the seconds unit reads the seconds alone, as
+/// pico's reads only `tv_sec`.
+#[inline(never)]
+fn interval(secs: i64, parts: i64, parts_per_second: i64, unit: Unit) -> i64 {
+    // At most a million, which an `i64` holds.
+    let per_second = units_per_second(unit) as i64;
+    let part = match unit {
+        Unit::Second => 0,
+        // Both are a power of ten and `per_second` the smaller, so the divisor is one or more.
+        Unit::Micro | Unit::Milli => parts
+            .checked_div(parts_per_second.checked_div(per_second).unwrap_or(1))
+            .unwrap_or(0),
+    };
+    secs.saturating_mul(per_second).saturating_add(part)
 }
 
 /// Move a reading FORWARD by `duration` units.
@@ -183,20 +196,14 @@ pub fn wall_now() -> WallTime {
 /// reading upstream's behaviour, not a bug wz should silently repair. The seconds unit
 /// drops the sub-second part.
 pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
-    let (sec_scale, usec_div): (i64, i64) = match unit {
-        Unit::Micro => (1_000_000, 1),
-        Unit::Milli => (1_000, 1_000),
-        Unit::Second => (1, 0),
-    };
     let now = wall_now();
     // As in `clock_elapsed_between`: the differences of two readings fit an `i64`.
-    let secs = wide(now.tv_sec).wrapping_sub(wide(time.tv_sec));
-    let mut elapsed = secs.saturating_mul(sec_scale);
-    // The seconds unit has no divisor: it drops the sub-second part.
-    let usecs = wide(now.tv_usec).wrapping_sub(wide(time.tv_usec));
-    if let Some(part) = usecs.checked_div(usec_div) {
-        elapsed = elapsed.saturating_add(part);
-    }
+    let elapsed = interval(
+        wide(now.tv_sec).wrapping_sub(wide(time.tv_sec)),
+        wide(now.tv_usec).wrapping_sub(wide(time.tv_usec)),
+        1_000_000,
+        unit,
+    );
     // The wrapping cast IS the contract here. Truncating the 64-bit result to a 32-bit host's
     // `unsigned long` gives what pico's 32-bit `long` arithmetic wraps to.
     elapsed as c_ulong
@@ -651,6 +658,22 @@ mod tests {
         assert_eq!(split_seconds(999, Unit::Milli), (0, 999_000_000));
         assert_eq!(split_seconds(7, Unit::Second), (7, 0));
         assert_eq!(split_seconds(0, Unit::Micro), (0, 0));
+    }
+
+    /// The one interval body reads nanoseconds and microseconds at each unit, borrows a negative
+    /// part from the seconds, and the seconds unit reads the seconds alone. Turned red by a part
+    /// divided at another unit's scale or one the seconds unit adds.
+    #[test]
+    fn an_interval_reads_its_parts_at_each_unit() {
+        let nanos = NANOS_PER_SECOND as i64;
+        assert_eq!(interval(2, 500_001_000, nanos, Unit::Micro), 2_500_001);
+        assert_eq!(interval(2, 500_001_000, nanos, Unit::Milli), 2_500);
+        assert_eq!(interval(2, 999_999_999, nanos, Unit::Second), 2);
+        assert_eq!(interval(1, -1_000, nanos, Unit::Micro), 999_999);
+        assert_eq!(interval(3, 250_000, 1_000_000, Unit::Micro), 3_250_000);
+        assert_eq!(interval(3, 250_000, 1_000_000, Unit::Milli), 3_250);
+        assert_eq!(interval(3, -999_999, 1_000_000, Unit::Second), 3);
+        assert_eq!(interval(i64::MAX, 0, nanos, Unit::Micro), i64::MAX);
     }
 
     /// The carry in `clock_advance` is ONE borrow, and it has to fire when the
