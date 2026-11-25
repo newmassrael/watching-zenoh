@@ -1877,15 +1877,20 @@ impl SessionLimits {
         Self::BUILD
     }
 
-    /// The pico preset: each limit `[limit.pico_preset]` states at the preset's value, where the
-    /// build's domain holds it, and the rest at the build's. What an ABI that follows
-    /// zenoh-pico opens a session under before its config states otherwise; laid out when the
-    /// build is compiled, from the declaration and not from the build's environment.
+    /// The pico preset: each limit `[limit.pico_open]` states at its open value, each other
+    /// limit `[limit.pico_preset]` states at the preset's value, where the build's domain holds
+    /// it, and the rest at the build's. What an ABI that follows zenoh-pico opens a session
+    /// under before its config states otherwise; laid out when the build is compiled, from the
+    /// declaration and not from the build's environment.
     pub const PICO_PRESET: Self = {
         let mut limits = Self::BUILD;
         limits.keep(&KeyArenaBytesHeld::preset_or_build(
             4320,
             LimitValue::Integer(4320),
+        ));
+        limits.keep(&MaxSubscriptionsHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
         ));
         limits.keep(&DeliveryLaneBytesHeld::preset_or_build(
             4768,
@@ -1895,25 +1900,33 @@ impl SessionLimits {
             Quota::at_most(64),
             LimitValue::Integer(64),
         ));
-        limits.keep(&MaxPendingQueriesHeld::preset_or_build(
+        limits.keep(&MaxQueryablesHeld::preset_or_build(
             Quota::at_most(2),
             LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxPendingQueriesHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
         ));
         limits.keep(&MaxLivelinessSubscriptionsHeld::preset_or_build(
-            Quota::at_most(2),
-            LimitValue::Integer(2),
+            Quota::at_most(1),
+            LimitValue::Integer(1),
         ));
         limits.keep(&MaxLocalTokensHeld::preset_or_build(
-            Quota::at_most(2),
-            LimitValue::Integer(2),
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxPublishersHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
         ));
         limits.keep(&MaxQueriersHeld::preset_or_build(
-            Quota::at_most(2),
-            LimitValue::Integer(2),
+            Quota::at_most(1),
+            LimitValue::Integer(1),
         ));
         limits.keep(&MaxMatchingListenersHeld::preset_or_build(
-            Quota::at_most(2),
-            LimitValue::Integer(2),
+            Quota::at_most(1),
+            LimitValue::Integer(1),
         ));
         limits.keep(&MaxTransportEventsListenersHeld::preset_or_build(
             Quota::at_most(1),
@@ -1924,8 +1937,8 @@ impl SessionLimits {
             LimitValue::Integer(1),
         ));
         limits.keep(&MaxDeclaredKeyexprsHeld::preset_or_build(
-            Quota::at_most(306),
-            LimitValue::Integer(306),
+            Quota::at_most(2),
+            LimitValue::Integer(2),
         ));
         limits.keep(&MaxPendingLivelinessGetsHeld::preset_or_build(
             Quota::at_most(1),
