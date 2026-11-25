@@ -67,8 +67,8 @@ pub fn encode_auth_ext(payload: &[u8]) -> Result<ExtEntryOwned, CodecError> {
 pub fn decode_auth_ext(extensions: &[ExtEntryOwned]) -> Option<&[u8]> {
     // Told by its identity, the header without the chain flag, as upstream tells it
     // (`ext::Auth::ID`, the ZBuf that is not mandatory): a ZBuf of the same id that
-    // is mandatory is another extension.
-    let ext = crate::ext_view::find_by_eid(extensions, AUTH_EXT_EID)?;
+    // is mandatory is another extension. A repeated one is read by its last entry.
+    let ext = crate::ext_view::last_by_eid(extensions, AUTH_EXT_EID)?;
     match &ext.body {
         ExtEntryOwnedVariant::CodecZenohExtZbuf(z) => Some(z.value.as_slice()),
         _ => None,

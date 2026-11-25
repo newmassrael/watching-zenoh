@@ -335,9 +335,10 @@ impl MultiLinkDispatch {
 /// [`MULTILINK_ACK_EXT_EID`] on `OpenAck`
 /// (`commons/zenoh-protocol/src/transport/open.rs` @
 /// `pub type MultiLinkAck = zextunit!(0x4, false);`). An extension of the same id
-/// in any other shape is another extension and is not read.
+/// in any other shape is another extension and is not read; a repeated one is read
+/// by its last entry ([`crate::ext_view::last_by_eid`]).
 pub fn decode_multilink_ext(extensions: &[ExtEntryOwned], eid: u8) -> Option<AuthSubExt> {
-    let ext = crate::ext_view::find_by_eid(extensions, eid)?;
+    let ext = crate::ext_view::last_by_eid(extensions, eid)?;
     AuthSubExt::from_body(&ext.body)
 }
 

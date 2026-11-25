@@ -853,9 +853,10 @@ pub struct ReadEntries<'f>(ReadChainIter<'f>);
 impl<'f> Iterator for ReadEntries<'f> {
     type Item = wz_codecs::ext_entry::ExtEntryView<'f>;
 
-    // The slot profile keeps only the entries of an extension it reads
+    // The slot profile keeps only the entries of an extension it reads, the last of each identity
     // (`collect_handshake_ext_chain`), and a chain read where it lies is shown as it keeps it, so
-    // the two reads of one message agree.
+    // the two reads of one message agree: an entry is shown where no later entry of its identity
+    // supersedes it, which is the order the keeper holds them in.
     // Only an Init's and an Open's chain is handed to a judgement (`ReadList`), so the filter is
     // the slot profile's where either is compiled; a build without both walks no entry.
     #[cfg(all(
@@ -863,9 +864,17 @@ impl<'f> Iterator for ReadEntries<'f> {
         any(feature = "codec-init-body", feature = "codec-open-body")
     ))]
     fn next(&mut self) -> Option<Self::Item> {
-        self.0.as_mut()?.find(|entry| {
-            crate::ext_chain::reads_received_ext(crate::ext_view::ExtEntryView::ext_id(entry))
-        })
+        use crate::ext_view::ExtEntryView as _;
+        let walk = self.0.as_mut()?;
+        loop {
+            let entry = walk.next()?;
+            let identity = entry.eid();
+            if crate::ext_chain::reads_received_ext(entry.header)
+                && !walk.clone().any(|later| later.eid() == identity)
+            {
+                return Some(entry);
+            }
+        }
     }
 
     #[cfg(not(all(
@@ -909,7 +918,9 @@ impl ReadChain<'_> {
 
 /// What the one walk of a handshake chain read where it lies answers for the readers every build
 /// links (`ext_chain::read_handshake_chain`), found while the walk judges the chain: of each
-/// extension the first entry, as the readers of a held chain take the first.
+/// extension the last entry, as the readers of a held chain take the last and as upstream's
+/// decoder does, whose arm for an extension assigns each entry it meets
+/// (`commons/zenoh-codec/src/transport/init.rs` @ `ext_patch = p;`).
 // Built only by the walk of a handshake chain (`ext_chain::read_handshake_chain`), so it is
 // compiled where that walk is.
 #[cfg(all(
@@ -961,20 +972,23 @@ impl<'a> ChainAnswers<'a> {
         _unit: core::marker::PhantomData,
     };
 
-    /// Take what `entry`, the next entry of the walk, answers that no entry before it did.
+    /// Take what `entry`, the next entry of the walk, answers, in place of what an entry before it
+    /// of the same extension answered.
     pub(crate) fn note(&mut self, entry: &wz_codecs::ext_entry::ExtEntryView<'a>) {
         #[cfg(feature = "codec-init-body")]
         {
-            if self.patch.is_none() {
-                self.patch = crate::extpatch::patch_of_entry(entry);
+            if let Some(patch) = crate::extpatch::patch_of_entry(entry) {
+                self.patch = Some(patch);
             }
-            if self.region.is_none() && crate::extregion::is_region_entry(entry) {
-                self.region = crate::ext_view::ExtEntryBytes::plain_zbuf_in(entry);
+            if crate::extregion::is_region_entry(entry) {
+                if let Some(region) = crate::ext_view::ExtEntryBytes::plain_zbuf_in(entry) {
+                    self.region = Some(region);
+                }
             }
         }
         #[cfg(feature = "codec-open-body")]
-        if self.bound.is_none() {
-            self.bound = crate::extbound::bound_of_entry(entry);
+        if let Some(bound) = crate::extbound::bound_of_entry(entry) {
+            self.bound = Some(bound);
         }
         #[cfg(not(any(feature = "codec-init-body", feature = "codec-open-body")))]
         let _ = entry;
@@ -3827,9 +3841,10 @@ mod control_read_tests {
 
     /// One walk of a chain read where it lies answers its admission and its readers together: a
     /// chain the rule refuses still answers the patch level and the region name its entries carry,
-    /// and of an extension carried twice the first entry is the answer, the refused value of a
-    /// remote bound included. Turned red by a walk that stops at the refused header, or that lets a
-    /// later entry overwrite an earlier one.
+    /// and of an extension carried twice the last entry is the answer, as upstream's decoder
+    /// assigns each entry it meets (`commons/zenoh-codec/src/transport/open.rs` @
+    /// `ext_remote_bound = Some(q);`), the refused value of a remote bound included. Turned red by
+    /// a walk that stops at the refused header, or that keeps an earlier entry over a later one.
     #[test]
     fn the_walk_of_a_read_answers_the_admission_and_the_readers_together() {
         #[cfg(feature = "codec-init-body")]
@@ -3860,25 +3875,27 @@ mod control_read_tests {
             assert_eq!(message.chain().patch_and_region(), (1, Ok(Some(north))));
         }
         #[cfg(feature = "codec-open-body")]
-        {
+        for (first, last, read) in [
+            (0x02, 0x01, Ok(Some(crate::extbound::Bound::South))),
+            (0x01, 0x02, Err(crate::extbound::InvalidBound(2))),
+        ] {
             let wire = [
                 wire_const::T_MID_OPEN | wire_const::FLAG_T_OPEN_A | wire_const::FLAG_T_Z,
                 0x0A,
                 0x01,
                 0xA7,
-                0x02,
+                first,
                 0x27,
-                0x01,
+                last,
             ];
             let (message, _) = read_control(&wire).expect("an OpenAck with a chain");
             assert_eq!(
                 message.ext_admission(),
                 crate::ext_admit::ExtAdmission::Admissible
             );
-            assert_eq!(
-                message.chain().remote_bound(),
-                Err(crate::extbound::InvalidBound(2))
-            );
+            assert_eq!(message.chain().remote_bound(), read);
+            let (frame, _) = parse_inbound_consuming(&wire).expect("decoded");
+            assert_eq!(frame.control_chain().remote_bound(), read);
         }
     }
 
