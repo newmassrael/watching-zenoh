@@ -1541,7 +1541,7 @@ mod tests {
         let delivery = RoundDelivery::new(
             round,
             wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
-                alloc::boxed::Box::new(super::super::query::leaked_plane(1)),
+                super::super::query::leaked_plane(1),
             )),
         );
         let registry = RegistryOf::<H>::new(

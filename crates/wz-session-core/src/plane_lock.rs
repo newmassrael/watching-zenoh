@@ -11,6 +11,8 @@
 //! [`LockFamily`]: crate::plane_lock::LockFamily
 //! [`Queued`]: crate::plane_lock::Queued
 
+use core::mem::MaybeUninit;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The locks an engine keeps a plane's state under.
@@ -18,8 +20,18 @@ pub trait LockFamily {
     /// A lock over a value of `T`.
     type Lock<T>;
 
-    /// `value`, under a lock.
-    fn new<T>(value: T) -> Self::Lock<T>;
+    /// A lock made in `place` around the value `make` writes in the place it is handed and lends
+    /// back: a kernel's lock may point at itself, so it is made where it stays, and the value is
+    /// written there and not in a frame on its way. A family has no other way to make a lock.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a [`Self::Lock`] and aligned for it, and what it held is
+    /// overwritten without being dropped. The lock is not moved from `place` until it is dropped
+    /// there (`drop_in_place`).
+    unsafe fn init_at<T>(
+        place: NonNull<Self::Lock<T>>,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+    );
 
     /// `f` on the value under `lock`, which is held for the length of the call.
     fn with<T, R>(lock: &Self::Lock<T>, f: impl FnOnce(&mut T) -> R) -> R;
@@ -42,12 +54,23 @@ pub struct Queued<L: LockFamily, T> {
 }
 
 impl<L: LockFamily, T: Pending> Queued<L, T> {
-    /// `queue`, behind its lock.
-    pub fn new(queue: T) -> Self {
-        let pending = queue.is_pending();
-        Self {
-            queue: L::new(queue),
-            pending: AtomicBool::new(pending),
+    /// The queue `make` writes, behind its lock, made in `place` as [`LockFamily::init_at`] makes
+    /// a lock; its word says what the queue holds as made.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    pub unsafe fn init_at(place: NonNull<Self>, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) {
+        let at = place.as_ptr();
+        let mut pending = false;
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            L::init_at(NonNull::new_unchecked(addr_of_mut!((*at).queue)), |queue| {
+                let made = make(queue);
+                pending = made.is_pending();
+                made
+            });
+            addr_of_mut!((*at).pending).write(AtomicBool::new(pending));
         }
     }
 
@@ -77,6 +100,31 @@ impl<T> Pending for alloc::collections::VecDeque<T> {
     }
 }
 
+/// The value `make` writes, made beside the lock of a test's family, whose lock moves freely, to
+/// be moved into it.
+#[cfg(all(test, feature = "alloc"))]
+pub(crate) fn made_value<T>(make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) -> T {
+    let mut value = MaybeUninit::uninit();
+    let field: *const T = value.as_ptr();
+    let made: *const T = make(&mut value);
+    assert!(
+        core::ptr::eq(made, field),
+        "the value is written in the place it was handed"
+    );
+    // SAFETY: `make` lent back the place it was handed, so it wrote the value there.
+    unsafe { value.assume_init() }
+}
+
+/// A value `init` makes in a box of its own, where it stays: how a test holds a plane made in
+/// place.
+#[cfg(all(test, feature = "alloc"))]
+pub(crate) fn boxed_at<T>(init: impl FnOnce(NonNull<T>)) -> alloc::boxed::Box<T> {
+    let mut place = alloc::boxed::Box::<T>::new_uninit();
+    init(NonNull::from(&mut *place).cast::<T>());
+    // SAFETY: `init` wrote a whole `T` in the place it was handed, the box's.
+    unsafe { place.assume_init() }
+}
+
 /// The host's mutex as a family of locks, for the tests of the planes that keep their state under
 /// one.
 #[cfg(all(test, feature = "alloc"))]
@@ -86,8 +134,16 @@ pub(crate) enum StdLocks {}
 impl LockFamily for StdLocks {
     type Lock<T> = std::sync::Mutex<T>;
 
-    fn new<T>(value: T) -> std::sync::Mutex<T> {
-        std::sync::Mutex::new(value)
+    unsafe fn init_at<T>(
+        place: NonNull<std::sync::Mutex<T>>,
+        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
+    ) {
+        // SAFETY: `place` is valid for writes of the lock (the caller's contract).
+        unsafe {
+            place
+                .as_ptr()
+                .write(std::sync::Mutex::new(made_value(make)))
+        }
     }
 
     fn with<T, R>(lock: &std::sync::Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
@@ -104,7 +160,10 @@ mod tests {
     /// last of it is taken, and read with no lock.
     #[test]
     fn the_word_says_what_the_last_holder_left() {
-        let queue = Queued::<StdLocks, _>::new(VecDeque::<u8>::new());
+        // SAFETY: the box's place is valid for writes of the queue, which stays there.
+        let queue = boxed_at(|at| unsafe {
+            Queued::<StdLocks, _>::init_at(at, |queue| queue.write(VecDeque::<u8>::new()))
+        });
         assert!(!queue.is_pending(), "a new queue holds nothing");
         queue.with(|queue| queue.push_back(1));
         queue.with(|queue| queue.push_back(2));
@@ -120,7 +179,10 @@ mod tests {
     /// A queue made with something in it says so before any holder took its lock.
     #[test]
     fn a_queue_made_full_says_so_at_once() {
-        let queue = Queued::<StdLocks, _>::new(VecDeque::from([7u8]));
+        // SAFETY: as above.
+        let queue = boxed_at(|at| unsafe {
+            Queued::<StdLocks, _>::init_at(at, |queue| queue.write(VecDeque::from([7u8])))
+        });
         assert!(queue.is_pending());
     }
 }

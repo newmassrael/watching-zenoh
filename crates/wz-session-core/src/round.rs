@@ -1349,9 +1349,19 @@ struct Answering<C: RoundCalls>(
     <C::Locks as LockFamily>::Lock<Option<NonNull<dyn AnswersQueries<C>>>>,
 );
 
-impl<C: RoundCalls> Default for Answering<C> {
-    fn default() -> Self {
-        Self(<C::Locks as LockFamily>::new(None))
+impl<C: RoundCalls> Answering<C> {
+    /// Nothing answering yet, made in `at` with its lock.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>) {
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            <C::Locks as LockFamily>::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).0)),
+                |held| held.write(None),
+            );
+        }
     }
 }
 
@@ -1471,9 +1481,9 @@ impl<C: RoundCalls> Round<C> {
                 UnsafeCell::new(<C::Capture as Presence>::empty::<Option<Captured<C>>>()),
             );
             ptr::write(addr_of_mut!((*at).released), Released::new());
-            ptr::write(
-                addr_of_mut!((*at).answering),
-                <C::Queries as Presence>::empty::<Answering<C>>(),
+            <C::Queries as Presence>::init_at::<Answering<C>>(
+                NonNull::new_unchecked(addr_of_mut!((*at).answering)),
+                |answering| Answering::init_at(answering),
             );
             ptr::write(addr_of_mut!((*at).dropped), AtomicU64::new(0));
             ptr::write(addr_of_mut!((*at).held_over), AtomicU64::new(0));

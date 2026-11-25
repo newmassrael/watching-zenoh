@@ -136,13 +136,19 @@ fn plane<C: GetCalls>(rows: usize, held: usize) -> Placed<GetPlane<C>> {
     let ends = arena.lend(rows).expect("the arena has the rows");
     let legs = arena.lend(rows).expect("the arena has the rows");
     let replies = HeldReplies::lent(&mut arena, held).expect("the arena has the rows");
-    arena
-        .place(GetPlane::new(
-            EndedLegs::over(ends),
-            replies,
-            LegRows::over(legs),
-        ))
-        .expect("the arena has the plane's place")
+    // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where it
+    // stays.
+    unsafe {
+        arena.place_with(|at| {
+            GetPlane::init_at(
+                NonNull::new_unchecked(at),
+                EndedLegs::over(ends),
+                replies,
+                LegRows::over(legs),
+            )
+        })
+    }
+    .expect("the arena has the plane's place")
 }
 
 /// A round of a few records, placed with its tables in an arena over leaked memory.

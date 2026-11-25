@@ -957,15 +957,19 @@ fn lend_session(
     // What the gets share: placed here, so the round is told whose legs' callbacks its replies'
     // records hold counts of before it is shared.
     #[cfg(feature = "query")]
-    let get_plane = GetPlane::new(EndedLegs::over(legs), held_replies, LegRows::over(leg_rows));
+    let (ended, legs) = (EndedLegs::over(legs), LegRows::over(leg_rows));
+    // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where it
+    // stays.
     #[cfg(all(feature = "query", feature = "runtime-plan"))]
-    let gets = arena
-        .arena_mut()
-        .place(get_plane)
-        .map_err(ArenaRefused::Lend)?;
+    let gets = unsafe {
+        arena.arena_mut().place_with(|at| {
+            GetPlane::init_at(NonNull::new_unchecked(at), ended, held_replies, legs)
+        })
+    }
+    .map_err(ArenaRefused::Lend)?;
     // SAFETY: as for the region's places above, for the gets' field.
     #[cfg(all(feature = "query", not(feature = "runtime-plan")))]
-    let gets = unsafe { StatePlaces::gets(region_places, get_plane) };
+    let gets = unsafe { StatePlaces::gets(region_places, ended, held_replies, legs) };
     // The round lies beside its tables, owned by the session's state and reached by handles that
     // count nothing.
     #[cfg(feature = "runtime-plan")]
@@ -994,15 +998,18 @@ fn lend_session(
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
-    let query_plane = QueryPlane::over(query::FinalHolds::over(held_finals, refused_finals));
+    let holds = query::FinalHolds::over(held_finals, refused_finals);
+    // SAFETY: as for the gets' plane above.
     #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
-    let plane = arena
-        .arena_mut()
-        .place(query_plane)
-        .map_err(ArenaRefused::Lend)?;
+    let plane = unsafe {
+        arena
+            .arena_mut()
+            .place_with(|at| QueryPlane::init_at(NonNull::new_unchecked(at), holds))
+    }
+    .map_err(ArenaRefused::Lend)?;
     // SAFETY: as above, for the queryables' field.
     #[cfg(all(feature = "queryable", not(feature = "runtime-plan")))]
-    let plane = unsafe { StatePlaces::queries(region_places, query_plane) };
+    let plane = unsafe { StatePlaces::queries(region_places, holds) };
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
@@ -2877,12 +2884,51 @@ pub(crate) enum CoopLocks {}
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
-    fn new<T>(value: T) -> Mutex<T> {
-        Mutex::new(value)
+    unsafe fn init_at<T>(
+        place: NonNull<Mutex<T>>,
+        make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+    ) {
+        // SAFETY: the caller's contract is `mutex_in`'s.
+        unsafe { os::mutex_in(place, make) }
     }
 
     fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut lock.lock())
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod plane_lock_tests {
+    use super::{CoopLocks, Mutex};
+    use core::mem::{size_of, MaybeUninit};
+    use core::ptr::NonNull;
+    use wz_session_core::plane_lock::LockFamily;
+
+    /// A plane's lock is made where it stays, around a value written in the lock's own place: the
+    /// place the maker is handed lies inside the lock's, and what it wrote is what the lock holds.
+    /// Turned red by a family that makes the value in a frame of its own and moves it in.
+    #[test]
+    fn a_planes_lock_is_made_around_a_value_written_in_its_place() {
+        let mut place = MaybeUninit::<Mutex<[u8; 64]>>::uninit();
+        let start = place.as_ptr() as usize;
+        let lock_bytes = start..start + size_of::<Mutex<[u8; 64]>>();
+        let mut handed = 0usize;
+        // SAFETY: the place is valid for writes of the lock, which is dropped there below.
+        unsafe {
+            CoopLocks::init_at(NonNull::from(&mut place).cast(), |value| {
+                handed = value.as_ptr() as usize;
+                value.write([7; 64])
+            });
+        }
+        assert!(
+            lock_bytes.contains(&handed),
+            "the value is written inside the lock's place"
+        );
+        // SAFETY: the lock was made in the place above.
+        let lock = unsafe { place.assume_init_ref() };
+        assert_eq!(CoopLocks::with(lock, |value| value[63]), 7);
+        // SAFETY: the lock was made in the place and is dropped once, there.
+        unsafe { place.assume_init_drop() };
     }
 }
 
@@ -4980,20 +5026,22 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // out for it (`ArenaPlan::holding_planes`), or in the region where the build fixes the
         // session's shape.
         #[cfg(feature = "connectivity")]
-        let face_plane =
-            FacePlane::with_room(face_event_rows(config.max_faces, config.groups.len()));
+        let face_rows = face_event_rows(config.max_faces, config.groups.len());
+        // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where
+        // it stays.
         #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
-        let watchers = lent
-            .arena
-            .arena_mut()
-            .place(face_plane)
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        let watchers = unsafe {
+            lent.arena
+                .arena_mut()
+                .place_with(|at| FacePlane::init_at(NonNull::new_unchecked(at), face_rows))
+        }
+        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // SAFETY: the region's places were placed by the open's lend and its faces' field is
         // reached by this write alone; the block is held by `Core` after the session's state,
         // which holds the plane's owner, and neither moves nor goes back before it.
         #[cfg(all(feature = "connectivity", not(feature = "runtime-plan")))]
         let watchers =
-            unsafe { StatePlaces::faces(StateRegion::places_at(lent.state.as_ptr()), face_plane) };
+            unsafe { StatePlaces::faces(StateRegion::places_at(lent.state.as_ptr()), face_rows) };
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::holding_admission`); its rows are the heap's, and a heap that refuses them

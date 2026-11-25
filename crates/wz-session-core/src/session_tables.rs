@@ -281,6 +281,17 @@ pub trait Presence: sealed::Presence {
     /// The table of no rows, as `T`'s `Default` makes it where the kind is kept.
     fn empty<T: Default>() -> Self::Table<T>;
 
+    /// The table made at `at`, where it stays: by `make`, handed the place, where the kind is
+    /// kept, and of no bytes otherwise. What a table that holds a lock is made by.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a table and aligned for it, and `make` writes a whole `T` at
+    /// the place it is handed.
+    unsafe fn init_at<T>(
+        at: core::ptr::NonNull<Self::Table<T>>,
+        make: impl FnOnce(core::ptr::NonNull<T>),
+    );
+
     /// The table, to read, where the kind is kept.
     fn get<T>(table: &Self::Table<T>) -> Option<&T>;
 
@@ -362,6 +373,10 @@ impl Presence for Present {
         T::default()
     }
 
+    unsafe fn init_at<T>(at: core::ptr::NonNull<T>, make: impl FnOnce(core::ptr::NonNull<T>)) {
+        make(at);
+    }
+
     fn get<T>(table: &T) -> Option<&T> {
         Some(table)
     }
@@ -426,6 +441,14 @@ impl Presence for Absent {
 
     fn empty<T: Default>() -> AbsentTable<T> {
         AbsentTable::new()
+    }
+
+    unsafe fn init_at<T>(
+        at: core::ptr::NonNull<AbsentTable<T>>,
+        _make: impl FnOnce(core::ptr::NonNull<T>),
+    ) {
+        // SAFETY: `at` is valid for writes of the table (the caller's contract).
+        unsafe { at.as_ptr().write(AbsentTable::new()) }
     }
 
     fn get<T>(_table: &AbsentTable<T>) -> Option<&T> {

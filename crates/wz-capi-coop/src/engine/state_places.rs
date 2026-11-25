@@ -34,10 +34,14 @@ use super::Registry;
 use super::{query, FinalHold, RefusedFinal};
 #[cfg(feature = "query")]
 use super::{Ended, LegRow, PendingGet, Rows};
+#[cfg(feature = "query")]
+use super::{EndedLegs, LegRows};
 use super::{RoomPlace, RoomPlaces, SessionReassembly, StepPlaces};
 #[cfg(any(feature = "query", feature = "queryable"))]
 use crate::arena::SessionRows;
 use crate::round::{CoopCalls, Round, RoundRowCounts, RoundRows};
+#[cfg(feature = "query")]
+use wz_session_core::bounded::Lent;
 
 /// The legs a region keeps a row of each table of for: one for each get its tables of pending gets
 /// hold, the dial role's face's and, with `local-queryable`, the session's own
@@ -233,44 +237,56 @@ impl StatePlaces {
         }
     }
 
-    /// The gets' `plane`, written in its field of the places at `at`.
+    /// The gets' plane over `ended`, `replies` and `legs`, made in its field of the places at
+    /// `at` with its locks.
     ///
     /// # Safety
     /// As [`Self::steps`], for the gets' field.
     #[cfg(feature = "query")]
-    pub(super) unsafe fn gets(at: NonNull<Self>, plane: GetPlane) -> Placed<GetPlane> {
-        // SAFETY: the caller's contract; the field is aligned for the plane and the owner's alone.
+    pub(super) unsafe fn gets(
+        at: NonNull<Self>,
+        ended: EndedLegs,
+        replies: HeldReplies<u64, Lent>,
+        legs: LegRows,
+    ) -> Placed<GetPlane> {
+        // SAFETY: the caller's contract; the field is aligned for the plane, the owner's alone,
+        // and stays where it is.
         unsafe {
             Placed::written_at(value_at(addr_of_mut!((*at.as_ptr()).gets)), |place| {
-                place.write(plane)
+                GetPlane::init_at(NonNull::new_unchecked(place), ended, replies, legs)
             })
         }
     }
 
-    /// The queryables' `plane`, written in its field of the places at `at`.
+    /// The queryables' plane over `holds`, made in its field of the places at `at` with its
+    /// locks.
     ///
     /// # Safety
     /// As [`Self::steps`], for the queryables' field.
     #[cfg(feature = "queryable")]
-    pub(super) unsafe fn queries(at: NonNull<Self>, plane: QueryPlane) -> Placed<QueryPlane> {
-        // SAFETY: the caller's contract; the field is aligned for the plane and the owner's alone.
+    pub(super) unsafe fn queries(
+        at: NonNull<Self>,
+        holds: query::FinalHolds,
+    ) -> Placed<QueryPlane> {
+        // SAFETY: as for the gets' plane.
         unsafe {
             Placed::written_at(value_at(addr_of_mut!((*at.as_ptr()).queries)), |place| {
-                place.write(plane)
+                QueryPlane::init_at(NonNull::new_unchecked(place), holds)
             })
         }
     }
 
-    /// The plane of the watchers of the faces, written in its field of the places at `at`.
+    /// The plane of the watchers of the faces, its queue of `room` rows, made in its field of the
+    /// places at `at` with its locks.
     ///
     /// # Safety
     /// As [`Self::steps`], for the faces' field.
     #[cfg(feature = "connectivity")]
-    pub(super) unsafe fn faces(at: NonNull<Self>, plane: FacePlane) -> Placed<FacePlane> {
-        // SAFETY: the caller's contract; the field is aligned for the plane and the owner's alone.
+    pub(super) unsafe fn faces(at: NonNull<Self>, room: usize) -> Placed<FacePlane> {
+        // SAFETY: as for the gets' plane.
         unsafe {
             Placed::written_at(value_at(addr_of_mut!((*at.as_ptr()).faces)), |place| {
-                place.write(plane)
+                FacePlane::init_at(NonNull::new_unchecked(place), room)
             })
         }
     }
