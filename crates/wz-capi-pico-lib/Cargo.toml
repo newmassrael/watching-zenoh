@@ -14,9 +14,11 @@
 #   cargo build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
 #       --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-unknown-linux-gnu
 #
-# A library without `std` does not unwind, so a profile that unwinds (`dev`, `release`, `ship`)
-# cannot build it. The tokio engine's library (`abi/engine-tokio`) links `std`, defines none of
-# those items and builds with any profile. Every export is the ABI crate's `#[no_mangle]`
+# The library is without `std` under the profiles it ships with, which do not unwind; under one that
+# unwinds (`dev`, `release`, `ship`), the workspace's own build and lint of it, it links `std`,
+# since a stable toolchain builds no unwinding library without it (`src/lib.rs`). The tokio
+# engine's library (`abi/engine-tokio`) links `std`, defines none of those items and builds with
+# any profile. Every export is the ABI crate's `#[no_mangle]`
 # function; that each reaches the artifact is held by the export check of the library's symbols
 # (`nm`, `scripts/lib/capi_abi_pin.py`).
 

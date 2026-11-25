@@ -87,9 +87,9 @@ profile_min="wz-session-mcu:session-slot wz-session-lwip:session-slot wz-mcu-ses
 
 # The cargo profile an artifact crate is graded with, `<crate>:<profile>`, beside its tier: the one
 # it ships with, with the configuration named after it (`.cargo/<profile>.toml`) and the host's own
-# target, as that configuration asks. `wz-capi-pico-lib` is a library without `std`, which does
-# not unwind: a profile that unwinds refuses its panic handler, so its reduced combination is
-# graded as it is built (crates/wz-capi-pico-lib/Cargo.toml).
+# target, as that configuration asks. `wz-capi-pico-lib` is a library without `std` where it does
+# not unwind, and under a profile that unwinds it links `std` (crates/wz-capi-pico-lib/src/lib.rs),
+# so its reduced combination is graded as it ships, without `std`.
 ship_profile="wz-capi-pico-lib:capi-nostd"
 
 # The cargo profile of $1, or nothing when the crate is graded with the default one.

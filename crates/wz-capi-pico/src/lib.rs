@@ -128,8 +128,8 @@ pub mod c_runtime {
 /// a panic handler that aborts the process, as a failed assertion in zenoh-pico does, and on a POSIX
 /// host the personality routine the toolchain's prebuilt `core` names in its unwind tables, which
 /// nothing calls because nothing unwinds (`src/os/no_std_host.rs`). Expanded once, by the C
-/// library's artifact `wz-capi-pico-lib`, never in this rlib, so a Rust program or test that links
-/// this crate keeps `std`'s own. Empty in a build without `os-host`: the tokio engine's library
+/// library's artifact `wz-capi-pico-lib` in a build that does not unwind, never in this rlib, so
+/// a Rust program or test that links this crate keeps `std`'s own. Empty in a build without `os-host`: the tokio engine's library
 /// links `std`, and a Zephyr image's C seams and board define them.
 #[cfg(feature = "os-host")]
 #[macro_export]
