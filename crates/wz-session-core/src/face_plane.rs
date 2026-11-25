@@ -39,6 +39,7 @@ pub const MAX_WATCHERS: usize =
 
 /// A row of a face event as the queue holds it.
 type Event = (FaceEventKind, FaceLinkRow);
+use core::ptr::{addr_of_mut, NonNull};
 
 /// The watchers, each under the id that stops it, in the order of their ids.
 struct Watchers {
@@ -80,45 +81,40 @@ pub struct FacePlane<K: LockFamily> {
     room: usize,
 }
 
-impl<K: LockFamily> Default for FacePlane<K> {
-    /// A plane whose queue holds the build's rows ([`crate::caps::MAX_FACE_WATCH_ROWS`]).
-    fn default() -> Self {
-        Self::with_room(MAX_FACE_WATCH_ROWS)
-    }
-}
-
 impl<K: LockFamily> FacePlane<K> {
-    /// A plane whose queue holds `room` rows, at most the build's. A plane of no room keeps no
-    /// row and has none to tell a loss with, so an engine makes one of at least one. The plane is
-    /// made in the caller's frame; an engine places it where it lies instead ([`Self::place_in`]).
-    pub fn with_room(room: usize) -> Self {
-        Self {
-            watchers: K::new(Self::no_watcher()),
-            events: Queued::new(Waiting { first: 0, len: 0 }),
-            rows: Rows(UnsafeCell::new(
-                [const { MaybeUninit::uninit() }; MAX_FACE_WATCH_ROWS],
-            )),
-            room: room.min(MAX_FACE_WATCH_ROWS),
+    /// A plane whose queue holds `room` rows, at most the build's, made in `at` with its locks:
+    /// the rows lie in the plane, so a watch that comes after the plane was made, and every row
+    /// told within them, allocates nothing. A plane of no room keeps no row and has none to tell a
+    /// loss with, so an engine makes one of at least one.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The plane is not moved from `at` until it is dropped there.
+    pub unsafe fn init_at(at: NonNull<Self>, room: usize) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each but the rows is written once; the rows hold no value,
+        // which a row of `MaybeUninit` is valid as.
+        unsafe {
+            K::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at).watchers)),
+                |watchers| watchers.write(Self::no_watcher()),
+            );
+            Queued::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at).events)),
+                |events| events.write(Waiting { first: 0, len: 0 }),
+            );
+            addr_of_mut!((*at).room).write(room.min(MAX_FACE_WATCH_ROWS));
         }
     }
 
-    /// A plane as [`Self::with_room`] makes it, built in the next span of `arena`, where it lies
+    /// A plane as [`Self::init_at`] makes it, built in the next span of `arena`, where it lies
     /// for as long as the owner handed back: its rows, which are most of its bytes, are never in
     /// a frame. Refused, as the arena refuses the span, past what is left.
     pub fn place_in(arena: &mut Arena, room: usize) -> Result<Placed<Self>, LendRefused> {
-        let write = |at: *mut Self| {
-            // SAFETY: `at` is aligned for a plane and valid for writes of one (`place_with`);
-            // each field but the rows is written once through a pointer to it, and the rows hold
-            // no value, which a row of `MaybeUninit` is valid as.
-            unsafe {
-                core::ptr::addr_of_mut!((*at).watchers).write(K::new(Self::no_watcher()));
-                core::ptr::addr_of_mut!((*at).events)
-                    .write(Queued::new(Waiting { first: 0, len: 0 }));
-                core::ptr::addr_of_mut!((*at).room).write(room.min(MAX_FACE_WATCH_ROWS));
-            }
-        };
-        // SAFETY: `write` leaves a whole plane at the pointer it is handed.
-        unsafe { arena.place_with(write) }
+        // SAFETY: `place_with` hands a place aligned for a plane and valid for writes of one,
+        // where it stays, and `init_at` leaves a whole plane there.
+        unsafe { arena.place_with(|at: *mut Self| Self::init_at(NonNull::new_unchecked(at), room)) }
     }
 
     /// The watchers of a plane no one watches yet.
@@ -325,6 +321,12 @@ mod tests {
     use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    /// A plane whose queue holds `room` rows, made in a box of its own.
+    fn plane<K: LockFamily>(room: usize) -> alloc::boxed::Box<FacePlane<K>> {
+        // SAFETY: the box's place is valid for writes of the plane, which stays there.
+        crate::plane_lock::boxed_at(|at| unsafe { FacePlane::init_at(at, room) })
+    }
+
     fn row(zid: u8) -> FaceLinkRow {
         FaceLinkRow {
             zid: [zid; 16],
@@ -362,7 +364,7 @@ mod tests {
     /// one is left, and only that one is told.
     #[test]
     fn a_watcher_is_stopped_by_its_id_once() {
-        let plane = FacePlane::<StdLocks>::default();
+        let plane = plane::<StdLocks>(crate::caps::MAX_FACE_WATCH_ROWS);
         assert!(!plane.watched());
         let (first_told, second_told) = (Arc::default(), Arc::default());
         let first = plane.watch(counting(&first_told)).unwrap();
@@ -393,8 +395,16 @@ mod tests {
     impl LockFamily for CountedLocks {
         type Lock<T> = Mutex<T>;
 
-        fn new<T>(value: T) -> Mutex<T> {
-            Mutex::new(value)
+        unsafe fn init_at<T>(
+            place: NonNull<Mutex<T>>,
+            make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+        ) {
+            // SAFETY: `place` is valid for writes of the lock (the caller's contract).
+            unsafe {
+                place
+                    .as_ptr()
+                    .write(Mutex::new(crate::plane_lock::made_value(make)))
+            }
         }
 
         fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
@@ -408,7 +418,7 @@ mod tests {
     /// next row that takes the queue's lock whether or not it holds one.
     #[test]
     fn an_empty_queue_is_answered_with_no_lock_taken() {
-        let plane = FacePlane::<CountedLocks>::default();
+        let plane = plane::<CountedLocks>(crate::caps::MAX_FACE_WATCH_ROWS);
         let before = TAKEN.load(Ordering::Relaxed);
         assert!(plane.next_event().is_none());
         assert!(!plane.hand_out_next());
@@ -428,7 +438,7 @@ mod tests {
     /// Rows are handed out in the order they happened, each once.
     #[test]
     fn rows_are_handed_out_in_the_order_they_happened() {
-        let plane = FacePlane::<StdLocks>::default();
+        let plane = plane::<StdLocks>(crate::caps::MAX_FACE_WATCH_ROWS);
         plane.happened(FaceEventKind::Up, row(1));
         plane.happened(FaceEventKind::Down, row(2));
         let (kind, first) = plane.next_event().unwrap();
@@ -445,7 +455,8 @@ mod tests {
     /// stopped watcher's place, or by one that reads the watchers anew past the row's last.
     #[test]
     fn a_watcher_stopped_or_added_during_a_hand_out_leaves_the_others_told_once() {
-        let plane = Arc::new(FacePlane::<StdLocks>::default());
+        let plane =
+            Arc::<FacePlane<StdLocks>>::from(plane::<StdLocks>(crate::caps::MAX_FACE_WATCH_ROWS));
         let told = Arc::new(Mutex::new(Vec::new()));
         let second = Arc::new(AtomicU64::new(0));
         let (into, by, stop) = (Arc::clone(&told), Arc::clone(&plane), Arc::clone(&second));
@@ -483,11 +494,11 @@ mod tests {
                 >= MAX_FACE_WATCH_ROWS * core::mem::size_of::<(FaceEventKind, FaceLinkRow)>()
         );
         assert_eq!(
-            FacePlane::<StdLocks>::with_room(4).room(),
+            plane::<StdLocks>(4).room(),
             4_usize.min(MAX_FACE_WATCH_ROWS)
         );
         assert_eq!(
-            FacePlane::<StdLocks>::with_room(MAX_FACE_WATCH_ROWS + 1).room(),
+            plane::<StdLocks>(MAX_FACE_WATCH_ROWS + 1).room(),
             MAX_FACE_WATCH_ROWS
         );
     }
@@ -497,7 +508,7 @@ mod tests {
     /// written once its first row has moved past the last.
     #[test]
     fn rows_taken_round_the_ring_keep_their_order() {
-        let plane = FacePlane::<StdLocks>::default();
+        let plane = plane::<StdLocks>(MAX_FACE_WATCH_ROWS);
         let mut next = 0_u8;
         let mut taken = Vec::new();
         for _ in 0..3 * MAX_FACE_WATCH_ROWS {
@@ -518,7 +529,7 @@ mod tests {
     /// that grows past its bound, or by a refused watch that took an id.
     #[test]
     fn a_watch_past_the_bound_is_refused_and_its_sink_handed_back() {
-        let plane = FacePlane::<StdLocks>::default();
+        let plane = plane::<StdLocks>(MAX_FACE_WATCH_ROWS);
         let told = Arc::default();
         for id in 1..=MAX_WATCHERS {
             assert_eq!(plane.watch(counting(&told)).ok(), Some(id as u64));
@@ -587,7 +598,7 @@ mod tests {
     /// told, none lost), by a loss counted on no row, or by a count told again with a later row.
     #[test]
     fn rows_past_the_room_are_lost_and_told_once_with_the_last_row_kept() {
-        let plane = FacePlane::<StdLocks>::with_room(2);
+        let plane = plane::<StdLocks>(2);
         let told = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&told);
         plane
@@ -624,7 +635,8 @@ mod tests {
         assert_eq!(watches, [false, true]);
         assert!(!FaceReports::watched(&()));
         FaceReports::happened(&(), FaceEventKind::Up, row(1));
-        let plane = Arc::new(FacePlane::<StdLocks>::default());
+        let plane =
+            Arc::<FacePlane<StdLocks>>::from(plane::<StdLocks>(crate::caps::MAX_FACE_WATCH_ROWS));
         let told = Arc::new(AtomicUsize::new(0));
         plane.watch(counting(&told)).unwrap();
         assert!(FaceReports::watched(&plane));
@@ -682,7 +694,7 @@ mod tests {
                 release,
             )
         };
-        let plane = FacePlane::<StdLocks>::default();
+        let plane = plane::<StdLocks>(MAX_FACE_WATCH_ROWS);
         let id = plane.watch(sink).unwrap();
         plane.happened(FaceEventKind::Up, row(1));
         assert!(plane.hand_out_next());

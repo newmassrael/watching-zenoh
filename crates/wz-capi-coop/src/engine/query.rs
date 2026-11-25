@@ -400,7 +400,7 @@ impl QueryView for OwnGet<'_> {
 /// A plane that holds the Finals of at most `rows` queries at once, in rows lent from an arena
 /// the test leaks.
 #[cfg(test)]
-pub(super) fn leaked_plane(rows: usize) -> QueryPlane {
+pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
     use wz_session_core::bounded::Arena;
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
     let refused = Arena::table_bytes::<RefusedFinal>(rows).expect("rows the address space holds");
@@ -414,7 +414,12 @@ pub(super) fn leaked_plane(rows: usize) -> QueryPlane {
     let mut lend = arena.lender();
     let holds = FinalHolds::over(lend.table(rows), lend.table(rows));
     lend.finish().expect("the arena has the rows");
-    QueryPlane::over(holds)
+    let mut place = Box::<QueryPlane>::new_uninit();
+    // SAFETY: the box's place is valid for writes of the plane, which stays there.
+    unsafe {
+        QueryPlane::init_at(NonNull::from(&mut *place).cast::<QueryPlane>(), holds);
+        place.assume_init()
+    }
 }
 
 /// The query each thread's callback is answering now: the thread, its engine (by address), the

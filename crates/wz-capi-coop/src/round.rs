@@ -262,8 +262,12 @@ pub(crate) enum CoopSyncLocks {}
 impl LockFamily for CoopSyncLocks {
     type Lock<T> = wz_capi_port::sync::Lock<T>;
 
-    fn new<T>(value: T) -> Self::Lock<T> {
-        wz_capi_port::sync::Lock::new(value)
+    unsafe fn init_at<T>(
+        place: core::ptr::NonNull<Self::Lock<T>>,
+        make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+    ) {
+        // SAFETY: the caller's contract is the lock's.
+        unsafe { wz_capi_port::sync::Lock::init_at(place, make) }
     }
 
     fn with<T, R>(lock: &Self::Lock<T>, f: impl FnOnce(&mut T) -> R) -> R {

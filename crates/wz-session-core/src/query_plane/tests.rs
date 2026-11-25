@@ -37,6 +37,12 @@ fn holds(rows: usize) -> FinalHolds {
     )
 }
 
+/// A plane over `holds`, made in a box of its own.
+fn plane<C: PlaneCalls>(holds: FinalHolds) -> alloc::boxed::Box<QueryPlane<C>> {
+    // SAFETY: the box's place is valid for writes of the plane, which stays there.
+    crate::plane_lock::boxed_at(|at| unsafe { QueryPlane::init_at(at, holds) })
+}
+
 /// A call begun on a test's queryable row, which counts its end.
 struct Begun(Arc<AtomicUsize>);
 
@@ -171,7 +177,7 @@ fn within_five_seconds<R: Send + 'static>(
 #[test]
 fn a_full_table_refuses_the_row_and_keeps_the_one_held() {
     let (first, refused, still_full, next) = within_five_seconds("a refused take", || {
-        let plane = QueryPlane::<Local>::over(holds(1));
+        let plane = plane::<Local>(holds(1));
         let first = OwnFinalHold::take(&plane, 1);
         let refused = OwnFinalHold::take(&plane, 2).is_none();
         let still_full = OwnFinalHold::take(&plane, 3).is_none();
@@ -323,7 +329,7 @@ fn a_refused_take_withholds_no_final() {
 /// Returning the wrapped value without the step over `LOCAL_QUERY` reds the second assertion.
 #[test]
 fn a_links_generation_is_never_the_sessions_own() {
-    let plane = QueryPlane::<Linked>::over(FinalHolds::default());
+    let plane = plane::<Linked>(FinalHolds::default());
     assert_eq!(plane.next_generation(), 1);
     plane
         .generation
@@ -344,7 +350,7 @@ fn a_links_generation_is_never_the_sessions_own() {
 /// an arrival that begins its call before its Final is admitted, or that counts no refusal.
 #[test]
 fn a_query_no_row_holds_is_refused_before_its_call_begins() {
-    let plane = QueryPlane::<Linked>::over(holds(1));
+    let plane = plane::<Linked>(holds(1));
     let round = crate::round::tests::round::<Linked>();
     let calls = Calls::default();
     plane.set_arriving(5);
@@ -373,7 +379,7 @@ fn a_query_no_row_holds_is_refused_before_its_call_begins() {
 /// its hold back, and is no refusal.
 #[test]
 fn a_query_no_call_begins_for_gives_its_hold_back() {
-    let plane = QueryPlane::<Linked>::over(holds(1));
+    let plane = plane::<Linked>(holds(1));
     let round = crate::round::tests::round::<Linked>();
     plane.set_arriving(5);
     // SAFETY: this thread is the round's one writer.
@@ -391,7 +397,7 @@ fn a_query_no_call_begins_for_gives_its_hold_back() {
 /// round, which ends its call. Turned red by an arrival that offers the get's query to the round.
 #[test]
 fn the_sessions_own_get_notes_the_calls_it_begins() {
-    let plane = QueryPlane::<Local>::over(holds(2));
+    let plane = plane::<Local>(holds(2));
     let round = crate::round::tests::round::<Local>();
     let calls = Calls::default();
     plane.set_arriving(5);
@@ -423,7 +429,7 @@ fn the_sessions_own_get_notes_the_calls_it_begins() {
 /// Turned red by a plane of such a session that takes the query as its own get's.
 #[test]
 fn a_session_whose_own_queryables_answer_none_notes_no_call() {
-    let plane = QueryPlane::<Linked>::over(holds(1));
+    let plane = plane::<Linked>(holds(1));
     let round = crate::round::tests::round::<Linked>();
     let calls = Calls::default();
     plane.set_arriving(5);

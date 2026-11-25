@@ -37,6 +37,17 @@ impl<X> TransportPlace for Option<X> {
     }
 }
 
+/// The one-face session's place in a region the allocator zeroed: none at zero bytes whatever the
+/// transport's type, which an `Option` of it is not.
+impl<X> TransportPlace for crate::bounded::ZeroOption<X> {
+    type Transport = X;
+
+    #[inline]
+    fn lend<U>(&mut self, f: impl FnOnce(&mut X) -> U) -> Option<U> {
+        self.as_mut().map(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,5 +87,27 @@ mod tests {
         let mut place = Some(21u32);
         assert_eq!(bump(&mut place), Some(42));
         assert_eq!(bump(&mut None::<u32>), None);
+    }
+
+    /// A region's place of all zero bytes holds no transport and runs nothing; once the link is
+    /// made it lends the transport as an `Option` does. Turned red by a zeroed place read as one
+    /// that holds a transport.
+    #[test]
+    fn a_zeroed_region_place_holds_no_transport_until_one_is_made() {
+        use crate::bounded::ZeroOption;
+        // SAFETY: `ZeroOption` is `ZeroEmpty`: all zero bytes are a place that holds none.
+        let mut place: ZeroOption<u32> = unsafe { core::mem::zeroed() };
+        let mut ran = false;
+        assert_eq!(place.lend(|_transport| ran = true), None);
+        assert!(!ran, "no transport, no call");
+        assert!(place.replace(5).is_none());
+        assert_eq!(
+            place.lend(|transport| {
+                *transport += 1;
+                *transport
+            }),
+            Some(6)
+        );
+        assert_eq!(place.as_ref(), Some(&6));
     }
 }

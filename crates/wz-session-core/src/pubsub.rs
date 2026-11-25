@@ -478,12 +478,12 @@ struct PeerNaming<P: Storage = Profile> {
     /// Per SESSION for the reason the table above is: our id space is the one of
     /// the session's own bundle, and two sessions have two.
     #[cfg(feature = "alloc")]
-    own_mapping_space: Option<SharedOwnMappingSpace>,
+    own_mapping_space: crate::bounded::ZeroOption<SharedOwnMappingSpace>,
     /// The key ids every node of the deployment shares, when the session holds them
     /// (`shared-key-ids`): an id neither declared space holds is read in it. Installed, as the
     /// own space is, by the engine that opened the session; `None` keeps the two spaces alone.
     #[cfg(feature = "shared-key-ids")]
-    shared_key_ids: Option<crate::shared_key_ids::SharedKeyIds>,
+    shared_key_ids: crate::bounded::ZeroOption<crate::shared_key_ids::SharedKeyIds>,
     /// R231 — this session's own zid prefix (1..=16 bytes),
     /// negotiated during the session-FSM open handshake. When set,
     /// [`dispatch_push`](SubscriberTable::dispatch_push) suppresses wire-arrived
@@ -2896,9 +2896,9 @@ impl<P: Storage> Default for SubscriberPeer<P> {
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 keys: Default::default(),
                 #[cfg(feature = "alloc")]
-                own_mapping_space: None,
+                own_mapping_space: crate::bounded::ZeroOption::NONE,
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: None,
+                shared_key_ids: crate::bounded::ZeroOption::NONE,
                 own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
@@ -2930,9 +2930,9 @@ impl SubscriberPeer<crate::bounded::Static> {
                 key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
                 keys: crate::bounded::InlineKeys,
                 #[cfg(feature = "alloc")]
-                own_mapping_space: None,
+                own_mapping_space: crate::bounded::ZeroOption::NONE,
                 #[cfg(feature = "shared-key-ids")]
-                shared_key_ids: None,
+                shared_key_ids: crate::bounded::ZeroOption::NONE,
                 own_zid: OwnZid::NONE,
             },
             #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
@@ -2949,6 +2949,57 @@ impl SubscriberPeer<crate::bounded::Static> {
             class: None,
             _policy: core::marker::PhantomData,
         }
+    }
+}
+
+/// The rows of a [`SubscriberPeer`] of the region policy, which a region lays out beside it: the
+/// staging of the answers to the peer's interests, at the build's bound. The peer's aliases and
+/// interests are inline in the side, at their bounds, as the region policy keeps a peer's rows.
+pub struct SubscriberPeerRows {
+    #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+    staged: [core::mem::MaybeUninit<SubInterestReply>; caps::MAX_PENDING_DECLARES],
+}
+
+// SAFETY: the staging's rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl crate::bounded::ZeroEmpty for SubscriberPeerRows {}
+
+/// The lines a region's description holds for one [`SubscriberPeer`] of the region policy, at
+/// most: its staging's rows; and its two handles to the key arena, its aliases' and its interests'.
+pub const SUBSCRIBER_PEER_LINES: usize = 2;
+
+// SAFETY: of the region policy, at all zero bytes: the aliases are a `FixedIdMap` and the interests
+// a static sequence (`ZeroEmpty`), the staging a `LentSeq` of no rows, each key arena handle a
+// `LentKeys` of none; the bounds are `Limited` (`ZeroEmpty`), bounds of nothing until the session
+// states them; the own id space and the shared key ids are `ZeroOption`s of none, the own zid is
+// one of no bytes (`OwnZid::NONE`), the class is `None` (`ClassId` is a transparent `NonZeroU16`);
+// the shared-memory state is `ZeroEmpty`; every count and epoch is zero; the composing row is
+// `ComposeInline` (`ZeroEmpty`). Nothing drops a value, every sequence holding none.
+unsafe impl crate::bounded::ZeroEmpty for SubscriberPeer<crate::bounded::Region> {}
+
+impl SubscriberPeer<crate::bounded::Region> {
+    /// The description of a side of the region policy at `at` in a region and its
+    /// [`SubscriberPeerRows`] at `rows`: the line of its staging's rows and its handles to the
+    /// region's key arena, those the build keeps.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<SUBSCRIBER_PEER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY;
+        #[cfg(feature = "storage-profile")]
+        let lines = lines.keys_at(at.wrapping_add(core::mem::offset_of!(Self, naming.keys)));
+        #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
+        let lines = lines
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
+            .seq(crate::bounded::SeqPlace::of::<SubInterestReply>(
+                at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
+                rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
+                caps::MAX_PENDING_DECLARES,
+            ));
+        #[cfg(not(feature = "storage-profile"))]
+        let _ = at;
+        #[cfg(not(all(feature = "declare-subscriber", feature = "interest-answer")))]
+        let _ = rows;
+        lines
     }
 }
 
@@ -3260,7 +3311,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// error under this workspace's deny-warnings docs policy.)
     #[cfg(feature = "alloc")]
     pub fn set_own_mapping_space(&mut self, space: SharedOwnMappingSpace) {
-        self.naming.own_mapping_space = Some(space);
+        self.naming.own_mapping_space.set(Some(space));
     }
 
     /// R311y739 — release the installed own space; `M=0` aliases refuse again.
@@ -3268,7 +3319,7 @@ impl<P: Storage> SubscriberPeer<P> {
     /// session teardown / re-init, exactly as `clear_own_zid` pairs its install.
     #[cfg(feature = "alloc")]
     pub fn clear_own_mapping_space(&mut self) {
-        self.naming.own_mapping_space = None;
+        self.naming.own_mapping_space.set(None);
     }
 
     /// Install the key ids every node of the deployment shares: from now on an id that neither
@@ -3277,14 +3328,14 @@ impl<P: Storage> SubscriberPeer<P> {
     /// its link carries anything; a second install replaces the first.
     #[cfg(feature = "shared-key-ids")]
     pub fn set_shared_key_ids(&mut self, ids: crate::shared_key_ids::SharedKeyIds) {
-        self.naming.shared_key_ids = Some(ids);
+        self.naming.shared_key_ids.set(Some(ids));
     }
 
     /// Release the installed dictionary: an id neither declared space holds resolves to
     /// nothing again.
     #[cfg(feature = "shared-key-ids")]
     pub fn clear_shared_key_ids(&mut self) {
-        self.naming.shared_key_ids = None;
+        self.naming.shared_key_ids.set(None);
     }
 
     /// R311y739 — BOTH id spaces, for this registry and for every consumer the
@@ -3681,7 +3732,7 @@ impl<P: Storage> PeerNaming<P> {
         #[cfg(not(feature = "alloc"))]
         let own = tables;
         #[cfg(feature = "shared-key-ids")]
-        if let Some(ids) = &self.shared_key_ids {
+        if let Some(ids) = self.shared_key_ids.as_ref() {
             return MappingSpaces::<P, O>::of_aliases(&self.aliases, own).with_shared(ids);
         }
         MappingSpaces::<P, O>::of_aliases(&self.aliases, own)

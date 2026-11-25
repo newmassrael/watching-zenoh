@@ -58,6 +58,9 @@ use crate::policy_binding::{Driven, LimitKind};
 #[repr(transparent)]
 pub struct Quota(usize);
 
+// SAFETY: a `Quota` is one `usize`; zero is `at_most(0)`, which admits nothing and holds nothing.
+unsafe impl crate::bounded::ZeroEmpty for Quota {}
+
 impl Quota {
     /// No bound: every request is admitted. Only a build with no capacity of the limit allows it.
     pub const UNBOUNDED: Self = Self(usize::MAX);
@@ -643,6 +646,14 @@ pub trait LimitSpec: 'static {
 #[repr(transparent)]
 pub struct Limited<L: LimitSpec, const HELD: usize> {
     value: [L::Value; HELD],
+}
+
+// SAFETY: `HELD` values of the limit, each `ZeroEmpty`. A limit of zero bytes holds the value zero,
+// a bound that admits nothing where the build allows a choice (the build's value where it allows
+// one, which no byte holds): a region's limits refuse everything until its open states them.
+unsafe impl<L: LimitSpec, const HELD: usize> crate::bounded::ZeroEmpty for Limited<L, HELD> where
+    L::Value: crate::bounded::ZeroEmpty
+{
 }
 
 impl<L: LimitSpec, const HELD: usize> Limited<L, HELD> {

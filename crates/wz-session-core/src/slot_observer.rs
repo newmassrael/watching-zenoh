@@ -131,6 +131,94 @@ pub struct RequesterRows {
     pub liveliness_gets: usize,
 }
 
+/// The rows of a [`Requesters`] of the region policy, which a region lays out beside it: each
+/// registry's, at the build's bounds.
+pub struct RequesterRegionRows<R: ReplySink, G: ReplySink> {
+    replies: crate::reply::ReplyRegistryRows<R>,
+    #[cfg(feature = "liveliness-get")]
+    liveliness_gets: crate::declare::liveliness_get::LivelinessGetRows<G>,
+    _gets: core::marker::PhantomData<G>,
+}
+
+// SAFETY: each field is rows of `MaybeUninit` (`ZeroEmpty`) or no bytes, holding no value until
+// placed.
+unsafe impl<R: ReplySink, G: ReplySink> crate::bounded::ZeroEmpty for RequesterRegionRows<R, G> {}
+
+/// The lines a region's description holds for one [`Requesters`] of the region policy, at most:
+/// the pending queries' and, with `liveliness-get`, the pending snapshots' and their markers'.
+pub const REQUESTER_LINES: usize = crate::reply::REPLY_REGISTRY_LINES + 2;
+
+impl<R: ReplySink, G: ReplySink> Requesters<R, G, crate::bounded::Region> {
+    /// The description of requesters of the region policy at `at` in a region and their
+    /// [`RequesterRegionRows`] at `rows`: each registry's lines, and the queries' handle to the
+    /// region's key arena. The registries are written as [`Default`] makes them before the region
+    /// is placed, and held to the session's limits after ([`Self::limit_to`]).
+    pub const fn places(at: usize, rows: usize) -> crate::bounded::RegionLines<REQUESTER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY.with(
+            &ReplyRegistry::<R, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, replies)),
+                rows.wrapping_add(core::mem::offset_of!(RequesterRegionRows<R, G>, replies)),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-get")]
+        let lines = lines.with(
+            &LivelinessGetRegistry::<G, crate::bounded::Region>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, liveliness_gets)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    RequesterRegionRows<R, G>,
+                    liveliness_gets
+                )),
+            ),
+            0,
+        );
+        lines
+    }
+}
+
+#[cfg(all(test, feature = "alloc"))]
+mod requester_region_tests {
+    use super::{RequesterRegionRows, Requesters, REQUESTER_LINES};
+    use crate::bounded::Region;
+    use crate::caps;
+    use crate::reply_sink::BoxedReplySink;
+
+    type RegionRequesters = Requesters<BoxedReplySink, BoxedReplySink, Region>;
+
+    /// The requesters' description names the pending queries' rows at the build's bound, the
+    /// snapshots' two tables where the build keeps them, and one handle to the key arena, each
+    /// row line inside the rows laid out for them. Turned red by a line of the wrong bound, a
+    /// missing table, or rows placed outside `RequesterRegionRows`.
+    #[test]
+    fn region_requesters_describe_each_registrys_rows_inside_their_rows() {
+        const AT: usize = 64;
+        const ROWS: usize = AT + core::mem::size_of::<RegionRequesters>();
+        let lines = RegionRequesters::places(AT, ROWS);
+        let seqs = lines.seq_lines();
+        let snapshots = cfg!(feature = "liveliness-get");
+        assert_eq!(seqs.len(), 1 + 2 * usize::from(snapshots));
+        assert!(seqs.len() <= REQUESTER_LINES);
+        assert_eq!(seqs[0].room as usize, caps::MAX_PENDING_QUERIES);
+        if snapshots {
+            assert_eq!(seqs[1].room as usize, caps::MAX_PENDING_LIVELINESS_GETS);
+            assert_eq!(seqs[2].room as usize, caps::MAX_PENDING_LIVELINESS_GETS);
+        }
+        assert_eq!(lines.key_lines().len(), 1);
+        let end =
+            ROWS + core::mem::size_of::<RequesterRegionRows<BoxedReplySink, BoxedReplySink>>();
+        for line in seqs {
+            assert!(
+                (AT..ROWS).contains(&line.seq),
+                "a table lies in the requesters"
+            );
+            assert!(
+                (ROWS..end).contains(&line.rows),
+                "its rows lie in their rows"
+            );
+        }
+    }
+}
+
 impl<R: ReplySink, G: ReplySink> Requesters<R, G, Lent> {
     /// No query pending, each registry's rows lent from `arena` as `rows` states, the keyexpr
     /// each query was asked under kept in `keys`, the session's key arena, and held to `limits`
@@ -1193,6 +1281,103 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
             #[cfg(feature = "liveliness-token")]
             ptr::write(addr_of_mut!((*at).local_tokens), LocalTokenRegistry::new());
         }
+    }
+}
+
+/// The rows of a [`SlotObserverOf`] of the region policy apart from its application tables', which
+/// a region lays out beside it: the declaration watchers' lists, at the build's bound, and
+/// `LOCAL_TOKENS` rows of the session's own tokens (none where the tables keep the tokens as rows).
+pub struct ObserverRegionRows<K: ObserverSinks, const LOCAL_TOKENS: usize> {
+    #[cfg(feature = "declare-subscriber")]
+    remote_subscribers: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "declare-queryable")]
+    remote_queryables: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "liveliness-token")]
+    liveliness: crate::decl_sink::DeclObserverRows<K::Declared, K::Undeclared>,
+    #[cfg(feature = "liveliness-token")]
+    local_tokens: crate::declare::local_token::LocalTokenRows<LOCAL_TOKENS>,
+    _sinks: core::marker::PhantomData<K>,
+}
+
+// SAFETY: every field is rows of `MaybeUninit` (`ZeroEmpty`), holding no value until placed.
+unsafe impl<K: ObserverSinks, const LOCAL_TOKENS: usize> crate::bounded::ZeroEmpty
+    for ObserverRegionRows<K, LOCAL_TOKENS>
+{
+}
+
+/// The lines a region's description holds for one [`SlotObserverOf`] of the region policy apart
+/// from its application tables', at most: three watcher pairs' and the session's own tokens'.
+pub const SLOT_OBSERVER_LINES: usize = 3 * crate::decl_sink::DECL_OBSERVER_LINES + 1;
+
+// SAFETY: of the region policy, at all zero bytes: the application tables are `ZeroEmpty` (the
+// bound), each watcher table and the registry of the session's own tokens is one of the region
+// policy (`ZeroEmpty`), and the matching sink's place holds no byte. A build with the switchboard
+// keeps a registry that is not empty at zero bytes, and has no observer of the region policy.
+#[cfg(not(feature = "switchboard"))]
+unsafe impl<K: ObserverSinks, M: MatchingReport> crate::bounded::ZeroEmpty
+    for SlotObserverOf<K, crate::bounded::Region, M>
+where
+    K::Tables<crate::bounded::Region>: crate::bounded::ZeroEmpty,
+{
+}
+
+impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, crate::bounded::Region, M> {
+    /// The description of an observer of the region policy at `at` in a region and its
+    /// [`ObserverRegionRows`] at `rows`, apart from its application tables, which the region
+    /// describes by their own type (`SessionTables::places` at the offset of [`Self::tables`]):
+    /// the lines of the watchers' lists and of the session's own tokens, and the tokens' handle to
+    /// the key arena, those the build keeps.
+    pub const fn places<const LOCAL_TOKENS: usize>(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<SLOT_OBSERVER_LINES> {
+        let lines = crate::bounded::RegionLines::EMPTY;
+        #[cfg(feature = "declare-subscriber")]
+        let lines = lines.with(
+            &RemoteSubscriberTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_subscribers)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    remote_subscribers
+                )),
+            ),
+            0,
+        );
+        #[cfg(feature = "declare-queryable")]
+        let lines = lines.with(
+            &RemoteQueryableTable::<K::Declared, K::Undeclared, crate::bounded::Region, M>::places(
+                at.wrapping_add(core::mem::offset_of!(Self, remote_queryables)),
+                rows.wrapping_add(core::mem::offset_of!(
+                    ObserverRegionRows<K, LOCAL_TOKENS>,
+                    remote_queryables
+                )),
+            ),
+            0,
+        );
+        #[cfg(feature = "liveliness-token")]
+        let lines = lines
+            .with(
+                &LivelinessRegistry::<K::Declared, K::Undeclared, crate::bounded::Region>::places(
+                    at.wrapping_add(core::mem::offset_of!(Self, liveliness)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        liveliness
+                    )),
+                ),
+                0,
+            )
+            .with(
+                &LocalTokenRegistry::<crate::bounded::Region>::places::<LOCAL_TOKENS>(
+                    at.wrapping_add(core::mem::offset_of!(Self, local_tokens)),
+                    rows.wrapping_add(core::mem::offset_of!(
+                        ObserverRegionRows<K, LOCAL_TOKENS>,
+                        local_tokens
+                    )),
+                ),
+                0,
+            );
+        let _ = (at, rows);
+        lines
     }
 }
 

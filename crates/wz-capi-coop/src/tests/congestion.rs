@@ -10,6 +10,7 @@
 //! faces the holder waits on and on no other, as each of zenoh's transports drops on its own
 //! queue: the session's other faces are still sent it.
 
+use core::ptr::NonNull;
 use std::sync::{Arc, Mutex};
 
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
@@ -73,7 +74,7 @@ impl LinkWaits for Answers {
 
 /// The rooms of a session over a stack whose waits are `answers`, four places lent from an arena
 /// the test leaks.
-fn rooms(answers: &Answers) -> LinkRooms<Answers> {
+fn rooms(answers: &Answers) -> Box<LinkRooms<Answers>> {
     const PLACES: usize = 4;
     let bytes =
         Arena::table_bytes::<Option<RoomPlace>>(PLACES).expect("places the address space holds");
@@ -84,7 +85,16 @@ fn rooms(answers: &Answers) -> LinkRooms<Answers> {
         .arena_mut()
         .lend(PLACES)
         .expect("the arena has the places");
-    LinkRooms::new(answers.clone(), places)
+    let mut place = Box::<LinkRooms<Answers>>::new_uninit();
+    // SAFETY: the box's place is valid for writes of the rooms, which stay there.
+    unsafe {
+        LinkRooms::init_at(
+            NonNull::from(&mut *place).cast::<LinkRooms<Answers>>(),
+            answers.clone(),
+            places,
+        );
+        place.assume_init()
+    }
 }
 
 /// The places of the faces `room` names congested, or `None` for another answer.

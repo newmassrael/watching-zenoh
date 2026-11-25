@@ -475,6 +475,10 @@ pub(crate) const fn held_places(handle: core::alloc::Layout) -> wz_capi_coop::ar
         }
         kinds = rest;
     }
+    #[cfg(feature = "connectivity")]
+    {
+        held = crate::session_ext::held_lodgings(held);
+    }
     held
 }
 
@@ -1244,6 +1248,8 @@ mod tests {
             .fold(HeldPlaces::handle(HANDLE), |held, (entity, layout)| {
                 held.with_entity(entity, layout)
             });
+        #[cfg(feature = "connectivity")]
+        let walked = crate::session_ext::held_lodgings(walked);
         assert_eq!(HELD, walked);
         assert_ne!(
             HELD,

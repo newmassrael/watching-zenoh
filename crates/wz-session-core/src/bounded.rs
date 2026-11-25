@@ -221,6 +221,131 @@ unsafe impl<T> ZeroEmpty for Option<NonNull<T>> {}
 // SAFETY: a `PhantomData` is no bytes.
 unsafe impl<T: ?Sized> ZeroEmpty for PhantomData<T> {}
 
+/// A value or none, whose all zero bytes are none whatever the value's type: a flag and a place
+/// for the value. An `Option<T>` is `None` at zero bytes only where `T` has a niche the language
+/// guarantees (a reference, `NonNull`, a `NonZero` integer), so a field of a region that may hold
+/// a counted handle, a transport or a generated value is one of these instead, and the region's
+/// zeroed block holds none of them.
+pub struct ZeroOption<T> {
+    held: bool,
+    value: core::mem::MaybeUninit<T>,
+}
+
+impl<T> ZeroOption<T> {
+    /// No value, as all zero bytes are.
+    pub const NONE: Self = Self {
+        held: false,
+        value: core::mem::MaybeUninit::uninit(),
+    };
+
+    /// `value`, held.
+    pub const fn some(value: T) -> Self {
+        Self {
+            held: true,
+            value: core::mem::MaybeUninit::new(value),
+        }
+    }
+
+    /// Whether a value is held.
+    pub const fn is_some(&self) -> bool {
+        self.held
+    }
+
+    /// Whether no value is held.
+    pub const fn is_none(&self) -> bool {
+        !self.held
+    }
+
+    /// The value held, by reference.
+    pub fn as_ref(&self) -> Option<&T> {
+        if self.held {
+            // SAFETY: `held` is set only once the value is written, and cleared before it is read
+            // out, so the value is initialised.
+            Some(unsafe { self.value.assume_init_ref() })
+        } else {
+            None
+        }
+    }
+
+    /// The value held, by unique reference.
+    pub fn as_mut(&mut self) -> Option<&mut T> {
+        if self.held {
+            // SAFETY: as `as_ref`; `&mut self` makes this the only borrow of the value.
+            Some(unsafe { self.value.assume_init_mut() })
+        } else {
+            None
+        }
+    }
+
+    /// What the value held points at.
+    pub fn as_deref(&self) -> Option<&T::Target>
+    where
+        T: Deref,
+    {
+        self.as_ref().map(Deref::deref)
+    }
+
+    /// The value held, taken out, leaving none.
+    pub fn take(&mut self) -> Option<T> {
+        if self.held {
+            self.held = false;
+            // SAFETY: the value is initialised (`held` was set), and `held` is cleared first, so
+            // the value is read out once and neither read nor dropped in place again.
+            Some(unsafe { self.value.assume_init_read() })
+        } else {
+            None
+        }
+    }
+
+    /// Hold `value`, answering the value held before.
+    pub fn replace(&mut self, value: T) -> Option<T> {
+        let before = self.take();
+        self.value.write(value);
+        self.held = true;
+        before
+    }
+
+    /// Hold `value`, or none; the value held before is dropped.
+    pub fn set(&mut self, value: Option<T>) {
+        let before = match value {
+            Some(value) => self.replace(value),
+            None => self.take(),
+        };
+        drop(before);
+    }
+}
+
+impl<T> Drop for ZeroOption<T> {
+    fn drop(&mut self) {
+        drop(self.take());
+    }
+}
+
+impl<T> Default for ZeroOption<T> {
+    fn default() -> Self {
+        Self::NONE
+    }
+}
+
+impl<T> From<Option<T>> for ZeroOption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => Self::some(value),
+            None => Self::NONE,
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for ZeroOption<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.as_ref().fmt(f)
+    }
+}
+
+// SAFETY: `false` is a valid `bool` and says no value is held; a `MaybeUninit` is valid as any
+// bytes; and dropping a value that holds none drops nothing.
+unsafe impl<T> ZeroEmpty for ZeroOption<T> {}
+
 /// A policy each of whose sequences and texts is [`ZeroEmpty`] whatever it holds: a table of it is
 /// empty at all zero bytes for every row type, which a bound on each sequence could state only by
 /// naming the row's type, a private one of the table's own.
@@ -888,6 +1013,23 @@ impl<T, const N: usize> BoundedVec<T, N, Lent> {
         Self { inner }
     }
 
+    /// The table over the `M` rows at `places`, rows a region the build lays out keeps beside
+    /// the table instead of an arena's span: `room` of them, at most the rows there, the build's
+    /// ceiling `N` and what a lent table counts.
+    ///
+    /// # Safety
+    /// `places` is aligned and valid for reads and writes, holds no value, and is reached by
+    /// nothing but the table for as long as it lives.
+    pub unsafe fn placed_over<const M: usize>(
+        places: NonNull<[core::mem::MaybeUninit<T>; M]>,
+        room: usize,
+    ) -> Self {
+        let room = room.min(M).min(N).min(u32::MAX as usize) as u32;
+        // SAFETY: the caller's contract, for no more rows than lie at `places`: an array of
+        // `MaybeUninit<T>` is laid out as as many rows of `T`.
+        unsafe { Self::lent_over(places.cast::<T>(), room) }
+    }
+
     /// The next row, for `write` to build a value in where the table keeps it, counted as held
     /// once `write` returns, and the value built; `None`, `write` not called, when the table holds
     /// every row it was lent. For a value too large to be one of its own in a frame, which
@@ -1311,6 +1453,30 @@ unsafe fn drop_row<T>(row: *mut u8) {
 // SAFETY: `LentSeq` is `repr(C)` of an `Option<NonNull<T>>`, whose null is `None`, two `u32`s and a
 // `PhantomData`: all zero bytes are a table lent no rows and holding no value, which drops nothing.
 unsafe impl<T> ZeroEmpty for LentSeq<T> {}
+
+impl<T, const N: usize> BoundedVec<T, N, Region> {
+    /// Count the first `len` rows of a table a region placed as holding values: rows its owner
+    /// wrote where they lie before the table was placed over them, so a value too large for a frame
+    /// is never one (a region's sets of face tables, each written field by field in its row). A
+    /// count past the rows placed is held to them.
+    ///
+    /// # Safety
+    /// The table holds no value yet, and each of its first `len` rows (at most the rows placed)
+    /// holds a value of `T` that nothing else owns or drops.
+    pub unsafe fn assume_held(&mut self, len: usize) {
+        debug_assert_eq!(
+            self.inner.len, 0,
+            "a table counts rows it was placed over once"
+        );
+        let held = if len < self.inner.room() {
+            len
+        } else {
+            self.inner.room()
+        };
+        // At most the room, which is a `u32`.
+        self.inner.len = held as u32;
+    }
+}
 
 /// Where a region the build lays out keeps the rows of one table of the [`Lent`] shape: a line of
 /// the region's own description, which [`place_seqs`] reads. Offsets are bytes from the region's
@@ -2936,6 +3102,29 @@ mod tests {
         assert_eq!(table.push(1).map_err(|full| full.0), Err(1));
     }
 
+    /// A table placed over a region's rows takes the rows asked, at most the rows there and the
+    /// build's ceiling, and keeps its values in them. Turned red by a table that takes more rows
+    /// than lie there or than its ceiling, or that keeps its rows anywhere else.
+    #[test]
+    fn a_table_placed_over_rows_takes_them_at_most() {
+        let mut places = [core::mem::MaybeUninit::<u32>::uninit(); 3];
+        let at = NonNull::from(&mut places);
+        // SAFETY: the rows are this frame's, hold no value and are reached by this table alone,
+        // which is dropped before the next one is placed over them.
+        let mut table = unsafe { BoundedVec::<u32, { usize::MAX }, Lent>::placed_over(at, 5) };
+        assert_eq!(table.free_slots(), 3, "held to the rows there");
+        assert!(table.push(7).is_ok());
+        assert_eq!(table.as_ptr(), at.cast::<u32>().as_ptr().cast_const());
+        drop(table);
+        // SAFETY: as above; the table before is gone.
+        let ceiling = unsafe { BoundedVec::<u32, 2, Lent>::placed_over(at, 3) };
+        assert_eq!(ceiling.free_slots(), 2, "held to the build's ceiling");
+        drop(ceiling);
+        // SAFETY: as above.
+        let fewer = unsafe { BoundedVec::<u32, 8, Lent>::placed_over(at, 1) };
+        assert_eq!(fewer.free_slots(), 1, "CONTROL: the rows asked, under both");
+    }
+
     /// A lent table is a pointer and two 32-bit counts, whatever its rows: a set of a session's
     /// tables holds many. A table of more rows than a 32-bit count names is refused at the lend,
     /// taking nothing, by that count; the CONTROL is the table of as many rows as it names.
@@ -3232,6 +3421,47 @@ mod tests {
         assert_eq!(zeroed::<Cell<u32>>().get(), 0);
     }
 
+    /// A `ZeroOption` of all zero bytes holds nothing; one that holds a value lends it, gives it
+    /// up once to `take`, answers the value it held to `replace` and `set`, and drops what it holds
+    /// exactly once. Turned red by a `held` flag whose zero meant a value, or by a value dropped
+    /// twice or not at all.
+    #[test]
+    fn a_zero_option_of_zero_bytes_holds_nothing_and_drops_what_it_holds_once() {
+        let none = zeroed::<ZeroOption<std::rc::Rc<u32>>>();
+        assert!(none.is_none());
+        assert!(none.as_ref().is_none());
+        drop(none);
+
+        let counted = std::rc::Rc::new(7u32);
+        let mut place = ZeroOption::some(std::rc::Rc::clone(&counted));
+        assert!(place.is_some());
+        assert_eq!(place.as_deref(), Some(&7));
+        assert_eq!(std::rc::Rc::strong_count(&counted), 2);
+        let taken = place.take().expect("the value held");
+        assert!(place.is_none());
+        assert!(place.take().is_none(), "a value is given up once");
+        assert!(place.replace(taken).is_none());
+        let before = place.replace(std::rc::Rc::new(8));
+        assert_eq!(before.as_deref(), Some(&7));
+        drop(before);
+        assert_eq!(std::rc::Rc::strong_count(&counted), 1);
+        place.set(Some(std::rc::Rc::clone(&counted)));
+        assert_eq!(std::rc::Rc::strong_count(&counted), 2);
+        if let Some(value) = place.as_mut() {
+            *value = std::rc::Rc::new(9);
+        }
+        assert_eq!(std::rc::Rc::strong_count(&counted), 1);
+        place.set(Some(std::rc::Rc::clone(&counted)));
+        drop(place);
+        assert_eq!(
+            std::rc::Rc::strong_count(&counted),
+            1,
+            "the value held is dropped with its place"
+        );
+        assert!(ZeroOption::from(None::<u8>).is_none());
+        assert_eq!(ZeroOption::from(Some(3u8)).as_ref(), Some(&3));
+    }
+
     /// A region of two tables of the lent shape and one of the static policy, with the rows of
     /// the first two beside them, as a session's region lays its layers' out.
     #[repr(C)]
@@ -3310,5 +3540,64 @@ mod tests {
         assert_eq!(room.buffer(&mut ()).as_str(), "");
         assert!(room.buffer(&mut ()).push_str("demo/key").is_ok());
         assert_eq!(room.buffer(&mut ()).as_str(), "demo/key");
+    }
+}
+
+#[cfg(test)]
+mod region_held_tests {
+    use super::{place_seqs, BoundedVec, Region, SeqPlace};
+    use core::mem::{offset_of, MaybeUninit};
+    use core::ptr::NonNull;
+
+    #[repr(C)]
+    struct OneTable {
+        table: BoundedVec<u32, 4, Region>,
+        rows: [MaybeUninit<u32>; 3],
+    }
+
+    /// Rows written before their table was placed over them are the table's values once counted,
+    /// and a count past the rows placed is held to them; the table then refuses past its room.
+    /// Turned red by `assume_held` counting past the room, or by a placed table that counts no row.
+    #[test]
+    fn a_region_table_counts_the_rows_written_before_it_was_placed() {
+        let mut one = OneTable {
+            table: BoundedVec::default(),
+            rows: [MaybeUninit::uninit(); 3],
+        };
+        one.rows[0].write(7);
+        one.rows[1].write(9);
+        let base = NonNull::from(&mut one).cast::<u8>();
+        let line = SeqPlace::of::<u32>(offset_of!(OneTable, table), offset_of!(OneTable, rows), 3);
+        // SAFETY: the line names the table and its three rows in `one`, aligned, which only the
+        // table reaches from here.
+        unsafe { place_seqs(base, &[line]) };
+        assert_eq!(
+            one.table.len(),
+            0,
+            "a placed table holds nothing until counted"
+        );
+        // SAFETY: the first two rows hold values nothing else owns.
+        unsafe { one.table.assume_held(2) };
+        assert!(one.table.iter().copied().eq([7, 9]));
+        assert!(one.table.push(11).is_ok());
+        assert!(one.table.push(13).is_err(), "three rows were placed");
+        let mut other = OneTable {
+            table: BoundedVec::default(),
+            rows: [
+                MaybeUninit::new(1),
+                MaybeUninit::new(2),
+                MaybeUninit::new(3),
+            ],
+        };
+        let base = NonNull::from(&mut other).cast::<u8>();
+        // SAFETY: as above.
+        unsafe { place_seqs(base, &[line]) };
+        // SAFETY: every row placed holds a value.
+        unsafe { other.table.assume_held(8) };
+        assert_eq!(
+            other.table.len(),
+            3,
+            "a count past the rows is held to them"
+        );
     }
 }

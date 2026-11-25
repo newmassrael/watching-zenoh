@@ -33,7 +33,7 @@ use alloc::sync::Arc;
 use core::any::Any;
 use core::num::NonZeroU32;
 use core::ops::{Deref, DerefMut};
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 // A 64-bit atomic where the target has one, and a critical section where it does not (a
 // Cortex-M7 has 32-bit atomics only).
@@ -56,20 +56,25 @@ use crate::arena::{
 use crate::form::{
     LinkCount, LockForm, SessionLock, SharedCount, StateGuard, StateLock, UnderCoreLock,
 };
+use crate::lodging::LodgingPlaces;
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 use crate::round::LendingLink;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
-use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
+#[cfg(feature = "runtime-plan")]
+use crate::round::RoundRows;
+use crate::round::{CoopForm, Latch, Round, RoundCounts};
 use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
-use wz_session_core::bounded::{Arena, KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::bounded::Arena;
+use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(feature = "liveliness")]
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 use wz_session_core::placed::{Placed, PlacedRef};
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::row_callback::{RowCallback, ThreadForm};
 #[cfg(feature = "local-queryable")]
@@ -81,6 +86,7 @@ use wz_session_core::session_tables::{
     SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -143,7 +149,7 @@ use wz_session_core::driver_loop::{EventSink, IterationEvent};
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::interest_build::InterestKinds;
 use wz_session_core::lent_push;
-use wz_session_core::limits::{MaxKeyexprBytesHeld, SessionLimits};
+use wz_session_core::limits::SessionLimits;
 #[cfg(feature = "listen")]
 use wz_session_core::link_admission::{LinkAdmission, LinkBook, LinkRegistry};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -236,12 +242,35 @@ mod pinned;
 mod replies;
 
 mod registry;
+#[cfg(not(feature = "runtime-plan"))]
+use crate::region::{RegionBlock, RegionField, StateRegion};
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
+// The values the state owns and its tasks reach by handles, as fields of the region.
+#[cfg(not(feature = "runtime-plan"))]
+mod state_places;
+#[cfg(feature = "runtime-plan")]
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
 pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    not(feature = "runtime-plan")
+))]
+use state_places::PlacedTables;
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) use state_places::StatePlaces;
+
+/// How the session's state holds its registry: by value where the open lent its tables from the
+/// arena, and by the handle of the field of the session's region where the build laid it out
+/// (`crate::region`), which drops it in place.
+#[cfg(feature = "runtime-plan")]
+type RegistryHold = Registry;
+#[cfg(not(feature = "runtime-plan"))]
+type RegistryHold = RegionField<Registry>;
 
 mod replay;
 use replay::{Replay, TurnEnd};
@@ -695,6 +724,7 @@ struct LentApart {
     /// The place the engine is written at.
     engine: EnginePlace,
     handle_place: Option<HandlePlace>,
+    lodgings: LodgingPlaces,
     #[cfg(any(feature = "listen", feature = "group"))]
     handed: HandedTable,
     #[cfg(feature = "advanced-cache")]
@@ -709,7 +739,7 @@ struct SessionLent {
     transport: TransportTables,
     router: SessionReassembly,
     keys: KeySpace,
-    registry: Registry,
+    registry: RegistryHold,
     /// After the registry, whose dispatch reaches it by a handle that counts nothing.
     #[cfg(feature = "queryable")]
     plane: Placed<QueryPlane>,
@@ -722,6 +752,8 @@ struct SessionLent {
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     handle_place: Option<HandlePlace>,
     places: EntityPlaces,
+    /// The places for values lodged by counts, each of which keeps the arena's memory while lent.
+    lodgings: LodgingPlaces,
     /// The links the plan holds buffers for: the rows of the session's link admission.
     #[cfg(feature = "listen")]
     links: usize,
@@ -731,7 +763,7 @@ struct SessionLent {
     /// The ring the advanced publishers' caches keep their samples in, none for a plan of none.
     #[cfg(feature = "advanced-cache")]
     cache: Option<CacheSpan>,
-    /// The places of the faces' rooms, a row for each set of face tables (`LinkRooms::new`).
+    /// The places of the faces' rooms, a row for each set of face tables (`LinkRooms::init_at`).
     room_places: RoomPlaces,
     /// The places the session lends its registry and its Router in for a step, in the arena.
     steps: StepPlaces,
@@ -742,25 +774,30 @@ struct SessionLent {
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
     engine: EnginePlace,
+    /// The region the session's registry and its key arena lie in: after the registry's handle,
+    /// which drops the registry in place, and every table that keeps a key there.
+    #[cfg(not(feature = "runtime-plan"))]
+    state: RegionBlock<StateRegion>,
     arena: SessionArena,
 }
 
 /// The plain tables of a session's state, lent by an open's one lender
-/// (`SessionRows::lent_from`): the key arena, and the ends of its legs, their callbacks and the
-/// session's note of each leg pending.
+/// (`SessionRows::lent_from`): the ends of its legs, their callbacks and the session's note of
+/// each leg pending, and the Finals its queryables hold, where the arena lends them
+/// (`runtime-plan`; a region holds them otherwise, `StatePlaces::tables`), and the ring of the
+/// advanced publishers' caches.
 struct StateTables {
-    keys: LentKeys,
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     legs: Rows<Ended, { usize::MAX }>,
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
     /// for each query held at once (`query::FinalHolds`).
-    #[cfg(feature = "queryable")]
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     held_finals: query::HeldFinals,
-    #[cfg(feature = "queryable")]
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     refused_finals: query::RefusedFinals,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
@@ -769,20 +806,29 @@ struct StateTables {
 impl SessionRows {
     /// The session's plain tables, lent by `lend` in the order the plan laid them out, each key
     /// at most `longest` bytes. A count past the address space is a table the lender refuses.
-    fn lent_from(&self, lend: &mut TableLender<'_>, longest: MaxKeyexprBytesHeld) -> StateTables {
-        #[cfg(feature = "query")]
+    fn lent_from(&self, lend: &mut TableLender<'_>) -> StateTables {
+        // A build that asks and answers no query from the arena and caches no sample lends the
+        // state no plain table: its lender is asked nothing.
+        #[cfg(not(any(
+            all(
+                any(feature = "query", feature = "queryable"),
+                feature = "runtime-plan"
+            ),
+            feature = "advanced-cache"
+        )))]
+        let _ = lend;
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
-            keys: lend.keys(self.key_bytes(), longest),
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "query", feature = "runtime-plan"))]
             legs: lend.table(legs),
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "query", feature = "runtime-plan"))]
             leg_rows: lend.table(legs),
-            #[cfg(feature = "query")]
+            #[cfg(all(feature = "query", feature = "runtime-plan"))]
             pending_gets: lend.table(legs),
-            #[cfg(feature = "queryable")]
+            #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
             held_finals: lend.table(self.held_queries()),
-            #[cfg(feature = "queryable")]
+            #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
             refused_finals: lend.table(self.held_queries()),
             #[cfg(feature = "advanced-cache")]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
@@ -814,35 +860,93 @@ fn lend_session(
         PlanFrom::Config => plan.count(config, resolve_limits(config))?,
     }
     lay_out_open(&mut plan, holds)?;
+    #[cfg(feature = "runtime-plan")]
     let mut arena = SessionArena::reserve(&plan, memory)?;
+    // The registry and the key arena lie in the region the build lays out, the head of the one
+    // block the open reserves, zeroed, the arena of what it sizes at run time after it: the
+    // session's tables are the region's fields, placed over their rows by one walk.
+    #[cfg(not(feature = "runtime-plan"))]
+    let (mut arena, state) = SessionArena::reserve_after::<StateRegion>(&plan, memory)?;
+    // SAFETY: the head is a zeroed `StateRegion` this open alone reaches; the arena gives the
+    // block back only after its last holder, and the region's block is dropped before the arena
+    // wherever both are held (here, being made after it, then `SessionLent` and `Core`, whose
+    // arena is their last field).
+    #[cfg(not(feature = "runtime-plan"))]
+    let state = unsafe { RegionBlock::<StateRegion>::within(state) };
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
     // open moves into what it makes one by one, are taken apart at once instead: a table held as
     // a field of a set partly moved out would need its own drop on each refusal below.
     let transport = plan.transport().lent_from(&mut lend);
+    // The key arena is the arena's where the open lends the registry from it, and the region's
+    // otherwise, beside the registry whose tables keep their keys there.
+    #[cfg(feature = "runtime-plan")]
+    let keys = lend.keys(
+        plan.session().key_bytes(),
+        config.limits.max_keyexpr_bytes_held(),
+    );
     let StateTables {
-        keys,
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        legs,
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        leg_rows,
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        pending_gets,
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        held_finals,
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        refused_finals,
+        #[cfg(feature = "advanced-cache")]
+        cache,
+    } = plan.session().lent_from(&mut lend);
+    let PlaceTables {
+        handle,
+        entities: places,
+        lodgings,
+    } = plan.places().lent_from(&mut lend, plan.entities());
+    #[cfg(feature = "runtime-plan")]
+    let room_places: RoomPlaces = lend.table(plan.peers().sets());
+    #[cfg(feature = "runtime-plan")]
+    let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    #[cfg(not(feature = "runtime-plan"))]
+    lend.finish().map_err(ArenaRefused::Lend)?;
+    // SAFETY: the block is a zeroed `StateRegion` this open alone reaches; it neither moves nor goes
+    // back before the registry's handle and every key of it are let go of, being held after them
+    // by what this hands back and then by the session's state.
+    #[cfg(not(feature = "runtime-plan"))]
+    let keys = unsafe { StateRegion::place(state.as_ptr(), resolve_limits(config)) };
+    // The plane, the round, the step places, the queryables' plane and the plain tables' rows lie
+    // in the region where the build fixes the session's shape, each in a field of it no other
+    // owner reaches.
+    // SAFETY: the region was placed above, and nothing reaches its places' fields but this open,
+    // which writes each once; the block is held after every owner written in it (`SessionLent`,
+    // then `Core`), and neither moves nor goes back before them.
+    #[cfg(not(feature = "runtime-plan"))]
+    let region_places = unsafe { StateRegion::places_at(state.as_ptr()) };
+    // SAFETY: as above, for the plain tables' fields: each table is held by the plane or the
+    // state it is moved into, both dropped before the block.
+    #[cfg(all(
+        any(feature = "query", feature = "queryable"),
+        not(feature = "runtime-plan")
+    ))]
+    let PlacedTables {
         #[cfg(feature = "query")]
         legs,
         #[cfg(feature = "query")]
         leg_rows,
         #[cfg(feature = "query")]
         pending_gets,
+        #[cfg(feature = "query")]
+        held_replies,
         #[cfg(feature = "queryable")]
         held_finals,
         #[cfg(feature = "queryable")]
         refused_finals,
-        #[cfg(feature = "advanced-cache")]
-        cache,
-    } = plan
-        .session()
-        .lent_from(&mut lend, config.limits.max_keyexpr_bytes_held());
-    let PlaceTables {
-        handle,
-        entities: places,
-    } = plan.places().lent_from(&mut lend, plan.entities());
-    let room_places: RoomPlaces = lend.table(plan.peers().sets());
-    let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
+    } = unsafe { StatePlaces::tables(region_places, plan.session()) };
+    // SAFETY: as above, for the rooms' places: the table is held by the rooms, which the session's
+    // state drops before the block.
+    #[cfg(not(feature = "runtime-plan"))]
+    let room_places = unsafe { StatePlaces::rooms(region_places, plan.peers().sets()) };
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
@@ -855,27 +959,37 @@ fn lend_session(
         policy,
         SessionChains::over(&transport.reassembly, LENT_CHAINS),
     );
+    #[cfg(feature = "runtime-plan")]
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
     // The rows the gets that consolidate hold their replies in, lent beside the round's.
-    #[cfg(feature = "query")]
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
         .map_err(ArenaRefused::Lend)?;
     // What the gets share: placed here, so the round is told whose legs' callbacks its replies'
     // records hold counts of before it is shared.
     #[cfg(feature = "query")]
-    let gets = arena
-        .arena_mut()
-        .place(GetPlane::new(
-            EndedLegs::over(legs),
-            held_replies,
-            LegRows::over(leg_rows),
-        ))
-        .map_err(ArenaRefused::Lend)?;
-    // The round lies in the arena beside its tables, owned by the session's state and reached by
-    // handles that count nothing.
+    let (ended, legs) = (EndedLegs::over(legs), LegRows::over(leg_rows));
+    // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where it
+    // stays.
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    let gets = unsafe {
+        arena.arena_mut().place_with(|at| {
+            GetPlane::init_at(NonNull::new_unchecked(at), ended, held_replies, legs)
+        })
+    }
+    .map_err(ArenaRefused::Lend)?;
+    // SAFETY: as for the region's places above, for the gets' field.
+    #[cfg(all(feature = "query", not(feature = "runtime-plan")))]
+    let gets = unsafe { StatePlaces::gets(region_places, ended, held_replies, legs) };
+    // The round lies beside its tables, owned by the session's state and reached by handles that
+    // count nothing.
+    #[cfg(feature = "runtime-plan")]
     let mut samples =
         Round::placed_over(arena.arena_mut(), round_rows).map_err(ArenaRefused::Lend)?;
+    // SAFETY: as above, for the round's field and the field of its tables' rows.
+    #[cfg(not(feature = "runtime-plan"))]
+    let mut samples = unsafe { StatePlaces::round(region_places, plan.round()) };
     // No handle of the round is taken yet: it reads the keys a peer's aliases keep in the
     // session's key arena where they lie.
     let round = samples.get_mut();
@@ -888,17 +1002,26 @@ fn lend_session(
         // then the plane is held where it was placed, by this value and then by the state.
         unsafe { round.calls_legs_of(legs) };
     }
+    #[cfg(feature = "runtime-plan")]
     let steps = StepPlaces::placed_in(arena.arena_mut()).map_err(ArenaRefused::Lend)?;
+    // SAFETY: as above, for the step places' fields.
+    #[cfg(not(feature = "runtime-plan"))]
+    let steps = unsafe { StatePlaces::steps(region_places) };
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
-    let plane = arena
-        .arena_mut()
-        .place(QueryPlane::over(query::FinalHolds::over(
-            held_finals,
-            refused_finals,
-        )))
-        .map_err(ArenaRefused::Lend)?;
+    let final_holds = query::FinalHolds::over(held_finals, refused_finals);
+    // SAFETY: as for the gets' plane above.
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+    let plane = unsafe {
+        arena
+            .arena_mut()
+            .place_with(|at| QueryPlane::init_at(NonNull::new_unchecked(at), final_holds))
+    }
+    .map_err(ArenaRefused::Lend)?;
+    // SAFETY: as above, for the queryables' field.
+    #[cfg(all(feature = "queryable", not(feature = "runtime-plan")))]
+    let plane = unsafe { StatePlaces::queries(region_places, final_holds) };
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
     // owner changes the round no more.
@@ -912,6 +1035,7 @@ fn lend_session(
     let delivery = RoundDelivery::new(lane);
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
+    #[cfg(feature = "runtime-plan")]
     let registry = Registry::new(
         resolve_limits(config),
         arena.arena_mut(),
@@ -927,12 +1051,30 @@ fn lend_session(
         delivery,
     )
     .map_err(ArenaRefused::Lend)?;
+    // The application's tables are the region's, placed above; the session's one table set holds
+    // its tokens as rows, so the observer's own registry of them has none (`RegistryRegion`).
+    // SAFETY: the region was written and placed by `StateRegion::place` above and nothing reaches
+    // its registry yet; the block is held after the handle (`SessionLent`, then `Core`).
+    #[cfg(not(feature = "runtime-plan"))]
+    let registry = unsafe {
+        RegistryRegion::bind(
+            StateRegion::registry_at(state.as_ptr()),
+            resolve_limits(config),
+            &plan.tables(),
+            delivery,
+        )
+    }
+    .map_err(ArenaRefused::Lend)?;
     let runtime = arena
         .runtime_place(holds.runtime)
         .map_err(ArenaRefused::Lend)?;
     let engine = arena
         .engine_place(holds.engine)
         .map_err(ArenaRefused::Lend)?;
+    // SAFETY: the span was lent above to the lodging places alone, and `engine.memory` is the count
+    // of the memory it lies in, held by the session's engine for as long as the engine lends from
+    // the places.
+    let lodgings = unsafe { lodgings.kept_by(engine.memory) };
     Ok(SessionLent {
         runtime,
         engine,
@@ -951,12 +1093,15 @@ fn lend_session(
         pending_gets,
         handle_place,
         places,
+        lodgings,
         #[cfg(feature = "listen")]
         links: plan.links(),
         #[cfg(feature = "listen")]
         tx_pool_short: plan.tx_pool_short(),
         #[cfg(feature = "advanced-cache")]
         cache,
+        #[cfg(not(feature = "runtime-plan"))]
+        state,
         arena,
     })
 }
@@ -1157,6 +1302,9 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// The place the arena lent the ABI's handle of the session, when the open was asked for one
     /// ([`CoopDrive::handle_place`]).
     handle_place: Option<HandlePlace>,
+    /// The places for values lodged by counts that may outlive the session, the ABI's
+    /// ([`PlaceLender::lend_lodging`]) and the engine's own, lent and given back with no lock.
+    lodgings: LodgingPlaces,
     /// The ring the session's advanced publishers' caches keep their samples in, under a lock of
     /// its own, which nothing that holds the session's lock takes ([`wz_capi_port::CacheBytes`]).
     #[cfg(feature = "advanced-cache")]
@@ -1310,10 +1458,20 @@ struct Confined<T>(T);
 struct CoreLock<L: CoopLinks + 'static, C: ClockSource + 'static>(StateLock<Confined<Core<L, C>>>);
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
-    /// `core` behind the lock, its key arena guarded by it from now on.
-    fn new(core: Core<L, C>) -> Self {
+    /// `core` behind the lock, made in `at` with the state written in the lock's own place, its
+    /// key arena guarded by it from now on.
+    ///
+    /// # Safety
+    /// As for [`LockForm::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>, core: Core<L, C>) {
         core.session.keys.guard_by_owner_lock();
-        Self(<CoopForm as LockForm>::new(Confined(core)))
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            <CoopForm as LockForm>::init_at(
+                NonNull::new_unchecked(core::ptr::addr_of_mut!((*at.as_ptr()).0)),
+                |state| state.write(Confined(core)),
+            );
+        }
     }
 
     fn lock(&self) -> CoreGuard<'_, L, C> {
@@ -1401,14 +1559,17 @@ struct RoomTable {
 }
 
 /// The places of the table of rooms, one for each set of face tables the open lent
-/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena with them.
+/// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena or laid in its region
+/// (`StatePlaces::rooms`), so of the lent policy whichever policy the registry's rows are of.
 pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
     Option<RoomPlace>,
     { crate::arena::MAX_FACE_SETS },
-    RowPolicy,
+    wz_session_core::bounded::Lent,
 >;
 
-/// The bytes of one place of the table of rooms, as the plan lays the places out.
+/// The bytes of one place of the table of rooms, as the plan lays the places out where the arena
+/// lends them.
+#[cfg(feature = "runtime-plan")]
 pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
 
 /// The bytes of the rooms of a session over `links`, which the open places in the session's
@@ -1510,12 +1671,22 @@ impl Drop for SendingOn<'_> {
 
 impl<W: LinkWaits> LinkRooms<W> {
     /// The rooms of a session over a stack whose waits are `waits`, a place for each row of
-    /// `places`, each free: none grows after.
-    pub(crate) fn new(waits: W, mut places: RoomPlaces) -> Self {
+    /// `places`, each free, made in `at` with their lock: none grows after.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The rooms are not moved from `at` until they are dropped there.
+    pub(crate) unsafe fn init_at(at: NonNull<Self>, waits: W, mut places: RoomPlaces) {
         while places.push(None).is_ok() {}
-        Self {
-            waits,
-            rooms: Mutex::new(RoomTable { places, mark: 0 }),
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).waits).write(waits);
+            os::mutex_in(
+                NonNull::new_unchecked(core::ptr::addr_of_mut!((*at).rooms)),
+                |rooms| rooms.write(RoomTable { places, mark: 0 }),
+            );
         }
     }
 
@@ -1847,15 +2018,20 @@ type RegistryLend = StepLend<Registry, PlacedRef<LendCell<Registry>>>;
 type RouterPlace = PlacedRef<LendCell<SessionReassembly>>;
 
 /// The bytes of the place the session lends its registry in ([`RegistryLend`]).
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(all(
+    feature = "runtime-plan",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 pub(crate) const REGISTRY_LEND_BYTES: usize = core::mem::size_of::<LendCell<Registry>>();
 
 /// The bytes of the place the session lends its reassembly Router in ([`RouterPlace`]).
+#[cfg(feature = "runtime-plan")]
 pub(crate) const ROUTER_LEND_BYTES: usize = core::mem::size_of::<LendCell<SessionReassembly>>();
 
 /// The places the session lends its registry and its reassembly Router in for a pass of its
-/// tasks, each in the session's arena and reached through handles that count nothing: owned by
-/// [`Core`], after every holder of a handle of them.
+/// tasks, each in the session's arena, or in its region where the build fixes its shape
+/// (`StatePlaces::steps`), and reached through handles that count nothing: owned by [`Core`],
+/// after every holder of a handle of them.
 struct StepPlaces {
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     registry: Placed<LendCell<Registry>>,
@@ -1864,6 +2040,7 @@ struct StepPlaces {
 
 impl StepPlaces {
     /// Both places, nothing lent in either, placed in `arena`. Refused past what it has left.
+    #[cfg(feature = "runtime-plan")]
     fn placed_in(arena: &mut Arena) -> Result<Self, LendRefused> {
         Ok(Self {
             #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -1943,7 +2120,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> 
 /// many as the limit the open resolved, `N` the build's ceiling. A declaration that finds it full
 /// is refused before anything is taken, registered or sent.
 #[cfg(feature = "query")]
-type Rows<T, const N: usize> = wz_session_core::bounded::BoundedVec<T, N, RowPolicy>;
+type Rows<T, const N: usize> =
+    wz_session_core::bounded::BoundedVec<T, N, wz_session_core::bounded::Lent>;
 
 /// What a move of the links left settled ([`Core::move_links`]): every face up or waiting for a
 /// time, no port to ask and no group. The links are moved again once a face's link ended, a face
@@ -2049,6 +2227,12 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// drop alone.
     #[cfg(feature = "listen")]
     _admission: Placed<Admission<C>>,
+    /// The region the session's registry and its key arena lie in (`crate::region`): after the
+    /// session's state, whose handle of the registry drops it in place, and every table that keeps
+    /// a key in it. Held for its owner's drop alone: the session reaches the region through those
+    /// handles.
+    #[cfg(not(feature = "runtime-plan"))]
+    _state: RegionBlock<StateRegion>,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
     arena: SessionArena,
@@ -2062,7 +2246,7 @@ type SessionState = wz_session_core::session_state::SessionState<CoopSession>;
 enum CoopSession {}
 
 impl SessionParts for CoopSession {
-    type Registry = Registry;
+    type Registry = RegistryHold;
     type Faces = Registry;
     type Callbacks = CoopRows;
     type Storage = RowPolicy;
@@ -2098,19 +2282,19 @@ impl SessionParts for CoopSession {
     #[cfg(not(feature = "local-queryable"))]
     type LocalRequests = ();
 
-    fn tables(registry: &Registry) -> &CoopTables {
+    fn tables(registry: &RegistryHold) -> &CoopTables {
         tables(registry)
     }
 
-    fn tables_mut(registry: &mut Registry) -> &mut CoopTables {
+    fn tables_mut(registry: &mut RegistryHold) -> &mut CoopTables {
         tables_mut(registry)
     }
 
-    fn faces(registry: &Registry) -> &Registry {
+    fn faces(registry: &RegistryHold) -> &Registry {
         registry
     }
 
-    fn faces_mut(registry: &mut Registry) -> &mut Registry {
+    fn faces_mut(registry: &mut RegistryHold) -> &mut Registry {
         registry
     }
 }
@@ -2824,12 +3008,46 @@ pub(crate) enum CoopLocks {}
 impl wz_session_core::plane_lock::LockFamily for CoopLocks {
     type Lock<T> = Mutex<T>;
 
-    fn new<T>(value: T) -> Mutex<T> {
-        Mutex::new(value)
+    unsafe fn init_at<T>(
+        place: NonNull<Mutex<T>>,
+        make: impl FnOnce(&mut core::mem::MaybeUninit<T>) -> &mut T,
+    ) {
+        // SAFETY: the caller's contract is `mutex_in`'s.
+        unsafe { os::mutex_in(place, make) }
     }
 
     fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
         f(&mut lock.lock())
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod plane_lock_tests {
+    use super::{CoopLocks, Mutex};
+    use core::mem::MaybeUninit;
+    use core::ptr::NonNull;
+    use wz_session_core::plane_lock::LockFamily;
+
+    /// A plane's lock made in a place holds there the value its maker wrote, and is dropped there
+    /// once. Where the host's lock takes the value is the host lock's own (`wz-host-sync`: in place
+    /// where `std`'s would box, moved once into `std`'s otherwise). Turned red by a family that
+    /// writes the lock anywhere but the place it is handed, or loses the value made.
+    #[test]
+    fn a_planes_lock_made_in_a_place_holds_what_its_maker_wrote() {
+        let mut place = MaybeUninit::<Mutex<[u8; 64]>>::uninit();
+        // SAFETY: the place is valid for writes of a lock of `[u8; 64]`, the type written, and
+        // the lock is dropped there below.
+        unsafe {
+            CoopLocks::init_at(
+                NonNull::from(&mut place).cast::<Mutex<[u8; 64]>>(),
+                |value: &mut MaybeUninit<[u8; 64]>| value.write([7; 64]),
+            );
+        }
+        // SAFETY: the lock was made in the place above.
+        let lock = unsafe { place.assume_init_ref() };
+        assert_eq!(CoopLocks::with(lock, |value| (value[0], value[63])), (7, 7));
+        // SAFETY: the lock was made in the place and is dropped once, there.
+        unsafe { place.assume_init_drop() };
     }
 }
 
@@ -3141,25 +3359,25 @@ fn as_link_admission<C: ClockSource + 'static>(
 /// reach by handles that count nothing, each where its feature is ([`ArenaPlan::lay_planes`]).
 #[derive(Clone, Copy)]
 pub(crate) struct SessionPlanes {
-    /// The queryables' plane (`QueryPlane`).
-    #[cfg(feature = "queryable")]
+    /// The queryables' plane (`QueryPlane`), in the arena where the open lays it out.
+    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
     pub(crate) queries: usize,
-    /// The gets' plane (`GetPlane`).
-    #[cfg(feature = "query")]
+    /// The gets' plane (`GetPlane`), in the arena where the open lays it out.
+    #[cfg(all(feature = "query", feature = "runtime-plan"))]
     pub(crate) gets: usize,
-    /// The plane of the watchers of the faces (`FacePlane`).
-    #[cfg(feature = "connectivity")]
+    /// The plane of the watchers of the faces (`FacePlane`), in the arena where the open lays it out.
+    #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
     pub(crate) faces: usize,
 }
 
 impl SessionPlanes {
     /// This build's planes.
     pub(crate) const OF_BUILD: Self = Self {
-        #[cfg(feature = "queryable")]
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         queries: core::mem::size_of::<QueryPlane>(),
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         gets: core::mem::size_of::<GetPlane>(),
-        #[cfg(feature = "connectivity")]
+        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         faces: core::mem::size_of::<FacePlane>(),
     };
 }
@@ -4889,11 +5107,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let mut entropy = SessionEntropy::<SharedCount>::try_held(entropy)
                 .map_err(|bytes| OpenError::Arena(ArenaRefused::NoMemory { bytes }))?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
-            let rooms = lent
-                .arena
-                .arena_mut()
-                .place(LinkRooms::new(links.waits(), lent.room_places))
-                .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+            let (waits, places) = (links.waits(), lent.room_places);
+            // SAFETY: the arena hands a place aligned for the rooms and valid for writes of
+            // them, where they stay.
+            let rooms = unsafe {
+                lent.arena
+                    .arena_mut()
+                    .place_with(|at| LinkRooms::init_at(NonNull::new_unchecked(at), waits, places))
+            }
+            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
             Ok((wire, entropy, rooms))
         })?;
         links.lend_buffers(lent.transport.links);
@@ -4930,13 +5152,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         });
         // No watcher yet: the plane holds its watchers and its rows itself, so a program that
         // watches after the open is told its faces with nothing allocated. The plane is built in
-        // the row the plan laid out for it (`ArenaPlan::lay_planes`), never in this frame.
+        // the row the plan laid out for it (`ArenaPlan::lay_planes`), never in this frame,
+        // or in the region where the build fixes the session's shape.
         #[cfg(feature = "connectivity")]
-        let watchers = FacePlane::place_in(
-            lent.arena.arena_mut(),
-            face_event_rows(config.max_faces, config.groups.len()),
-        )
-        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        let face_rows = face_event_rows(config.max_faces, config.groups.len());
+        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
+        let watchers = FacePlane::place_in(lent.arena.arena_mut(), face_rows)
+            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        // SAFETY: the region's places were placed by the open's lend and its faces' field is
+        // reached by this write alone; the block is held by `Core` after the session's state,
+        // which holds the plane's owner, and neither moves nor goes back before it.
+        #[cfg(all(feature = "connectivity", not(feature = "runtime-plan")))]
+        let watchers =
+            unsafe { StatePlaces::faces(StateRegion::places_at(lent.state.as_ptr()), face_rows) };
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::lay_admission`); its rows are the heap's, and a heap that refuses them
@@ -5084,6 +5312,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             _steps: lent.steps,
             #[cfg(feature = "listen")]
             _admission: admission,
+            #[cfg(not(feature = "runtime-plan"))]
+            _state: lent.state,
             arena: lent.arena,
         };
         let apart = LentApart {
@@ -5091,6 +5321,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             router: lent.router,
             engine: lent.engine,
             handle_place: lent.handle_place,
+            lodgings: lent.lodgings,
             #[cfg(any(feature = "listen", feature = "group"))]
             handed: lent.transport.handed,
             #[cfg(feature = "advanced-cache")]
@@ -5112,6 +5343,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             router,
             engine: place,
             handle_place,
+            lodgings,
             #[cfg(any(feature = "listen", feature = "group"))]
             handed,
             #[cfg(feature = "advanced-cache")]
@@ -5146,7 +5378,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
         #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-        let direct = direct::DirectFace::new(router, core.transport.lend.clone());
+        let direct_lend = core.transport.lend.clone();
         let make = |this: NonNull<Self>| {
             // SAFETY: `this` is where the `Shared` the open places lays the engine, which is
             // taken out of its row at its close and first in its drop, before its place is given
@@ -5163,56 +5395,125 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 // on.
                 unsafe { samples.answer_queries_with(answering) };
             }
-            Self {
+            let at = this.as_ptr();
+            // SAFETY: `at` is the engine's place, valid for writes of a `Self` that stays there
+            // (`Shared::placed_with`), so each field is too; each field is written once, below,
+            // and the locks are made where they stay.
+            unsafe {
                 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
-                direct,
-                core: CoreLock::new(core),
-                rooms,
-                wait_before_drop_us,
-                held_drop,
-                sending_on: AtomicU64::new(NOT_SENDING),
+                direct::DirectFace::init_at(
+                    NonNull::new_unchecked(addr_of_mut!((*at).direct)),
+                    router,
+                    direct_lend,
+                );
+                CoreLock::init_at(NonNull::new_unchecked(addr_of_mut!((*at).core)), core);
+                addr_of_mut!((*at).rooms).write(rooms);
+                addr_of_mut!((*at).wait_before_drop_us).write(wait_before_drop_us);
+                addr_of_mut!((*at).held_drop).write(held_drop);
+                addr_of_mut!((*at).sending_on).write(AtomicU64::new(NOT_SENDING));
                 #[cfg(any(feature = "listen", feature = "group"))]
-                handed: Mutex::new(handed),
+                addr_of_mut!((*at).handed).write(Mutex::new(handed));
                 #[cfg(any(feature = "listen", feature = "group"))]
-                owed: AtomicBool::new(false),
+                addr_of_mut!((*at).owed).write(AtomicBool::new(false));
                 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-                input_held: AtomicBool::new(false),
+                addr_of_mut!((*at).input_held).write(AtomicBool::new(false));
                 #[cfg(feature = "threads")]
-                hand_back: HandBack::new(),
+                addr_of_mut!((*at).hand_back).write(HandBack::new());
                 #[cfg(any(feature = "listen", feature = "group"))]
-                handed_limits,
+                addr_of_mut!((*at).handed_limits).write(handed_limits);
                 #[cfg(feature = "transport-stats")]
-                unsent_drops: AtomicU64::new(0),
-                samples,
-                matching_owed: AtomicBool::new(false),
+                addr_of_mut!((*at).unsent_drops).write(AtomicU64::new(0));
+                addr_of_mut!((*at).samples).write(samples);
+                addr_of_mut!((*at).matching_owed).write(AtomicBool::new(false));
                 #[cfg(feature = "queryable")]
-                plane,
+                addr_of_mut!((*at).plane).write(plane);
                 #[cfg(feature = "query")]
-                gets,
+                addr_of_mut!((*at).gets).write(gets);
                 #[cfg(feature = "connectivity")]
-                faces,
+                addr_of_mut!((*at).faces).write(faces);
                 #[cfg(any(
                     feature = "remote-declaration-watch",
                     feature = "declarations-synced-event"
                 ))]
-                decl_watches,
-                zid: wire,
-                closed: AtomicBool::new(false),
+                addr_of_mut!((*at).decl_watches).write(decl_watches);
+                addr_of_mut!((*at).zid).write(wire);
+                addr_of_mut!((*at).closed).write(AtomicBool::new(false));
                 #[cfg(any(feature = "query", feature = "ticker"))]
-                next_local: AtomicU64::new(1),
+                addr_of_mut!((*at).next_local).write(AtomicU64::new(1));
                 #[cfg(feature = "threads")]
-                reader: Mutex::new(None),
+                os::mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).reader)),
+                    |reader| reader.write(None),
+                );
                 #[cfg(feature = "threads")]
-                reader_run: core::sync::atomic::AtomicUsize::new(0),
-                deliveries: Deliveries::new(),
-                arena_bytes,
-                handle_place,
+                addr_of_mut!((*at).reader_run).write(core::sync::atomic::AtomicUsize::new(0));
+                addr_of_mut!((*at).deliveries).write(Deliveries::new());
+                addr_of_mut!((*at).arena_bytes).write(arena_bytes);
+                addr_of_mut!((*at).handle_place).write(handle_place);
+                addr_of_mut!((*at).lodgings).write(lodgings);
                 #[cfg(feature = "advanced-cache")]
-                cache: Mutex::new(cache),
+                os::mutex_in(NonNull::new_unchecked(addr_of_mut!((*at).cache)), |held| {
+                    held.write(cache)
+                });
                 #[cfg(test)]
-                takes: Takes::default(),
-                reach,
+                addr_of_mut!((*at).takes).write(Takes::default());
+                addr_of_mut!((*at).reach).write(reach);
             }
+        };
+        // Each field of the engine is written above, one statement each: a field added to the
+        // engine and not there fails this pattern.
+        let _every_field_is_written = |engine: &Self| {
+            let Self {
+                #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+                    direct: _,
+                core: _,
+                rooms: _,
+                wait_before_drop_us: _,
+                held_drop: _,
+                sending_on: _,
+                #[cfg(any(feature = "listen", feature = "group"))]
+                    handed: _,
+                #[cfg(any(feature = "listen", feature = "group"))]
+                    owed: _,
+                #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+                    input_held: _,
+                #[cfg(feature = "threads")]
+                    hand_back: _,
+                #[cfg(any(feature = "listen", feature = "group"))]
+                    handed_limits: _,
+                #[cfg(feature = "transport-stats")]
+                    unsent_drops: _,
+                samples: _,
+                matching_owed: _,
+                #[cfg(feature = "queryable")]
+                    plane: _,
+                #[cfg(feature = "query")]
+                    gets: _,
+                #[cfg(feature = "connectivity")]
+                    faces: _,
+                #[cfg(any(
+                    feature = "remote-declaration-watch",
+                    feature = "declarations-synced-event"
+                ))]
+                    decl_watches: _,
+                zid: _,
+                closed: _,
+                #[cfg(any(feature = "query", feature = "ticker"))]
+                    next_local: _,
+                #[cfg(feature = "threads")]
+                    reader: _,
+                #[cfg(feature = "threads")]
+                    reader_run: _,
+                deliveries: _,
+                arena_bytes: _,
+                handle_place: _,
+                lodgings: _,
+                #[cfg(feature = "advanced-cache")]
+                    cache: _,
+                #[cfg(test)]
+                    takes: _,
+                reach: _,
+            } = engine;
         };
         // SAFETY: the place was lent to the engine alone, aligned as asserted above and as large as
         // `Shared::<Self>::layout`, in the arena `place.memory` keeps; the engine is read through
@@ -7346,7 +7647,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// after the lock hands it: after a step that wrote the faces' tables, and after each
     /// declaration of the session's own that may move a verdict.
     fn read_matching(&self, core: &Core<L, C>) {
-        let registry = &core.session.registry;
+        // The registry itself, not its holder: the tables' walk reads it as what the peers declare.
+        let registry: &Registry = &core.session.registry;
         core.session.matching.read_at(registry.faces_written());
         let mut cursor = 0;
         while registry
@@ -7431,7 +7733,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let Some(handle) = row_of(id) else {
             return false;
         };
-        let registry = &core.session.registry;
+        // The registry itself, not its holder: the filter reads it as what the peers declare.
+        let registry: &Registry = &core.session.registry;
         // What the peers answered is kept by the filter's row until a face's tables are written.
         let open = registry.app.tables.write_filter_open(handle, registry);
         open.is_some_and(|open| !open)
@@ -7832,7 +8135,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     // told each face its rows gather into, gathered in a place of its own.
     #[cfg(feature = "connectivity")]
     fn watch_faces(&self, sink: FaceEventSink) -> Result<u64, Declined> {
-        let place = wz_capi_port::lodge::Lent::try_boxed().map_err(|_| Declined::NoRoom)?;
+        let place = self
+            .lodgings
+            .lend(wz_capi_port::lodge::Lent::<wz_capi_port::face_rows::Gathering>::LAYOUT)
+            .ok_or(Declined::NoRoom)?;
+        let place = wz_capi_port::lodge::Lent::of_bytes(place).map_err(|_| Declined::NoRoom)?;
         SessionEngine::watch_face_rows(
             self,
             wz_capi_port::face_rows::snapshots_of_rows(sink, place),
@@ -9256,6 +9563,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> PlaceLender for C
     fn give_back_place(&self, place: EntityPlace) -> Result<(), EntityPlace> {
         self.core.lock().0.places.give_back(place)
     }
+
+    /// Closed or not, with no lock of the session taken: a place's mark is its own, and the
+    /// arena's memory is kept by each place lent until its value's last count lets it go.
+    fn lend_lodging(&self, layout: core::alloc::Layout) -> Option<wz_capi_port::lodge::LentBytes> {
+        self.lodgings.lend(layout)
+    }
 }
 
 /// The ring the session's arena laid out at its open for its advanced publishers' caches
@@ -9345,7 +9658,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // the table.
         #[cfg(feature = "query")]
         {
-            let registry = &mut core.session.registry;
+            let registry = CoopSession::faces_mut(&mut core.session.registry);
             while let Some(pending) = core.session.pending_gets.pop() {
                 pending.unregister(&mut *registry);
             }
@@ -9561,7 +9874,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for 
                     .iter()
                     .position(|pending| pending.fan == Some(key))?;
                 let pending = core.session.pending_gets.remove(at);
-                pending.unregister(&mut core.session.registry);
+                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
                 Some(pending.leg)
             });
             let Some(leg) = leg else {
@@ -9589,7 +9902,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return FilteredPut::Sent(Ok(0));
         };
         let core = &core.0;
-        let registry = &core.session.registry;
+        // The registry itself, not its holder: the filter reads it as what the peers declare.
+        let registry: &Registry = &core.session.registry;
         // The filter's row is looked up once, for its plan, its answer and the plain way it keeps.
         let row = row_of(filter).and_then(|handle| tables(registry).write_filters().get(handle));
         // A write that brings nothing of its own, at the send epoch its way was planned at, is
@@ -9808,7 +10122,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Drop for CoopEngi
         #[cfg(feature = "query")]
         {
             let core = self.core.dropping();
-            let registry = &mut core.session.registry;
+            let registry = CoopSession::faces_mut(&mut core.session.registry);
             while let Some(pending) = core.session.pending_gets.pop() {
                 pending.unregister(&mut *registry);
             }

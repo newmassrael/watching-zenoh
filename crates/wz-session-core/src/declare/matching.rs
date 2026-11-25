@@ -120,9 +120,15 @@ struct MatchingWatch<C, K> {
 /// (`vendor/zenoh-pico/include/zenoh-pico/net/filtering.h:56-66`), so the
 /// watch key is a criterion rather than a keyexpr in upstream too.
 pub struct MatchingWatchList<C, K> {
-    watches: Vec<MatchingWatch<C, K>>,
+    /// None until the first watch: a list of all zero bytes is an empty one, as a region that holds
+    /// the list is handed zeroed.
+    watches: crate::bounded::ZeroOption<Vec<MatchingWatch<C, K>>>,
     next_id: u64,
 }
+
+// SAFETY: at all zero bytes the watches are a `ZeroOption` of none and the id source zero: a list
+// of no watch, which drops nothing.
+unsafe impl<C, K> crate::bounded::ZeroEmpty for MatchingWatchList<C, K> {}
 
 impl<C: MatchingSink, K> Default for MatchingWatchList<C, K> {
     fn default() -> Self {
@@ -134,7 +140,7 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     /// Empty watch list.
     pub const fn new() -> Self {
         Self {
-            watches: Vec::new(),
+            watches: crate::bounded::ZeroOption::NONE,
             next_id: 0,
         }
     }
@@ -185,30 +191,39 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
         if initial {
             sink.on_matching_changed(true);
         }
-        self.watches.push(MatchingWatch {
+        let watch = MatchingWatch {
             id,
             criterion,
             last: initial,
             sink,
-        });
+        };
+        match self.watches.as_mut() {
+            Some(watches) => watches.push(watch),
+            None => self.watches.set(Some(alloc::vec![watch])),
+        }
         id
     }
 
     /// Remove the watch with `id`. Returns whether one was removed.
     pub fn unregister(&mut self, id: u64) -> bool {
-        let before = self.watches.len();
-        self.watches.retain(|w| w.id != id);
-        self.watches.len() != before
+        let Some(watches) = self.watches.as_mut() else {
+            return false;
+        };
+        let before = watches.len();
+        watches.retain(|w| w.id != id);
+        watches.len() != before
     }
 
     /// Number of registered watches.
     pub fn len(&self) -> usize {
-        self.watches.len()
+        self.watches.as_ref().map_or(0, Vec::len)
     }
 
     /// Whether no watches are registered.
     pub fn is_empty(&self) -> bool {
-        self.watches.is_empty()
+        self.watches
+            .as_ref()
+            .is_none_or(|watches| watches.is_empty())
     }
 
     /// Re-evaluate every watch against `has_matching` (the owning
@@ -228,7 +243,10 @@ impl<C: MatchingSink, K> MatchingWatchList<C, K> {
     #[inline(never)]
     fn reevaluate_by(&mut self, has_matching: &dyn Fn(&K) -> bool) -> usize {
         let mut fired = 0usize;
-        for watch in self.watches.iter_mut() {
+        let Some(watches) = self.watches.as_mut() else {
+            return 0;
+        };
+        for watch in watches.iter_mut() {
             let now = has_matching(&watch.criterion);
             if now != watch.last {
                 watch.last = now;

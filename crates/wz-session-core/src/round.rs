@@ -47,6 +47,7 @@
 
 use core::cell::{OnceCell, UnsafeCell};
 use core::convert::Infallible;
+use core::mem::MaybeUninit;
 use core::ptr::{self, addr_of_mut, NonNull};
 use core::sync::atomic::{AtomicBool, Ordering};
 // The split `hlc` and `session_actions` use: the host profile has the native atomics, the
@@ -56,7 +57,9 @@ use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize};
 #[cfg(feature = "no_std")]
 use portable_atomic::{AtomicU64, AtomicU8, AtomicUsize};
 
-use crate::bounded::{Arena, BoundedVec, CapacityFull, LendRefused, Lent, Static, Storage};
+use crate::bounded::{
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Static, Storage, ZeroEmpty,
+};
 use crate::byte_cells::{ByteBuf, KeptBytes};
 use crate::caps;
 use crate::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
@@ -205,7 +208,36 @@ pub trait RecordForm: ThreadForm {
     /// # Errors
     /// Refused past the build's bound of the table or past what the arena has left.
     fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused>;
+
+    /// The rows a region the build lays out keeps the records of a round of this form in
+    /// ([`RoundRowPlaces`]): the build's bound of them where an arena would lend them, none where
+    /// the round keeps them in itself.
+    type RecordPlaces<T>: ZeroEmpty;
+
+    /// The bytes such a region keeps the keys of a round of this form in: as many of the build's
+    /// longest keys as the form holds ([`Self::KEYS`]).
+    type KeyPlaces: ZeroEmpty;
+
+    /// The records of a round of `rows` records over `places`, at most the rows there.
+    ///
+    /// # Safety
+    /// `places` is aligned and valid for reads and writes, holds no value, and is reached by
+    /// nothing but the records handed back for as long as they live.
+    unsafe fn records_in<T>(
+        places: NonNull<Self::RecordPlaces<T>>,
+        rows: usize,
+    ) -> Self::Records<T>;
+
+    /// The keys of a round of `bytes` bytes of them over `places`, at most the bytes there.
+    ///
+    /// # Safety
+    /// As [`Self::records_in`]'s, for `places`.
+    unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys;
 }
+
+/// The table a round writes its records' keys in: the bytes of as many of the build's longest
+/// keys as the form that holds the most of them keeps.
+pub type RoundKeys = BoundedVec<u8, { key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>() }, Lent>;
 
 /// The records of a round, in the order they were written.
 pub trait RecordRows<T>: Default + core::ops::Deref<Target = [T]> + core::ops::DerefMut {
@@ -248,6 +280,23 @@ impl RecordForm for crate::row_callback::Threads {
     fn records<T>(arena: &mut Arena, rows: usize) -> Result<Self::Records<T>, LendRefused> {
         arena.lend(rows)
     }
+
+    type RecordPlaces<T> = [MaybeUninit<T>; caps::DELIVERY_LANE_EVENTS];
+
+    type KeyPlaces = [MaybeUninit<u8>; key_bytes::<{ caps::MAX_KEYEXPR_BYTES }>()];
+
+    unsafe fn records_in<T>(
+        places: NonNull<Self::RecordPlaces<T>>,
+        rows: usize,
+    ) -> Self::Records<T> {
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, rows) }
+    }
+
+    unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys {
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, bytes) }
+    }
 }
 
 impl RecordForm for crate::row_callback::OneThread {
@@ -261,6 +310,22 @@ impl RecordForm for crate::row_callback::OneThread {
 
     fn records<T>(_arena: &mut Arena, _rows: usize) -> Result<Self::Records<T>, LendRefused> {
         Ok(BoundedVec::new_static())
+    }
+
+    type RecordPlaces<T> = ();
+
+    type KeyPlaces = [MaybeUninit<u8>; caps::MAX_KEYEXPR_BYTES];
+
+    unsafe fn records_in<T>(
+        _places: NonNull<Self::RecordPlaces<T>>,
+        _rows: usize,
+    ) -> Self::Records<T> {
+        BoundedVec::new_static()
+    }
+
+    unsafe fn keys_in(places: NonNull<Self::KeyPlaces>, bytes: usize) -> RoundKeys {
+        // SAFETY: the caller's contract.
+        unsafe { BoundedVec::placed_over(places, bytes) }
     }
 }
 
@@ -749,7 +814,51 @@ impl<C: RoundCalls> RoundRows<C> {
             longest_key: counts.longest_key,
         })
     }
+
+    /// The tables of a round of `counts` over the rows of a region the build lays out
+    /// ([`RoundRowPlaces`]), each at most the build's bound there: what a session whose shape the
+    /// build fixes keeps in place of [`Self::lent`]'s, lent from no arena.
+    ///
+    /// # Safety
+    /// `at` points at rows, aligned, that hold no value, that nothing reaches but the tables handed
+    /// back, and that neither move nor are given back while those tables, or the round they are
+    /// moved into, live.
+    pub unsafe fn placed_in(at: NonNull<RoundRowPlaces<C>>, counts: RoundRowCounts) -> Self {
+        let at = at.as_ptr();
+        // SAFETY: the caller's contract, for each field of the rows, each reached by one table:
+        // a field of a value at a pointer that is not null is not null either.
+        unsafe {
+            Self {
+                records: <C::Form as RecordForm>::records_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).records)),
+                    counts.records,
+                ),
+                callbacks: BoundedVec::placed_over(
+                    NonNull::new_unchecked(addr_of_mut!((*at).callbacks)),
+                    counts.callbacks,
+                ),
+                keys: <C::Form as RecordForm>::keys_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).keys)),
+                    counts.key_bytes::<C::Form>(),
+                ),
+                longest_key: counts.longest_key,
+            }
+        }
+    }
 }
+
+/// The rows of a round's tables where a region the build lays out keeps them, beside the round
+/// instead of lent from an arena ([`RoundRows::placed_in`]): the build's bound of each table, as
+/// the form keeps it ([`RecordForm::RecordPlaces`], [`RecordForm::KeyPlaces`]).
+pub struct RoundRowPlaces<C: RoundCalls> {
+    records: <C::Form as RecordForm>::RecordPlaces<Entry<C>>,
+    callbacks: [MaybeUninit<Owed<C>>; caps::DELIVERY_LANE_CALLBACKS],
+    keys: <C::Form as RecordForm>::KeyPlaces,
+}
+
+// SAFETY: the form's places are `ZeroEmpty` by the trait's bounds, and the callbacks' rows are
+// `MaybeUninit`, which hold no value at any bytes.
+unsafe impl<C: RoundCalls> ZeroEmpty for RoundRowPlaces<C> {}
 
 /// The table holds nothing; the session may write it.
 const EMPTY: u8 = 0;
@@ -1247,9 +1356,19 @@ struct Answering<C: RoundCalls>(
     <C::Locks as LockFamily>::Lock<Option<NonNull<dyn AnswersQueries<C>>>>,
 );
 
-impl<C: RoundCalls> Default for Answering<C> {
-    fn default() -> Self {
-        Self(<C::Locks as LockFamily>::new(None))
+impl<C: RoundCalls> Answering<C> {
+    /// Nothing answering yet, made in `at` with its lock.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>) {
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            <C::Locks as LockFamily>::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).0)),
+                |held| held.write(None),
+            );
+        }
     }
 }
 
@@ -1275,6 +1394,19 @@ impl<C: RoundCalls> Round<C> {
         // SAFETY: `write_in` writes every field of a round at the place it is given, which
         // `place_with` gives aligned and valid for writes of one.
         unsafe { arena.place_with(|at: *mut Self| Self::write_in(at, rows)) }
+    }
+
+    /// The session's round over `rows`, built at `at`, a place of the session's own memory that
+    /// an arena does not lend (a field of its region): owned by one owner and reached by handles
+    /// that count nothing, as [`Self::placed_over`]'s round is.
+    ///
+    /// # Safety
+    /// `at` is aligned and valid for writes of one round, which nothing else drops or reaches but
+    /// through the owner handed back; the memory stays, unmoved, until after that owner is dropped.
+    pub unsafe fn placed_at(at: NonNull<Self>, rows: RoundRows<C>) -> Placed<Self> {
+        // SAFETY: `write_in` writes every field of a round at the place it is given, which the
+        // caller gives aligned and valid for writes of one, and keeps for the owner.
+        unsafe { Placed::written_at(at, |at: *mut Self| Self::write_in(at, rows)) }
     }
 
     /// An empty round written where `at` points, field by field.
@@ -1356,9 +1488,9 @@ impl<C: RoundCalls> Round<C> {
                 UnsafeCell::new(<C::Capture as Presence>::empty::<Option<Captured<C>>>()),
             );
             ptr::write(addr_of_mut!((*at).released), Released::new());
-            ptr::write(
-                addr_of_mut!((*at).answering),
-                <C::Queries as Presence>::empty::<Answering<C>>(),
+            <C::Queries as Presence>::init_at::<Answering<C>>(
+                NonNull::new_unchecked(addr_of_mut!((*at).answering)),
+                |answering| Answering::init_at(answering),
             );
             ptr::write(addr_of_mut!((*at).dropped), AtomicU64::new(0));
             ptr::write(addr_of_mut!((*at).held_over), AtomicU64::new(0));

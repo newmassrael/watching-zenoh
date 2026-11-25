@@ -16,7 +16,7 @@ use core::fmt;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
-use core::ptr::addr_of_mut;
+use core::ptr::{addr_of_mut, NonNull};
 #[cfg(feature = "std")]
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -48,18 +48,20 @@ impl<T> Mutex<T> {
         }
     }
 
-    /// A new mutex written in `place` around the value `make` writes in the place it is handed
-    /// and lends back: neither the value nor the mutex is a value of its own on a stack. A maker
-    /// that lends back anything but the place it was handed has not written it there, and is
-    /// refused with a panic. `place` is overwritten without dropping what it held.
-    pub fn new_in(
-        place: &mut MaybeUninit<Self>,
-        make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T,
-    ) -> &mut Self {
-        let at = place.as_mut_ptr();
-        // SAFETY: `at` is valid for writes of a `Self`, and each field is written once through a
-        // pointer to it: the value in its cell (`UnsafeCell<T>` and `MaybeUninit<T>` each have the
-        // layout of `T`) by `make`, which lent the cell back and so wrote it, then the lock.
+    /// A mutex made in `place` around the value `make` writes in the place it is handed and
+    /// lends back: neither the value nor the mutex is a value of its own on a stack. A maker that
+    /// lends back anything but the place it was handed has not written it there, and is refused
+    /// with a panic.
+    ///
+    /// # Safety
+    /// `place` is valid for writes of a `Self` and aligned for it, and what it held is
+    /// overwritten without being dropped. A maker that panics leaves `place` as unwritten.
+    pub unsafe fn init_at(place: NonNull<Self>, make: impl FnOnce(&mut MaybeUninit<T>) -> &mut T) {
+        let at = place.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` (the caller's contract), and each field is
+        // written once through a pointer to it: the value in its cell (`UnsafeCell<T>` and
+        // `MaybeUninit<T>` each have the layout of `T`) by `make`, which lent the cell back and so
+        // wrote it, then the lock.
         unsafe {
             let cell = &mut *addr_of_mut!((*at).value).cast::<MaybeUninit<T>>();
             let field: *const T = cell.as_ptr();
@@ -71,7 +73,6 @@ impl<T> Mutex<T> {
             addr_of_mut!((*at).raw).write(RawLock::new());
             #[cfg(feature = "std")]
             addr_of_mut!((*at).poisoned).write(AtomicBool::new(false));
-            &mut *at
         }
     }
 
@@ -439,18 +440,34 @@ mod tests {
     use std::sync::Arc;
     use std::time::Instant;
 
-    /// A mutex made in its place holds the value its maker wrote there, and its lock is the lock a
-    /// mutex made by value has.
+    /// A mutex made in its place holds the value its maker wrote there, inside the mutex's own
+    /// bytes, and its lock is the lock a mutex made by value has.
     #[test]
     fn a_mutex_made_in_its_place_holds_what_its_maker_wrote() {
         let mut place = MaybeUninit::<Mutex<u32>>::uninit();
-        let mutex = Mutex::new_in(&mut place, |value| value.write(7));
+        let start = place.as_ptr() as usize;
+        let mut written = 0_usize;
+        // SAFETY: the place is this frame's, unmoved until it is dropped below.
+        unsafe {
+            Mutex::<u32>::init_at(NonNull::from(&mut place).cast(), |value| {
+                written = value.as_ptr() as usize;
+                value.write(7)
+            });
+        }
+        assert!(
+            written >= start
+                && written + core::mem::size_of::<u32>()
+                    <= start + core::mem::size_of::<Mutex<u32>>(),
+            "the value is written in the mutex's place"
+        );
+        // SAFETY: made above.
+        let mutex = unsafe { place.assume_init_ref() };
         let guard = mutex.lock();
         assert!(mutex.try_lock().is_none(), "a held mutex is not given");
         drop(guard);
         assert_eq!(mutex.try_lock().map(|value| *value), Some(7));
         assert!(!mutex.is_poisoned(), "made in place, not poisoned");
-        // SAFETY: `new_in` wrote the whole mutex into `place`, and it is dropped once.
+        // SAFETY: `init_at` wrote the whole mutex into `place`, and it is dropped once.
         unsafe { place.assume_init_drop() };
     }
 
@@ -460,7 +477,8 @@ mod tests {
     fn a_maker_that_writes_elsewhere_is_refused() {
         let elsewhere: &'static mut u32 = std::boxed::Box::leak(std::boxed::Box::new(0));
         let mut place = MaybeUninit::<Mutex<u32>>::uninit();
-        Mutex::new_in(&mut place, |_| elsewhere);
+        // SAFETY: the place is this frame's; the panic leaves it unwritten and undropped.
+        unsafe { Mutex::<u32>::init_at(NonNull::from(&mut place).cast(), |_| elsewhere) };
     }
 
     /// A waiter on the condition variable sees what its notifier wrote under the mutex, by

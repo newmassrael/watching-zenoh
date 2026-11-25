@@ -1330,6 +1330,41 @@ impl<C: ReplySink> ReplyRegistry<C, Lent> {
     }
 }
 
+/// The rows of a [`ReplyRegistry`] of the region policy, which a region lays out beside it: its
+/// pending queries', at the build's bound.
+pub struct ReplyRegistryRows<C: ReplySink> {
+    pending:
+        [core::mem::MaybeUninit<Pending<C, crate::bounded::Region>>; caps::MAX_PENDING_QUERIES],
+}
+
+// SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
+unsafe impl<C: ReplySink> crate::bounded::ZeroEmpty for ReplyRegistryRows<C> {}
+
+/// The lines a region's description holds for one [`ReplyRegistry`] of the region policy: its
+/// pending queries' rows (and its handle to the key arena, a line of the other kind).
+pub const REPLY_REGISTRY_LINES: usize = 1;
+
+impl<C: ReplySink> ReplyRegistry<C, crate::bounded::Region> {
+    /// The description of a registry of the region policy at `at` in a region and its
+    /// [`ReplyRegistryRows`] at `rows`: the line of its pending queries' rows and its handle to
+    /// the region's key arena. The registry is written as [`Default`] makes one before the
+    /// region is placed, since a deadline of none and the build's key gate are not zero bytes.
+    pub const fn places(
+        at: usize,
+        rows: usize,
+    ) -> crate::bounded::RegionLines<REPLY_REGISTRY_LINES> {
+        crate::bounded::RegionLines::EMPTY
+            .seq(crate::bounded::SeqPlace::of::<
+                Pending<C, crate::bounded::Region>,
+            >(
+                at.wrapping_add(core::mem::offset_of!(Self, pending)),
+                rows.wrapping_add(core::mem::offset_of!(ReplyRegistryRows<C>, pending)),
+                caps::MAX_PENDING_QUERIES,
+            ))
+            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
+    }
+}
+
 impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// The bytes one pending query takes in the table's storage: the key its replies are held to
     /// with it where the storage policy keeps the text in the row, and its sink as the table holds

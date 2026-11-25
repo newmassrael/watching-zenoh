@@ -37,7 +37,7 @@
 //! [`LegId`]: crate::get_plane::LegId
 
 use alloc::collections::VecDeque;
-use core::ptr::NonNull;
+use core::ptr::{addr_of_mut, NonNull};
 use core::sync::atomic::Ordering;
 // The split `round` uses: the host profile has the native atomics, the `no_std` profile gets the
 // critical-section ones for the cores that have none.
@@ -256,9 +256,19 @@ enum Capture {
 /// The capture of a plane that keeps one ([`PlaneCalls::Captures`]), under the engine's lock.
 struct Capturing<C: GetCalls>(<C::Locks as LockFamily>::Lock<Capture>);
 
-impl<C: GetCalls> Default for Capturing<C> {
-    fn default() -> Self {
-        Self(C::Locks::new(Capture::Off))
+impl<C: GetCalls> Capturing<C> {
+    /// A capture that takes nothing, made in `at` with its lock.
+    ///
+    /// # Safety
+    /// As for [`LockFamily::init_at`], of a `Self`.
+    unsafe fn init_at(at: NonNull<Self>) {
+        // SAFETY: the caller's contract, for the one field.
+        unsafe {
+            C::Locks::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at.as_ptr()).0)),
+                |capture| capture.write(Capture::Off),
+            );
+        }
     }
 }
 
@@ -283,14 +293,38 @@ pub struct GetPlane<C: GetCalls> {
 
 impl<C: GetCalls> GetPlane<C> {
     /// A plane with nothing ended, its ends waiting in `ended`, the replies its gets hold in
-    /// `replies` and its legs' callbacks in `legs`.
-    pub fn new(ended: EndedLegs, replies: HeldReplies<u64, Lent>, legs: LegRows<C>) -> Self {
-        Self {
-            ended: Queued::new(ended),
-            held: Queued::new(VecDeque::new()),
-            replies: C::Locks::new(replies),
-            legs: C::Locks::new(legs),
-            capture: <C::Captures as Presence>::empty::<Capturing<C>>(),
+    /// `replies` and its legs' callbacks in `legs`, made in `at` with its locks.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The plane is not moved from `at` until it is dropped there.
+    pub unsafe fn init_at(
+        at: NonNull<Self>,
+        ended: EndedLegs,
+        replies: HeldReplies<u64, Lent>,
+        legs: LegRows<C>,
+    ) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).ended)), |queue| {
+                queue.write(ended)
+            });
+            Queued::init_at(NonNull::new_unchecked(addr_of_mut!((*at).held)), |queue| {
+                queue.write(VecDeque::new())
+            });
+            C::Locks::init_at(
+                NonNull::new_unchecked(addr_of_mut!((*at).replies)),
+                |held| held.write(replies),
+            );
+            C::Locks::init_at(NonNull::new_unchecked(addr_of_mut!((*at).legs)), |rows| {
+                rows.write(legs)
+            });
+            <C::Captures as Presence>::init_at::<Capturing<C>>(
+                NonNull::new_unchecked(addr_of_mut!((*at).capture)),
+                |capturing| Capturing::init_at(capturing),
+            );
         }
     }
 

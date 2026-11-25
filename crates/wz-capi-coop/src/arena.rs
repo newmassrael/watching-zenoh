@@ -70,7 +70,7 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`]), lent after the record and before the tables that keep their keys in it. A
+//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the tables that keep their keys in it. A
 //!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
 //!   declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
@@ -121,36 +121,61 @@ use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
-use wz_session_core::bounded::{Arena, LendRefused, Lent, TableLender, ARENA_ALIGN};
+#[cfg(any(
+    feature = "runtime-plan",
+    all(feature = "liveliness", any(feature = "listen", feature = "group"))
+))]
+use wz_session_core::bounded::Lent;
+#[cfg(not(feature = "runtime-plan"))]
+use wz_session_core::bounded::ZeroEmpty;
+use wz_session_core::bounded::{Arena, LendRefused, TableLender, ARENA_ALIGN};
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::caps;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::key_arena::KeySpace;
 use wz_session_core::limit_binding::{Quota, UnlentRows};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locator_directory::LocatorText;
-use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::peer_tables::PeerTables;
+use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, SHARES_ROWS};
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::policy::HeldPublishDrop;
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_sink::ConsolidatingSink;
 use wz_session_core::row_pool::MAX_POOL_ROWS;
 use wz_session_core::session_tables::TableRows;
-#[cfg(feature = "query")]
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::HeapSinks;
+use wz_session_core::slot_observer::RequesterRows;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{HeapSinks, RequesterRows, SlotObserverOf};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::SlotObserverOf;
 
+#[cfg(feature = "query")]
+use crate::engine::LegHold;
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
+use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(all(
+    feature = "runtime-plan",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
 use crate::engine::REGISTRY_LEND_BYTES;
-use crate::engine::{CoopTables, FACE_SET_BYTES, ROOM_PLACE_BYTES, ROUTER_LEND_BYTES};
-#[cfg(feature = "query")]
-use crate::engine::{LegHold, LegSink};
+#[cfg(feature = "runtime-plan")]
+use crate::engine::ROOM_PLACE_BYTES;
+#[cfg(feature = "runtime-plan")]
+use crate::engine::{CoopTables, FACE_SET_BYTES, ROUTER_LEND_BYTES};
 use crate::form::SessionLock;
+use crate::lodging::{LodgingRows, LodgingSpan};
 use crate::open_source::EndpointList;
-use crate::round::{CoopForm, RoundRowCounts, CALLBACK_BYTES, RECORD_BYTES};
+#[cfg(feature = "runtime-plan")]
+use crate::round::{CoopForm, CALLBACK_BYTES};
+use crate::round::{RoundRowCounts, RECORD_BYTES};
 use crate::CoopConfig;
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_hold::HeldReply;
 
 /// `?` where a const fn reads a result: the value of an `Ok`, or the `Err` handed back as it is.
@@ -295,6 +320,7 @@ pub enum ArenaPart {
     AdvancedSubscriberPlaces,
     LinkEventsListenerPlaceFlags,
     LinkEventsListenerPlaces,
+    LodgingPlaces,
     ArenaKeep,
     RuntimeState,
     EngineState,
@@ -439,6 +465,7 @@ impl ArenaPart {
             Self::LinkEventsListenerPlaces => {
                 ("link events listener places", "MAX_LINK_EVENTS_LISTENERS")
             }
+            Self::LodgingPlaces => ("lodging places", ""),
             Self::ArenaKeep => ("arena keep", ""),
             Self::RuntimeState => ("runtime state", "MAX_TASKS + MAX_TIMERS"),
             Self::EngineState => ("engine state", ""),
@@ -460,16 +487,19 @@ const ENDPOINT_ROWS: usize = 1;
 /// places.
 const LINK_ROWS: usize = 4 + cfg!(feature = "listen") as usize;
 /// The round's records where the arena lends them, the callbacks they owe, its keys and the round
-/// itself: the round keeps no area, since every record is read where it lies, and a round of one
-/// thread keeps its records in itself.
-const LANE_ROWS: usize = 3 + (RECORD_BYTES != 0) as usize;
-/// The places the session lends its reassembly Router in for a step, and its registry where a
-/// step dispatches apart from the session's lock (a build whose links are tasks).
-const STEP_LEND_ROWS: usize = 1 + cfg!(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group"
-)) as usize;
+/// itself, where the open places them in the arena (`runtime-plan`); a region holds them otherwise:
+/// the round keeps no area, since every record is read where it lies, and a round of one thread
+/// keeps its records in itself.
+const LANE_ROWS: usize =
+    ((RECORD_BYTES != 0) as usize + 3) * cfg!(feature = "runtime-plan") as usize;
+/// The places the session lends its Router and, where its links run as tasks, its registry in for
+/// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
+const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+    * (1 + cfg!(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group"
+    )) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
 /// The receive buffers of the groups the session may join and their flags (`group`).
@@ -480,29 +510,34 @@ const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
 /// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
 const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
-/// The application's tables apart from the session's one table set: the declaration watchers.
-const OBSERVER_ROWS: usize = 1;
-/// The pending gets, the ends of their legs, the legs' callbacks, the session's note of each leg
-/// pending and the replies the gets that consolidate hold, all of a build that asks (`query`): one
-/// that asks nothing holds no table of gets.
-const GET_ROWS: usize = 5 * cfg!(feature = "query") as usize;
-/// The faces' sets, and the index of the held ones where the build takes faces beside its dial
-/// role's (`TAKES_FACES`): a session of that face alone knows it holds the first set.
-const FACE_ROWS: usize = 1 + TAKES_FACES as usize;
+/// The application's tables apart from the session's one table set: the declaration watchers,
+/// where the arena lends them (`runtime-plan`).
+const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
+/// The pending gets, the ends of the legs, the legs' callbacks, the session's note of each leg
+/// pending and the replies the gets that consolidate hold, of a build that asks (`query`), where
+/// the arena lends them (`runtime-plan`): one that asks nothing holds no table of gets, and a
+/// region holds them otherwise (`crate::engine::StatePlaces`).
+const GET_ROWS: usize = 5 * cfg!(all(feature = "query", feature = "runtime-plan")) as usize;
+/// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
+/// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
+/// alone knows it holds the first set.
+const FACE_ROWS: usize = cfg!(feature = "runtime-plan") as usize + TAKES_FACES as usize;
 /// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
-/// for each set of face tables.
-const ROOM_ROWS: usize = 2;
-/// The peers' tables, and the pools their rows lie in where the faces share them.
-const PEER_ROWS: usize = 1 + 3 * SHARES_ROWS as usize;
+/// for each set of face tables, where the arena lends them (`runtime-plan`); a region holds its
+/// one set's place otherwise.
+const ROOM_ROWS: usize = 1 + cfg!(feature = "runtime-plan") as usize;
+/// The peers' tables, and the pools their rows lie in where the faces share them, where the arena
+/// lends them (`runtime-plan`).
+const PEER_ROWS: usize = cfg!(feature = "runtime-plan") as usize * (1 + 3 * SHARES_ROWS as usize);
 /// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
 /// session whose faces share their pools, so counted where a build shares them at all.
 const OWED_ROWS: usize = (cfg!(all(
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
-/// The session's declarations ([`ArenaPlan::put_entities`]): the session's one table set and the
-/// key arena.
-const ENTITY_ROWS: usize = 2;
+/// The session's declarations, the session's one table set and the key arena, where the arena
+/// lends them (`runtime-plan`; `ArenaPlan::put_entities`).
+const ENTITY_ROWS: usize = 2 * cfg!(feature = "runtime-plan") as usize;
 /// The links' cells, their gates', their sessions' actions' and the halves those hold, each a
 /// table of flags and cells ([`ArenaPlan::holding_cells`]).
 const CELL_ROWS: usize = 8;
@@ -547,6 +582,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + CELL_ROWS
     + HANDLE_ROWS
     + ENTITY_PLACE_ROWS
+    + LODGING_ROWS
     + CACHE_RING_ROWS
     + FINAL_ROWS
     + RUNTIME_ROWS
@@ -554,21 +590,26 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + PLANE_ROWS
     + ADMISSION_ROWS;
 
+/// The places for values lodged by counts, the ABI's and the engine's, one table of cells that
+/// each carry their own mark ([`ArenaPlan::holding`]).
+const LODGING_ROWS: usize = 1;
 /// The flag and the span of the ring the advanced publishers' caches keep their samples in
 /// (`advanced-cache`).
 const CACHE_RING_ROWS: usize = 2 * cfg!(feature = "advanced-cache") as usize;
-/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`).
-const FINAL_ROWS: usize = 2 * cfg!(feature = "queryable") as usize;
+/// The Finals the queryables' plane holds and the requests a dispatch refused (`queryable`), where
+/// the arena lends them (`runtime-plan`); a region holds them otherwise.
+const FINAL_ROWS: usize = 2 * cfg!(all(feature = "queryable", feature = "runtime-plan")) as usize;
 /// The count the arena is kept by and the span the session's runtime is placed in
 /// ([`ArenaPlan::holding_runtime`]).
 const RUNTIME_ROWS: usize = 2;
 /// The place the session's engine lies in ([`ArenaPlan::holding_engine`]).
 const ENGINE_STATE_ROWS: usize = 1;
 /// The planes the session's queryables, gets and watchers of its faces share, each where its
-/// feature is ([`ArenaPlan::lay_planes`]).
-const PLANE_ROWS: usize = cfg!(feature = "queryable") as usize
-    + cfg!(feature = "query") as usize
-    + cfg!(feature = "connectivity") as usize;
+/// feature is ([`ArenaPlan::lay_planes`]), where the arena holds them (`runtime-plan`).
+const PLANE_ROWS: usize = cfg!(feature = "runtime-plan") as usize
+    * (cfg!(feature = "queryable") as usize
+        + cfg!(feature = "query") as usize
+        + cfg!(feature = "connectivity") as usize);
 /// The admission the links of a session that listens ask while their handshakes run
 /// (`ArenaPlan::lay_admission`).
 const ADMISSION_ROWS: usize = cfg!(feature = "listen") as usize;
@@ -621,10 +662,20 @@ const fn place_parts(kind: EntityKind) -> [ArenaPart; 2] {
 /// names, a place of that layout for each row the session keeps of the kind. What it holds there is
 /// reserved with the session and takes no memory of its own, and an open whose arena cannot hold it
 /// opens nothing.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HeldPlaces {
     handle: Option<Layout>,
     entities: [Option<Layout>; ENTITY_KINDS],
+    /// The table of places for values lodged by counts ([`Self::with_lodgings`]), laid out by the
+    /// largest asked; `None` once one asked is past what an arena holds.
+    lodging: Option<LodgingRows>,
+}
+
+impl Default for HeldPlaces {
+    /// No place at all.
+    fn default() -> Self {
+        Self::NONE
+    }
 }
 
 /// Where an open's arena comes from and which places of the ABI's it holds beside the session's
@@ -677,18 +728,36 @@ impl ArenaRegion {
         }
     }
 
+    /// The rows of the session's tables the region lays out ([`ArenaPlan::tables`]).
+    pub const fn tables(&self) -> TableRows {
+        self.plan.tables()
+    }
+
+    /// The limits a session of the region opens under, and no other.
+    pub const fn limits(&self) -> &SessionLimits {
+        &self.limits
+    }
+
     /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
     /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
-    /// and limits. A region holds a row of text for each endpoint it may dial, so a config that
-    /// dials fewer leaves rows unwritten, and one that dials more is refused under
-    /// `MAX_STATIC_CONNECT`; any other number of the config, or limits, not the region's is
-    /// refused under [`ArenaLimit::ShapeDiffersFromBuild`] or
-    /// [`ArenaLimit::LimitsDifferFromBuild`], whose rows would be sized for another session.
+    /// and limits, refused as [`Self::admit`] refuses the config.
     pub(crate) fn lay_out_on<E: EndpointList>(
         &self,
         plan: &mut ArenaPlan,
         config: &CoopConfig<E>,
     ) -> Result<(), ArenaRefused> {
+        self.admit(config)?;
+        plan.clone_from(&self.plan);
+        Ok(())
+    }
+
+    /// Whether a session of `config` opens in this region. A region holds a row of text for each
+    /// endpoint it may dial, so a config that dials fewer leaves rows unwritten, and one that dials
+    /// more is refused under `MAX_STATIC_CONNECT`; any other number of the config, or limits, not
+    /// the region's is refused under [`ArenaLimit::ShapeDiffersFromBuild`] or
+    /// [`ArenaLimit::LimitsDifferFromBuild`], whose rows would be sized for another session. What
+    /// an open whose rows are a type's fields asks in place of a plan: it lays out nothing.
+    pub fn admit<E: EndpointList>(&self, config: &CoopConfig<E>) -> Result<(), ArenaRefused> {
         let shape = PlanShape::of(config);
         hold(ArenaLimit::MaxStaticConnect, shape.dials, self.shape.dials)?;
         // The handshakes a config admits size nothing for a session that listens on nothing
@@ -715,24 +784,48 @@ impl ArenaRegion {
                 why: UnlentRows::NoCeiling,
             });
         }
-        plan.clone_from(&self.plan);
         Ok(())
     }
 }
+
+/// The table of lodgings of no place: none, its places laid out for the watchers of the faces'
+/// snapshots the engine lodges itself in a build that has them, so an open counts those places and
+/// lays none out ([`ArenaPlan::holding`]).
+#[cfg(feature = "connectivity")]
+const NO_LODGINGS: Option<LodgingRows> = LodgingRows::NONE.with(
+    wz_capi_port::lodge::Lent::<wz_capi_port::face_rows::Gathering>::LAYOUT,
+    0,
+);
+/// The table of lodgings of no place.
+#[cfg(not(feature = "connectivity"))]
+const NO_LODGINGS: Option<LodgingRows> = Some(LodgingRows::NONE);
 
 impl HeldPlaces {
     /// No place at all.
     pub const NONE: Self = Self {
         handle: None,
         entities: [None; ENTITY_KINDS],
+        lodging: NO_LODGINGS,
     };
 
     /// A place of `layout` for the ABI's handle of the session, and none for its entities.
     pub const fn handle(layout: Layout) -> Self {
         Self {
             handle: Some(layout),
-            entities: [None; ENTITY_KINDS],
+            ..Self::NONE
         }
+    }
+
+    /// These places, with `count` more places for values lodged by counts that may outlive the
+    /// session ([`wz_capi_port::lodge::Lent::of_bytes`]), each of at least `layout`
+    /// (`Lent::<T>::LAYOUT` for a `T`): one table of them, every place as large and as aligned
+    /// as the largest asked, lent and given back from any thread
+    /// ([`wz_capi_port::PlaceLender::lend_lodging`]). A `const fn`, as [`Self::with_entity`].
+    pub const fn with_lodgings(mut self, layout: Layout, count: usize) -> Self {
+        if let Some(rows) = self.lodging {
+            self.lodging = rows.with(layout, count);
+        }
+        self
     }
 
     /// These places, with a place of `layout` for each row the session keeps of `kind`. A
@@ -952,7 +1045,7 @@ impl GetTables {
 
 /// One face's table of pending gets, as the arena lends it. A build that asks no query keeps none
 /// (`engine::registry::Gets`) and lays out none.
-#[cfg(feature = "query")]
+#[cfg(all(feature = "query", feature = "runtime-plan"))]
 type FaceGets = Requesters<ConsolidatingSink<LegSink, LegHold>, LegSink, Lent>;
 
 /// The tables of what a face's peer writes and is owed that a session's arena lends: how many rows
@@ -1393,6 +1486,8 @@ pub struct PlaceRows {
     /// The kinds of `entity_bytes` the plan holds places of, by their place in
     /// [`EntityKind::ALL`]: what the lend walks.
     held: HeldBits,
+    /// The table of places for values lodged by counts ([`HeldPlaces::with_lodgings`]).
+    lodging: LodgingRows,
 }
 
 /// The places a session's arena lent the ABI ([`PlaceRows::lent_from`]).
@@ -1401,6 +1496,9 @@ pub(crate) struct PlaceTables {
     pub(crate) handle: Option<LentByteCells>,
     /// The places of the ABI's entities, a table of each kind the plan holds places of.
     pub(crate) entities: EntityPlaces,
+    /// The span of the places for values lodged by counts, made a table once the count that keeps
+    /// the arena's memory is known (`LodgingSpan::kept_by`).
+    pub(crate) lodgings: LodgingSpan,
 }
 
 impl PlaceRows {
@@ -1409,6 +1507,7 @@ impl PlaceRows {
         handle_bytes: 0,
         entity_bytes: [0; ENTITY_KINDS],
         held: HeldBits(0),
+        lodging: LodgingRows::NONE,
     };
 
     /// The places, lent by `lend` in the order the plan laid them out: the handle's first, then
@@ -1425,7 +1524,12 @@ impl PlaceRows {
                 *cells = Some(lend.byte_cells(bytes, count));
             }
         }
-        PlaceTables { handle, entities }
+        let lodgings = self.lodging.lent_from(lend);
+        PlaceTables {
+            handle,
+            entities,
+            lodgings,
+        }
     }
 }
 
@@ -1756,6 +1860,9 @@ impl ArenaPlan {
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
         // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
+        // Where the build fixes the session's shape the tables and the round lie in the session's
+        // region instead (`StatePlaces::round`).
+        #[cfg(feature = "runtime-plan")]
         if RECORD_BYTES != 0 {
             self.put(
                 ArenaPart::DeliveryRecords,
@@ -1763,18 +1870,22 @@ impl ArenaPlan {
                 RECORD_BYTES,
             );
         }
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::DeliveryCallbacks,
             self.session.round.callbacks,
             CALLBACK_BYTES,
         );
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::DeliveryKeys,
             1,
             self.session.round.key_bytes::<CoopForm>(),
         );
         // The round itself, placed beside its tables (`Round::placed_over`): its one owner and
-        // the handles of it that count nothing.
+        // the handles of it that count nothing. Where the build fixes the session's shape the round
+        // and the step places below lie in the session's region instead (`StatePlaces`).
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::DeliveryRound,
             1,
@@ -1783,8 +1894,12 @@ impl ArenaPlan {
         // The places the session lends its registry and its Router in for a step, a place each
         // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
         // session's lock and lends no registry.
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(all(
+            feature = "runtime-plan",
+            any(feature = "threads", feature = "listen", feature = "group")
+        ))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
+        #[cfg(feature = "runtime-plan")]
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
         self.put_table(
@@ -1832,10 +1947,17 @@ impl ArenaPlan {
             limits.max_decl_observers(),
             caps::MAX_DECL_OBSERVERS,
         );
-        let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
-            watchers,
-        ));
-        self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
+        // A build of the region's form lays the lists out in its region, at the build's bound; the
+        // limit is still held, so a config over the build's is refused under its name either way.
+        #[cfg(feature = "runtime-plan")]
+        {
+            let watcher_bytes = self.sized(SlotObserverOf::<HeapSinks, Lent>::decl_watcher_bytes(
+                watchers,
+            ));
+            self.put(ArenaPart::DeclarationWatchers, 1, watcher_bytes);
+        }
+        #[cfg(not(feature = "runtime-plan"))]
+        let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
             self.lent(
@@ -1865,14 +1987,17 @@ impl ArenaPlan {
         };
         // A row of tables, each the spans of one face's registries: a face takes one whole. A build
         // that asks no query holds no table of gets (`NoRequesters`), and its plan no row of them.
-        #[cfg(feature = "query")]
+        // A build of the region's form holds its face's gets in its region (`RegistryRegion`).
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
             let get_bytes = self.sized(FaceGets::arena_bytes(self.session.gets.rows));
             self.put(ArenaPart::PendingGets, self.session.gets.tables, get_bytes);
         }
         // The ends of the legs, the rows of their callbacks and the session's note of each leg
-        // pending, a row of each for each get every table holds (`GetTables::legs`).
-        #[cfg(feature = "query")]
+        // pending, a row of each for each get every table holds (`GetTables::legs`). A build of
+        // the region's form holds them in its region, at the build's bound
+        // (`crate::engine::StatePlaces`).
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         {
             let legs = self.sized(self.session.gets.legs());
             self.put(
@@ -1893,6 +2018,7 @@ impl ArenaPlan {
         }
         // The replies the gets that consolidate hold to their Finals: a row for each reply, in one
         // table shared by every get, each tagged with its leg (`engine::get::LegHold`).
+        // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
             self.session.held_replies = self.lent(
@@ -1900,6 +2026,7 @@ impl ArenaPlan {
                 limits.max_pending_replies(),
                 caps::MAX_PENDING_REPLIES,
             );
+            #[cfg(feature = "runtime-plan")]
             self.put(
                 ArenaPart::HeldReplies,
                 self.session.held_replies,
@@ -1929,7 +2056,9 @@ impl ArenaPlan {
             dial: shape.dial_role(),
         };
         // The sets of face tables themselves, one for each face, in one table
-        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it.
+        // (`engine::registry::Registry::new`); what each set's tables hold is the rows after it. A
+        // build of the region's form holds its one set, its tables and their rows in its region.
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::FaceTables,
             self.session.peers.sets(),
@@ -1944,16 +2073,23 @@ impl ArenaPlan {
             HELD_SET_BYTES,
         );
         // What the face holding each set names for a wait for its room, a place for each set
-        // (`crate::engine::LinkRooms`).
+        // (`crate::engine::LinkRooms`); a build of the region's form holds its one set's place in
+        // its region (`crate::engine::StatePlaces`).
+        #[cfg(feature = "runtime-plan")]
         self.put(
             ArenaPart::RoomPlaces,
             self.session.peers.sets(),
             ROOM_PLACE_BYTES,
         );
-        let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
-        self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
+        #[cfg(feature = "runtime-plan")]
+        {
+            let peer_bytes = self.sized(PeerTables::<Lent>::arena_bytes(self.session.peers.rows));
+            self.put(ArenaPart::PeerTables, self.session.peers.tables, peer_bytes);
+        }
         // Each kind one area: a pool the faces share, or for a session of one face a span of its
-        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline.
+        // tables' own (`pool_rows`); none in a build whose faces keep those rows inline, as a
+        // build of the region's form does.
+        #[cfg(feature = "runtime-plan")]
         if SHARES_ROWS {
             let pools = self.session.peers.pools;
             let aliases = self.sized(pools.alias_bytes());
@@ -1985,8 +2121,9 @@ impl ArenaPlan {
             0
         };
         // The Finals held for those queries and the requests a dispatch refused for want of a
-        // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`).
-        #[cfg(feature = "queryable")]
+        // row, a row of each for each query held (`wz_session_core::query_plane::FinalHolds`),
+        // where the arena lends them; a build of the region's form holds them in its region.
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         {
             let held = self.session.held_queries;
             self.put(
@@ -2015,6 +2152,9 @@ impl ArenaPlan {
                 );
             }
         }
+        // A build of the region's form holds the session's tables and its key arena in its region
+        // (`crate::region::StateRegion`).
+        #[cfg(feature = "runtime-plan")]
         self.put_entities();
         self.settled()
     }
@@ -2056,6 +2196,7 @@ impl ArenaPlan {
     }
 
     /// The rows of the session's declarations ([`EntityRows`]).
+    #[cfg(feature = "runtime-plan")]
     const fn put_entities(&mut self) {
         // The session's one table set, holding the kinds moved onto it so far: the write filters,
         // the matching listeners and the Interests they hold among them.
@@ -2235,10 +2376,11 @@ impl ArenaPlan {
 
     /// Lay out the places `held` names, lent after every other row: the ABI's handle of the
     /// session first, then each kind of entity in the order of [`EntityKind::ALL`], a place for
-    /// each row the session keeps of the kind. What the ABI keeps there takes no memory of its
-    /// own, and an open whose arena cannot hold it reserves nothing, as for any other row. A place
-    /// of no bytes, and a kind the session keeps no row of, take none, and a place the plan holds
-    /// already is not laid out again. Refused as past the address space when a place asks for more
+    /// each row the session keeps of the kind; then one table of places for values lodged by
+    /// counts ([`HeldPlaces::with_lodgings`]), the engine's own among them. What the ABI keeps
+    /// there takes no memory of its own, and an open whose arena cannot hold it reserves nothing,
+    /// as for any other row. A place of no bytes, and a kind the session keeps no row of, take
+    /// none, and a place the plan holds already is not laid out again. Refused as past the address space when a place asks for more
     /// alignment than a span of the arena starts on ([`ARENA_ALIGN`]), or the arena with the
     /// places is. The plan is laid out where it lies; a refused one is no plan to open by.
     pub fn holding(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
@@ -2282,6 +2424,24 @@ impl ArenaPlan {
                 *bytes = place.size();
                 self.places.held = self.places.held.with(at);
             }
+        }
+        let Some(rows) = held.lodging else {
+            return Err(ArenaRefused::TooLarge);
+        };
+        // The engine lodges a watcher of the faces' snapshots for each transport events listener
+        // the session holds (`SessionEngine::watch_faces`), in the ABI's table of lodgings, whose
+        // places are laid out for it already (`NO_LODGINGS`).
+        #[cfg(feature = "connectivity")]
+        let Some(rows) = rows.more(
+            self.session
+                .entities
+                .of_kind(EntityKind::TransportEventsListener),
+        ) else {
+            return Err(ArenaRefused::TooLarge);
+        };
+        if rows.count() != 0 && self.places.lodging.count() == 0 {
+            self.places.lodging = rows;
+            self.put(ArenaPart::LodgingPlaces, rows.count(), rows.stride());
         }
         Ok(())
     }
@@ -2372,11 +2532,13 @@ impl ArenaPlan {
     /// the gets' and the watchers' of the faces, each where its feature is. Laid out once, at the
     /// open, the plan not settled: a refusal is kept for `Self::settled`.
     pub(crate) fn lay_planes(&mut self, planes: crate::engine::SessionPlanes) {
-        #[cfg(feature = "queryable")]
+        // Where the build fixes the session's shape these lie in its region
+        // (`crate::engine::StatePlaces`).
+        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
         self.put(ArenaPart::QueryPlaneState, 1, planes.queries);
-        #[cfg(feature = "query")]
+        #[cfg(all(feature = "query", feature = "runtime-plan"))]
         self.put(ArenaPart::GetPlaneState, 1, planes.gets);
-        #[cfg(feature = "connectivity")]
+        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
         self.put(ArenaPart::FacePlaneState, 1, planes.faces);
         let _ = planes;
     }
@@ -3280,6 +3442,7 @@ unsafe fn give_arena_back(kept: NonNull<Kept>) {
 impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
+    #[cfg(any(feature = "runtime-plan", test))]
     pub(crate) fn reserve(
         plan: &ArenaPlan,
         memory: &'static dyn ArenaMemory,
@@ -3287,28 +3450,65 @@ impl SessionArena {
         Self::of_bytes(plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?, memory)
     }
 
+    /// The arena `plan` lays out and, before it, a `T` of all zero bytes, reserved from `memory`
+    /// as one block: the region the build lays a session's state out in and the arena of what the
+    /// session's open sizes at run time take one reservation, given back whole by the arena's last
+    /// holder (`Self::keep`), so the region's owner drops the `T` in place and gives back nothing.
+    /// Refused as an arena alone is, having taken nothing.
+    #[cfg(not(feature = "runtime-plan"))]
+    pub(crate) fn reserve_after<T: ZeroEmpty>(
+        plan: &ArenaPlan,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<(Self, NonNull<T>), ArenaRefused> {
+        let bytes = plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?;
+        let (arena, base) = Self::of_bytes_after(Layout::new::<T>(), bytes, memory)?;
+        Ok((arena, base.cast::<T>()))
+    }
+
     /// Reserve an arena of `bytes` from `memory`. Refused, having taken nothing, when the memory has
     /// none to give.
+    #[cfg(any(feature = "runtime-plan", test))]
     pub(crate) fn of_bytes(
         bytes: usize,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Self, ArenaRefused> {
+        Self::of_bytes_after(Layout::new::<()>(), bytes, memory).map(|(arena, _)| arena)
+    }
+
+    /// An arena of `bytes` reserved from `memory` after a head of `head`'s layout, every byte of
+    /// the head zero, and where the block starts: the head's place. One body for an arena alone
+    /// (a head of no bytes) and for one beside a region. Refused, having taken nothing, when the
+    /// block is past the address space or the memory has none to give.
+    fn of_bytes_after(
+        head: Layout,
+        bytes: usize,
+        memory: &'static dyn ArenaMemory,
+    ) -> Result<(Self, NonNull<u8>), ArenaRefused> {
         // At least one span, so the memory is never asked for nothing.
-        let layout = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
+        let (layout, offset) = Layout::from_size_align(bytes.max(ARENA_ALIGN), ARENA_ALIGN)
+            .and_then(|tail| head.extend(tail))
             .map_err(|_| ArenaRefused::TooLarge)?;
-        let base = memory
-            .reserve(layout)
-            .ok_or(ArenaRefused::NoMemory { bytes })?;
-        // SAFETY: the memory gave `layout`, aligned to `ARENA_ALIGN` and at least `bytes` long, to
-        // this arena alone, until `Drop` gives it back.
-        let arena = unsafe { Arena::over(base, bytes) };
-        Ok(Self {
-            arena,
+        let base = memory.reserve(layout).ok_or(ArenaRefused::NoMemory {
+            bytes: offset.saturating_add(bytes),
+        })?;
+        // SAFETY: the memory gave `layout` to this call alone: the head's `head.size()` bytes at
+        // its start are inside it, and its arena starts `offset` bytes in, aligned to
+        // `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long, used by nothing else until the
+        // block is given back (`Drop`, or the last count of `Self::keep`).
+        let arena = unsafe {
+            base.as_ptr().write_bytes(0, head.size());
+            Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes)
+        };
+        Ok((
+            Self {
+                arena,
+                base,
+                layout,
+                memory,
+                kept: None,
+            },
             base,
-            layout,
-            memory,
-            kept: None,
-        })
+        ))
     }
 
     /// The count the arena's memory is kept by, lent from the arena on the first ask: the session
@@ -3384,8 +3584,11 @@ impl SessionArena {
     /// Whether `at` is a byte of the arena's memory.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn holds(&self, at: *const u8) -> bool {
-        let base = self.base.as_ptr() as usize;
-        (base..base + self.bytes()).contains(&(at as usize))
+        // The arena is the tail of the block, after a region's head where there is one, and its
+        // span at least `ARENA_ALIGN` long (`Self::of_bytes_after`).
+        let start =
+            self.base.as_ptr() as usize + self.layout.size() - self.bytes().max(ARENA_ALIGN);
+        (start..start + self.bytes()).contains(&(at as usize))
     }
 }
 
@@ -3407,6 +3610,29 @@ mod tests {
 
     fn empty_plan() -> ArenaPlan {
         ArenaPlan::vacant()
+    }
+
+    /// The allocator, its reservations written over with a byte that is not zero.
+    #[cfg(not(feature = "runtime-plan"))]
+    struct Dirty;
+
+    /// The byte [`Dirty`] writes over what it reserves.
+    #[cfg(not(feature = "runtime-plan"))]
+    const DIRTY: u8 = 0xa5;
+
+    #[cfg(not(feature = "runtime-plan"))]
+    impl ArenaMemory for Dirty {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = AllocatorMemory.reserve(layout)?;
+            // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+            unsafe { core::ptr::write_bytes(base.as_ptr(), DIRTY, layout.size()) };
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
@@ -3788,6 +4014,90 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), all.len(), "two limits share a name");
+    }
+
+    /// What `a_region_and_its_arena_are_one_reservation_given_back_whole` reserves from: the
+    /// allocator, its reservations written over as [`Dirty`]'s are, counting what it gives and
+    /// what it is given back.
+    #[cfg(not(feature = "runtime-plan"))]
+    struct OneBlock {
+        reserves: core::sync::atomic::AtomicUsize,
+        reserved: core::sync::atomic::AtomicUsize,
+        releases: core::sync::atomic::AtomicUsize,
+        released: core::sync::atomic::AtomicUsize,
+    }
+
+    #[cfg(not(feature = "runtime-plan"))]
+    impl ArenaMemory for OneBlock {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = Dirty.reserve(layout)?;
+            self.reserves
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            self.reserved
+                .fetch_add(layout.size(), core::sync::atomic::Ordering::SeqCst);
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            self.releases
+                .fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            self.released
+                .fetch_add(layout.size(), core::sync::atomic::Ordering::SeqCst);
+            // SAFETY: the caller's contract, handed on to the memory that reserved it.
+            unsafe { Dirty.release(base, layout) }
+        }
+    }
+
+    /// A region and the arena after it are one reservation from a memory whose reservations are
+    /// not zero: the region at the block's start, every byte of it zero, the arena after it of the
+    /// plan's bytes, and the block given back once, whole, when the arena is let go. Turned red by
+    /// a region reserved apart from its arena, by a head left as the memory wrote it, or by a
+    /// release of a layout other than the one reserved.
+    #[cfg(not(feature = "runtime-plan"))]
+    #[test]
+    fn a_region_and_its_arena_are_one_reservation_given_back_whole() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static BLOCK: OneBlock = OneBlock {
+            reserves: AtomicUsize::new(0),
+            reserved: AtomicUsize::new(0),
+            releases: AtomicUsize::new(0),
+            released: AtomicUsize::new(0),
+        };
+        /// A head of an odd length, so the arena after it starts past a pad.
+        struct Head([u8; 41]);
+        // SAFETY: a head of zero bytes is one of zeros, which holds nothing to drop.
+        unsafe impl ZeroEmpty for Head {}
+
+        let control = Layout::new::<Head>();
+        let base = Dirty.reserve(control).expect("the allocator answers");
+        // SAFETY: the memory gave `control.size()` bytes at `base`, read once and given back.
+        let dirty = unsafe {
+            let read = core::slice::from_raw_parts(base.as_ptr(), control.size())
+                .iter()
+                .all(|byte| *byte == DIRTY);
+            Dirty.release(base, control);
+            read
+        };
+        assert!(dirty, "CONTROL: the memory's own reservation is not zero");
+
+        let mut plan = ArenaPlan::vacant();
+        plan.holding_runtime(64).expect("the span fits");
+        let bytes = plan.reserved_bytes().expect("within the address space");
+        let (arena, head) =
+            SessionArena::reserve_after::<Head>(&plan, &BLOCK).expect("the host has it");
+        // SAFETY: the head is the block's first bytes, which nothing else reaches.
+        let zeroed = unsafe { head.as_ref() }.0.iter().all(|byte| *byte == 0);
+        assert!(zeroed, "the region is zero in every byte");
+        assert_eq!(arena.bytes(), bytes, "the arena holds the plan's bytes");
+        let reserved = BLOCK.reserved.load(Ordering::SeqCst);
+        assert!(
+            reserved >= Arena::span(core::mem::size_of::<Head>()).expect("a small span") + bytes,
+            "the arena lies after the region, aligned"
+        );
+        assert_eq!(BLOCK.reserves.load(Ordering::SeqCst), 1, "one reservation");
+        drop(arena);
+        assert_eq!(BLOCK.releases.load(Ordering::SeqCst), 1, "given back once");
+        assert_eq!(BLOCK.released.load(Ordering::SeqCst), reserved, "whole");
     }
 
     /// What the arena of `an_arena_a_runtime_is_placed_in_goes_back_after_its_last_holder` is

@@ -17,7 +17,7 @@
 //!
 //! What a peer writes by its own choice (its aliases, its declarations and the repeats of them,
 //! its interests) is not lent to each set at the bound of one peer: each kind of row lies in one
-//! pool of the session's ([`PeerPools`]), lent at the open as the sets are, and a face's tables
+//! pool of the session's (`PeerPools`), lent at the open as the sets are, and a face's tables
 //! are lists of the rows its peer holds there. A face keeps the bound of one peer; the pool bounds
 //! what the faces hold together, and a face that goes gives back its rows, and only its.
 //!
@@ -36,21 +36,28 @@
     feature = "declarations-synced-event"
 ))]
 use super::decl_watch::WatchObserver;
+use wz_session_core::bounded::BoundedVec;
 #[cfg(feature = "queryable")]
 use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{Arena, BoundedVec, LendRefused};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::bounded::{Arena, LendRefused};
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 use wz_session_core::driver_loop::InPlaceRecord;
 
 use crate::RowPolicy;
 use wz_session_core::driver_loop::IterationEvent;
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::key_arena::{KeySpace, LentKeys};
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limit_binding::Quota;
 #[cfg(feature = "multicast-declarations")]
 use wz_session_core::limits::MaxPeerKeyexprAliasesHeld;
 use wz_session_core::limits::SessionLimits;
-use wz_session_core::peer_tables::{PeerPools, PeerRows, PeerTables, SHARES_ROWS};
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::peer_tables::PeerPools;
+use wz_session_core::peer_tables::PeerTables;
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::peer_tables::{PeerRows, SHARES_ROWS};
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 use wz_session_core::pubsub::LentPush;
 #[cfg(feature = "query")]
@@ -65,16 +72,25 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(feature = "runtime-plan")]
+use wz_session_core::slot_observer::ObserverRows;
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 use wz_session_core::slot_observer::OtherPeers;
 #[cfg(feature = "query")]
 use wz_session_core::slot_observer::Requesters;
-use wz_session_core::slot_observer::{ObserverRows, ObserverSinks, SlotObserverOf};
+use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 #[cfg(feature = "query")]
 use super::{LegHold, LegSink};
 use super::{RoundDelivery, SubscriberRow};
-use crate::arena::{FacePeers, GetTables, MAX_FACE_SETS};
+use crate::arena::MAX_FACE_SETS;
+#[cfg(feature = "runtime-plan")]
+use crate::arena::{FacePeers, GetTables};
+#[cfg(feature = "runtime-plan")]
 use wz_session_core::slot_observer::RequesterRows;
 
 use wz_session_core::declare::matching::MatchingSink;
@@ -127,7 +143,7 @@ pub(super) type PeerRoom = wz_session_core::pubsub::LentRoom<RowPolicy>;
 
 /// What the session holds for one face: what its peer wrote and what the session asked of it.
 ///
-/// A set is built where the registry keeps it ([`Self::rowless_in`], then [`Self::lend`]) and is
+/// A set is built where the registry keeps it ([`Self::rowless_in`], then `Self::lend`) and is
 /// never moved from there: a face that comes takes a set where it lies and one that goes empties it
 /// there, its rows of the session's pools going back to them. A set holds a few words for each of
 /// its tables, and the session's tables are placed once and not moved.
@@ -147,7 +163,7 @@ pub(super) struct FaceTables {
 impl FaceTables {
     /// A set for no face yet, written field by field into `place`, which is overwritten without
     /// dropping what it held: tables of no rows, each refusing what is asked of it until
-    /// [`Self::lend`] lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
+    /// `Self::lend` lends it rows, the peer's held to `limits`. Not inlined: the peer's tables,
     /// nearly all of the set, are written where they lie by `init_in`, and of the set only its
     /// gets are a value in this frame.
     #[inline(never)]
@@ -183,6 +199,7 @@ impl FaceTables {
     /// peer's tables, from `arena`, in that order, the peer's keys kept in `keys`, the session's
     /// key arena, held to `limits`. Refused when the arena has not the rows; the set stays whole,
     /// with what was lent before the refusal.
+    #[cfg(feature = "runtime-plan")]
     fn lend(
         &mut self,
         arena: &mut Arena,
@@ -210,7 +227,8 @@ impl FaceTables {
 }
 
 /// The bytes of one set of face tables, a row of the arena's table of them
-/// (`crate::arena::ArenaPlan`).
+/// (`crate::arena::ArenaPlan`), where the arena lends them (`runtime-plan`).
+#[cfg(feature = "runtime-plan")]
 pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 
 /// The bytes of one entry of the index of held sets, a row of the arena's table of them: kept by a
@@ -236,10 +254,16 @@ fn names_face(holder: FaceId) -> bool {
     holder < NAMES_NO_FACE
 }
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 mod adding;
 mod held;
 use held::Holders;
+#[cfg(not(feature = "runtime-plan"))]
+pub(crate) mod placed;
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
 /// place: never a free set, whose row names no face.
@@ -267,14 +291,18 @@ impl HeldFace {
         feature = "listen",
         feature = "group",
         feature = "interest-answer",
-        test
+        all(test, feature = "runtime-plan")
     ))]
     pub(super) const fn new(at: usize, id: FaceId) -> Self {
         Self { at, id }
     }
 
     /// The place of the face's set, which its link and its room keep too.
-    #[cfg(any(feature = "listen", feature = "group", test))]
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
     pub(super) const fn at(&self) -> usize {
         self.at
     }
@@ -298,7 +326,11 @@ pub(super) struct HistoryCursor {
 /// The faces other than the one a call acts on, which the matching verdicts of that call count:
 /// the sets before the call's own and after it, and the rows of the index of held sets that
 /// name their faces.
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 pub(super) struct Others<'a> {
     before: &'a [FaceTables],
     after: &'a [FaceTables],
@@ -306,7 +338,11 @@ pub(super) struct Others<'a> {
     held_after: &'a [FaceId],
 }
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 impl Others<'_> {
     fn faces(&self) -> impl Iterator<Item = &FaceTables> {
         let before = self.before.iter().zip(self.held_before);
@@ -318,7 +354,11 @@ impl Others<'_> {
     }
 }
 
-#[cfg(any(feature = "listen", feature = "group", test))]
+#[cfg(any(
+    feature = "listen",
+    feature = "group",
+    all(test, feature = "runtime-plan")
+))]
 impl OtherPeers for Others<'_> {
     fn subscribes(
         &self,
@@ -469,7 +509,7 @@ pub(super) struct RegistryOf<H: Holders> {
     delivery: RoundDelivery,
     /// The session's pools of what its peers write by their own choice, which every face's tables
     /// keep their rows in from the open on: what a test reads the pools' counts by.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "runtime-plan"))]
     pools: PeerPools,
     /// Every set of face tables, each where it was built and never moved from, in a table the arena
     /// lent at the open with a row for each face the config admits: the dial role's face's first
@@ -594,6 +634,7 @@ impl<H: Holders> RegistryOf<H> {
     /// declare keeps its keys in `keys`, the session's key arena, as the session's own
     /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
     /// the arena has not the rows, which one reserved by the plan that counts them always has.
+    #[cfg(feature = "runtime-plan")]
     pub(super) fn new(
         limits: &SessionLimits,
         arena: &mut Arena,
@@ -646,7 +687,7 @@ impl<H: Holders> RegistryOf<H> {
             owed,
             #[cfg(feature = "multicast-declarations")]
             peer_aliases: limits.max_peer_keyexpr_aliases_held(),
-            #[cfg(test)]
+            #[cfg(all(test, feature = "runtime-plan"))]
             pools,
             #[cfg(feature = "local-queryable")]
             local,
@@ -754,7 +795,7 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The faces the session holds, in the order of their sets.
-    #[cfg(any(feature = "liveliness", test))]
+    #[cfg(any(feature = "liveliness", all(test, feature = "runtime-plan")))]
     fn held_ids(&self) -> impl Iterator<Item = FaceId> + '_ {
         self.holders
             .rows()
@@ -834,7 +875,11 @@ impl<H: Holders> RegistryOf<H> {
     /// The tables of `face`, gone with the face and left, emptied, where they lie for the next
     /// face: its place is free. The dial role's face is never removed, and the key of a face that
     /// is not held removes nothing.
-    #[cfg(any(feature = "listen", feature = "group", test))]
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
     pub(super) fn remove_face(&mut self, face: HeldFace) {
         self.let_go(face, NO_FACE);
     }
@@ -875,7 +920,11 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// Empty the set `face` holds, its row then reading `row`.
-    #[cfg(any(feature = "listen", feature = "group", test))]
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
     fn let_go(&mut self, face: HeldFace, row: FaceId) {
         if face.id == DIAL_FACE {
             return;
@@ -1656,6 +1705,7 @@ fn reconcile_face(app: &App, face: &mut FaceTables) {
 /// `keys`, the session's key arena, and what its peer writes in the rows `pools`, the session's,
 /// hands it, and hand it back: a set is never a value of its own in this frame. `None` when
 /// `sets` holds every row it was lent.
+#[cfg(feature = "runtime-plan")]
 fn push_rowless<'s>(
     sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
@@ -1671,6 +1721,7 @@ fn push_rowless<'s>(
 /// dial face's of a session that dials nothing, which never has a peer to write into them. With one
 /// face's own spans, taking them here would leave the one face that comes none. `None` when
 /// `sets` holds every row it was lent.
+#[cfg(feature = "runtime-plan")]
 fn push_unpeered<'s>(
     sets: &'s mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
     keys: KeySpace,
@@ -1692,6 +1743,7 @@ fn push_unpeered<'s>(
 ///
 /// Never inlined: the open calls it in a loop, and a loop whose first turn the compiler peels
 /// would carry the set's writing and lending twice.
+#[cfg(feature = "runtime-plan")]
 #[inline(never)]
 fn lend_set(
     sets: &mut BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>,
@@ -1747,7 +1799,9 @@ unsafe fn let_go(
     }
 }
 
-#[cfg(test)]
+// The registry's own tests build it from an arena, as a build that lays its arena out at the open
+// does; a build of the region's form is held by the region's tests (`crate::tests::region`).
+#[cfg(all(test, feature = "runtime-plan"))]
 mod tests {
     //! Each face's tables are lent from the session's arena: the dial face's at the open, an
     //! accepted face's from the spares the open lent, and past those tables of no rows that refuse
@@ -1859,7 +1913,7 @@ mod tests {
         let delivery = RoundDelivery::new(
             round,
             wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
-                alloc::boxed::Box::new(super::super::query::leaked_plane(1)),
+                super::super::query::leaked_plane(1),
             )),
         );
         let registry = RegistryOf::<H>::new(
