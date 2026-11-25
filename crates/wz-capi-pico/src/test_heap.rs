@@ -19,12 +19,13 @@ std::thread_local! {
 }
 
 /// Every allocation of the calling thread while `run` runs, counted: read by the tests of a
-/// session's doors, on the tokio engine through the connectivity plane's tests and on the
-/// cooperative one with threads by the kept query's, so it is built where one of them is.
+/// session's doors, through the connectivity tests on the tokio engine and by the kept query's
+/// tests on the cooperative one with threads, each built with the module it reads.
 #[cfg(any(
     all(feature = "engine-tokio", feature = "connectivity"),
     all(
         not(feature = "engine-tokio"),
+        feature = "queryable",
         feature = "std",
         feature = "peer",
         feature = "query",

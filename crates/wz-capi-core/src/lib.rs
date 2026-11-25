@@ -60,6 +60,7 @@ pub use wz_capi_port::cancellation;
 /// onto its tasks; the facade crate carries it across its own close with it.
 pub mod caller_span;
 pub mod codec;
+mod deliveries;
 pub mod drive;
 pub mod encoding_ids;
 pub mod fan_undo;

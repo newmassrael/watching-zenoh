@@ -1330,17 +1330,39 @@ pub(crate) struct QueryableState {
     /// closure its row calls lies in it, and one whose declaration was refused is let go of with
     /// none.
     declared: Option<DeclaredQueryable>,
-    /// Cached loan of the declaration's key, so `z_queryable_keyexpr` hands back a borrow of
-    /// stable storage rather than of a temporary.
+    /// The loan `z_queryable_keyexpr` hands back: the key as the session's record of the
+    /// queryable keeps it, with the declaration the record holds that the key begins with
+    /// ([`crate::keyexpr::record_loan`]).
     loaned_keyexpr: z_loaned_keyexpr_t,
 }
 
-/// A queryable's declaration: its id and its key.
+/// A queryable's declaration: its id in the session, whose record of the queryable keeps its key
+/// and holds the declaration pico makes for the key's non-wild prefix, from the declaration until
+/// the queryable is retracted; the door keeps no copy of the key.
 struct DeclaredQueryable {
     id: QblId,
-    /// R2959 — the queryable's key with the non-wild-prefix declaration pico
-    /// makes for it; dropped after the queryable, so the retraction follows.
-    key: DeclaredKeyexpr,
+    /// The session and the declaration the record holds that the key begins with, as the record
+    /// lent it ([`wz_capi_port::SessionEngine::queryable_keyexpr`]): what the loan of the key
+    /// names, and what a key made of the loan holds.
+    record: crate::keyexpr::RecordKey,
+}
+
+impl QueryableState {
+    /// Point the cached loan at the key the session's record of the queryable keeps, once declared
+    /// and placed.
+    fn bind(&mut self) {
+        let Some(declared) = self.declared.as_mut() else {
+            return;
+        };
+        let lent = wz_capi_port::SessionEngine::queryable_keyexpr(
+            crate::session::EngineHold::as_ref(&self.engine),
+            declared.id,
+        );
+        if let Some(view) = lent {
+            declared.record = crate::keyexpr::RecordKey::lent(&self.engine, view.own);
+            self.loaned_keyexpr = crate::keyexpr::record_loan(view, &declared.record);
+        }
+    }
 }
 
 /// What a queryable's place keeps for its row past the queryable's handle: the C closure the row
@@ -1393,8 +1415,8 @@ impl z_owned_queryable_t {
 
 /// Let go of a queryable: its declaration is retracted, which lets its row's callback go after
 /// its last call, the release waits for the closure to be let go of (pico's `_z_sync_group_wait`)
-/// unless it is made from inside a callback, and the key goes after. The place goes back with the
-/// last of the handle and the closure.
+/// unless it is made from inside a callback; the session's record of it, and the key it keeps, go
+/// with the retraction. The place goes back with the last of the handle and the closure.
 ///
 /// # Safety
 /// `h` must be a live `QueryableState` handle, let go of once.
@@ -1490,8 +1512,11 @@ unsafe fn declare_queryable_in(
         // as the subscriber's and the liveliness subscriber's doors hand theirs.
         queryable_sink_at(state),
     ) {
-        Ok((id, key)) => {
-            (*state).declared = Some(DeclaredQueryable { id, key });
+        Ok(id) => {
+            (*state).declared = Some(DeclaredQueryable {
+                id,
+                record: crate::keyexpr::RecordKey::UNLENT,
+            });
             Ok(state)
         }
         Err(code) => {
@@ -1527,35 +1552,33 @@ pub(crate) fn declare_queryable_on(
     complete: bool,
     allowed_origin: wz_session_core::locality::Locality,
     sink: QueryableSink,
-) -> Result<(QblId, DeclaredKeyexpr), ZResult> {
-    let key = DeclaredKeyexpr::declare_non_wild_prefix(&session.engine, keyexpr, existing)?;
+) -> Result<QblId, ZResult> {
+    let key = crate::keyexpr::EntityKey::non_wild_prefix(&session.engine, keyexpr, existing)?;
     let id = wz_capi_port::SessionEngine::declare_queryable_on_wire(
         &*session.engine,
         keyexpr,
-        key.wire(crate::session::EngineHold::as_ref(&session.engine)),
+        key.wire(),
         complete,
         allowed_origin,
         // A peer or router-hat session retracts the queryable naming its key
         // (`_z_undeclare_queryable`) — the announced one, for a queryable.
-        key.retraction_naming_in(
-            session.mode,
-            crate::session::EngineHold::as_ref(&session.engine),
-        ),
+        key.retraction_naming_in(session.mode),
         sink,
     )
     .map_err(|refused| crate::refusal::refusal_code(refused, crate::refusal::Door::Entity))?;
-    Ok((id, key))
+    // The session's record holds the declarations the wire and the retraction name from here on:
+    // the door's hold goes, and the key is lent from the record.
+    drop(key);
+    Ok(id)
 }
 
-/// A pico queryable with no C handle around it, retracted when dropped: the
-/// declaration and its key, for a composite that answers with something other
-/// than a C closure (an advanced publisher's cache, the admin space).
+/// A pico queryable with no C handle around it, retracted when dropped, for a composite that
+/// answers with something other than a C closure (an advanced publisher's cache, the admin
+/// space). The session's record of the queryable keeps its key.
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
     engine: crate::session::EngineHold,
     id: QblId,
-    /// Dropped after the queryable, so the retraction follows.
-    _key: DeclaredKeyexpr,
 }
 
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
@@ -1570,7 +1593,7 @@ impl PlainQueryable {
     ) -> Result<Self, ZResult> {
         // Declared as pico declares its own (`z_declare_queryable` with NULL options):
         // the default origin.
-        let (id, key) = declare_queryable_on(
+        let id = declare_queryable_on(
             session,
             keyexpr,
             existing,
@@ -1581,7 +1604,6 @@ impl PlainQueryable {
         Ok(Self {
             engine: session.engine.clone(),
             id,
-            _key: key,
         })
     }
 }
@@ -1616,10 +1638,8 @@ pub unsafe extern "C" fn z_declare_queryable(
             Ok(state) => state,
             Err(code) => return code,
         };
-        // Point the cached view at the placed keyexpr's final address.
-        if let Some(declared) = &(*state).declared {
-            (*state).loaned_keyexpr = declared.key.loaned();
-        }
+        // The loan names the state where it lies, which is where it stays.
+        (*state).bind();
         *queryable = z_owned_queryable_t {
             handle: state as *mut c_void,
             _pad: [core::ptr::null_mut(); 3],
@@ -3000,6 +3020,114 @@ mod tests {
             "the closure's drop gave the place back"
         );
 
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// What `z_queryable_keyexpr` lends is the key the session's record of the queryable keeps:
+    /// its bytes, not the caller's, and the declaration of the key's non-wild start, which the
+    /// record holds once the door let its own hold go. A key copied from the loan is one more
+    /// holder of that declaration, counted at its row and given back with the copy. The record and
+    /// its key go with the queryable.
+    ///
+    /// Turned red by a loan bound to a copy the door keeps (the address), a loan that names no
+    /// declaration (slot 2, the wire), a tag the loan's readers do not know (the copy's row), a copy
+    /// that takes no hold of its own or gives none back (the count), or a record left after the
+    /// undeclaration.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_queryables_lent_key_is_the_sessions_record_and_a_copy_holds_its_declaration() {
+        use crate::abi::z_owned_keyexpr_t;
+        use crate::keyexpr::{z_keyexpr_clone, z_keyexpr_drop, z_keyexpr_loan, z_keyexpr_move};
+        use crate::session::{
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move,
+        };
+        use wz_capi_port::SessionEngine;
+        use wz_session_core::session_tables::KeyexprCount;
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) }
+            .expect("an open session has its handle");
+        let engine = engine_held(handle).clone();
+        let shared = crate::session::EngineHold::as_ref(&engine);
+        let key = "demo/lent/qbl/**";
+        let caller = z_loaned_keyexpr_t::borrowed(key.as_ptr(), key.len());
+        let mut queryable = z_owned_queryable_t::null_value();
+        // SAFETY: every pointer is to a live value of this frame; the closure calls nothing.
+        unsafe {
+            let mut closure: z_owned_closure_query_t = core::mem::zeroed();
+            assert_eq!(
+                z_closure_query(&mut closure, None, None, core::ptr::null_mut()),
+                Z_OK
+            );
+            assert_eq!(
+                z_declare_queryable(
+                    z_session_loan(&session),
+                    &mut queryable,
+                    &caller,
+                    z_closure_query_move(&mut closure),
+                    core::ptr::null(),
+                ),
+                Z_OK
+            );
+        }
+        let state = queryable.handle.cast::<QueryableState>();
+        // SAFETY: the queryable is live until it is let go of below.
+        let id =
+            unsafe { (*state).declared.as_ref().map(|declared| declared.id) }.expect("declared");
+        let record =
+            SessionEngine::queryable_keyexpr(shared, id).expect("the record keeps the key");
+        let own = record
+            .own
+            .expect("the record holds the prefix's declaration");
+        assert_eq!(
+            own.prefix_len,
+            "demo/lent/qbl".len(),
+            "the key's non-wild start"
+        );
+        // SAFETY: the loan is live until the queryable is let go of below, and the row its slot 2
+        // names stands while the record holds the declaration.
+        unsafe {
+            let lent = z_queryable_keyexpr(z_queryable_loan(&queryable));
+            assert_eq!((*lent)._start, record.start, "the bytes the record keeps");
+            assert_ne!((*lent)._start, key.as_ptr(), "not the caller's");
+            assert_eq!(keyexpr_str(lent), Some(key));
+            assert_ne!((*lent)._handle, 0, "the loan names the declaration's row");
+            assert_eq!((*lent)._handle, own.row_address());
+            let wire = crate::keyexpr::wire_key_of(lent, shared);
+            assert_eq!(
+                wire.mapping_id, own.mapping,
+                "named on the wire by the declaration"
+            );
+
+            let count = &*((*lent)._handle as *const KeyexprCount);
+            let holds = count.holds();
+            let mut copy = z_owned_keyexpr_t::null_value();
+            assert_eq!(z_keyexpr_clone(&mut copy, lent), Z_OK);
+            assert_eq!(
+                Some(count.holds()),
+                holds.checked_add(1),
+                "the copy holds it"
+            );
+            assert_eq!(
+                (*z_keyexpr_loan(&copy))._handle,
+                (*lent)._handle,
+                "at its row"
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&copy)), Some(key));
+            z_keyexpr_drop(z_keyexpr_move(&mut copy));
+            assert_eq!(count.holds(), holds, "the copy gave its hold back");
+        }
+        // SAFETY: the queryable made above, let go of once here.
+        unsafe { z_queryable_drop(z_queryable_move(&mut queryable)) };
+        assert_eq!(
+            SessionEngine::queryable_keyexpr(shared, id),
+            None,
+            "undeclared, the record and its key are gone"
+        );
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

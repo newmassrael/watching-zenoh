@@ -828,17 +828,51 @@ unsafe fn session_tail<'a>(zs: *const z_loaned_session_t) -> &'a SessionTail {
 /// counted is.
 pub(crate) unsafe fn session_count(zs: *const z_loaned_session_t) -> crate::ffi::CountIn {
     // SAFETY: the caller's: the session's place stands, as its handle is held.
-    let tail = unsafe { session_tail(zs) };
-    // SAFETY: the count lies in the place `_val` names, which goes back only through
-    // `give_back_session_place`, called by whichever of the handle's release and the last
-    // hold counted goes last.
-    unsafe {
-        crate::ffi::CountIn::new(
-            &tail.open,
-            core::ptr::NonNull::new_unchecked((*zs)._val),
-            give_back_session_place,
-        )
-    }
+    unsafe { count_at(core::ptr::NonNull::new_unchecked((*zs)._val)) }
+}
+
+/// The count of the session whose place is `place`.
+///
+/// # Safety
+/// `place` is the place of a session's handle (`_val`), which stands.
+unsafe fn count_at(place: core::ptr::NonNull<c_void>) -> crate::ffi::CountIn {
+    // SAFETY: the caller's: `place` holds a `SessionPlace`, which stands.
+    let tail = unsafe { (*place.cast::<SessionPlace>().as_ptr()).beside() };
+    // SAFETY: the count lies in `place`, which goes back only through
+    // `give_back_session_place`, called by whichever of the handle's release and the last hold
+    // counted goes last.
+    unsafe { crate::ffi::CountIn::new(&tail.open, place, give_back_session_place) }
+}
+
+/// A hold of the session `zs` names, as an engine's row keeps it with a background subscriber's
+/// closure and lets it go after the closure's C drop: the session's close waits for it, as pico's
+/// waits for the callbacks in flight (`_z_sync_group_wait`), and the row keeps one pointer for it.
+///
+/// # Safety
+/// As [`session_count`].
+pub(crate) unsafe fn session_let_go(zs: *const z_loaned_session_t) -> wz_capi_port::LetGo {
+    // SAFETY: the caller's.
+    unsafe { session_hold_let_go(session_count(zs)) }
+}
+
+/// As [`session_let_go`], for the session whose count is `count`.
+///
+/// # Safety
+/// `count` is a session's count ([`session_count`]), whose handle is not let go of before the
+/// hold is.
+pub(crate) unsafe fn session_hold_let_go(count: crate::ffi::CountIn) -> wz_capi_port::LetGo {
+    let place = count.hold().into_place();
+    // SAFETY: `let_go_session_hold` takes back the one hold parted above, once.
+    unsafe { wz_capi_port::LetGo::new(let_go_session_hold, place.as_ptr()) }
+}
+
+/// Let go of a hold of a session's count that [`session_hold_let_go`] parted from its value.
+///
+/// # Safety
+/// `place` is the place of the session that hold was counted in, called once for it.
+unsafe fn let_go_session_hold(place: *mut c_void) {
+    // SAFETY: the caller's: the hold keeps the place standing until it is let go of, here.
+    drop(unsafe { crate::ffi::HeldIn::adopt(count_at(core::ptr::NonNull::new_unchecked(place))) });
 }
 
 /// Count `closure` in the session `zs` names: its close waits for the closure's `drop(context)`,

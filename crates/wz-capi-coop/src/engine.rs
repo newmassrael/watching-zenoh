@@ -101,10 +101,10 @@ use wz_capi_port::os::{self, Mutex, MutexGuard};
 #[cfg(feature = "threads")]
 use wz_capi_port::os::{JoinHandle, ThreadId};
 use wz_capi_port::{
-    BatchStep, CalledFromReadTask, FanoutError, FilterId, FilterPlane, FilteredPut, HeldKey,
-    HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, MatchId, MatchingSink, PeerIdentity,
-    PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive, SessionEngine, SessionKeys,
-    StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    BatchStep, CalledFromReadTask, EngineDeliveries, FanoutError, FilterId, FilterPlane,
+    FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
+    MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
+    SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -2964,11 +2964,15 @@ fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<
 }
 
 /// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
-/// of there: the id of the Interest it held last, `None` when no filter is there.
-fn unwatch_filter(tables: &mut CoopTables, handle: WriteFilterHandle) -> Option<Option<EntityId>> {
+/// of there: the id of the Interest it held last, and of the declaration its key is named by when
+/// it held that last, whose retractions go on the wire; `None` when no filter is there.
+fn unwatch_filter(
+    tables: &mut CoopTables,
+    handle: WriteFilterHandle,
+) -> Option<(Option<EntityId>, Option<ExprId>)> {
     tables
         .undeclare_write_filter_quietly(handle)
-        .map(|unwatched| unwatched.interest_final)
+        .map(|unwatched| (unwatched.interest_final, unwatched.keyexpr))
 }
 
 /// Whether the session's own entities of `plane`'s kind count for a write filter or a matching
@@ -8264,6 +8268,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 }
 
+/// The hold of the declaration `id` taken in row `handle` of `tables`, naming where the row lies,
+/// so a copy of it takes its hold, and a holder that is not the last gives its own back, at the
+/// row with no lock of the session.
+fn placed_hold(tables: &CoopTables, id: ExprId, handle: KeyexprHandle) -> KeyHold {
+    let hold = KeyHold::taken(id, handle);
+    match tables.keyexprs().get(handle) {
+        // SAFETY: the session's rows lie in its region, or in the span lent at its open
+        // (`RowPolicy`), neither of which moves while the session's state stands.
+        Some(row) => unsafe { hold.placed_at(row.head().count()) },
+        None => hold,
+    }
+}
+
+/// An entity's key `text`, as its row in `tables` keeps it, lent with `held`, the declaration the
+/// row holds that the key is lent with: that of the entity's own key, or else the one the key is
+/// named by.
+fn lent_key(tables: &CoopTables, text: &str, held: Option<KeyexprHandle>) -> KeyView {
+    match held.and_then(|handle| Some((handle, tables.keyexprs().get(handle)?))) {
+        // SAFETY: the session's rows lie in its region, or in the span lent at its open
+        // (`RowPolicy`), neither of which moves while the session's state stands; and the entity's
+        // row holds the declaration until the entity is retracted.
+        Some((handle, row)) => unsafe {
+            KeyView::holding(text, handle, row.key(), row.id(), row.head().count())
+        },
+        None => KeyView::literal(text),
+    }
+}
+
 // A key's hold and a periodic job's handle name the session by these alone, so the doors that
 // reach the engine as its own type make no table of all of its operations for them.
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::KeyHolds
@@ -8300,6 +8332,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Key
         } else {
             Err(HoldRefused::Gone)
         }
+    }
+
+    #[inline(never)]
+    fn declared_prefix(&self, row: KeyexprHandle, key: &str) -> Option<(ExprId, usize)> {
+        let core = self.live()?;
+        tables(&core.0.session.registry).declared_prefix(row, key)
+    }
+
+    // The tally of the holds handed out (`Takes::holds`) counts the ones taken and given back at
+    // their rows as it counts the ones the session took and was given back.
+    #[cfg(test)]
+    fn counted_at_row(&self, change: isize) {
+        self.takes.holds.fetch_add(change, Ordering::Relaxed);
     }
 }
 
@@ -8696,6 +8741,36 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         Ok(id)
     }
 
+    // The text is the row's own, which does not move while the row stands.
+    #[inline(never)]
+    fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView> {
+        let core = self.live()?;
+        let tables = tables(&core.0.session.registry);
+        if let Some((_, row)) = tables.subscribers().iter().find(|(_, row)| row.id() == id) {
+            let key = row.key();
+            return Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())));
+        }
+        #[cfg(feature = "liveliness")]
+        if let Some((_, row)) = tables
+            .liveliness_subscribers()
+            .iter()
+            .find(|(_, row)| row.id() == id)
+        {
+            let key = row.key();
+            return Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())));
+        }
+        None
+    }
+
+    // The text is the filter's row's own, which does not move while the row stands.
+    fn filtered_keyexpr(&self, id: FilterId) -> Option<KeyView> {
+        let handle = row_of(id)?;
+        let core = self.live()?;
+        let tables = tables(&core.0.session.registry);
+        let row = tables.write_filters().get(handle)?;
+        Some(lent_key(tables, row.key(), row.own()))
+    }
+
     #[inline(never)]
     fn undeclare_subscriber(&self, id: SubId) {
         // A liveliness subscriber's id is one of these too (the port's one id space): its row goes
@@ -8829,7 +8904,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         if !declared.new {
             #[cfg(test)]
             self.takes.holds.fetch_add(1, Ordering::Relaxed);
-            return Ok(KeyHold::taken(id, declared.handle));
+            return Ok(placed_hold(
+                tables(&core.session.registry),
+                id,
+                declared.handle,
+            ));
         }
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
@@ -8848,7 +8927,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         #[cfg(test)]
         self.takes.holds.fetch_add(1, Ordering::Relaxed);
-        Ok(KeyHold::taken(id, declared.handle))
+        Ok(placed_hold(
+            tables(&core.session.registry),
+            id,
+            declared.handle,
+        ))
     }
 
     fn key_arena(&self) -> Option<&dyn SessionKeys> {
@@ -8967,12 +9050,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             suffix: form.suffix,
             aggregate: form.aggregate,
         });
+        // The row holds the declaration the key is named by from here on, so the entity keeps no
+        // hold of its key and lends it from the row (`filtered_keyexpr`).
+        let own = tables(&core.session.registry).keyexpr_at(wire.declared());
         let watching = tables_mut(&mut core.session.registry)
             .declare_write_filter_as(
                 plane_of(plane),
                 keyexpr,
                 counts_own(plane, count_local),
                 name,
+                own,
             )
             .map_err(Declined::from)?;
         let id = row_id(watching.handle);
@@ -8988,6 +9075,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // `_z_add_interest` takes it before it decides: a filter that finds none left is
                 // refused, its row given back.
                 let Some(taken) = core.session.take_entity_id() else {
+                    // The caller holds the declaration the row held through this call, so the
+                    // row's going is not its last holder's and retracts nothing.
                     let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
                     return Err(Declined::NoEntityId);
                 };
@@ -9035,18 +9124,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             return;
         };
         let core = &mut core.0;
-        let place = {
+        // What the links are told is placed while the row stands: its Interest, and the
+        // declaration its key is named by when the row holds that last.
+        let (place, keyexpr_place) = {
             let tables = tables(&core.session.registry);
             let Some(row) = tables.write_filters().get(handle) else {
                 return;
             };
-            interest_rank(tables, row.interest())
+            (
+                interest_rank(tables, row.interest()),
+                core.prefix_retraction(row.own()),
+            )
         };
-        let Some(last_held) = unwatch_filter(tables_mut(&mut core.session.registry), handle) else {
+        let Some((last_held, keyexpr)) =
+            unwatch_filter(tables_mut(&mut core.session.registry), handle)
+        else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
         core.end_interest(last_held, place);
+        core.retract_keyexpr(keyexpr_place, keyexpr);
         // The groups it asked are told the asking ended.
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
@@ -9708,6 +9805,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         }
         #[cfg(feature = "local-queryable")]
         self.deliver();
+    }
+
+    // The text is the row's own, which does not move while the row stands.
+    #[cfg(feature = "queryable")]
+    fn queryable_keyexpr(&self, id: QblId) -> Option<KeyView> {
+        let core = self.live()?;
+        let tables = tables(&core.0.session.registry);
+        let (_, row) = tables.queryables().iter().find(|(_, row)| row.id() == id)?;
+        let key = row.key();
+        Some(lent_key(tables, key.as_str(), key.named().or(key.prefix())))
     }
 
     #[cfg(feature = "liveliness")]
