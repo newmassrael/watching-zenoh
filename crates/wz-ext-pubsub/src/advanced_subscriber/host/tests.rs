@@ -285,6 +285,10 @@ impl SessionEngine for Script {
             .find(|s| s.0 == id)
             .map(|s| wz_capi_port::KeyView::literal(&s.1))
     }
+    // The script keeps no write filter's key.
+    fn filtered_keyexpr(&self, _id: FilterId) -> Option<wz_capi_port::KeyView> {
+        None
+    }
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         Err(Refusal::NotBuilt)
     }

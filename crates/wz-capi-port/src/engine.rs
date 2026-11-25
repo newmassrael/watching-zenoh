@@ -455,6 +455,13 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// subscriber. Every engine states it, as each keeps its subscriptions its own way.
     fn subscriber_keyexpr(&self, id: SubId) -> Option<KeyView>;
 
+    /// The key the entity holding write filter `id` was declared on, a publisher's or a querier's,
+    /// as the engine's record of the filter keeps it: its text, and the declaration the record
+    /// holds that the key is named by, when it holds one ([`Self::declare_write_filter`]). Valid
+    /// until the filter is undeclared, the record holding both until then; `None` for an id that
+    /// names no filter. Every engine states it, as each keeps its filters its own way.
+    fn filtered_keyexpr(&self, id: FilterId) -> Option<KeyView>;
+
     /// Hold a declaration of `keyexpr`, declaring it if no one holds it yet: the hold, which
     /// names its mapping id and its row. Refused when the session has no id left to give
     /// ([`Refusal::NoEntityId`]), no row or key room left, or is closed; and with
@@ -556,6 +563,12 @@ pub trait SessionEngine: KeyHolds + Tickers + Send + Sync + 'static {
     /// id ([`Self::next_entity_id`]): a filter that could not ask would hold every write back. A
     /// refused filter answers why, with nothing held, asked or numbered. `ask` is lent: an engine
     /// copies the rest of the key it names only where it keeps one of its own.
+    ///
+    /// The record of the filter keeps `keyexpr` and holds the declaration `wire` names, as a
+    /// subscriber's record holds its key's, until the filter is undeclared: the entity keeps no
+    /// copy of its key and lends it from the record ([`Self::filtered_keyexpr`]). The caller holds
+    /// that declaration through the call; a count with no room for the record refuses the filter
+    /// ([`Refusal::KeyHoldsFull`]).
     fn declare_write_filter(
         &self,
         plane: FilterPlane,

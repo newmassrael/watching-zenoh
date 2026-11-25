@@ -459,7 +459,7 @@ pub(crate) struct AdvPubState {
 impl AdvPubState {
     /// Point the cached view at the wrapped publisher's own key, after boxing.
     fn bind(&mut self) {
-        self.loaned_keyexpr = self.publisher.publisher().key().loaned();
+        self.loaned_keyexpr = self.publisher.publisher().loan();
     }
 }
 

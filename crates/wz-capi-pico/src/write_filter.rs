@@ -45,7 +45,9 @@
 //! the key they were held on, which a client's do not
 //! (`DeclaredKeyexpr::retraction_naming_in`).
 
-use wz_capi_port::{FilterId, FilterPlane, FilteredPut, MatchId, MatchingSink, Refusal, WireKey};
+use wz_capi_port::{
+    FilterId, FilterPlane, FilteredPut, KeyView, MatchId, MatchingSink, OwnKey, Refusal, WireKey,
+};
 #[cfg(feature = "advanced")]
 use wz_node_time::node_clock::NodeHlc;
 use wz_session_core::declare_form::InterestAsk;
@@ -141,15 +143,16 @@ pub(crate) struct WriteFilter {
 }
 
 impl WriteFilter {
-    /// Create the filter for an entity whose own key is `key`. `count_local` is pico's
+    /// Create the filter for an entity whose own key is `keyexpr`. `count_local` is pico's
     /// `ctx->allow_local`: the session's own subscribers or queryables count too, which
     /// they do for an entity whose destination admits session-local traffic in a build
     /// with the local switch (`vendor/zenoh-pico/src/net/filtering.c` @
     /// `_z_write_filter_session_register`).
     ///
-    /// `wire` is `key` as the entity names it on the wire (`DeclaredKeyexpr::wire`): its own
+    /// `wire` is the key as the entity names it on the wire (`DeclaredKeyexpr::wire`): its own
     /// declaration's id and the rest of the key, or the literal when nothing covers it. The
-    /// entity makes it once and keeps it for what it sends.
+    /// entity makes it once and keeps it for what it sends. The session's record of the filter
+    /// keeps the key and holds that declaration from here on.
     ///
     /// Refused with the code pico's filter answers for the cause ([`Door::WriteFilter`]): the
     /// session holds no more, its table of the entity's filters at the limit it opened under or
@@ -157,14 +160,14 @@ impl WriteFilter {
     pub(crate) fn declare(
         session: &PicoSession,
         plane: FilterPlane,
-        key: &DeclaredKeyexpr,
+        keyexpr: &str,
         wire: &WireKey,
         count_local: bool,
     ) -> Result<Self, ZResult> {
         let shared = session.engine.clone();
-        let ask = interest_ask(&shared, session.mode, key, wire);
+        let ask = interest_ask(&shared, session.mode, keyexpr, wire);
         let id = shared
-            .declare_write_filter(plane, key.literal(), wire, ask, count_local)
+            .declare_write_filter(plane, keyexpr, wire, ask, count_local)
             .map_err(|refused| refusal_code(refused, Door::WriteFilter))?;
         Ok(Self {
             shared,
@@ -235,13 +238,16 @@ impl WriteFilter {
     }
 }
 
-/// A publisher's or a querier's key with its declaration, its write filter and the key as the
-/// entity names it on the wire: what both are declared with, in pico's order. The filter is
-/// first, so a holder that drops it whole retracts the filter's Interest while the declaration it
-/// names still stands.
+/// A publisher's or a querier's write filter, its key as the session's record of the filter keeps
+/// it and the key as the entity names it on the wire: what both are declared with, in pico's
+/// order. The record holds the declaration the key is named by and keeps the key until the filter
+/// is undeclared, which retracts the filter's Interest before it lets the declaration go
+/// (upstream's `_z_undeclare_publisher` clears the filter, then the key): the entity keeps no
+/// copy of its key.
 pub(crate) struct FilteredKey {
     pub(crate) filter: WriteFilter,
-    pub(crate) key: DeclaredKeyexpr,
+    /// The key as the record lent it ([`wz_capi_port::SessionEngine::filtered_keyexpr`]).
+    key: KeyView,
     pub(crate) wire: WireKey,
     /// The `eid` half of the global id the unstable API reports for the entity.
     #[cfg(feature = "unstable-api")]
@@ -303,18 +309,63 @@ impl FilteredKey {
         let eid = session.engine.next_entity_id().ok_or(Z_ERR_GENERIC)?;
         #[cfg(not(feature = "unstable-api"))]
         let _ = eid;
-        // The entity keeps its key, which holds the declaration: its wire form holds nothing.
+        // The record of the filter holds the declaration: the wire form holds nothing.
         let wire = key.wire(crate::session::EngineHold::as_ref(&session.engine));
-        let filter = WriteFilter::declare(session, plane, &key, &wire, count_local)?;
+        let filter = WriteFilter::declare(session, plane, key.literal(), &wire, count_local)?;
+        // The door's hold goes with `key`, the record's standing; the key is lent from the record,
+        // and an engine that keeps none refuses the entity, its filter undeclared.
+        drop(key);
+        let lent = session
+            .engine
+            .filtered_keyexpr(filter.id)
+            .ok_or(Z_ERR_GENERIC)?;
         // SAFETY: the caller's: `at` is room for one, written field by field, once each.
         unsafe {
             core::ptr::addr_of_mut!((*at).filter).write(filter);
-            core::ptr::addr_of_mut!((*at).key).write(key);
+            core::ptr::addr_of_mut!((*at).key).write(lent);
             core::ptr::addr_of_mut!((*at).wire).write(wire);
             #[cfg(feature = "unstable-api")]
             core::ptr::addr_of_mut!((*at).eid).write(eid);
         }
         Ok(())
+    }
+}
+
+impl FilteredKey {
+    /// The entity's key, where the session's record of its filter keeps it.
+    pub(crate) fn keyexpr(&self) -> &str {
+        // SAFETY: the record keeps the text, which was a `str` there, at one address until the
+        // filter is undeclared, which is when `self.filter` goes, and `self` with it.
+        unsafe {
+            core::str::from_utf8_unchecked(core::slice::from_raw_parts(
+                self.key.start,
+                self.key.len,
+            ))
+        }
+    }
+
+    /// The session the entity is on and the declaration its key is lent with: what a key made of
+    /// its loan holds, and names on the wire.
+    pub(crate) fn record_key(&self) -> (&EngineHold, Option<OwnKey>) {
+        (self.filter.engine(), self.key.own)
+    }
+
+    /// The loan of the entity's key: the record's text and declaration, named from `self`, which
+    /// must stay at its address while the loan is read ([`crate::keyexpr::record_loan`]).
+    pub(crate) fn loan(&self) -> crate::abi::z_loaned_keyexpr_t {
+        crate::keyexpr::record_loan(self.key, self)
+    }
+
+    /// The key as a message sent once names it: the record's declaration and the rest of the key.
+    #[cfg(feature = "query")]
+    pub(crate) fn wire_once(&self) -> WireKey {
+        let shared = self.filter.engine();
+        crate::keyexpr::record_wire(
+            shared,
+            self.key.own,
+            self.key.len,
+            EngineHold::as_ref(shared),
+        )
     }
 }
 
@@ -331,18 +382,18 @@ impl Drop for WriteFilter {
 }
 
 /// How the entity's Interest is put, or `None` for none — pico's rules, see the
-/// module doc. The key is lent from the entity's own declaration and wire form.
+/// module doc. The key is lent from the entity's key and wire form.
 fn interest_ask<'a>(
     shared: &EngineHold,
     mode: WhatAmI,
-    key: &'a DeclaredKeyexpr,
+    keyexpr: &'a str,
     wire: &'a WireKey,
 ) -> Option<InterestAsk<'a>> {
     let client = mode == WhatAmI::Client;
     if !client && !shared.has_router_peer() {
         return None;
     }
-    let (mapping_id, suffix) = wire.names_in(key.literal());
+    let (mapping_id, suffix) = wire.names_in(keyexpr);
     Some(InterestAsk {
         mapping_id,
         suffix,
@@ -395,8 +446,8 @@ mod tests {
         let filtered =
             FilteredKey::declare(pico, FilterPlane::Subscribers, "demo/filtered", None, false)
                 .unwrap_or_else(|code| panic!("a session with room declares the key, not {code}"));
-        assert_eq!(filtered.key.literal(), "demo/filtered");
-        let (id, rest) = filtered.wire.names_in(filtered.key.literal());
+        assert_eq!(filtered.keyexpr(), "demo/filtered");
+        let (id, rest) = filtered.wire.names_in(filtered.keyexpr());
         assert_ne!(id, 0, "the wire names the key's own declaration");
         assert_eq!(rest, None, "the declaration names the whole key");
         assert!(

@@ -1161,6 +1161,13 @@ pub struct KeyView {
     pub own: Option<OwnKey>,
 }
 
+// SAFETY: the text a view names is read only, through shared borrows, and lies in the engine's
+// record of the entity, which is `Send + Sync` and keeps it at one address while the entity
+// stands; the declaration is named by its row and the address of its count, which is atomic.
+unsafe impl Send for KeyView {}
+// SAFETY: as `Send`.
+unsafe impl Sync for KeyView {}
+
 impl KeyView {
     /// `key`, named whole: no declaration of it is held.
     pub fn literal(key: &str) -> Self {

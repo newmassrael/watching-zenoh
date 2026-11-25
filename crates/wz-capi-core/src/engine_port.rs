@@ -384,6 +384,10 @@ impl SessionEngine for SharedSession {
         SharedSession::subscriber_keyexpr(self, id)
     }
 
+    fn filtered_keyexpr(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
+        SharedSession::filtered_keyexpr(self, id)
+    }
+
     fn acquire_keyexpr(&self, keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         self.declared(|| SharedSession::acquire_keyexpr(self, keyexpr.to_owned()))
     }
@@ -463,9 +467,7 @@ impl SessionEngine for SharedSession {
         if SharedSession::is_closed(self) {
             return Err(Refusal::Closed);
         }
-        // The registry refuses a filter for want of an entity id alone.
         SharedSession::declare_write_filter(self, plane, keyexpr.to_owned(), wire, ask, count_local)
-            .ok_or(Refusal::NoEntityId)
     }
 
     fn write_filter_active(&self, id: FilterId) -> bool {

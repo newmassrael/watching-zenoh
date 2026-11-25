@@ -1537,7 +1537,7 @@ impl PlainPublisher {
         // was declared with, when a declaration names the whole key: the filter's row keeps it.
         let wire = &filtered.wire;
         filtered.filter.keep_plain(
-            matches!(wire.names_in(filtered.key.literal()), (id, None) if id != 0)
+            matches!(wire.names_in(filtered.keyexpr()), (id, None) if id != 0)
                 .then(|| {
                     let mut bare = put_options();
                     declared.apply(&mut bare);
@@ -1566,9 +1566,8 @@ impl PlainPublisher {
         // A put or a delete on a publisher whose session was closed answers
         // `_Z_ERR_SESSION_CLOSED`, as pico's do under `Z_FEATURE_SESSION_CHECK` (on by
         // default), and before the write filter is consulted.
-        let FilteredKey {
-            filter, key, wire, ..
-        } = &self.entity;
+        let FilteredKey { filter, wire, .. } = &self.entity;
+        let key = self.entity.keyexpr();
         let engine = filter.engine();
         if engine.is_closed() {
             return Z_ERR_SESSION_CLOSED;
@@ -1577,7 +1576,7 @@ impl PlainPublisher {
             self.declared.apply(opts);
             &*opts
         });
-        match filter.publish(key.literal(), wire, payload, opts) {
+        match filter.publish(key, wire, payload, opts) {
             FilteredPut::Suppressed => Z_OK,
             FilteredPut::Sent(sent) => publish_code(sent),
             // The filter let a bare put through and it is not plain on this node (no plain form
@@ -1585,7 +1584,7 @@ impl PlainPublisher {
             FilteredPut::NotPlain => {
                 let mut bare = put_options();
                 self.declared.apply(&mut bare);
-                publish_code(engine.publish_on_wire_all(key.literal(), wire, payload, &bare))
+                publish_code(engine.publish_on_wire_all(key, wire, payload, &bare))
             }
         }
     }
@@ -1596,10 +1595,20 @@ impl PlainPublisher {
         self.entity.eid
     }
 
-    /// The publisher's key with its declaration.
+    /// A key of its own made of the publisher's, holding the declaration the session's record of
+    /// the publisher holds, as a copy of the publisher's loan is ([`DeclaredKeyexpr::of_record`]).
     #[cfg(feature = "advanced")]
-    pub(crate) fn key(&self) -> &DeclaredKeyexpr {
-        &self.entity.key
+    pub(crate) fn key_copy(&self) -> Result<DeclaredKeyexpr, ZResult> {
+        let (session, own) = self.entity.record_key();
+        let key = self.entity.keyexpr();
+        DeclaredKeyexpr::of_record(session, own, key, key)
+    }
+
+    /// The loan of the publisher's key, from the session's record of it ([`FilteredKey::loan`]),
+    /// valid while the publisher stays at its address.
+    #[cfg(feature = "advanced")]
+    pub(crate) fn loan(&self) -> z_loaned_keyexpr_t {
+        self.entity.loan()
     }
 
     /// pico's matching status of the publisher: whether its write filter has a match
@@ -1620,20 +1629,18 @@ impl PlainPublisher {
 /// face registry, so a put fans out to every connected peer.
 pub(crate) struct PublisherState {
     core: PlainPublisher,
-    /// R311y559 — cached loan of `key`, so `z_publisher_keyexpr` hands back a
-    /// borrow of stable storage rather than of a temporary. Bound by
-    /// [`PublisherState::bind`] once the state sits at its final address — the
-    /// same discipline `QueryableState` and `SampleMarshal` use, and for the
-    /// same reason. R2959 — it carries the declaration, as pico's loan of
-    /// `&pub->_key` does, so a put on it aliases.
+    /// The loan `z_publisher_keyexpr` hands back: the key as the session's record of the
+    /// publisher's filter keeps it, with the declaration the record holds, so a put on it aliases
+    /// as one on pico's loan of `&pub->_key` does ([`FilteredKey::loan`]). Bound by
+    /// [`PublisherState::bind`] once the state sits at its final address.
     loaned_keyexpr: z_loaned_keyexpr_t,
 }
 
 impl PublisherState {
-    /// Point the cached view at this state's own keyexpr. MUST run only once
-    /// the state sits at its FINAL address (i.e. after `Box::new`).
+    /// Point the cached loan at the key the session's record keeps. MUST run only once the state
+    /// sits at its FINAL address, which the loan names.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.core.entity.key.loaned();
+        self.loaned_keyexpr = self.core.entity.loan();
     }
 
     /// Publish on this publisher's key — [`PlainPublisher::publish`].
@@ -4240,6 +4247,84 @@ mod tests {
             None,
             "retracted, the record and its key are gone"
         );
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// What `z_publisher_keyexpr` lends is the key the session's record of the publisher's filter
+    /// keeps: its bytes, not the caller's, and the declaration made for the whole key, which the
+    /// record alone holds once the door let its own hold go. A key copied from the loan is one
+    /// more holder of that declaration, counted at its row and given back with the copy.
+    ///
+    /// Turned red by a door that keeps its own hold (the count of one), a loan bound to a copy the
+    /// caller's text or the door keeps (the address), a loan that names no declaration (slot 2,
+    /// the wire), or a copy that takes no hold of its own or gives none back.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn a_publishers_lent_key_is_the_records_and_a_copy_holds_its_declaration() {
+        use crate::abi::z_owned_keyexpr_t;
+        use crate::keyexpr::{z_keyexpr_clone, z_keyexpr_drop, z_keyexpr_loan, z_keyexpr_move};
+        use crate::session::{
+            engine_held, listening_on_loopback, z_session_drop, z_session_loan, z_session_move,
+        };
+        use wz_session_core::session_tables::KeyexprCount;
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned_session = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle =
+            unsafe { session_handle(loaned_session) }.expect("an open session has its handle");
+        let engine = engine_held(handle).clone();
+        let shared = crate::session::EngineHold::as_ref(&engine);
+        let key = "demo/lent/pub";
+        let caller = z_loaned_keyexpr_t::borrowed(key.as_ptr(), key.len());
+        let mut owned = z_owned_publisher_t::null_value();
+        // SAFETY: every pointer is live; null options are pico's defaults.
+        let code =
+            unsafe { z_declare_publisher(loaned_session, &mut owned, &caller, core::ptr::null()) };
+        assert_eq!(code, Z_OK);
+        let loaned = &owned as *const z_owned_publisher_t as *const z_loaned_publisher_t;
+        // SAFETY: the loan is live until the publisher is undeclared below, and the row its slot 2
+        // names stands while the record holds the declaration.
+        unsafe {
+            let lent = crate::session::z_publisher_keyexpr(loaned);
+            assert_eq!(crate::keyexpr::keyexpr_str(lent), Some(key));
+            assert_ne!(
+                (*lent)._start,
+                key.as_ptr(),
+                "the record's text, not the caller's"
+            );
+            assert_ne!((*lent)._handle, 0, "the loan names the declaration's row");
+            let wire = crate::keyexpr::wire_key_of(lent, shared);
+            assert_ne!(wire.mapping_id, 0, "named on the wire by the declaration");
+            assert_eq!(
+                wire.names_in(key),
+                (wire.mapping_id, None),
+                "the declaration covers the whole key"
+            );
+
+            let count = &*((*lent)._handle as *const KeyexprCount);
+            assert_eq!(count.holds(), 1, "the record alone holds it");
+            let mut copy = z_owned_keyexpr_t::null_value();
+            assert_eq!(z_keyexpr_clone(&mut copy, lent), Z_OK);
+            assert_eq!(count.holds(), 2, "the copy holds it");
+            assert_eq!(
+                (*z_keyexpr_loan(&copy))._handle,
+                (*lent)._handle,
+                "at its row"
+            );
+            z_keyexpr_drop(z_keyexpr_move(&mut copy));
+            assert_eq!(count.holds(), 1, "the copy gave its hold back");
+        }
+        // SAFETY: the publisher declared above, a moved publisher being its owned one.
+        let code = unsafe {
+            z_undeclare_publisher(
+                &mut owned as *mut z_owned_publisher_t as *mut z_moved_publisher_t,
+            )
+        };
+        assert_eq!(code, Z_OK);
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

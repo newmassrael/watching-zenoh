@@ -117,6 +117,11 @@ pub(super) struct EngineState {
     /// entity ids are spent.
     next_local_id: AtomicU64,
     subscriptions: Mutex<HashMap<SubId, Subscribed>>,
+    /// The key each write filter of the program's was declared on, the node's record of the
+    /// filter, which a publisher or a querier is lent its key from
+    /// ([`SessionEngine::filtered_keyexpr`]). Each key is a buffer of its own, so it stays where it
+    /// is when the map moves the entry.
+    filters: Mutex<HashMap<FilterId, Box<str>>>,
     /// The program's queryables, each by the id the node's data plane holds it under. That id is
     /// the data plane's key for its own face's declaration, which no peer reads; the program is
     /// given an entity id, as every other declaration of its session.
@@ -142,6 +147,7 @@ impl EngineState {
             next_entity_id: AtomicU64::new(1),
             next_local_id: AtomicU64::new(1),
             subscriptions: Mutex::new(HashMap::new()),
+            filters: Mutex::new(HashMap::new()),
             queryables: Mutex::new(HashMap::new()),
             tokens: Mutex::new(HashMap::new()),
             jobs: Mutex::new(HashMap::new()),
@@ -168,6 +174,37 @@ impl EngineState {
 
     fn local_id(&self) -> u64 {
         self.next_local_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// A write filter on `keyexpr`: its id, the key kept as the filter's record. The node holds
+    /// no write back, so the record is all there is of the filter.
+    fn filter_declared(&self, keyexpr: &str) -> FilterId {
+        let id = self.local_id();
+        self.filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, keyexpr.into());
+        id
+    }
+
+    /// The key filter `id` was declared on, named whole as the node names every key: the text
+    /// its record keeps, at one address until the filter is undeclared.
+    fn filter_key(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
+        self.filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|key| wz_capi_port::KeyView::literal(key))
+    }
+
+    /// Filter `id` undeclared: its record goes, the key with it.
+    fn filter_retracted(&self, id: FilterId) {
+        let gone = self
+            .filters
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        drop(gone);
     }
 }
 
@@ -411,6 +448,10 @@ impl SessionEngine for RouterState {
             .map(|subscribed| wz_capi_port::KeyView::literal(&subscribed.key))
     }
 
+    fn filtered_keyexpr(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
+        self.engine.filter_key(id)
+    }
+
     fn acquire_keyexpr(&self, _keyexpr: &str) -> Result<wz_capi_port::KeyHold, Refusal> {
         // A node names every key whole: there is no alias to hold.
         Err(Refusal::NotBuilt)
@@ -484,14 +525,14 @@ impl SessionEngine for RouterState {
     fn declare_write_filter(
         &self,
         _plane: FilterPlane,
-        _keyexpr: &str,
+        keyexpr: &str,
         _wire: &WireKey,
         _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
     ) -> Result<FilterId, Refusal> {
         // A node holds no write back: the router forwards by what the faces declared, and asks
-        // nothing, so the filter takes no entity id.
-        Ok(self.engine.local_id())
+        // nothing, so the filter takes no entity id. It keeps the key, which its entity is lent.
+        Ok(self.engine.filter_declared(keyexpr))
     }
 
     fn write_filter_active(&self, _id: FilterId) -> bool {
@@ -502,7 +543,9 @@ impl SessionEngine for RouterState {
         false
     }
 
-    fn undeclare_write_filter(&self, _id: FilterId) {}
+    fn undeclare_write_filter(&self, id: FilterId) {
+        self.engine.filter_retracted(id);
+    }
 
     fn put_plain_filtered(
         &self,
@@ -834,6 +877,44 @@ mod tests {
             state.local_id(),
             local + 1,
             "a write filter or a job takes no entity id"
+        );
+    }
+
+    /// A write filter's record keeps the key it was declared on, which its publisher or querier is
+    /// lent named whole: the text lies where the record keeps it, stays there while other filters
+    /// come and go, and goes with the filter's undeclaration. Turned red by a record that keeps no
+    /// key, lends a copy, moves the text when the map grows, names a declaration, or outlives the
+    /// undeclaration.
+    #[test]
+    fn a_write_filters_record_lends_its_key_until_it_is_undeclared() {
+        let state = EngineState::new();
+        let key = "demo/node/pub";
+        let filter = state.filter_declared(key);
+        let lent = state.filter_key(filter).expect("the record keeps the key");
+        assert_eq!(lent.own, None, "a node names every key whole");
+        assert_ne!(
+            lent.start,
+            key.as_ptr(),
+            "the record's own text, not the caller's"
+        );
+        let others: Vec<FilterId> = (0..64)
+            .map(|at| state.filter_declared(&format!("demo/node/other/{at}")))
+            .collect();
+        assert_eq!(
+            state.filter_key(filter),
+            Some(lent),
+            "the text stays where it was lent while the records move"
+        );
+        // SAFETY: the record keeps the text where it lent it until the filter is undeclared below.
+        let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
+        assert_eq!(text, key.as_bytes());
+        state.filter_retracted(filter);
+        assert_eq!(state.filter_key(filter), None, "gone with the filter");
+        assert!(
+            others
+                .iter()
+                .all(|&other| state.filter_key(other).is_some()),
+            "CONTROL: the other filters stand"
         );
     }
 

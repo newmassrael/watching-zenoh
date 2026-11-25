@@ -2686,7 +2686,7 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
     let mut tables = Tables::new();
     let before = tables.next_entity_id();
     let quiet = tables
-        .declare_write_filter_as(Plane::Subscribers, "q", false, None)
+        .declare_write_filter_as(Plane::Subscribers, "q", false, None, None)
         .unwrap();
     assert_eq!(quiet.interest, None);
     assert_eq!(tables.interests().len(), 0, "no Interest held");
@@ -2709,6 +2709,67 @@ fn a_filter_that_asks_nothing_is_judged_on_its_own_key() {
         .unwrap();
     assert_eq!(unwatched.interest_final, None);
     assert_eq!(gone, [listener]);
+}
+
+/// A write filter's row holds the declaration its entity's key is named by from its declaration to
+/// its undeclaration, which hands back that declaration's id when the row held it last; a count
+/// with no room refuses the filter, keeping nothing, its Interest closed. Turned red by a row that
+/// takes no hold or gives none back, an undeclaration that hands back no id, or a filter kept past
+/// a full count.
+#[test]
+fn a_write_filter_holds_its_keys_declaration_until_it_goes() {
+    let mut tables = Tables::new();
+    let declared = tables.declare_keyexpr("demo/pub").unwrap();
+    let holds = |tables: &Tables| {
+        tables
+            .keyexprs()
+            .get(declared.handle)
+            .map(|row| row.holds())
+    };
+    let filter = tables
+        .declare_write_filter_as(
+            Plane::Subscribers,
+            "demo/pub",
+            false,
+            None,
+            Some(declared.handle),
+        )
+        .unwrap();
+    assert_eq!(holds(&tables), Some(2), "the declarer's and the row's");
+    assert_eq!(
+        tables.write_filters().get(filter.handle).unwrap().own(),
+        Some(declared.handle)
+    );
+    assert_eq!(
+        tables.undeclare_keyexpr(declared.handle),
+        None,
+        "the row still holds it"
+    );
+    let unwatched = tables
+        .undeclare_write_filter(filter.handle, |_, _| {})
+        .unwrap();
+    assert_eq!(unwatched.keyexpr, Some(declared.id), "the row held it last");
+    assert_eq!(holds(&tables), None, "gone with its last holder");
+
+    let full = tables.declare_keyexpr("demo/full").unwrap();
+    while tables.retain_keyexpr(full.handle) {}
+    let interests = tables.interests().len();
+    assert!(matches!(
+        tables.declare_write_filter_as(
+            Plane::Subscribers,
+            "demo/full",
+            false,
+            Some(InterestName::whole("demo/full")),
+            Some(full.handle),
+        ),
+        Err(RegisterError::KeyexprHoldsFull)
+    ));
+    assert_eq!(tables.interests().len(), interests, "its Interest went too");
+    assert_eq!(
+        tables.keyexprs().get(full.handle).map(|row| row.holds()),
+        Some(KeyexprHolds::MAX),
+        "CONTROL: the count is full"
+    );
 }
 
 /// A listener declared on a key opens an Interest of its own on the key whole, apart from a filter
@@ -2830,6 +2891,7 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
                     suffix: Some(suffix),
                     aggregate: true,
                 }),
+                None,
             )
             .unwrap();
         let interest = tables
@@ -2885,6 +2947,7 @@ fn an_interest_names_its_rest_by_a_range_of_its_key() {
                 suffix: None,
                 aggregate: false,
             }),
+            None,
         )
         .unwrap();
     let interest = tables

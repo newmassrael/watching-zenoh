@@ -1092,6 +1092,9 @@ pub struct WriteFilterRow<Key> {
     /// The Interest it holds, `None` for a filter that asks the peers nothing.
     interest: Option<InterestHandle>,
     key: Key,
+    /// The declaration the entity's key is named by, which the row holds as an entity's row holds
+    /// its own ([`EntityKey::named`]), so the entity keeps no hold of its key; `None` for none.
+    own: Option<KeyexprHandle>,
     count_local: bool,
     /// Whether a matching listener declared on a key owns it: it counts apart from the publishers'
     /// and the queriers' bounds, and goes with that listener.
@@ -1153,6 +1156,12 @@ impl<Key: KeyBacking> WriteFilterRow<Key> {
     /// The key it filters on.
     pub fn key(&self) -> &str {
         self.key.as_str()
+    }
+
+    /// The declaration the row holds that its key is named by, `None` when it holds none: what a
+    /// program asking for the entity's key is lent beside the key's text.
+    pub fn own(&self) -> Option<KeyexprHandle> {
+        self.own
     }
 
     /// How a write that brings nothing of its own is sent the plain way, when its entity said.
@@ -1514,6 +1523,9 @@ pub struct Unwatched<R> {
     pub row: Option<R>,
     /// The id of the Interest it held last, whose Final goes on the wire.
     pub interest_final: Option<EntityId>,
+    /// The id of the declaration it held last ([`WriteFilterRow::own`]), whose retraction goes
+    /// on the wire.
+    pub keyexpr: Option<ExprId>,
 }
 
 /// What ending one leg of a get left of it.
@@ -2514,7 +2526,13 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         key: &str,
         count_local: bool,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
-        self.declare_write_filter_as(plane, key, count_local, Some(InterestName::whole(key)))
+        self.declare_write_filter_as(
+            plane,
+            key,
+            count_local,
+            Some(InterestName::whole(key)),
+            None,
+        )
     }
 
     /// Whether a write filter of `plane`, or a key listener's, finds room under its own bound in
@@ -2533,15 +2551,19 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// Declare the write filter of a publisher or a querier on `key`, holding an Interest named as
-    /// `ask` says, or none for a filter that asks the peers nothing.
+    /// `ask` says, or none for a filter that asks the peers nothing, and `own`, the declaration the
+    /// entity's key is named by, until it is undeclared. One no longer declared is not held; one
+    /// whose count holds as many holders as it can refuses the filter
+    /// ([`RegisterError::KeyexprHoldsFull`]), keeping nothing.
     pub fn declare_write_filter_as(
         &mut self,
         plane: Plane,
         key: &str,
         count_local: bool,
         ask: Option<InterestName<'_>>,
+        own: Option<KeyexprHandle>,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
-        self.declare_filter(plane, key, count_local, ask, false)
+        self.declare_filter(plane, key, count_local, ask, own, false)
     }
 
     /// [`Self::declare_write_filter_as`] for an entity, or for the matching listener declared on
@@ -2552,6 +2574,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         key: &str,
         count_local: bool,
         ask: Option<InterestName<'_>>,
+        own: Option<KeyexprHandle>,
         for_listener: bool,
     ) -> Result<Watching<kind::WriteFilter>, RegisterError> {
         // Tables that keep no write filter have no room for one, nor has an owner at its own
@@ -2567,10 +2590,20 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             None => None,
         };
         let interest = asked.map(|opened| opened.handle);
+        // Held last, once nothing else can refuse but the insert: the caller holds the declaration
+        // through the call, so giving the hold back on that refusal is never its last.
+        let own = own.filter(|&own| self.keyexprs.get(own).is_some());
+        if own.is_some_and(|own| !self.retain_keyexpr(own)) {
+            if let Some(interest) = interest {
+                let _ = self.close_interest(interest);
+            }
+            return Err(RegisterError::KeyexprHoldsFull);
+        }
         let row = WriteFilterRow {
             plane,
             interest,
             key: kept,
+            own,
             count_local,
             for_listener,
             listeners: 0,
@@ -2591,6 +2624,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 if let Some(interest) = interest {
                     let _ = self.close_interest(interest);
                 }
+                if let Some(own) = own {
+                    let _ = release_keyexpr(&mut self.keyexprs, own);
+                }
                 Err(RegisterError::TableFull)
             }
         }
@@ -2605,7 +2641,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: WriteFilterHandle,
         mut each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>),
     ) -> Option<Unwatched<WriteFilterRow<<P as Storage>::Key>>> {
-        let interest = self.kept_write_filters()?.get(handle)?.interest;
+        let (interest, own) = {
+            let row = self.kept_write_filters()?.get(handle)?;
+            (row.interest, row.own)
+        };
         let mut cursor = 0usize;
         while let Some((listener, owned)) = self
             .kept_matching()
@@ -2620,9 +2659,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         }
         let removal = self.kept_write_filters_mut()?.remove(handle)?;
         let interest_final = interest.and_then(|interest| self.close_interest(interest));
+        let keyexpr = own.and_then(|own| release_keyexpr(&mut self.keyexprs, own));
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
+            keyexpr,
         })
     }
 
@@ -2710,6 +2751,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             key,
             count_local,
             Some(InterestName::whole(key)),
+            None,
             true,
         ) {
             Ok(filter) => filter,
@@ -2766,9 +2808,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         } else {
             None
         };
+        // A filter declared on a key holds no declaration of it.
         Some(Unwatched {
             row: removal.taken(),
             interest_final,
+            keyexpr: None,
         })
     }
 

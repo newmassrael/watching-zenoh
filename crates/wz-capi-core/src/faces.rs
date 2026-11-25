@@ -398,6 +398,10 @@ struct FilterEntry {
     /// the facts it is sent from and the declaration naming its whole key. `None` sends it the
     /// general way.
     plain: Option<(wz_runtime_tokio::session::PlainPutParams, ExprId)>,
+    /// The declaration the entity's key is named by, held by the entry until the filter is
+    /// undeclared ([`SharedSession::admit_entry`]): the entity keeps no hold of its key and lends
+    /// it from the entry ([`SharedSession::filtered_keyexpr`]).
+    held: Option<KeyexprHandle>,
 }
 
 /// A write filter's answer ([`SharedSession::write_filter_active`]) with the state of the
@@ -6945,7 +6949,9 @@ impl SharedSession {
     /// asked by that id for its members' declarations on `wire`, the key as the peers were
     /// told it. A group that comes up later is not asked: zenoh-pico opens its one transport
     /// before any entity, so it has no such moment. With no entity id left the filter is
-    /// refused (`None`) and nothing is asked.
+    /// refused (`NoEntityId`) and nothing is asked; so it is (`KeyHoldsFull`) when the count of
+    /// the declaration `wire` names, which the entry holds until the filter is undeclared, has no
+    /// room.
     ///
     /// The subscribers a publisher's filter asks for are asked under the
     /// `aggregation/publishers` aggregate that includes its key, when one does, the key the
@@ -6957,10 +6963,13 @@ impl SharedSession {
         wire: &WireKey,
         ask: Option<InterestAsk<'_>>,
         count_local: bool,
-    ) -> Option<FilterId> {
+    ) -> Result<FilterId, wz_capi_port::Refusal> {
         let mut guard = self.lock();
-        // Taken first, so a filter refused for want of an id leaves no filter id spent either.
-        let interest_id = guard.take_entity_id()?;
+        // The Interest's id is taken first, so a filter refused for want of an id leaves no filter
+        // id spent either; with it the entry's hold of the declaration its key is named by, a
+        // count with no room refusing the filter.
+        let (interest_id, [held, _]) =
+            Self::admit_entry(&mut guard, [wire.declared(), KeyexprRef::default()])?;
         guard.next_filter_id = guard.next_filter_id.wrapping_add(1);
         let id = guard.next_filter_id;
         #[cfg(feature = "multicast-transport")]
@@ -6990,8 +6999,35 @@ impl SharedSession {
             #[cfg(target_has_atomic = "64")]
             cache: None,
             plain: None,
+            held,
         });
-        Some(id)
+        Ok(id)
+    }
+
+    /// The key write filter `id` was declared on, as its SSOT entry keeps it, with the declaration
+    /// the entry holds that the key is named by. The text is the entry's heap buffer, which stays
+    /// where it is when the entries move and goes with the entry.
+    pub fn filtered_keyexpr(&self, id: FilterId) -> Option<wz_capi_port::KeyView> {
+        let guard = self.lock();
+        let entry = guard.filters.iter().find(|entry| entry.id == id)?;
+        let lent = entry
+            .held
+            .and_then(|handle| Some((handle, guard.tables.keyexprs().get(handle)?)));
+        Some(match lent {
+            // SAFETY: the growable table keeps its rows in chunks that are only ever added
+            // (`Chunked`), so a row stays where it was put while it stands; and the entry holds
+            // the declaration until the filter is undeclared.
+            Some((handle, row)) => unsafe {
+                wz_capi_port::KeyView::holding(
+                    &entry.keyexpr,
+                    handle,
+                    row.key(),
+                    row.id(),
+                    row.head().count(),
+                )
+            },
+            None => wz_capi_port::KeyView::literal(&entry.keyexpr),
+        })
     }
 
     /// What write filter `id` counts, the literal it is matched on and whether the session's own
@@ -7010,10 +7046,11 @@ impl SharedSession {
     /// drop reaches the face's session and its link.
     pub fn undeclare_write_filter(&self, id: FilterId) {
         let mut dropped = Vec::new();
+        let mut held = None;
         {
             let mut guard = self.lock();
             if let Some(pos) = guard.filters.iter().position(|e| e.id == id) {
-                guard.filters.remove(pos);
+                held = guard.filters.remove(pos).held;
             }
             for face in guard.faces.values_mut() {
                 if let Some(hold) = face.filters.remove(&id) {
@@ -7024,6 +7061,8 @@ impl SharedSession {
             Self::end_filter_on_groups(&mut guard, id);
         }
         drop(dropped);
+        // After the Interest's holds, as zenoh-pico clears the filter before the key.
+        self.release_named([held, None]);
     }
 
     /// Whether write filter `id` keeps a put, a delete or a get from being sent: it says
@@ -7950,6 +7989,54 @@ mod matching_aggregate_tests {
         );
     }
 
+    /// A write filter's entry keeps its key and holds the declaration the key is named by, which the
+    /// entity's key is lent with, from the filter's declaration until its undeclaration, when the
+    /// hold goes back. Turned red by an entry that takes no hold, lends another text or no
+    /// declaration, or keeps its hold or its key past the undeclaration.
+    #[test]
+    fn a_write_filter_lends_its_key_with_the_declaration_it_holds() {
+        let shared = SharedSession::new(TokioTime::new(), test_zid(), SessionPolicy::defaults())
+            .expect("test host entropy");
+        let key = "wz/wf/lent";
+        let hold = shared
+            .acquire_keyexpr(key.to_owned())
+            .expect("a session with room declares");
+        let row = hold.row().expect("a hold names its row");
+        let holds = |shared: &SharedSession| {
+            shared
+                .lock()
+                .tables
+                .keyexprs()
+                .get(row)
+                .map(|row| row.holds())
+        };
+        let filter = shared
+            .declare_write_filter(
+                FilterPlane::Subscribers,
+                key.to_owned(),
+                &WireKey::aliased_tail(hold.mapping_id(), 0).at_row(Some(row)),
+                None,
+                false,
+            )
+            .expect("a session with ids left declares");
+        assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
+        let lent = shared
+            .filtered_keyexpr(filter)
+            .expect("the entry keeps the key");
+        // SAFETY: the entry keeps the text where it lent it until the filter is undeclared below.
+        let text = unsafe { core::slice::from_raw_parts(lent.start, lent.len) };
+        assert_eq!(text, key.as_bytes());
+        let own = lent.own.expect("lent with the declaration the entry holds");
+        assert_eq!(
+            (own.row, own.mapping, own.prefix_len),
+            (row, hold.mapping_id(), key.len())
+        );
+        shared.undeclare_write_filter(filter);
+        assert_eq!(shared.filtered_keyexpr(filter), None, "gone with its entry");
+        assert_eq!(holds(&shared), Some(1), "the entry gave its hold back");
+        hold.release(&shared);
+    }
+
     /// A declaration whose key names a declaration with as many holders as its count holds is
     /// refused by that cause, through the engine port and through the registry's own door alike,
     /// and takes nothing: no entry, no entity id, no hold. A declaration that went refuses
@@ -8118,7 +8205,7 @@ mod matching_aggregate_tests {
                 None,
                 false,
             ),
-            None
+            Err(wz_capi_port::Refusal::NoEntityId)
         );
         assert_eq!(shared.next_entity_id(), None);
 

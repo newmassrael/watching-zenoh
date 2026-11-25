@@ -32,6 +32,7 @@ use crate::result::{
     Z_ERR_NULL, Z_OK,
 };
 use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
+use crate::write_filter::FilteredKey;
 
 /// Whether `key` is no longer than the longest key a row of a session's tables stores: the
 /// capacity the build gives the row (`MAX_KEYEXPR_BYTES`), which no session's limits raise. A key
@@ -53,8 +54,8 @@ const fn row_capacity<const N: usize>() -> usize {
 ///
 /// Both arms keep the literal at slots 0/1 (see [`z_loaned_keyexpr_t`]). A view's text is the
 /// caller's and is checked; a key that names the object keeping it (slot 3) lies in that object's
-/// text, or in the text the session's record of a subscription keeps, either of which was a `str`
-/// when it was kept, and is read as it is.
+/// text, or in the text the session's record of an entity keeps, either of which was a `str` when
+/// it was kept, and is read as it is.
 ///
 /// Out of line: every door that names a key reads it here, and each copy inlined carried the
 /// UTF-8 check of its own.
@@ -130,18 +131,42 @@ enum LentKey<'a> {
     View,
     /// A key this crate keeps, with the declaration that covers a prefix of it.
     Kept(&'a DeclaredKeyexpr),
-    /// A subscription's key as the session's record of it keeps it ([`record_loan`]).
-    Record(&'a SubscriberState),
+    /// An entity's key as the session's record of it keeps it ([`record_loan`]): the session the
+    /// entity is on, and the declaration the record holds that the key begins with.
+    Record(&'a crate::session::EngineHold, Option<OwnKey>),
 }
 
-/// The bit slot 3 of a key lent from the session's record of a subscription carries
-/// ([`record_loan`]), the subscriber's state lying at the address without it. A kept key's
-/// address never carries it: both are aligned past it.
-const RECORD_TAG: usize = 1;
+/// The state of an entity whose key is lent from the session's record of it ([`record_loan`]),
+/// by the kind it is named by in slot 3 of the loan.
+pub(crate) trait LentRecord {
+    /// The kind, carried in the bits of slot 3 ([`RECORD_TAGS`]) beside the state's address.
+    const TAG: usize;
+}
+
+/// The kind of a subscription's or a liveliness subscription's state.
+const SUBSCRIBER_TAG: usize = 1;
+/// The kind of a publisher's or a querier's key, filter and all.
+const FILTERED_TAG: usize = 2;
+
+impl LentRecord for SubscriberState {
+    const TAG: usize = SUBSCRIBER_TAG;
+}
+
+impl LentRecord for FilteredKey {
+    const TAG: usize = FILTERED_TAG;
+}
+
+/// The bits slot 3 of a key lent from the session's record of an entity carries
+/// ([`record_loan`]): the kind of the entity's state, lying at the address without them. A kept
+/// key's address never carries them: every such state is aligned past them.
+const RECORD_TAGS: usize = 0b11;
 
 const _: () = assert!(
-    core::mem::align_of::<DeclaredKeyexpr>() > RECORD_TAG
-        && core::mem::align_of::<SubscriberState>() > RECORD_TAG
+    core::mem::align_of::<DeclaredKeyexpr>() > RECORD_TAGS
+        && core::mem::align_of::<SubscriberState>() > RECORD_TAGS
+        && core::mem::align_of::<FilteredKey>() > RECORD_TAGS
+        && SUBSCRIBER_TAG & !RECORD_TAGS == 0
+        && FILTERED_TAG & !RECORD_TAGS == 0
 );
 
 /// What slot 3 of `ke` names.
@@ -153,34 +178,36 @@ unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> LentKey<'a> {
         return LentKey::View;
     }
     let state = (*ke)._state;
-    if (state as usize) & RECORD_TAG == 0 {
+    let tag = (state as usize) & RECORD_TAGS;
+    let at = state.cast::<u8>().wrapping_sub(tag);
+    let (session, own) = match tag {
         // SAFETY: an untagged slot 3 is a kept key, live while the loan is (the caller's).
-        LentKey::Kept(unsafe { &*(state as *const DeclaredKeyexpr) })
-    } else {
-        // SAFETY: a tagged slot 3 is the subscriber's state the tag was added to (`record_loan`),
-        // which stands while its loan does (the caller's).
-        LentKey::Record(unsafe {
-            &*state
-                .cast::<u8>()
-                .wrapping_sub(RECORD_TAG)
-                .cast::<SubscriberState>()
-        })
-    }
+        0 => return LentKey::Kept(unsafe { &*(state as *const DeclaredKeyexpr) }),
+        // SAFETY: slot 3 tagged so is the state of that kind the tag was added to
+        // (`record_loan`), which stands while its loan does (the caller's).
+        SUBSCRIBER_TAG => unsafe { &*at.cast::<SubscriberState>() }.record_key(),
+        // SAFETY: as above.
+        FILTERED_TAG => unsafe { &*at.cast::<FilteredKey>() }.record_key(),
+        // No loan carries another tag.
+        _ => return LentKey::View,
+    };
+    LentKey::Record(session, own)
 }
 
-/// The loan of `view`, the key the session's record of the subscription whose state lies at
-/// `state` keeps: its text where the record keeps it, the address of the count of the declaration
-/// it names in slot 2, and the state, tagged, in slot 3, which names the session and the
-/// declaration a key made of the loan holds ([`SubscriberState::record_key`]). Valid while the
-/// state stays at its address and the subscription stands.
-pub(crate) fn record_loan(view: KeyView, state: *const SubscriberState) -> z_loaned_keyexpr_t {
+/// The loan of `view`, the key the session's record of the entity whose state lies at `state`
+/// keeps: its text where the record keeps it, the address of the count of the declaration it names
+/// in slot 2, and the state, tagged with its kind, in slot 3, which names the session and the
+/// declaration a key made of the loan holds ([`SubscriberState::record_key`],
+/// [`FilteredKey::record_key`]). Valid while the state stays at its address and the entity
+/// stands.
+pub(crate) fn record_loan<T: LentRecord>(view: KeyView, state: *const T) -> z_loaned_keyexpr_t {
     z_loaned_keyexpr_t {
         _start: view.start,
         _len: view.len,
         _handle: view.own.map_or(0, |own| own.row_address()),
         _state: state
             .cast::<u8>()
-            .wrapping_add(RECORD_TAG)
+            .wrapping_add(T::TAG)
             .cast_mut()
             .cast::<c_void>(),
     }
@@ -198,7 +225,7 @@ pub(crate) fn record_loan(view: KeyView, state: *const SubscriberState) -> z_loa
 pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'a DeclaredKeyexpr> {
     match lent_of(ke) {
         LentKey::Kept(declared) => Some(declared),
-        LentKey::View | LentKey::Record(_) => None,
+        LentKey::View | LentKey::Record(..) => None,
     }
 }
 
@@ -221,18 +248,15 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
     match lent_of(ke) {
         LentKey::Kept(declared) => declared.wire(shared),
-        LentKey::Record(state) => {
-            let (session, own) = state.record_key();
-            record_wire(session, own, (*ke)._len, shared)
-        }
+        LentKey::Record(session, own) => record_wire(session, own, (*ke)._len, shared),
         LentKey::View => WireKey::literal(),
     }
 }
 
-/// How a key of `len` bytes lent from the session's record of a subscription on `session` goes on
+/// How a key of `len` bytes lent from the session's record of an entity on `session` goes on
 /// `shared`'s wire: the id of `own`, the declaration the record holds, and the rest of the key,
-/// when the subscription is `shared`'s; the literal otherwise. Read off the loan: no row, no lock.
-fn record_wire(
+/// when the entity is `shared`'s; the literal otherwise. Read off the loan: no row, no lock.
+pub(crate) fn record_wire(
     session: &crate::session::EngineHold,
     own: Option<OwnKey>,
     len: usize,
@@ -547,7 +571,7 @@ impl DeclaredKeyexpr {
     /// `literal` still begins with the bytes of `named` it covers, as [`Self::extended`] keeps
     /// one. The hold is one more of the declaration's count, taken at its row
     /// ([`WireDeclaration::lent`]). Refused as the text and the hold are.
-    fn of_record(
+    pub(crate) fn of_record(
         shared: &crate::session::EngineHold,
         own: Option<OwnKey>,
         named: &str,
@@ -1428,10 +1452,7 @@ pub unsafe extern "C" fn z_keyexpr_clone(
         // null.
         let key = match lent_of(src) {
             LentKey::Kept(declared) => declared.share(),
-            LentKey::Record(state) => {
-                let (session, own) = state.record_key();
-                DeclaredKeyexpr::of_record(session, own, text, text)
-            }
+            LentKey::Record(session, own) => DeclaredKeyexpr::of_record(session, own, text, text),
             LentKey::View => DeclaredKeyexpr::literal_only(text),
         };
         match key {
@@ -1534,8 +1555,7 @@ unsafe fn extended_from(
 ) -> Result<DeclaredKeyexpr, ZResult> {
     match lent_of(left) {
         LentKey::Kept(declared) => declared.extended(literal),
-        LentKey::Record(state) => {
-            let (session, own) = state.record_key();
+        LentKey::Record(session, own) => {
             DeclaredKeyexpr::of_record(session, own, keyexpr_str(left).unwrap_or_default(), literal)
         }
         LentKey::View => DeclaredKeyexpr::literal_only(literal),

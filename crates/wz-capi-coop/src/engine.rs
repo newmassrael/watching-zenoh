@@ -2685,11 +2685,15 @@ fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<
 }
 
 /// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
-/// of there: the id of the Interest it held last, `None` when no filter is there.
-fn unwatch_filter(tables: &mut CoopTables, handle: WriteFilterHandle) -> Option<Option<EntityId>> {
+/// of there: the id of the Interest it held last, and of the declaration its key is named by when
+/// it held that last, whose retractions go on the wire; `None` when no filter is there.
+fn unwatch_filter(
+    tables: &mut CoopTables,
+    handle: WriteFilterHandle,
+) -> Option<(Option<EntityId>, Option<ExprId>)> {
     tables
         .undeclare_write_filter_quietly(handle)
-        .map(|unwatched| unwatched.interest_final)
+        .map(|unwatched| (unwatched.interest_final, unwatched.keyexpr))
 }
 
 /// Whether the session's own entities of `plane`'s kind count for a write filter or a matching
@@ -7946,6 +7950,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         None
     }
 
+    // The text is the filter's row's own, which does not move while the row stands.
+    fn filtered_keyexpr(&self, id: FilterId) -> Option<KeyView> {
+        let handle = row_of(id)?;
+        let core = self.live()?;
+        let tables = tables(&core.0.session.registry);
+        let row = tables.write_filters().get(handle)?;
+        Some(lent_key(tables, row.key(), row.own()))
+    }
+
     #[inline(never)]
     fn undeclare_subscriber(&self, id: SubId) {
         // A liveliness subscriber's id is one of these too (the port's one id space): its row goes
@@ -8225,12 +8238,16 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             suffix: form.suffix,
             aggregate: form.aggregate,
         });
+        // The row holds the declaration the key is named by from here on, so the entity keeps no
+        // hold of its key and lends it from the row (`filtered_keyexpr`).
+        let own = tables(&core.session.registry).keyexpr_at(wire.declared());
         let watching = tables_mut(&mut core.session.registry)
             .declare_write_filter_as(
                 plane_of(plane),
                 keyexpr,
                 counts_own(plane, count_local),
                 name,
+                own,
             )
             .map_err(Declined::from)?;
         let id = row_id(watching.handle);
@@ -8246,6 +8263,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 // `_z_add_interest` takes it before it decides: a filter that finds none left is
                 // refused, its row given back.
                 let Some(taken) = core.session.take_entity_id() else {
+                    // The caller holds the declaration the row held through this call, so the
+                    // row's going is not its last holder's and retracts nothing.
                     let _ = unwatch_filter(tables_mut(&mut core.session.registry), watching.handle);
                     return Err(Declined::NoEntityId);
                 };
@@ -8293,18 +8312,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             return;
         };
         let core = &mut core.0;
-        let place = {
+        // What the links are told is placed while the row stands: its Interest, and the
+        // declaration its key is named by when the row holds that last.
+        let (place, keyexpr_place) = {
             let tables = tables(&core.session.registry);
             let Some(row) = tables.write_filters().get(handle) else {
                 return;
             };
-            interest_rank(tables, row.interest())
+            (
+                interest_rank(tables, row.interest()),
+                core.prefix_retraction(row.own()),
+            )
         };
-        let Some(last_held) = unwatch_filter(tables_mut(&mut core.session.registry), handle) else {
+        let Some((last_held, keyexpr)) =
+            unwatch_filter(tables_mut(&mut core.session.registry), handle)
+        else {
             return;
         };
         // The row went before the links are told: a send never finds the tables borrowed.
         core.end_interest(last_held, place);
+        core.retract_keyexpr(keyexpr_place, keyexpr);
         // The groups it asked are told the asking ended.
         #[cfg(feature = "group")]
         for group in &core.transport.groups {
