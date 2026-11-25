@@ -801,7 +801,7 @@ fn a_build_that_puts_nothing_in_the_round_lays_out_none_of_it() {
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
     let parts: Vec<&str> = built.rows().map(|row| row.part()).collect();
     assert!(
-        parts.contains(&"endpoint texts"),
+        parts.contains(&"router lend"),
         "CONTROL: the plan lays its parts out"
     );
     for part in [
