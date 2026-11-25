@@ -55,6 +55,7 @@ struct AtomicWord(core::sync::atomic::AtomicU32);
 
 #[cfg(target_has_atomic = "32")]
 impl Word for AtomicWord {
+    #[inline]
     fn load(&self) -> u32 {
         self.0.load(core::sync::atomic::Ordering::Acquire)
     }
@@ -74,6 +75,7 @@ struct HeldWord(core::cell::Cell<u32>);
 
 #[cfg(any(not(target_has_atomic = "32"), test))]
 impl Word for HeldWord {
+    #[inline]
     fn load(&self) -> u32 {
         self.0.get()
     }
@@ -98,6 +100,7 @@ impl Word for HeldWord {
 struct LocalWord(core::sync::atomic::AtomicU32);
 
 impl Word for LocalWord {
+    #[inline]
     fn load(&self) -> u32 {
         self.0.load(core::sync::atomic::Ordering::Relaxed)
     }
@@ -159,6 +162,8 @@ type TargetWord = HeldWord;
 #[derive(Debug, Default)]
 pub struct CallLatch(Counter<TargetWord>);
 
+// Each method is inlined across crates: an engine calls them on every delivery, and a call of one
+// costs more than its body.
 impl CallLatch {
     /// Whether a call is ended with the tables held: on a target with no atomic read-modify-write
     /// of the word, whose count the tables' lock guards.
@@ -175,6 +180,7 @@ impl CallLatch {
 
     /// Count one more call: `false` once the row is retired, and past the most calls one word
     /// counts.
+    #[inline]
     pub fn begin(&self) -> bool {
         self.0.begin()
     }
@@ -182,17 +188,20 @@ impl CallLatch {
     /// Count one call fewer: `true` when it was the last call of a retired row, whose letting go
     /// is then the caller's. Called once for each [`Self::begin`] that returned `true`, with the
     /// tables held where [`Self::ENDS_HELD`].
+    #[inline]
     pub fn end(&self) -> bool {
         self.0.end()
     }
 
     /// Retire the row: no call begins from here. `true` when no call runs, so the row may be let
     /// go of now; else the call that ends last says so ([`Self::end`]). Called once.
+    #[inline]
     pub fn retire(&self) -> bool {
         self.0.retire()
     }
 
     /// Whether the row is retired and no call of it runs.
+    #[inline]
     pub fn drained(&self) -> bool {
         self.0.drained()
     }
@@ -200,6 +209,7 @@ impl CallLatch {
     /// Whether the row is retired, calls of it still running or not: a call begun before the
     /// retirement that has not reached its row yet reads it here, so the latch stays the one
     /// record of whether the row is live.
+    #[inline]
     pub fn retired(&self) -> bool {
         self.0.retired()
     }
@@ -211,6 +221,7 @@ impl CallLatch {
 #[derive(Debug, Default)]
 pub struct LocalLatch(Counter<LocalWord>);
 
+// Inlined across crates, as `CallLatch`'s are.
 impl LocalLatch {
     /// A call ends with no lock: no other thread changes the word.
     pub const ENDS_HELD: bool = false;
@@ -221,26 +232,31 @@ impl LocalLatch {
     }
 
     /// As [`CallLatch::begin`].
+    #[inline]
     pub fn begin(&self) -> bool {
         self.0.begin()
     }
 
     /// As [`CallLatch::end`].
+    #[inline]
     pub fn end(&self) -> bool {
         self.0.end()
     }
 
     /// As [`CallLatch::retire`].
+    #[inline]
     pub fn retire(&self) -> bool {
         self.0.retire()
     }
 
     /// As [`CallLatch::drained`].
+    #[inline]
     pub fn drained(&self) -> bool {
         self.0.drained()
     }
 
     /// As [`CallLatch::retired`].
+    #[inline]
     pub fn retired(&self) -> bool {
         self.0.retired()
     }
@@ -270,22 +286,27 @@ pub trait RowLatch: Default {
 impl RowLatch for CallLatch {
     const ENDS_HELD: bool = CallLatch::ENDS_HELD;
 
+    #[inline]
     fn begin(&self) -> bool {
         CallLatch::begin(self)
     }
 
+    #[inline]
     fn end(&self) -> bool {
         CallLatch::end(self)
     }
 
+    #[inline]
     fn retire(&self) -> bool {
         CallLatch::retire(self)
     }
 
+    #[inline]
     fn drained(&self) -> bool {
         CallLatch::drained(self)
     }
 
+    #[inline]
     fn retired(&self) -> bool {
         CallLatch::retired(self)
     }
@@ -294,22 +315,27 @@ impl RowLatch for CallLatch {
 impl RowLatch for LocalLatch {
     const ENDS_HELD: bool = LocalLatch::ENDS_HELD;
 
+    #[inline]
     fn begin(&self) -> bool {
         LocalLatch::begin(self)
     }
 
+    #[inline]
     fn end(&self) -> bool {
         LocalLatch::end(self)
     }
 
+    #[inline]
     fn retire(&self) -> bool {
         LocalLatch::retire(self)
     }
 
+    #[inline]
     fn drained(&self) -> bool {
         LocalLatch::drained(self)
     }
 
+    #[inline]
     fn retired(&self) -> bool {
         LocalLatch::retired(self)
     }

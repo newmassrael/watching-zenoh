@@ -1252,6 +1252,7 @@ impl Engine {
                             timestamps,
                         ),
                     )
+                    .map(|declared| declared.id)
                     .map_err(|refused| zerror!("the engine refused a subscriber: {refused}").into())
             }
         }
@@ -1319,7 +1320,8 @@ impl Engine {
                         ask.as_ref().map(|form| form.as_ask()),
                         destination != Locality::Remote,
                     )
-                    .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?;
+                    .map_err(|refused| zerror!("the engine refused a publisher: {refused}"))?
+                    .id;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a publisher {id}, which is more than an id holds")
                         .into()
@@ -1456,6 +1458,7 @@ impl Engine {
                             promotion,
                         ),
                     )
+                    .map(|declared| declared.id)
                     .map_err(|refused| zerror!("the engine refused a queryable: {refused}").into())
             }
         }
@@ -1534,7 +1537,8 @@ impl Engine {
                         ask.as_ref().map(|form| form.as_ask()),
                         destination != Locality::Remote,
                     )
-                    .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?;
+                    .map_err(|refused| zerror!("the engine refused a querier: {refused}"))?
+                    .id;
                 Id::try_from(id).map_err(|_| {
                     zerror!("the engine numbered a querier {id}, which is more than an id holds")
                         .into()
@@ -1726,6 +1730,7 @@ impl Engine {
                         links,
                         tokio_engine::liveliness_sink(callback, notifier),
                     )
+                    .map(|declared| declared.id)
                     .map_err(|refused| {
                         zerror!("the engine refused a liveliness subscriber: {refused}").into()
                     })
@@ -1755,7 +1760,7 @@ impl Engine {
                 tokio_engine::ask_liveliness(
                     request,
                     Box::new(move |key, _wire, timeout_ms, fan, leg| {
-                        let mut leg = || wz_capi_core::faces::face_reply(leg());
+                        let mut leg = || shared.face_reply(leg());
                         Ok(shared.liveliness_get_on_links(key, timeout_ms, links, fan, &mut leg))
                     }),
                 )

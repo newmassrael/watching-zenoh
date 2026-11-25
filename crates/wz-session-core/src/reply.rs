@@ -1238,9 +1238,9 @@ struct Pending<C: ReplySink, P: Storage = Profile> {
 /// hard-capped table and the growable one.
 pub struct ReplyRegistry<C: ReplySink, P: Storage = Profile> {
     pending: BoundedVec<Pending<C, P>, { caps::MAX_PENDING_QUERIES }, P>,
-    /// No pending entry's deadline is before this ([`Self::due_ms`]): lowered as an entry with a
-    /// deadline is registered, worked out again by a sweep that ran. An entry that ended otherwise
-    /// leaves it where it was, which only brings a sweep that finds nothing forward.
+    /// The earliest deadline of a pending entry ([`Self::due_ms`]), `u64::MAX` with none: lowered
+    /// as an entry with a deadline is registered, and worked out again only when the entry that
+    /// leaves the table held it, so a holder reads it without a walk of the entries.
     due_ms: u64,
     /// The most queries the registry holds pending (`MAX_PENDING_QUERIES`): what the creator of
     /// the registry resolved ([`Self::limit_to`]), the build's value until it does. A growable
@@ -1517,6 +1517,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// were asked of does to them, each sink's drop being its end. The rows stay the table's.
     pub fn clear(&mut self) {
         self.pending.clear();
+        self.due_ms = u64::MAX;
     }
 
     /// Whether one more query may be held pending: inside the quota its creator stated and in a
@@ -1534,7 +1535,16 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
     /// fired-and-removed returns `false` without panicking.
     pub fn unregister(&mut self, rid: crate::wire_id::RequestId) -> bool {
         let before = self.pending.len();
-        self.pending.retain(|p| p.rid != rid);
+        let due_ms = self.due_ms;
+        let mut held_due = false;
+        self.pending.retain(|p| {
+            let keep = p.rid != rid;
+            held_due |= !keep && p.deadline_ms == Some(due_ms);
+            keep
+        });
+        if held_due {
+            self.rearm_due();
+        }
         before != self.pending.len()
     }
 
@@ -1868,6 +1878,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             // At most the table's rows.
             ended = ended.saturating_add(1);
         }
+        self.due_ms = u64::MAX;
         ended
     }
 
@@ -1960,15 +1971,20 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
             // siblings.
             entry.sink.on_timeout(rid);
         }
-        self.due_ms = self.next_deadline_ms().unwrap_or(u64::MAX);
+        self.rearm_due();
         swept
     }
 
-    /// No pending entry's deadline is before this: a sweep before it ends nothing, and its holder
-    /// may pass it over ([`Self::sweep_timed_out`]). `u64::MAX` with no deadline registered since
-    /// the last sweep.
+    /// The earliest deadline of a pending entry, `u64::MAX` when none has one: a sweep before it
+    /// ends nothing, and its holder may pass it over ([`Self::sweep_timed_out`]). Kept as the
+    /// entries come and go, so it is [`Self::next_deadline_ms`] read without a walk.
     pub fn due_ms(&self) -> u64 {
         self.due_ms
+    }
+
+    /// Work [`Self::due_ms`] out again from the entries left, after one that held it left.
+    fn rearm_due(&mut self) {
+        self.due_ms = self.next_deadline_ms().unwrap_or(u64::MAX);
     }
 
     /// R311y296 — the EARLIEST absolute deadline among the pending
@@ -2082,6 +2098,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         // for the documented duplicate-rid registration-order final firing).
         // One entry in the frame and not the table of them: this is the
         // function the final of every get passes through.
+        let due_ms = self.due_ms;
+        let mut held_due = false;
         let mut at = 0;
         while let Some(mut entry) = self.pending.take_next_where(&mut at, |entry| {
             // An entry of this rid that still owes a Final owes one fewer; the last one ends it.
@@ -2093,7 +2111,11 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 _ => false,
             }
         }) {
+            held_due |= entry.deadline_ms == Some(due_ms);
             entry.sink.on_final(rid);
+        }
+        if held_due {
+            self.rearm_due();
         }
     }
 
@@ -5144,6 +5166,77 @@ mod tests {
             u64::MAX,
             "only an entry that never expires is left"
         );
+    }
+
+    /// The earliest deadline is kept as entries end by every road besides the sweep: a Final
+    /// (the last of two an entry owes), an unregistration, the loss of the face and the drop of
+    /// the table. Each leaves the earliest of the entries left, as a walk of them reads it, and
+    /// none once none is left. Turned red by a road that leaves the deadline of an entry gone, or
+    /// that moves it when an entry that is not the earliest ends.
+    #[test]
+    fn due_ms_is_the_earliest_left_after_every_end_of_an_entry() {
+        let mut reg = ReplyRegistry::new();
+        for (rid, finals, deadline_ms) in [
+            (1, 1, Some(300)),
+            (2, 1, Some(100)),
+            (3, 1, None),
+            (4, 1, Some(200)),
+            (5, 2, Some(100)),
+        ] {
+            reg.register(
+                rid,
+                finals,
+                deadline_ms,
+                crate::reply_acceptance::ReplyAcceptance::Any,
+                |_| {},
+                |_| {},
+            )
+            .expect("no quota is stated on this table");
+        }
+        assert_eq!(reg.due_ms(), 100);
+        reg.deliver_local_final(2);
+        assert_eq!(reg.due_ms(), 100, "the other entry at 100 is left");
+        reg.deliver_local_final(5);
+        assert_eq!(
+            reg.due_ms(),
+            100,
+            "an entry that owes one more Final is left"
+        );
+        reg.deliver_local_final(5);
+        assert_eq!(reg.due_ms(), 200, "the earliest left after the Finals");
+        assert_eq!(Some(reg.due_ms()), reg.next_deadline_ms());
+        assert!(reg.unregister(1));
+        assert_eq!(reg.due_ms(), 200, "a later entry's end moved it");
+        assert!(reg.unregister(4));
+        assert_eq!(
+            reg.due_ms(),
+            u64::MAX,
+            "only an entry that never expires is left"
+        );
+        assert_eq!(reg.next_deadline_ms(), None);
+        reg.register(
+            6,
+            1,
+            Some(50),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
+        assert_eq!(reg.due_ms(), 50);
+        assert_eq!(reg.finish_all(), 2, "the entries at 50 and with none");
+        assert_eq!(reg.due_ms(), u64::MAX, "the face's loss left a deadline");
+        reg.register(
+            7,
+            1,
+            Some(60),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
+        reg.clear();
+        assert_eq!(reg.due_ms(), u64::MAX, "the table's drop left a deadline");
     }
 
     /// Sweeping the earliest entry re-arms on the next one, and a table

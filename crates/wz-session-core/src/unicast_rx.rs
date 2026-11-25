@@ -3,7 +3,8 @@
 
 //! The receive half of a unicast session's transport, as one value the session core owns: the
 //! reassembly Router its fragments are staged in, and, for a receive in place (`rx-in-place`),
-//! the one-record buffer each record is decoded into and the count of the paths its units took.
+//! the one-record buffer each record is decoded into, where the dispatch of a datagram its link
+//! keeps stopped, and the count of the paths its units took.
 //!
 //! A driver holds a [`UnicastRx`] beside the session's engine and hands it what its link gave
 //! (the bytes a link lends, or a frame it read) and the time; it keeps no state of the receive
@@ -25,7 +26,7 @@ use crate::chain_staging::ChainStaging;
 #[cfg(any(feature = "alloc", feature = "rx-in-place"))]
 use crate::drive::SessionEngine;
 #[cfg(feature = "rx-in-place")]
-use crate::drive::{CopyReason, DatagramPath};
+use crate::drive::{CopyReason, DatagramPath, DatagramReader};
 #[cfg(feature = "alloc")]
 use crate::driver_loop::DriverLoopOutcome;
 use crate::driver_loop::EventSink;
@@ -35,8 +36,6 @@ use crate::driver_loop::IterationEvent;
 use crate::link::SessionRuntime;
 #[cfg(feature = "alloc")]
 use crate::link::{LinkEvent, RxFrame};
-#[cfg(feature = "rx-in-place")]
-use crate::network_message::{new_record_buf, RecordBuf};
 #[cfg(feature = "reassembly")]
 use crate::reassembly_dispatch::ReassemblyDispatcher;
 #[cfg(any(feature = "alloc", feature = "rx-in-place"))]
@@ -79,14 +78,15 @@ pub trait RxReassembly {
         on_event: &mut F,
     );
 
-    /// Dispatch one datagram where the link holds it, its fragments staged here.
+    /// Dispatch one datagram where the link holds it, its fragments staged here, with what the
+    /// receive keeps from one datagram to the next (`reader`).
     #[cfg(feature = "rx-in-place")]
     fn dispatch_in_place<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
-        record: &mut RecordBuf,
+        reader: &mut DatagramReader,
         now_ms: u64,
         on_event: &mut F,
     ) -> DatagramPath;
@@ -125,11 +125,11 @@ impl RxReassembly for () {
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
-        record: &mut RecordBuf,
+        reader: &mut DatagramReader,
         _now_ms: u64,
         on_event: &mut F,
     ) -> DatagramPath {
-        crate::drive::dispatch_datagram(unit, actions, engine, record, on_event)
+        crate::drive::dispatch_datagram(unit, actions, engine, reader, on_event)
     }
 }
 
@@ -181,12 +181,12 @@ where
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
-        record: &mut RecordBuf,
+        reader: &mut DatagramReader,
         now_ms: u64,
         on_event: &mut F,
     ) -> DatagramPath {
         crate::drive::dispatch_datagram_reassembling(
-            unit, actions, engine, record, self, now_ms, on_event,
+            unit, actions, engine, reader, self, now_ms, on_event,
         )
     }
 }
@@ -312,12 +312,12 @@ where
         unit: &[u8],
         actions: &SessionLinkActions<R, T>,
         engine: &mut SessionEngine<R, T>,
-        record: &mut RecordBuf,
+        reader: &mut DatagramReader,
         now_ms: u64,
         on_event: &mut F,
     ) -> DatagramPath {
         self.with(|router| {
-            router.dispatch_in_place(unit, actions, engine, record, now_ms, on_event)
+            router.dispatch_in_place(unit, actions, engine, reader, now_ms, on_event)
         })
         .unwrap_or(DatagramPath::RouterHeld)
     }
@@ -400,10 +400,11 @@ impl RxPathCounts {
 /// The receive half of one unicast session's transport. See the module documentation.
 pub struct UnicastRx<Router> {
     router: Router,
-    /// The one record an inbound record is decoded into and dispatched from, made once with the
-    /// receive: a datagram costs it nothing however many records it carries.
+    /// What the receive keeps from one datagram to the next: the one record an inbound record is
+    /// decoded into, made once with the receive, and where the dispatch of a datagram its link
+    /// keeps stopped.
     #[cfg(feature = "rx-in-place")]
-    record: RecordBuf,
+    reader: DatagramReader,
     #[cfg(feature = "rx-in-place")]
     paths: RxPathCounts,
 }
@@ -414,7 +415,7 @@ impl<Router> UnicastRx<Router> {
         Self {
             router,
             #[cfg(feature = "rx-in-place")]
-            record: new_record_buf(),
+            reader: DatagramReader::new(),
             #[cfg(feature = "rx-in-place")]
             paths: RxPathCounts::default(),
         }
@@ -447,7 +448,7 @@ impl<Router> UnicastRx<Router> {
         // other field is written once below through its own address, and then every field is.
         unsafe {
             #[cfg(feature = "rx-in-place")]
-            core::ptr::addr_of_mut!((*at).record).write(new_record_buf());
+            core::ptr::addr_of_mut!((*at).reader).write(DatagramReader::new());
             #[cfg(feature = "rx-in-place")]
             core::ptr::addr_of_mut!((*at).paths).write(RxPathCounts::default());
             Some(place.assume_init_mut())
@@ -463,6 +464,13 @@ impl<Router> UnicastRx<Router> {
     #[cfg(feature = "rx-in-place")]
     pub fn path_counts(&self) -> RxPathCounts {
         self.paths
+    }
+
+    /// Whether the dispatch of the datagram this receive was last lent stopped before its end, so
+    /// its link is to keep it and lend it again ([`DatagramReader::resumes`]).
+    #[cfg(feature = "rx-in-place")]
+    pub fn resumes_datagram(&self) -> bool {
+        self.reader.resumes()
     }
 }
 
@@ -558,7 +566,7 @@ impl<Router: RxReassembly> UnicastRx<Router> {
             unit,
             actions,
             engine,
-            &mut self.record,
+            &mut self.reader,
             now_ms,
             on_event,
         );

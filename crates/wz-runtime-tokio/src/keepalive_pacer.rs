@@ -31,7 +31,7 @@
 //! The pacer wakes a little after the loop's own keepalive deadline and, if the
 //! line is still idle, emits through the same
 //! [`wz_session_core::drive::check_keepalive_deadline`] the loop uses. That function needs no engine and
-//! ends the keepalive tick it judges under the link's stamps' lock, so the two
+//! ends the keepalive tick it judges in one compare-and-swap of its stamp, so the two
 //! emitters cannot send twice for one tick: whichever ends it first answers
 //! for it, and the other finds it ended. The
 //! slack is what makes the loop the normal emitter and this one the backstop; a

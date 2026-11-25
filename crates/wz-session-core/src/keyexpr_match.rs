@@ -260,6 +260,58 @@ pub fn keyexpr_intersects_text_with(
     keyexpr_intersects(candidate, target)
 }
 
+/// A key asked against one pattern after another, its [`KeyFacts`] read the first time an answer
+/// needs them and kept for the rest: an arriving key is matched against every subscriber's
+/// pattern, and most answers need nothing of the key but its text.
+#[derive(Debug, Clone)]
+pub struct AskedKey<'k> {
+    text: &'k str,
+    facts: Option<KeyFacts>,
+}
+
+impl<'k> AskedKey<'k> {
+    /// The key `text`, its facts not read yet.
+    pub const fn new(text: &'k str) -> Self {
+        Self { text, facts: None }
+    }
+
+    /// The key `text`, whose facts its caller already read.
+    pub const fn with_facts(text: &'k str, facts: KeyFacts) -> Self {
+        Self {
+            text,
+            facts: Some(facts),
+        }
+    }
+
+    /// The key's text.
+    pub const fn text(&self) -> &'k str {
+        self.text
+    }
+
+    /// The key's facts, read now if no answer read them before.
+    pub fn facts(&mut self) -> KeyFacts {
+        let text = self.text;
+        *self.facts.get_or_insert_with(|| KeyFacts::of(text))
+    }
+}
+
+/// [`keyexpr_intersects_text_with`] for a pattern whose facts are known and a key whose facts are
+/// read only where the answer needs them: a wildcard pattern walks the two texts whatever the key
+/// holds, and a pattern equal to the key has the key's facts as its own.
+pub fn keyexpr_intersects_asked(
+    candidate: &str,
+    candidate_facts: KeyFacts,
+    target: &mut AskedKey<'_>,
+) -> bool {
+    if candidate_facts.wild {
+        return keyexpr_intersects(candidate, target.text);
+    }
+    if candidate == target.text {
+        return candidate_facts.key;
+    }
+    target.facts().wild && keyexpr_intersects(candidate, target.text)
+}
+
 // How many times `keyexpr_intersects` walked two keys on this thread: a test reads the difference
 // to tell a match answered from the keys' facts from one that walked them.
 #[cfg(test)]
@@ -568,6 +620,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A key asked against patterns gives the answers the two keys' facts give, and reads its own
+    /// facts only for a pattern that holds no wildcard and is not the key's own text. Turned red
+    /// by an answer that reads the key for a pattern equal to it, or one that differs from
+    /// `keyexpr_intersects_text_with`.
+    #[test]
+    fn an_asked_key_answers_as_the_two_facts_do_and_reads_itself_only_when_needed() {
+        for candidate in FACT_KEYS {
+            let candidate_facts = KeyFacts::of(candidate);
+            for target in FACT_KEYS {
+                let mut asked = AskedKey::new(target);
+                assert_eq!(
+                    keyexpr_intersects_asked(candidate, candidate_facts, &mut asked),
+                    keyexpr_intersects_text_with(
+                        candidate,
+                        candidate_facts,
+                        target,
+                        KeyFacts::of(target)
+                    ),
+                    "{candidate:?} against {target:?}"
+                );
+                let needed = !candidate_facts.wild && candidate != target;
+                assert_eq!(
+                    asked.facts.is_some(),
+                    needed,
+                    "{candidate:?} against {target:?} read the key's facts"
+                );
+            }
+        }
+        let mut asked = AskedKey::with_facts("a/b", KeyFacts::of("a/b"));
+        assert_eq!(asked.text(), "a/b");
+        assert_eq!(asked.facts(), KeyFacts::of("a/b"));
     }
 
     #[test]

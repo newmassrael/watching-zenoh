@@ -201,7 +201,8 @@ fn a_filter_and_a_listener_count_the_peers_of_every_face() {
             }),
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     until(&engine, "both routers to see the Interest", || {
         first.seen(|s| s.interests) >= 1 && second.seen(|s| s.interests) >= 1
     });

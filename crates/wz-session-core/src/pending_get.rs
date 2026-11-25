@@ -121,7 +121,8 @@ pub trait LegTables {
     /// The entry `kind` names is no longer pending here.
     fn end_leg(&mut self, kind: GetKind);
 
-    /// When the earliest entry here is due: a query's or a liveliness snapshot's.
+    /// When the earliest entry here is due: a query's or a liveliness snapshot's, as each table
+    /// keeps it, with no walk of the entries.
     fn next_deadline_ms(&self) -> Option<u64>;
 }
 
@@ -140,12 +141,10 @@ impl<R: ReplySink, G: ReplySink, P: Storage> LegTables for Requesters<R, G, P> {
     }
 
     fn next_deadline_ms(&self) -> Option<u64> {
-        let queries = self.replies.next_deadline_ms();
+        let due_ms = self.replies.due_ms();
         #[cfg(feature = "liveliness-get")]
-        let snapshots = self.liveliness_gets.next_deadline_ms();
-        #[cfg(not(feature = "liveliness-get"))]
-        let snapshots = None;
-        queries.into_iter().chain(snapshots).min()
+        let due_ms = due_ms.min(self.liveliness_gets.due_ms());
+        (due_ms != u64::MAX).then_some(due_ms)
     }
 }
 
@@ -256,5 +255,48 @@ mod tests {
             false
         }));
         assert!(!asked, "no room asked");
+    }
+
+    /// A face's tables answer the earliest deadline still pending in either of them, as each
+    /// keeps it: a query's Final hands the earliest to the snapshot's, and none is left once each
+    /// table's legs ended. Turned red by a table that keeps the deadline of an entry gone, or by
+    /// a read of the queries' table alone.
+    #[cfg(all(feature = "storage-profile", feature = "alloc"))]
+    #[test]
+    fn a_faces_tables_answer_the_earliest_deadline_left_in_either() {
+        use crate::reply_acceptance::ReplyAcceptance;
+        use crate::reply_sink::BoxedReplySink;
+        fn sink() -> BoxedReplySink {
+            BoxedReplySink::new(|_| {}, |_| {})
+        }
+        let mut tables = Requesters::<BoxedReplySink, BoxedReplySink>::new();
+        assert_eq!(tables.next_deadline_ms(), None, "CONTROL: nothing pending");
+        tables
+            .replies
+            .register_sink(1, 1, Some(100), ReplyAcceptance::Any, sink())
+            .expect("a row is free");
+        tables
+            .replies
+            .register_sink(2, 1, Some(400), ReplyAcceptance::Any, sink())
+            .expect("a row is free");
+        #[cfg(feature = "liveliness-get")]
+        tables
+            .liveliness_gets
+            .register(7, Some(250), sink())
+            .expect("a row is free");
+        assert_eq!(tables.next_deadline_ms(), Some(100));
+        tables.replies.deliver_local_final(1);
+        #[cfg(feature = "liveliness-get")]
+        {
+            assert_eq!(
+                tables.next_deadline_ms(),
+                Some(250),
+                "the snapshot's is the earliest left"
+            );
+            tables.end_leg(GetKind::Liveliness(7));
+        }
+        assert_eq!(tables.next_deadline_ms(), Some(400));
+        tables.end_leg(GetKind::Query(2));
+        assert_eq!(tables.next_deadline_ms(), None, "every leg ended");
     }
 }

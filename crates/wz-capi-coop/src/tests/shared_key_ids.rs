@@ -230,6 +230,7 @@ fn counts_a_subscriber_declared_by_id(ids: Option<SharedKeyIds>, form: KeyWireFo
                 false,
             )
             .expect("a session with ids left declares")
+            .id
     };
     let (by_id, mark) = (filter("lab/rig/alpha"), filter("lab/mark"));
     assert!(
@@ -477,7 +478,8 @@ fn a_filtered_plain_put_names_its_key_as_the_links_form_says() {
             None,
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     eventually("the client's subscriber to open the filter", || {
         !listener.write_filter_active(filter)
     });
@@ -817,7 +819,8 @@ fn a_publishers_bare_put_is_planned_where_its_link_names_its_key_by_the_declarat
                 None,
                 false,
             )
-            .expect("a session with ids left declares");
+            .expect("a session with ids left declares")
+            .id;
         eventually("the client's subscriber to open the filter", || {
             !listener.write_filter_active(filter)
         });

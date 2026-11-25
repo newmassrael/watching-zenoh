@@ -31,6 +31,7 @@ fn filter_on(engine: &Engine, key: &str) -> FilterId {
             false,
         )
         .expect("a session with ids left declares")
+        .id
 }
 
 /// How many times the session's lock was taken since the open.

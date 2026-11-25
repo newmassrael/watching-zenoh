@@ -53,7 +53,7 @@ use crate::get::{
     z_query_consolidation_t, z_query_target_t, Z_CONSOLIDATION_MODE_AUTO,
     Z_QUERY_TARGET_BEST_MATCHING,
 };
-use crate::keyexpr::{declared_of, DeclaredKeyexpr};
+use crate::keyexpr::declared_of;
 use crate::matching::{
     declare_on_filter, z_matching_status_t, z_moved_closure_matching_status_t,
     z_owned_matching_listener_t,
@@ -246,22 +246,17 @@ impl GetShape {
 /// Behind a `z_owned_querier_t`: the declared keyexpr, the options every get
 /// through it inherits, and the session's engine to ask them on.
 pub(crate) struct QuerierState {
-    /// R2962 — pico's write filter for this querier, which decides whether a get
-    /// is SENT, and which its matching listeners are declared on and retracted with. It holds
-    /// the session the querier is declared in, which the querier reaches through it.
-    /// Declared BEFORE `key` so it drops first, as the publisher's does.
-    filter: WriteFilter,
-    /// R2959 — the querier's key with the whole-key declaration pico makes
-    /// for it; retracted after the querier, as the publisher's is.
-    key: DeclaredKeyexpr,
-    /// R311y559 — the `eid` half of the global id `z_querier_id` reports,
-    /// allocated once at declare. See `PublisherState::eid`. Only with
-    /// `unstable-api`, which is what reports it.
-    #[cfg(feature = "unstable-api")]
-    eid: wz_session_core::wire_id::EntityId,
-    /// R311y559 — cached loan of `key` for `z_querier_keyexpr`; bound after
-    /// boxing, as everywhere else here.
+    /// pico's write filter for this querier, which decides whether a get is SENT, and which its
+    /// matching listeners are declared on and retracted with, holding the session the querier is
+    /// declared in; the querier's key, which the session's record of the filter keeps with the
+    /// whole-key declaration pico makes for it, retracted after the filter's Interest, as the
+    /// publisher's is; and the `eid` half of the global id `z_querier_id` reports.
+    entity: FilteredKey,
+    /// The loan `z_querier_keyexpr` hands back, from the record ([`FilteredKey::lend`]); bound
+    /// once the state sits at its final address.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
+    /// What the loan names besides the key's text, in the state with the session it names.
+    record: crate::keyexpr::RecordKey,
     /// How every get through it asks, its request QoS included: pico's
     /// `z_querier_get_options_t` carries no QoS fields, so the per-get call has nothing to
     /// override them with, and this is where they live.
@@ -282,21 +277,21 @@ pub(crate) struct QuerierState {
 }
 
 impl QuerierState {
-    /// Point the cached view at this state's own keyexpr, after boxing.
+    /// Point the cached loan at the key the session's record keeps, once placed.
     pub(crate) fn bind(&mut self) {
-        self.loaned_keyexpr = self.key.loaned();
+        self.loaned_keyexpr = self.entity.lend(&mut self.record);
     }
 
     /// The `eid` half of the global id `z_querier_id` reports.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn entity_id(&self) -> wz_session_core::wire_id::EntityId {
-        self.eid
+        self.entity.eid
     }
 
     /// The SESSION's zid — the other half of that global id.
     #[cfg(feature = "unstable-api")]
     pub(crate) fn shared_zid(&self) -> [u8; 16] {
-        self.filter.engine().zid()
+        self.entity.filter.engine().zid()
     }
 
     /// The cached borrow `z_querier_keyexpr` hands back.
@@ -438,14 +433,12 @@ pub unsafe extern "C" fn z_declare_querier(
             // holding none and never moved while the querier stands; each field is written once
             // through a pointer to it, not null as it is inside the place, the token made there.
             unsafe {
-                #[cfg(feature = "unstable-api")]
-                addr_of_mut!((*at).eid).write(filtered.eid);
-                addr_of_mut!((*at).filter).write(filtered.filter);
-                addr_of_mut!((*at).key).write(filtered.key);
+                addr_of_mut!((*at).entity).write(filtered);
                 addr_of_mut!((*at).loaned_keyexpr).write(crate::abi::z_loaned_keyexpr_t::borrowed(
                     core::ptr::null(),
                     0,
                 ));
+                addr_of_mut!((*at).record).write(crate::keyexpr::RecordKey::UNLENT);
                 addr_of_mut!((*at).shape).write(shape);
                 addr_of_mut!((*at).encoding).write(encoding);
                 CancellationToken::init_in(NonNull::new_unchecked(addr_of_mut!((*at).cancel)));
@@ -553,12 +546,12 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         // pico checks the session first, then the write filter, and on either refusal runs
         // the closure's `drop` (`z_querier_get_with_parameters_substr`, `should_proceed`); a
         // session on a multicast transport proceeds whatever the filter says.
-        let engine = state.filter.engine();
+        let engine = state.entity.filter.engine();
         if engine.is_closed() {
             drop(closure);
             return Z_ERR_SESSION_CLOSED;
         }
-        if state.filter.holds_back() {
+        if state.entity.filter.holds_back() {
             drop(closure);
             return Z_OK;
         }
@@ -574,8 +567,8 @@ pub unsafe extern "C" fn z_querier_get_with_parameters_substr(
         let ask = held.ask(params_in, state.shape, state.encoding.as_ref());
         issue_get(
             engine,
-            state.key.literal(),
-            state.key.wire(crate::session::EngineHold::as_ref(engine)),
+            state.entity.keyexpr(),
+            state.entity.wire_once(),
             &ask,
             closure,
             token,
@@ -607,7 +600,7 @@ pub unsafe extern "C" fn z_querier_get_matching_status(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
-        (*matching_status).matching = !state.filter.active();
+        (*matching_status).matching = !state.entity.filter.active();
         Z_OK
     })
 }
@@ -643,7 +636,7 @@ pub unsafe extern "C" fn z_querier_declare_background_matching_listener(
 /// # Safety
 /// `querier` must be null or a live loaned querier.
 unsafe fn querier_filter<'a>(querier: *const z_loaned_querier_t) -> Option<&'a WriteFilter> {
-    handle_ref::<z_loaned_querier_t, QuerierState>(querier).map(|state| &state.filter)
+    handle_ref::<z_loaned_querier_t, QuerierState>(querier).map(|state| &state.entity.filter)
 }
 
 #[cfg(test)]

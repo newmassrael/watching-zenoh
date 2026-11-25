@@ -155,6 +155,15 @@ impl wz_capi_port::KeyHolds for Script {
     ) -> Result<(), wz_capi_port::HoldRefused> {
         Err(wz_capi_port::HoldRefused::Gone)
     }
+
+    // The script declares no key, so no row is its.
+    fn declared_prefix(
+        &self,
+        _row: wz_session_core::session_tables::KeyexprHandle,
+        _key: &str,
+    ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+        None
+    }
 }
 
 impl wz_capi_port::Tickers for Script {
@@ -238,17 +247,21 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         if self.ids_spent.load(Ordering::SeqCst) {
             return Err(Refusal::NoEntityId);
         }
         let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare subscriber {keyexpr}"));
+        // The script's record keeps the text in a buffer of its own, which stays where it is when
+        // the records move.
+        let key = keyexpr.to_owned();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.subscriptions
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), wire, Arc::new(sink)));
-        Ok(id)
+            .push((id, key, wire, Arc::new(sink)));
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
     fn undeclare_subscriber(&self, id: SubId) {
         let known = self
@@ -295,8 +308,12 @@ impl SessionEngine for Script {
         _wire: &WireKey,
         _ask: Option<InterestAsk<'_>>,
         _count_local: bool,
-    ) -> Result<FilterId, Refusal> {
-        Ok(0)
+    ) -> Result<wz_capi_port::Declared<FilterId>, Refusal> {
+        // The script keeps no write filter's key.
+        Ok(wz_capi_port::Declared {
+            id: 0,
+            key: wz_capi_port::KeyView::ABSENT,
+        })
     }
     fn write_filter_active(&self, _id: FilterId) -> bool {
         false
@@ -356,14 +373,16 @@ impl SessionEngine for Script {
         _wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<SubId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<SubId>, Refusal> {
         let id = self.next_entity_id().ok_or(Refusal::NoEntityId)?;
         self.event(format!("declare liveliness {keyexpr}"));
+        let key = keyexpr.to_owned();
+        let lent = wz_capi_port::KeyView::literal(&key);
         self.liveliness
             .lock()
             .unwrap()
-            .push((id, keyexpr.to_owned(), history, Arc::new(sink)));
-        Ok(id)
+            .push((id, key, history, Arc::new(sink)));
+        Ok(wz_capi_port::Declared { id, key: lent })
     }
     fn get_on_wire(
         &self,
@@ -410,7 +429,7 @@ impl SessionEngine for Script {
         _allowed_origin: Locality,
         _retraction: Option<RetractionKey>,
         _sink: wz_capi_port::QueryableSink,
-    ) -> Result<QblId, Refusal> {
+    ) -> Result<wz_capi_port::Declared<QblId>, Refusal> {
         Err(Refusal::NotBuilt)
     }
 }
@@ -1620,7 +1639,7 @@ fn a_subscriber_lodged_in_a_lent_core_gives_it_back_once_after_its_last_holder()
     assert!(script.events().is_empty(), "nothing was declared");
 }
 
-/// The late-publisher subscription's callback is the engine's raw form over a count of the
+/// The late-publisher subscription's callback is the engine's plain form over a count of the
 /// subscriber, so declaring it takes no closure of its own, and the engine letting it go lets go
 /// of the count.
 #[test]
@@ -1633,8 +1652,8 @@ fn the_late_publisher_callback_is_a_count_of_the_subscriber() {
     let held = Strong::strong_count(&subscriber.shared);
     let sink = script.liveliness.lock().unwrap().remove(0).3;
     assert!(
-        matches!(*sink, LivelinessSink::Raw(_)),
-        "the callback is the raw form, which allocates no closure"
+        matches!(*sink, LivelinessSink::Plain(_)),
+        "the callback is the plain form, which allocates no closure"
     );
     drop(sink);
     assert_eq!(

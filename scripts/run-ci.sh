@@ -13035,18 +13035,24 @@ layer_c1cf_reduced_features() {
 # The second leg is the size ledger (docs/c-abi-architecture.md P9): `size_ledger_gate.py` reads
 # the release case the cost gate just built, and its zenoh-pico reference, by AREA, and holds each
 # area's ratio under its row of `deploy/size_ledger.json`, so a change that grows one area is
-# refused there and not only in the total. It builds nothing the first leg did not (the same
-# commands, target directory and reference directory), reads its case only on the shard the first
-# leg deals that case to, and checks the ledger itself on every shard. The two legs are
-# independent: a red case of the first does not hide the ledger's verdict.
+# refused there and not only in the total. Each byte goes to the source file the line table names
+# for it, inlined code included, read from the first leg's own builds: every case and reference is
+# built once with its line tables and measured with its debug information taken off, the file that
+# ships, whose executable sections the first leg holds to the build's. It builds nothing the first
+# leg did not (the same commands, target directory and reference directory), reads its case only on
+# the shard the first leg deals that case to, and checks the ledger itself on every shard. The two
+# legs are independent: a red case of the first does not hide the ledger's verdict.
 layer_c1cs_capability_cost() {
     local c1cs_shard_args=()
     if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
         c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
     fi
     _runci_legs_open C1cs || return 1
-    _runci_leg capability_cost_gate -- python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
-    _runci_leg size_ledger_gate -- python3 scripts/lib/size_ledger_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
+    # Each case is built under its ABI's own preset (`wz_config.build_of`), which the pinned Kconfig
+    # interpreter resolves.
+    _runci_leg kconfig -- bash scripts/provision-kconfiglib.sh
+    _runci_leg capability_cost_gate --after kconfig -- python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
+    _runci_leg size_ledger_gate --after kconfig -- python3 scripts/lib/size_ledger_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
     _runci_legs_close
 }
 
@@ -13383,22 +13389,20 @@ _c1p32_pico_profile_tests() {
 # leg ledger: the gate's own fixtures do not wait on the build, and the reading is judged only after
 # both passed.
 layer_c1nh_no_heap_after_open() {
-    local profile="configs/profiles/host-peer-ext.conf" resolved limits
+    local profile="configs/profiles/host-peer-ext.conf" resolved
     local -a args=() limit_env=()
     # The profile is read by the one pinned Kconfig interpreter, provisioned as Layer C1p32 does.
     bash scripts/provision-kconfiglib.sh || return 1
-    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-features pico "$profile")"; then
+    if ! resolved="$(python3 scripts/lib/wz_config.py --resolve-build pico "$profile")"; then
         echo "  C1nh FAIL: profile $profile did not resolve" >&2
         return 1
     fi
-    read -r -a args <<<"$resolved"
-    if ! limits="$(python3 scripts/lib/wz_config.py --resolve-env "$profile")"; then
-        echo "  C1nh FAIL: the limits of profile $profile did not resolve" >&2
-        return 1
-    fi
-    if [[ -n "$limits" ]]; then
-        mapfile -t limit_env <<<"$limits"
-    fi
+    # The one resolver's build (`wz_config.py --resolve-build`): the arguments on its first line,
+    # the limits and policies after.
+    local -a build_lines=()
+    mapfile -t build_lines <<<"$resolved"
+    read -r -a args <<<"${build_lines[0]}"
+    limit_env=("${build_lines[@]:1}")
     local reading="$WZ_ARTIFACTS/target/no-heap/reading.txt"
     mkdir -p "${reading%/*}" || return 1
     rm -f "$reading"

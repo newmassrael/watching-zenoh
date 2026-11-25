@@ -97,16 +97,16 @@ typedef struct { const uint8_t *_start; size_t _len; size_t _pad[2]; } z_view_st
 /* ------------------------------------------------------------------- keyexpr */
 /* A keyexpr view aliases the caller's NUL-terminated string (borrowed
  * `{ start, len }`); the caller keeps that string alive for the view. A
- * DECLARED keyexpr (z_declare_keyexpr) instead OWNS its literal and adds the
- * wire alias id. Both loan to z_loaned_keyexpr_t, which is why the literal
- * stays at slots 0/1 in each: _handle and _mapping are zero for a view, and
- * _mapping == 0 means "not declared" (0 is reserved on the wire). */
+ * DECLARED keyexpr (z_declare_keyexpr) instead OWNS its literal and names its
+ * declaration. Both loan to z_loaned_keyexpr_t, which is why the literal
+ * stays at slots 0/1 in each: _handle (the declaration's row) and _state (the
+ * object that keeps the key) are zero for a view. */
 typedef struct {
-    const uint8_t *_start; size_t _len; void *_handle; size_t _mapping;
+    const uint8_t *_start; size_t _len; size_t _handle; void *_state;
 } z_loaned_keyexpr_t;
 typedef struct { const uint8_t *_start; size_t _len; size_t _pad[4]; } z_view_keyexpr_t; /* 48 B */
 typedef struct {
-    const uint8_t *_start; size_t _len; void *_handle; size_t _mapping; size_t _pad[2];
+    const uint8_t *_start; size_t _len; size_t _handle; void *_state; size_t _pad[2];
 } z_owned_keyexpr_t; /* 48 B */
 typedef struct { z_owned_keyexpr_t _this; } z_moved_keyexpr_t;
 

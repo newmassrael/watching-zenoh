@@ -37,7 +37,8 @@ fn subscribe(engine: &Engine, key: &str, origin: Locality) -> (SubId, Arc<Atomic
                 into.fetch_add(1, Ordering::SeqCst);
             })
         })
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     (id, count)
 }
 
@@ -181,6 +182,7 @@ fn a_filter_and_a_listener_count_the_sessions_own_subscribers_when_asked() {
                 count_local,
             )
             .expect("a session with ids left declares")
+            .id
     };
     let counting_filter = filter(true);
     let blind_filter = filter(false);
@@ -415,7 +417,8 @@ fn an_undeclare_on_another_thread_waits_for_the_running_call() {
                 let _ = released.lock().unwrap().recv();
             }),
         )
-        .expect("declared");
+        .expect("declared")
+        .id;
     let putting = {
         let engine = engine.clone();
         std::thread::spawn(move || put_own(&engine, "demo/wait/a", b"v"))
@@ -484,7 +487,8 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
                 }
             })
         })
-        .expect("declared");
+        .expect("declared")
+        .id;
     *own.lock().unwrap() = Some(id);
     let walks = || engine.takes.walks.load(Ordering::SeqCst);
     let before = walks();
@@ -510,5 +514,105 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
         walks() - before,
         1,
         "a put that leaves no row waiting walks no table"
+    );
+}
+
+/// An undeclare made inside a subscriber callback of another session waits for the subscriber's
+/// call on another thread to end, and returns with the callback let go of (P11): a thread
+/// delivering for one session is no delivery of another. Turned red by one delivery mark for
+/// every engine, or an undeclare that skips its wait inside any callback.
+#[cfg(feature = "threads")]
+#[test]
+fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let (router, other_router) = (Router::start(CatchAll::Held), Router::start(CatchAll::Held));
+    let (one, other) = (open(&router), open(&other_router));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let let_go = Arc::new(AtomicBool::new(false));
+    let (entered, inside) = channel::<()>();
+    let (release, released) = channel::<()>();
+    let (entered, released) = (Mutex::new(entered), Mutex::new(released));
+    let guard = Dropped(dropped.clone());
+    let id = one
+        .declare_subscriber_on_wire(
+            "demo/across/sub",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                let _ = entered.lock().unwrap().send(());
+                let _ = released
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+            }),
+        )
+        .expect("declared")
+        .id;
+    let putting = {
+        let one = one.clone();
+        std::thread::spawn(move || put_own(&one, "demo/across/sub", b"v"))
+    };
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the put calls the callback");
+
+    let undeclared: Arc<Mutex<Option<(bool, usize)>>> = Arc::default();
+    let session = EngineHold::downgrade(&one);
+    let (into, seen_let_go, seen_dropped) = (undeclared.clone(), let_go.clone(), dropped.clone());
+    other
+        .declare_subscriber_on_wire(
+            "demo/across/other",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    engine.undeclare_subscriber(id);
+                    let at_return = (
+                        seen_let_go.load(Ordering::SeqCst),
+                        seen_dropped.load(Ordering::SeqCst),
+                    );
+                    *into.lock().unwrap() = Some(at_return);
+                }
+            }),
+        )
+        .expect("declared");
+    let releasing = {
+        let let_go = let_go.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            let_go.store(true, Ordering::SeqCst);
+            let _ = release.send(());
+        })
+    };
+    assert_eq!(
+        put_own(&other, "demo/across/other", b"v"),
+        Ok(1),
+        "CONTROL: the other session's subscriber was reached"
+    );
+    releasing.join().expect("the releasing thread");
+    assert_eq!(
+        putting.join().expect("the put returns"),
+        Ok(1),
+        "the put reached the subscriber once"
+    );
+
+    let (released_first, dropped_at_return) = undeclared
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the other session's callback ran inside its put");
+    assert!(
+        released_first,
+        "the undeclare returned before the call it retracts was released"
+    );
+    assert_eq!(
+        dropped_at_return, 1,
+        "the callback was let go of when the undeclare returned"
     );
 }

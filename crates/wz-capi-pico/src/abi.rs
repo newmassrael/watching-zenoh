@@ -250,8 +250,13 @@ impl z_owned_slice_t {
 /// | slot | view (borrowed literal) | owned / entity key |
 /// |------|-------------------------|--------------------|
 /// | 0/1  | `{ start, len }` into the caller's storage | `{ start, len }` into the OWNED copy |
-/// | 2    | null                    | the `DeclaredKeyexpr` (boxed for an owned key, the entity's own for an entity's loan) |
-/// | 3    | 0                       | 0                  |
+/// | 2    | 0                       | the address of the declaration's count in the session's tables (`KeyexprCount`), 0 for none |
+/// | 3    | null                    | the `DeclaredKeyexpr` for an owned key; for an entity's, its record's key, tagged (`crate::keyexpr::record_loan`) |
+///
+/// Slot 2 is where the declaration's count and id lie: a copy of the key takes its hold of the
+/// declaration there, and a publish reads the id there, neither with a lock of the session. Slot 3
+/// is what keeps the key's text and names its session, by which the session is known to stand
+/// before the row is read.
 ///
 /// Keeping `{ start, len }` at slots 0/1 for BOTH is what lets
 /// `crate::keyexpr::keyexpr_str` stay a single branchless read: the literal
@@ -260,17 +265,14 @@ impl z_owned_slice_t {
 /// would make slot 0 ambiguous (a non-null pointer means "literal" in one arm
 /// and "handle" in the other) and force every reader to carry a tag.
 ///
-/// R2959 — slot 3 used to carry the wire mapping id and double as the
-/// "declared" discriminant. A declaration can now cover a PREFIX of the key, so
-/// an id alone cannot say what goes on the wire; the key behind slot 2 answers
-/// that (`crate::keyexpr::wire_key_of`), and slot 3 is kept zeroed for the
-/// layout.
+/// A declaration can cover a PREFIX of the key, so an id alone cannot say what goes on the wire;
+/// the row behind slot 2 answers that with the length of its key (`crate::keyexpr::wire_key_of`).
 #[repr(C)]
 pub struct z_loaned_keyexpr_t {
     pub(crate) _start: *const u8,
     pub(crate) _len: usize,
-    pub(crate) _handle: Handle,
-    pub(crate) _mapping: usize,
+    pub(crate) _handle: usize,
+    pub(crate) _state: Handle,
 }
 
 impl z_loaned_keyexpr_t {
@@ -286,8 +288,8 @@ impl z_loaned_keyexpr_t {
         Self {
             _start: start,
             _len: len,
-            _handle: core::ptr::null_mut(),
-            _mapping: 0,
+            _handle: 0,
+            _state: core::ptr::null_mut(),
         }
     }
 }
@@ -314,8 +316,8 @@ pub struct z_view_keyexpr_t {
 pub struct z_owned_keyexpr_t {
     pub(crate) _start: *const u8,
     pub(crate) _len: usize,
-    pub(crate) _handle: Handle,
-    pub(crate) _mapping: usize,
+    pub(crate) _handle: usize,
+    pub(crate) _state: Handle,
     pub(crate) _pad: [usize; 2],
 }
 
@@ -331,8 +333,8 @@ impl z_owned_keyexpr_t {
         Self {
             _start: core::ptr::null(),
             _len: 0,
-            _handle: core::ptr::null_mut(),
-            _mapping: 0,
+            _handle: 0,
+            _state: core::ptr::null_mut(),
             _pad: [0usize; 2],
         }
     }

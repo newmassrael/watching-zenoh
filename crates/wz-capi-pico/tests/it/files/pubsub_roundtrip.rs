@@ -467,7 +467,7 @@ fn publish_from_subscriber_callback_delivers_echo() {
 ///
 /// R311y535 fixed exactly this shape on the MATCHING plane, with a thread-local
 /// delivery guard that makes a re-entrant retirement DECLINE rather than block
-/// on its own frame's lock (`faces.rs::MatchingDeliveryGuard`). The four other
+/// on its own frame's lock (`faces.rs::retire_matching_sink`). The four other
 /// SSOT sinks — subscriber, queryable, liveliness-subscriber, advanced
 /// subscriber — were left with no equivalent, and the project's own debt ledger
 /// carries that as an OPEN QUESTION rather than a cleared one: the matching

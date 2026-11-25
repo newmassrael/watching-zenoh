@@ -495,7 +495,7 @@ pub(crate) unsafe fn declare_subscriber_on(
         // key, so a subscriber that states no links is declared as it always was.
         // A session that has handed out every entity id refuses the subscriber, as it refuses a
         // token above.
-        let Ok(id): Result<SubId, _> = state.shared.declare_liveliness_subscriber_on_links(
+        let Ok(answered) = state.shared.declare_liveliness_subscriber_on_links(
             ke,
             WireKey::literal(),
             opts,
@@ -507,6 +507,7 @@ pub(crate) unsafe fn declare_subscriber_on(
         ) else {
             return Z_EUNAVAILABLE;
         };
+        let id: SubId = answered.id;
         unsafe {
             *subscriber = z_owned_subscriber_t::from_handle(subscriber_state_handle(
                 &state.shared,

@@ -80,6 +80,7 @@ use wz_session_core::sink::{SampleRef, SampleView};
 
 pub mod cancellation;
 pub mod decl_watch;
+mod deliveries;
 mod drive;
 mod engine;
 pub mod entity_place;
@@ -115,6 +116,7 @@ pub mod told;
 pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
+pub use deliveries::EngineDeliveries;
 pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
 pub use engine::{
     DeclarationReach, EngineHolder, KeyHolds, RedeclareRefusal, SessionEngine, Tickers,
@@ -157,9 +159,9 @@ pub type FilterId = u64;
 /// upstream zenoh's callback is an `Arc<dyn Fn(Sample) + Send + Sync>`. It is let go of once, when
 /// the engine is done with it, after its last call has returned: its drop is the program's.
 pub enum SubscriberSink {
-    /// A C program's closure: its function, its context and its drop, held as they are, with no
-    /// heap ([`Self::raw`]).
-    Raw(RawSampleCallback),
+    /// A closure given as plain functions over one context, with no heap: a C program's as its
+    /// ABI hands it over ([`Self::c`]), or a Rust function's ([`Self::raw`]).
+    Plain(PlainCallback<SampleMarshal>),
     /// A Rust program's closure, shared ([`Self::shared`]).
     Shared(Arc<SharedSampleFn>),
 }
@@ -168,27 +170,170 @@ pub enum SubscriberSink {
 /// `Callback<Sample>` shape.
 pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
 
-/// The parts of a C program's closure an engine calls ([`SubscriberSink::Raw`]): plain values,
-/// copied where they go; the drop runs once, when the [`SubscriberSink`] holding them is dropped.
-/// It is handed the session's own sample ([`SampleRef`]), whose parts it reads as fields: one
-/// indirect call per delivery, and none through a view.
-#[derive(Clone, Copy)]
-pub struct RawSampleCallback {
-    call: unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>),
+/// A C program's callback function as a port holds it, its first argument erased to a pointer:
+/// the ABI's marshal calls it with the ABI's own loaned argument, which an `extern "C"` function
+/// receives as it receives any other pointer to a sized type.
+pub type CCall =
+    unsafe extern "C" fn(argument: *const core::ffi::c_void, context: *mut core::ffi::c_void);
+
+/// A C program's drop of its closure's context.
+pub type CDrop = unsafe extern "C" fn(context: *mut core::ffi::c_void);
+
+/// How a plain subscriber callback is called ([`PlainCallback`]): with the function it holds, its
+/// context, the session's own sample ([`SampleRef`]), whose parts it reads as fields, and whether
+/// the callback is shown its timestamp. The sample is lent as it lies to every subscriber, so a
+/// marshal told to hide the timestamp leaves it out of what it hands the program; nothing copies
+/// the sample to hide it.
+pub type SampleMarshal = unsafe fn(
+    call: CCall,
     context: *mut core::ffi::c_void,
-    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+    sample: &SampleRef<'_>,
+    shows_timestamp: bool,
+);
+
+/// A subscriber callback given as a Rust function over its context ([`SubscriberSink::raw`]).
+type RawSampleFn = unsafe fn(context: *mut core::ffi::c_void, sample: &SampleRef<'_>);
+
+/// What a row lets go of after the C drop of the closure it holds has run: a function and the one
+/// pointer it is called with, for a hold an ABI keeps with the closure (the count of the session a
+/// background subscriber's close waits on), with no heap.
+#[derive(Clone, Copy)]
+pub struct LetGo {
+    run: unsafe fn(at: *mut core::ffi::c_void),
+    at: *mut core::ffi::c_void,
 }
 
-// SAFETY: a raw callback is made only by `SubscriberSink::raw`, whose caller promises that its
-// function may be called with its context from any thread, at once from several and from inside
-// itself, and its drop once on any thread; the shared one is `Send + Sync` itself.
+impl LetGo {
+    /// `run(at)`, called once, after the C drop of the closure it is held with.
+    ///
+    /// # Safety
+    /// `run` may be called with `at` once, on any thread.
+    pub unsafe fn new(
+        run: unsafe fn(at: *mut core::ffi::c_void),
+        at: *mut core::ffi::c_void,
+    ) -> Self {
+        Self { run, at }
+    }
+}
+
+/// The parts of a closure given as plain functions, held in an engine's row with no heap: for each
+/// delivery `marshal` is called with `call` and `context` (one indirect call, and none through a
+/// view), and once, after the last call, the closure is let go of: `drop` with `context`, then
+/// what was held with it. A closure given no function is held with a marshal that calls none, so no
+/// delivery tests whether it was given one.
+pub struct PlainCallback<M> {
+    marshal: M,
+    /// The function `marshal` calls, as it was erased: a C program's, or a Rust function's.
+    call: CCall,
+    context: *mut core::ffi::c_void,
+    drop: Option<CDrop>,
+    then: Option<LetGo>,
+}
+
+impl<M> PlainCallback<M> {
+    /// `marshal` over `call` when one is given, else `silent`, which calls nothing.
+    fn new(
+        marshal: M,
+        silent: M,
+        call: Option<CCall>,
+        context: *mut core::ffi::c_void,
+        drop: Option<CDrop>,
+        then: Option<LetGo>,
+    ) -> Self {
+        let (marshal, call) = match call {
+            Some(call) => (marshal, call),
+            None => (silent, no_call as CCall),
+        };
+        Self {
+            marshal,
+            call,
+            context,
+            drop,
+            then,
+        }
+    }
+
+    /// Let go of the closure: its drop with its context, then what was held with it.
+    ///
+    /// # Safety
+    /// As the constructor's that took the parts: called once, after the closure's last call.
+    unsafe fn let_go(&self) {
+        // SAFETY: the caller's.
+        unsafe { let_go_c(self.context, self.drop, self.then) };
+    }
+}
+
+/// The one letting go of a plain closure's parts, whatever it is called with: its C drop with its
+/// context, then what was held with it. Apart from [`PlainCallback`]'s marshal type, so every sink
+/// lets go through one body.
+///
+/// # Safety
+/// As the constructor's that took the parts: called once, after the closure's last call.
+unsafe fn let_go_c(context: *mut core::ffi::c_void, drop: Option<CDrop>, then: Option<LetGo>) {
+    if let Some(drop) = drop {
+        // SAFETY: the caller's: the drop's one call, after the last call of the closure.
+        unsafe { drop(context) };
+    }
+    if let Some(then) = then {
+        // SAFETY: the caller's: `LetGo::new`'s one call, after the C drop.
+        unsafe { (then.run)(then.at) };
+    }
+}
+
+/// The function a plain closure given none holds: never called, as its marshal calls nothing.
+extern "C" fn no_call(_argument: *const core::ffi::c_void, _context: *mut core::ffi::c_void) {}
+
+/// The marshal of a subscriber closure given no function: it calls nothing.
+fn no_sample_call(
+    _call: CCall,
+    _context: *mut core::ffi::c_void,
+    _sample: &SampleRef<'_>,
+    _shows_timestamp: bool,
+) {
+}
+
+/// The marshal of a subscriber callback given as a Rust function ([`SubscriberSink::raw`]).
+///
+/// # Safety
+/// `call` is a `RawSampleFn` `SubscriberSink::raw` erased, and that constructor's contract
+/// holds for this call.
+unsafe fn raw_sample_call(
+    call: CCall,
+    context: *mut core::ffi::c_void,
+    sample: &SampleRef<'_>,
+    shows_timestamp: bool,
+) {
+    // SAFETY: the caller's: `call` was erased from this type, and is called only as it.
+    let call = unsafe { core::mem::transmute::<CCall, RawSampleFn>(call) };
+    shown(sample, shows_timestamp, |sample| {
+        // SAFETY: the caller's: `SubscriberSink::raw`'s contract.
+        unsafe { call(context, sample) }
+    });
+}
+
+/// Hand `sample` to a Rust callback, which reads the sample itself: as it lies when the callback
+/// sees its timestamp or it carries none, else a sample of its own with no timestamp and every
+/// other part lent as it lies. A C program's marshal is told to hide it instead
+/// ([`SampleMarshal`]) and copies nothing.
+fn shown(sample: &SampleRef<'_>, shows_timestamp: bool, call: impl FnOnce(&SampleRef<'_>)) {
+    if shows_timestamp || sample.timestamp.is_none() {
+        call(sample)
+    } else {
+        call(&sample.without_timestamp())
+    }
+}
+
+// SAFETY: a plain callback is made only by `SubscriberSink::raw` or `SubscriberSink::c`, whose
+// caller promises that its function may be called with its context from any thread, at once from
+// several and from inside itself, and its drops once on any thread; the shared one is
+// `Send + Sync` itself.
 unsafe impl Send for SubscriberSink {}
 // SAFETY: as `Send`.
 unsafe impl Sync for SubscriberSink {}
 
 impl SubscriberSink {
-    /// A C program's closure: `call` with `context` for each sample, and `drop` with `context`
-    /// once, when the engine lets it go.
+    /// A closure given as a Rust function: `call` with `context` for each sample, and `drop` with
+    /// `context` once, when the engine lets it go.
     ///
     /// # Safety
     /// `call` may be called with `context` from any thread, at once from several and from inside
@@ -199,11 +344,41 @@ impl SubscriberSink {
         context: *mut core::ffi::c_void,
         drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
     ) -> Self {
-        Self::Raw(RawSampleCallback {
+        // SAFETY: two function pointers of one size; `raw_sample_call` alone calls it, as the
+        // type it is erased from here.
+        let call = unsafe { core::mem::transmute::<RawSampleFn, CCall>(call) };
+        Self::Plain(PlainCallback::<SampleMarshal> {
+            marshal: raw_sample_call,
+            call,
+            context,
+            drop: None,
+            then: drop.map(|run| LetGo { run, at: context }),
+        })
+    }
+
+    /// A C program's closure as its ABI holds it: `marshal(call, context, sample)` for each
+    /// sample while `call` is given, `drop(context)` once when the engine lets it go, and
+    /// `then` after that drop.
+    ///
+    /// # Safety
+    /// `marshal` may be called with `call` and `context` from any thread, at once from several
+    /// and from inside itself, until `drop` is called; `drop`, when given, may be called with
+    /// `context` once, on any thread, after the last call has returned, and `then` after it.
+    pub unsafe fn c(
+        marshal: SampleMarshal,
+        call: Option<CCall>,
+        context: *mut core::ffi::c_void,
+        drop: Option<CDrop>,
+        then: Option<LetGo>,
+    ) -> Self {
+        Self::Plain(PlainCallback::<SampleMarshal>::new(
+            marshal,
+            no_sample_call,
             call,
             context,
             drop,
-        })
+            then,
+        ))
     }
 
     /// A Rust program's closure, shared.
@@ -211,38 +386,41 @@ impl SubscriberSink {
         Self::Shared(Arc::new(call))
     }
 
-    /// Hand `sample` to the callback: a C program's is handed the session's sample read once off
-    /// the view ([`SampleRef::of`]), for an engine that holds its sample as a view.
+    /// Hand `sample` to the callback: a plain one is handed the session's sample read once off
+    /// the view ([`SampleRef::of`]), for an engine that holds its sample as a view. The view shows
+    /// the timestamp the callback is to see: one that hides it is a view that answers none.
     pub fn call(&self, sample: &dyn SampleView) {
         match self {
-            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
-            Self::Raw(raw) => unsafe { (raw.call)(raw.context, &SampleRef::of(sample)) },
+            // SAFETY: the constructor's contract: the call may be made from here, now.
+            Self::Plain(plain) => unsafe {
+                (plain.marshal)(plain.call, plain.context, &SampleRef::of(sample), true)
+            },
             Self::Shared(call) => call(sample),
         }
     }
 
     /// Hand the session's own `sample` to the callback as it lies, for an engine that holds its
-    /// sample so: a C program's reads its parts with no call through a view.
-    pub fn call_ref(&self, sample: &SampleRef<'_>) {
+    /// sample so, its timestamp shown only when `shows_timestamp` (`entity-timestamp-opt-in`): a
+    /// plain one reads its parts with no call through a view, and leaves out a timestamp it is not
+    /// to show.
+    #[inline]
+    pub fn call_ref(&self, sample: &SampleRef<'_>, shows_timestamp: bool) {
         match self {
-            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
-            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
-            Self::Shared(call) => call(sample),
+            // SAFETY: the constructor's contract: the call may be made from here, now.
+            Self::Plain(plain) => unsafe {
+                (plain.marshal)(plain.call, plain.context, sample, shows_timestamp)
+            },
+            Self::Shared(call) => shown(sample, shows_timestamp, |sample| call(sample)),
         }
     }
 }
 
 impl Drop for SubscriberSink {
     fn drop(&mut self) {
-        if let Self::Raw(RawSampleCallback {
-            context,
-            drop: Some(drop),
-            ..
-        }) = *self
-        {
-            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call, since a
-            // call borrows the sink and the sink is dropped only once no borrow is left.
-            unsafe { drop(context) };
+        if let Self::Plain(plain) = self {
+            // SAFETY: the constructor's contract: this is its one drop, after its last call, since
+            // a call borrows the sink and the sink is dropped only once no borrow is left.
+            unsafe { plain.let_go() };
         }
     }
 }
@@ -311,9 +489,9 @@ impl<H: Deref<Target: Tickers>> Drop for Ticker<H> {
 /// on the key is a `Put`, each it retracts a `Delete`. Called through a shared borrow, from any
 /// thread and at any depth, and let go of once, after its last call, as [`SubscriberSink`] is.
 pub enum LivelinessSink {
-    /// A C program's closure: its function, its context and its drop, held as they are, with no
-    /// heap ([`Self::raw`]).
-    Raw(RawLivelinessCallback),
+    /// A closure given as plain functions over one context, with no heap, as a subscriber's
+    /// ([`SubscriberSink::Plain`]).
+    Plain(PlainCallback<LivelinessMarshal>),
     /// A Rust program's closure, shared ([`Self::shared`]).
     Shared(Arc<SharedLivelinessFn>),
 }
@@ -321,24 +499,47 @@ pub enum LivelinessSink {
 /// A Rust program's liveliness callback, as [`LivelinessSink::Shared`] shares it.
 pub type SharedLivelinessFn = dyn for<'a> Fn(LivelinessSample<'a>) + Send + Sync;
 
-/// The parts of a C program's closure an engine calls ([`LivelinessSink::Raw`]), as
-/// [`RawSampleCallback`] holds a subscriber's.
-#[derive(Clone, Copy)]
-pub struct RawLivelinessCallback {
-    call: unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>),
-    context: *mut core::ffi::c_void,
-    drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
+/// How a plain liveliness callback is called ([`PlainCallback`]), as a subscriber's
+/// ([`SampleMarshal`]).
+pub type LivelinessMarshal =
+    unsafe fn(call: CCall, context: *mut core::ffi::c_void, sample: LivelinessSample<'_>);
+
+/// A liveliness callback given as a Rust function over its context ([`LivelinessSink::raw`]).
+type RawLivelinessFn = unsafe fn(context: *mut core::ffi::c_void, sample: LivelinessSample<'_>);
+
+/// The marshal of a liveliness closure given no function: it calls nothing.
+fn no_liveliness_call(
+    _call: CCall,
+    _context: *mut core::ffi::c_void,
+    _sample: LivelinessSample<'_>,
+) {
 }
 
-// SAFETY: as `SubscriberSink`'s: a raw callback is made only by `LivelinessSink::raw`, whose
-// caller promises what the marker traits ask of it.
+/// The marshal of a liveliness callback given as a Rust function ([`LivelinessSink::raw`]).
+///
+/// # Safety
+/// `call` is a `RawLivelinessFn` `LivelinessSink::raw` erased, and that constructor's
+/// contract holds for this call.
+unsafe fn raw_liveliness_call(
+    call: CCall,
+    context: *mut core::ffi::c_void,
+    sample: LivelinessSample<'_>,
+) {
+    // SAFETY: the caller's: `call` was erased from this type, and is called only as it.
+    let call = unsafe { core::mem::transmute::<CCall, RawLivelinessFn>(call) };
+    // SAFETY: the caller's: `LivelinessSink::raw`'s contract.
+    unsafe { call(context, sample) }
+}
+
+// SAFETY: as `SubscriberSink`'s: a plain callback is made only by `LivelinessSink::raw` or
+// `LivelinessSink::c`, whose caller promises what the marker traits ask of it.
 unsafe impl Send for LivelinessSink {}
 // SAFETY: as `Send`.
 unsafe impl Sync for LivelinessSink {}
 
 impl LivelinessSink {
-    /// A C program's closure: `call` with `context` for each change, and `drop` with `context`
-    /// once, when the engine lets it go.
+    /// A closure given as a Rust function: `call` with `context` for each change, and `drop`
+    /// with `context` once, when the engine lets it go.
     ///
     /// # Safety
     /// As [`SubscriberSink::raw`]'s.
@@ -347,11 +548,37 @@ impl LivelinessSink {
         context: *mut core::ffi::c_void,
         drop: Option<unsafe fn(context: *mut core::ffi::c_void)>,
     ) -> Self {
-        Self::Raw(RawLivelinessCallback {
+        // SAFETY: two function pointers of one size; `raw_liveliness_call` alone calls it, as the
+        // type it is erased from here.
+        let call = unsafe { core::mem::transmute::<RawLivelinessFn, CCall>(call) };
+        Self::Plain(PlainCallback::<LivelinessMarshal> {
+            marshal: raw_liveliness_call,
+            call,
+            context,
+            drop: None,
+            then: drop.map(|run| LetGo { run, at: context }),
+        })
+    }
+
+    /// A C program's closure as its ABI holds it, as a subscriber's ([`SubscriberSink::c`]).
+    ///
+    /// # Safety
+    /// As [`SubscriberSink::c`]'s.
+    pub unsafe fn c(
+        marshal: LivelinessMarshal,
+        call: Option<CCall>,
+        context: *mut core::ffi::c_void,
+        drop: Option<CDrop>,
+        then: Option<LetGo>,
+    ) -> Self {
+        Self::Plain(PlainCallback::<LivelinessMarshal>::new(
+            marshal,
+            no_liveliness_call,
             call,
             context,
             drop,
-        })
+            then,
+        ))
     }
 
     /// A Rust program's closure, shared.
@@ -362,8 +589,8 @@ impl LivelinessSink {
     /// Hand `sample` to the callback.
     pub fn call(&self, sample: LivelinessSample<'_>) {
         match self {
-            // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
-            Self::Raw(raw) => unsafe { (raw.call)(raw.context, sample) },
+            // SAFETY: the constructor's contract: the call may be made from here, now.
+            Self::Plain(plain) => unsafe { (plain.marshal)(plain.call, plain.context, sample) },
             Self::Shared(call) => call(sample),
         }
     }
@@ -371,14 +598,9 @@ impl LivelinessSink {
 
 impl Drop for LivelinessSink {
     fn drop(&mut self) {
-        if let Self::Raw(RawLivelinessCallback {
-            context,
-            drop: Some(drop),
-            ..
-        }) = *self
-        {
-            // SAFETY: `Self::raw`'s contract: this is its one drop, after its last call.
-            unsafe { drop(context) };
+        if let Self::Plain(plain) = self {
+            // SAFETY: the constructor's contract: this is its one drop, after its last call.
+            unsafe { plain.let_go() };
         }
     }
 }
@@ -806,12 +1028,20 @@ pub enum HoldRefused {
 /// is neither copied nor cloned, so each hold is given back once, and one dropped unused is warned
 /// of where it is made. What a session records holds its declarations in the same count itself,
 /// and takes no `KeyHold` ([`WireKey`]).
+///
+/// An engine whose tables keep the row in place names its address too ([`Self::placed_at`]): a
+/// copy then takes its hold, and a holder that is not the last gives its own back, at the row
+/// itself, with no lock of the session.
 #[must_use = "a hold is given back to its session (`KeyHold::release`), or its declaration stays"]
 #[derive(Debug, PartialEq, Eq)]
 pub struct KeyHold {
     mapping_id: wz_session_core::wire_id::ExprId,
     /// The row the hold was taken in; `None` for a copy its session took no hold for.
     row: Option<wz_session_core::session_tables::KeyexprHandle>,
+    /// The address of the row's count of holders
+    /// ([`KeyexprCount`](wz_session_core::session_tables::KeyexprCount)), `0` where the engine
+    /// named none or the hold holds nothing.
+    head: usize,
 }
 
 impl KeyHold {
@@ -824,7 +1054,50 @@ impl KeyHold {
         Self {
             mapping_id,
             row: Some(row),
+            head: 0,
         }
+    }
+
+    /// This hold, naming `head`, the head of the row it was taken in, as where its row lies: a
+    /// copy takes its hold and a holder that is not the last gives its own back there, with no
+    /// lock of the session.
+    ///
+    /// # Safety
+    /// `head` is the count of the head of the row this hold was taken in
+    /// ([`KeyexprHead::count`](wz_session_core::session_tables::KeyexprHead::count)), and stays
+    /// at its address while the row stands and the session's tables do: the engine's table keeps its rows in place (a
+    /// region, what it was lent, or the growable policy's chunks,
+    /// [`Chunked`](wz_session_core::slot_map::Chunked)).
+    pub unsafe fn placed_at(
+        mut self,
+        head: &wz_session_core::session_tables::KeyexprCount,
+    ) -> Self {
+        if self.row.is_some() {
+            self.head = head as *const wz_session_core::session_tables::KeyexprCount as usize;
+        }
+        self
+    }
+
+    /// The address of the row's count ([`Self::placed_at`]), `0` for none: what a lent key names
+    /// its declaration by.
+    pub fn row_address(&self) -> usize {
+        self.head
+    }
+
+    /// The row's count, reached with no lock of the session ([`Self::placed_at`]); `None` when
+    /// the engine named none.
+    ///
+    /// # Safety
+    /// The session this hold was taken of stands (the caller holds it), so its tables, and the
+    /// row this hold counts, are where they were.
+    pub unsafe fn head<'a>(&self) -> Option<&'a wz_session_core::session_tables::KeyexprCount> {
+        if self.head == 0 {
+            return None;
+        }
+        // SAFETY: a non-zero address is the head `placed_at` was given, which stays where it is
+        // while the row stands, and the row stands while this hold counts it in tables the caller
+        // keeps standing.
+        Some(unsafe { &*(self.head as *const wz_session_core::session_tables::KeyexprCount) })
     }
 
     /// The declaration held.
@@ -843,8 +1116,24 @@ impl KeyHold {
     /// counted holder's going retracts. A copy of a declaration no longer held, or of one on a
     /// closed session ([`HoldRefused::Gone`]), holds nothing, so that giving it back lets go of
     /// no hold another holder took.
+    ///
+    /// Taken at the row when the hold names where it lies ([`Self::placed_at`]), with no lock of
+    /// the session; `session` stands for the call, which is what keeps the row where it is.
     pub fn share<H: KeyHolds + ?Sized>(&self, session: &H) -> Option<Self> {
-        let row = match self.row.map(|row| (row, session.retain_keyexpr(row))) {
+        let taken = self.row.map(|row| {
+            // SAFETY: `session` is the session this hold was taken of, standing for the call.
+            match unsafe { self.head() } {
+                Some(head) => {
+                    let taken = Self::retained_at(head, row);
+                    if taken.is_ok() {
+                        session.counted_at_row(1);
+                    }
+                    (row, taken)
+                }
+                None => (row, session.retain_keyexpr(row)),
+            }
+        });
+        let row = match taken {
             Some((row, Ok(()))) => Some(row),
             Some((_, Err(HoldRefused::Full))) => return None,
             Some((_, Err(HoldRefused::Gone))) | None => None,
@@ -852,7 +1141,25 @@ impl KeyHold {
         Some(Self {
             mapping_id: self.mapping_id,
             row,
+            head: if row.is_some() { self.head } else { 0 },
         })
+    }
+
+    /// One more hold of the declaration in `row` taken at the row `head` heads, as the engine's
+    /// count answers it.
+    fn retained_at(
+        head: &wz_session_core::session_tables::KeyexprCount,
+        row: wz_session_core::session_tables::KeyexprHandle,
+    ) -> Result<(), HoldRefused> {
+        head.retain(row).map_err(Self::refused_at_row)
+    }
+
+    /// What a refusal at the row's address is to the holder.
+    fn refused_at_row(refused: wz_session_core::session_tables::RowHoldRefused) -> HoldRefused {
+        match refused {
+            wz_session_core::session_tables::RowHoldRefused::Full => HoldRefused::Full,
+            wz_session_core::session_tables::RowHoldRefused::Released => HoldRefused::Gone,
+        }
     }
 
     /// A copy of a hold whose session is gone, which holds nothing.
@@ -860,15 +1167,23 @@ impl KeyHold {
         Self {
             mapping_id: self.mapping_id,
             row: None,
+            head: 0,
         }
     }
 
     /// Give the hold back to `session`, the session it was taken of; the last one retracts the
-    /// declaration.
+    /// declaration. A hold that names where its row lies and is not the last is given back there,
+    /// with no lock of the session; the last goes back to the session, whose table removes the row.
     pub fn release<H: KeyHolds + ?Sized>(self, session: &H) {
-        if let Some(row) = self.row {
-            session.release_keyexpr(row);
+        let Some(row) = self.row else {
+            return;
+        };
+        // SAFETY: `session` is the session this hold was taken of, standing for the call.
+        if unsafe { self.head() }.is_some_and(|head| head.release_shared(row)) {
+            session.counted_at_row(-1);
+            return;
         }
+        session.release_keyexpr(row);
     }
 
     /// Let go of a hold whose session is gone: the count it was one of went with the session, so
@@ -877,7 +1192,138 @@ impl KeyHold {
         let Self {
             mapping_id: _,
             row: _,
+            head: _,
         } = self;
+    }
+}
+
+/// An entity's key as its engine keeps it, as its declaration answers it ([`Declared::key`]): the text, where
+/// the engine's record of the entity holds it, and the declaration the record holds that the key
+/// begins with ([`OwnKey`]), `None` when it holds none. What an ABI lends a program asking for the
+/// entity's key, so the key it reads and the declaration it names are the session's, not a copy.
+///
+/// The text is named by its start and length because it is lent past the engine's lock: the
+/// record keeps it at one address until the entity is retracted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyView {
+    /// The first byte of the key's text.
+    pub start: *const u8,
+    /// The length of the key's text, in bytes.
+    pub len: usize,
+    /// The declaration the record holds that the key begins with.
+    pub own: Option<OwnKey>,
+}
+
+// SAFETY: the text a view names is read only, through shared borrows, and lies in the engine's
+// record of the entity, which is `Send + Sync` and keeps it at one address while the entity
+// stands; the declaration is named by its row and the address of its count, which is atomic.
+unsafe impl Send for KeyView {}
+// SAFETY: as `Send`.
+unsafe impl Sync for KeyView {}
+
+impl KeyView {
+    /// No key: what a declaration answers when the engine's record of the entity is gone before
+    /// the declaration returns (a liveliness subscriber its own history's callback undeclared), so
+    /// there is nothing to lend. A door binds no loan to it.
+    pub const ABSENT: Self = Self {
+        start: core::ptr::null(),
+        len: 0,
+        own: None,
+    };
+
+    /// Whether this is [`Self::ABSENT`]: no record keeps the key.
+    pub fn is_absent(&self) -> bool {
+        self.start.is_null()
+    }
+
+    /// `key`, named whole: no declaration of it is held.
+    pub fn literal(key: &str) -> Self {
+        Self {
+            start: key.as_ptr(),
+            len: key.len(),
+            own: None,
+        }
+    }
+
+    /// `key`, with the declaration of `declared`, id `mapping`, in `row`, whose count of
+    /// holders is `count`, when `key` begins with `declared`; with none otherwise, as a key the
+    /// declaration does not begin cannot be named by it.
+    ///
+    /// # Safety
+    /// As [`KeyHold::placed_at`]: `count` is the count of the head of `row`, and stays at its
+    /// address while the row stands and the session's tables do; and the engine's record of the
+    /// entity holds the declaration until the entity is retracted.
+    // Inlined into an engine's reader of the row, which has read every argument off it.
+    #[inline]
+    pub unsafe fn holding(
+        key: &str,
+        row: wz_session_core::session_tables::KeyexprHandle,
+        declared: &str,
+        mapping: wz_session_core::wire_id::ExprId,
+        count: &wz_session_core::session_tables::KeyexprCount,
+    ) -> Self {
+        let own = key
+            .as_bytes()
+            .starts_with(declared.as_bytes())
+            .then_some(OwnKey {
+                row,
+                mapping,
+                prefix_len: declared.len(),
+                count: count as *const wz_session_core::session_tables::KeyexprCount as usize,
+            });
+        Self {
+            start: key.as_ptr(),
+            len: key.len(),
+            own,
+        }
+    }
+}
+
+/// What a declaration of the port answers: the id the entity is retracted by, and its key as the
+/// engine's record of the entity keeps it ([`KeyView`]), valid until the entity is retracted. The
+/// door keeps the key from here on, so it asks the engine for it again nowhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Declared<Id> {
+    /// The id the entity is retracted by.
+    pub id: Id,
+    /// The entity's key, where the engine's record of it keeps it.
+    pub key: KeyView,
+}
+
+/// The declaration an engine's record of an entity holds for the entity's key ([`KeyView`]): the
+/// declaration of the entity's own key, or else the one its key is named by, either of which the
+/// key begins with. What a lent key names on the wire, and what a copy of it takes its own hold
+/// of, read with no lock of the session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OwnKey {
+    /// The row the declaration lies in.
+    pub row: wz_session_core::session_tables::KeyexprHandle,
+    /// The id the wire names the declaration by.
+    pub mapping: wz_session_core::wire_id::ExprId,
+    /// How many bytes of the key the declaration covers.
+    pub prefix_len: usize,
+    /// The address of the row's count of holders.
+    count: usize,
+}
+
+impl OwnKey {
+    /// The address of the row's count of holders
+    /// ([`KeyexprCount`](wz_session_core::session_tables::KeyexprCount)): what a lent key names
+    /// its declaration by.
+    pub fn row_address(&self) -> usize {
+        self.count
+    }
+
+    /// The record's hold of the declaration, as a holder names it: a share of it
+    /// ([`KeyHold::share`]) takes one more at the row. It is the record's hold, given back by the
+    /// record alone, so a holder that names it gives it back to no one
+    /// ([`KeyHold::outlived_its_session`]).
+    pub fn named_hold(&self) -> KeyHold {
+        KeyHold {
+            mapping_id: self.mapping,
+            row: Some(self.row),
+            head: self.count,
+        }
     }
 }
 
@@ -1231,7 +1677,7 @@ mod tests {
         sample.attachment = Some(&b"att"[..]);
         let at = core::ptr::from_ref(&sample) as usize;
 
-        sink.call_ref(&sample);
+        sink.call_ref(&sample, true);
         assert_eq!(HANDED.load(Ordering::SeqCst), at, "the engine's own sample");
         assert_eq!(READ.load(Ordering::SeqCst), 14);
 
@@ -1247,6 +1693,252 @@ mod tests {
             14,
             "with every part the view handed"
         );
+    }
+
+    /// A C program's closure as its ABI hands it over is called through the ABI's marshal with
+    /// its C function and context, not at all with no function, and let go of once: its C drop
+    /// with its context, then what was held with it. Turned red by a marshal handed another
+    /// function or context, a call made with none, or a let-go run before the drop or twice.
+    #[test]
+    fn a_c_sink_calls_through_its_marshal_and_lets_go_after_its_drop() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::SampleKind;
+        static CALLED: AtomicUsize = AtomicUsize::new(0);
+        static MARSHALLED: AtomicUsize = AtomicUsize::new(0);
+        // Each step writes its digit: the drop 1, the let-go 2, so the order reads 12.
+        static ORDER: AtomicUsize = AtomicUsize::new(0);
+        unsafe extern "C" fn program(
+            _argument: *const core::ffi::c_void,
+            context: *mut core::ffi::c_void,
+        ) {
+            CALLED.store(context as usize, Ordering::SeqCst);
+        }
+        unsafe fn marshal(
+            call: CCall,
+            context: *mut core::ffi::c_void,
+            sample: &SampleRef<'_>,
+            _shows_timestamp: bool,
+        ) {
+            MARSHALLED.fetch_add(sample.keyexpr.len(), Ordering::SeqCst);
+            // SAFETY: `program` reads nothing through its argument.
+            unsafe { call(core::ptr::null(), context) };
+        }
+        unsafe extern "C" fn dropped(context: *mut core::ffi::c_void) {
+            assert_eq!(context as usize, 0x5d, "the program's context");
+            ORDER.store(ORDER.load(Ordering::SeqCst) * 10 + 1, Ordering::SeqCst);
+        }
+        unsafe fn let_go(at: *mut core::ffi::c_void) {
+            assert_eq!(at as usize, 0x6e, "what the let-go was given");
+            ORDER.store(ORDER.load(Ordering::SeqCst) * 10 + 2, Ordering::SeqCst);
+        }
+        let context = 0x5d_usize as *mut core::ffi::c_void;
+        // SAFETY: every function here reads only what it is handed, from any thread.
+        let sink = unsafe {
+            SubscriberSink::c(
+                marshal,
+                Some(program),
+                context,
+                Some(dropped),
+                Some(LetGo::new(let_go, 0x6e_usize as *mut core::ffi::c_void)),
+            )
+        };
+        let sample = SampleRef::new("demo/c", b"", SampleKind::Put, Reliability::Reliable);
+        sink.call_ref(&sample, true);
+        assert_eq!(CALLED.load(Ordering::SeqCst), 0x5d, "the program's context");
+        assert_eq!(MARSHALLED.load(Ordering::SeqCst), 6, "through the marshal");
+        assert_eq!(ORDER.load(Ordering::SeqCst), 0, "nothing let go of yet");
+        drop(sink);
+        assert_eq!(
+            ORDER.load(Ordering::SeqCst),
+            12,
+            "the drop, then the let-go"
+        );
+
+        // SAFETY: as above; with no function the marshal is never called.
+        let silent = unsafe { SubscriberSink::c(marshal, None, context, None, None) };
+        silent.call_ref(&sample, true);
+        assert_eq!(
+            MARSHALLED.load(Ordering::SeqCst),
+            6,
+            "no call with no function"
+        );
+    }
+
+    /// A sink told to hide the timestamp hides it from every kind of callback, and shows the one it
+    /// is told to show: a C program's marshal is handed the session's sample as it lies with the
+    /// choice to apply, and a Rust function or closure, which reads the sample itself, a sample
+    /// with none. Turned red by a marshal handed a copy of the sample or another choice, or a Rust
+    /// callback handed a timestamp it is not to see or not handed one it is.
+    #[test]
+    fn a_sink_hides_the_timestamp_it_is_told_to() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::SampleKind;
+        static HANDED: AtomicUsize = AtomicUsize::new(0);
+        static SHOWN: AtomicUsize = AtomicUsize::new(2);
+        unsafe fn marshal(
+            _call: CCall,
+            _context: *mut core::ffi::c_void,
+            sample: &SampleRef<'_>,
+            shows_timestamp: bool,
+        ) {
+            HANDED.store(core::ptr::from_ref(sample) as usize, Ordering::SeqCst);
+            SHOWN.store(usize::from(shows_timestamp), Ordering::SeqCst);
+        }
+        unsafe extern "C" fn program(
+            _argument: *const core::ffi::c_void,
+            _context: *mut core::ffi::c_void,
+        ) {
+        }
+        unsafe fn note(_context: *mut core::ffi::c_void, sample: &SampleRef<'_>) {
+            SHOWN.store(usize::from(sample.timestamp.is_some()), Ordering::SeqCst);
+        }
+        let mut sample = SampleRef::new("demo/stamp", b"p", SampleKind::Put, Reliability::Reliable);
+        sample.timestamp = Some((7, &[1u8, 2][..]));
+        let at = core::ptr::from_ref(&sample) as usize;
+
+        // SAFETY: `marshal` reads only the sample it is handed and calls nothing; nothing dropped.
+        let c =
+            unsafe { SubscriberSink::c(marshal, Some(program), core::ptr::null_mut(), None, None) };
+        // SAFETY: `note` reads only the sample it is handed, from any thread; nothing is dropped.
+        let raw = unsafe { SubscriberSink::raw(note, core::ptr::null_mut(), None) };
+        let shared = SubscriberSink::shared(|sample: &dyn SampleView| {
+            SHOWN.store(
+                usize::from(sample.timestamp_parts().is_some()),
+                Ordering::SeqCst,
+            );
+        });
+        for shows in [false, true] {
+            c.call_ref(&sample, shows);
+            assert_eq!(HANDED.load(Ordering::SeqCst), at, "the sample as it lies");
+            assert_eq!(
+                SHOWN.load(Ordering::SeqCst),
+                usize::from(shows),
+                "the C choice"
+            );
+            for rust in [&raw, &shared] {
+                SHOWN.store(2, Ordering::SeqCst);
+                rust.call_ref(&sample, shows);
+                assert_eq!(
+                    SHOWN.load(Ordering::SeqCst),
+                    usize::from(shows),
+                    "a Rust one"
+                );
+            }
+        }
+        assert!(
+            sample.timestamp.is_some(),
+            "the session's sample keeps its own"
+        );
+    }
+
+    /// A plain sink takes no word of its own beside its parts: the shared form fits around the
+    /// functions a plain one holds, so a row keeps a C program's callback in the bytes of its
+    /// parts. Turned red by a form that adds a tag word to either sink.
+    #[test]
+    fn a_plain_sink_is_as_large_as_its_parts() {
+        assert_eq!(
+            core::mem::size_of::<SubscriberSink>(),
+            core::mem::size_of::<PlainCallback<SampleMarshal>>()
+        );
+        assert_eq!(
+            core::mem::size_of::<LivelinessSink>(),
+            core::mem::size_of::<PlainCallback<LivelinessMarshal>>()
+        );
+    }
+
+    /// A callback given as a Rust function is called with its own context, and its drop runs
+    /// once, with that context, when the sink is let go of. Turned red by a raw function called
+    /// through another marshal, or a drop run twice, with another context, or not at all.
+    #[test]
+    fn a_raw_sink_is_called_with_its_context_and_dropped_once() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::reliability::Reliability;
+        use wz_session_core::sample::SampleKind;
+        static CALLED: AtomicUsize = AtomicUsize::new(0);
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        unsafe fn note(context: *mut core::ffi::c_void, _sample: &SampleRef<'_>) {
+            CALLED.store(context as usize, Ordering::SeqCst);
+        }
+        unsafe fn dropped(context: *mut core::ffi::c_void) {
+            assert_eq!(context as usize, 0x7a, "the sink's context");
+            DROPPED.fetch_add(1, Ordering::SeqCst);
+        }
+        let context = 0x7a_usize as *mut core::ffi::c_void;
+        // SAFETY: both functions read only what they are handed, from any thread.
+        let sink = unsafe { SubscriberSink::raw(note, context, Some(dropped)) };
+        let sample = SampleRef::new("demo/raw", b"", SampleKind::Put, Reliability::Reliable);
+        sink.call_ref(&sample, true);
+        assert_eq!(
+            CALLED.load(Ordering::SeqCst),
+            0x7a,
+            "called with its context"
+        );
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 0, "not dropped while held");
+        drop(sink);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1, "dropped once");
+    }
+
+    /// A liveliness closure is called as a subscriber's: a C one through its marshal, not at all
+    /// with no function, and a Rust function with its own context; each let go of once. Turned red
+    /// by a liveliness sink that calls a closure given no function, or drops one twice.
+    #[test]
+    fn a_plain_liveliness_sink_calls_as_its_constructor_said() {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
+        static MARSHALLED: AtomicUsize = AtomicUsize::new(0);
+        static RAW: AtomicUsize = AtomicUsize::new(0);
+        static DROPPED: AtomicUsize = AtomicUsize::new(0);
+        unsafe fn marshal(
+            _call: CCall,
+            _context: *mut core::ffi::c_void,
+            sample: LivelinessSample<'_>,
+        ) {
+            MARSHALLED.fetch_add(sample.keyexpr.len(), Ordering::SeqCst);
+        }
+        unsafe extern "C" fn program(
+            _argument: *const core::ffi::c_void,
+            _context: *mut core::ffi::c_void,
+        ) {
+        }
+        unsafe extern "C" fn dropped(_context: *mut core::ffi::c_void) {
+            DROPPED.fetch_add(1, Ordering::SeqCst);
+        }
+        unsafe fn raw(context: *mut core::ffi::c_void, _sample: LivelinessSample<'_>) {
+            RAW.store(context as usize, Ordering::SeqCst);
+        }
+        let sample = LivelinessSample {
+            kind: LivelinessSampleKind::Put,
+            keyexpr: "demo/live",
+            token_id: 1,
+        };
+        let context = 0x4c_usize as *mut core::ffi::c_void;
+        // SAFETY: every function here reads only what it is handed, from any thread.
+        let called =
+            unsafe { LivelinessSink::c(marshal, Some(program), context, Some(dropped), None) };
+        called.call(sample);
+        assert_eq!(MARSHALLED.load(Ordering::SeqCst), 9, "through the marshal");
+        drop(called);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 1, "its C drop, once");
+
+        // SAFETY: as above; with no function the marshal is never called.
+        let silent = unsafe { LivelinessSink::c(marshal, None, context, Some(dropped), None) };
+        silent.call(sample);
+        assert_eq!(
+            MARSHALLED.load(Ordering::SeqCst),
+            9,
+            "no call with no function"
+        );
+        drop(silent);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 2, "dropped even so");
+
+        // SAFETY: `raw` reads only what it is handed, from any thread; nothing is dropped.
+        let rust = unsafe { LivelinessSink::raw(raw, context, None) };
+        rust.call(sample);
+        assert_eq!(RAW.load(Ordering::SeqCst), 0x4c, "called with its context");
+        drop(rust);
+        assert_eq!(DROPPED.load(Ordering::SeqCst), 2, "no drop was given");
     }
 
     #[test]
@@ -1479,6 +2171,15 @@ mod tests {
                 }
             }
         }
+
+        // The double counts holds and keeps no tables, so no row declares a key.
+        fn declared_prefix(
+            &self,
+            _row: wz_session_core::session_tables::KeyexprHandle,
+            _key: &str,
+        ) -> Option<(wz_session_core::wire_id::ExprId, usize)> {
+            None
+        }
     }
 
     /// The row of slot 4 at generation 1, as the bits of its handle.
@@ -1533,6 +2234,40 @@ mod tests {
         assert!(session.released.read().is_empty());
         named.release(&session);
         assert_eq!(session.released.read(), [ROW_BITS], "CONTROL: the held one");
+    }
+
+    /// The hold a record's declaration is named by is the record's: a share of it is one more of the
+    /// session's count, by its row, given back once, and naming it gives nothing back. Turned red
+    /// by a `named_hold` that names another declaration or row, or one whose letting go gives a
+    /// hold back.
+    #[test]
+    fn a_records_declaration_is_shared_by_its_row_and_its_named_hold_gives_nothing_back() {
+        let session = CountedHolds::default();
+        let own = OwnKey {
+            row: row(),
+            mapping: 4,
+            prefix_len: 5,
+            count: 0,
+        };
+        let named = own.named_hold();
+        assert_eq!(
+            (named.mapping_id(), named.row(), named.row_address()),
+            (4, Some(row()), own.row_address())
+        );
+        let shared = named.share(&session).expect("a count with room");
+        named.outlived_its_session();
+        assert_eq!(session.retained.read(), [ROW_BITS]);
+        assert!(
+            session.released.read().is_empty(),
+            "naming it gave nothing back"
+        );
+        shared.release(&session);
+        assert_eq!(session.released.read(), [ROW_BITS], "the share's, once");
+        assert_eq!(
+            KeyView::literal("demo/key").own,
+            None,
+            "CONTROL: a literal names none"
+        );
     }
 
     /// An engine's periodic jobs as a test counts them: the ids it gave and the jobs it stopped.

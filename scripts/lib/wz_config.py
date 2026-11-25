@@ -48,10 +48,9 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --features pico --engine coop|tokio CONFIG
                                   the same list on a named engine: on the cooperative one (the
                                   base's) the features that select the tokio engine (its drive
-                                  threads, the raw Ethernet group, gossip) are left out; on the
-                                  tokio one `engine-coop` is replaced by the tokio option's
-                                  features, so the build is the header arm's drop-in with the
-                                  engine under it changed
+                                  threads, gossip) are left out; on the tokio one `engine-coop`
+                                  is replaced by the tokio option's features, so the build is the
+                                  header arm's drop-in with the engine under it changed
     --pico-config-h [--engine coop] FEATURES
                                   the reverse: print the zenoh-pico `config.h` of the wz-capi-pico
                                   build of FEATURES (a comma list, empty for none) on the default
@@ -84,6 +83,15 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   prints for the same header, the whole drop-in build
     --original-features ORIGINAL  resolve configs/<ORIGINAL>_defconfig alone and print the cargo
                                   arguments of the ABI that original is built through
+    --resolve-build ABI [PRESET...]
+                                  the whole build of ABI the presets name, or with none its
+                                  original's defconfig: the cargo arguments --resolve-features
+                                  prints on the first line, then the lines --resolve-env prints.
+                                  Every path that builds a preset or an original reads this
+    --original-env ORIGINAL       the same defconfig, resolved alone; print what --resolve-env
+                                  prints of it. With --original-features, the whole build the
+                                  defconfig names: a limit its preset switch sets (the pico
+                                  preset's) reaches the build only through this environment
     --resolve-env PRESET...       the same merge; print WZ_LIMIT_<NAME>=<value> for each limit it
                                   sets off its default, WZ_POLICY_<NAME>=<value> for each policy
                                   it sets off upstream's, and WZ_POLICY_<NAME>_ALLOWS_<VALUE>=off
@@ -182,6 +190,8 @@ Usage:
                          | config-schema | rust-feature-bits
     wz_config.py --resolve-features pico|c|core PRESET...
     wz_config.py --resolve-env PRESET...
+    wz_config.py --original-env zenoh-pico|zenoh-c|zenoh
+    wz_config.py --resolve-build pico|c|core [PRESET...]
     wz_config.py --conformance-statement pico [--engine coop] CONFIG
     wz_config.py --conformance-statement c HEADER
     wz_config.py --resolve-conformance-statement pico|c|core PRESET...
@@ -2295,6 +2305,14 @@ def cargo_args(decl: dict, abi: str, on: set[str]) -> str:
     return cargo_args_of(features_for(decl, abi, on))
 
 
+def original_features(original: str) -> list[str]:
+    """The feature list of an upstream original's own default build in wz: its defconfig alone,
+    resolved strictly, for the ABI it is built through (`BASE_ABI`). A configuration the
+    resolution refuses raises PresetError."""
+    decl = load_decl()
+    return features_for(decl, BASE_ABI[original], resolved_caps(decl, resolve([], original=original)))
+
+
 def cargo_args_of(feats: list[str]) -> str:
     """The cargo arguments of a build of exactly `feats`."""
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
@@ -2383,10 +2401,9 @@ def coop_features(feats: list[str], table: dict) -> list[str]:
 
     A pico library has one engine, and the crate refuses `engine-tokio` beside a cooperative
     one, so the cooperative build must name no feature that selects it: one that lists
-    `engine-tokio`, or lists a feature that does (the drive threads, the raw Ethernet group,
-    gossip). What is
-    left is what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so
-    selects neither, and `engine-coop` is named in the place `engine-tokio` was. The table is
+    `engine-tokio`, or lists a feature that does (the drive threads, gossip). What is left is
+    what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so selects
+    neither, and `engine-coop` is named in the place `engine-tokio` was. The table is
     READ, not listed here, so a feature that later selects the tokio engine leaves the list by
     itself.
     """
@@ -2535,6 +2552,15 @@ def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str
                           f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
     if stdlib == "std":
         return named
+    return nostd_named_features(named, table)
+
+
+def nostd_named_features(named: list[str], table: dict) -> list[str]:
+    """`named`, the feature list of a cooperative pico build with `std`, as the library without it,
+    `table` the crate's feature table: `BENCH_NOSTD_FEATURE` in the place of `engine-coop` and `std`
+    left out, as the Windows package without `std` is made from its profile's list. A feature that
+    turns `std` on is refused by name rather than built into a library with `std` after all (the
+    crate refuses that build)."""
     bare = [BENCH_NOSTD_FEATURE] + [f for f in named if f not in ("engine-coop", "std")]
     with_std = [f for f in bare if "std" in enabled_features(table, [f])]
     if with_std:
@@ -4761,6 +4787,33 @@ def resolved_policy_env(decl: dict, kconf) -> list[str]:
     return out
 
 
+# The original whose default build an ABI's build is when it names no preset.
+ORIGINAL_OF_ABI = {abi: original for original, abi in BASE_ABI.items()}
+
+
+def resolved_build(decl: dict, abi: str, kconf) -> tuple[list[str], list[str]]:
+    """The whole build a resolved configuration names for `abi`: the cargo arguments of its
+    capabilities on the engine it chose, and the `WZ_LIMIT_` and `WZ_POLICY_` environment cargo
+    runs under. The one place a configuration becomes a build: the limits and policies reach the
+    code only through the environment (`option_env!`), so a path that took the arguments alone
+    would build the configuration's capabilities at the host defaults of every build constant."""
+    return (cargo_args_of(resolved_features(decl, abi, kconf)).split(),
+            resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf))
+
+
+def configuration_of(abi: str, presets: list[pathlib.Path]):
+    """The resolved configuration of the build of `abi` the presets name, or with none of its
+    original's defconfig alone: a build that names no preset is the ABI's own preset, never the
+    host defaults of its limits. A caller that needs the feature list as well as the build reads
+    it from this same configuration (`resolved_features`)."""
+    return resolve(presets) if presets else resolve([], original=ORIGINAL_OF_ABI[abi])
+
+
+def build_of(decl: dict, abi: str, presets: list[pathlib.Path]) -> tuple[list[str], list[str]]:
+    """The build of `abi` the presets name (`resolved_build` of `configuration_of`)."""
+    return resolved_build(decl, abi, configuration_of(abi, presets))
+
+
 # The conformance statement of one build, in the
 # sense of an implementation conformance statement (ISO/IEC 9646-7): what the build exports and
 # the value of every limit and policy it was built with, in the declaration's vocabulary, so
@@ -5686,16 +5739,18 @@ def cmd_selftest() -> int:
     good = manifest_features(MANIFESTS["pico"])
     expect("the shipped pico manifest passes", check_manifest(decl, "pico", good) == [])
     # The cooperative list is the arm's with the engine changed: the base's tokio features and a
-    # capability that selects the tokio engine (the raw Ethernet group) are out, what the
-    # engines share stays (the multicast group among it), and the engine is named first.
-    arm = features_for(decl, "pico", {"peer", "query", "raweth-transport"})
+    # capability that selects the tokio engine (gossip) are out, what the engines share stays
+    # (the raw Ethernet group and the multicast group it implies among them), and the engine is
+    # named first.
+    arm = features_for(decl, "pico", {"peer", "query", "raweth-transport", "gossip"})
     coop = coop_features(arm, good)
     expect("the cooperative list names its engine first and not the tokio one",
            coop[0] == "engine-coop" and "engine-tokio" not in coop)
     expect("the cooperative list drops what selects the tokio engine",
-           not {"serial-drive-own-thread", "rx-busy-poll", "raweth-transport"} & set(coop))
+           not {"serial-drive-own-thread", "rx-busy-poll", "gossip"} & set(coop))
     expect("the cooperative list keeps what the engines share",
-           {"link-udp", "scout", "peer", "query", "multicast-transport"} <= set(coop))
+           {"link-udp", "scout", "peer", "query", "multicast-transport", "raweth-transport"}
+           <= set(coop))
     tokio_selecting = dict(good)
     tokio_selecting["query"] = list(good["query"]) + ["engine-tokio"]
     expect("a capability that later selects the tokio engine leaves the list by itself",
@@ -5707,7 +5762,7 @@ def cmd_selftest() -> int:
     expect("the tokio engine is the list with the base's engine replaced by the tokio option's",
            engine_features("pico", base, arm, False, good, switches) == tokio_features(arm, switches)
            and "engine-coop" not in engine_features("pico", base, arm, False, good, switches)
-           and "raweth-transport" in engine_features("pico", base, arm, False, good, switches))
+           and "gossip" in engine_features("pico", base, arm, False, good, switches))
     expect("the base is the cooperative engine's",
            "engine-coop" in base and "engine-tokio" not in base)
     expect("the cooperative engine is the cooperative list, the base's tokio switches out",
@@ -5722,7 +5777,7 @@ def cmd_selftest() -> int:
         return ""
 
     expect("a capability only the tokio engine runs is refused by name on the cooperative one",
-           "raweth-transport" in refusal("pico", arm))
+           "gossip" in refusal("pico", arm) and "raweth-transport" not in refusal("pico", arm))
     expect("the cooperative engine is refused for the zenoh-c ABI",
            ENGINE_COOP_SYMBOL in refusal("c", features_for(decl, "c", set())))
     expect("the cargo arguments of a list are the list's",
@@ -5761,7 +5816,8 @@ def cmd_selftest() -> int:
            and bench_cargo_args("coop", [], good).startswith(
                "--no-default-features --features wz-capi-pico/engine-coop,"))
     expect("a capability asked of a bench that only the tokio engine runs is refused by name",
-           "raweth-transport" in refusal_text(lambda: bench_named_features("coop", ["raweth-transport"], good)))
+           "gossip" in refusal_text(lambda: bench_named_features("coop", ["gossip"], good))
+           and "raweth-transport" in bench_named_features("coop", ["raweth-transport"], good))
     # Without std: the same capabilities with the POSIX host's form in the place of the engine
     # feature, so a table read from it compares the libraries alike but for the standard library.
     on_nostd = bench_features("coop", [], good, "nostd")
@@ -5776,6 +5832,10 @@ def cmd_selftest() -> int:
            and bench_named_features("coop", [], good, "std") == bench_named_features("coop", [], good))
     expect("a capability that turns std on is refused of a bench without it, by name",
            "clock-source" in refusal_text(lambda: bench_named_features("coop", ["clock-source"], good, "nostd")))
+    expect("a preset's list without std names the host's form in the engine's place and keeps the rest",
+           nostd_named_features(["std", "engine-coop", "peer", "query"], good)
+           == [BENCH_NOSTD_FEATURE, "peer", "query"]
+           and "clock-source" in refusal_text(lambda: nostd_named_features(["engine-coop", "clock-source"], good)))
     if kconfiglib_module() is not None:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",
@@ -5807,8 +5867,8 @@ def cmd_selftest() -> int:
     expect("a statement of the cooperative build states what that build has, not what was asked",
            {c["id"]: c["supported"] for c in conformance_statement(
                decl, "pico", coop, defaults, upstream, {"kind": "test"})["capabilities"]}
-           ["raweth-transport"] is False
-           and {c["id"]: c["supported"] for c in stated["capabilities"]}["raweth-transport"])
+           ["gossip"] is False
+           and {c["id"]: c["supported"] for c in stated["capabilities"]}["gossip"])
     expect("the digest does not depend on where the values were read from",
            conformance_statement(decl, "pico", arm, defaults, upstream, {"kind": "other"})["digest"]
            == stated["digest"] and stated["digest"].startswith("sha256:"))
@@ -7460,6 +7520,34 @@ requires = "WZ_MODE_P && !WZ_SIDE_R"
                    resolved_limit_env(decl, resolve([first])) == ["WZ_LIMIT_MAX_TASKS=4"])
             expect("a later preset overrides an earlier one",
                    resolved_limit_env(decl, resolve([first, later])) == ["WZ_LIMIT_MAX_TASKS=6"])
+            declared = {lim["id"]: lim for lim in decl["limits"]}
+            expect("zenoh-pico's defconfig alone gives --original-env every pico preset value "
+                   "that differs from its limit's default",
+                   {f"{declared[lid]['kconfig']}={value}"
+                    for lid, value in limit_presets(decl["limits"]).items()
+                    if value != declared[lid]["default"]}
+                   <= set(resolved_limit_env(decl, resolve([], original="zenoh-pico"))))
+            shipped_args, shipped_env = build_of(decl, "pico", [])
+            expect("a build of the pico ABI that names no preset is its defconfig's: the "
+                   "arguments --resolve-features gives it and every pico preset limit",
+                   shipped_args == cargo_args_of(resolved_features(
+                       decl, "pico", resolve([], original="zenoh-pico"))).split()
+                   and {f"{declared[lid]['kconfig']}={value}"
+                        for lid, value in limit_presets(decl["limits"]).items()
+                        if value != declared[lid]["default"]} <= set(shipped_env))
+            carried = None
+            for pol in decl["policies"]:
+                if pol["kind"] != "bool" or pol["default"] == "on":
+                    continue
+                try:
+                    _, policy_env = build_of(decl, "c", [preset(
+                        d, "policy.conf", f"CONFIG_{pol['kconfig']}=y\n")])
+                except PresetError:
+                    continue
+                carried = f"{pol['kconfig']}=on" in policy_env
+                break
+            expect("a policy a preset turns on reaches the build's environment with its limits",
+                   carried is True)
             resolved_doc = resolved_statement(decl, "c", resolve([first]),
                                               {"kind": "presets", "inputs": ["first.conf"]})
             expect("a preset's statement states the value its preset gives and the features "
@@ -7587,7 +7675,7 @@ def main(argv: list[str]) -> int:
             feats = coop_features(stated, manifest_features(MANIFESTS["pico"]))
         else:
             # The header's build on the tokio engine, which the base no longer names: a header
-            # arm whose capability only that engine runs (raw Ethernet), or a leg that grades
+            # arm whose capability only that engine runs (gossip), or a leg that grades
             # the tokio engine until it leaves the C library (phase P5).
             feats = tokio_features(stated, engine_option_features(decl, "tokio"))
         print("--no-default-features --features " + ",".join(feats))
@@ -7606,6 +7694,19 @@ def main(argv: list[str]) -> int:
         return cmd_check_presets()
     if len(argv) == 2 and argv[1] == "--check-equivalence":
         return cmd_check_equivalence()
+    if len(argv) >= 3 and argv[1] == "--resolve-build" and argv[2] in ABIS:
+        # The whole build in one answer: the cargo arguments on the first line, then one
+        # `NAME=value` line for each limit and policy, as `build_of` gives them.
+        decl = load_decl()
+        try:
+            args, env = build_of(decl, argv[2], [pathlib.Path(p) for p in argv[3:]])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        print(" ".join(args))
+        for line in env:
+            print(line)
+        return 0
     if len(argv) >= 4 and argv[1] == "--resolve-features" and argv[2] in ABIS:
         decl = load_decl()
         try:
@@ -7640,13 +7741,24 @@ def main(argv: list[str]) -> int:
         # An upstream original's own default build: its defconfig alone, resolved strictly, as the
         # cargo arguments of the ABI it is built through. A lane compares this with the build its
         # interop legs link. It never skips: the lane that asks provisions the interpreter.
-        decl = load_decl()
         try:
-            kconf = resolve([], original=argv[2])
+            print(cargo_args_of(original_features(argv[2])))
         except PresetError as exc:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
-        print(cargo_args(decl, BASE_ABI[argv[2]], resolved_caps(decl, kconf)))
+        return 0
+    if len(argv) == 3 and argv[1] == "--original-env" and argv[2] in BASE_ABI:
+        # The half of an original's build that cargo arguments cannot carry: the limits and
+        # policies its defconfig sets, as --resolve-env prints a preset's. A build of
+        # --original-features alone is the defconfig's capabilities at the host defaults of every
+        # build constant, which the defconfig's conformance statement does not describe.
+        try:
+            _, lines = build_of(load_decl(), BASE_ABI[argv[2]], [])
+        except PresetError as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        for line in lines:
+            print(line)
         return 0
     if len(argv) >= 3 and argv[1] == "--resolve-env":
         decl = load_decl()

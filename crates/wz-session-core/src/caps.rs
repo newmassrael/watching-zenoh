@@ -117,6 +117,34 @@ const fn limit(stated: Option<&str>, default: usize) -> usize {
 /// rather than silently truncated.
 pub const MAX_KEYEXPR_BYTES: usize = generated::MAX_KEYEXPR_BYTES;
 
+/// The integer a row that keeps a key's length beside it keeps it in: the narrowest that holds
+/// [`MAX_KEYEXPR_BYTES`], chosen when the build is made, so a build of the default bound keeps a
+/// declaration's row head as small as its fields allow and one whose bound was raised past
+/// `u16` keeps every length it admits.
+pub type KeyLen = <KeyLenOf<{ MAX_KEYEXPR_BYTES <= u16::MAX as usize }> as Narrowest>::Int;
+
+/// The choice behind [`KeyLen`]: whether the bound on a key's length fits a `u16`.
+pub struct KeyLenOf<const FITS_U16: bool>;
+
+/// The integer a choice of [`KeyLenOf`] makes.
+pub trait Narrowest {
+    /// The integer.
+    type Int;
+}
+
+impl Narrowest for KeyLenOf<true> {
+    type Int = u16;
+}
+
+impl Narrowest for KeyLenOf<false> {
+    type Int = u32;
+}
+
+const _: () = assert!(
+    (MAX_KEYEXPR_BYTES as u64) < (1u64 << (8 * core::mem::size_of::<KeyLen>() as u64)),
+    "KeyLen must hold MAX_KEYEXPR_BYTES"
+);
+
 /// The bytes of key text the keyed rows of a session's tables of the lent policy hold at once, in
 /// the one key arena they share ([`crate::key_arena`]): each key a block of its header and its
 /// bytes. A key of the session's own that finds no room is refused as one that finds its table

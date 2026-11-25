@@ -26,6 +26,7 @@ fn subscribe(engine: &Engine, key: &str) -> SubId {
             SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
         .expect("a session with ids left declares")
+        .id
 }
 
 /// How many declarations the router has been told.

@@ -298,15 +298,12 @@ mod tests {
         let PushVariant::CodecZenohMsgPut(put) = &push.body else {
             return None;
         };
-        let qos = push.extensions.as_ref().and_then(|chain| {
-            chain
-                .iter()
-                .find(|ext| ext.header & 0x7f == 0x21)
-                .and_then(|ext| match &ext.body {
-                    wz_codecs::lent::ExtEntryVariant::CodecZenohExtZint(z) => Some(z.value as u8),
-                    _ => None,
-                })
-        });
+        // The QoS the owned parse delivers: the last entry of its identity.
+        let qos = push
+            .extensions
+            .as_ref()
+            .and_then(|chain| crate::sample::extract_qos_in(chain.iter()))
+            .map(|qos| qos.raw);
         Some((
             id,
             mapping,
@@ -459,6 +456,37 @@ mod tests {
         let truncated = &plain[..plain.len() - 1];
         assert!(read_one(truncated).is_none());
         assert!(read_one(&[]).is_none());
+    }
+
+    /// A Push whose chain carries the QoS twice is declined by the lane, which reads a chain of
+    /// the QoS alone, and is left to the owned parse, which reads the last entry as upstream's
+    /// decoder assigns each one it meets (`commons/zenoh-codec/src/network/push.rs` @
+    /// `ext_qos = q;`). Turned red by a codec reading that keeps the first entry.
+    #[test]
+    fn a_repeated_qos_is_left_to_the_codec_which_reads_the_last() {
+        // Push header with `Z`, id 3, the QoS (`0x21` with the chain flag, value `0x05`), the
+        // QoS again (`0x21`, value `0x1a`), the Put header, a length of three, the payload.
+        let twice = alloc::vec![
+            0x9du8,
+            3,
+            QOS_EXT_HEADER | 0x80,
+            0x05,
+            QOS_EXT_HEADER,
+            0x1a,
+            PLAIN_PUT_HEADER,
+            3,
+            b'a',
+            b'b',
+            b'c'
+        ];
+        assert!(
+            read_one(&twice).is_none(),
+            "a chain of two is not a plain Put"
+        );
+        assert_eq!(
+            through_the_codec(&twice).expect("the codec reads it"),
+            (3, false, None, b"abc".to_vec(), Some(0x1a), twice.len())
+        );
     }
 
     /// A suffix as long as a key holds reads, and one byte longer is declined here as the codec

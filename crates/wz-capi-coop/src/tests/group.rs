@@ -499,7 +499,8 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
             None,
             false,
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     assert!(
         first.write_filter_active(filter),
         "CONTROL: no member holds a subscriber yet"
@@ -512,7 +513,8 @@ fn a_members_subscriber_is_announced_on_the_group_and_retracted_from_it() {
             None,
             SubscriberSink::shared(|_: &dyn SampleView| {}),
         )
-        .expect("a session with ids left declares");
+        .expect("a session with ids left declares")
+        .id;
     eventually("the announcement to open the first's filter", || {
         !first.write_filter_active(filter)
     });
@@ -845,7 +847,8 @@ mod alive {
         });
         let id = engine
             .declare_liveliness_subscriber_on_wire(keyexpr, WireKey::literal(), history, sink)
-            .expect("the engine has liveliness");
+            .expect("the engine has liveliness")
+            .id;
         (id, heard)
     }
 
@@ -988,7 +991,8 @@ mod mapped {
                 None,
                 false,
             )
-            .expect("a session with ids left declares a filter");
+            .expect("a session with ids left declares a filter")
+            .id;
         eventually("the member's answer to open the filter", || {
             !first.write_filter_holds_back(filter)
         });
@@ -2074,6 +2078,7 @@ mod in_place {
                     false,
                 )
                 .expect("a session with ids left declares")
+                .id
         };
         let (on_a, on_b) = (filter("demo/scoped/a"), filter("demo/scoped/b"));
         assert!(
@@ -2480,6 +2485,7 @@ mod member_keyexprs {
                     false,
                 )
                 .expect("a session with ids left declares")
+                .id
         };
         let (on_a, on_b) = (filter("demo/alias/a"), filter("demo/alias/b"));
         assert!(

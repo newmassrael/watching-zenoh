@@ -72,7 +72,7 @@ use crate::keyexpr::{declared_of, keyexpr_str, DeclaredKeyexpr};
 use crate::prelude::*;
 use crate::pubsub::{
     z_closure_drop_callback_t, z_moved_closure_sample_t, z_owned_closure_sample_t,
-    z_owned_subscriber_t, CClosure, SubscriberKept,
+    z_owned_subscriber_t, CClosure,
 };
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SYSTEM_OUT_OF_MEMORY,
@@ -455,12 +455,14 @@ pub(crate) struct AdvPubState {
     /// `z_publisher_keyexpr(&pub->_publisher)` is: a put made on the loan
     /// aliases.
     loaned_keyexpr: crate::abi::z_loaned_keyexpr_t,
+    /// What the loan names besides the key's text, in the state with the session it names.
+    record: crate::keyexpr::RecordKey,
 }
 
 impl AdvPubState {
     /// Point the cached view at the wrapped publisher's own key, after boxing.
     fn bind(&mut self) {
-        self.loaned_keyexpr = self.publisher.publisher().key().loaned();
+        self.loaned_keyexpr = self.publisher.publisher().lend(&mut self.record);
     }
 }
 
@@ -618,6 +620,7 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             engine,
             publisher,
             loaned_keyexpr: crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
+            record: crate::keyexpr::RecordKey::UNLENT,
         });
         // Bound where it lies: the place does not move until the undeclare gives it back.
         (*state).bind();
@@ -1153,6 +1156,26 @@ pub(crate) struct AdvSubState {
 /// gives the place back (`crate::object_slot::Answering`).
 pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubKept>;
 
+/// The C sample closure an advanced subscriber's host calls where its place keeps it, and for a
+/// background subscriber a hold on its session's count, so the session's close waits for the
+/// closure as pico's does (`_z_sync_group_wait`). Let go of in that order, when the host lets go
+/// of the sample callback ([`let_go_adv_sample`]).
+pub(crate) struct SampleKept {
+    closure: CClosure,
+    // Held for its drop, which lets the session's count go after the closure; never read.
+    _session: Option<crate::ffi::HeldIn>,
+}
+
+impl SampleKept {
+    /// `closure`, kept with `session`, the hold of a background subscriber's session.
+    fn new(closure: CClosure, session: Option<crate::ffi::HeldIn>) -> Self {
+        Self {
+            closure,
+            _session: session,
+        }
+    }
+}
+
 /// What an advanced subscriber's place keeps past its state for the host: the C sample closure
 /// the host calls, with the hold on a background subscriber's session, taken out when the host
 /// lets go of it; and the part the host's callbacks, gets and jobs share, lodged here, with the
@@ -1163,7 +1186,7 @@ pub(crate) type AdvSubPlace = crate::object_slot::Answering<AdvSubState, AdvSubK
 /// the forms that name the subscriber's entities, with a keep of their own, and the rooms of the
 /// anchors those names stand on, each anchor keeping the place while it stands.
 pub(crate) struct AdvSubKept {
-    sample: SubscriberKept,
+    sample: SampleKept,
     core: SubscriberCore<EngineHold>,
     core_hold: core::mem::MaybeUninit<crate::ffi::HeldIn>,
     miss: core::mem::MaybeUninit<Lodging<MissRooms>>,
@@ -1175,7 +1198,7 @@ pub(crate) struct AdvSubKept {
 
 impl AdvSubKept {
     /// `sample` kept, with nothing lodged and no hold for it.
-    fn new(sample: SubscriberKept) -> Self {
+    fn new(sample: SampleKept) -> Self {
         Self {
             sample,
             core: SubscriberCore::vacant(),
@@ -1486,10 +1509,7 @@ unsafe fn declare_subscriber_state(
                 miss: None,
                 session: Some(session),
             },
-            AdvSubKept::new(SubscriberKept::new(
-                closure,
-                background.then(|| session.hold()),
-            )),
+            AdvSubKept::new(SampleKept::new(closure, background.then(|| session.hold()))),
         ))
         .cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
@@ -2321,15 +2341,17 @@ pub unsafe extern "C" fn ze_advanced_subscriber_detect_publishers_background(
         ) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
-        let session = state.session.map(crate::ffi::CountIn::hold);
+        // SAFETY: the count kept in the state is its session's, read only while the session is
+        // open, as checked above.
+        let session = state
+            .session
+            .map(|count| unsafe { crate::session::session_hold_let_go(count) });
         match crate::liveliness::declare_liveliness_subscriber_in(
             &engine, slot, &detection, None, closure, history, session,
         ) {
             Ok(placed) => {
                 // No handle will undeclare it: its owner lets go of it at once, with no wait.
-                crate::object_slot::retire_entity::<crate::pubsub::SubscriberState, SubscriberKept>(
-                    placed,
-                );
+                crate::object_slot::release_entity(placed);
                 Z_OK
             }
             Err(code) => code,
@@ -2478,7 +2500,7 @@ mod tests {
             },
             // The C closure kept beside the state is counted in nothing and taken out by nothing:
             // the subscriber's callback is the Rust closure above.
-            AdvSubKept::new(SubscriberKept::new(
+            AdvSubKept::new(SampleKept::new(
                 CClosure::uncounted(std::ptr::null_mut(), None, None),
                 None,
             )),
@@ -3460,14 +3482,15 @@ mod tests {
         unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 
-    /// An advanced subscriber's background publisher detection holds a liveliness subscriber's
-    /// place of the session past its declaration, and its closure is let go of by the time the
-    /// session's close returns; one asked for once the session is closed is refused with its
-    /// closure dropped. Turned red by a detection whose closure takes memory of its own, which
-    /// holds no liveliness subscriber's place and which the close does not wait for.
+    /// An advanced subscriber's background publisher detection takes a liveliness subscriber's
+    /// place of the session for its declaration and gives it back at once, its row holding the
+    /// closure, which is let go of by the time the session's close returns; one asked for once the
+    /// session is closed is refused with its closure dropped. Turned red by a detection whose place
+    /// is kept past its declaration (no handle will give it back), or whose closure the close does
+    /// not let go of.
     #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
     #[test]
-    fn a_background_publisher_detection_lies_in_a_place_of_its_session() {
+    fn a_background_publisher_detections_closure_lies_in_its_row_until_the_close() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
             engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
@@ -3531,8 +3554,8 @@ mod tests {
         assert_eq!(code, Z_OK);
         assert_eq!(
             free(&engine, Kind::LivelinessSubscriber),
-            detections - 1,
-            "the background detection holds a liveliness subscriber's place"
+            detections,
+            "the background detection's place goes back at once: no handle gives it back"
         );
         assert_eq!(detect_drops.load(Ordering::SeqCst), 0);
         drop(engine);

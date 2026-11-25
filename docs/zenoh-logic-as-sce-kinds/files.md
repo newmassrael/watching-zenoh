@@ -246,6 +246,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tls.rs` | S7 | |
 | `crates/wz-capi-core/src/caller_span.rs` | S7 | |
 | `crates/wz-capi-core/src/codec.rs` | S7 | |
+| `crates/wz-capi-core/src/deliveries.rs` | S7 | |
 | `crates/wz-capi-core/src/drive.rs` | S7 | |
 | `crates/wz-capi-core/src/drive/router_node.rs` | S7 | |
 | `crates/wz-capi-core/src/drive/router_node/engine.rs` | S7 | |
@@ -361,6 +362,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/zid.rs` | S7 | |
 | `crates/wz-capi-port/src/cancellation.rs` | S7 | |
 | `crates/wz-capi-port/src/decl_watch.rs` | S7 | |
+| `crates/wz-capi-port/src/deliveries.rs` | S7 | |
 | `crates/wz-capi-port/src/drive.rs` | S7 | |
 | `crates/wz-capi-port/src/engine.rs` | S7 | |
 | `crates/wz-capi-port/src/entity_place.rs` | S7 | |
