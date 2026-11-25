@@ -208,6 +208,58 @@ fn a_client_masks_each_frame_with_a_fresh_key_and_a_server_does_not() {
     assert_eq!(written.get(4..), Some(&batch[..]));
 }
 
+/// A batch is sealed where it lies as one BINARY message: a server writes the head alone in the
+/// room in front of it, a client the head with the next key of its stream and the batch masked by
+/// that key; a batch with no room for its head, or past the MTU, is refused before a byte of it
+/// changes. Turned red by a seal that masks before it checks the room, or writes a head other
+/// than `write_head`'s.
+#[test]
+fn a_batch_is_sealed_where_it_lies_as_one_binary_message() {
+    let batch = *b"hello";
+    let mut head = [0u8; MAX_HEAD_LEN];
+
+    let server = WsFraming::server();
+    let mut slot = [0u8; WS_HEADROOM + 5];
+    slot[WS_HEADROOM..].copy_from_slice(&batch);
+    let from = server
+        .seal(&mut slot, WS_HEADROOM)
+        .expect("room for the head");
+    let head_len = write_head(&mut head, OP_BINARY, batch.len(), None);
+    assert_eq!(from, WS_HEADROOM - head_len);
+    assert_eq!(&slot[from..WS_HEADROOM], &head[..head_len]);
+    assert_eq!(&slot[WS_HEADROOM..], &batch);
+
+    let client = WsFraming::client(MaskKeys::seeded(&[0; MASK_SEED_LEN]));
+    let key = MaskKeys::seeded(&[0; MASK_SEED_LEN]).next_key();
+    let mut slot = [0u8; WS_HEADROOM + 5];
+    slot[WS_HEADROOM..].copy_from_slice(&batch);
+    let from = client
+        .seal(&mut slot, WS_HEADROOM)
+        .expect("room for the head");
+    let head_len = write_head(&mut head, OP_BINARY, batch.len(), Some(key));
+    assert_eq!(from, WS_HEADROOM - head_len);
+    assert_eq!(&slot[from..WS_HEADROOM], &head[..head_len]);
+    let mut masked = batch;
+    apply_mask(&mut masked, key);
+    assert_eq!(&slot[WS_HEADROOM..], &masked);
+
+    let mut short = [0u8; 3 + 5];
+    short[3..].copy_from_slice(&batch);
+    assert_eq!(
+        client.seal(&mut short, 3),
+        None,
+        "no room for a masked head"
+    );
+    assert_eq!(&short[3..], &batch);
+    assert_eq!(
+        server.seal(&mut [0u8; 4], 5),
+        None,
+        "a start past the bytes"
+    );
+    let mut past = std::vec![0u8; WS_HEADROOM + WS_MTU + 1];
+    assert_eq!(server.seal(&mut past, WS_HEADROOM), None);
+}
+
 /// What the link reports of itself: a WebSocket's ends, no length in the batch, a batch bounded
 /// by the slot less the header room and by zenoh's WebSocket MTU. Turned red by a link that
 /// names itself `tcp/` or asks the session for a length.

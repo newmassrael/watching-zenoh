@@ -53,18 +53,6 @@ struct Control {
     from: usize,
 }
 
-/// The header a frame of a batch is written behind.
-pub struct WsPrefix {
-    bytes: [u8; MAX_HEAD_LEN],
-    len: usize,
-}
-
-impl AsRef<[u8]> for WsPrefix {
-    fn as_ref(&self) -> &[u8] {
-        self.bytes.get(..self.len).unwrap_or_default()
-    }
-}
-
 /// RFC 6455's framing of a stream, for one end of one link. A client masks every frame it writes
 /// with a key from its [`MaskKeys`] and takes only unmasked frames; a server the other way round
 /// (RFC 6455 section 5.1), and a frame masked the wrong way ends the link.
@@ -201,7 +189,6 @@ fn partial(held: &[u8], capacity: usize) -> Front {
 impl StreamFraming for WsFraming {
     const HEADROOM: usize = WS_HEADROOM;
     const LENGTH_PREFIXED: bool = false;
-    type Prefix = WsPrefix;
 
     fn front(&self, held: &mut [u8], capacity: usize, consume: bool) -> Front {
         if let Some(kept) = self.kept.get() {
@@ -292,14 +279,25 @@ impl StreamFraming for WsFraming {
         self.kept.set(None);
     }
 
-    fn prefix(&self, len: usize) -> Option<(WsPrefix, Option<[u8; 4]>)> {
-        if len > WS_MTU {
+    // The batch is one BINARY message: its head in front of it and, from a client, its bytes
+    // masked where they lie. The head is checked against the room before a byte is masked.
+    fn seal(&self, bytes: &mut [u8], start: usize) -> Option<usize> {
+        if start > bytes.len() {
+            return None;
+        }
+        let (room, batch) = bytes.split_at_mut(start);
+        if batch.len() > WS_MTU {
             return None;
         }
         let mask = self.next_mask();
-        let mut bytes = [0u8; MAX_HEAD_LEN];
-        let len = write_head(&mut bytes, OP_BINARY, len, mask);
-        Some((WsPrefix { bytes, len }, mask))
+        let mut head = [0u8; MAX_HEAD_LEN];
+        let head_len = write_head(&mut head, OP_BINARY, batch.len(), mask);
+        let from = start.checked_sub(head_len)?;
+        room.get_mut(from..)?.copy_from_slice(head.get(..head_len)?);
+        if let Some(key) = mask {
+            apply_mask(batch, key);
+        }
+        Some(from)
     }
 
     // A WebSocket's ends are those of the TCP connection it runs over, under its own scheme.

@@ -621,9 +621,6 @@ pub trait StreamFraming {
     /// ([`BoxedLinkDriver::batch_length_prefixed`]).
     const LENGTH_PREFIXED: bool;
 
-    /// What a send writes in front of a batch.
-    type Prefix: AsRef<[u8]>;
-
     /// Read the unit at the front of `held`, the bytes a buffer of `capacity` bytes read. With
     /// `consume` the unit is the receive's to hand over, and the framing may change its bytes
     /// where they lie (unmask them, join the parts of a message); without it the receive only asks
@@ -638,9 +635,16 @@ pub trait StreamFraming {
     /// behind it are the next unit's.
     fn passed(&self) {}
 
-    /// What a send writes in front of a batch of `len` bytes, and the key its bytes are masked
-    /// with when the framing masks them; `None` when no unit carries a batch that long.
-    fn prefix(&self, len: usize) -> Option<(Self::Prefix, Option<[u8; 4]>)>;
+    /// Seal a batch for the stream where it lies. `bytes` is the slot from its first byte to the
+    /// batch's last: the batch is `bytes[start..]` and the headroom in front of it is the
+    /// framing's room. What goes in front of the batch is written into that room, the batch's
+    /// bytes are changed as the framing changes them (a client's WebSocket masks them), and the
+    /// answer is where the bytes to write start. `None` when no unit carries a batch that long or
+    /// the room in front of it is too short; the caller gives the slot back.
+    ///
+    /// The framing's own: a framing that writes a length alone carries no masking branch and no
+    /// head of a variable length.
+    fn seal(&self, bytes: &mut [u8], start: usize) -> Option<usize>;
 
     /// The ends a link over a stream with `ends` reports, which name the kind of link it is: the
     /// stream's own ([`StreamEnds::link_ends`]), unless the framing makes the link a kind of its
@@ -689,15 +693,17 @@ pub struct LengthPrefix;
 impl StreamFraming for LengthPrefix {
     const HEADROOM: usize = STREAM_BATCH_LENGTH_BYTES;
     const LENGTH_PREFIXED: bool = true;
-    type Prefix = [u8; STREAM_BATCH_LENGTH_BYTES];
-
     fn front(&self, held: &mut [u8], capacity: usize, _consume: bool) -> Front {
         front(held, capacity)
     }
 
-    fn prefix(&self, len: usize) -> Option<(Self::Prefix, Option<[u8; 4]>)> {
-        let length = u16::try_from(len).ok()?;
-        Some((length.to_le_bytes(), None))
+    fn seal(&self, bytes: &mut [u8], start: usize) -> Option<usize> {
+        let length = u16::try_from(bytes.len().checked_sub(start)?).ok()?;
+        let from = start.checked_sub(STREAM_BATCH_LENGTH_BYTES)?;
+        bytes
+            .get_mut(from..start)?
+            .copy_from_slice(&length.to_le_bytes());
+        Some(from)
     }
 }
 
@@ -1374,20 +1380,12 @@ where
         _reliability: Reliability,
         _priority: Priority,
     ) -> LinkSendOutcome {
-        let Some((prefix, mask)) = self.framing.prefix(len) else {
-            self.tx.lender.release(slot);
-            return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
-        };
-        if let Some(key) = mask {
-            if !self.tx.lender.mask(slot, start, len, key) {
-                self.tx.lender.release(slot);
-                return LinkSendOutcome::Dropped(LinkDropCause::Oversize);
-            }
-        }
+        // The framing seals the batch in the slot: its head written into the headroom and, for a
+        // framing that masks, the batch masked where it lies.
         match self
             .tx
             .lender
-            .frame_prefixed(slot, start, len, prefix.as_ref())
+            .seal(slot, start, len, |bytes, at| self.framing.seal(bytes, at))
         {
             Some((from, end)) => self.send(slot, from, end),
             None => {
@@ -2456,6 +2454,42 @@ mod tests {
             link.tx_slot_acquire(10, Priority::Data).is_some(),
             "and back anyway"
         );
+    }
+
+    /// zenoh's framing seals a batch with its length, little-endian, in the room just in front of
+    /// it, and touches nothing else; a batch with no room for the length, or past a `u16`, is
+    /// refused with its bytes as they were. Turned red by a length written big-endian, or by a
+    /// seal that writes past the room it was given.
+    #[test]
+    fn the_length_framing_seals_a_batch_with_its_length_in_the_room_in_front() {
+        let mut slot = [0xAAu8; 8];
+        slot[2..5].copy_from_slice(b"xyz");
+        assert_eq!(LengthPrefix.seal(&mut slot[..5], 2), Some(0));
+        assert_eq!(&slot[..5], &[3, 0, b'x', b'y', b'z']);
+        assert_eq!(&slot[5..], &[0xAA; 3], "nothing past the batch is touched");
+
+        let mut short = [0u8, b'a', b'b'];
+        assert_eq!(LengthPrefix.seal(&mut short, 1), None);
+        assert_eq!(short, [0, b'a', b'b']);
+        assert_eq!(
+            LengthPrefix.seal(&mut [0u8; 4], 5),
+            None,
+            "a start past the bytes"
+        );
+
+        let longest = STREAM_BATCH_LENGTH_BYTES + u16::MAX as usize;
+        let mut bytes = std::vec![0u8; longest];
+        assert_eq!(
+            LengthPrefix.seal(&mut bytes, STREAM_BATCH_LENGTH_BYTES),
+            Some(0)
+        );
+        assert_eq!(&bytes[..2], &[0xFF, 0xFF]);
+        let mut past = std::vec![0u8; longest + 1];
+        assert_eq!(
+            LengthPrefix.seal(&mut past, STREAM_BATCH_LENGTH_BYTES),
+            None
+        );
+        assert_eq!(&past[..2], &[0, 0]);
     }
 
     #[test]
