@@ -693,35 +693,37 @@ pub enum FaceEventKind {
     Down,
 }
 
-/// A face-lifecycle observer.
-///
-/// `Arc` rather than `Box` because a registry clones the sink list OUT of its lock before it
-/// invokes any of them: a sink may reach code that re-enters the registry.
-pub type FaceEventSink = Arc<dyn Fn(FaceEventKind, &FaceSnapshot) + Send + Sync>;
+/// A face-lifecycle observer told the whole face, a snapshot of it and of its links
+/// ([`FaceSnapshot`]), each time one comes up or goes: a count of the watcher, as a
+/// [`FaceRowSink`] is, and copied out of a registry's lock before it is told, so a sink may reach
+/// code that re-enters the registry.
+pub type FaceEventSink = FaceWatcher<FaceSnapshot>;
 
 /// A face-lifecycle observer told a row at a time ([`FaceLinkRow`]): each link of a face that
 /// came up or went, its links in order, or the one row of a face with none, the face's facts in
 /// each. The rows of one face are told one after another. A row holds everything in itself, so
 /// an engine that writes its rows in place tells them with nothing allocated.
-///
-/// A count of the watcher, copied out of a registry's lock before it is told, as a
-/// [`FaceEventSink`] is. The watcher lies where its maker put it and is counted by its maker's
-/// functions ([`Self::counted`]), so one in a place its session lent takes nothing of the heap;
-/// one in an `Arc` is counted by the `Arc`'s counts ([`Self::of_arc`]).
-pub struct FaceRowSink {
+pub type FaceRowSink = FaceWatcher<FaceLinkRow>;
+
+/// A count of a watcher of the faces told a `T` of each face that came up or went
+/// ([`FaceEventSink`], [`FaceRowSink`]), copied out of a registry's lock before it is told. The
+/// watcher lies where its maker put it and is counted by its maker's functions
+/// ([`Self::counted`]), so one in a place its session lent takes nothing of the heap; one in an
+/// `Arc` is counted by the `Arc`'s counts ([`Self::of_arc`]).
+pub struct FaceWatcher<T> {
     raw: NonNull<c_void>,
-    tell: unsafe fn(*const c_void, FaceEventKind, &FaceLinkRow),
+    tell: unsafe fn(*const c_void, FaceEventKind, &T),
     retain: unsafe fn(*const c_void),
     release: unsafe fn(*mut c_void),
 }
 
-// SAFETY: made only by `FaceRowSink::counted`, whose caller vouches that the watcher and its counts
-// are reached from any thread.
-unsafe impl Send for FaceRowSink {}
+// SAFETY: made only by `FaceWatcher::counted`, whose caller vouches that the watcher and its
+// counts are reached from any thread; the sink holds no `T`, only functions that are handed one.
+unsafe impl<T> Send for FaceWatcher<T> {}
 // SAFETY: as `Send`.
-unsafe impl Sync for FaceRowSink {}
+unsafe impl<T> Sync for FaceWatcher<T> {}
 
-impl Clone for FaceRowSink {
+impl<T> Clone for FaceWatcher<T> {
     fn clone(&self) -> Self {
         // SAFETY: this count holds the watcher, so another may be taken from it (`counted`).
         unsafe { (self.retain)(self.raw.as_ptr().cast_const()) };
@@ -734,18 +736,18 @@ impl Clone for FaceRowSink {
     }
 }
 
-impl Drop for FaceRowSink {
+impl<T> Drop for FaceWatcher<T> {
     fn drop(&mut self) {
         // SAFETY: this count was given to the sink (`counted`) and is let go of once, here.
         unsafe { (self.release)(self.raw.as_ptr()) };
     }
 }
 
-impl FaceRowSink {
+impl<T> FaceWatcher<T> {
     /// The watcher `sink` counts, in its `Arc`: each copy one more count of the `Arc`.
     pub fn of_arc<F>(sink: Arc<F>) -> Self
     where
-        F: Fn(FaceEventKind, &FaceLinkRow) + Send + Sync + 'static,
+        F: Fn(FaceEventKind, &T) + Send + Sync + 'static,
     {
         // SAFETY: `into_raw` gives up the `Arc`'s count, never null, to the sink; `F` is `Send +
         // Sync`, stands while a count of its `Arc` is held, and the three functions tell, take
@@ -753,16 +755,16 @@ impl FaceRowSink {
         unsafe {
             Self::counted(
                 NonNull::new_unchecked(Arc::into_raw(sink).cast_mut().cast::<c_void>()),
-                tell_arc::<F>,
+                tell_arc::<T, F>,
                 retain_arc::<F>,
                 release_arc::<F>,
             )
         }
     }
 
-    /// The watcher at `raw`, of which this sink is one count: `tell` tells it a row, `retain`
-    /// takes one more count of it, and `release` lets one go, the last letting the watcher go as
-    /// its maker said.
+    /// The watcher at `raw`, of which this sink is one count: `tell` tells it what came or went,
+    /// `retain` takes one more count of it, and `release` lets one go, the last letting the
+    /// watcher go as its maker said.
     ///
     /// # Safety
     /// `raw` is a count of a watcher that may be reached from any thread, given up to the sink;
@@ -770,7 +772,7 @@ impl FaceRowSink {
     /// from any thread while a count is held, `release` once for each count.
     pub unsafe fn counted(
         raw: NonNull<c_void>,
-        tell: unsafe fn(*const c_void, FaceEventKind, &FaceLinkRow),
+        tell: unsafe fn(*const c_void, FaceEventKind, &T),
         retain: unsafe fn(*const c_void),
         release: unsafe fn(*mut c_void),
     ) -> Self {
@@ -782,24 +784,20 @@ impl FaceRowSink {
         }
     }
 
-    /// Tell the watcher a row of a face that came up or went.
-    pub fn tell(&self, kind: FaceEventKind, row: &FaceLinkRow) {
+    /// Tell the watcher of a face that came up or went.
+    pub fn tell(&self, kind: FaceEventKind, what: &T) {
         // SAFETY: this sink is a count of the watcher, which stands while it is held (`counted`).
-        unsafe { (self.tell)(self.raw.as_ptr().cast_const(), kind, row) }
+        unsafe { (self.tell)(self.raw.as_ptr().cast_const(), kind, what) }
     }
 }
 
-/// Tell the watcher in the `Arc` at `raw` a row.
+/// Tell the watcher in the `Arc` at `raw` what came or went.
 ///
 /// # Safety
 /// `raw` is an `Arc<F>`'s pointer, of which the caller holds a count for the call.
-unsafe fn tell_arc<F: Fn(FaceEventKind, &FaceLinkRow)>(
-    raw: *const c_void,
-    kind: FaceEventKind,
-    row: &FaceLinkRow,
-) {
+unsafe fn tell_arc<T, F: Fn(FaceEventKind, &T)>(raw: *const c_void, kind: FaceEventKind, what: &T) {
     // SAFETY: the caller's count holds the value.
-    (unsafe { &*raw.cast::<F>() })(kind, row);
+    (unsafe { &*raw.cast::<F>() })(kind, what);
 }
 
 /// Take one more count of the `Arc` at `raw`.

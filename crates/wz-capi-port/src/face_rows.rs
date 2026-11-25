@@ -6,7 +6,6 @@
 //! form and answers a watch of the other through these, so each fact of a face is read once, by
 //! the engine, in the form it tells.
 
-use alloc::sync::Arc;
 use core::ffi::c_void;
 use core::ptr::{addr_of_mut, NonNull};
 
@@ -20,10 +19,39 @@ use crate::os::Mutex;
 /// A watcher of rows told through a watch of snapshots: each snapshot handed on as its rows
 /// ([`FaceLinkRow::each_of_snapshot`]). What an engine that tells snapshots answers a watch of
 /// rows with ([`crate::SessionEngine::watch_face_rows`]).
-pub fn rows_of_snapshots(sink: FaceRowSink) -> FaceEventSink {
-    Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
-        FaceLinkRow::each_of_snapshot(face, |row| sink.tell(kind, &row));
-    })
+///
+/// The watcher of rows lies in `place`, which its holder lent ([`Lent`]) and gets back with the
+/// last count of the watch.
+pub fn rows_of_snapshots(sink: FaceRowSink, place: Lent<Splitting>) -> FaceEventSink {
+    let count = Strong::new_at(place, Splitting { sink });
+    // SAFETY: `into_raw` gives up a count of a lodging, which is never null, to the sink; the
+    // watcher is reached from any thread (a `FaceRowSink` is `Send + Sync`) and stands while a
+    // count of it is held; the three functions tell, take and let go of a count of that lodging's
+    // `Splitting`.
+    unsafe {
+        FaceEventSink::counted(
+            NonNull::new_unchecked(Strong::into_raw(count)),
+            tell_split,
+            crate::lodge::retain_raw::<Splitting>,
+            crate::lodge::release_raw::<Splitting>,
+        )
+    }
+}
+
+/// What a watcher of rows told through snapshots holds: the watcher each snapshot's rows are
+/// handed on to.
+pub struct Splitting {
+    sink: FaceRowSink,
+}
+
+/// Hand each row of `face` to the watcher of rows lodged at `raw`.
+///
+/// # Safety
+/// `raw` names a lodging of a [`Splitting`] of which the caller holds a count for the call.
+unsafe fn tell_split(raw: *const c_void, kind: FaceEventKind, face: &FaceSnapshot) {
+    // SAFETY: the caller's count holds the value.
+    let split = unsafe { Strong::<Splitting>::value_of(raw) };
+    FaceLinkRow::each_of_snapshot(face, |row| split.sink.tell(kind, &row));
 }
 
 /// A watcher of rows that lies where its maker put it, counted there ([`Strong`]): what
@@ -113,7 +141,7 @@ impl RowWatcher for Gathering {
         // Called with the gathering let go of: the sink may reach back into the session, whose
         // next face's rows would wait on it.
         if let Some(face) = whole {
-            (self.sink)(kind, &face);
+            self.sink.tell(kind, &face);
         }
     }
 }
@@ -122,6 +150,7 @@ impl RowWatcher for Gathering {
 mod tests {
     use super::*;
     use alloc::string::String;
+    use alloc::sync::Arc;
     use alloc::vec::Vec;
     use std::sync::Mutex as StdMutex;
     use wz_session_core::face::GroupLink;
@@ -146,8 +175,9 @@ mod tests {
         }
     }
 
-    /// A place for a gathering in a box of its own.
-    fn heap_place() -> Lent<Gathering> {
+    /// A place for a gathering, or for a watcher of rows told through snapshots, in a box of its
+    /// own.
+    fn heap_place<T>() -> Lent<T> {
         Lent::try_boxed().expect("the test's heap")
     }
 
@@ -162,15 +192,16 @@ mod tests {
     fn each_form_of_a_watcher_is_told_what_the_other_is() {
         let rows_told: Told<(FaceEventKind, u8, usize, usize)> = Arc::default();
         let into = Arc::clone(&rows_told);
-        let by_snapshot = rows_of_snapshots(FaceRowSink::of_arc(Arc::new(
-            move |kind, row: &FaceLinkRow| {
+        let by_snapshot = rows_of_snapshots(
+            FaceRowSink::of_arc(Arc::new(move |kind: FaceEventKind, row: &FaceLinkRow| {
                 into.lock()
                     .unwrap()
                     .push((kind, row.zid[0], row.link, row.links));
-            },
-        )));
-        by_snapshot(FaceEventKind::Up, &face(1, 2));
-        by_snapshot(FaceEventKind::Down, &face(2, 0));
+            })),
+            heap_place(),
+        );
+        by_snapshot.tell(FaceEventKind::Up, &face(1, 2));
+        by_snapshot.tell(FaceEventKind::Down, &face(2, 0));
         assert_eq!(
             *rows_told.lock().unwrap(),
             [
@@ -183,10 +214,10 @@ mod tests {
         let faces_told: Told<(FaceEventKind, u8, Vec<String>)> = Arc::default();
         let into = Arc::clone(&faces_told);
         let by_row = snapshots_of_rows(
-            Arc::new(move |kind, face: &FaceSnapshot| {
+            FaceEventSink::of_arc(Arc::new(move |kind: FaceEventKind, face: &FaceSnapshot| {
                 let srcs = face.links.iter().map(|link| link.src.clone()).collect();
                 into.lock().unwrap().push((kind, face.zid[0], srcs));
-            }),
+            })),
             heap_place(),
         );
         for (kind, told) in [
@@ -217,9 +248,9 @@ mod tests {
         let told: Arc<StdMutex<Vec<FaceSnapshot>>> = Arc::default();
         let into = Arc::clone(&told);
         let by_row = snapshots_of_rows(
-            Arc::new(move |_, face: &FaceSnapshot| {
+            FaceEventSink::of_arc(Arc::new(move |_: FaceEventKind, face: &FaceSnapshot| {
                 into.lock().unwrap().push(face.clone());
-            }),
+            })),
             heap_place(),
         );
         let mut member = face(5, 1);
@@ -248,9 +279,9 @@ mod tests {
         let held = Arc::new(());
         let in_watcher = Arc::clone(&held);
         let by_row = snapshots_of_rows(
-            Arc::new(move |_, _: &FaceSnapshot| {
+            FaceEventSink::of_arc(Arc::new(move |_: FaceEventKind, _: &FaceSnapshot| {
                 let _ = Arc::strong_count(&in_watcher);
-            }),
+            })),
             heap_place(),
         );
         let copy = by_row.clone();
@@ -261,6 +292,32 @@ mod tests {
             "a copy still holds the gathering"
         );
         FaceLinkRow::each_of_snapshot(&face(6, 1), |row| copy.tell(FaceEventKind::Up, &row));
+        drop(copy);
+        assert_eq!(Arc::strong_count(&held), 1, "the last copy let it go");
+    }
+
+    /// A watcher of rows told through snapshots lies in the place it was lent and is one watcher
+    /// however many copies of its sink an engine takes: the watcher of rows is let go of with the
+    /// last of them, not before. Turned red by a sink whose copy takes no count of the place, which
+    /// lets the watcher go with the first drop.
+    #[test]
+    fn a_watcher_of_rows_told_through_snapshots_is_let_go_of_with_its_last_copy() {
+        let held = Arc::new(());
+        let in_watcher = Arc::clone(&held);
+        let by_snapshot = rows_of_snapshots(
+            FaceRowSink::of_arc(Arc::new(move |_: FaceEventKind, _: &FaceLinkRow| {
+                let _ = Arc::strong_count(&in_watcher);
+            })),
+            heap_place(),
+        );
+        let copy = by_snapshot.clone();
+        drop(by_snapshot);
+        assert_eq!(
+            Arc::strong_count(&held),
+            2,
+            "a copy still holds the watcher"
+        );
+        copy.tell(FaceEventKind::Up, &face(7, 1));
         drop(copy);
         assert_eq!(Arc::strong_count(&held), 1, "the last copy let it go");
     }

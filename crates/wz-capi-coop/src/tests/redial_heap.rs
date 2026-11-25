@@ -193,7 +193,9 @@ enum Watching {
 #[cfg(feature = "connectivity")]
 fn a_loss_counted(watching: Watching) -> (u64, usize) {
     use wz_capi_port::SessionEngine;
-    use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink, FaceSnapshot};
+    use wz_session_core::face::{
+        FaceEventKind, FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot,
+    };
 
     let router = Router::start(CatchAll::None);
     let refusing = Arc::new(AtomicBool::new(false));
@@ -226,11 +228,13 @@ fn a_loss_counted(watching: Watching) -> (u64, usize) {
         ),
         Watching::Snapshots => SessionEngine::watch_faces(
             &*engine,
-            Arc::new(move |kind: FaceEventKind, _face: &FaceSnapshot| {
-                if kind == FaceEventKind::Down {
-                    into.fetch_add(1, Ordering::SeqCst);
-                }
-            }),
+            FaceEventSink::of_arc(Arc::new(
+                move |kind: FaceEventKind, _face: &FaceSnapshot| {
+                    if kind == FaceEventKind::Down {
+                        into.fetch_add(1, Ordering::SeqCst);
+                    }
+                },
+            )),
         ),
     };
     assert!(watched.is_ok(), "an open session watches its faces");
