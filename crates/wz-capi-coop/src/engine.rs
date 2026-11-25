@@ -134,7 +134,7 @@ use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::transport::{DialWalk, FaceStep};
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
-    LinkCalls, TransportFaces, TransportRefusal, TransportRouter, TransportSession, WireMaking,
+    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
@@ -287,7 +287,9 @@ pub(crate) fn face_event_rows(max_faces: usize, groups: usize) -> usize {
 #[cfg(feature = "connectivity")]
 mod told;
 #[cfg(feature = "connectivity")]
-use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot};
+use wz_session_core::face::{
+    FaceEventKind, FaceEventSink, FaceLinkRow, FaceRowSink, FaceSnapshot, LinkFacts, LinkSnapshot,
+};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 #[cfg(feature = "connectivity")]
@@ -4090,7 +4092,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The lost peer's chains end with its link: the next link's fragments would be spliced
         // onto them.
         if let Some(zid) = facts.and_then(|facts| facts.peer) {
-            self.transport.router.abort_peer_chains(zid.as_slice());
+            self.transport.end_peer_chains(&zid);
         }
         // What a replaying listener was told of the face is read while its facts are held.
         #[cfg(feature = "connectivity")]
@@ -4112,9 +4114,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// lets go of it, so a face stands for a reader of the session exactly while its link's
     /// session does. Its facts stay until the loss is taken, which is told by them.
     fn end_closed_facts(&mut self) {
-        for face in self.transport.links.faces_mut() {
-            let ended = !face.link.wire().is_some_and(|wire| wire.established());
-            if let Some(facts) = face.facts.as_mut().filter(|_| ended) {
+        // Looked at in place first: a face reached to be written counts as a move of the links,
+        // which a pass that ended no session must not make.
+        for at in 0..self.transport.links.places() {
+            let ended = self.transport.links.face(at).is_some_and(|face| {
+                face.facts().is_some() && !face.link.wire().is_some_and(|wire| wire.established())
+            });
+            if !ended {
+                continue;
+            }
+            if let Some(facts) = self
+                .transport
+                .links
+                .face_mut(at)
+                .and_then(|face| face.facts.as_mut())
+            {
                 facts.ended = true;
             }
         }

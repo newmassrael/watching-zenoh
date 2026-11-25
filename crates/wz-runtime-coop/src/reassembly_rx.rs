@@ -169,7 +169,7 @@ pub type SessionPeers = ManyPeers;
 
 /// Whose chains a session's one Router holds where it does not listen: its dial's one peer, as
 /// such a session holds no face besides the dial's. A chain is keyed by its channel alone, and a
-/// link that is lost ends every chain (`TransportRouter::abort_peer_chains`).
+/// link that is lost ends every chain (`TransportState::end_peer_chains`).
 #[cfg(not(feature = "listen"))]
 pub type SessionPeers = OnePeer;
 

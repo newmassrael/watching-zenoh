@@ -591,6 +591,13 @@ impl<T: TransportFaces> TransportState<T> {
         None
     }
 
+    /// End the chains the peer `peer` of a link that is lost has under way in the session's Router:
+    /// the Router the session's links share would otherwise splice the fragments of the peer's
+    /// next link onto them. A session that keeps its Router apart ends them where it keeps it.
+    pub fn end_peer_chains(&mut self, peer: &SessionZid) {
+        self.router.abort_peer_chains(peer.as_slice());
+    }
+
     /// Whether the session holds a transport, as zenoh-pico's `_z_transport_get_common` finds
     /// one: a link that is up, a port it listens on (a peer's unicast transport stands before any
     /// peer comes), or a group it joined. A client whose router went away holds none until a dial
