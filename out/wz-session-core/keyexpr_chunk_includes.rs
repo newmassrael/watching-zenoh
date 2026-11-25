@@ -18,10 +18,10 @@ use super::keyexpr_dsl_matches;
 #[allow(clippy::all)]
 #[allow(unused_assignments)]
 pub fn keyexpr_chunk_includes(a: &[u8], a_start: u32, a_end: u32, b: &[u8], b_start: u32, b_end: u32, wild_single: bool, wild_dsl: bool) -> bool {
-    if a_end > (a).len() as u32 {
+    if a_end > a.len() as u32 {
         return false;
     }
-    if b_end > (b).len() as u32 {
+    if b_end > b.len() as u32 {
         return false;
     }
     if keyexpr_range_equal::keyexpr_range_equal(a, a_start, a_end, b, b_start, b_end) {
