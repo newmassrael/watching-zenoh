@@ -7606,6 +7606,23 @@
       "carry_forward_bullets": [
         "data_leaves_only_an_established_link...: state an unsettled send limit as a type (Option) rather than a ring code 0; Vmiri: SCE engine with_policy overlapping &mut, taken by scxml-core-engine-52 (split Engine into policy and state); the int-fix branch's table_tests merge conflict (Counted defined twice); the hosted runs on 0cdadfbe8."
       ]
+    },
+    "Round 4643": {
+      "decision_summary": "Three structural repairs of the session core, each closing a state that could be read two ways.\n\nAn unsettled send limit is a type now: negotiated_tx_limits answers None until establishment settles the limits (and again from a reopen until the next establishment), where it answered (0, 127) and read ring code 0, the 8-bit ring, as \"not settled\". The settled flag shares the limits' atomic word, so one load reads a coherent answer; the send path takes its limits from the same read that judges the gate and answers TransportUnavailable for None. The data-send gate opens only where limits settle: SendGate::open is crate-private, so enter_established and open_without_handshake are the only doors, and the test rigs that opened the gate by hand (reconnect replays, multilink joins, the shm segment) now establish their links.\n\nA received extension that repeats is read by its last entry, as upstream 1.10.2's establishment decoders do (zenoh-codec transport/init.rs @ `ext_patch = p;`, open.rs @ `ext_remote_bound = Some(q);`), where wz read the first. The slot profile keeps one place per extension identity (patch level and remote bound are one identity, 0x27), its bound is derived from the identity table and tied to it by a compile-time assertion as the send-side bound is, and ExtChainOverflow is gone, as the assertion makes it unreachable and upstream refuses no such chain.\n\nTests are compiled with the items they exercise: the fragment, join and record-walk tests, the kind-name vector and the Vec JOIN encoder's tests take alloc, and the JOIN fixture writes into an array so the slot multicast build without the heap runs it.",
+      "changes_bullets": [
+        "crates/wz-session-core: session_actions.rs (TxLimits settled flag, Option limits, unsettle at reopen, dispatch), send_gate.rs (open crate-private), ext_chain.rs (identity table, derived bound, last-entry keeping), inbound.rs, extpatch.rs, extbound.rs, extregion.rs, ext_view.rs (last_by_eid), extauth.rs, extmultilink.rs, extshm.rs, multicast_join.rs, parse_error.rs, transport_message_parity.rs, frame_encode.rs, network_message.rs, sn.rs, tests/join_into_alloc.rs, session_actions/bundle_tests.rs. crates/wz-runtime-tokio: session/mod.rs, session_glue.rs, multilink.rs, shm_auth_segment.rs, tests/it session_fsm_accepting_path.rs and compression_e2e.rs."
+      ],
+      "verification_bullets": [
+        "Through bx on the integration worktree: the workspace-unified lib set of wz-capi-core, wz-runtime-tokio, wz-runtime-coop, wz-session-core, wz-capi-coop (session-core 3314, 0 failed, data_leaves_only_an_established_link green); wz-session-core lib default (1619), all-features (3925), the slot set with alloc (1941), the slot multicast set without alloc (1207), the lend-only heap set with every target; wz-runtime-tokio it (317) with compression and fragmentation; wz-capture lib (1429); clippy -D warnings of wz-session-core in all four sets, of wz-runtime-tokio and wz-capi-coop; zenoh and wz-capi-pico all targets check. mnemosyne-cli validate-workspace: no new T1 orphan."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-1-transport"
+      ],
+      "carry_forward_bullets": [
+        "The network-layer extension reader ext_view::find_by_eid still takes the first entry of a repeated identity where upstream's network decoders keep the last; the SCE with_policy fix (SCE ADR 0131, queued as SCE item 435) and the pin move after it, with the two hand-written StatePolicy impls; the hosted runs on main."
+      ]
     }
   },
   "inventory_entries": {
