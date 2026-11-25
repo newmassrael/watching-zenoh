@@ -394,6 +394,29 @@ fn an_insert_writes_its_row_once_into_a_freed_or_an_added_slot() {
     assert_eq!(drops.get(), 3);
 }
 
+/// The core adds a slot only where the rows' column has a place for its row: refused, the metadata
+/// column and the count stay as they were; given one, the slot is added after the last and counted;
+/// and a freed slot is taken again, at its next generation, before any is added. Turned red by a
+/// core that adds a slot whose row has no place, or adds one while a slot is free.
+#[test]
+fn the_core_adds_a_slot_only_where_its_row_has_a_place() {
+    let mut meta = BoundedVec::<Meta, 4, Static>::default();
+    let mut slots = Core::new(4);
+    assert!(slots.take_slot(meta.seq_mut(), false).is_none());
+    assert_eq!((meta.len(), slots.held), (0, 0), "nothing is taken");
+    let added = slots
+        .take_slot(meta.seq_mut(), true)
+        .expect("a place for the row");
+    assert_eq!((added.at, added.generation, added.grown), (0, 0, true));
+    assert_eq!((meta.len(), slots.held), (1, 1));
+    slots.free(&mut meta, added.at);
+    let reused = slots
+        .take_slot(meta.seq_mut(), false)
+        .expect("the freed slot needs no new place");
+    assert_eq!((reused.at, reused.generation, reused.grown), (0, 1, false));
+    assert_eq!((meta.len(), slots.held), (1, 1));
+}
+
 /// A row's rank and the row at a rank are read off the slots, in the order the table's walk hands
 /// its rows: a freed slot and a row removed while pinned hold no rank. Turned red by a rank that
 /// counts a slot that holds no live row, or a walk to a rank that skips none.

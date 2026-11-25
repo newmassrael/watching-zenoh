@@ -35,7 +35,8 @@ use core::marker::PhantomData;
 use core::num::{NonZeroU16, NonZeroU32};
 
 use crate::bounded::{
-    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, Storage, TableLender, ARENA_ALIGN,
+    Arena, BoundedVec, CapacityFull, LendRefused, Lent, Profile, SeqBacking, Storage, TableLender,
+    ARENA_ALIGN,
 };
 use core::ptr::NonNull;
 
@@ -211,14 +212,12 @@ struct Meta {
     state: State,
 }
 
-/// What the core found for a row to take.
-enum Claim {
-    /// The free slot at this place, now live.
-    Reused(usize),
-    /// No slot is free: the next one is to be added after every slot there is.
-    Grow,
-    /// The table is at its bound.
-    Full,
+/// The slot the core took for a row: its place and generation, and whether it was added after
+/// every slot there was, so the rows' column takes one more place for its row.
+struct Taken {
+    at: usize,
+    generation: u16,
+    grown: bool,
 }
 
 /// What retiring a row did.
@@ -259,33 +258,50 @@ impl Core {
         }
     }
 
-    /// Find a slot for a row.
+    /// A live slot for a row: a free one, or else one added after every slot there is, its
+    /// metadata pushed, when the rows' column has a place for its row too (`rows_room`). `None`,
+    /// nothing taken, when the table is at its bound or has neither.
+    ///
+    /// Generic over the metadata column's sequence alone, not over the rows' type or the bound:
+    /// on the lent policy that is one type for every table, so every table's insert calls this one
+    /// body, where each inlined the slot's bookkeeping of its own.
     #[inline(never)]
-    fn claim(&mut self, meta: &mut [Meta]) -> Claim {
+    fn take_slot<S: SeqBacking<Meta>>(&mut self, meta: &mut S, rows_room: bool) -> Option<Taken> {
         if self.held >= self.limit {
-            return Claim::Full;
+            return None;
         }
         if self.free != NIL {
             let at = usize::from(self.free);
-            let Some(slot) = meta.get_mut(at) else {
-                return Claim::Full;
-            };
+            let slot = meta.as_mut_slice().get_mut(at)?;
             self.free = slot.next;
             slot.next = NIL;
             slot.pins = 0;
             slot.state = State::Live;
             self.held = self.held.saturating_add(1);
-            return Claim::Reused(at);
+            return Some(Taken {
+                at,
+                generation: slot.generation,
+                grown: false,
+            });
         }
-        if meta.len() >= MAX_SLOTS {
-            return Claim::Full;
+        let at = meta.as_slice().len();
+        // A slot's index is a `u16` counted from one: the place past the last has none.
+        if at >= MAX_SLOTS || !rows_room {
+            return None;
         }
-        Claim::Grow
-    }
-
-    /// A slot was added after every slot there was, holding a row.
-    fn grown(&mut self) {
+        meta.push(Meta {
+            generation: 0,
+            next: NIL,
+            pins: 0,
+            state: State::Live,
+        })
+        .ok()?;
         self.held = self.held.saturating_add(1);
+        Some(Taken {
+            at,
+            generation: 0,
+            grown: true,
+        })
     }
 
     /// `place`, when its slot holds a live row taken at `generation`, or with `retired_too` a
@@ -501,58 +517,28 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     pub fn insert(&mut self, value: T) -> Result<Handle<K>, CapacityFull<T>> {
         // The slot is found first and the row written once, whichever way it was found: a row
         // written in each way would be written twice in every caller of every row type.
-        let Some((at, handle)) = self.claim_slot() else {
+        let rows_room = self.rows.free_slots() != 0;
+        let Some(taken) = self.core.take_slot(self.meta.seq_mut(), rows_room) else {
             return Err(CapacityFull(value));
         };
-        match self.rows.get_mut(at) {
-            Some(row) => {
+        if taken.grown {
+            // An empty place, so a refused push holds no value; the core added the slot only where
+            // the rows' column had room for it.
+            let _ = self.rows.push(None);
+        }
+        match (
+            Handle::at(taken.at, taken.generation),
+            self.rows.get_mut(taken.at),
+        ) {
+            (Some(handle), Some(row)) => {
                 *row = Some(value);
                 Ok(handle)
             }
-            // The two columns are the same length, so this is not reached; the slot goes back,
-            // free, and the value with the refusal.
-            None => {
-                self.core.free(&mut self.meta, at);
+            // A place under `MAX_SLOTS` names a handle and the two columns are the same length,
+            // so this is not reached; the slot goes back, free, and the value with the refusal.
+            _ => {
+                self.core.free(&mut self.meta, taken.at);
                 Err(CapacityFull(value))
-            }
-        }
-    }
-
-    /// A live slot for a row and its handle: a free one, or one added after every slot there is,
-    /// its row's place pushed empty so a refused push holds no value. `None` when the table is
-    /// full, with nothing taken.
-    fn claim_slot(&mut self) -> Option<(usize, Handle<K>)> {
-        match self.core.claim(&mut self.meta) {
-            Claim::Full => None,
-            Claim::Reused(at) => {
-                let generation = self.meta.get(at).map_or(0, |slot| slot.generation);
-                // Every place is under `MAX_SLOTS`, so a slot is always named; one that were not
-                // goes back.
-                let handle = Handle::at(at, generation);
-                if handle.is_none() {
-                    self.core.free(&mut self.meta, at);
-                }
-                handle.map(|handle| (at, handle))
-            }
-            Claim::Grow => {
-                let at = self.meta.len();
-                let handle = Handle::at(at, 0)?;
-                if self.meta.free_slots() == 0 || self.rows.free_slots() == 0 {
-                    return None;
-                }
-                let slot = Meta {
-                    generation: 0,
-                    next: NIL,
-                    pins: 0,
-                    state: State::Live,
-                };
-                self.meta.push(slot).ok()?;
-                if self.rows.push(None).is_err() {
-                    let _ = self.meta.pop();
-                    return None;
-                }
-                self.core.grown();
-                Some((at, handle))
             }
         }
     }
