@@ -2412,11 +2412,10 @@ fn interest_rank(tables: &CoopTables, handle: Option<InterestHandle>) -> Option<
 }
 
 /// Take the write filter `handle` names out of `tables`, with the listeners declared on it, let go
-/// of there: the id of the Interest it held last, `None` when no filter is there. Every caller
-/// passes this one closure, so the tables' walk is built once.
+/// of there: the id of the Interest it held last, `None` when no filter is there.
 fn unwatch_filter(tables: &mut CoopTables, handle: WriteFilterHandle) -> Option<Option<EntityId>> {
     tables
-        .undeclare_write_filter(handle, |_, _| {})
+        .undeclare_write_filter_quietly(handle)
         .map(|unwatched| unwatched.interest_final)
 }
 

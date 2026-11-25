@@ -2261,6 +2261,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         })
     }
 
+    /// [`Self::undeclare_write_filter`] handing no caller the listeners it lets go of: one body
+    /// for every caller that takes none, where each passed a closure of its own and so held a
+    /// copy of the walk over the listeners.
+    #[inline(never)]
+    pub fn undeclare_write_filter_quietly(
+        &mut self,
+        handle: WriteFilterHandle,
+    ) -> Option<Unwatched<WriteFilterRow<<P as Storage>::Key>>> {
+        self.undeclare_write_filter(handle, |_, _| {})
+    }
+
     /// Declare a matching listener on the write filter `filter`, whose kind, key and Interest it
     /// reads and with which it goes: it asks the peers nothing of its own, as zenoh-pico's
     /// listener is a callback of its entity's filter
@@ -2345,7 +2356,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 interest: filter.interest,
             }),
             Err(refused) => {
-                let _ = self.undeclare_write_filter(filter.handle, |_, _| {});
+                let _ = self.undeclare_write_filter_quietly(filter.handle);
                 Err(refused)
             }
         }
@@ -2385,7 +2396,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         };
         let removal = self.retire_matching_listener(handle)?;
         let interest_final = if owns_filter {
-            self.undeclare_write_filter(filter, |_, _| {})
+            self.undeclare_write_filter_quietly(filter)
                 .and_then(|gone| gone.interest_final)
         } else {
             None
