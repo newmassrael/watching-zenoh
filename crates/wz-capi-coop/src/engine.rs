@@ -5099,7 +5099,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 continue;
             }
             // A link another holder has now is settled at its next event.
-            let _ = wire.try_session(move |session| settle(&*session.actions));
+            let _ = wire.try_session(move |session| settle(&session.actions));
         }
         // A group's stage is written by the thread that put on it outside the group's own step.
         #[cfg(feature = "group")]

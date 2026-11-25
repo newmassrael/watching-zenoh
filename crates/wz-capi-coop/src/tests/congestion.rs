@@ -401,11 +401,11 @@ mod stalled_link {
     /// waiting for room on a full link, and return once it does: the thread ends with how long the
     /// publish that waited took.
     fn hold_with_a_blocking_publish(
-        publisher: &Arc<super::super::Engine>,
+        publisher: &crate::EngineHold<super::super::Engine>,
     ) -> std::thread::JoinHandle<Option<Duration>> {
         let progress = Arc::new(AtomicUsize::new(0));
         let blocking = {
-            let publisher = Arc::clone(publisher);
+            let publisher = publisher.clone();
             let progress = Arc::clone(&progress);
             std::thread::spawn(move || {
                 let payload = vec![0x5a; PAYLOAD];
