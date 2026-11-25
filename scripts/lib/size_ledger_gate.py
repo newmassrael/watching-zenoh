@@ -86,6 +86,10 @@ from their paths. A file outside every source tree is code a crate includes (the
 the bodies that begin in it share, and one none of whose functions is a body of its own is the
 crate whose directory under `out/` holds it (`out/<dir>` mirrors `crates/<dir>`).
 
+wz's third-party collections are language support as zenoh-pico's are: `heapless` (the bounded
+vector and string the no-heap build holds its tables in) is the counterpart of zenoh-pico's
+`src/collections`, which its rules place in language, as they place `alloc` and `hashbrown`.
+
 zenoh-pico: the owner of a file is its path in the export of the submodule the reference was built
 from (`src/..`, `include/..`). A file outside the export is the C toolchain's,
 `toolchain/<its path>`: the compiler's and the C library's headers, whose inline functions (the

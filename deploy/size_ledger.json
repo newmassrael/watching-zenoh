@@ -11,7 +11,7 @@
     {"id": "driver", "title": "runtime and driver (executor, timers, links, platform)"},
     {"id": "keyexpr", "title": "key expressions (canonization, matching)"},
     {"id": "codec", "title": "wire codec (message encoders and decoders)"},
-    {"id": "language", "title": "language support (Rust core, alloc and drop glue, and the out-of-line bodies of the standard library; zenoh-pico's collections, buffers and utilities)"}
+    {"id": "language", "title": "language support (Rust core, alloc and drop glue, and the out-of-line bodies of the standard library; heapless; zenoh-pico's collections, buffers and utilities)"}
   ],
   "rows": {
     "sessions": {"ratio_at_most": 2.571, "debt": "debt-pico-host-size-ceiling", "reading": {"date": "2026-11-25", "wz_text": 81494, "pico_text": 31698, "pico_pin": "6a881c21dad1", "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"}},
@@ -79,6 +79,7 @@
         "compiler_builtins": "language",
         "alloc": "language",
         "hashbrown": "language",
+        "heapless": "language",
         "foldhash": "language",
         "log": "language",
         "__rustc": "language"
