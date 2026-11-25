@@ -33,18 +33,17 @@
 # there is the value of the rendered header's switch too; a source file given with a feature
 # list is linked against the library with those features.
 #
-# WZ_PICO_ENGINE names the engine the library runs its sessions on: `tokio` (or unset), the
-# default build's, or `coop`, the cooperative engine alone (`--no-default-features` with
-# `engine-coop` and the feature list), whose header arm is rendered with `--engine coop`. A
-# cooperative build replaces the default one in the same target directory, so a step that asks
-# for it comes after the steps that link the default library.
+# WZ_PICO_ENGINE names the engine the library runs its sessions on: `tokio` (or unset), or
+# `coop`, the cooperative engine alone (`--no-default-features` with `os-host` and the feature
+# list), whose header arm is rendered with `--engine coop`. The library is the C library's crate,
+# `wz-capi-pico-lib`, each feature named through its dependency on the ABI crate (`abi/`).
 #
-# WZ_PICO_FORM names the form of a cooperative library: `std` (or unset), the host's standard
-# library under the engine, or `nostd`, the same engine and capabilities without it (`os-posix` in
-# place of `engine-coop`, `os-windows` on Windows), built as the host library without `std` is:
-# the `capi-nostd` profile and its configuration (`crates/.cargo/capi-nostd.toml`), for the host's
-# own target, so it lives in a target directory of its own. Its header arm is the cooperative one,
-# as the capabilities are.
+# WZ_PICO_FORM names the standard library of the library, which its engine decides: `std` for the
+# tokio engine, `nostd` for the cooperative one (docs/win-budget/std-heap.md, S1: the C library on
+# that engine has no `std` form), built as the host library without `std` is: the `capi-nostd`
+# profile and its configuration (`crates/.cargo/capi-nostd.toml`), for the host's own target, so it
+# lives in a target directory of its own. Unset, it is the engine's; a form the engine's library
+# does not have is refused.
 #
 # WZ_PICO_PROGRAM_ROLES, when set, is a list of words the program is run with, one process each,
 # all at once, each given its role and one loopback port the script picks (`<exe> <role> <port>`):
@@ -93,12 +92,13 @@ case "$engine" in
         exit 2
         ;;
 esac
-form="${WZ_PICO_FORM:-std}"
+engine_form=std
+[ "$engine" = coop ] && engine_form=nostd
+form="${WZ_PICO_FORM:-$engine_form}"
 case "$form" in
-    std) ;;
-    nostd)
-        if [ "$engine" != coop ]; then
-            echo "pico-c-program: WZ_PICO_FORM=nostd is a form of the cooperative engine: set WZ_PICO_ENGINE=coop" >&2
+    std | nostd)
+        if [ "$form" != "$engine_form" ]; then
+            echo "pico-c-program: the $engine engine's library is built $engine_form, not $form" >&2
             exit 2
         fi
         ;;
@@ -157,16 +157,16 @@ if [ ! -f "$src" ]; then
 fi
 
 # The crate's default build is the cooperative engine (docs/c-abi-engine-and-memory.md, P1). The
-# tokio engine is that build's list with `engine-coop` replaced by the tokio option's features
+# tokio engine is that build's list with `os-host` replaced by the tokio option's features
 # (`wz_config.py --bench-cargo-args tokio`), without the default features, and the program's
 # capabilities; its header is the default build's, as the capabilities are. The cooperative engine
-# here is `engine-coop` in front of the program's capabilities alone, and the header renderer is
-# told that engine.
+# here is `os-host` in front of the program's capabilities alone, built without `std` (below), and
+# the header renderer is told that engine.
 build_features="$features"
 engine_args=()
 header_engine=()
 if [ "$engine" = coop ]; then
-    build_features="engine-coop${features:+,$features}"
+    build_features="os-host${features:+,$features}"
     engine_args=(--no-default-features)
     header_engine=(--engine coop)
 else
@@ -181,7 +181,7 @@ else
         exit 1
     fi
     tokio_words="${tokio_words#--no-default-features --features }"
-    build_features="${tokio_words//wz-capi-pico\//}"
+    build_features="${tokio_words//abi\//}"
     engine_args=(--no-default-features)
 fi
 if [ "$form" = nostd ]; then
@@ -190,12 +190,6 @@ if [ "$form" = nostd ]; then
         say "pico-program-probe on ${os}: rustc named no host target NOT-MEASURED"
         exit 1
     fi
-    # The form names the host it is built for: Windows has its own (`os-windows`).
-    case "$host_triple" in
-        *-windows-*) host_form="os-windows" ;;
-        *) host_form="os-posix" ;;
-    esac
-    build_features="${host_form}${features:+,$features}"
     engine_args=(--no-default-features --profile capi-nostd --config .cargo/capi-nostd.toml
         --target "$host_triple")
     lib_dir="$WZ_ARTIFACTS/crates/target/$host_triple/capi-nostd"
@@ -211,7 +205,7 @@ if [ "$sanitizer" = thread ] || [ "$sanitizer" = address ]; then
 fi
 feature_args=()
 if [ -n "$build_features" ]; then
-    feature_args=(--features "wz-capi-pico/${build_features//,/,wz-capi-pico/}")
+    feature_args=(--features "abi/${build_features//,/,abi/}")
 fi
 # Cargo's own report of the build names the include directory: the vendored library's build script
 # installs the headers of the arm THIS feature list selects into its own out directory, and a tree
@@ -221,7 +215,7 @@ fi
 build_report="$(mktemp)"
 # Expanded as `${a[@]+...}`: macOS's bash 3.2 reads an empty array as unbound under `set -u`.
 if ! (cd crates && cargo build --message-format=json-render-diagnostics -p zenoh-pico-sys \
-    -p wz-capi-pico ${engine_args[@]+"${engine_args[@]}"} \
+    -p wz-capi-pico-lib ${engine_args[@]+"${engine_args[@]}"} \
     ${feature_args[@]+"${feature_args[@]}"}) > "$build_report"; then
     say "pico-program-probe on ${os}: the pico headers and the cdylib did not build NOT-MEASURED"
     exit 1

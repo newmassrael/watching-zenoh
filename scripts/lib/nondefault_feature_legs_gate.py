@@ -118,25 +118,7 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
         "lane",
         "the cooperative engine's secure channel, refused beside the tokio engine every leg of "
         "this crate keeps; lane C1co runs its files (SKIPS of the tests gate say the same)",
-        (("scripts/run-ci.sh", '_runci_guarded_test "C1co tls engine-coop"'),),
-    ),
-    ("wz-capi-pico", "os-posix"): Exemption(
-        "gap",
-        "the POSIX library without `std`: one step of the platform workflow builds it and runs a C "
-        "program against it, and that step is observed (continue-on-error), so a red fails no run",
-        (
-            (".github/workflows/platform.yml", "WZ_PICO_FORM: nostd"),
-            ("scripts/pico-c-program.sh", '*) host_form="os-posix" ;;'),
-        ),
-    ),
-    ("wz-capi-pico", "os-windows"): Exemption(
-        "gap",
-        "the Windows library without `std`, an MSVC target's: the same observed platform step on "
-        "its Windows host, so a red fails no run",
-        (
-            (".github/workflows/platform.yml", "WZ_PICO_FORM: nostd"),
-            ("scripts/pico-c-program.sh", '*-windows-*) host_form="os-windows" ;;'),
-        ),
+        (("scripts/run-ci.sh", '_runci_guarded_test "C1co tls os-host"'),),
     ),
     ("wz-capi-pico", "gossip"): Exemption(
         "gap",

@@ -2506,6 +2506,10 @@ PICO_ENGINES = ("tokio", "coop")
 #: run records it beside the engine (`scripts/host-bench/perf_matrix.py`), so a table read from one form
 #: is not judged against the other.
 PICO_STDLIBS = ("std", "nostd")
+#: The crate a C program of the pico ABI links (`wz-capi-pico` is an rlib), and the name its manifest
+#: gives its dependency on the ABI crate, through which a build names the ABI's features.
+PICO_ARTIFACT = "wz-capi-pico-lib"
+PICO_ARTIFACT_DEP = "abi"
 PICO_ENGINE_STDLIB = {"tokio": "std", "coop": "nostd"}
 
 
@@ -2569,9 +2573,10 @@ def bench_features(engine: str, asked: list[str], table: dict, stdlib: str | Non
 
 
 def bench_cargo_args(engine: str, asked: list[str], table: dict) -> str:
-    """The cargo words of that build, each feature named by its package, so the same words build it
-    beside another package (`-p zenoh-pico-sys -p wz-capi-pico`)."""
-    named = [f"wz-capi-pico/{f}" for f in bench_named_features(engine, asked, table)]
+    """The cargo words of that build of the C library, `-p wz-capi-pico-lib`, each feature named
+    through its dependency on the ABI crate (`abi`), so the same words build it beside another
+    package (`-p zenoh-pico-sys -p wz-capi-pico-lib`)."""
+    named = [f"{PICO_ARTIFACT_DEP}/{f}" for f in bench_named_features(engine, asked, table)]
     words = ["--no-default-features"]
     if named:
         words.append("--features " + ",".join(named))
@@ -5814,8 +5819,8 @@ def cmd_selftest() -> int:
            and "engine-tokio" in bench_features("tokio", [], good)
            and "os-host" not in bench_features("tokio", [], good)
            and bench_cargo_args("tokio", [], good).startswith(
-               "--no-default-features --features wz-capi-pico/engine-tokio,")
-           and bench_cargo_args("tokio", ["app-transport"], good).endswith(",wz-capi-pico/app-transport"))
+               "--no-default-features --features abi/engine-tokio,")
+           and bench_cargo_args("tokio", ["app-transport"], good).endswith(",abi/app-transport"))
     expect("the default build is the cooperative engine's",
            pico_build_features("default", [], good) == enabled_features(good, ["default"])
            and "os-host" in pico_build_features("default", [], good)
@@ -5826,7 +5831,10 @@ def cmd_selftest() -> int:
            and not {"serial-drive-own-thread", "rx-busy-poll"} & on_coop
            and set(coop_features(list(good["default"]), good)) <= on_coop
            and bench_cargo_args("coop", [], good).startswith(
-               "--no-default-features --features wz-capi-pico/os-host,"))
+               "--no-default-features --features abi/os-host,"))
+    expect("the pico C library takes the ABI crate by the dependency its features are named through",
+           f'{PICO_ARTIFACT_DEP} = {{ package = "wz-capi-pico"'
+           in (ROOT / "crates" / PICO_ARTIFACT / "Cargo.toml").read_text(encoding="utf-8"))
     expect("a capability asked of a bench that only the tokio engine runs is refused by name",
            "gossip" in refusal_text(lambda: bench_named_features("coop", ["gossip"], good))
            and "raweth-transport" in bench_named_features("coop", ["raweth-transport"], good))

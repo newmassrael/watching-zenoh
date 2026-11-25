@@ -10935,13 +10935,17 @@ layer_c1bl_cargo_test_router_failfast() {
 # at. Captured instead: the count comes out of libtest's own summary, so the
 # evidence line moves the moment either binary stops selecting its case.
 # The cargo words of a wz-capi-pico build on the tokio engine with the features `$1` (a comma
-# list, optional): the crate's default list with `engine-coop` replaced by the tokio option's
+# list, optional): the crate's default list with `os-host` replaced by the tokio option's
 # features of deploy/wz-config.toml, as `wz_config.py --bench-cargo-args tokio` prints them. The
 # crate's default is the cooperative engine (docs/c-abi-engine-and-memory.md, P1); a leg that grades
 # the tokio engine, or a link only it runs, names it through this. Removed in phase P5 with the
 # tokio engine's place in the C library.
 pico_tokio_args() {
-    python3 scripts/lib/wz_config.py --bench-cargo-args tokio "${1:-}"
+    local words
+    words="$(python3 scripts/lib/wz_config.py --bench-cargo-args tokio "${1:-}")" || return 1
+    # The words name each feature through the C library's dependency on the ABI crate (`abi/`);
+    # a leg that builds or tests the ABI crate itself names them as its own.
+    echo "${words//abi\//}"
 }
 
 layer_c1bm_cargo_test_pico_failfast() {
@@ -13120,7 +13124,7 @@ layer_z8_upstream_suite() {
 # delivers its own puts and gets to its own subscribers and queryables, and lists the node as its
 # one transport and hears it leave (`crates/wz-capi-pico/tests/client_only_dials_a_listener.rs`). Such a build cannot listen, so
 # the node is the `hold_a_listener` example of a build that does, run as a process, and it is
-# run twice: the full build's (the tokio engine) and the cooperative engine's (`engine-coop` with
+# run twice: the full build's (the tokio engine) and the cooperative engine's (`os-host` with
 # `peer`, step L4 of `docs/capi-pico-on-coop-engine.md`), so each engine's client is held against
 # each engine's listener. A feature set is one per build, so this takes several invocations,
 # which no row of the non-default test table (built on the default features) can spell.
@@ -13131,7 +13135,7 @@ layer_z8_upstream_suite() {
 # per leg, so a test the build stops compiling is a failure and not a smaller pass.
 layer_c1co_pico_client_dials_a_listener() {
     # The node is the example of a build that listens, once on each engine: the tokio engine's
-    # (`pico_tokio_args`) and the cooperative engine's (`engine-coop` with `peer`, and the
+    # (`pico_tokio_args`) and the cooperative engine's (`os-host` with `peer`, and the
     # multi-threaded arm so its read task accepts). Each build replaces the example in the
     # target directory, so each is kept under a name of its own.
     local examples="$WZ_ARTIFACTS/crates/target/debug/examples"
@@ -13141,7 +13145,7 @@ layer_c1co_pico_client_dials_a_listener() {
     (cd crates && cargo build -p wz-capi-pico $tokio_args --example hold_a_listener) || return 1
     cp "$examples/hold_a_listener" "$examples/hold_a_listener-tokio" || return 1
     (cd crates && cargo build -p wz-capi-pico --no-default-features \
-        --features engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness \
+        --features os-host,peer,multi-thread,link-udp,query,queryable,liveliness \
         --example hold_a_listener) || return 1
     cp "$examples/hold_a_listener" "$examples/hold_a_listener-coop" || return 1
     # The real zenoh-pico dials each listener too: upstream's own `z_pub`, `z_sub` and `z_get`
@@ -13156,7 +13160,7 @@ layer_c1co_pico_client_dials_a_listener() {
             env WZ_PICO_LISTENER_BIN="$listener" \
             cargo test -p wz-integration-tests "${WZ_TEST_ARGS[@]}" \
             -- --ignored || return 1
-        for engine in engine-coop engine-tokio; do
+        for engine in os-host engine-tokio; do
             for answering in ",queryable" ""; do
                 # The admin space is a queryable, so it joins the legs that have the answering end.
                 if [[ -n "$answering" ]]; then
@@ -13180,7 +13184,7 @@ layer_c1co_pico_client_dials_a_listener() {
         # publisher's cache and then its live puts, in order (`mod advanced` of the same test).
         # The count is MEASURED on each engine (11, the build with the liveliness and local
         # switches and no admin space), and exact, as the legs above are.
-        for engine in engine-coop engine-tokio; do
+        for engine in os-host engine-tokio; do
             wz_test_args wz-capi-pico client_only_dials_a_listener
             _runci_guarded_test "C1co ${engine} advanced on a ${listener_engine} listener" 11 \
                 env WZ_PICO_LISTENER_BIN="$listener" \
@@ -13200,7 +13204,7 @@ layer_c1co_pico_client_dials_a_listener() {
     (cd crates && cargo build -p wz-capi-pico $tokio_args --example dial_a_listener) || return 1
     cp "$examples/dial_a_listener" "$examples/dial_a_listener-tokio" || return 1
     (cd crates && cargo build -p wz-capi-pico --no-default-features \
-        --features engine-coop,multi-thread,link-udp,query \
+        --features os-host,multi-thread,link-udp,query \
         --example dial_a_listener) || return 1
     cp "$examples/dial_a_listener" "$examples/dial_a_listener-coop" || return 1
     local dialer_engine
@@ -13216,9 +13220,9 @@ layer_c1co_pico_client_dials_a_listener() {
     # The tokio engine's run is the crate's default test build; this is the cooperative engine's,
     # whose admission rule it reads: with the rule shut off the test fails on a doubled transport.
     wz_test_args wz-capi-pico mutual_dial
-    _runci_guarded_test "C1co engine-coop mutual dial" 2 \
+    _runci_guarded_test "C1co os-host mutual dial" 2 \
         cargo test -p wz-capi-pico --no-default-features \
-        --features "engine-coop,peer,multi-thread,link-udp,connectivity" \
+        --features "os-host,peer,multi-thread,link-udp,connectivity" \
         "${WZ_TEST_ARGS[@]}" || return 1
     # The `tls/` link on the cooperative engine, reached through the exported `z_*` symbols (step
     # T4 of L6, `crates/wz-capi-pico/tests/tls_coop_roundtrip.rs`): a listener presents a chain and
@@ -13227,7 +13231,7 @@ layer_c1co_pico_client_dials_a_listener() {
     # (Mbed TLS built from the pinned submodules), so there is no tokio engine in this build; with
     # the link left out of the stack the listener itself is refused and both tests fail.
     wz_test_args wz-capi-pico tls_coop_roundtrip
-    _runci_guarded_test "C1co tls engine-coop" 2 \
+    _runci_guarded_test "C1co tls os-host" 2 \
         cargo test -p wz-capi-pico --no-default-features \
         --features "tls-mbedtls,peer,multi-thread,link-udp" \
         "${WZ_TEST_ARGS[@]}" || return 1
@@ -13247,9 +13251,9 @@ layer_c1co_pico_client_dials_a_listener() {
     # tokio engine's default build already runs; this is the same test with no tokio engine in
     # the build (`crates/wz-capi-pico/tests/open_scouts_for_a_locator.rs`).
     wz_test_args wz-capi-pico open_scouts_for_a_locator
-    _runci_guarded_test "C1co scout engine-coop" 1 \
+    _runci_guarded_test "C1co scout os-host" 1 \
         cargo test -p wz-capi-pico --no-default-features \
-        --features "engine-coop,link-udp,scout" \
+        --features "os-host,link-udp,scout" \
         "${WZ_TEST_ARGS[@]}" || return 1
     # A sixth: the observation plane's instruments hosted by the cooperative engine with no task
     # and no tokio engine in the build (the supervision instrument). The supervisor and the
@@ -13261,9 +13265,9 @@ layer_c1co_pico_client_dials_a_listener() {
     # `2 passed` that neither binary prints).
     local door
     for door in supervision_doors event_log_doors; do
-        _runci_guarded_test "C1co observation plane engine-coop ${door}" 1 \
+        _runci_guarded_test "C1co observation plane os-host ${door}" 1 \
             cargo test -p wz-capi-pico --no-default-features \
-            --features "engine-coop,link-udp,supervision,event-ring,clock-source,resource-snapshot" \
+            --features "os-host,link-udp,supervision,event-ring,clock-source,resource-snapshot" \
             --test "$door" || return 1
     done
 }
@@ -13325,8 +13329,8 @@ layer_c1p32_pico_i686() {
     fi
     # The cooperative engine's planes: the profile's that this engine has (the client's pub/sub,
     # the roles, queries, liveliness, the advanced plane, connectivity and a program's transport)
-    # on `engine-coop`, with the read task of the multi-threaded arm.
-    local coop="engine-coop,peer,multi-thread,link-udp,query,queryable,liveliness,liveliness-get"
+    # on `os-host`, with the read task of the multi-threaded arm.
+    local coop="os-host,peer,multi-thread,link-udp,query,queryable,liveliness,liveliness-get"
     coop+=",advanced,unstable-api,connectivity,app-transport"
     _runci_legs_open C1p32 || return 1
     _runci_leg kconfig -- bash scripts/provision-kconfiglib.sh
@@ -13335,9 +13339,9 @@ layer_c1p32_pico_i686() {
         cargo test -p wz-capi-pico --target "$target" --no-default-features --features "$coop" --lib \
         --no-fail-fast
     wz_test_args wz-capi-pico mutual_dial
-    _runci_leg coop-mutual-dial -- _runci_guarded_test "C1p32 engine-coop mutual dial" 2 \
+    _runci_leg coop-mutual-dial -- _runci_guarded_test "C1p32 os-host mutual dial" 2 \
         cargo test -p wz-capi-pico --target "$target" --no-default-features \
-        --features "engine-coop,peer,multi-thread,link-udp,connectivity" "${WZ_TEST_ARGS[@]}"
+        --features "os-host,peer,multi-thread,link-udp,connectivity" "${WZ_TEST_ARGS[@]}"
     _runci_leg linked-crates -- _runci_guarded_test "C1p32 the crates the library links" + \
         cargo test --target "$target" --lib --no-fail-fast -p wz-abi-stamp -p wz-app-frame -p wz-app-schema -p wz-capi-core \
         -p wz-capi-coop -p wz-capi-port -p wz-codecs -p wz-ext-pubsub -p wz-host-net \
@@ -21646,7 +21650,7 @@ layer_s_pico_stability() {
     wz_test_args wz-capi-pico allocation_faults
     _runci_guarded_test "S allocation faults, cooperative engine" 8 \
         cargo test -p wz-capi-pico --no-default-features \
-        --features engine-coop,app-transport,peer,query,queryable,multi-thread \
+        --features os-host,app-transport,peer,query,queryable,multi-thread \
         "${WZ_TEST_ARGS[@]}" -- --ignored --nocapture --test-threads=1 || return 1
 
     # The link legs (`crates/wz-integration-tests/tests/it/files/pico_link_qos_on_wz_capi.rs`): one
