@@ -1865,21 +1865,15 @@ pub(crate) fn walk_lent_payload(
     use crate::network_message::{new_record_buf, try_for_each_record_while, RecordForm};
     let mut record = new_record_buf();
     let mut dispatched = false;
-    // Set once the host has no room for another record; the walk then ends before the next.
-    let stopping = core::cell::Cell::new(false);
-    let go_on = || !stopping.get();
     let walked = try_for_each_record_while(
         payload,
         &mut record,
         RecordForm::LentControl,
-        &go_on,
         |one| {
             report_lent_record(one, reliable, sn, priority, &mut *on_event);
             dispatched = true;
-            if may_stop && !on_event.takes_another() {
-                stopping.set(true);
-            }
-            Ok(())
+            // A host with no room for another record ends the walk before the next.
+            Ok(!may_stop || on_event.takes_another())
         },
         #[cfg(all(feature = "transport-stats", feature = "alloc"))]
         counted,
