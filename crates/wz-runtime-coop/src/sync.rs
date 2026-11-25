@@ -504,7 +504,10 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
     /// (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
     /// `return _z_mutex_try_lock(&ztc->_mutex_tx);`).
     pub fn try_lend<U>(&self, f: impl FnOnce(&mut X) -> U) -> Lend<U> {
-        match K::try_with(&self.place, |place| place.as_mut().map(f)) {
+        match K::try_with(&self.place, |place| {
+            let _lent = FaceLent::enter();
+            place.as_mut().map(f)
+        }) {
             None => Lend::Held,
             Some(None) => Lend::Empty,
             Some(Some(answer)) => Lend::Lent(answer),
@@ -524,7 +527,115 @@ impl<K: LockKind, X: Send + 'static> wz_session_core::transport_place::Transport
 
     #[inline]
     fn lend<U>(&mut self, f: impl FnOnce(&mut X) -> U) -> Option<U> {
-        K::with(&self.place, |place| place.as_mut().map(f))
+        K::with(&self.place, |place| {
+            let _lent = FaceLent::enter();
+            place.as_mut().map(f)
+        })
+    }
+}
+
+/// Whether the calling thread is inside a lend of a face's place ([`FacePlace`]), as far as the
+/// marks say: the lock of a session's state is taken before a face's and never inside one, so its
+/// taker asks this first and a debug build fails a take that would invert the order, which two
+/// threads taking the locks in the two orders would deadlock on. Kept in a debug build whose
+/// critical sections count on `std`'s thread-locals (`host-lock` without `host-lock-sys`); every
+/// other build keeps nothing and reads that none is lent.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+pub fn face_lent_here() -> bool {
+    FaceLent::any_here()
+}
+
+/// A lend of a face's place on the calling thread, from [`Self::enter`] to drop, on return and on
+/// unwind alike ([`face_lent_here`]).
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+struct FaceLent {
+    #[cfg(all(
+        debug_assertions,
+        feature = "host-lock",
+        not(feature = "host-lock-sys")
+    ))]
+    _marked: (),
+}
+
+/// How many lends of faces' places the calling thread is inside: one inside another is two.
+#[cfg(all(
+    debug_assertions,
+    feature = "host-lock",
+    not(feature = "host-lock-sys"),
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+mod face_lent {
+    extern crate std;
+
+    std::thread_local! {
+        pub(super) static DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl FaceLent {
+    #[inline]
+    fn enter() -> Self {
+        #[cfg(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        ))]
+        {
+            face_lent::DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+            Self { _marked: () }
+        }
+        #[cfg(not(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        )))]
+        {
+            Self {}
+        }
+    }
+
+    #[inline]
+    fn any_here() -> bool {
+        #[cfg(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        ))]
+        {
+            face_lent::DEPTH.with(|depth| depth.get() != 0)
+        }
+        #[cfg(not(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        )))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(all(
+    debug_assertions,
+    feature = "host-lock",
+    not(feature = "host-lock-sys"),
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl Drop for FaceLent {
+    fn drop(&mut self) {
+        face_lent::DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
@@ -715,10 +826,51 @@ mod many_threads_tests {
 ))]
 mod face_place_tests {
     use super::tests::TestOwner;
-    use super::{Confined, FacePlace, Lend};
+    use super::{face_lent_here, Confined, FacePlace, Lend};
     use wz_session_core::transport_place::TransportPlace;
 
     type Place = FacePlace<Confined<TestOwner>, u32>;
+
+    /// A thread is inside a face's lend for as long as the lend's call runs, by either lend and
+    /// one nested in another, and is not once the call returned or unwound; a build that keeps no
+    /// mark reads none. Turned red by a mark that is not made around the call, or one an unwind
+    /// leaves set, which would fail every later take of a session's lock on the thread.
+    #[test]
+    fn a_thread_is_inside_a_faces_lend_for_as_long_as_it_runs() {
+        extern crate std;
+        let marked = cfg!(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        ));
+        let place = Place::empty();
+        let other = Place::empty();
+        place.hold(1);
+        other.hold(2);
+        assert!(!face_lent_here());
+        assert_eq!(place.try_lend(|_| face_lent_here()), Lend::Lent(marked));
+        assert_eq!(
+            (&place).lend(|_| other.try_lend(|_| face_lent_here())),
+            Some(Lend::Lent(marked))
+        );
+        assert_eq!(
+            (&place).lend(|_| {
+                let _ = other.try_lend(|_| ());
+                face_lent_here()
+            }),
+            Some(marked),
+            "the inner lend's end leaves the outer one marked"
+        );
+        assert!(!face_lent_here(), "no lend runs now");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            place.try_lend(|_| panic!("inside the lend"))
+        }));
+        assert!(unwound.is_err());
+        assert!(
+            !face_lent_here(),
+            "a lend that unwound is not one the thread is inside"
+        );
+    }
 
     /// A place lends nothing before its link is up, lends what it holds after, and keeps what a
     /// lend did; taken out, it lends nothing again. Turned red by a lend that runs on an empty

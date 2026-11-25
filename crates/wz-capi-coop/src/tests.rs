@@ -3519,6 +3519,9 @@ mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
 mod entity_tables;
+// The marks a lend of a face's place makes are kept in a debug build on `std`'s thread-locals.
+#[cfg(all(feature = "std", not(feature = "host-sys"), debug_assertions))]
+mod face_order;
 #[cfg(all(
     feature = "listen",
     feature = "query",
