@@ -8083,7 +8083,9 @@ mod matching_aggregate_tests {
                 false,
                 Locality::Any,
                 None,
-                wz_capi_port::QueryableSink::shared(|_, _, _| {}),
+                Arc::new(|_: &TokioQueryHolder| {
+                    Box::new(|_: &dyn QueryView, _: &mut dyn ReplyOut| {}) as Box<_>
+                }),
             )
             .expect("a session with ids left declares");
         assert_eq!(holds(&shared), Some(2), "the program's and the entry's");
