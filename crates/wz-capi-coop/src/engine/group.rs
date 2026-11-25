@@ -566,6 +566,11 @@ pub(super) struct GroupFace<W> {
     /// with its task and its stage; it leaves with the group's join.
     #[cfg(feature = "transport-stats")]
     stats: Rc<TransportStats>,
+    /// The spacing of the transport messages this join of the group received (`resource-snapshot`),
+    /// fed by its task; retired into the session's reading when the join is replaced or the
+    /// session closes (`Core::retired_groups`).
+    #[cfg(feature = "resource-snapshot")]
+    messages: Rc<wz_session_core::interval_meter::BuildIntervalMeter>,
     /// The keyexprs this join of the group was told, and the members' asks for them the session
     /// owes an answer ([`GroupKeyexprAnswers`]).
     keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
@@ -672,6 +677,10 @@ impl<W: LinkWaits> GroupFace<W> {
         .with_input_gate(input_gate);
         #[cfg(feature = "transport-stats")]
         let seed = seed.with_stats(Rc::clone(&stats));
+        #[cfg(feature = "resource-snapshot")]
+        let messages = Rc::new(wz_session_core::interval_meter::BuildIntervalMeter::new());
+        #[cfg(feature = "resource-snapshot")]
+        let seed = seed.with_meter(Rc::clone(&messages));
         let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
         let on_event = answering_asks(
             noting_members(
@@ -716,6 +725,8 @@ impl<W: LinkWaits> GroupFace<W> {
             join_ask,
             #[cfg(feature = "transport-stats")]
             stats,
+            #[cfg(feature = "resource-snapshot")]
+            messages,
             keyexprs,
             keyexpr_ask_owed,
             filters: RefCell::new(Vec::new()),
@@ -822,6 +833,14 @@ impl<W: LinkWaits> GroupFace<W> {
     #[cfg(feature = "transport-stats")]
     pub(super) fn stats_report(&self) -> wz_session_core::stats::TransportStatsReport {
         self.stats.report()
+    }
+
+    /// What this join of the group received, spaced (`resource-snapshot`): cumulative.
+    #[cfg(feature = "resource-snapshot")]
+    pub(super) fn message_reading(
+        &self,
+    ) -> wz_session_core::resource_snapshot::BuildMessageReading {
+        self.messages.reading()
     }
 
     /// The group's stage, as its dispatch stages a reply on it. Read only by

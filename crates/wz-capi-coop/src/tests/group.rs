@@ -478,6 +478,56 @@ fn a_member_whose_group_link_is_lost_joins_the_group_again() {
     SessionDrive::close(&*first);
 }
 
+/// What a member's group received is in the session's message reading, and stays there when the
+/// group's join is replaced by a join again and when the session closes. Turned red by a reading of
+/// the links alone, or by a join replaced or let go of at the close with its count not retired
+/// (`Core::retired_groups`).
+#[cfg(feature = "resource-snapshot")]
+#[test]
+fn what_a_group_received_stays_in_the_message_reading_across_a_join_again_and_the_close() {
+    let network = Arc::new(Network::default());
+    let redialling = |member: u8| CoopConfig {
+        redial_ms: Some(100),
+        ..member_config(member, GROUP)
+    };
+    let first = open_member(&network, 1, redialling(1)).expect("the first joins");
+    let second = open_member(&network, 2, redialling(2)).expect("the second joins");
+    SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+    SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+    until_members_know_each_other(&first, &second);
+    let heard = subscribe(&second, "demo/group/**");
+    eventually("three puts to cross the group", || {
+        put(&first, "demo/group/counted", b"counted");
+        heard.lock().unwrap().len() >= 3
+    });
+    let before = second.message_reading();
+    assert!(
+        before.messages >= 2,
+        "the first's JOIN and its frames were received on the group: {before:?}"
+    );
+
+    network.cut(2);
+    eventually(
+        "the second member's stack to be asked to join again",
+        || network.joins_of(2) == 2,
+    );
+    until_members_know_each_other(&first, &second);
+    let again = second.message_reading();
+    assert!(
+        again.messages > before.messages,
+        "the join replaced kept its count, and the new join counted a JOIN: {again:?} after \
+         {before:?}"
+    );
+
+    SessionDrive::close(&*second);
+    let closed = second.message_reading();
+    assert!(
+        closed.messages >= again.messages,
+        "the close kept what the group had received: {closed:?} after {again:?}"
+    );
+    SessionDrive::close(&*first);
+}
+
 /// A subscriber a member declares is announced on the group, as zenoh-pico declares its entities
 /// over a multicast transport (`GroupDeclarations::Entities`), and retracted from it when it is
 /// undeclared: the other member's write filter, which counts what its peers declare, opens on the

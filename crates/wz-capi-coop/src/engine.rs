@@ -2230,6 +2230,10 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Apart from the session's being closed, which a step that loses the dial role's link says
     /// too, so the close that follows such a step still lets them go, and once.
     released: bool,
+    /// What the joins of the groups had received when they were replaced by a join again or let go
+    /// of at the close (`resource-snapshot`), so the session's reading never falls when one ends.
+    #[cfg(all(feature = "resource-snapshot", feature = "group"))]
+    retired_groups: wz_session_core::resource_snapshot::BuildReceiveLedger,
     /// The links as the last move left them, when it left them settled ([`Self::move_links`]).
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     links_settled: Option<LinksSettled>,
@@ -4748,6 +4752,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                             // ended.
                             #[cfg(feature = "connectivity")]
                             face.keep_tombs_of(ended);
+                            #[cfg(feature = "resource-snapshot")]
+                            self.retired_groups.retire(&ended.message_reading());
                             *ended = face;
                         }
                     }
@@ -5067,6 +5073,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         #[cfg(feature = "group")]
         if self.transport.stop_groups() {
             self.run_tasks();
+            #[cfg(feature = "resource-snapshot")]
+            for group in &self.transport.groups {
+                self.retired_groups.retire(&group.message_reading());
+            }
             self.transport.groups.clear();
         }
         self.transport.links.end_faces(|face| face.replay.discard());
@@ -5463,6 +5473,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             config,
             policy,
             released: false,
+            #[cfg(all(feature = "resource-snapshot", feature = "group"))]
+            retired_groups: wz_session_core::resource_snapshot::BuildReceiveLedger::new(),
             #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
             links_settled: None,
             #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
@@ -6362,13 +6374,28 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         report
     }
 
-    /// What the receive paths of the session's links counted (`resource-snapshot`), those up and
-    /// those let go of (`LinkSupervisor::message_reading`), as one reading that only grows. Read
-    /// under the session's lock, the one a link is let go of under, so a link that goes meanwhile
-    /// is counted once; a closed session reads what its links had counted when they ended.
+    /// What the receive paths of the session's links and groups counted (`resource-snapshot`),
+    /// those up and those let go of (`LinkSupervisor::message_reading`, `Core::retired_groups`),
+    /// as one reading that only grows. Read under the session's lock, the one a link or a join is
+    /// let go of under, so one that goes meanwhile is counted once; a closed session reads what
+    /// its links and groups had counted when they ended.
     #[cfg(feature = "resource-snapshot")]
     pub fn message_reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
-        self.core.lock().0.transport.links.message_reading()
+        let held = self.core.lock();
+        #[cfg(feature = "group")]
+        {
+            let groups = held.0.transport.groups.iter();
+            let mut total = held
+                .0
+                .retired_groups
+                .total(groups.map(|group| group.message_reading()));
+            total.merge(&held.0.transport.links.message_reading());
+            total
+        }
+        #[cfg(not(feature = "group"))]
+        {
+            held.0.transport.links.message_reading()
+        }
     }
 
     /// Run the periodic jobs that are due, with no lock held: what a job does (a beacon is a
