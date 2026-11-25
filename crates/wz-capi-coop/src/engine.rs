@@ -3511,6 +3511,27 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 struct SessionEnds;
 
+/// The dial of a face as its step read it: the answer of the dial, kept for the handshake the
+/// face's life asks for next, and the endpoint it dialled, which names the reason a refusal
+/// leaves. One value, so what a step read is carried through the arms of its life's effects
+/// (`Core::carry_out`) whole; a step that read no dial carries [`Self::none`].
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+struct ReadDial<P> {
+    answer: DialAnswer<P, LinkCount>,
+    dialled: Option<DialEndpoint>,
+}
+
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+impl<P> ReadDial<P> {
+    /// No dial read: no answer and no endpoint.
+    fn none() -> Self {
+        Self {
+            answer: None,
+            dialled: None,
+        }
+    }
+}
+
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
     /// spawned on the session's local set and stepped once so that an initiator's InitSyn is sent
@@ -3616,16 +3637,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Dial the session's endpoint at `row` for the face at `at`, and say what came of it as the
     /// input of the face's life. A dial the network has not answered yet is left under way in the
     /// face and asked at the steps that follow, so no dial is waited for while the session is
-    /// held; one answered at once with a link has it kept in `answer`, its endpoint in `dialled`,
-    /// for the handshake the life asks for next. A refusal is kept in `last`. A dial names its
-    /// endpoint by its row of the session's endpoint texts, which holds the text.
+    /// held; one answered at once with a link has it kept in `read`, with its endpoint, for the
+    /// handshake the life asks for next. A refusal is kept in `last`. A dial names its endpoint
+    /// by its row of the session's endpoint texts, which holds the text.
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     fn dial_endpoint(
         &mut self,
         at: usize,
         row: usize,
-        answer: &mut DialAnswer<L::Pump, LinkCount>,
-        dialled: &mut Option<DialEndpoint>,
+        read: &mut ReadDial<L::Pump>,
         last: &mut OpenError,
     ) -> LinkInput {
         match self.transport.dial_row(at, row) {
@@ -3636,8 +3656,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // Put in the face where it was asked (`LinkSupervisor::ask_dial`).
             Ok(None) => LinkInput::DialPending,
             Ok(Some(Ok(opened))) => {
-                *answer = Some(Ok(opened));
-                *dialled = Some(DialEndpoint::Listed(row));
+                read.answer = Some(Ok(opened));
+                read.dialled = Some(DialEndpoint::Listed(row));
                 LinkInput::DialMade
             }
             Ok(Some(Err(refused))) => {
@@ -3666,7 +3686,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// Begin the handshake of the link the dial of the face at `at`, numbered `id`, made: the
-    /// link in `answer`, from the endpoint in `dialled`. The face holds the link from then on,
+    /// link and the endpoint it came from, as `read` holds them. The face holds the link from then on,
     /// and the input of its life says whether the handshake began; why it did not is kept in
     /// `last`. A task refused is not the endpoint's (the next one would be refused the same),
     /// and no cookie key for the attempt is not a reason any endpoint can pass.
@@ -3675,12 +3695,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         id: FaceId,
-        answer: &mut DialAnswer<L::Pump, LinkCount>,
-        dialled: &mut Option<DialEndpoint>,
+        read: &mut ReadDial<L::Pump>,
         last: &mut OpenError,
     ) -> LinkInput {
-        let endpoint = dialled.take();
-        let Some(answered) = answer.take() else {
+        let endpoint = read.dialled.take();
+        let Some(answered) = read.answer.take() else {
             return LinkInput::HandshakeRefused(HandshakeRefusal::Endpoint);
         };
         let opened = match self.transport.dialled(endpoint.as_ref(), answered) {
@@ -3910,23 +3929,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 self.run_tasks();
             }
         }
-        let mut answer = None;
-        let mut dialled = None;
+        let mut read = ReadDial::none();
         let step = self
             .transport
-            .face_step(at, id, now_us, &mut answer, &mut dialled);
+            .face_step(at, id, now_us, &mut read.answer, &mut read.dialled);
         if step.effects.is_empty() {
             return Ok(());
         }
-        self.carry_out(
-            at,
-            step.effects,
-            was,
-            &mut answer,
-            &mut dialled,
-            now_us,
-            last,
-        )
+        self.carry_out(at, step.effects, was, &mut read, now_us, last)
     }
 
     /// Give the life of the face at `at` the input `input` at `now_us`, and carry out what it
@@ -3944,26 +3954,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         };
         let was = face.life.phase();
         let effects = face.life.input(input, now_us);
-        self.carry_out(at, effects, was, &mut None, &mut None, now_us, last)
+        self.carry_out(at, effects, was, &mut ReadDial::none(), now_us, last)
     }
 
     /// Carry out what the life of the face at `at`, which stood at `was`, asks for (`effects`),
     /// in the order [`Effects`] names, reporting the dial or the handshake it asks for back to it
-    /// as its next input, read at the clock after the I/O, until it asks for no more. `answer` and
-    /// `dialled` hold the answer of the face's dial and the endpoint it dialled when the step read
-    /// them. `Err` when the session ends, the reason the last endpoint tried gave left in `last`,
-    /// which every arm writes rather than hands back.
+    /// as its next input, read at the clock after the I/O, until it asks for no more. `read` holds
+    /// the face's dial as the step read it ([`ReadDial`]). `Err` when the session ends, the
+    /// reason the last endpoint tried gave left in `last`, which every arm writes rather than
+    /// hands back.
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-    // What the step read and the reason the session ends for are written where the caller keeps
-    // them rather than handed back (`SessionEnds`), each an argument of its own.
-    #[allow(clippy::too_many_arguments)]
     fn carry_out(
         &mut self,
         at: usize,
         mut effects: Effects,
         was: LinkPhase,
-        answer: &mut DialAnswer<L::Pump, LinkCount>,
-        dialled: &mut Option<DialEndpoint>,
+        read: &mut ReadDial<L::Pump>,
         now_us: u64,
         last: &mut OpenError,
     ) -> Result<(), SessionEnds> {
@@ -3973,9 +3979,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         *last = OpenError::NoEndpoint;
         // The dial the step read the refusal of, and one the life walked past or let go of with
         // no answer read: either is over, and its endpoint names the reason.
-        if matches!(answer, Some(Err(_))) {
-            if let Some(Err(refused)) = answer.take() {
-                self.refuse(last, dialled.as_ref(), Refusal::Link(refused));
+        if matches!(read.answer, Some(Err(_))) {
+            if let Some(Err(refused)) = read.answer.take() {
+                self.refuse(last, read.dialled.as_ref(), Refusal::Link(refused));
             }
         } else if let Some(endpoint) = self.transport.links.end_dial(at) {
             self.refuse(last, Some(&endpoint), Refusal::NoAnswerInTime);
@@ -4019,9 +4025,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 return Ok(());
             }
             let input = if effects.begin_handshake() {
-                self.begin_handshake(at, id, answer, dialled, last)
+                self.begin_handshake(at, id, read, last)
             } else if let Some(row) = effects.dial() {
-                self.dial_endpoint(at, row, answer, dialled, last)
+                self.dial_endpoint(at, row, read, last)
             } else {
                 // A wait to dial again is the life's: its wake (`UnicastLink::wake_at`) brings
                 // the face's next step.
