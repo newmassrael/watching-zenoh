@@ -1291,7 +1291,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let Some((opened, endpoint)) = slot.opened.take() else {
             return LinkInput::HandshakeRefused(Refused::Endpoint);
         };
-        match self.place_link_session(face, core, slot, opened, &endpoint) {
+        match self.place_link_session(
+            face,
+            core,
+            slot,
+            opened,
+            SessionRole::Initiator,
+            Some(&endpoint),
+        ) {
             Ok(()) => LinkInput::HandshakeBegun,
             Err(refused) => {
                 let why = match refused {
@@ -1305,9 +1312,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// The session of the link `opened`, dialled to `endpoint`, built in the face's place for
-    /// it and held by the face's link in its handshake. Never inlined, for the stack: what is built
-    /// here lies in this frame alone.
+    /// The session of the link `opened`, run in `role` and dialled to or taken on `endpoint`,
+    /// built in the face's place for it and held by the face's link in its handshake. Never
+    /// inlined, for the stack: what is built here lies in this frame alone.
     #[inline(never)]
     fn place_link_session(
         &self,
@@ -1315,7 +1322,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         core: &mut Core<L, C>,
         slot: &mut DirectSlot<L, C>,
         opened: OpenedLink<L::Pump, LinkCount>,
-        endpoint: &DialEndpoint,
+        role: SessionRole,
+        endpoint: Option<&DialEndpoint>,
     ) -> Result<(), OpenError> {
         slot.drop_link(&face.site);
         face.end.ready();
@@ -1345,8 +1353,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 opened,
                 OpenedAs {
                     face: face_id,
-                    role: SessionRole::Initiator,
-                    endpoint: Some(endpoint),
+                    role,
+                    endpoint,
                 },
                 WireMaking {
                     params,
@@ -1612,11 +1620,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         .unwrap_or((0, 0))
     }
 
-    /// Let go of the one link's session at the close, unless a read steps it now: that read lets
-    /// it go once it has returned from the pump.
+    /// Let go of each face's link at the close, unless a read steps it now: that read lets it go
+    /// once it has returned from the pump.
     pub(super) fn let_go_link(&self) {
-        if let Some(mut held) = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot) {
-            held.0.let_go();
+        for face in self.direct.iter() {
+            if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
+                held.0.let_go();
+            }
         }
     }
 
