@@ -1167,10 +1167,10 @@ fn qos_priority_of_entry<E: crate::ext_view::ExtEntryView>(
 /// what the receive path that does not copy a unit (`drive::dispatch_datagram`)
 /// needs of it, kept in fixed storage, so reading it allocates nothing.
 ///
-/// The chain is read by the header's document (`transport_frame_header.scxml`,
-/// `transport_fragment_header.scxml`) to the entry whose `Z` flag is clear,
-/// whatever its length, and walked here once ([`KeptChain`]). What is kept is
-/// what a participant acts on, folded as the walk goes so that the storage does
+/// The chain is read as the header's document (`transport_frame_header.scxml`,
+/// `transport_fragment_header.scxml`) reads it, to the entry whose `Z` flag is
+/// clear, whatever its length, each entry decoded once ([`KeptChain::read`]).
+/// What is kept is what a participant acts on, folded as the walk goes so that the storage does
 /// not grow with the chain: the mandatory-extension rule's verdict for the
 /// message ([`crate::ext_admit::judge_ext_chain`]), the priority the QoS
 /// extension carries, and the two chain-boundary markers of a Fragment. Each is
@@ -1391,13 +1391,12 @@ pub fn parse_inbound_consuming_in_into(
     Ok(used)
 }
 
-/// The form a Frame's or a Fragment's own extension chain is kept in, taken
-/// from the entries its header's document read ([`decode_frame_head`],
-/// [`decode_fragment_head`]): the owned entries of a decoded message, or the
-/// [`InPlaceExtChain`] of one read where it lies. The document's view reads the
-/// chain to the entry whose `Z` flag is clear, whatever its length, and neither
-/// form refuses a chain for its length: the owned one grows, and the in-place one
-/// keeps a fixed summary of it.
+/// The form a Frame's or a Fragment's own extension chain is kept in, read where the head's SN
+/// ends ([`decode_frame_head`], [`decode_fragment_head`]): the owned entries of a decoded message,
+/// or the [`InPlaceExtChain`] of one read where it lies. Each form reads the chain to the entry
+/// whose `Z` flag is clear, whatever its length, as the header's document reads it, and neither
+/// refuses a chain for its length: the owned one grows, and the in-place one keeps a fixed summary
+/// of it.
 // Gated as the head decoders that name it.
 #[cfg(all(
     feature = "codec-frame",
@@ -1413,22 +1412,41 @@ pub fn parse_inbound_consuming_in_into(
     )
 ))]
 pub(crate) trait KeptChain: Sized {
-    /// The chain whose entries `walked` yields, in wire order, of a message of
-    /// the transport id `mid`.
-    fn keep<'a>(
-        mid: u8,
-        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
-    ) -> Result<Self, InboundParseError>;
+    /// The chain at `cursor` of a message of the transport id `mid`, read to the entry whose `Z`
+    /// flag is clear when `present` (the header's `Z` flag) and empty otherwise, the cursor left
+    /// past it. A chain the header's document refuses is refused with the document's error.
+    fn read(cursor: &mut SceCursor<'_>, mid: u8, present: bool) -> Result<Self, InboundParseError>;
 }
 
 #[cfg(all(feature = "alloc", feature = "codec-frame"))]
 impl KeptChain for Vec<ExtEntryOwned> {
-    /// Every entry is kept, so the message's id is not needed to judge it.
-    fn keep<'a>(
+    /// Every entry is kept, so the message's id is not needed to judge it. The whole chain is
+    /// checked as the document checks it before an entry is kept, so a chain the document refuses
+    /// is refused with its error even where keeping an earlier entry would refuse it too.
+    fn read(
+        cursor: &mut SceCursor<'_>,
         _mid: u8,
-        walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
+        present: bool,
     ) -> Result<Self, InboundParseError> {
-        crate::ext_chain::collect_ext_chain(walked)
+        use sce_forge_runtime::codec::{Bounded, ListView};
+        use wz_codecs::ext_entry::{ExtEntryView, ExtEntryWalk};
+        if !present {
+            return Ok(Vec::new());
+        }
+        let rest = cursor.peek_slice(cursor.remaining())?;
+        let mut count: u32 = 0;
+        loop {
+            let entry = ExtEntryView::decode(cursor)?;
+            // An entry is a byte at least, so no unit holds `u32::MAX` of them.
+            count = count.saturating_add(1);
+            if !entry.z() {
+                break;
+            }
+        }
+        let list: ListView<'_, ExtEntryWalk, 0> = ListView::new(rest, count, []);
+        let chain: Bounded<_, { usize::MAX }, 1> =
+            Bounded::new(list).ok_or(CodecError::TooManyElements)?;
+        crate::ext_chain::collect_ext_chain(crate::ext_view::walked(Some(&chain)))
     }
 }
 
@@ -1441,11 +1459,8 @@ impl KeptChain for Vec<ExtEntryOwned> {
     )
 ))]
 impl KeptChain for InPlaceExtChain {
-    fn keep<'a>(
-        mid: u8,
-        mut walked: impl Iterator<Item = wz_codecs::ext_entry::ExtEntryView<'a>>,
-    ) -> Result<Self, InboundParseError> {
-        Self::fold(mid, &mut walked)
+    fn read(cursor: &mut SceCursor<'_>, mid: u8, present: bool) -> Result<Self, InboundParseError> {
+        Self::read_folded(cursor, mid, present)
     }
 }
 
@@ -1458,14 +1473,15 @@ impl KeptChain for InPlaceExtChain {
     )
 ))]
 impl InPlaceExtChain {
-    /// The fold of [`KeptChain::keep`], over the walk as a trait object
-    /// ([`crate::ext_view::EntryWalk`]): each message's header document has a walk type of its
-    /// own (the Frame's, the Fragment's), and the fold is compiled once for all of them. A header's chain is a few entries at most, so a call through
-    /// the table per entry costs nothing a receive can see.
+    /// [`KeptChain::read`] of the in-place form: each entry decoded once, by the entry reader the
+    /// header's document decodes it with, and folded as it is decoded. The fold refuses nothing,
+    /// so a chain is refused with the document's error alone, at the entry the document refuses.
+    // Out of line: the heads of a Frame and of a Fragment read their chains through one body.
     #[inline(never)]
-    fn fold<'a>(
+    fn read_folded(
+        cursor: &mut SceCursor<'_>,
         mid: u8,
-        walked: &mut dyn crate::ext_view::EntryWalk<'a>,
+        present: bool,
     ) -> Result<Self, InboundParseError> {
         #[cfg(feature = "session-unicast")]
         let carrier = crate::ext_admit::ExtCarrier::Transport(mid);
@@ -1475,22 +1491,13 @@ impl InPlaceExtChain {
         // is all of the chain its verdict needs.
         #[cfg(feature = "session-unicast")]
         let mut refused: Option<u8> = None;
-        #[cfg(all(
-            feature = "alloc",
-            any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-        ))]
-        let mut chained = false;
         #[cfg(feature = "reassembly")]
         let mut markers = crate::extfragment::FragmentMarkers::NONE;
         let mut priority = None;
-        while let Some(entry) = walked.next_entry() {
-            #[cfg(all(
-                feature = "alloc",
-                any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
-            ))]
-            {
-                chained = true;
-            }
+        let mut more = present;
+        while more {
+            let entry = wz_codecs::ext_entry::ExtEntryView::decode(cursor)?;
+            more = entry.z();
             #[cfg(feature = "session-unicast")]
             if refused.is_none()
                 && crate::ext_admit::judge_ext_chain(carrier, [entry.header]).is_refusal()
@@ -1504,7 +1511,7 @@ impl InPlaceExtChain {
             // A later QoS entry supersedes an earlier one, as upstream's Frame and Fragment
             // decoders assign each they meet (`commons/zenoh-codec/src/transport/frame.rs` @
             // `ext_qos = q;`): the rule `crate::ext_view::last_by_eid` states, folded into
-            // the one walk this chain is read in.
+            // the one decode this chain is read in.
             if crate::ext_header::ext_eid(entry.header)
                 == crate::ext_header::network_eid::TRANSPORT_QOS
             {
@@ -1516,7 +1523,7 @@ impl InPlaceExtChain {
                 feature = "alloc",
                 any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
             ))]
-            chained,
+            chained: present,
             #[cfg(feature = "session-unicast")]
             admission: crate::ext_admit::judge_ext_chain(carrier, refused),
             #[cfg(feature = "reassembly")]
@@ -1606,17 +1613,23 @@ impl FrameHead<InPlaceExtChain> {
 fn decode_frame_head<C: KeptChain>(
     unit: &[u8],
 ) -> Result<(FrameHead<C>, usize), InboundParseError> {
+    // The fields in the document's order and with its errors
+    // (`TransportFrameHeaderView::decode_into`); the chain is read by its own form, so an
+    // entry is decoded once and not again to keep it.
     let mut cursor = SceCursor::new(unit);
-    let view = wz_codecs::transport_frame_header::TransportFrameHeaderView::decode(&mut cursor)?;
-    let chain = C::keep(
+    let header = cursor.peek_u8()?;
+    cursor.advance(1)?;
+    let sn = cursor.read_vle_u64()?;
+    let chain = C::read(
+        &mut cursor,
         wire_const::T_MID_FRAME,
-        crate::ext_view::walked(view.extensions.as_ref()),
+        (header & wire_const::FLAG_T_Z) != 0,
     )?;
     let head = FrameHead {
-        reliable: (view.header & wire_const::FLAG_T_FRAME_R) != 0,
-        sn: view.sn,
+        reliable: (header & wire_const::FLAG_T_FRAME_R) != 0,
+        sn,
         #[cfg(feature = "alloc")]
-        has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
+        has_ext: (header & wire_const::FLAG_T_Z) != 0,
         chain,
     };
     Ok((head, unit.len().saturating_sub(cursor.remaining())))
@@ -1698,18 +1711,22 @@ pub(crate) struct FragmentHead<C> {
 fn decode_fragment_head<C: KeptChain>(
     unit: &[u8],
 ) -> Result<(FragmentHead<C>, usize), InboundParseError> {
+    // As [`decode_frame_head`] reads a Frame's, by the fragment header's document
+    // (`TransportFragmentHeaderView::decode_into`).
     let mut cursor = SceCursor::new(unit);
-    let view =
-        wz_codecs::transport_fragment_header::TransportFragmentHeaderView::decode(&mut cursor)?;
-    let chain = C::keep(
+    let header = cursor.peek_u8()?;
+    cursor.advance(1)?;
+    let sn = cursor.read_vle_u64()?;
+    let chain = C::read(
+        &mut cursor,
         wire_const::T_MID_FRAGMENT,
-        crate::ext_view::walked(view.extensions.as_ref()),
+        (header & wire_const::FLAG_T_Z) != 0,
     )?;
     let head = FragmentHead {
-        reliable: (view.header & wire_const::FLAG_T_FRAGMENT_R) != 0,
-        sn: view.sn,
-        more: (view.header & wire_const::FLAG_T_FRAGMENT_M) != 0,
-        has_ext: (view.header & wire_const::FLAG_T_Z) != 0,
+        reliable: (header & wire_const::FLAG_T_FRAGMENT_R) != 0,
+        sn,
+        more: (header & wire_const::FLAG_T_FRAGMENT_M) != 0,
+        has_ext: (header & wire_const::FLAG_T_Z) != 0,
         chain,
     };
     Ok((head, unit.len().saturating_sub(cursor.remaining())))
@@ -4005,5 +4022,221 @@ mod control_read_tests {
             read_control(&init_ack(COOKIE_MAX + 1)),
             Err(InboundParseError::Codec(CodecError::CapacityExceeded))
         ));
+    }
+}
+
+/// The head of a Frame and of a Fragment read in one pass, each entry of its chain decoded once,
+/// held to what the header's document reads: the flags, the SN, where the payload starts, the error
+/// a head is refused with, and what the in-place chain keeps of the entries the document's walk
+/// yields (the admission verdict and the priority of the last QoS entry).
+#[cfg(all(
+    test,
+    feature = "codec-frame",
+    feature = "storage-profile",
+    feature = "session-unicast"
+))]
+mod head_read_tests {
+    use super::*;
+    use crate::ext_admit::{ExtAdmission, ExtCarrier};
+    use crate::qos::Priority;
+
+    const F: u8 = wire_const::T_MID_FRAME;
+    const R: u8 = wire_const::FLAG_T_FRAME_R;
+    const Z: u8 = wire_const::FLAG_T_Z;
+
+    /// Heads of every shape the reader takes a branch for: no chain, one entry, an entry that ends
+    /// a chain of two, two QoS entries, a mandatory entry of no known id, and cut at each place a
+    /// head can be cut (in the chain, in an entry's value, in the SN, before the SN).
+    const WIRES: [&[u8]; 9] = [
+        &[F | R, 0x07, 0xEE],
+        &[F | R | Z, 0x80, 0x01, 0x31, 0x02, 0xEE],
+        &[F | Z, 0x07, 0xB1, 0x02, 0x03, 0xEE],
+        &[F | Z, 0x07, 0xB1, 0x02, 0x31, 0x06],
+        &[F | Z, 0x07, 0x1F, 0xEE],
+        &[F | Z, 0x07, 0xB1],
+        &[F | Z, 0x07, 0x31, 0x80],
+        &[F | R, 0x80],
+        &[F],
+    ];
+
+    type HeadRead = Result<(bool, u64, Priority, ExtAdmission, usize), InboundParseError>;
+
+    /// What the one-pass reader makes of `wire`, whose first byte is a Frame's.
+    fn in_place(wire: &[u8]) -> HeadRead {
+        let (head, payload_at) =
+            parse_frame_in_place(wire).expect("the unit begins with a Frame")?;
+        Ok((
+            head.reliable,
+            head.sn,
+            head.priority(),
+            head.ext_admission(),
+            payload_at,
+        ))
+    }
+
+    /// What the document reads of the head in `wire`, and what the in-place chain is to keep of
+    /// the entries its walk yields: the reading the one-pass reader is held to.
+    fn by_the_document(wire: &[u8]) -> HeadRead {
+        let mut cursor = SceCursor::new(wire);
+        let view =
+            wz_codecs::transport_frame_header::TransportFrameHeaderView::decode(&mut cursor)?;
+        let carrier = ExtCarrier::Transport(F);
+        let mut refused = None;
+        let mut priority = Priority::DEFAULT;
+        for entry in crate::ext_view::walked(view.extensions.as_ref()) {
+            if refused.is_none()
+                && crate::ext_admit::judge_ext_chain(carrier, [entry.header]).is_refusal()
+            {
+                refused = Some(entry.header);
+            }
+            if crate::ext_header::ext_eid(entry.header)
+                == crate::ext_header::network_eid::TRANSPORT_QOS
+            {
+                priority = qos_priority_of_entry(&entry).unwrap_or(Priority::DEFAULT);
+            }
+        }
+        Ok((
+            (view.header & R) != 0,
+            view.sn,
+            priority,
+            crate::ext_admit::judge_ext_chain(carrier, refused),
+            wire.len() - cursor.remaining(),
+        ))
+    }
+
+    /// Turned red by a reader that reads a field out of the document's order, refuses a head with
+    /// another error, stops the chain at another entry, or keeps another entry's QoS.
+    #[test]
+    fn the_frame_head_read_in_one_pass_is_the_documents_reading() {
+        for wire in WIRES {
+            assert_eq!(
+                in_place(wire),
+                by_the_document(wire),
+                "the head of {wire:02x?}"
+            );
+        }
+    }
+
+    /// The cases above are not all read alike: a chain cut short is refused, a head with no chain
+    /// is read, and of two QoS entries the later one holds. Turned red by a reader that refuses
+    /// nothing or keeps the first QoS entry.
+    #[test]
+    fn the_one_pass_reader_refuses_a_cut_chain_and_keeps_the_last_qos() {
+        assert!(in_place(&[F | Z, 0x07, 0xB1]).is_err(), "a chain cut short");
+        assert_eq!(in_place(&[F | R, 0x07, 0xEE]).map(|read| read.4), Ok(2));
+        assert_eq!(
+            in_place(&[F | Z, 0x07, 0xB1, 0x02, 0x31, 0x06]).map(|read| read.2),
+            Ok(Priority::from_wire(0x06))
+        );
+    }
+
+    /// What the document reads of the head in `wire`, its chain kept as the owned decode keeps the
+    /// entries the document's walk yields: the reading the owned form is held to.
+    #[cfg(feature = "alloc")]
+    fn owned_by_the_document(
+        wire: &[u8],
+    ) -> Result<(bool, u64, Vec<ExtEntryOwned>, usize), InboundParseError> {
+        let mut cursor = SceCursor::new(wire);
+        let view =
+            wz_codecs::transport_frame_header::TransportFrameHeaderView::decode(&mut cursor)?;
+        let entries = crate::ext_view::walked(view.extensions.as_ref());
+        let chain = crate::ext_chain::collect_ext_chain(entries)?;
+        Ok((
+            (view.header & R) != 0,
+            view.sn,
+            chain,
+            wire.len() - cursor.remaining(),
+        ))
+    }
+
+    /// The owned form reads the same chain as the document's walk keeps it, and refuses what the
+    /// document refuses with the document's error. Turned red by an owned read that keeps an entry
+    /// the document did not check, or stops elsewhere.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn the_owned_chain_is_the_documents_chain() {
+        for wire in WIRES {
+            let ours = decode_frame_head::<Vec<ExtEntryOwned>>(wire)
+                .map(|(head, payload_at)| (head.reliable, head.sn, head.chain, payload_at));
+            assert_eq!(ours, owned_by_the_document(wire), "the head of {wire:02x?}");
+        }
+    }
+
+    /// What the fragment header's document reads of the head in `wire`, and what the in-place chain
+    /// is to keep of the entries its walk yields.
+    #[cfg(feature = "reassembly")]
+    fn fragment_by_the_document(wire: &[u8]) -> Result<FragmentRead, InboundParseError> {
+        let mut cursor = SceCursor::new(wire);
+        let view =
+            wz_codecs::transport_fragment_header::TransportFragmentHeaderView::decode(&mut cursor)?;
+        let mut markers = crate::extfragment::FragmentMarkers::NONE;
+        let mut priority = Priority::DEFAULT;
+        for entry in crate::ext_view::walked(view.extensions.as_ref()) {
+            markers = markers.with_header(entry.header);
+            if crate::ext_header::ext_eid(entry.header)
+                == crate::ext_header::network_eid::TRANSPORT_QOS
+            {
+                priority = qos_priority_of_entry(&entry).unwrap_or(Priority::DEFAULT);
+            }
+        }
+        Ok(FragmentRead {
+            reliable: (view.header & wire_const::FLAG_T_FRAGMENT_R) != 0,
+            sn: view.sn,
+            more: (view.header & wire_const::FLAG_T_FRAGMENT_M) != 0,
+            priority,
+            markers,
+            payload_at: wire.len() - cursor.remaining(),
+        })
+    }
+
+    /// What a Fragment's head is read as, field by field.
+    #[cfg(feature = "reassembly")]
+    #[derive(Debug, PartialEq)]
+    struct FragmentRead {
+        reliable: bool,
+        sn: u64,
+        more: bool,
+        priority: Priority,
+        markers: crate::extfragment::FragmentMarkers,
+        payload_at: usize,
+    }
+
+    /// What the one-pass reader makes of `wire`, whose first byte is a Fragment's.
+    #[cfg(feature = "reassembly")]
+    fn fragment_in_place(wire: &[u8]) -> Result<FragmentRead, InboundParseError> {
+        let (head, payload_at) =
+            parse_fragment_in_place(wire).expect("the unit begins with a Fragment")?;
+        Ok(FragmentRead {
+            reliable: head.reliable,
+            sn: head.sn,
+            more: head.more,
+            priority: head.priority(),
+            markers: head.markers(),
+            payload_at,
+        })
+    }
+
+    /// A Fragment's head is read by the same chain reader: its flags, SN, payload offset and the
+    /// fold of its chain are the document's. Turned red by a fragment head read with the Frame's
+    /// flags, or a chain whose markers or priority are folded from another entry.
+    #[cfg(feature = "reassembly")]
+    #[test]
+    fn the_fragment_head_read_in_one_pass_is_the_documents_reading() {
+        const G: u8 = wire_const::T_MID_FRAGMENT;
+        const M: u8 = wire_const::FLAG_T_FRAGMENT_M;
+        let wires: [&[u8]; 5] = [
+            &[G | M, 0x07, 0xEE],
+            &[G | Z, 0x07, 0xB1, 0x05, 0x03, 0xEE],
+            &[G | M | Z, 0x80, 0x01, 0x82, 0x31, 0x01],
+            &[G | Z, 0x07, 0xB1],
+            &[G],
+        ];
+        for wire in wires {
+            assert_eq!(
+                fragment_in_place(wire),
+                fragment_by_the_document(wire),
+                "the head of {wire:02x?}"
+            );
+        }
     }
 }
