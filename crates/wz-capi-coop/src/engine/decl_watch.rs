@@ -169,10 +169,16 @@ struct Cell {
 }
 
 impl Cell {
-    /// The cell of a row that holds no watch, its lock made where it stays.
+    /// The cell of a row that holds no watch, its lock made where it stays. A new count is the
+    /// only one, so its place is always this count's; were it not, the cell is made and moved in
+    /// whole, its lock unused until then, rather than the open stopping.
     fn empty() -> Arc<Self> {
         let mut cell = Arc::<Self>::new_uninit();
-        let place = Arc::get_mut(&mut cell).expect("a new cell has no other holder");
+        let Some(place) = Arc::get_mut(&mut cell) else {
+            return Arc::new(Self {
+                slot: Mutex::new(Slot::default()),
+            });
+        };
         // SAFETY: the cell's place is this count's alone, valid for writes of a cell, and stays
         // where it is until the cell is dropped there.
         unsafe {
@@ -760,7 +766,16 @@ impl DeclWatches {
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
     fn holding(watches: usize, round: &PlacedRef<Round>) -> Self {
         let mut shared = Arc::<Shared>::new_uninit();
-        let place = Arc::get_mut(&mut shared).expect("a new table has no other holder");
+        // A new count is the only one; were it not, the table is made and moved in whole, as
+        // `Cell::empty` makes a cell.
+        let Some(place) = Arc::get_mut(&mut shared) else {
+            return Self {
+                shared: Arc::new(Shared {
+                    table: Mutex::new(Table::holding(watches)),
+                    round: *round,
+                }),
+            };
+        };
         let at = place.as_mut_ptr();
         // SAFETY: the place is this count's alone, valid for writes of the shared table, and
         // stays where it is until it is dropped there; each field is written once.
