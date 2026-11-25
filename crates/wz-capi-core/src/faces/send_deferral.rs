@@ -112,8 +112,13 @@ impl SendDeferral for UnderTheRegistry {
 /// Give the session of a face the registry sends to under its lock the deferral that keeps every
 /// wait for room out of that lock. Called before the registry sends the face anything.
 pub(super) fn defer_under_the_registry(actions: &Arc<SessionLinkActions>) {
-    let sender: Weak<dyn DeferredSender> = Arc::downgrade(actions);
-    actions.install_send_deferral(Box::new(UnderTheRegistry { sender }));
+    // Unsized before it is downgraded: `Arc::downgrade` takes `&Arc<T>` and answers `Weak<T>`,
+    // so a `Weak<dyn DeferredSender>` asked of it directly makes `T` the trait object, and a
+    // reference to the session's `Arc` is no `&Arc<dyn DeferredSender>`.
+    let session: Arc<dyn DeferredSender> = actions.clone();
+    actions.install_send_deferral(Box::new(UnderTheRegistry {
+        sender: Arc::downgrade(&session),
+    }));
 }
 
 /// [`defer_under_the_registry`] for the producer of a group the registry sends to under its
