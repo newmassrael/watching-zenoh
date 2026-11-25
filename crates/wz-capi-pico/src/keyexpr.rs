@@ -305,11 +305,28 @@ impl WireDeclaration {
     /// as it can.
     fn lent(shared: &crate::session::EngineHold, own: OwnKey) -> Result<Self, ZResult> {
         let named = own.named_hold();
-        let hold = named.share(crate::session::EngineHold::as_ref(shared));
+        let held = Self::held(shared, &named, own.prefix_len);
         // The record's own hold: it gives it back itself, so naming it gives nothing back.
         named.outlived_its_session();
-        let hold = hold.ok_or(crate::result::Z_ERR_OVERFLOW)?;
-        Ok(Self::taken(shared, hold, own.prefix_len))
+        held
+    }
+
+    /// One more holder of the declaration `hold` names, taken of `shared`, the session it is on,
+    /// covering `prefix_len` bytes of the key: refused with pico's code for a count past its bound
+    /// (`vendor/zenoh-pico/src/collections/refcount.c` @ `_Z_ERROR_RETURN(_Z_ERR_OVERFLOW);`) when
+    /// the count holds as many holders as it can, as a copy that held nothing would name a
+    /// declaration its last counted holder's going retracts. Out of line: a copy of a kept key and
+    /// a copy of an entity's lent key each carried the count's share.
+    #[inline(never)]
+    fn held(
+        shared: &crate::session::EngineHold,
+        hold: &KeyHold,
+        prefix_len: usize,
+    ) -> Result<Self, ZResult> {
+        let hold = hold
+            .share(crate::session::EngineHold::as_ref(shared))
+            .ok_or(crate::result::Z_ERR_OVERFLOW)?;
+        Ok(Self::taken(shared, hold, prefix_len))
     }
 
     /// The hold the caller took of `shared`, covering `prefix_len` bytes of the key.
@@ -349,20 +366,37 @@ impl WireDeclaration {
     /// `_Z_ERROR_RETURN(_Z_ERR_OVERFLOW);`) when the count holds as many as it can: a copy that held
     /// nothing would name a declaration its last counted holder's going retracts.
     fn share(&self) -> Result<Self, ZResult> {
-        let hold = match self.session.upgrade() {
-            Some(engine) => self
-                .hold
-                .share(crate::session::EngineHold::as_ref(&engine))
-                .ok_or(crate::result::Z_ERR_OVERFLOW)?,
+        match self.session.upgrade() {
+            Some(engine) => Self::held(&engine, &self.hold, self.prefix_len),
             // A session that is gone counts nothing: the copy gives nothing back either.
-            None => self.hold.unheld(),
-        };
-        Ok(Self {
-            // A copy where the session is held by a handle that is `Copy`, a count where by an `Arc`.
-            session: Clone::clone(&self.session),
-            hold: ManuallyDrop::new(hold),
-            prefix_len: self.prefix_len,
-        })
+            None => Ok(Self {
+                // A copy where the session is held by a handle that is `Copy`, a count where by
+                // an `Arc`.
+                session: Clone::clone(&self.session),
+                hold: ManuallyDrop::new(self.hold.unheld()),
+                prefix_len: self.prefix_len,
+            }),
+        }
+    }
+}
+
+/// The declaration a key made of another holds one more hold of, when the new key still begins with
+/// the bytes it covers ([`DeclaredKeyexpr::kept_with`]).
+enum Covering<'a> {
+    /// A kept key's declaration ([`WireDeclaration::share`]).
+    Kept(&'a WireDeclaration),
+    /// The declaration the session's record of an entity on `shared` holds
+    /// ([`WireDeclaration::lent`]).
+    Lent(&'a crate::session::EngineHold, OwnKey),
+}
+
+impl Covering<'_> {
+    /// How many bytes of the key the declaration covers.
+    fn prefix_len(&self) -> usize {
+        match self {
+            Self::Kept(declaration) => declaration.prefix_len,
+            Self::Lent(_, own) => own.prefix_len,
+        }
     }
 }
 
@@ -451,13 +485,18 @@ impl KeyText {
         self.key.as_str()
     }
 
-    /// `text` kept where this key's text is: in the same session's key arena when this is a block
-    /// of one, refused as [`Self::of_session`] refuses; a copy of its own otherwise.
-    pub(crate) fn beside(&self, text: &str) -> Result<Self, ZResult> {
-        match &*self.engine {
+    /// `text` kept for an object of `engine`'s session ([`Self::of_session`]), or a copy of its own
+    /// for an object of none ([`Self::owned`]); refused as those refuse it.
+    fn kept_for(engine: Option<&crate::session::EngineHold>, text: &str) -> Result<Self, ZResult> {
+        match engine {
             Some(engine) => Self::of_session(engine, text),
             None => Self::owned(text),
         }
+    }
+
+    /// The session whose key arena holds the text, `None` for a copy of its own.
+    fn engine(&self) -> Option<&crate::session::EngineHold> {
+        (*self.engine).as_ref()
     }
 
     /// Another holder of the same text: one more holder of the block for a key of the arena, a
@@ -574,20 +613,48 @@ impl DeclaredKeyexpr {
     /// `literal` still begins with the bytes of `named` it covers, as [`Self::extended`] keeps
     /// one. The hold is one more of the declaration's count, taken at its row
     /// ([`WireDeclaration::lent`]). Refused as the text and the hold are.
+    #[cfg(feature = "advanced")]
     pub(crate) fn of_record(
         shared: &crate::session::EngineHold,
         own: Option<OwnKey>,
         named: &str,
         literal: &str,
     ) -> Result<Self, ZResult> {
+        Self::kept_with(
+            Some(shared),
+            named,
+            literal,
+            own.map(|own| Covering::Lent(shared, own)),
+        )
+    }
+
+    /// `literal` kept for an object of `engine`'s session, or as a copy of its own for none
+    /// ([`KeyText::kept_for`]), holding the declaration `covering` names while `literal` still
+    /// begins with the bytes of `named` it covers: one more holder of a kept key's declaration
+    /// ([`WireDeclaration::share`]) or of the one the session's record of an entity holds
+    /// ([`WireDeclaration::lent`]). Refused as the text and the hold are.
+    ///
+    /// Out of line: a copy and a concatenation of every kind of loan, and an advanced entity's
+    /// keys, end here, and each carried its own copy of the text's keeping and the hold's share.
+    #[inline(never)]
+    fn kept_with(
+        engine: Option<&crate::session::EngineHold>,
+        named: &str,
+        literal: &str,
+        covering: Option<Covering<'_>>,
+    ) -> Result<Self, ZResult> {
         // The text is kept first: a refusal then has no hold of the declaration to let go of.
-        let text = KeyText::of_session(shared, literal)?;
-        let declaration = own
-            .filter(|own| {
-                literal.get(..own.prefix_len).is_some()
-                    && literal.get(..own.prefix_len) == named.get(..own.prefix_len)
+        let text = KeyText::kept_for(engine, literal)?;
+        let declaration = covering
+            .filter(|covering| {
+                let prefix_len = covering.prefix_len();
+                literal.get(..prefix_len).is_some()
+                    && literal.get(..prefix_len) == named.get(..prefix_len)
             })
-            .map(|own| WireDeclaration::lent(shared, own))
+            .map(|covering| match covering {
+                Covering::Kept(declaration) => declaration.share(),
+                Covering::Lent(shared, own) => WireDeclaration::lent(shared, own),
+            })
             .transpose()?;
         Ok(Self {
             literal: text,
@@ -638,7 +705,7 @@ impl DeclaredKeyexpr {
     /// rewrite the seam, and a declaration naming bytes the key no longer
     /// starts with would put the wrong key on the wire.
     ///
-    /// The new literal is kept where this key's is ([`KeyText::beside`]), and refused as that
+    /// The new literal is kept where this key's is ([`KeyText::kept_for`]), and refused as that
     /// refuses it.
     pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
         // The key's own text, as a copy names it (`z_keyexpr_clone`): one more holder of the
@@ -646,21 +713,12 @@ impl DeclaredKeyexpr {
         if core::ptr::eq(literal, self.literal()) {
             return self.share();
         }
-        // The text is kept first: a refusal then has no hold of the declaration to let go of.
-        let kept = self.literal.beside(literal)?;
-        let declaration = self
-            .declaration
-            .as_ref()
-            .filter(|d| {
-                literal.get(..d.prefix_len).is_some()
-                    && literal.get(..d.prefix_len) == self.literal().get(..d.prefix_len)
-            })
-            .map(WireDeclaration::share)
-            .transpose()?;
-        Ok(Self {
-            literal: kept,
-            declaration,
-        })
+        Self::kept_with(
+            self.literal.engine(),
+            self.literal(),
+            literal,
+            self.declaration.as_ref().map(Covering::Kept),
+        )
     }
 
     fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
@@ -1672,7 +1730,7 @@ pub unsafe extern "C" fn z_keyexpr_concat(
 /// plain literal otherwise. Refused as [`DeclaredKeyexpr::extended`] refuses.
 ///
 /// Out of line: the clone door and the canonizing body both end here, and each carried its own
-/// read of the kinds of a loan and its own copy of a record's key ([`DeclaredKeyexpr::of_record`]).
+/// read of the kinds of a loan, so each kind is one call of [`DeclaredKeyexpr::kept_with`].
 ///
 /// # Safety
 /// `left` must be null or a live loaned keyexpr.
@@ -1683,10 +1741,13 @@ unsafe fn extended_from(
 ) -> Result<DeclaredKeyexpr, ZResult> {
     match lent_of(left) {
         LentKey::Kept(declared) => declared.extended(literal),
-        LentKey::Record(session, own) => {
-            DeclaredKeyexpr::of_record(session, own, keyexpr_str(left).unwrap_or_default(), literal)
-        }
-        LentKey::View => DeclaredKeyexpr::literal_only(literal),
+        LentKey::Record(session, own) => DeclaredKeyexpr::kept_with(
+            Some(session),
+            keyexpr_str(left).unwrap_or_default(),
+            literal,
+            own.map(|own| Covering::Lent(session, own)),
+        ),
+        LentKey::View => DeclaredKeyexpr::kept_with(None, "", literal, None),
     }
 }
 
