@@ -1318,33 +1318,30 @@ jobs:
   # package a release ships is uploaded with the symbols of both builds (the PDB beside each DLL)
   # whatever those readings say, and a size red can be read function by function from the same run.
   #
-  # The rows `nostd` are the package a release ships (owner, 2026-11-23, docs/c-abi-engine-and-memory.md
-  # E7, and the release workflow's `windows-packages`, which runs the same action on the same rows):
-  # the DLL built without `std` (`os-windows` over the system's own calls, P4), in the one form, the
-  # examples and the check program compiled against it and run, the sizes of the size gate's
-  # client in both forms printed (`pico-client-coop-windows`, `pico-client-coop-nostd-windows`),
-  # which only a Windows host can read, and the release DLL held under zenoh-pico built as the
-  # same build in the same job, by its width's row of `deploy/pico_host_ceiling.json`
-  # (`pico-release-windows-x64`, `pico-release-windows-x86`; docs/upstream-parity.md D9). The
-  # rows `std` are the library with the host's standard library, kept to compare and measure
-  # against, in both forms: `single`, the one DLL, and `split`,
-  # the core and the additional library built apart from the same feature list
-  # (docs/capi-pico-additional-library.md), whose programs link both import libraries; the split form
-  # has no row without `std` because its additional library has no form without it. The examples and
-  # the check program are the same for every row, so each passing them is every form doing what one
-  # program asks of it alike.
+  # Every DLL is the C library without `std` (docs/win-budget/std-heap.md, S1: `os-host` over the
+  # system's own calls), the only form it has. The rows `single` are the package a release ships
+  # (owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7, and the release workflow's
+  # `windows-packages`, which runs the same action on the same rows): the one DLL, the examples and
+  # the check program compiled against it and run, the sizes of the size gate's client printed
+  # (`pico-client-coop-nostd-windows`), which only a Windows host can read, and the release DLL held
+  # under zenoh-pico built as the same build in the same job, by its width's row of
+  # `deploy/pico_host_ceiling.json` (`pico-release-windows-x64`, `pico-release-windows-x86`;
+  # docs/upstream-parity.md D9). The rows `split` are the core and the additional library built
+  # apart from the same feature list (docs/capi-pico-additional-library.md), whose programs link both
+  # import libraries; no release carries them. The examples and the check program are the same for
+  # every row, so each passing them is every form doing what one program asks of it alike.
   #
   # Every row is a GATE: a red here fails the run, as a package no longer builds or a program compiled
-  # against it no longer holds its checks. The `std` rows became one when two consecutive hosted runs
-  # read every row green, each with every verdict line of its test PASS (Platform runs 44891883427 and
-  # 44895098014, from the job logs). The `nostd` rows are one because they are what a release ships:
+  # against it no longer holds its checks. The `split` rows keep the verdict the rows with `std` held
+  # once two consecutive hosted runs read every row green, each with every verdict line of its test
+  # PASS (Platform runs 44891883427 and 44895098014, from the job logs). The `single` rows are one because they are what a release ships:
   # a release run fails on the same red, so the lane that reads every push holds them to the same
   # verdict rather than observing a form the release already judges.
   #
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
   package-windows:
-    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} ${{ matrix.stdlib }} (windows-latest)
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
@@ -1353,10 +1350,6 @@ jobs:
       matrix:
         arch: [x64, x86]
         form: [single, split]
-        stdlib: [nostd, std]
-        exclude:
-          - form: split
-            stdlib: nostd
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -1371,24 +1364,22 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
-          stdlib: ${{ matrix.stdlib }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}-${{ matrix.stdlib }}
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
           path: |
             ${{ steps.package.outputs.directory }}/*.zip
             ${{ steps.package.outputs.directory }}/*.zip.sha256
           if-no-files-found: error
           retention-days: 7
 
-      # The size gate's client in both forms, for this width: the DLL's sizes read from its own
-      # section table, and the ratio of the form without `std` to the one with it. Printed, gating
-      # nothing yet; after the package's test and its upload, so a measurement never stands in for
+      # The size gate's client, for this width: the DLL's sizes read from its own section table.
+      # Printed, gating nothing yet; after the package's test and its upload, so a measurement never stands in for
       # the test and a failing one never keeps the package from being uploaded.
-      - name: the sizes of the client with and without std (printed)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+      - name: the sizes of the client (printed)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
         shell: bash
         env:
           WZ_PACKAGE_ARCH: ${{ matrix.arch }}
@@ -1400,7 +1391,7 @@ jobs:
       # Windows host given the same plan by hand builds it; the judge reads both DLLs and grades the
       # ratio. A finding, an unfilled row or a ratio over its ratchet fails the step.
       - name: the release DLL against zenoh-pico built as the same build, held to its ceiling row (gated)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
         shell: bash
         env:
           WZ_PACKAGE_ARCH: ${{ matrix.arch }}
@@ -1429,7 +1420,7 @@ jobs:
       # on (the judge holds it). It runs whatever the step above found, so a red release row still
       # reads the rows that say where the bytes are; a reading the step above did not leave fails it.
       - name: the release DLL's zenoh-pico features and each door over them, held to their ceiling rows (gated)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
         shell: bash
         env:
           WZ_PACKAGE_ARCH: ${{ matrix.arch }}
@@ -1500,7 +1491,7 @@ jobs:
       - name: Download the release package of this width
         uses: actions/download-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-single-nostd
+          name: pico-windows-package-${{ matrix.arch }}-single
           path: ${{ runner.temp }}/pico-package
 
       - name: zenoh-pico's own programs on the release DLL (observed)

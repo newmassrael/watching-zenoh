@@ -522,7 +522,7 @@ the single library without `std`, the form a release ships: `docs/c-abi-engine-a
 
 ```sh
 out=target/perf-win; mkdir -p "$out"
-gh run download <platform run id> -n pico-windows-package-x64-single-nostd -D "$out"
+gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
 zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
 python3 scripts/host-bench/perf_matrix.py windows-plan "$zip" "$out/plan.json"
 git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD

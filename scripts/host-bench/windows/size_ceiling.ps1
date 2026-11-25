@@ -31,7 +31,7 @@ host reached over ssh (its shell cmd); the package is the package-windows artifa
 Platform run, the single library without std of the width (x86 alike, with its artifact):
 
   out=target/size-win; mkdir -p "$out"
-  gh run download <platform run id> -n pico-windows-package-x64-single-nostd -D "$out"
+  gh run download <platform run id> -n pico-windows-package-x64-single -D "$out"
   zip="$(ls "$out"/wz-capi-pico-*-windows-x64-*.zip)"
   python3 scripts/lib/pico_windows_package.py --size-plan "$zip" "$out/plan.json"
   git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$PWD/$out/zenoh-pico.zip" HEAD

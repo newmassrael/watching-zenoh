@@ -3034,8 +3034,8 @@ def cmd_selftest() -> int:
            inherits_from("b", "a", chain) and inherits_from("a", "a", chain)
            and not inherits_from("d", "a", chain) and not inherits_from("release", "a", chain)
            and chain["c"] == {"inherits": '"a"'})
-    expect("the Windows lane builds its packages and its client with std by the same profile",
-           pico_windows_package.SHIP_PROFILE == SHIP_PROFILE)
+    expect("the Windows lane builds its packages and its client with the C library's configuration",
+           pico_windows_package.NOSTD_CONFIG == NOSTD_CONFIG)
     # THE PICO CEILING (D9): synthetic readings against each kind of row, and the committed table.
     def rd(wz: int, pico: int, date: str = "2026-11-21", tc: str = "cc 1") -> dict:
         return ceiling_reading(wz, pico, "e1ab223a28aa", tc, date)

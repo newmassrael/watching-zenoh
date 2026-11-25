@@ -11,13 +11,12 @@
 # The profile is fixed here, not an input: the package a release ships is the one the Platform lane
 # tests. Composite steps take no `timeout-minutes`, so the caller's job timeout bounds the build.
 #
-# `stdlib` names the standard library the DLL is built with: `nostd` (the default, and the form a
-# release ships: owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7), the library without it over
-# the system's own calls (`os-windows`, P4), which is made in the one form; or `std`, the host's,
-# built to compare and measure against and carried by no release. The sizes the Platform lane reads
-# from a package (the size gate's client in both forms, and the release DLL under zenoh-pico built
-# as the same build) are its job's own steps after the upload, so a package that passed its test is
-# uploaded with its symbols even when a size reading of it fails.
+# The DLL is the C library without `std` (docs/win-budget/std-heap.md, S1), over the system's own
+# calls (`os-host`), the only form it has and the one a release ships (owner, 2026-11-23,
+# docs/c-abi-engine-and-memory.md E7). The sizes the Platform lane reads from a package (the size
+# gate's client, and the release DLL under zenoh-pico built as the same build) are its job's own
+# steps after the upload, so a package that passed its test is uploaded with its symbols even when a
+# size reading of it fails.
 name: pico library Windows package
 description: Build the pico C ABI library's Windows package of one width and form, then test its zip
 inputs:
@@ -27,10 +26,6 @@ inputs:
   form:
     description: The form of the library (`single` or `split`), as `pico_windows_package.py --form` takes it
     required: true
-  stdlib:
-    description: The standard library the DLL is built with (`nostd` or `std`), as `pico_windows_package.py --stdlib` takes it
-    required: false
-    default: nostd
 outputs:
   directory:
     description: The directory holding the package's zip and its `.zip.sha256`
@@ -44,8 +39,7 @@ runs:
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
-        WZ_PACKAGE_STDLIB: ${{ inputs.stdlib }}
-      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}-${WZ_PACKAGE_STDLIB}" >> "$GITHUB_OUTPUT"
+      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust toolchain (pinned by rust-toolchain.toml)
       shell: bash
@@ -76,22 +70,20 @@ runs:
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
-        WZ_PACKAGE_STDLIB: ${{ inputs.stdlib }}
         WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
-      run: python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" --profile host-peer-ext --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM" --stdlib "$WZ_PACKAGE_STDLIB"
+      run: python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" --profile host-peer-ext --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM"
 
     - name: the package's regression test (its zip, extracted, verified, compiled against and run)
       shell: bash
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
-        WZ_PACKAGE_STDLIB: ${{ inputs.stdlib }}
         WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
       run: |
         out="$(cygpath -u "$WZ_PACKAGE_OUT")"
         set -- "$out"/*-windows-"$WZ_PACKAGE_ARCH"-*.zip
         if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-          echo "pico-package-test on Windows $WZ_PACKAGE_ARCH $WZ_PACKAGE_FORM $WZ_PACKAGE_STDLIB: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "pico-package-test on Windows $WZ_PACKAGE_ARCH $WZ_PACKAGE_FORM: the build left no single zip in $out: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
           exit 1
         fi
         python scripts/lib/pico_windows_package.py --test "$(cygpath -w "$1")"
