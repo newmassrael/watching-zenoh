@@ -85,15 +85,19 @@ fn vle(buf: &[u8], at: &mut usize) -> Option<u64> {
 }
 
 /// [`vle`] for a number that is not one byte, or a buffer that ends.
+///
+/// The loop ends on the bytes it reads, not on a count, so it is one loop in the image and not
+/// nine copies of its body.
 #[inline(never)]
 fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
     let mut value: u64 = 0;
-    // Seven times the step, so at most 56: every shift is below the width of a `u64`.
+    // Seven bits a byte, so the ninth byte is the one at a shift of 56, which is below the width
+    // of a `u64` as every shift here is.
     let mut shift: u32 = 0;
-    for step in 0..9 {
+    loop {
         let byte = *buf.get(*at)?;
         *at = at.saturating_add(1);
-        if step == 8 {
+        if shift == 56 {
             return Some(value | u64::from(byte).wrapping_shl(shift));
         }
         value |= u64::from(byte & 0x7f).wrapping_shl(shift);
@@ -102,7 +106,6 @@ fn vle_long(buf: &[u8], at: &mut usize) -> Option<u64> {
         }
         shift = shift.saturating_add(7);
     }
-    None
 }
 
 /// Read a key's id at `*at`, advancing it: a VLE of an `ExprId` in at most three
@@ -183,6 +186,11 @@ fn read_plain_put_after(buf: &[u8], at: usize, known_utf8: Option<&[u8]>) -> Opt
     let id = vle_expr_id(buf, &mut cursor)?;
     let suffix = if header & FLAG_N != 0 {
         let length = usize::try_from(vle(buf, &mut cursor)?).ok()?;
+        // The codec refuses a suffix longer than a key holds (`LengthOutOfRange`); this reader
+        // does not accept it.
+        if length > usize::from(u16::MAX) {
+            return None;
+        }
         let end = cursor.checked_add(length)?;
         let bytes = buf.get(cursor..end)?;
         // The codec refuses a suffix that is not UTF-8; this reader does not accept it.
@@ -570,6 +578,29 @@ mod tests {
         let truncated = &plain[..plain.len() - 1];
         assert!(read_plain_put(truncated, 0).is_none());
         assert!(read_plain_put(&[], 0).is_none());
+    }
+
+    /// A suffix as long as a key holds reads, and one byte longer is declined here as the codec
+    /// refuses it (`LengthOutOfRange`): a reader that took it would hand on a key the codec
+    /// never delivers.
+    #[test]
+    fn a_suffix_longer_than_a_key_holds_is_declined_as_the_codec_refuses_it() {
+        let record = |length: usize, vle: &[u8]| {
+            // Push with `N`: the literal key, whole in the suffix.
+            let mut out = alloc::vec![0x3du8, 0];
+            out.extend_from_slice(vle);
+            out.resize(out.len() + length, b'a');
+            out.extend_from_slice(&[PLAIN_PUT_HEADER, 1, b'x']);
+            out
+        };
+        let longest = record(65_535, &[0xff, 0xff, 0x03]);
+        let (plain, end) = read_plain_put(&longest, 0).expect("the longest suffix reads");
+        assert_eq!((plain.suffix, end), (Some((5, 5 + 65_535)), longest.len()));
+        assert!(through_the_codec(&longest).is_some());
+
+        let longer = record(65_536, &[0x80, 0x80, 0x04]);
+        assert!(read_plain_put(&longer, 0).is_none());
+        assert!(through_the_codec(&longer).is_none());
     }
 
     /// The widest id an `ExprId` holds reads, and the next one is declined here and refused
