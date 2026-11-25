@@ -290,11 +290,11 @@ fn a_face_lost_is_told_to_a_watcher_of_its_rows_with_nothing_allocated() {
 
 /// A session watched only after its open, whose faces turn over past the rows its queue holds
 /// between two deliveries, tells its watcher the rows it kept and, once, how many it lost, with no
-/// memory of the heap: the rows were reserved at the open, and a row past them is counted on the
-/// last row kept rather than grown into. The watch itself takes its own entry in the list of
-/// watchers and nothing for the queue. Turned red by rows reserved with the first watch (the watch
-/// allocates them too), by a queue that grows past its room (an allocation, and every row told),
-/// or by a loss told with no row or with two.
+/// memory of the heap: the rows lie in the plane placed at the open, and a row past them is
+/// counted on the last row kept rather than grown into. The watch takes a row of the plane's table
+/// of watchers and nothing of the heap. Turned red by a watch that allocates its entry or the
+/// queue's rows, by a queue that grows past its room (an allocation, and every row told), or by a
+/// loss told with no row or with two.
 #[cfg(feature = "connectivity")]
 #[test]
 fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_nothing_allocated() {
@@ -337,8 +337,8 @@ fn rows_past_the_room_of_a_session_watched_after_its_open_are_told_lost_with_not
         );
     });
     assert_eq!(
-        watching, 1,
-        "the watch takes its entry in the list of watchers and nothing for the queue"
+        watching, 0,
+        "the watch takes a row of the plane's table of watchers and nothing of the heap"
     );
 
     let row = |first: u8| FaceLinkRow {

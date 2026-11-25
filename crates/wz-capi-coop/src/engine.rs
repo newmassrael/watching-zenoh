@@ -4582,18 +4582,15 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             moves.watch(wake.waker.clone());
             Some(wake)
         });
-        // No watcher yet: the queue's rows are reserved now, so a program that watches after the
-        // open is told its faces with nothing allocated. The plane lies in the row the plan laid
-        // out for it (`ArenaPlan::holding_planes`).
+        // No watcher yet: the plane holds its watchers and its rows itself, so a program that
+        // watches after the open is told its faces with nothing allocated. The plane is built in
+        // the row the plan laid out for it (`ArenaPlan::holding_planes`), never in this frame.
         #[cfg(feature = "connectivity")]
-        let watchers = lent
-            .arena
-            .arena_mut()
-            .place(FacePlane::with_room(face_event_rows(
-                config.max_faces,
-                config.groups.len(),
-            )))
-            .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
+        let watchers = FacePlane::place_in(
+            lent.arena.arena_mut(),
+            face_event_rows(config.max_faces, config.groups.len()),
+        )
+        .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?;
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
         // after its open is admitted in place. The admission lies in the row the plan laid out for
         // it (`ArenaPlan::holding_admission`); its rows are the heap's, and a heap that refuses them
@@ -7269,7 +7266,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         if SessionEngine::is_closed(self) {
             return Err(Declined::Closed);
         }
-        Ok(self.faces.watch(sink))
+        // A refused sink is let go of here, with the plane's lock let go of.
+        self.faces.watch(sink).map_err(|_| Declined::TableFull)
     }
 
     #[cfg(feature = "connectivity")]
