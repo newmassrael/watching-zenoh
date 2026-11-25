@@ -558,6 +558,12 @@ impl Default for AuthDispatch {
 /// Find the sub-ext whose id matches `id` in a demuxed inner chain (the
 /// `ztake!` analogue), projected to an [`AuthSubExt`]. `None` when the peer sent
 /// no sub-ext for that id (or one in an encoding this kernel does not carry).
+///
+/// The first entry and not the last, unlike every other reader of a received
+/// chain: the methods' own chain is not a decoder's chain of assignments but a
+/// list upstream takes from by id, the first match
+/// (`io/zenoh-transport/src/unicast/establishment/ext/auth/mod.rs` @
+/// `.position(|x| x.id & iext::ID_MASK == $id)`).
 fn find_method_sub_ext(entries: &[ExtEntryOwned], id: u8) -> Option<AuthSubExt> {
     entries
         .iter()
