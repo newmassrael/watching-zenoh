@@ -2314,15 +2314,6 @@ def original_features(original: str) -> list[str]:
     return features_for(decl, BASE_ABI[original], resolved_caps(decl, resolve([], original=original)))
 
 
-def original_env(original: str) -> list[str]:
-    """The other half of that build, which a feature list cannot carry: the `WZ_LIMIT_<NAME>=<n>` and
-    `WZ_POLICY_<NAME>=<value>` lines its defconfig sets, as --resolve-env prints a preset's. A
-    configuration the resolution refuses raises PresetError."""
-    decl = load_decl()
-    kconf = resolve([], original=original)
-    return resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf)
-
-
 def cargo_args_of(feats: list[str]) -> str:
     """The cargo arguments of a build of exactly `feats`."""
     return "--no-default-features" + (f" --features {','.join(feats)}" if feats else "")
@@ -4812,12 +4803,17 @@ def resolved_build(decl: dict, abi: str, kconf) -> tuple[list[str], list[str]]:
             resolved_limit_env(decl, kconf) + resolved_policy_env(decl, kconf))
 
 
-def build_of(decl: dict, abi: str, presets: list[pathlib.Path]) -> tuple[list[str], list[str]]:
-    """The build of `abi` the presets name (`resolved_build`), or with none the build of its
+def configuration_of(abi: str, presets: list[pathlib.Path]):
+    """The resolved configuration of the build of `abi` the presets name, or with none of its
     original's defconfig alone: a build that names no preset is the ABI's own preset, never the
-    host defaults of its limits."""
-    kconf = resolve(presets) if presets else resolve([], original=ORIGINAL_OF_ABI[abi])
-    return resolved_build(decl, abi, kconf)
+    host defaults of its limits. A caller that needs the feature list as well as the build reads
+    it from this same configuration (`resolved_features`)."""
+    return resolve(presets) if presets else resolve([], original=ORIGINAL_OF_ABI[abi])
+
+
+def build_of(decl: dict, abi: str, presets: list[pathlib.Path]) -> tuple[list[str], list[str]]:
+    """The build of `abi` the presets name (`resolved_build` of `configuration_of`)."""
+    return resolved_build(decl, abi, configuration_of(abi, presets))
 
 
 # The conformance statement of one build, in the

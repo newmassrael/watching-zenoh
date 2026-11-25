@@ -13045,8 +13045,11 @@ layer_c1cs_capability_cost() {
         c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
     fi
     _runci_legs_open C1cs || return 1
-    _runci_leg capability_cost_gate -- python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
-    _runci_leg size_ledger_gate -- python3 scripts/lib/size_ledger_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
+    # Each case is built under its ABI's own preset (`wz_config.build_of`), which the pinned Kconfig
+    # interpreter resolves.
+    _runci_leg kconfig -- bash scripts/provision-kconfiglib.sh
+    _runci_leg capability_cost_gate --after kconfig -- python3 scripts/lib/capability_cost_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
+    _runci_leg size_ledger_gate --after kconfig -- python3 scripts/lib/size_ledger_gate.py --check ${c1cs_shard_args[@]+"${c1cs_shard_args[@]}"}
     _runci_legs_close
 }
 
