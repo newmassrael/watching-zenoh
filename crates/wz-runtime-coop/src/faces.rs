@@ -40,7 +40,7 @@ use crate::session_drive::{
     LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial, SessionDatagramLink,
     SessionLinks, WaitOn,
 };
-use crate::sync::{AtSeat, FacePlace, HoldKind, Lend, LockKind, SeatOf, SeatTaken};
+use crate::sync::{AtSeat, FacePlace, HoldKind, Lend, LockKind, PlaceHold, SeatOf, SeatTaken};
 use crate::CoopLocalJoinHandle;
 use core::sync::atomic::{fence, AtomicU32, Ordering};
 
@@ -645,6 +645,9 @@ impl<K: HoldKind, P: SendParts> FaceSite<K, P> {
     /// What [`Self::send`]'s `Send` bounds keep is the caller's to keep while it holds the send:
     /// no handle on a cell of the link made from the send part outlives the send, and no handle
     /// made outside the parts is put into them.
+    // Out of line, as the send's drop is: every operation's hold of a face and every leg of a
+    // publish take the place through this one body.
+    #[inline(never)]
     pub unsafe fn hold_send(&self) -> Option<SiteSend<'_, K, P>> {
         // SAFETY: the place's seats are made by `Self::lend_seating` alone, each over `P::Tx`.
         let held = match unsafe { self.place.at_seat_of::<P::Tx>() } {
@@ -669,7 +672,7 @@ enum SendHeld<'a, K: HoldKind, P: SendParts> {
     /// Through the seat of the holder's step on this thread.
     Seat(SeatTaken<'a, P::Tx>),
     /// Through the parts, held, and let go of in the send's drop once the debts owed are paid.
-    Lent(ManuallyDrop<K::Hold<'a, Option<FaceHeld<P>>>>),
+    Lent(ManuallyDrop<PlaceHold<'a, K, FaceHeld<P>>>),
 }
 
 impl<K: HoldKind, P: SendParts> SiteSend<'_, K, P> {
@@ -690,6 +693,8 @@ impl<K: HoldKind, P: SendParts> SiteSend<'_, K, P> {
 }
 
 impl<K: HoldKind, P: SendParts> Drop for SiteSend<'_, K, P> {
+    // Out of line: every send held as a value lets the place go through this one body.
+    #[inline(never)]
     fn drop(&mut self) {
         if let SendHeld::Lent(held) = &mut self.held {
             let place: &mut Option<FaceHeld<P>> = held;
@@ -754,8 +759,9 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
     /// # Safety
     ///
     /// `site` lives, at the address it has now, for as long as the handle does. A read made
-    /// inside a lend of `site` finds the place held, on every kind
-    /// ([`crate::sync::Confined`]'s try included), and reads the link as quiet.
+    /// inside a lend of `site` finds the place held, on every kind (a kind whose own try cannot
+    /// see it has the lend marked in the place, [`FacePlace::try_lend`]), and reads the link as
+    /// quiet.
     pub unsafe fn new(
         site: &FaceSite<K, P>,
         end: E,
@@ -911,25 +917,58 @@ where
     type Session = <P::Wire as LendsSession>::Session;
 
     fn try_session<U: Send>(&self, f: impl FnOnce(&Self::Session) -> U + Send) -> Lend<U> {
-        let site = self.site();
-        // SAFETY: the place's seats are made by `FaceSite::lend_seating` alone, each over `P::Tx`.
-        match unsafe { site.place.at_seat_of::<P::Tx>() } {
-            AtSeat::Taken(mut taken) => {
-                P::wire_of(taken.tx()).map_or(Lend::Empty, |wire| wire.try_session(f))
+        let (mut f, mut answer) = (Some(f), None);
+        let lent = self.lend_wire(&mut |wire: &P::Wire| {
+            if let Some(f) = f.take() {
+                answer = Some(wire.try_session(f));
             }
-            AtSeat::InUse => Lend::Held,
-            AtSeat::None => match site
-                .try_lend(|held| held.lend(|parts| parts.wire().map(|wire| wire.try_session(f))))
-            {
-                Lend::Lent(Some(lent)) => lent,
-                Lend::Lent(None) | Lend::Empty => Lend::Empty,
-                Lend::Held => Lend::Held,
-            },
+        });
+        match (lent, answer) {
+            (Lend::Lent(()), Some(answer)) => answer,
+            (Lend::Held, _) => Lend::Held,
+            _ => Lend::Empty,
         }
     }
 
     fn owe(&self, debts: u32) {
         self.site().owe(debts);
+    }
+}
+
+impl<K: LockKind, P: SendParts, E: LinkEnd> FaceAt<K, P, E> {
+    /// `on` on the wire of the parts, reached as a send of this thread reaches it: through the
+    /// send part this thread seated ([`FaceSite::lend_seating`]), else by a try of the place that
+    /// waits for nothing. What the lend came to; `on` ran only where it is [`Lend::Lent`]. Out of
+    /// line, and handed `on` by reference, so every lend of the link's session a handle makes,
+    /// whatever its answer, goes through one body of the seat's look, the try and its pay.
+    #[inline(never)]
+    fn lend_wire(&self, on: &mut (dyn FnMut(&P::Wire) + Send)) -> Lend<()> {
+        let site = self.site();
+        // SAFETY: the place's seats are made by `FaceSite::lend_seating` alone, each over `P::Tx`.
+        match unsafe { site.place.at_seat_of::<P::Tx>() } {
+            AtSeat::Taken(mut taken) => match P::wire_of(taken.tx()) {
+                Some(wire) => {
+                    on(wire);
+                    Lend::Lent(())
+                }
+                None => Lend::Empty,
+            },
+            AtSeat::InUse => Lend::Held,
+            AtSeat::None => {
+                let lent = site.try_lend(|held| {
+                    held.lend(|parts| {
+                        let wire = parts.wire()?;
+                        on(wire);
+                        Some(())
+                    })
+                });
+                match lent {
+                    Lend::Lent(Some(())) => Lend::Lent(()),
+                    Lend::Lent(None) | Lend::Empty => Lend::Empty,
+                    Lend::Held => Lend::Held,
+                }
+            }
+        }
     }
 }
 
@@ -3325,7 +3364,8 @@ mod tests {
     /// keeps no close owed to it. Turned red by a handle that reads its end or its waits off the
     /// parts, reads an empty place as anything but quiet, or a close owed to an empty place told
     /// to the link held after; or by a read inside the place's own lend that reaches the parts
-    /// (`OwnerHeld::try_with`), or a close made there that is not owed to that lend.
+    /// (the place's mark of its lend, `FacePlace::try_lend`), or a close made there that is not
+    /// owed to that lend.
     #[test]
     fn a_link_in_a_faces_place_is_read_through_the_place() {
         let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
