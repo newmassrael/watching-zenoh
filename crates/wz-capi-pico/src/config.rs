@@ -331,10 +331,9 @@ impl ConfigState {
     /// enters a config, so no door records one unjudged.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
         if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
-            // A constant, so the judgement reads the limits where the build keeps them.
-            const OPENING: wz_session_core::limits::SessionLimits =
-                crate::session::opening_limits();
-            if let Err(code) = crate::config_limits::state_over(Some(value), &OPENING) {
+            // Judged over a copy of what an open composes from, which the judgement drops.
+            let mut probe = crate::config_limits::Stated::OPENING;
+            if let Err(code) = crate::config_limits::state_over(Some(value), &mut probe) {
                 return code;
             }
         }
@@ -595,6 +594,38 @@ mod tests {
             Z_ERR_CONFIG_INVALID_VALUE
         );
         assert_eq!(state.get(LIMITS), Some(""));
+    }
+
+    /// An open writes the counts of the limits key over the statement it is handed, under the
+    /// build's policies for a config that states none, and refuses a config the build refuses
+    /// without a policy. Turned red by an open that answers the statement it was handed unwritten.
+    #[test]
+    fn an_open_writes_the_limits_keys_counts_over_its_statement() {
+        use crate::config_limits::{state_over, Stated, WZ_EXT_CONFIG_LIMITS_KEY as LIMITS};
+        use wz_session_core::policy::SessionPolicy;
+        let Some(fewer) = Stated::OPENING
+            .limits
+            .max_subscriptions()
+            .most()
+            .and_then(|count| count.checked_sub(1))
+        else {
+            return;
+        };
+        let text = alloc::format!("MAX_SUBSCRIPTIONS={fewer}");
+        let mut expected = Stated::OPENING;
+        if state_over(Some(text.as_str()), &mut expected).is_err() || expected == Stated::OPENING {
+            return;
+        }
+        let mut config = Config::new();
+        assert_eq!(config.insert(LIMITS, &text), Z_OK);
+        // SAFETY: the config is live and holds a `ConfigState`.
+        let state = unsafe { &*(config.0.handle as *const ConfigState) };
+        let mut stated = Stated::OPENING;
+        assert_eq!(
+            crate::session::resolve_open(state, &mut stated),
+            Ok(SessionPolicy::defaults())
+        );
+        assert_eq!(stated, expected);
     }
 
     /// An empty value is its terminator alone: read back empty, and lent as a C string of no

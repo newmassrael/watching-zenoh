@@ -99,7 +99,8 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, Refused> {
             "the open refuses this config: its mode is neither client nor peer",
         )
     })?;
-    crate::session::resolve_open(cfg).map_err(|code| {
+    let mut stated = crate::config_limits::Stated::OPENING;
+    crate::session::resolve_open(cfg, &mut stated).map_err(|code| {
         (
             code,
             "the open refuses this config: the build refuses a policy or limit it states",

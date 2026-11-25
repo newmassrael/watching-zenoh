@@ -347,28 +347,45 @@ fn pico_group(
 pub(crate) fn resolve_snapshots(
     policies: &PolicyStatements,
 ) -> Result<(SessionPolicy, SessionLimits), ZResult> {
-    let mut policy = SessionPolicy::defaults();
     let mut limits = opening_limits();
-    policies.compose_into(&mut policy, &mut limits)?;
+    let policy = compose_snapshots(policies, &mut limits)?;
     Ok((policy, limits))
 }
 
-/// The snapshots `z_open` opens `cfg` under: [`resolve_snapshots`] of its doors' statements, and
-/// over them the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads, the
-/// held values the process pools reserve at the first open among them;
-/// `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of it.
+/// [`resolve_snapshots`] over `limits` in place: the build's policies with `policies` written
+/// over them, returned, and the limits they state written over `limits`. The one composition the
+/// doors' check and the open share; on a refusal what was written is no resolution.
+#[inline]
+fn compose_snapshots(
+    policies: &PolicyStatements,
+    limits: &mut SessionLimits,
+) -> Result<SessionPolicy, ZResult> {
+    let mut policy = SessionPolicy::defaults();
+    policies.compose_into(&mut policy, limits)?;
+    Ok(policy)
+}
+
+/// The snapshots `z_open` opens `cfg` under, its limits composed over `stated`, which an open
+/// hands as [`Stated::OPENING`]: the policies its doors state over the build's, returned, and the
+/// limits they state written over `stated`, as [`resolve_snapshots`] composes both, and over them
+/// the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads, the held values
+/// the process pools reserve at the first open among them; `Z_ERR_CONFIG_INVALID_VALUE` when the
+/// build refuses any of it, and then what was written is no resolution, which the caller drops.
 ///
-/// Not inlined: `z_open` and the device requirements' judgement share this one body, and its
-/// result is written once where the caller holds it rather than moved through each layer's.
+/// Not inlined: `z_open` and the device requirements' judgement share this one body. The limits
+/// are written in place where the caller holds them, not returned and moved through each layer.
 ///
+/// [`Stated::OPENING`]: crate::config_limits::Stated::OPENING
 /// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
 #[inline(never)]
 pub(crate) fn resolve_open(
     cfg: &ConfigState,
-) -> Result<(SessionPolicy, crate::config_limits::Stated), ZResult> {
-    let (policy, limits) = resolve_snapshots(&cfg.policies)?;
+    stated: &mut crate::config_limits::Stated,
+) -> Result<SessionPolicy, ZResult> {
+    let policy = compose_snapshots(&cfg.policies, &mut stated.limits)?;
     let text = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY);
-    Ok((policy, crate::config_limits::state_over(text, &limits)?))
+    crate::config_limits::state_over(text, stated)?;
+    Ok(policy)
 }
 
 /// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
@@ -1219,7 +1236,8 @@ unsafe fn open_request(
     // comes back on another locator is found there and not here. The scout runs under the
     // snapshot of the open it finds a node for, and a config whose policies or limits the
     // build refuses opens nothing and scouts for nothing.
-    let (policy, stated) = resolve_open(cfg)?;
+    let mut stated = crate::config_limits::Stated::OPENING;
+    let policy = resolve_open(cfg, &mut stated)?;
     // The first open reserves the process pools it has not found reserved and fixes them, so
     // nothing of the process is reserved after an open; a later open that states more of a held
     // value than they hold is refused here, before it takes anything.

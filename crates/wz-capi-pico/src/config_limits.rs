@@ -44,6 +44,11 @@ impl Stated {
             held: crate::process_pool::Held::BUILD,
         }
     }
+
+    /// What an open composes its config's statements over: the limits a session opens under
+    /// before its config states any (`crate::session::opening_limits`) and the build's held
+    /// values. A constant, so each door that composes a statement starts from a copy of it.
+    pub(crate) const OPENING: Self = Self::over(crate::session::opening_limits());
 }
 
 impl Stated {
@@ -74,14 +79,15 @@ impl Stated {
     }
 }
 
-/// What an open composes over `limits`: [`Stated::over`] them, each count `text`, the key's value
-/// where the config holds one, states selected over it ([`Stated::select`]);
-/// `Z_ERR_CONFIG_INVALID_VALUE` for an item that is not `NAME=count` or one the build refuses.
-/// One body for every door that reads the key: `zp_config_insert` judges a value with it as the
-/// open composes it, and an open whose config holds none composes through it too.
+/// Select over `stated` each count `text`, the key's value where the config holds one, states
+/// ([`Stated::select`]), left to right; `Z_ERR_CONFIG_INVALID_VALUE` for an item that is not
+/// `NAME=count` or one the build refuses, and then what was written is no statement, which the
+/// caller drops. Written in place: an open composes its config's limits and then these over the
+/// one statement it opens from, which no layer copies out. One body for every door that reads the
+/// key: `zp_config_insert` judges a value with it as the open composes it, and an open whose
+/// config holds none composes through it too.
 #[inline(never)]
-pub(crate) fn state_over(text: Option<&str>, limits: &SessionLimits) -> Result<Stated, ZResult> {
-    let mut next = Stated::over(*limits);
+pub(crate) fn state_over(text: Option<&str>, stated: &mut Stated) -> Result<(), ZResult> {
     // Read as bytes: the separators are ASCII, and a byte's search is a plain loop where a
     // `char`'s pulls in the string searcher. No value states nothing, as an empty one does.
     for item in text
@@ -100,11 +106,11 @@ pub(crate) fn state_over(text: Option<&str>, limits: &SessionLimits) -> Result<S
         // The item is trimmed at both ends, so a name has spaces only before the `=` and a count
         // only after it.
         let count = count_of(count.trim_ascii_start()).ok_or(Z_ERR_CONFIG_INVALID_VALUE)?;
-        if !next.select(name.trim_ascii_end(), count) {
+        if !stated.select(name.trim_ascii_end(), count) {
             return Err(Z_ERR_CONFIG_INVALID_VALUE);
         }
     }
-    Ok(next)
+    Ok(())
 }
 
 /// Whether `name` spells the id `id`, byte for byte: a name that is no text spells none.
@@ -153,7 +159,7 @@ fn count_of(digits: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::{count_of, names, position_named, state_over, Stated};
-    use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+    use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
     use wz_session_core::limit_binding::Quota;
     use wz_session_core::limits::SessionLimits;
 
@@ -168,6 +174,43 @@ mod tests {
         Stated::over(crate::session::opening_limits())
     }
 
+    /// What an open composes from `text` over what it opens from, as the open writes it.
+    fn state(text: Option<&str>) -> Result<Stated, ZResult> {
+        let mut stated = Stated::OPENING;
+        state_over(text, &mut stated).map(|()| stated)
+    }
+
+    /// An open composes from the limits a session opens under and the build's held values.
+    /// Turned red by a constant built over other limits than the open's.
+    #[test]
+    fn an_open_composes_from_the_opening_limits() {
+        assert_eq!(Stated::OPENING, opening());
+    }
+
+    /// A text is stated over what the statement holds, so a limit the text does not name keeps
+    /// the value an earlier layer wrote. Turned red by a door that starts again from the
+    /// limits a session opens under.
+    #[test]
+    fn a_text_is_stated_over_what_the_statement_holds() {
+        let mut stated = Stated::OPENING;
+        let opening = stated.limits.max_publishers();
+        let Some(written) = [Quota::at_most(1), Quota::at_most(2)]
+            .into_iter()
+            .find(|quota| *quota != opening)
+        else {
+            return;
+        };
+        if stated.limits.select_max_publishers(written).is_err() {
+            return;
+        }
+        let Some(count) = stated.limits.max_subscriptions().most() else {
+            return;
+        };
+        let text = alloc::format!("MAX_SUBSCRIPTIONS={count}");
+        assert_eq!(state_over(Some(text.as_str()), &mut stated), Ok(()));
+        assert_eq!(stated.limits.max_publishers(), written);
+    }
+
     /// A count under the bound is selected over the limits the session opens under, and the
     /// limits it does not name keep their values. Turned red by a door that drops the statement.
     #[test]
@@ -179,8 +222,8 @@ mod tests {
         {
             return;
         }
-        let stated = state_over(Some(" MAX_SUBSCRIPTIONS = 2 ,"), &opening.limits)
-            .expect("a count under the bound is stated");
+        let stated =
+            state(Some(" MAX_SUBSCRIPTIONS = 2 ,")).expect("a count under the bound is stated");
         assert_eq!(stated.limits.max_subscriptions(), Quota::at_most(2));
         assert_eq!(
             stated.limits.max_publishers(),
@@ -197,10 +240,7 @@ mod tests {
             return;
         };
         let past = alloc::format!("MAX_PUBLISHERS=1,MAX_SUBSCRIPTIONS={}", bound + 1);
-        assert_eq!(
-            state_over(Some(past.as_str()), &opening().limits),
-            Err(Z_ERR_CONFIG_INVALID_VALUE)
-        );
+        assert_eq!(state(Some(past.as_str())), Err(Z_ERR_CONFIG_INVALID_VALUE));
     }
 
     /// A name that is no limit of a session nor a held value, any other runtime limit included,
@@ -209,7 +249,6 @@ mod tests {
     /// found by its prefix.
     #[test]
     fn what_is_no_session_limit_or_no_count_is_refused() {
-        let opening = opening();
         for text in [
             "MAX_SUBSCRIPTION=1",
             "MAX_SUBSCRIPTIONSS=1",
@@ -222,11 +261,7 @@ mod tests {
             "MAX_SUBSCRIPTIONS=many",
             "MAX_SUBSCRIPTIONS=-1",
         ] {
-            assert_eq!(
-                state_over(Some(text), &opening.limits),
-                Err(Z_ERR_CONFIG_INVALID_VALUE),
-                "{text}"
-            );
+            assert_eq!(state(Some(text)), Err(Z_ERR_CONFIG_INVALID_VALUE), "{text}");
         }
     }
 
@@ -326,9 +361,9 @@ mod tests {
             };
             let bare = alloc::format!("{name}={count}");
             let spaced = alloc::format!(" \t{name} \t=\t {count}\t , ");
-            let stated = state_over(Some(bare.as_str()), limits);
+            let stated = state(Some(bare.as_str()));
             stated_any |= stated.is_ok();
-            assert_eq!(state_over(Some(spaced.as_str()), limits), stated, "{name}");
+            assert_eq!(state(Some(spaced.as_str())), stated, "{name}");
         }
         assert!(stated_any, "an opening count of an entity is stated");
     }
@@ -338,9 +373,9 @@ mod tests {
     #[test]
     fn an_empty_text_states_nothing() {
         let opening = opening();
-        assert_eq!(state_over(None, &opening.limits), Ok(opening));
-        assert_eq!(state_over(Some(""), &opening.limits), Ok(opening));
-        assert_eq!(state_over(Some(" , ,"), &opening.limits), Ok(opening));
+        assert_eq!(state(None), Ok(opening));
+        assert_eq!(state(Some("")), Ok(opening));
+        assert_eq!(state(Some(" , ,")), Ok(opening));
     }
 
     /// A held value's count is stated beside the session's limits, and one past the build's value
@@ -355,17 +390,13 @@ mod tests {
             "HELD_SAMPLES={},HELD_LARGE_PAYLOAD_BLOCKS=0",
             caps::HELD_SAMPLES
         );
-        let stated = state_over(Some(text.as_str()), &opening.limits)
-            .expect("held values under their bounds");
+        let stated = state(Some(text.as_str())).expect("held values under their bounds");
         let mut expected = crate::process_pool::Held::BUILD;
         assert_eq!(expected.select(b"HELD_LARGE_PAYLOAD_BLOCKS", 0), Some(true));
         assert_eq!(stated.held, expected);
         assert_eq!(stated.limits, opening.limits);
 
         let past = alloc::format!("HELD_SAMPLES=1,HELD_REPLIES={}", caps::HELD_REPLIES + 1);
-        assert_eq!(
-            state_over(Some(past.as_str()), &opening.limits),
-            Err(Z_ERR_CONFIG_INVALID_VALUE)
-        );
+        assert_eq!(state(Some(past.as_str())), Err(Z_ERR_CONFIG_INVALID_VALUE));
     }
 }
