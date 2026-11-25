@@ -38,6 +38,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
 
 use super::registry::Planes;
+#[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::bounded::{BoundedVec, Lent};
 
 /// The pump of the session's one link, which the read steps itself.
@@ -337,9 +338,33 @@ pub(super) struct HeldSend<'a, C: ClockSource + 'static> {
     before: Option<&'a HeldSend<'a, C>>,
 }
 
-/// What an operation runs with every face's send place held, then the session's lock
-/// (`CoopEngine::live_on_link`): the session's state, and the places it holds.
-type UnderHeldFaces<'o, L, C> = dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>) + 'o;
+/// An operation run with every face's send place held, then the session's lock
+/// (`CoopEngine::live_on_link`), on the session's state and the places it holds. Reached by a
+/// vtable of its one method: a closure's vtable would carry a `call_once` shim beside it, into
+/// which a small operation is copied whole.
+trait UnderHeldFaces<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
+    /// Run the operation, once.
+    fn run(&mut self, core: &mut Core<L, C>, tx: LinkTx<'_, C>);
+}
+
+/// The operation `f`, run at most once, and what it answered.
+struct HeldOperation<F, U> {
+    f: Option<F>,
+    answer: Option<U>,
+}
+
+impl<L, C, F, U> UnderHeldFaces<L, C> for HeldOperation<F, U>
+where
+    L: CoopLinks + 'static,
+    C: ClockSource + Clone + 'static,
+    F: FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
+{
+    fn run(&mut self, core: &mut Core<L, C>, tx: LinkTx<'_, C>) {
+        if let Some(f) = self.f.take() {
+            self.answer = Some(f(core, tx));
+        }
+    }
+}
 
 /// What an operation holds of the faces' send places, taken before the session's lock
 /// (`CoopEngine::live_on_link`, `CoopEngine::on_faces`): a send to a held face writes the
@@ -376,14 +401,15 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
         self.held_of(link).is_some()
     }
 
-    /// The wire of the face whose record holds `link`, through its held place; `None` while
-    /// that place is not held or holds no link.
+    /// The wire of the face whose record holds `link`, through its held place, found by one walk
+    /// of the holds: `None` while that place is not held, and `Some(None)` while it is held and
+    /// holds no link, which no try of the place reaches either.
     #[inline]
-    pub(super) fn wire_of<L: CoopLinks + 'static>(
+    pub(super) fn held_wire<L: CoopLinks + 'static>(
         &self,
         link: &DirectWire<L, C>,
-    ) -> Option<&'a Wire<C>> {
-        self.held_of(link).and_then(|held| held.wire)
+    ) -> Option<Option<&'a Wire<C>>> {
+        self.held_of(link).map(|held| held.wire)
     }
 
     /// Whether a publish's leg sent through this hold goes to the face whose record holds
@@ -688,16 +714,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
 }
 
 /// The faces past the dial role's, a row of the session's arena for each place of the face table
-/// after its first, made at the open and kept where they lie for the session's life.
+/// after its first, made at the open and kept where they lie for the session's life. A build that
+/// takes no face beside the dial role's has none, nor any walk of them.
+#[cfg(any(feature = "listen", feature = "group"))]
 pub(super) type TakenFaces<L, C> = BoundedVec<DirectFace<L, C>, { usize::MAX }, Lent>;
 
 /// Every face the read steps itself: the dial role's, at the face table's first place, in the
 /// engine's place, and one for each place after it in a table of the session's arena
-/// ([`TakenFaces`]). Each face has its own read slot, Router and send place, so a face's read
+/// (`TakenFaces`). Each face has its own read slot, Router and send place, so a face's read
 /// and its sends never wait on another face's; and none moves, so the session's record of a face
 /// reaches its place by a handle.
 pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> {
     dial: DirectFace<L, C>,
+    #[cfg(any(feature = "listen", feature = "group"))]
     taken: TakenFaces<L, C>,
 }
 
@@ -706,6 +735,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// table's place `n` in the table's row `n - 1`, each with a Router of its own under
     /// `policy`, staging its chains in `chains`, lent through `lend`. Refused past what the
     /// arena has left.
+    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) fn taken_in(
         arena: &mut Arena,
         rows: usize,
@@ -740,7 +770,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         at: NonNull<Self>,
         router: SessionReassembly,
         lend: RouterLend<SessionReassembly, RouterPlace>,
-        taken: TakenFaces<L, C>,
+        #[cfg(any(feature = "listen", feature = "group"))] taken: TakenFaces<L, C>,
     ) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
@@ -752,6 +782,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
                 router,
                 lend,
             );
+            #[cfg(any(feature = "listen", feature = "group"))]
             addr_of_mut!((*at).taken).write(taken);
         }
     }
@@ -760,12 +791,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// it in its row of the arena.
     #[inline(always)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
-        core::iter::once(&self.dial).chain(self.taken.iter())
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            core::iter::once(&self.dial).chain(self.taken.iter())
+        }
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            core::iter::once(&self.dial)
+        }
     }
 
     /// Let go of every face's link with the faces owned whole: the engine's drop.
     pub(super) fn let_go_owned(&mut self) {
         self.dial.let_go_owned();
+        #[cfg(any(feature = "listen", feature = "group"))]
         for face in self.taken.iter_mut() {
             face.let_go_owned();
         }
@@ -1458,14 +1497,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
     ) -> Option<U> {
-        let mut f = Some(f);
-        let mut answer = None;
-        self.hold_faces_from(self.direct.iter(), None, &mut |core, tx| {
-            if let Some(f) = f.take() {
-                answer = Some(f(core, tx));
-            }
-        });
-        answer
+        let mut operation = HeldOperation {
+            f: Some(f),
+            answer: None,
+        };
+        self.hold_faces_from(self.direct.iter(), None, &mut operation);
+        operation.answer
     }
 
     /// Hold the send place of each face `faces` has left, after those `before` holds, then the
@@ -1478,11 +1515,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &'f self,
         mut faces: impl Iterator<Item = &'f DirectFace<L, C>>,
         before: Option<&HeldSend<'_, C>>,
-        f: &mut UnderHeldFaces<'_, L, C>,
+        f: &mut (dyn UnderHeldFaces<L, C> + '_),
     ) {
         let Some(face) = faces.next() else {
             if let Some(mut core) = self.live() {
-                f(
+                f.run(
                     &mut core.0,
                     FaceTx {
                         held: before,
@@ -1594,7 +1631,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     pub(crate) fn faces_reached_by_an_operation(&self) -> (usize, usize) {
         self.live_on_link(|core, tx| {
             core.up_wires_at().fold((0, 0), |(held, tried), (_, wire)| {
-                if tx.wire_of(wire).is_some() {
+                if tx.held_wire(wire).flatten().is_some() {
                     (held + 1, tried)
                 } else {
                     (held, tried + 1)

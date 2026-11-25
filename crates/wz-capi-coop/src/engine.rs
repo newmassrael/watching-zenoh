@@ -66,7 +66,10 @@ use crate::round::RoundRows;
 use crate::round::{Round, RoundCounts};
 use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
-#[cfg(any(feature = "runtime-plan", not(wz_round)))]
+#[cfg(any(
+    feature = "runtime-plan",
+    all(not(wz_round), any(feature = "listen", feature = "group"))
+))]
 use wz_session_core::bounded::Arena;
 use wz_session_core::bounded::{KeyBacking, KeyMaker, KeyUnkept, LendRefused, TableLender};
 use wz_session_core::caps;
@@ -146,7 +149,11 @@ use wz_runtime_coop::transport::{
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
 };
-#[cfg(any(all(test, feature = "std"), feature = "advanced-cache", not(wz_round)))]
+#[cfg(any(
+    all(test, feature = "std"),
+    feature = "advanced-cache",
+    all(not(wz_round), any(feature = "listen", feature = "group"))
+))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
@@ -742,8 +749,8 @@ struct LentApart<L: CoopLinks + 'static, C: ClockSource + 'static> {
     #[cfg(not(wz_round))]
     router: SessionReassembly,
     /// The read slots and send places of the faces past the dial role's, made in the rows the
-    /// open lent them (`direct`).
-    #[cfg(not(wz_round))]
+    /// open lent them (`direct`), in a build that takes faces beside the dial role's.
+    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
     taken: direct::TakenFaces<L, C>,
     /// A build whose links run as tasks lends nothing of a face's link apart from the state.
     #[cfg(wz_round)]
@@ -767,7 +774,7 @@ struct SessionLent {
     router: SessionReassembly,
     /// The rows of the faces past the dial role's the plan laid out for their read slots and send
     /// places (`ArenaPlan::lay_direct_faces`), which the open lends and makes.
-    #[cfg(not(wz_round))]
+    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
     taken_faces: usize,
     keys: KeySpace,
     registry: RegistryHold,
@@ -1145,7 +1152,7 @@ fn lend_session(
         cache,
         #[cfg(not(feature = "runtime-plan"))]
         state,
-        #[cfg(not(wz_round))]
+        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
         taken_faces: plan.peers().sets().saturating_sub(1),
         arena,
     })
@@ -2140,10 +2147,9 @@ fn publish_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     leg: &LinkLeg<'_>,
     how: FaceSend,
 ) -> Option<LegSent> {
-    if tx.holds(wire) {
-        tx.wire_of(wire).map(|held| leg.send_to(&held.actions, how))
-    } else {
-        publish_on(wire, leg, how)
+    match tx.held_wire(wire) {
+        Some(held) => held.map(|held| leg.send_to(&held.actions, how)),
+        None => publish_on(wire, leg, how),
     }
 }
 
@@ -3369,10 +3375,9 @@ fn send_through<L: CoopLinks + 'static, C: ClockSource + 'static>(
     tx: LinkTx<'_, C>,
     send: &(dyn SendTo<C> + Sync),
 ) -> Option<bool> {
-    if tx.holds(wire) {
-        tx.wire_of(wire).map(|held| send.send_to(&held.actions))
-    } else {
-        send_on(wire, send)
+    match tx.held_wire(wire) {
+        Some(held) => held.map(|held| send.send_to(&held.actions)),
+        None => send_on(wire, send),
     }
 }
 
@@ -3396,10 +3401,9 @@ fn lend_through<L: CoopLinks + 'static, C: ClockSource + 'static, U: Send>(
     tx: LinkTx<'_, C>,
     f: impl FnOnce(&LinkActions<C>) -> U + Send,
 ) -> Option<U> {
-    if tx.holds(wire) {
-        tx.wire_of(wire).map(|held| f(&*held.actions))
-    } else {
-        lend_actions(wire, f)
+    match tx.held_wire(wire) {
+        Some(held) => held.map(|held| f(&*held.actions)),
+        None => lend_actions(wire, f),
     }
 }
 
@@ -5105,8 +5109,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             };
             // The face whose place the caller holds is settled through the wire it holds.
             #[cfg(not(wz_round))]
-            if tx.holds(wire) {
-                if let Some(link) = tx.wire_of(wire) {
+            if let Some(held) = tx.held_wire(wire) {
+                if let Some(link) = held {
                     settle(&*link.actions);
                 }
                 continue;
@@ -6036,7 +6040,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         })?;
         // The read slots and send places of the faces past the dial role's, each with a Router of
         // its own over the session's chain buffers.
-        #[cfg(not(wz_round))]
+        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
         let taken = {
             // SAFETY: the handle is held by the faces' rows, which the engine drops first, before
             // the place's owner, `Core::steps`, which hands out no `&mut` of it.
@@ -6259,7 +6263,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let apart = LentApart {
             #[cfg(not(wz_round))]
             router: lent.router,
-            #[cfg(not(wz_round))]
+            #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
             taken,
             #[cfg(wz_round)]
             _of: core::marker::PhantomData,
@@ -6285,7 +6289,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let LentApart {
             #[cfg(not(wz_round))]
             router,
-            #[cfg(not(wz_round))]
+            #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
             taken,
             #[cfg(wz_round)]
                 _of: _,
@@ -6355,6 +6359,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     NonNull::new_unchecked(addr_of_mut!((*at).direct)),
                     router,
                     direct_lend,
+                    #[cfg(any(feature = "listen", feature = "group"))]
                     taken,
                 );
                 CoreLock::init_at(NonNull::new_unchecked(addr_of_mut!((*at).core)), core);

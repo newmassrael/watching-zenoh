@@ -671,8 +671,8 @@ fn tell_on<L: CoopLinks + 'static, C: ClockSource + 'static>(
     tx: super::LinkTx<'_, C>,
     retract: Retract<'_>,
 ) {
-    if tx.holds(wire) {
-        if let Some(held) = tx.wire_of(wire) {
+    if let Some(held) = tx.held_wire(wire) {
+        if let Some(held) = held {
             retract.tell(&held.actions);
         }
     } else {
