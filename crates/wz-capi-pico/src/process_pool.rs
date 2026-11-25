@@ -3048,14 +3048,13 @@ mod tests {
 
     /// A held value's count is set to what is stated up to the build's value of it, a count past
     /// that is refused and sets nothing, and an id that is no held value's is not one. Each id
-    /// is a limit the declaration holds. Turned red by a count held to no bound.
+    /// is a capacity limit the declaration holds, which neither snapshot carries. Turned red by a
+    /// count held to no bound, or an id the declaration does not spell.
     #[test]
     fn a_held_count_is_stated_up_to_the_builds_value() {
         for id in Held::IDS {
             assert!(
-                wz_session_core::limits::RUNTIME_LIMITS
-                    .iter()
-                    .any(|entry| entry.id() == id),
+                wz_session_core::limits::CAPACITY_LIMITS.contains(&id),
                 "{id}"
             );
             let mut held = Held::BUILD;
