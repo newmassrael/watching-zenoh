@@ -211,10 +211,8 @@ fn complete_one_chain(
 fn decode_from_a_lent_frame(batch: &[u8]) -> usize {
     let lent = RxBytes::lend(batch.to_vec());
     let before = allocations();
-    let messages = wz_session_core::network_message::parse_frame_payload_in(&lent)
-        .map_err(wz_session_core::parse_error::InboundParseError::Codec)
-        .and_then(wz_session_core::network_message::refuse_unknown_mandatory_ext)
-        .expect("the batch decodes");
+    let messages =
+        wz_session_core::network_message::admit_frame_payload_in(&lent).expect("the batch decodes");
     let outcome = DriverLoopOutcome::FramePayload {
         reliable: true,
         sn: 0,

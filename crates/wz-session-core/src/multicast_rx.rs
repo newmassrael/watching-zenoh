@@ -93,7 +93,7 @@ use crate::multicast_peer_lost::{MulticastPeerId, MulticastPeerLostReason};
         not(feature = "multicast-ingress-gate")
     ))
 ))]
-use crate::network_message::parse_frame_payload_in;
+use crate::network_message::admit_frame_payload_in;
 use crate::wire_const;
 use wz_codecs::whatami::WhatAmI;
 // R311mh — the reassembly-divergent tail SSOT (dispatch_multicast_inbound_reassembling
@@ -704,11 +704,7 @@ where
                         // A batch whose chains hold an extension its
                         // message does not define, with the M bit set, is dropped
                         // whole, as one that does not decode is.
-                        if let Some(messages) =
-                            parse_frame_payload_in(&payload).ok().and_then(|messages| {
-                                crate::network_message::refuse_unknown_mandatory_ext(messages).ok()
-                            })
-                        {
+                        if let Ok(messages) = admit_frame_payload_in(&payload) {
                             // The `ingest_frame_by_src` `&mut dispatcher` borrow
                             // ended at the match scrutinee (`FrameIngest` is a
                             // fieldless enum), so the dispatcher is free to

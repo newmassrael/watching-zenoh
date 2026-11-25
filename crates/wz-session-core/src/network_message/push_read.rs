@@ -366,38 +366,56 @@ mod tests {
     }
 
     /// What the owned parse makes of `bytes`, whose first record is a Push: the owned Push its one
-    /// record dispatch (`decode_one_record`) builds, and how far it read.
+    /// record dispatch (`decode_one_record`) builds, how far it read, and the verdict it judged as
+    /// it read the chains.
     #[cfg(feature = "alloc")]
     fn owned(
         bytes: &[u8],
-    ) -> Result<(wz_codecs::push::PushOwned<super::super::WireStorage>, usize), CodecError> {
+    ) -> Result<
+        (
+            wz_codecs::push::PushOwned<super::super::WireStorage>,
+            usize,
+            ExtAdmission,
+        ),
+        CodecError,
+    > {
         let mut cursor = SceCursor::new(bytes);
         let mut out = alloc::vec::Vec::new();
-        let known =
+        let decoded =
             super::super::decode_one_record(&mut cursor, &mut out, super::super::NO_ORIGIN)?;
-        assert!(known, "a Push is a record the build decodes");
         let consumed = bytes.len() - cursor.remaining();
+        let super::super::Decoded::Judged(verdict) = decoded else {
+            panic!("a Push is judged as it is read: {decoded:?}");
+        };
         match out.pop() {
             Some(super::super::NetworkMessage::Push(push)) if out.is_empty() => {
-                Ok((*push, consumed))
+                Ok((*push, consumed, verdict))
             }
             other => panic!("one Push is decoded: {other:?}"),
         }
     }
 
     /// What the generated codec decodes `bytes` to at the heap's capacity and projects into the
-    /// owned Push, and how far it read: the reading the owned parse is held to.
+    /// owned Push, how far it read, and the verdict the owned message's own judge gives it: the
+    /// reading the owned parse is held to.
     #[cfg(feature = "alloc")]
     fn owned_through_the_codec(
         bytes: &[u8],
-    ) -> Result<(wz_codecs::push::PushOwned<super::super::WireStorage>, usize), CodecError> {
+    ) -> Result<
+        (
+            wz_codecs::push::PushOwned<super::super::WireStorage>,
+            usize,
+            ExtAdmission,
+        ),
+        CodecError,
+    > {
         let mut cursor = SceCursor::new(bytes);
         let push = wz_codecs::push::PushIn::<super::super::LentHeap<'_>>::decode(&mut cursor)?;
         let consumed = bytes.len() - cursor.remaining();
-        Ok((
-            push.try_into_owned_in::<super::super::WireStorage>()?,
-            consumed,
-        ))
+        let owned = push.try_into_owned_in::<super::super::WireStorage>()?;
+        let verdict = super::super::NetworkMessage::Push(alloc::boxed::Box::new(owned.clone()))
+            .ext_admission();
+        Ok((owned, consumed, verdict))
     }
 
     /// What the plain lane is held to over a frame: the codec's reading of each record, every one a
@@ -479,7 +497,8 @@ mod tests {
     }
 
     /// The reader against the codec over `bytes`; with an allocator, the owned parse against the
-    /// codec's owned decode where the first record is a Push, and the plain lane over the whole of
+    /// codec's owned decode where the first record is a Push (the verdict it judged as it read
+    /// against the owned message's own), and the plain lane over the whole of
     /// `bytes` as a frame against the codec's reading of each record: what each case below is held
     /// to.
     fn agree(bytes: &[u8], case: &dyn core::fmt::Debug) {

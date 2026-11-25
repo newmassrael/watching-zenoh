@@ -1968,19 +1968,16 @@ pub fn reassembled_chain_outcome(
     // message it cannot read without closing the link
     // (`io/zenoh-transport/src/common/defragmentation.rs` @
     // `let res: Option<NetworkMessage> = rcodec.read(&mut reader).ok();`).
-    let decoded = match &chain {
-        ChainBytes::Borrowed(msg) => crate::network_message::parse_frame_payload_lending(msg),
+    let parsed = match &chain {
+        ChainBytes::Borrowed(msg) => crate::network_message::admit_frame_payload_lending(msg),
         #[cfg(feature = "rx-shared-bytes")]
-        ChainBytes::Lent(bytes) => crate::network_message::parse_frame_payload_in(bytes),
+        ChainBytes::Lent(bytes) => crate::network_message::admit_frame_payload_in(bytes),
         // A kept buffer is a cell of its session's table, which no message may outlive: copied
         // once, as a borrowed chain is.
         ChainBytes::Kept(kept) => {
-            crate::network_message::parse_frame_payload_lending(kept.as_slice())
+            crate::network_message::admit_frame_payload_lending(kept.as_slice())
         }
     };
-    let parsed = decoded
-        .map_err(InboundParseError::Codec)
-        .and_then(crate::network_message::refuse_unknown_mandatory_ext);
     match parsed {
         Ok(messages) => DriverLoopOutcome::FramePayload {
             reliable,
