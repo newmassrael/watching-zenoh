@@ -2123,7 +2123,10 @@ fn a_build_without_the_queryables_plane_refuses_their_listener_and_filter() {
 /// counts: any queryable on the key, or only a complete one when the plane requires it, as
 /// zenoh-pico's listener is that filter's callback. The CONTROL is a subscriber on the key, which
 /// the router declares first and which opens a subscriber filter while neither listener hears it.
-#[cfg(any(feature = "query", feature = "queryable"))]
+#[cfg(all(
+    any(feature = "query", feature = "queryable"),
+    feature = "key-matching-listener"
+))]
 #[test]
 fn a_queryable_matching_listener_counts_what_its_filter_counts() {
     let router = Router::start(CatchAll::None);

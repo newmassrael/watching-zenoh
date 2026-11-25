@@ -874,7 +874,7 @@ mod tests {
                     assert!(staged.is_empty(), "case {i}: the walk owes the Final");
                     assert_eq!(
                         owned.2,
-                        vec![(query.rid(), query.qos())],
+                        alloc::vec![(query.rid(), query.qos())],
                         "case {i}: the Final the walk owes is the dispatch's"
                     );
                     if let Some(first) = owned.0.first() {

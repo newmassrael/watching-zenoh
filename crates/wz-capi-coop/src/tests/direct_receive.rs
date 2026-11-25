@@ -25,8 +25,9 @@ use crate::{CoopConfig, EngineHold};
 const COUNT: u8 = 3;
 
 /// A peer's reply is handed to the get it answers by the read itself, with the session free and
-/// nothing of it held in the round. Turned red by a reply offered to the round (the read counts
-/// none) or handed out while the read holds the session.
+/// nothing of it held in the round. The get consolidates nothing, so the reply is handed as it
+/// comes and not with what its leg held to its end. Turned red by a reply offered to the round
+/// (the read counts none) or handed out while the read holds the session.
 #[cfg(all(
     feature = "query",
     not(any(feature = "threads", feature = "listen", feature = "group"))
@@ -46,7 +47,8 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     let issued = engine.get_on_wire(
         "demo/g/a",
         &WireKey::literal(),
-        &super::get::remote_get(),
+        &super::get::remote_get()
+            .with_consolidation(wz_session_core::query_mode::ConsolidationMode::None),
         None,
         &mut || {
             let seen = seen.clone();
