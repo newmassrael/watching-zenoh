@@ -20,7 +20,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::face::{FaceEventKind, FaceLinkRow, FaceRowSink};
-use crate::plane_lock::LockFamily;
+use crate::plane_lock::{LockFamily, Queued};
 
 /// The watchers, each under the id that stops it, in the order of their ids.
 struct Watchers {
@@ -33,7 +33,9 @@ struct Watchers {
 /// engine's ([`LockFamily`]).
 pub struct FacePlane<K: LockFamily> {
     watchers: K::Lock<Watchers>,
-    events: K::Lock<VecDeque<(FaceEventKind, FaceLinkRow)>>,
+    /// The rows waiting, whose emptiness every delivery reads with no lock taken: it looks for a
+    /// row on each of its passes and almost never finds one.
+    events: Queued<K, VecDeque<(FaceEventKind, FaceLinkRow)>>,
     /// The rows the queue holds, reserved when the plane was made; it never holds more.
     room: usize,
 }
@@ -55,7 +57,7 @@ impl<K: LockFamily> FacePlane<K> {
                 last: 0,
                 sinks: Vec::new(),
             }),
-            events: K::new(VecDeque::with_capacity(room)),
+            events: Queued::new(VecDeque::with_capacity(room)),
             room,
         }
     }
@@ -93,7 +95,7 @@ impl<K: LockFamily> FacePlane<K> {
     /// deliveries. A row that finds the queue's room held is let go of and counted on the last
     /// row queued, which tells the watchers of it with that row ([`FaceLinkRow::lost_after`]).
     pub fn happened(&self, kind: FaceEventKind, row: FaceLinkRow) {
-        K::with(&self.events, |events| {
+        self.events.with(|events| {
             if events.len() < self.room {
                 events.push_back((kind, row));
             } else if let Some((_, last)) = events.back_mut() {
@@ -104,7 +106,10 @@ impl<K: LockFamily> FacePlane<K> {
 
     /// The next row to hand out, in the order they happened.
     pub fn next_event(&self) -> Option<(FaceEventKind, FaceLinkRow)> {
-        K::with(&self.events, VecDeque::pop_front)
+        if !self.events.is_pending() {
+            return None;
+        }
+        self.events.with(VecDeque::pop_front)
     }
 
     /// Hand the next row to each watcher that stood when it was taken, in the order they came:
@@ -261,6 +266,46 @@ mod tests {
         assert!(!plane.watched());
     }
 
+    /// The host's mutex, counting each time a lock of the family is taken.
+    enum CountedLocks {}
+
+    static TAKEN: AtomicUsize = AtomicUsize::new(0);
+
+    impl LockFamily for CountedLocks {
+        type Lock<T> = Mutex<T>;
+
+        fn new<T>(value: T) -> Mutex<T> {
+            Mutex::new(value)
+        }
+
+        fn with<T, R>(lock: &Mutex<T>, f: impl FnOnce(&mut T) -> R) -> R {
+            TAKEN.fetch_add(1, Ordering::Relaxed);
+            f(&mut lock.lock().unwrap())
+        }
+    }
+
+    /// Every delivery asks the plane for a row, and almost always finds none: an empty queue is
+    /// answered with no lock taken, and a row queued is still found. Turned red by a look for the
+    /// next row that takes the queue's lock whether or not it holds one.
+    #[test]
+    fn an_empty_queue_is_answered_with_no_lock_taken() {
+        let plane = FacePlane::<CountedLocks>::default();
+        let before = TAKEN.load(Ordering::Relaxed);
+        assert!(plane.next_event().is_none());
+        assert!(!plane.hand_out_next());
+        assert_eq!(TAKEN.load(Ordering::Relaxed), before, "no lock for no row");
+        plane.happened(FaceEventKind::Up, row(1));
+        let (kind, held) = plane.next_event().expect("the row queued is found");
+        assert_eq!((kind, held.zid[0]), (FaceEventKind::Up, 1));
+        let after = TAKEN.load(Ordering::Relaxed);
+        assert!(!plane.hand_out_next());
+        assert_eq!(
+            TAKEN.load(Ordering::Relaxed),
+            after,
+            "the last row taken leaves it clear"
+        );
+    }
+
     /// Rows are handed out in the order they happened, each once.
     #[test]
     fn rows_are_handed_out_in_the_order_they_happened() {
@@ -308,7 +353,7 @@ mod tests {
     #[test]
     fn the_rows_a_plane_holds_are_reserved_when_it_is_made() {
         let plane = FacePlane::<StdLocks>::with_room(4);
-        let reserved = || StdLocks::with(&plane.events, |events| events.capacity());
+        let reserved = || plane.events.with(|events| events.capacity());
         let room = reserved();
         assert!(room >= 4, "the rows are reserved with the plane: {room}");
         assert_eq!(plane.room(), 4);
@@ -334,7 +379,7 @@ mod tests {
     #[test]
     fn rows_past_the_room_are_lost_and_told_once_with_the_last_row_kept() {
         let plane = FacePlane::<StdLocks>::with_room(2);
-        let reserved = || StdLocks::with(&plane.events, |events| events.capacity());
+        let reserved = || plane.events.with(|events| events.capacity());
         let room = reserved();
         let told = Arc::new(Mutex::new(Vec::new()));
         let into = Arc::clone(&told);
