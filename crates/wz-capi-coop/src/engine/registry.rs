@@ -1845,12 +1845,13 @@ mod tests {
             .arena_mut()
             .lend_keys(4096, SessionLimits::defaults().max_keyexpr_bytes_held())
             .expect("the arena holds the key arena");
-        let round = crate::round::leaked(4);
-        #[cfg(not(feature = "queryable"))]
-        let delivery = RoundDelivery::new(round);
+        #[cfg(not(wz_round))]
+        let delivery = RoundDelivery::new();
+        #[cfg(all(wz_round, not(feature = "queryable")))]
+        let delivery = RoundDelivery::new(crate::round::leaked(4));
         #[cfg(feature = "queryable")]
         let delivery = RoundDelivery::new(
-            round,
+            crate::round::leaked(4),
             wz_session_core::placed::PlacedRef::of_static(alloc::boxed::Box::leak(
                 alloc::boxed::Box::new(super::super::query::leaked_plane(1)),
             )),

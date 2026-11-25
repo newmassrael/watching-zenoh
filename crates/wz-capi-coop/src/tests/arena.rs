@@ -24,6 +24,7 @@ use wz_session_core::limits::{SessionLimits, CAPACITY_LIMITS, SESSION_LIMITS};
 use wz_session_core::locality::Locality;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
+#[cfg(wz_round)]
 use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
@@ -34,7 +35,10 @@ use super::{
 use crate::arena::{
     AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
 };
-use crate::round::{CoopForm, RoundRowCounts};
+#[cfg(wz_round)]
+use crate::form::CoopForm;
+#[cfg(wz_round)]
+use crate::round::RoundRowCounts;
 use crate::{CoopConfig, OpenError, OpenKeyIds};
 
 /// A memory with none to give, whatever it is asked.
@@ -709,6 +713,7 @@ fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
 /// the order the open lends them in. A round of one thread keeps its records in itself and is laid
 /// out no row of them. Turned red by a round of one thread lent two keys, or a row of records laid
 /// out where the arena lends none.
+#[cfg(wz_round)]
 #[test]
 fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
     let built =
@@ -755,6 +760,7 @@ fn the_plan_lays_out_the_rounds_tables_the_limits_state() {
 /// and no flag of one, and the round's tables are laid out next to each other, the round itself
 /// after them, one of it. Turned red by a plan that reserves the area again, or that lays out no
 /// place for the round the open places in the arena (`lend_session`).
+#[cfg(wz_round)]
 #[test]
 fn the_plan_lays_out_no_delivery_lane() {
     let built =
@@ -782,6 +788,30 @@ fn the_plan_lays_out_no_delivery_lane() {
         (round.count, round.entry_bytes),
         (1, core::mem::size_of::<crate::round::Round>())
     );
+}
+
+/// A build that puts nothing in the round (`wz_round`) lays out none of it: no records, no
+/// callbacks, no keys and no round, however many the limits state. The CONTROL is a part every
+/// plan lays out. Turned red by a plan that still lays out a part of the round where the open
+/// places none.
+#[cfg(not(wz_round))]
+#[test]
+fn a_build_that_puts_nothing_in_the_round_lays_out_none_of_it() {
+    let built =
+        ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
+    let parts: Vec<&str> = built.rows().map(|row| row.part()).collect();
+    assert!(
+        parts.contains(&"endpoint texts"),
+        "CONTROL: the plan lays its parts out"
+    );
+    for part in [
+        "delivery records",
+        "delivery callbacks",
+        "delivery keys",
+        "delivery round",
+    ] {
+        assert!(!parts.contains(&part), "{part}");
+    }
 }
 
 /// The plan lays out one place for each step lend the open places in the arena

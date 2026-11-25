@@ -1479,7 +1479,7 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     until(&engine, "the push and the retraction after it", || {
         !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
     });
-    let threads = <crate::round::CoopForm as ThreadForm>::OTHER_THREADS;
+    let threads = <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
     assert_eq!(
         *seen.lock().unwrap(),
         [threads],
@@ -3565,6 +3565,7 @@ mod queryable;
 pub(crate) mod redial_heap;
 mod redial_wait;
 mod replay;
+#[cfg(wz_round)]
 mod round;
 // The cells a link's task takes: a build whose read steps its one link itself runs none.
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -3584,3 +3585,24 @@ mod ticker;
 mod timestamps;
 #[cfg(feature = "listen")]
 mod tx_pool;
+
+/// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
+/// build script): a build whose read runs beside the program's calls, or one with a kind the read
+/// that hands each record out as it is read still queues. A build that keeps none compiles no
+/// `crate::round`, so this is read here, where every build reads it. A feature added to one list
+/// and not the other turns this red.
+#[test]
+fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
+    let queues = cfg!(any(
+        feature = "threads",
+        feature = "listen",
+        feature = "group",
+        feature = "liveliness",
+        feature = "query",
+        feature = "queryable",
+        feature = "local-subscriber",
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ));
+    assert_eq!(cfg!(wz_round), queues);
+}

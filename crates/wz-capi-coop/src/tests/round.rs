@@ -1639,23 +1639,3 @@ fn the_gate_passes_over_a_quiet_stack_until_a_wait_finds_input_or_the_links_move
         "CONTROL: the next wait that finds input reads it"
     );
 }
-
-/// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
-/// build script): a build whose read runs beside the program's calls, or one with a kind the read
-/// that hands each record out as it is read still queues. A feature added to one list and not the
-/// other turns this red.
-#[test]
-fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
-    let queues = cfg!(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group",
-        feature = "liveliness",
-        feature = "query",
-        feature = "queryable",
-        feature = "local-subscriber",
-        feature = "remote-declaration-watch",
-        feature = "declarations-synced-event"
-    ));
-    assert_eq!(cfg!(wz_round), queues);
-}
