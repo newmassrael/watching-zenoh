@@ -115,7 +115,8 @@ use wz_runtime_coop::faces::DialAnswer;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::faces::OwingWaits;
 use wz_runtime_coop::faces::{
-    DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, Link, LinkSupervisor,
+    DialEndpoint, EndpointTexts, FaceRecord, FaceSession, IdleWait, LendsSession, Link,
+    LinkSupervisor,
 };
 use wz_runtime_coop::link_cells::CellRc;
 use wz_runtime_coop::reassembly_rx::{
@@ -130,6 +131,7 @@ use wz_runtime_coop::session_drive::StackWake;
 use wz_runtime_coop::session_drive::{LinkOpenError, LinkWaits, WaitOn};
 use wz_runtime_coop::session_drive::{OpenedLink, SessionDatagramLink, SessionLinks, SessionRole};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
+use wz_runtime_coop::sync::Lend;
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use wz_runtime_coop::transport::{DialWalk, FaceStep};
 pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
@@ -234,7 +236,7 @@ use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
 
 mod replay;
-use replay::{Replay, TurnEnd};
+use replay::{Replay, SendTo, TurnEnd};
 
 #[cfg(feature = "listen")]
 mod faces_added;
@@ -2261,6 +2263,38 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
+/// What a face owes the session's sends that found its link held by another holder
+/// ([`LendsSession::owe`]): bits of its parts' debts, each paid by the holder once it lets go of
+/// the link, under the session's lock, from the session's own record of what the face is owed.
+mod face_debts {
+    /// The face's replay owes its peer a turn, from where its cursor stands.
+    pub(super) const REPLAY: u32 = 1;
+}
+
+/// Send `send` over the link `wire` holds, as every send of the session on a face is made: the
+/// link's session is lent to it in place, or by a try of the place the link lies in apart from the
+/// session's state, which waits for nothing ([`LendsSession::try_session`]). `send` was made of
+/// the session's state under its lock and reads only what may be shared across threads (text and
+/// ids read off the session's rows), so it holds no handle on a cell of the link or of the
+/// session. `Some` with whether the link took it; `None` while the link holds no session, and,
+/// with `debt` owed to the face, while another holder has the link.
+// Out of line and over `dyn`: one body lends a link for every send of the session.
+#[inline(never)]
+fn send_on<C: ClockSource + 'static>(
+    wire: &Wire<C>,
+    debt: u32,
+    send: &(dyn SendTo<C> + Sync),
+) -> Option<bool> {
+    match wire.try_session(|session| send.send_to(&session.actions)) {
+        Lend::Lent(took) => Some(took),
+        Lend::Held => {
+            wire.owe(debt);
+            None
+        }
+        Lend::Empty => None,
+    }
+}
+
 /// How the session of a face's link ends: with its task, or, where the read steps the one link
 /// itself, as the read's last step of it said (`direct`).
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -2630,25 +2664,52 @@ fn interest_on_link<C: ClockSource + 'static>(
     None
 }
 
-/// Send the Interest `row` holds open over `actions`, for what is declared now and what is
-/// declared later, naming its key as the link's key-wire form says: whether the link took it.
-fn send_interest<K: KeyBacking, C: ClockSource + 'static>(
-    row: &InterestRow<K>,
+/// An Interest as a link is asked it, read off its row ([`Self::of`]): its id, what it asks
+/// about, and its key's text and declared form, borrowed from the session's tables. Its send reads
+/// nothing else of the session's state ([`send_interest`]).
+#[derive(Clone, Copy)]
+struct InterestTell<'a> {
+    id: EntityId,
+    kind: InterestKind,
+    key: &'a str,
+    mapping_id: ExprId,
+    aggregate: bool,
+    suffix: Option<&'a str>,
+}
+
+impl<'a> InterestTell<'a> {
+    /// The Interest `row` holds open.
+    fn of<K: KeyBacking>(row: &'a InterestRow<K>) -> Self {
+        Self {
+            id: row.id(),
+            kind: row.kind(),
+            key: row.key(),
+            mapping_id: row.mapping_id(),
+            aggregate: row.aggregate(),
+            suffix: row.suffix(),
+        }
+    }
+}
+
+/// Send `interest` open over `actions`, for what is declared now and what is declared later,
+/// naming its key as the link's key-wire form says: whether the link took it.
+fn send_interest<C: ClockSource + 'static>(
+    interest: InterestTell<'_>,
     actions: &LinkActions<C>,
 ) -> bool {
-    let linked = interest_on_link(actions, row.key(), row.aggregate());
+    let linked = interest_on_link(actions, interest.key, interest.aggregate);
     let (mapping_id, suffix) = match &linked {
         Some(form) => (form.mapping_id, form.suffix.as_deref()),
-        None => (row.mapping_id(), row.suffix()),
+        None => (interest.mapping_id, interest.suffix),
     };
     actions
         .send_interest_kinds(
-            u64::from(row.id()),
+            u64::from(interest.id),
             wz_session_core::session_actions::InterestAsk {
-                kinds: kinds(row.kind()),
+                kinds: kinds(interest.kind),
                 current: true,
                 future: true,
-                aggregate: row.aggregate(),
+                aggregate: interest.aggregate,
             },
             mapping_id,
             suffix,
@@ -3910,17 +3971,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // then finds it lost, so the dial role's face dials again and tells everything over the
         // next link, and any other face goes.
         // A build that reaches no pace told the peer everything when the link came up.
-        let up = match &face.link {
-            Link::Up(wire) if ReplayPacing::REACHABLE && !wire.finished() => {
-                Some(wire.actions.clone())
-            }
-            _ => None,
-        };
-        if let Some(actions) = up {
-            if self.replay_turn(at, &actions, now_ms) == TurnEnd::EndsLink {
-                self.transport.links.abort_link(at);
-                self.run_tasks();
-            }
+        let up =
+            matches!(&face.link, Link::Up(wire) if ReplayPacing::REACHABLE && !wire.finished());
+        if up && self.replay_turn(at, now_ms) == TurnEnd::EndsLink {
+            self.transport.links.abort_link(at);
+            self.run_tasks();
         }
         // What became of the link is the face's value's to say (`FaceLife`), from what the
         // transport reads of the link here, the face's role among it; carrying it out is the
@@ -4150,11 +4205,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Tell the peer of the face at `at` everything the session holds again (`redeclare`):
     /// whether it was told, which a place with no face, or a face whose link is not up, is not.
     fn redeclare_on(&mut self, at: usize, now_ms: u64) -> bool {
-        let actions = match self.transport.links.face(at).map(|face| &face.link) {
-            Some(Link::Up(wire)) => wire.actions.clone(),
-            _ => return false,
-        };
-        match self.begin_replay(at, &actions, now_ms) {
+        let up = matches!(
+            self.transport.links.face(at).map(|face| &face.link),
+            Some(Link::Up(_))
+        );
+        if !up {
+            return false;
+        }
+        match self.begin_replay(at, now_ms) {
             TurnEnd::Kept => true,
             TurnEnd::EndsLink => {
                 if let Some(Link::Up(wire)) = self.transport.links.face(at).map(|face| &face.link) {
@@ -4184,14 +4242,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if let Some(on) = wire.room_wait() {
             self.rooms.hold(at, on);
         }
-        let actions = wire.actions.clone();
         let facts = UpFacts::of(wire);
         #[cfg(feature = "connectivity")]
         let told = facts.row.clone().filter(|_| self.session.faces_watched());
         if let Some(face) = self.transport.links.face_mut(at) {
             face.facts = Some(facts);
         }
-        if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
+        if self.begin_replay(at, now_us / 1000) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
         self.transport.links.establish(at);

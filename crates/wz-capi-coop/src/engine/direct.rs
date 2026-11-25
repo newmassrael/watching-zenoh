@@ -847,11 +847,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !ReplayPacing::REACHABLE {
             return;
         }
-        let actions = match core.transport.links.face(0).map(|face| &face.link) {
-            Some(Link::Up(wire)) => wire.actions.clone(),
-            _ => return,
-        };
-        if core.replay_turn(0, &actions, now_us / 1000) == TurnEnd::EndsLink {
+        let up = matches!(
+            core.transport.links.face(0).map(|face| &face.link),
+            Some(Link::Up(_))
+        );
+        if up && core.replay_turn(0, now_us / 1000) == TurnEnd::EndsLink {
             core.transport.links.abort_link(0);
         }
     }
