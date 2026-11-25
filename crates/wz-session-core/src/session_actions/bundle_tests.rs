@@ -1664,7 +1664,7 @@ mod facts_lock {
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
-                facts.handshake.peer_open_lease_ms,
+                actions.fact_peer_open_lease_ms(|slot| *slot),
                 facts.handshake.peer_remote_bound,
             )
         });
@@ -1689,7 +1689,7 @@ mod facts_lock {
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
-                facts.handshake.peer_open_lease_ms,
+                actions.fact_peer_open_lease_ms(|slot| *slot),
                 facts.handshake.peer_remote_bound,
             )
         });
@@ -1723,7 +1723,7 @@ mod facts_lock {
         let (awaiting, lease, bound) = actions.with_facts(|facts| {
             (
                 facts.handshake.awaiting_open_ack,
-                facts.handshake.peer_open_lease_ms,
+                actions.fact_peer_open_lease_ms(|slot| *slot),
                 facts.handshake.peer_remote_bound,
             )
         });
@@ -1812,16 +1812,17 @@ mod facts_lock {
         );
     }
 
-    /// An admitted OpenSyn spends the nonce that admitted it and takes the peer's lease in one
-    /// hold.
+    /// An admitted OpenSyn spends the nonce that admitted it and takes the peer's lease.
     #[cfg(all(feature = "codec-open-body", feature = "session-unicast-accept"))]
     #[test]
     fn an_admitted_open_syn_spends_the_nonce_and_takes_the_lease() {
         let (actions, _link) = bundle();
         actions.fact_cookie_nonce(|slot| *slot = Some(7));
         actions.admit_open_syn(5, 10);
-        let (nonce, lease) =
-            actions.with_facts(|facts| (facts.cookie_nonce, facts.handshake.peer_open_lease_ms));
+        let (nonce, lease) = (
+            actions.fact_cookie_nonce(|slot| *slot),
+            actions.fact_peer_open_lease_ms(|slot| *slot),
+        );
         assert_eq!(nonce, None, "a spent nonce admits no replay");
         assert_eq!(lease, Some(5), "the lease the OpenSyn advertised");
     }
@@ -1958,8 +1959,8 @@ mod link_stamps {
             "the later stamp is the baseline"
         );
         assert_eq!(
-            holds, 1,
-            "the peer's lease alone: the stamps are read under no lock"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 
@@ -1989,8 +1990,8 @@ mod link_stamps {
             "the earlier of the expiry and the watch"
         );
         assert_eq!(
-            holds, 1,
-            "the peer's lease alone: the stamps are read under no lock"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 
@@ -2031,8 +2032,8 @@ mod link_stamps {
             "nothing before the expiry, the expiry at it"
         );
         assert_eq!(
-            holds, 1,
-            "the peer's lease alone: the stamps are read under no lock"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 
@@ -2059,8 +2060,8 @@ mod link_stamps {
             "the later stamp is the baseline"
         );
         assert_eq!(
-            holds, 1,
-            "the peer's lease alone: the stamps are read under no lock"
+            holds, 0,
+            "the stamps and the peer's lease are read under no lock"
         );
     }
 

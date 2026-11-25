@@ -2079,6 +2079,28 @@ pub struct SessionCore<R: SessionRuntime, T: TimeSource> {
     /// without that feature. C1bz counted one of them.
     pub iteration_work: R::IterationWork,
     pub params: SessionInitParams,
+    /// R311kv — the lease window the peer advertised in its OPEN body
+    /// (milliseconds; `parse_inbound` already projected the wire T-flag
+    /// seconds form back, R311ku). Captured from BOTH OpenSyn (accepting
+    /// side) and OpenAck (initiating side)
+    /// — zenoh-pico adopts `min(advertised, Z_TRANSPORT_LEASE)` at the
+    /// same two arrival points (unicast/transport.c:193/269) and expires
+    /// the session by it (unicast/lease.c:147). wz stores the raw
+    /// advertisement; the deadline comparator applies the local cap
+    /// ([`crate::drive::check_lease_deadline`]: `min(this,
+    /// params.lease_ms)`) — the same store-raw / cap-at-check split as
+    /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
+    /// window governs alone.
+    ///
+    /// R2782 — captured once the Open frame is ADMITTED
+    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`), no
+    /// longer at parse time: a replayed Open frame after `Established` used
+    /// to rewrite it.
+    ///
+    /// A word of the runtime's, as a link's stamps are, and not a fact of the row: the lease and
+    /// keepalive deadlines read it at every step of the link, and a lock of the row there was a
+    /// hold for each. Reached through [`Self::fact_peer_open_lease_ms`].
+    peer_open_lease_ms: R::Word,
     /// Every fact the session keeps under a lock, under ONE lock: [`SessionFacts`]. Reached
     /// through a door (`Self::fact_*`, [`Self::with_facts`]), never named by a caller.
     facts: R::Mutex<SessionFacts>,
@@ -2464,25 +2486,6 @@ pub struct HandshakeFacts {
     /// `params.cookie` on the OpenSyn outbound, implementing the
     /// RFC §5.M echo contract on the Initiator side.
     pub inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
-    /// R311kv — the lease window the peer advertised in its OPEN body
-    /// (milliseconds; `parse_inbound` already projected the wire T-flag
-    /// seconds form back, R311ku). Captured from BOTH OpenSyn (accepting
-    /// side) and OpenAck (initiating side)
-    /// — zenoh-pico adopts `min(advertised, Z_TRANSPORT_LEASE)` at the
-    /// same two arrival points (unicast/transport.c:193/269) and expires
-    /// the session by it (unicast/lease.c:147). wz stores the raw
-    /// advertisement; the deadline comparator applies the local cap
-    /// ([`crate::drive::check_lease_deadline`]: `min(this,
-    /// params.lease_ms)`) — the same store-raw / cap-at-check split as
-    /// the multicast per-peer sweep (R311ks). `None` pre-OPEN: the local
-    /// window governs alone.
-    ///
-    /// R2782 — captured once the Open frame is ADMITTED
-    /// (`SessionLinkActions::admit_open_syn` / `admit_open_ack`; code spans,
-    /// because a field doc's `Self` is this struct, which has neither), no
-    /// longer at parse time: a replayed Open frame after `Established` used
-    /// to rewrite it.
-    pub peer_open_lease_ms: Option<u64>,
     /// R2782 — whether this initiator has sent its OpenSyn and not yet taken
     /// an OpenAck: the one window in which an OpenAck means anything.
     ///
@@ -2954,7 +2957,6 @@ fact_doors! {
     #[cfg(feature = "action-trace")]
     fact_trace => trace: ActionTrace,
     fact_inbound_cookie => handshake.inbound_cookie: Option<SessionBytes<COOKIE_MAX>>,
-    fact_peer_open_lease_ms => handshake.peer_open_lease_ms: Option<u64>,
     fact_awaiting_open_ack => handshake.awaiting_open_ack: bool,
     fact_inbound_peer_zid => handshake.inbound_peer_zid: Option<SessionZid>,
     fact_remote_peer_zid => handshake.remote_peer_zid: Option<SessionZid>,
@@ -3609,6 +3611,15 @@ link_stamp_doors! {
     fact_established_at => established_at,
     fact_last_inbound_at => last_inbound_at,
     fact_keepalive_tick_at => keepalive_tick_at,
+}
+
+impl<R: SessionRuntime, T: TimeSource> SessionCore<R, T> {
+    /// The lease window the peer's admitted Open advertised, lent to `f` and written back when
+    /// `f` changed it: a word of its own, in the form a link's stamps are.
+    #[inline]
+    pub fn fact_peer_open_lease_ms<U>(&self, f: impl FnOnce(&mut Option<u64>) -> U) -> U {
+        StampWords::<R::Word>::lend(&self.peer_open_lease_ms, f)
+    }
 }
 
 impl<R: SessionRuntime> LinkState<R> {
@@ -5646,6 +5657,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // with the value.
                 iteration_work: R::IterationWork::default(),
                 params: params,
+                peer_open_lease_ms: <R::Word as crate::runtime_cell::WordCell>::new(NO_STAMP),
                 // Every fact under the session's one lock (`SessionFacts`).
                 facts: R::new_mutex(SessionFacts {
                     handshake: HandshakeFacts {
@@ -5655,7 +5667,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                         inbound_peer_zid: None::<SessionZid>,
                         inbound_opensyn_cookie: None::<SessionBytes<COOKIE_MAX>>,
                         awaiting_open_ack: false,
-                        peer_open_lease_ms: None::<u64>,
                         inbound_peer_init_caps: None::<PeerInitCaps>,
                         // R311y578 — NOT YET NEGOTIATED. The first admitted Init
                         // seeds it from wz's own announced level and caps it at the
@@ -12084,7 +12095,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // projection) for the deadline comparator's min(); pico adopts it at
             // OpenSyn arrival (unicast/transport.c:269), which on its accept path
             // is after the cookie is judged.
-            f.handshake.peer_open_lease_ms = Some(lease);
+            self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
         });
     }
 
@@ -12223,7 +12234,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             self.seed_rx_sn_in(f, initial_sn);
             // R311kv — the OpenAck mirror of the OpenSyn lease capture (pico
             // unicast/transport.c:193).
-            f.handshake.peer_open_lease_ms = Some(lease);
+            self.fact_peer_open_lease_ms(|slot| *slot = Some(lease));
             OpenAckAdmission::Taken
         })
     }
