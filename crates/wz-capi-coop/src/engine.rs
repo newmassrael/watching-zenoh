@@ -53,7 +53,7 @@ use crate::arena::{
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
-use crate::form::{LockForm, SessionLock, StateGuard, StateLock, UnderCoreLock};
+use crate::form::{LockForm, SessionCount, SessionLock, StateGuard, StateLock, UnderCoreLock};
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 use crate::round::RoundGate;
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundRows};
@@ -952,7 +952,7 @@ fn session_zid(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
     endpoints: &EndpointTexts,
-    entropy: &mut SessionEntropy,
+    entropy: &mut SessionEntropy<SessionCount>,
 ) -> Result<SessionZid, OpenError> {
     match (&config.zid, policy.zid_derivation()) {
         (Some(zid), _) => Ok(wire_form(*zid)),
@@ -1929,7 +1929,7 @@ struct Core<L: SessionLinks + 'static, C: ClockSource + 'static> {
     /// The session's one entropy source, which every draw of the session goes through: its zid,
     /// the cookie key of each dial and, through each link's handshake binding (a handle on it,
     /// cloned per link), the cookie nonce and challenges of each handshake it accepts.
-    entropy: SessionEntropy,
+    entropy: SessionEntropy<SessionCount>,
     /// The config the session opened with, which counts its endpoints: their texts are the
     /// session's rows (`endpoints`).
     config: CoopConfig<Counted>,
@@ -4717,7 +4717,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
         let (wire, entropy, rooms) = written.and_then(|()| {
-            let mut entropy = SessionEntropy::new(entropy);
+            let mut entropy = SessionEntropy::<SessionCount>::held(entropy);
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
             let rooms = lent
                 .arena

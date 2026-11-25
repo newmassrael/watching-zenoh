@@ -132,7 +132,8 @@ pub trait LockKind: 'static {
     /// time, or across threads. Its table flag is [`Self::Flag`], so a handle of either kind
     /// is placed in a cell of a table the session lends.
     #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
-    type Count: crate::link_cells::CountKind<Flag = Self::Flag>;
+    type Count: crate::link_cells::CountKind<Flag = Self::Flag>
+        + crate::session_runtime::EntropyCount;
 
     /// A flag the session's holders write without a lock, and the flag of a table's cell
     /// (`SessionRuntime::Flag`): a cell where one task holds them, an atomic where threads do.

@@ -148,6 +148,10 @@ unsafe impl ConfinedOwner for UnderCoreLock {}
 /// ([`LockForm::SessionLock`]), made here once for the engine.
 pub(crate) type SessionLock = <CoopForm as LockForm>::SessionLock;
 
+/// How the handles on what a link's session shares are counted under [`SessionLock`]: the
+/// session's entropy handle is counted so.
+pub(crate) type SessionCount = <SessionLock as LockKind>::Count;
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::{CoopForm, LockForm, UnderCoreLock};

@@ -75,7 +75,7 @@ use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
 #[cfg(not(feature = "session-slot"))]
 use crate::link_storage::LinkTables;
-use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::session_runtime::{EntropyOf, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
@@ -1365,7 +1365,7 @@ pub struct PumpFields<
     /// The link's actions.
     pub actions: SessionHandle<C, D, K>,
     /// The session's entropy source, which the engine's handshake binding holds.
-    pub entropy: SessionEntropy,
+    pub entropy: EntropyOf<C, D, K>,
     /// The session's clock.
     pub clock: CoopTime<C>,
     /// How the session is driven.
@@ -1467,7 +1467,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
     ) -> Self {
@@ -1502,7 +1502,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         arena: ReassemblyArena,
@@ -1538,7 +1538,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,
@@ -1583,7 +1583,7 @@ impl<
         runtime: CoopRuntime<C, D, K>,
         link: L,
         actions: SessionHandle<C, D, K>,
-        entropy: SessionEntropy,
+        entropy: EntropyOf<C, D, K>,
         clock: CoopTime<C>,
         config: SessionDriveConfig,
         reasm: R,

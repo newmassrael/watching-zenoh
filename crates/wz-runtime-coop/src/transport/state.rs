@@ -63,7 +63,7 @@ use crate::session_drive::{
     PendingDial, PumpFields, SessionDatagramLink, SessionDriveConfig, SessionLinks, SessionPump,
     SessionRole, WaitOn,
 };
-use crate::session_runtime::{SessionEntropy, SessionHandle};
+use crate::session_runtime::{EntropyCount, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
 
@@ -247,13 +247,13 @@ pub enum DialRow<D, P, N: CountKind = OneTask> {
 /// What the making of a link's session is handed beside the link ([`TransportState::make_wire`]):
 /// the parameters the session opens it with, and what it borrows of the session's driver (the set
 /// its task runs on, its source of entropy, its clock and the deadlines of its handshake).
-pub struct WireMaking<'a, C: ClockSource + 'static> {
+pub struct WireMaking<'a, C: ClockSource + 'static, N: EntropyCount = OneTask> {
     /// The parameters the link's session is opened with.
     pub params: SessionInitParams,
     /// The set the link's task is spawned on.
     pub local: &'a CoopLocalSet<C>,
     /// The session's one source of entropy, which every link's handshake draws from.
-    pub entropy: &'a mut SessionEntropy,
+    pub entropy: &'a mut SessionEntropy<N>,
     /// The session's clock.
     pub clock: &'a CoopTime<C>,
     /// The deadlines of the link's handshake.
@@ -829,7 +829,7 @@ impl<T: TransportFaces> TransportState<T> {
         opened: OpenedLink<PumpOf<T>, CountOf<T>>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-        making: WireMaking<'_, T::Clock>,
+        making: WireMaking<'_, T::Clock, CountOf<T>>,
     ) -> Result<Wire<K::Session, TaskEnd, CountOf<T>>, TransportRefusal>
     where
         K::Dispatch: EventSink + 'static,
@@ -857,7 +857,7 @@ impl<T: TransportFaces> TransportState<T> {
         calls: &mut K,
         opened: OpenedLink<PumpOf<T>, CountOf<T>>,
         opened_as: OpenedAs<'_>,
-        making: WireMaking<'_, T::Clock>,
+        making: WireMaking<'_, T::Clock, CountOf<T>>,
         place: PumpPlace<'p, T, E>,
     ) -> Result<PlacedWire<'p, T, K, E>, TransportRefusal> {
         let runtime = making.local.runtime().retyped();
@@ -895,7 +895,7 @@ impl<T: TransportFaces> TransportState<T> {
         opened: OpenedLink<PumpOf<T>, CountOf<T>>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
-        making: WireMaking<'_, T::Clock>,
+        making: WireMaking<'_, T::Clock, CountOf<T>>,
     ) -> Result<WireBuilt<T, K::Dispatch, K::Session>, TransportRefusal> {
         let OpenedLink { sink, pump } = opened;
         let WireMaking {
