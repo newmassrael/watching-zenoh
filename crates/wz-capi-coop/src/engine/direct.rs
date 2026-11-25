@@ -21,11 +21,11 @@
 
 use super::*;
 
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::addr_of_mut;
 use core::sync::atomic::AtomicBool;
 
-use wz_runtime_coop::faces::{Dial, FaceAt, FaceSite, LinkEnd, SendParts, WireParts};
+use wz_runtime_coop::faces::{Dial, FaceAt, FaceSite, LinkEnd, SendParts, SiteSend, WireParts};
 use wz_runtime_coop::link_cells::{FaceHeld, FaceParts};
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::sync::{ConfinedOwner, SeatOf};
@@ -317,9 +317,39 @@ pub(super) type DirectWire<L, C> = FaceAt<DirectLock, DirectParts<L, C>, DirectE
 /// The place of the one link's parts.
 type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 
-/// An operation run on the session's state with the one link's wire, under the session's lock
-/// taken inside the link's place (`CoopEngine::in_place`), borrowing what it captures for `'f`.
-type OnLink<'f, L, C> = dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>) + 'f;
+/// The session's state an operation holds, with the one link's place held before it
+/// (`CoopEngine::hold_on_link`): let go of in the reverse order, the session's lock first.
+pub(super) struct OnLinkHold<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
+    core: ManuallyDrop<LiveCore<'a, L, C>>,
+    place: ManuallyDrop<Option<SiteSend<'a, DirectLock, DirectParts<L, C>>>>,
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> OnLinkHold<'_, L, C> {
+    /// The session's state, and the link's wire it sends through: none where the place holds no
+    /// link, or inside a send through the seat.
+    #[inline(always)]
+    pub(super) fn parts(&mut self) -> (&mut Core<L, C>, LinkTx<'_, C>) {
+        let tx = self
+            .place
+            .as_mut()
+            .and_then(|send| send.tx())
+            .and_then(|tx| tx.as_ref());
+        (&mut self.core.0, tx)
+    }
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + 'static> Drop for OnLinkHold<'_, L, C> {
+    // Out of line: every operation but a publish lets go of the session and the place through it.
+    #[inline(never)]
+    fn drop(&mut self) {
+        // SAFETY: each field is dropped here alone, once, and not reached after; the session's
+        // lock goes before the place it was taken inside.
+        unsafe {
+            ManuallyDrop::drop(&mut self.core);
+            ManuallyDrop::drop(&mut self.place);
+        }
+    }
+}
 
 /// The parts of the one link's session, held in the face's place apart from the session's state:
 /// the link's wire, which a send writes, the pump, written while `records` is held, and what each
@@ -1157,26 +1187,38 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .is_some_and(|face| face.life.phase() == LinkPhase::Up)
     }
 
-    /// The session's state for an operation that sends on the one link, with the link's wire it
-    /// sends through (`LinkTx`), taken inside the link's place, in the order the read takes
-    /// them: the place first, through the seat the read's step stands in when this is a callback
-    /// of it, else by a lend that waits for whatever holds it now, then the session's lock. A
-    /// send under both neither waits nor is owed, and the session's lock is never held while the
-    /// place is waited for. Where the place holds no link, or the call is made inside a send
-    /// through the seat, the session's lock alone is taken and `f` is handed no wire. `None`
-    /// once the session is closed.
+    /// The session's state for an operation that sends on the one link, held with the link's
+    /// place, in the order the read takes them: the place first, through the seat the read's step
+    /// stands in when this is a callback of it, else by a hold that waits for whatever holds it
+    /// now, then the session's lock. A send under both neither waits nor is owed, and the
+    /// session's lock is never held while the place is waited for. Where the place holds no link,
+    /// or the call is made inside a send through the seat, the session's lock alone is taken and
+    /// the hold hands no wire ([`OnLinkHold::parts`]). `None` once the session is closed.
+    // Out of line: one body takes the place and the session's lock for every operation but a
+    // publish.
+    #[inline(never)]
+    pub(super) fn hold_on_link(&self) -> Option<OnLinkHold<'_, L, C>> {
+        // SAFETY: an operation reaches the link's send part only as `LinkTx`, a shared borrow of
+        // the hold that ends before it, and what it sends is made of the session's state: no
+        // handle on a cell of the link leaves the parts and none comes into them.
+        let place = unsafe { self.direct.site.hold_send() };
+        let core = self.live()?;
+        Some(OnLinkHold {
+            core: ManuallyDrop::new(core),
+            place: ManuallyDrop::new(place),
+        })
+    }
+
+    /// `f` on the session's state and the one link's wire, held as [`Self::hold_on_link`]
+    /// holds them. `None` once the session is closed.
+    #[inline(always)]
     pub(super) fn live_on_link<U>(
         &self,
         f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
     ) -> Option<U> {
-        let mut f = Some(f);
-        let mut answer = None;
-        self.in_place(&mut |core, tx| {
-            if let Some(f) = f.take() {
-                answer = Some(f(core, tx));
-            }
-        });
-        answer
+        let mut held = self.hold_on_link()?;
+        let (core, tx) = held.parts();
+        Some(f(core, tx))
     }
 
     /// `f` on the one link's wire (`LinkTx`), taken inside the link's place as
@@ -1196,26 +1238,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return Some(answer);
         }
         f.map(|f| f(None))
-    }
-
-    /// [`Self::live_on_link`] over `f` by reference, which it calls once, with the session's
-    /// lock taken inside the place; not at all once the session is closed.
-    // Out of line and over `dyn`: one body takes the place and the session's lock, and lets them
-    // go, for every operation but a publish.
-    #[inline(never)]
-    fn in_place(&self, f: &mut OnLink<'_, L, C>) {
-        let carried = OnThisThread((self, &mut *f));
-        let lent = self.direct.site.send(move |tx| {
-            let (engine, f) = carried.get();
-            if let Some(mut guard) = engine.live() {
-                f(&mut guard.0, tx.as_ref());
-            }
-        });
-        if lent.is_none() {
-            if let Some(mut guard) = self.live() {
-                f(&mut guard.0, None);
-            }
-        }
     }
 
     /// Let go of the one link's session at the close, unless a read steps it now: that read lets
