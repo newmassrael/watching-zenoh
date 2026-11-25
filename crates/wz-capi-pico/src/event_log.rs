@@ -129,7 +129,7 @@ pub unsafe extern "C" fn wz_ext_event_emit(
         let args: &[u64] = if arg_count == 0 {
             &[]
         } else {
-            std::slice::from_raw_parts(args, arg_count)
+            core::slice::from_raw_parts(args, arg_count)
         };
         // The only refusal a write has is a full log.
         match events::emit(level, source, args) {
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn wz_ext_event_read(
         let args: &mut [u64] = if args_capacity == 0 {
             &mut []
         } else {
-            std::slice::from_raw_parts_mut(args, args_capacity)
+            core::slice::from_raw_parts_mut(args, args_capacity)
         };
         out.put(&match events::read(&mut *cursor, args) {
             Read::Record {

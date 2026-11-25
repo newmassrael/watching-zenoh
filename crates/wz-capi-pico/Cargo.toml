@@ -86,15 +86,14 @@ default = [
     "conformance-digest",
     "device-requires",
 ]
-# `std`: the library runs on a host, whose standard library gives the engine port's threads and
-# sleep (`wz-capi-port`'s `os`), the locks being `wz-host-sync`'s in its `std` build, which take no
-# memory when first taken on any host, and the host layer under the
+# `std`: the library runs on a host and links its standard library. The engine port's threads,
+# sleep and locks are `wz-host-sync`'s (`wz-capi-port`'s `os`) as without it, the locks in its
+# `std` build, which take no memory when first taken on any host, and the host layer under the
 # platform exports (`src/os/unix.rs`, `src/os/windows.rs`). Without it the crate is `no_std` with
 # `alloc` and the ABI layer stands on the port alone, so that the pico C ABI on an MCU is this
-# crate and not a copy of it (`docs/upstream-parity.md` section 5a). Both host engines and every
-# capability whose code is still written against the host's library select it, so a host build
-# has it whatever its feature list; a capability comes to the MCU when its module no longer
-# needs it.
+# crate and not a copy of it (`docs/upstream-parity.md` section 5a). The two host engines select
+# it; no capability does: a capability that needs a host's lock or clock is refused by name in a
+# build with none of `std`, `os-posix` and `os-windows` (`src/lib.rs`).
 std = [
     "dep:wz-host-sync",
     "wz-host-sync/std",
@@ -382,7 +381,6 @@ advanced = [
 # build is, and part of the unstable surface as the other `wz_ext_*` doors are: it implies
 # `unstable-api`. The registry and the clock are `wz-node-time`'s.
 clock-source = [
-    "std",
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/clock-source",
@@ -394,7 +392,6 @@ clock-source = [
 # reference build is, and part of the unstable surface: it implies `unstable-api`. The ring is
 # `wz-node-time`'s.
 event-ring = [
-    "std",
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/event-ring",
@@ -406,7 +403,6 @@ event-ring = [
 # wz's own, which zenoh-pico has not, so off as the reference build is, and part of the unstable
 # surface: it implies `unstable-api`. The machine and the supervisor are `wz-session-core`'s.
 supervision = [
-    "std",
     "unstable-api",
     "wz-session-core/supervision",
     "wz-capi-port/supervision",
@@ -417,7 +413,6 @@ supervision = [
 # part of the unstable surface: it implies `unstable-api`. The record, the sampler and the message
 # meter are `wz-session-core`'s.
 resource-snapshot = [
-    "std",
     "unstable-api",
     "wz-session-core/resource-snapshot",
     "wz-capi-port/resource-snapshot",
@@ -434,10 +429,10 @@ session-memory = ["unstable-api", "wz-capi-core?/session-memory"]
 # profile's header describes, put on a publisher or handed to a callback. wz's own, which zenoh-pico
 # has not, so off as the reference build is, and part of the unstable surface: it implies
 # `unstable-api`. The piece writer is `wz-app-frame`'s, the one the zenoh-c ABI's doors of the same
-# capability write with. Each sender is held under the host's lock, so it selects `std`. A put is
-# the publisher's, which both engines have, so it selects neither and forwards weakly.
+# capability write with. Each sender is held under the host's lock (`std`, `os-posix` or
+# `os-windows`; src/lib.rs refuses a build with none). A put is the publisher's, which both
+# engines have, so it selects neither and forwards weakly.
 segment-sender = [
-    "std",
     "unstable-api",
     "dep:wz-app-frame",
     "wz-capi-core?/segment-sender",
@@ -581,7 +576,6 @@ app-transport = [
 # `wz-node-time`'s and serves either engine: the cooperative engine's clock, or the clock the tokio
 # engine's session is made with (`wz-capi-core`'s).
 time-base = [
-    "std",
     "unstable-api",
     "dep:wz-node-time",
     "wz-node-time/time-base",
@@ -627,7 +621,6 @@ declarations-synced-event = [
 # `if(Z_FEATURE_ADMIN_SPACE AND NOT Z_FEATURE_QUERYABLE)`), so it implies `queryable`, and
 # forces it off without the unstable API, so it implies `unstable-api`.
 admin-space = [
-    "std",
     "queryable",
     "unstable-api",
     "wz-capi-core?/admin-space",

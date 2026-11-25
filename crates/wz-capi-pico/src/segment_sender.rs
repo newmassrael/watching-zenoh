@@ -43,6 +43,7 @@ use wz_host_sync::{Mutex, MutexGuard};
 use crate::abi::{z_moved_bytes_t, z_owned_bytes_t, z_owned_string_t};
 use crate::bytes::{store_owned_string, z_bytes_copy_from_buf};
 use crate::ffi::{guard_val, guarded};
+use crate::prelude::{format, Box, ToString};
 use crate::pubsub::{
     z_loaned_publisher_t, z_publisher_put, z_publisher_put_options_default,
     z_publisher_put_options_t, z_timestamp_t,
