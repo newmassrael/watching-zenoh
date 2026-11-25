@@ -4125,9 +4125,10 @@ pub static RUNTIME_LIMITS: [LimitEntry<RuntimeLimits>; RUNTIME_LIMIT_COUNT] = [
     LimitEntry::of::<ClockMaxForwardStepMs>(),
 ];
 
-/// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later
-/// stage decides it, so neither snapshot holds it and a document that states it is refused by
-/// name.
+/// Every limit that is a capacity alone, by its id: the build sizes storage by it, so neither
+/// snapshot holds it and a document that states it is refused by name. The build's value is
+/// the storage itself, except for those in [`PROCESS_OPEN_COUNTS`], whose build value is the
+/// most the process reserves.
 pub static CAPACITY_LIMITS: [&str; 42] = [
     "MATCH_MEMO_FIXED_SLOTS",
     "MATCH_MEMO_KEY_BYTES",
@@ -4171,4 +4172,18 @@ pub static CAPACITY_LIMITS: [&str; 42] = [
     "MAX_PEER_NODES",
     "HANDSHAKE_COOKIE_BYTES",
     "EVENT_RECORD_ARGS",
+];
+
+/// The capacities of the process pools whose count the config of the process's first open
+/// states, each up to the build's value, after which the pools are fixed: the build's value is
+/// the most the process reserves, and the first open's config the count it does reserve.
+pub static PROCESS_OPEN_COUNTS: [&str; 8] = [
+    "HELD_SAMPLES",
+    "HELD_REPLIES",
+    "HELD_QUERIES",
+    "HELD_HELLOS",
+    "HELD_SMALL_PAYLOAD_BLOCKS",
+    "HELD_MEDIUM_PAYLOAD_BLOCKS",
+    "HELD_LARGE_PAYLOAD_BLOCKS",
+    "HELD_ENCODINGS",
 ];
