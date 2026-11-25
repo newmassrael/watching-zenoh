@@ -28,7 +28,7 @@ use wz_runtime_coop::transport::{DialRow, LinkPump, OpenedAs, PlacedWire, PumpPl
 use wz_session_core::link_life::{LinkInput, LinkPhase, LinkTimes, Refused, UnicastLink};
 
 /// The pump of the session's one link, which the read steps itself.
-type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink>>;
+type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink, LinkCount>>;
 
 /// What the read and the link's end share of the link's session: whether its pump ended, and
 /// whether the session asked it to end. Read and written with loads and stores: the pump's end
@@ -86,7 +86,7 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
     pub(super) face: HeldFace,
     pub(super) actions: LinkHandle<C>,
     /// The link the records are read from, which keeps where the datagram it lends lies.
-    pub(super) link: CellRc<LinkGate<C>>,
+    pub(super) link: CellRc<LinkGate<C>, LinkCount>,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
     /// The link's generation, which the queries it carries are answered under.
@@ -245,7 +245,7 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The dial the life asked for, while the network has not answered it.
     dial: Option<Dial<L::Dial>>,
     /// The link a dial made, and the endpoint it reached, until its handshake is begun.
-    opened: Option<(OpenedLink<L::Pump>, DialEndpoint)>,
+    opened: Option<(OpenedLink<L::Pump, LinkCount>, DialEndpoint)>,
     /// Why the last endpoint tried came to no link: what the session ends with when the life
     /// ends it.
     last: Option<OpenError>,
@@ -325,7 +325,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
             }
             return LinkInput::Tick;
         }
-        let Some(answer) = self.dial.as_mut().and_then(|dial| dial.answer::<L::Pump>()) else {
+        let Some(answer) = self
+            .dial
+            .as_mut()
+            .and_then(|dial| dial.answer::<L::Pump, LinkCount>())
+        else {
             return LinkInput::Tick;
         };
         let Some(dial) = self.dial.take() else {
@@ -356,7 +360,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         &mut self,
         core: &Core<L, C>,
         endpoint: DialEndpoint,
-        answer: Result<OpenedLink<L::Pump>, LinkOpenError>,
+        answer: Result<OpenedLink<L::Pump, LinkCount>, LinkOpenError>,
     ) -> LinkInput {
         match core.transport.dialled(Some(&endpoint), answer) {
             Ok(opened) => {
@@ -776,7 +780,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         core: &mut Core<L, C>,
         slot: &mut DirectSlot<L, C>,
-        opened: OpenedLink<L::Pump>,
+        opened: OpenedLink<L::Pump, LinkCount>,
         endpoint: &DialEndpoint,
     ) -> Result<(), OpenError> {
         slot.drop_pump();
