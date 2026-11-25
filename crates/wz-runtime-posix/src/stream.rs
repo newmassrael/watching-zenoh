@@ -973,7 +973,7 @@ mod tests {
         let mut near = PosixTcpDial.dial_named(&name).expect("a connect begun");
         made_or_refused(&mut near).expect("localhost reaches the listener");
         assert_eq!(ip_ends(&near).1, at(port));
-        listener.accept().expect("the far end");
+        let _far = listener.accept().expect("the far end");
     }
 
     #[test]

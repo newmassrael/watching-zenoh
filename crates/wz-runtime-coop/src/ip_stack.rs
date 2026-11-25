@@ -2353,12 +2353,17 @@ mod tests {
             }
         }
 
+        // Asked through a function, as the transport asks it of the links it is generic over.
+        fn resolves<L: SessionLinks>() -> bool {
+            L::RESOLVES
+        }
+
         let host = |text: &'static str| match read_dial_target(text) {
             Ok(DialTarget::Named(name)) => name,
             other => panic!("{text} names a host: {other:?}"),
         };
         let named = IpLinks::<Datagrams, NamedDial>::new(NODE, NamedDial);
-        assert!(<IpLinks<Datagrams, NamedDial> as SessionLinks>::RESOLVES);
+        assert!(resolves::<IpLinks<Datagrams, NamedDial>>());
         let tcp = named
             .begin_named(&host("tcp/router.example:7447"))
             .expect("the dial begins")
@@ -2386,7 +2391,7 @@ mod tests {
         ));
 
         let plain = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
-        assert!(!<IpLinks<Datagrams, Dial> as SessionLinks>::RESOLVES);
+        assert!(!resolves::<IpLinks<Datagrams, Dial>>());
         assert!(matches!(
             plain.begin_named(&host("tcp/router.example:7447")),
             Err(LinkOpenError::Unsupported)

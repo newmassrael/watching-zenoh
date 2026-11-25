@@ -565,13 +565,18 @@ fn links_without_a_resolver_refuse_a_host_name_before_any_dial() {
     use crate::{EndpointRefusal, Refusal};
     use wz_runtime_coop::locator_text::DialRefused;
 
+    // Asked through a function, as the transport asks it of the links it is generic over.
+    fn resolves<L: SessionLinks<LinkCount>>() -> bool {
+        L::RESOLVES
+    }
+
     let dials = Arc::new(AtomicUsize::new(0));
     let links = Refusals {
         inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
         refusing: Arc::new(AtomicBool::new(true)),
         dials: dials.clone(),
     };
-    assert!(!<Refusals as SessionLinks<LinkCount>>::RESOLVES);
+    assert!(!resolves::<Refusals>(), "these links have no resolver");
     let endpoint = "tcp/router.example:7447";
     let refused = CoopEngine::open(
         links,
