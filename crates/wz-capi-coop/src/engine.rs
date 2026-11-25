@@ -2093,8 +2093,36 @@ impl LinkLeg<'_> {
     }
 }
 
+/// Send `leg` to the peer of the one link, whose record names it by `_wire`, as `how` says,
+/// through its wire `tx`, which the caller holds with the link's place, taken before the
+/// session's lock (`CoopEngine::on_link`). `None` while the place holds no wire.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[inline(always)]
+fn publish_through<C: ClockSource + 'static>(
+    _wire: &impl LendsSession<Session = LinkSession<C>>,
+    tx: LinkTx<'_, C>,
+    leg: &LinkLeg<'_>,
+    how: FaceSend,
+) -> Option<LegSent> {
+    tx.map(|wire| leg.send_to(&wire.actions, how))
+}
+
+/// Send `leg` over the link `wire` holds as `how` says, through the face's record, which the
+/// session's lock alone reaches where each record holds its link ([`publish_on`]).
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[inline(always)]
+fn publish_through<C: ClockSource + 'static>(
+    wire: &impl LendsSession<Session = LinkSession<C>>,
+    _tx: LinkTx<'_, C>,
+    leg: &LinkLeg<'_>,
+    how: FaceSend,
+) -> Option<LegSent> {
+    publish_on(wire, leg, how)
+}
+
 /// Send `leg` over the link `wire` holds as `how` says, the link's session lent as [`send_on`]
 /// lends it. `None` while the link is not lent.
+#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 fn publish_on<C: ClockSource + 'static>(
     wire: &impl LendsSession<Session = LinkSession<C>>,
     leg: &LinkLeg<'_>,
@@ -2859,6 +2887,13 @@ type LinkTx<'a, C> = Option<&'a Wire<C>>;
 /// link, and this with it.
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
 type LinkTx<'a, C> = core::marker::PhantomData<&'a Wire<C>>;
+
+/// The session's state an operation holds, and what it sends through on the one link, taken with
+/// that link's place before the session's lock (`CoopEngine::live_on_link`).
+struct Holding<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
+    core: &'a Core<L, C>,
+    tx: LinkTx<'a, C>,
+}
 
 /// What a face holds of its link while the link is up or in its handshake: the link's session
 /// itself where each link runs as a task, or a handle on the face's place that holds the session
@@ -6864,6 +6899,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some(f(&mut guard.0, core::marker::PhantomData))
     }
 
+    /// `f` on what an operation sends through (`LinkTx`), for one that takes the session's lock
+    /// its own way: nothing, where each face's record holds its link and is reached under that
+    /// lock. Always `Some`.
+    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[inline(always)]
+    fn on_link<U>(&self, f: impl FnOnce(LinkTx<'_, C>) -> U) -> Option<U> {
+        Some(f(core::marker::PhantomData))
+    }
+
     /// The session's state for a publish's leg to its links. A publish that may not be dropped
     /// waits for it ([`Self::live`]). One that may is not held behind a send that holds the
     /// session while it waits for room on a link, up to `wait_before_close` for a blocking one:
@@ -7294,6 +7338,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
         }
+        // The one link's place is taken before the session, as every send on it takes them.
+        self.on_link(|tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx))
+            .unwrap_or(Ok(0))
+    }
+
+    /// [`Self::publish_to_link`] through `tx`, what the caller holds of the one link.
+    #[inline(always)]
+    fn publish_to_link_on(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+        plan: Option<FilterId>,
+        tx: LinkTx<'_, C>,
+    ) -> Result<usize, FanoutError> {
         let meta = opts.push_metadata();
         // zenoh's `is_droppable` (`face_send::droppable`). A message with no QoS of its own is sent
         // with the default's, as the send reads it.
@@ -7351,7 +7411,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             meta: &meta,
             plan,
         };
-        let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass);
+        let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass, tx);
         // The clock is read only for a fan-out that stopped at a face, whose wait it bounds. Only
         // a send that waits for no slot stops one, which a build that listens on nothing never
         // makes: there the fan-out is done, and neither the clock nor the wait is read.
@@ -7441,7 +7501,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let now_us = core.0.now_us();
             core.0.transport.links.write_owed_now();
             let pass = run.waited(waited, now_us);
-            let (more, again) = self.fan_out_in(&mut core.0, put, None, pass);
+            let (more, again) =
+                self.fan_out_in(&mut core.0, put, None, pass, core::marker::PhantomData);
             if more.is_err() {
                 outcome = more;
             }
@@ -7474,7 +7535,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         put: &Publication<'_>,
         skip: Option<&DroppedOn>,
     ) -> Result<usize, FanoutError> {
-        self.fan_out_in(core, put, skip, Pass::EVERY_FACE).0
+        self.fan_out_in(core, put, skip, Pass::EVERY_FACE, core::marker::PhantomData)
+            .0
     }
 
     /// [`Self::fan_out`] by `pass`: with `listen`, to the faces from the one whose place is
@@ -7488,6 +7550,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         put: &Publication<'_>,
         skip: Option<&DroppedOn>,
         pass: Pass,
+        tx: LinkTx<'_, C>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
         let Publication {
             keyexpr,
@@ -7526,7 +7589,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             head,
             planned: false,
         };
-        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass);
+        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass, tx);
         if stuck.is_some() {
             return (outcome, stuck);
         }
@@ -7572,6 +7635,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         leg: &LinkLeg<'_>,
         skip: Option<&DroppedOn>,
         pass: Pass,
+        tx: LinkTx<'_, C>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
         let mut outcome = Ok(0);
         #[cfg(not(any(feature = "listen", feature = "group")))]
@@ -7592,7 +7656,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(test)]
             self.takes.face_marks.fetch_add(1, Ordering::Relaxed);
             // A link not lent to the put skips it, as a link that is down does.
-            let Some(sent) = publish_on(wire, leg, how) else {
+            let Some(sent) = publish_through(wire, tx, leg, how) else {
                 continue;
             };
             #[cfg(test)]
@@ -8088,26 +8152,28 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// session is closed or the query's link is no longer the session's.
     #[cfg(feature = "queryable")]
     fn send_reply(&self, generation: u64, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
-        let Some(core) = self.live() else {
-            return Ok(());
+        let fits = |core: &Core<L, C>| {
+            let (payload, attachment) = parts.bounded_lengths();
+            let most = core.config.limits.max_reply_payload_bytes();
+            if !most.admits(payload) || !most.admits(attachment) {
+                return Err(ReplyError::PayloadTooLarge);
+            }
+            Ok(())
         };
-        let (payload, attachment) = parts.bounded_lengths();
-        let most = core.0.config.limits.max_reply_payload_bytes();
-        if !most.admits(payload) || !most.admits(attachment) {
-            return Err(ReplyError::PayloadTooLarge);
-        }
         // The session's own get is answered to its pending entry, which is the registry's: what
         // the entry's consolidation forwards at once is handed to the leg's callback by this
         // thread, once it lets go of the session, and what it holds is handed out when the answer
         // ends (`Self::answer`).
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
+            let Some(mut core) = self.live() else {
+                return Ok(());
+            };
+            fits(&core.0)?;
             // Handed as it lies: a requester that keeps the reply copies what it keeps, and keeps
             // a buffer of shared memory as its page, as it keeps the owned projection's.
             let reply = wz_session_core::reply::LocalReplyView::new(parts);
             self.gets.capture();
-            // Mutable here alone: the link's path only reads the session.
-            let mut core = core;
             core.0
                 .session
                 .registry
@@ -8125,18 +8191,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             return Ok(());
         }
-        #[cfg(feature = "group")]
-        if let Some(sink) = core.0.transport.group_answer_sink(generation) {
-            sink.send_reply_parts(parts);
-            return Ok(());
-        }
-        if let Some(link) = core.0.answer_wire(generation) {
-            send_on(link, 0, &|actions: &LinkActions<C>| {
-                wz_session_core::response_sink::ResponseSink::send_reply_parts(actions, parts);
-                true
-            });
-        }
-        Ok(())
+        // The query's link's place is taken before the session, as every send on it takes them.
+        self.live_on_link(|core, tx| -> Result<(), ReplyError> {
+            fits(core)?;
+            #[cfg(feature = "group")]
+            if let Some(sink) = core.transport.group_answer_sink(generation) {
+                sink.send_reply_parts(parts);
+                return Ok(());
+            }
+            if let Some(link) = core.answer_wire(generation) {
+                send_through(link, tx, &|actions: &LinkActions<C>| {
+                    wz_session_core::response_sink::ResponseSink::send_reply_parts(actions, parts);
+                    true
+                });
+            }
+            Ok(())
+        })
+        .unwrap_or(Ok(()))
     }
 
     /// One turn of the answer to the query `rid` on the link of `generation` has ended, its
@@ -8151,10 +8222,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         rid: wz_session_core::wire_id::RequestId,
         release: query::Release,
     ) {
-        let Some(core) = self.live() else {
-            return;
-        };
-        let due = match release {
+        // Let go of the hold under the session's lock.
+        let due = || match release {
             query::Release::Hold => self
                 .plane
                 .with_holds(|holds| holds.release(generation, rid)),
@@ -8165,9 +8234,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The session's own get is answered to its pending entry, which is the registry's.
         #[cfg(feature = "local-queryable")]
         if generation == query::LOCAL_QUERY {
-            // Mutable here alone: the link's path only reads the session.
-            let mut core = core;
-            if due.is_some() {
+            let Some(mut core) = self.live() else {
+                return;
+            };
+            if due().is_some() {
                 core.0
                     .session
                     .registry
@@ -8179,24 +8249,28 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.deliver();
             return;
         }
-        #[cfg(feature = "group")]
-        let due = match (due, core.0.transport.group_answer_sink(generation)) {
-            (Some(qos), Some(sink)) => {
-                sink.send_response_final(rid, qos);
-                None
+        // The query's link's place is taken before the session, as every send on it takes them.
+        let _ = self.live_on_link(|core, tx| {
+            let due = due();
+            #[cfg(feature = "group")]
+            let due = match (due, core.transport.group_answer_sink(generation)) {
+                (Some(qos), Some(sink)) => {
+                    sink.send_response_final(rid, qos);
+                    None
+                }
+                (due, _) => due,
+            };
+            if let (Some(qos), Some(link)) = (due, core.answer_wire(generation)) {
+                send_through(link, tx, &|actions: &LinkActions<C>| {
+                    actions.send_response_final(rid, qos);
+                    true
+                });
             }
-            (due, _) => due,
-        };
-        if let (Some(qos), Some(link)) = (due, core.0.answer_wire(generation)) {
-            send_on(link, 0, &|actions: &LinkActions<C>| {
-                actions.send_response_final(rid, qos);
-                true
-            });
-        }
-        // A group's sink only stages: a kept query answered from the program's own thread would
-        // otherwise leave when the read task's wait ends, up to the group's tick a leg.
-        #[cfg(feature = "group")]
-        core.0.transport.write_answers(generation);
+            // A group's sink only stages: a kept query answered from the program's own thread
+            // would otherwise leave when the read task's wait ends, up to the group's tick a leg.
+            #[cfg(feature = "group")]
+            core.transport.write_answers(generation);
+        });
     }
 
     /// Hand the liveliness subscriber `handle` names the tokens the session already knows, which
@@ -8678,13 +8752,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// a group wants it the general way, or the key names nothing a link carries.
     fn put_plain_in(
         &self,
-        core: &Core<L, C>,
+        on: Holding<'_, L, C>,
         keyexpr: &str,
         declared: KeyexprRef,
         payload: &[u8],
         params: &PlainPutParams,
         head: Option<wz_session_core::lent_push::PutHead>,
     ) -> FilteredPut {
+        let core = on.core;
         // A put one of the session's own subscribers wants is not plain: the general publish
         // sends it and delivers it there.
         #[cfg(feature = "local-subscriber")]
@@ -8711,7 +8786,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let Some(named) = tables(&core.session.registry).named_at(keyexpr, declared) else {
             return FilteredPut::NotPlain;
         };
-        self.send_plain(core, named, payload, params, head, false)
+        self.send_plain(on, named, payload, params, head, false)
     }
 
     /// The plain put its write filter's row planned at the session's send epoch
@@ -8722,11 +8797,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         core: &Core<L, C>,
         planned: &wz_session_core::session_tables::PlannedPut<'_>,
         payload: &[u8],
+        tx: LinkTx<'_, C>,
     ) -> FilteredPut {
         #[cfg(test)]
         self.takes.plans.fetch_add(1, Ordering::Relaxed);
         self.send_plain(
-            core,
+            Holding { core, tx },
             planned.key(),
             payload,
             &planned.params(),
@@ -8740,7 +8816,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// when `planned`.
     fn send_plain(
         &self,
-        core: &Core<L, C>,
+        on: Holding<'_, L, C>,
         named: NamedKey<'_>,
         payload: &[u8],
         params: &PlainPutParams,
@@ -8767,7 +8843,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         // Marked as a publish for as long as it holds the session, as the general publish is.
         let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
-        let (outcome, _) = self.send_on_links(core, &leg, None, Pass::EVERY_FACE);
+        let (outcome, _) = self.send_on_links(on.core, &leg, None, Pass::EVERY_FACE, on.tx);
         FilteredPut::Sent(outcome)
     }
 
@@ -9717,19 +9793,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     /// its multicast transport, and is written by a flush or a stop on the caller's thread, as a
     /// link's is.
     fn batch_all(&self, step: BatchStep) -> usize {
-        self.live().map_or(0, |core| {
+        // The one link's place is taken before the session, as every send on it takes them.
+        self.live_on_link(|core, tx| {
             let links = core
-                .0
                 .up_wires_at()
                 .filter(|(_, wire)| {
-                    send_on(*wire, 0, &|actions: &LinkActions<C>| {
+                    send_through(*wire, tx, &|actions: &LinkActions<C>| {
                         batch_link(actions, step)
                     }) == Some(true)
                 })
                 .count();
             #[cfg(feature = "group")]
             let groups = core
-                .0
                 .transport
                 .groups
                 .iter()
@@ -9743,6 +9818,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let groups = 0;
             links.saturating_add(groups)
         })
+        .unwrap_or(0)
     }
 
     #[cfg(feature = "queryable")]
@@ -10795,16 +10871,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
     }
 
     fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        let core = self.live().ok_or(SessionClosed)?;
-        // A link that is down has no lease to keep; the session is not closed.
-        for (_, wire) in core.0.up_wires_at() {
-            // Owed nothing when the link is held: its own step keeps its lease.
-            send_on(wire, 0, &|actions: &LinkActions<C>| {
-                actions.send_keep_alive();
-                true
-            });
-        }
-        Ok(())
+        // The one link's place is taken before the session, as every send on it takes them.
+        self.live_on_link(|core, tx| {
+            // A link that is down has no lease to keep; the session is not closed.
+            for (_, wire) in core.up_wires_at() {
+                send_through(wire, tx, &|actions: &LinkActions<C>| {
+                    actions.send_keep_alive();
+                    true
+                });
+            }
+        })
+        .ok_or(SessionClosed)
     }
 
     fn spin_once(&self) -> bool {
@@ -10859,10 +10936,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
-        let Some(core) = self.live() else {
-            return FilteredPut::Sent(Ok(0));
-        };
-        let core = &core.0;
+        // The one link's place is taken before the session, as every send on it takes them.
+        self.live_on_link(|core, tx| {
+            self.put_through_filter_in(core, filter, keyexpr, payload, given, tx)
+        })
+        .unwrap_or(FilteredPut::Sent(Ok(0)))
+    }
+
+    /// [`Self::put_through_filter`] on `core`, through `tx`, what the caller holds of the one
+    /// link.
+    fn put_through_filter_in(
+        &self,
+        core: &Core<L, C>,
+        filter: FilterId,
+        keyexpr: &str,
+        payload: &[u8],
+        given: Option<(KeyexprRef, PlainPutParams)>,
+        tx: LinkTx<'_, C>,
+    ) -> FilteredPut {
         // The registry itself, not its holder: the filter reads it as what the peers declare.
         let registry: &Registry = &core.session.registry;
         // The filter's row is looked up once, for its plan, its answer and the plain way it keeps.
@@ -10878,7 +10969,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let groups_left = true;
         if given.is_none() && groups_left {
             if let Some(planned) = row.and_then(|row| row.planned_put(epoch)) {
-                return self.put_planned(core, &planned, payload);
+                return self.put_planned(core, &planned, payload, tx);
             }
         }
         if !Self::filters_left_unasked(core)
@@ -10905,7 +10996,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 (way.key, way.params, way.head)
             }
         };
-        let sent = self.put_plain_in(core, keyexpr, key, payload, &params, head);
+        let sent = self.put_plain_in(Holding { core, tx }, keyexpr, key, payload, &params, head);
         // The row's own way, sent plain to the peers of a filter that counts subscribers, is
         // planned at this epoch when every link names the filter's key as the session does, by
         // the head's declaration alone: the epoch counts the session's own subscribers, the
@@ -10914,7 +11005,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if row.plane() == Plane::Subscribers && params.destination.allows_remote() {
                 if let Some(named) = tables(registry).named_at(row.key(), key) {
                     if core.up_wires_at().all(|(_, wire)| {
-                        send_on(wire, 0, &|actions: &LinkActions<C>| {
+                        send_through(wire, tx, &|actions: &LinkActions<C>| {
                             key_on_link(actions, named).wire() == named.wire()
                         }) == Some(true)
                     }) {

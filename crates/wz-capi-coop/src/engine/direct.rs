@@ -327,9 +327,9 @@ pub(super) type DirectWire<L, C> = FaceAt<DirectLock, DirectParts<L, C>, DirectE
 /// The place of the one link's parts.
 type DirectSite<L, C> = FaceSite<DirectLock, DirectParts<L, C>>;
 
-/// An operation run on the session's state with the one link's wire, inside the link's place
-/// (`CoopEngine::live_in_place`), borrowing what it captures for `'f`.
-type OnLink<'f, L, C> = dyn FnMut(&mut Core<L, C>, LinkTx<'_, C>) + 'f;
+/// An operation run with the one link's wire, inside the link's place (`CoopEngine::in_place`),
+/// borrowing what it captures for `'f`.
+type OnLink<'f, C> = dyn FnMut(LinkTx<'_, C>) + 'f;
 
 /// The parts of the one link's session, held in the face's place apart from the session's state:
 /// the link's wire, which a send writes, the pump, written while `records` is held, and what each
@@ -1164,30 +1164,44 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ) -> Option<U> {
         let mut f = Some(f);
         let mut answer = None;
-        self.live_in_place(&mut |core, tx| {
+        self.in_place(&mut |tx| {
             if let Some(f) = f.take() {
-                answer = Some(f(core, tx));
+                answer = self.live().map(|mut guard| f(&mut guard.0, tx));
             }
         });
         answer
     }
 
-    /// [`Self::live_on_link`] over `f` by reference.
-    // Out of line and over `dyn`: one body takes the place and the lock for every operation.
-    #[inline(never)]
-    fn live_in_place(&self, f: &mut OnLink<'_, L, C>) {
-        let carried = OnThisThread((self, &mut *f));
-        let lent = self.direct.site.send(move |tx| {
-            let (engine, f) = carried.get();
-            if let Some(mut guard) = engine.live() {
-                f(&mut guard.0, tx.as_ref());
-            }
+    /// `f` on the one link's wire (`LinkTx`), taken inside the link's place as
+    /// [`Self::live_on_link`] takes it, for a publish, which takes the session's lock its own way
+    /// inside it (one that may be dropped tries it). `f` is handed no wire where the place holds
+    /// no link, or inside a send through the seat. `Some` once `f` ran, which it always does.
+    // Over `f` itself, not `dyn`: a publish's path is the one a message takes each time.
+    #[inline(always)]
+    pub(super) fn on_link<U>(&self, f: impl FnOnce(LinkTx<'_, C>) -> U) -> Option<U> {
+        let mut f = Some(f);
+        let carried = OnThisThread(&mut f);
+        let sent = self.direct.site.send(move |tx| {
+            let f = carried.get();
+            OnThisThread(f.take().map(|f| f(tx.as_ref())))
         });
-        if lent.is_some() {
-            return;
+        if let Some(answer) = sent.and_then(OnThisThread::get) {
+            return Some(answer);
         }
-        if let Some(mut guard) = self.live() {
-            f(&mut guard.0, None);
+        f.map(|f| f(None))
+    }
+
+    /// [`Self::live_on_link`] over `f` by reference, which it calls once.
+    // Out of line and over `dyn`: one body takes the place for every operation but a publish.
+    #[inline(never)]
+    fn in_place(&self, f: &mut OnLink<'_, C>) {
+        let carried = OnThisThread(&mut *f);
+        let lent = self.direct.site.send(move |tx| {
+            let f = carried.get();
+            f(tx.as_ref());
+        });
+        if lent.is_none() {
+            f(None);
         }
     }
 
