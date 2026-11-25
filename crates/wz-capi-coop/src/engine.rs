@@ -8751,8 +8751,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         declare: impl FnOnce(&mut Core<L, C>) -> MatchingDeclared,
     ) -> Result<MatchId, Declined> {
-        let declared = self.live_on_link(|core, tx| -> Result<MatchId, Refused<MatchingCall>> {
-            let watching = declare(core)?;
+        // The listener's callback the tables refuse, let go of once neither is held: the
+        // declaration answers only why, so its answer carries no callback.
+        let mut refused_call = None;
+        let declared = self.live_on_link(|core, tx| -> Result<MatchId, Declined> {
+            let watching = match declare(core) {
+                Ok(watching) => watching,
+                Err(refused) => {
+                    refused_call = Some(refused.callback);
+                    return Err(Declined::from(refused.why));
+                }
+            };
             // A listener on a key asks its own Interest of each link from its row; one on a
             // filter asks nothing.
             if let Some(opened) = watching.interest {
@@ -8763,16 +8772,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.read_matching(core);
             Ok(row_id(watching.handle))
         });
+        drop(refused_call);
         match declared {
             Some(Ok(id)) => {
                 self.deliver();
                 Ok(id)
             }
-            Some(Err(refused)) => {
-                let why = Declined::from(refused.why);
-                drop(refused.callback);
-                Err(why)
-            }
+            Some(Err(why)) => Err(why),
             None => Err(Declined::Closed),
         }
     }
@@ -9484,14 +9490,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // Taken by the declaration once it has an id; let go of, with the session and the link's
         // place, after it, whether it was declared or not.
         let mut unmade = Some((wire, sink));
+        // The row the tables refuse, let go of once the declaration let go of the session and the
+        // link's place: the declaration answers only why, so its answer carries no row.
+        let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
             let next = tables(&core.session.registry).next_entity_id();
             let Some(id) = next else {
-                return Err((Declined::NoEntityId, None));
+                return Err(Declined::NoEntityId);
             };
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
-                return Err((Declined::NoEntityId, None));
+                return Err(Declined::NoEntityId);
             };
             let form = core
                 .session
@@ -9515,7 +9524,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 Ok(declared) => declared,
                 // The program's callback goes with the refusal, let go of with no lock held, and
                 // what the key kept with it.
-                Err(refused) => return Err((Declined::from(refused.why), Some(refused.callback))),
+                Err(refused) => {
+                    refused_row = Some(refused.callback);
+                    return Err(Declined::from(refused.why));
+                }
             };
             debug_assert_eq!(
                 declared.id, id,
@@ -9552,16 +9564,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             self.read_matching(core);
             Ok(Declared { id, key: lent })
         });
+        drop(refused_row);
         match declared {
             Some(Ok(declared)) => {
                 #[cfg(feature = "local-subscriber")]
                 self.deliver();
                 Ok(declared)
             }
-            Some(Err((why, row))) => {
-                drop(row);
-                Err(why)
-            }
+            Some(Err(why)) => Err(why),
             None => Err(Declined::Closed),
         }
     }
@@ -10056,6 +10066,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // Taken by the declaration once it has an id; let go of, with the session and the link's
         // place, after it, whether it was declared or not.
         let mut unmade = Some((wire, sink));
+        // The row the tables refuse, let go of as the key and the sink are: the declaration
+        // answers only why, so its answer carries no row.
+        let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
             // The queryable is one row of the session's tables, numbered by the id they hand out
             // next: a full table, a key the session cannot hold or no id left refuses it before
@@ -10063,11 +10076,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // expression declaration its key is named by for as long as it stands.
             let next = tables(&core.session.registry).next_entity_id();
             let Some(id) = next else {
-                return Err((Declined::NoEntityId, None));
+                return Err(Declined::NoEntityId);
             };
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
-                return Err((Declined::NoEntityId, None));
+                return Err(Declined::NoEntityId);
             };
             let form = core
                 .session
@@ -10090,7 +10103,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 Ok(declared) => declared,
                 // The row goes with the refusal, let go of with no lock held, and what its key
                 // kept with it.
-                Err(refused) => return Err((Declined::from(refused.why), Some(refused.callback))),
+                Err(refused) => {
+                    refused_row = Some(refused.callback);
+                    return Err(Declined::from(refused.why));
+                }
             };
             debug_assert_eq!(
                 declared.id, id,
@@ -10126,16 +10142,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             self.read_matching(core);
             Ok(Declared { id, key: lent })
         });
+        drop(refused_row);
         match declared {
             Some(Ok(declared)) => {
                 #[cfg(feature = "local-queryable")]
                 self.deliver();
                 Ok(declared)
             }
-            Some(Err((why, row))) => {
-                drop(row);
-                Err(why)
-            }
+            Some(Err(why)) => Err(why),
             None => Err(Declined::Closed),
         }
     }
@@ -10739,6 +10753,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // the key holds goes back with the refusal, let go of, with the session and the link's
         // place, after the declaration.
         let mut unmade = Some((wire, sink));
+        // The row the tables refuse, let go of as the key and the sink are.
+        let mut refused_row = None;
         let declared = self.live_on_link(|core, tx| {
             // The subscriber is one row of the session's tables, numbered by the id they hand out
             // next, which its Interest carries: a full table, a key the session cannot hold or no
@@ -10747,11 +10763,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // as it stands.
             let next = tables(&core.session.registry).next_entity_id();
             let Some(id) = next else {
-                return Err((Declined::NoEntityId, None));
+                return Err(Declined::NoEntityId);
             };
             // Taken once: the declaration runs once.
             let Some((wire, sink)) = unmade.take() else {
-                return Err((Declined::NoEntityId, None));
+                return Err(Declined::NoEntityId);
             };
             let form = core
                 .session
@@ -10767,7 +10783,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 Ok(declared) => declared,
                 // The program's callback goes with the refusal, let go of with no lock held, and
                 // what the key kept with it.
-                Err(refused) => return Err((Declined::from(refused.why), Some(refused.callback))),
+                Err(refused) => {
+                    refused_row = Some(refused.callback);
+                    return Err(Declined::from(refused.why));
+                }
             };
             debug_assert_eq!(
                 declared.id, id,
@@ -10779,12 +10798,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             }
             Ok((id, declared.handle))
         });
+        drop(refused_row);
         let (id, handle) = match declared {
             Some(Ok(declared)) => declared,
-            Some(Err((why, row))) => {
-                drop(row);
-                return Err(why);
-            }
+            Some(Err(why)) => return Err(why),
             None => return Err(Declined::Closed),
         };
         // With `history`, the subscriber is handed the tokens the session already knows before
