@@ -6405,15 +6405,35 @@ mod mandatory_extension_rule_tests {
         (0u8..0x80).filter(|h| (h >> 5) & 3 != 3)
     }
 
-    /// One generic entry with `header` and the body its encoding needs.
-    fn entry<S: ExtEntryStorage>(header: u8) -> ExtEntryOwned<S> {
+    /// One generic entry with `header` and the body its encoding needs. These tests judge the
+    /// mandatory-extension rule, so the body of an identity some message declares is one every
+    /// reader of that identity reads (the readers' well-formed cases in `ext_admit`): the
+    /// verdict then turns on the header alone. Every other identity carries the empty body.
+    fn entry<S: ExtEntryStorage>(header: u8) -> ExtEntryOwned<S>
+    where
+        <S as sce_forge_runtime::codec::HoldsBytes<wz_codecs::ext_zbuf::ExtZbufValueField>>::Bytes:
+            wz_codecs::SceByteBuf,
+    {
+        let zbuf: &[u8] = match header {
+            // A timestamp: a time, an id length of 1, an id that is not zero.
+            0x42 => &[0x05, 0x01, 0x01],
+            // A responder (zid length, zid, entity id) and a Query's value (an encoding
+            // with no schema, then the payload): these bytes are both.
+            0x43 => &[0x00, 0x01, 0x07],
+            // A source info: a zid, an entity id and a sequence number.
+            0x41 => &[0x00, 0x01, 0x02, 0x03],
+            // A timestamp stack: flags that are not zero, then one interception.
+            0x47 => &[0x01, 0x01, 0x02, 0x01, 0xAA],
+            // An undeclaration's key: a scope and a UTF-8 suffix.
+            0x5F => &[0x01, 0x00, b'a'],
+            _ => &[],
+        };
         let body = match (header >> 5) & 3 {
             0 => ExtEntryOwnedVariant::CodecZenohExtUnit(ExtUnit::default()),
             1 => ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value: 0 }),
-            // The default value is the empty body.
             _ => ExtEntryOwnedVariant::CodecZenohExtZbuf(ExtZbufOwned {
-                value_len: 0,
-                value: Default::default(),
+                value_len: zbuf.len() as u64,
+                value: crate::codec_owned::owned_bytes(zbuf).expect("a short body fits"),
             }),
         };
         ExtEntryOwned { header, body }
