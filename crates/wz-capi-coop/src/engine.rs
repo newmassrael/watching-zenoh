@@ -2783,6 +2783,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
+        #[cfg(all(test, feature = "std"))]
+        if self.after_pushes {
+            let _ = self
+                .registry
+                .with(|registry| registry.count_drain_within_frame());
+        }
         self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
@@ -2830,6 +2836,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             return;
         }
         // What the Pushes before this record put off is done before it, as it was after each.
+        #[cfg(all(test, feature = "std"))]
+        if self.after_pushes {
+            let _ = self
+                .registry
+                .with(|registry| registry.count_drain_within_frame());
+        }
         self.end_records();
         #[cfg(debug_assertions)]
         let _gated = Gated::over(&self.lane);
@@ -2846,7 +2858,7 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
-    /// The drains a run of Pushes put off ([`Registry::after_pushes`]), once for the run: at the
+    /// The drains a run of Pushes put off ([`Registry::settle`]), once for the run: at the
     /// end of the frame, or before the first record of it that is not a Push.
     fn end_records(&mut self) {
         if !core::mem::take(&mut self.after_pushes) {
@@ -2854,18 +2866,9 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         }
         let face = self.face;
         let actions = &*self.actions;
-        #[cfg(feature = "queryable")]
-        let (plane, generation) = (&self.plane, self.generation);
-        let dispatched = self.registry.with(|registry| {
-            #[cfg(feature = "queryable")]
-            registry.after_pushes(face, actions, |rid, qos| {
-                if plane.with_holds(|holds| holds.owe(generation, rid, qos)) {
-                    actions.send_response_final(rid, qos);
-                }
-            });
-            #[cfg(not(feature = "queryable"))]
-            registry.after_pushes(face, actions);
-        });
+        let dispatched = self
+            .registry
+            .with(|registry| registry.settle(face, actions));
         debug_assert!(dispatched.is_some(), "{UNLENT}");
     }
 
@@ -3853,6 +3856,37 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 false
             }
+        }
+    }
+
+    /// Send each face's peer what the application's declaration or undeclaration of a subscriber
+    /// owes its Interests ([`Registry::settle`]) now: the reconcile that stages it otherwise runs
+    /// at the next event of the link's session, a record or a keep-alive, up to a keep-alive
+    /// interval later, and not at all while the program does not step the session.
+    #[cfg(feature = "interest-answer")]
+    fn settle_faces(&mut self) {
+        for at in 0..self.transport.links.places() {
+            let Some(face) = self.transport.links.face(at) else {
+                continue;
+            };
+            if let Link::Up(wire) = &face.link {
+                self.session
+                    .registry
+                    .settle(HeldFace::new(at, face.id), &*wire.actions);
+            }
+        }
+        // A group's stage is written by the thread that put on it outside the group's own step.
+        #[cfg(feature = "group")]
+        for group in self
+            .transport
+            .groups
+            .iter()
+            .filter(|group| !group.has_ended())
+        {
+            self.session
+                .registry
+                .settle(HeldFace::new(group.at(), group.id()), group.replies());
+            group.write_staged();
         }
     }
 
@@ -5248,6 +5282,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         self.core.lock().0.session.registry.push_dispatches()
     }
 
+    /// How often the session's links drained a run of Pushes before a later record of its own
+    /// frame: what tells a test that a Push and the record after it came in one frame.
+    #[cfg(all(test, feature = "std"))]
+    pub(crate) fn drains_within_frames(&self) -> usize {
+        self.core.lock().0.session.registry.drains_within_frames()
+    }
+
     /// Whether the peer of every established link has been told every declaration the session
     /// holds. A session with no link established owes nothing yet, so it is synced, as the slot
     /// node's is before a client has come: synced is a statement about established sessions, not
@@ -5710,7 +5751,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             meta: &meta,
         };
         let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass);
-        // The clock is read only for a fan-out that stopped at a face, whose wait it bounds.
+        // The clock is read only for a fan-out that stopped at a face, whose wait it bounds. Only
+        // a send that waits for no slot stops one, which a build that listens on nothing never
+        // makes: there the fan-out is done, and neither the clock nor the wait is read.
+        debug_assert!(
+            stuck.is_none() || cfg!(feature = "listen"),
+            "a fan-out stops at a face only where a send waits for no slot"
+        );
+        let stuck = stuck.filter(|_| cfg!(feature = "listen"));
         let fanned = run.fanned(stuck, || core.0.now_us());
         #[cfg(feature = "listen")]
         let waits = match fanned.then {
@@ -7415,23 +7463,30 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
     ) -> Result<SubId, Declined> {
-        // A closed session declares nothing, and takes no id for what it does not declare; what
-        // the key holds goes back with the refusal.
-        let Some(mut guard) = self.live() else {
-            drop(wire);
-            return Err(Declined::Closed);
+        // A closed session declares nothing, and takes no id for what it does not declare. The
+        // subscriber is one row of the session's tables, numbered by the id they hand out next: a
+        // full table, a key the session cannot hold or no id left refuses it before anything is
+        // sent. What the key holds and the sink go back with either refusal, let go of after the
+        // session in the one place both are. The row holds the key expression declaration its
+        // key is named by for as long as it stands.
+        let live = self.live().map(|guard| {
+            let next = tables(&guard.0.session.registry).next_entity_id();
+            (guard, next)
+        });
+        let (mut guard, id) = match live {
+            Some((guard, Some(id))) => (guard, id),
+            refused => {
+                let why = match refused {
+                    Some(_) => Declined::NoEntityId,
+                    None => Declined::Closed,
+                };
+                drop(refused);
+                drop(wire);
+                drop(sink);
+                return Err(why);
+            }
         };
         let core = &mut guard.0;
-        // The subscriber is one row of the session's tables, numbered by the id they hand out
-        // next: a full table, a key the session cannot hold or no id left refuses it before
-        // anything is sent, and the sink goes with the refusal. The row holds the key expression
-        // declaration its key is named by for as long as it stands.
-        let next = tables(&core.session.registry).next_entity_id();
-        let Some(id) = next else {
-            drop(guard);
-            drop(wire);
-            return Err(Declined::NoEntityId);
-        };
         let form = core
             .session
             .key_form(
@@ -7484,6 +7539,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
                 });
             }
         }
+        // What it owes the Interests the peers asked goes now, after the declaration itself.
+        #[cfg(feature = "interest-answer")]
+        core.settle_faces();
         // A matching listener that counts the session's own subscribers may now match: it is
         // told, outside the lock.
         #[cfg(feature = "local-subscriber")]
@@ -7579,6 +7637,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
             });
             core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
             core.retract_keyexpr(named_place, undeclared.named);
+            // An aggregate answer it alone stood for is retracted now, as it was declared.
+            #[cfg(feature = "interest-answer")]
+            core.settle_faces();
             // One that counted it may now match no more.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);

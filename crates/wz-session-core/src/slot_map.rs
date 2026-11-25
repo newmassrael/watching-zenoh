@@ -523,11 +523,19 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
 
     /// Keep `value` in a free slot: its handle, or `value` back when the table is full.
     pub fn insert(&mut self, value: T) -> Result<Handle<K>, CapacityFull<T>> {
+        self.insert_with(value, core::convert::identity)
+            .map_err(CapacityFull)
+    }
+
+    /// Keep the row `make` builds of `parts` in a free slot: its handle, or `parts` back, with
+    /// `make` not called, when the table is full. A caller whose row holds what the refusal hands
+    /// back builds it only once a slot was found, and so has no row to take apart on a refusal.
+    pub fn insert_with<A>(&mut self, parts: A, make: impl FnOnce(A) -> T) -> Result<Handle<K>, A> {
         // The slot is found first and the row written once, whichever way it was found: a row
         // written in each way would be written twice in every caller of every row type.
         let room = self.meta.free_slots() != 0 && self.rows.free_slots() != 0;
         let Some(taken) = self.core.take_slot(&mut self.meta, room) else {
-            return Err(CapacityFull(value));
+            return Err(parts);
         };
         if taken.grown {
             // Both columns were found to have a place, so neither push is refused; the row's is
@@ -540,14 +548,14 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             self.rows.get_mut(taken.at),
         ) {
             (Some(handle), Some(row)) => {
-                *row = Some(value);
+                *row = Some(make(parts));
                 Ok(handle)
             }
             // A place under `MAX_SLOTS` names a handle and the two columns are the same length,
-            // so this is not reached; the slot goes back, free, and the value with the refusal.
+            // so this is not reached; the slot goes back, free, and the parts with the refusal.
             _ => {
                 self.core.free(&mut self.meta, taken.at);
-                Err(CapacityFull(value))
+                Err(parts)
             }
         }
     }

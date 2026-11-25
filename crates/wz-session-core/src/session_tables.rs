@@ -1513,22 +1513,26 @@ impl<P: Storage> Declaring<'_, P> {
     /// hold has as many holders as its count holds: a row that named it holding nothing would name
     /// a declaration its last counted holder's going retracts.
     fn entity_key(&self, text: &str, form: KeyForm) -> Result<EntityKey<P::Key>, RegisterError> {
-        let prefix = self.holdable(form.prefix.filter(|&prefix| {
+        // Each declaration is looked up once, and its count read off the row that look found.
+        let prefix = Self::holdable(form.prefix.and_then(|prefix| {
             self.keyexprs
                 .get(prefix)
-                .is_some_and(|row| text.starts_with(KeyBacking::as_str(&row.key)))
+                .filter(|row| text.starts_with(KeyBacking::as_str(&row.key)))
+                .map(|row| (prefix, row.holds))
         }))?;
         // The declaration of the entity's own key: the one the form states, or else the one a
         // named retraction names, found by its id once, here, and held by handle from here on.
         // One no longer declared is not held, and a retraction that named it names the key whole.
-        let stated = form.own.filter(|&own| self.keyexprs.get(own).is_some());
-        let named = self.holdable(stated.or_else(|| {
+        let stated = form
+            .own
+            .and_then(|own| Some((own, self.keyexprs.get(own)?.holds)));
+        let named = Self::holdable(stated.or_else(|| {
             match form.retraction {
                 Retraction::Named(named) if named.mapping_id != 0 => self
                     .keyexprs
                     .iter()
                     .find(|(_, row)| row.id == named.mapping_id)
-                    .map(|(handle, _)| handle),
+                    .map(|(handle, row)| (handle, row.holds)),
                 _ => None,
             }
         }))?;
@@ -1541,13 +1545,13 @@ impl<P: Storage> Declaring<'_, P> {
         })
     }
 
-    /// `declaration` where it stands and its count has room for one more holder; `None` where it
-    /// went, which is held by nothing; refused where its count is full.
+    /// A declaration found standing, with the holders its count has: its handle where the count
+    /// has room for one more; `None` where none was found, which is held by nothing; refused
+    /// where its count is full.
     fn holdable(
-        &self,
-        declaration: Option<KeyexprHandle>,
+        found: Option<(KeyexprHandle, KeyexprHolds)>,
     ) -> Result<Option<KeyexprHandle>, RegisterError> {
-        match declaration.and_then(|handle| Some((handle, self.keyexprs.get(handle)?.holds))) {
+        match found {
             Some((_, holds)) if holds == KeyexprHolds::MAX => Err(RegisterError::KeyexprHoldsFull),
             stands => Ok(stands.map(|(handle, _)| handle)),
         }
@@ -1583,8 +1587,7 @@ impl<P: Storage> Declaring<'_, P> {
     }
 
     /// Declare an entity on `text` into `table`: the row `make` builds of its id, its key and
-    /// `callback`, or the refusal with `callback` back (`back` takes it out of a row the table
-    /// refused).
+    /// `callback`, or the refusal with `callback` back.
     // Out of line: the declaration of each kind measured smaller with the row built and placed
     // apart from the caller that hands it its parts.
     #[inline(never)]
@@ -1595,7 +1598,6 @@ impl<P: Storage> Declaring<'_, P> {
         form: KeyForm,
         callback: C,
         make: impl FnOnce(EntityId, EntityKey<P::Key>, C) -> R,
-        back: impl FnOnce(R) -> C,
     ) -> Result<Declared<K>, Refused<C>> {
         // One refusal hands `callback` back for a full table, a key not kept and the ids run out
         // alike: each of its own would move the callback into the refusal once more.
@@ -1604,15 +1606,19 @@ impl<P: Storage> Declaring<'_, P> {
             Err(why) => return Err(Refused { why, callback }),
         };
         let (prefix, named) = key.holds();
-        match table.insert(make(id, key, callback)) {
+        // The row is built only in the slot it is kept in: a table that refuses it after all hands
+        // its parts back whole, the key let go of here and the callback with the refusal.
+        match table.insert_with((id, key, callback), |(id, key, callback)| {
+            make(id, key, callback)
+        }) {
             Ok(handle) => {
                 self.hold(prefix);
                 self.hold(named);
                 Ok(Declared { handle, id })
             }
-            Err(CapacityFull(row)) => Err(Refused {
+            Err((_, _, callback)) => Err(Refused {
                 why: RegisterError::TableFull,
-                callback: back(row),
+                callback,
             }),
         }
     }
@@ -1980,7 +1986,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 origin,
                 callback,
             },
-            SubscriberRow::into_callback,
         )?;
         self.subscriber_epoch = self.subscriber_epoch.wrapping_add(1);
         Ok(declared)
@@ -2029,21 +2034,16 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
-        .declare(
-            queryables,
-            key,
-            form,
-            callback,
-            |id, key, callback| QueryableRow {
+        .declare(queryables, key, form, callback, |id, key, callback| {
+            QueryableRow {
                 facts: KeyFacts::of(key.as_str()),
                 id,
                 key,
                 origin,
                 complete,
                 callback,
-            },
-            QueryableRow::into_callback,
-        )
+            }
+        })
     }
 
     /// Undeclare the queryable `handle` names, its callback handed back.
@@ -2075,14 +2075,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
-        .declare(
-            tokens,
-            key,
-            form,
-            (),
-            |id, key, ()| TokenRow { id, key },
-            |_| (),
-        )
+        .declare(tokens, key, form, (), |id, key, ()| TokenRow { id, key })
         .map_err(|refused| refused.why)
     }
 
@@ -2114,20 +2107,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             keyexprs: &mut self.keyexprs,
             next_entity: &mut self.next_entity,
         }
-        .declare(
-            subscribers,
-            key,
-            form,
-            callback,
-            |id, key, callback| LivelinessSubscriberRow {
+        .declare(subscribers, key, form, callback, |id, key, callback| {
+            LivelinessSubscriberRow {
                 id,
                 key,
                 history,
                 history_complete: Cell::new(false),
                 callback,
-            },
-            LivelinessSubscriberRow::into_callback,
-        )
+            }
+        })
     }
 
     /// Undeclare the liveliness subscriber `handle` names, its callback handed back: its id is its
