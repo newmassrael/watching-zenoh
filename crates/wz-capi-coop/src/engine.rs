@@ -53,6 +53,7 @@ use crate::arena::{
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
     PlanFrom, SessionArena, SessionRows, TransportTables,
 };
+use crate::form::{LockForm, StateGuard, StateLock};
 use crate::round::{CoopForm, Latch, Round, RoundCounts, RoundGate, RoundRows};
 use wz_capi_port::reach::{ReachEngine, RowClaim};
 use wz_runtime_coop::kept::Shared;
@@ -207,9 +208,6 @@ pub use hold::{EngineHandle, EngineHold};
 
 mod ledger;
 use ledger::{Ledger, Seen};
-
-#[cfg(not(feature = "threads"))]
-mod one_thread_lock;
 
 mod registry;
 pub(crate) use registry::FACE_SET_BYTES;
@@ -1241,18 +1239,6 @@ impl HandBack {
 /// The session state no other thread may touch while one does; see the module doc.
 struct Confined<T>(T);
 
-/// The lock the session's state lies behind: the host's or the kernel's where other threads may
-/// call in, and a flag in a build of one thread, whose calls come from one thread at a time
-/// (`one_thread_lock`).
-#[cfg(feature = "threads")]
-type StateLock<T> = Mutex<T>;
-#[cfg(feature = "threads")]
-type StateGuard<'a, T> = MutexGuard<'a, T>;
-#[cfg(not(feature = "threads"))]
-type StateLock<T> = one_thread_lock::OneThreadLock<T>;
-#[cfg(not(feature = "threads"))]
-type StateGuard<'a, T> = one_thread_lock::OneThreadGuard<'a, T>;
-
 /// The session's state behind its one lock. Every hold of it goes through here, and tells the
 /// session's key arena that the lock is held for as long as it is
 /// ([`KeySpace::guard_by_owner_lock`]): the arena's counts are touched only under this lock, so a
@@ -1266,18 +1252,18 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// `core` behind the lock, its key arena guarded by it from now on.
     fn new(core: Core<L, C>) -> Self {
         core.session.keys.guard_by_owner_lock();
-        Self(StateLock::new(Confined(core)))
+        Self(<CoopForm as LockForm>::new(Confined(core)))
     }
 
     fn lock(&self) -> CoreGuard<'_, L, C> {
         // Marked before the take, so a take on the thread that holds the lock already fails a
         // debug build instead of waiting on itself.
         let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(self).cast());
-        CoreGuard::taken(self.0.lock(), held)
+        CoreGuard::taken(<CoopForm as LockForm>::lock(&self.0), held)
     }
 
     fn try_lock(&self) -> Option<CoreGuard<'_, L, C>> {
-        let guard = self.0.try_lock()?;
+        let guard = <CoopForm as LockForm>::try_lock(&self.0)?;
         let held = wz_capi_port::sync::SessionHeld::enter(core::ptr::from_ref(self).cast());
         Some(CoreGuard::taken(guard, held))
     }
@@ -1285,7 +1271,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// The state with no lock, the engine being let go of: the key arena is marked held for the
     /// rest of the engine's drop, which drops every row that keeps a key.
     fn dropping(&mut self) -> &mut Core<L, C> {
-        let core = &mut self.0.get_mut().0;
+        let core = &mut <CoopForm as LockForm>::get_mut(&mut self.0).0;
         core.session.keys.owner_lock_taken();
         core
     }
