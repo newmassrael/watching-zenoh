@@ -960,8 +960,21 @@ def cmd_run(args: argparse.Namespace) -> int:
 #: library whose size the gate measures, and its reference zenoh-pico by the gate's rule for that build
 #: (`capability_cost_gate.reference_build`): without `std`, C with no unwind tables, linked with the script
 #: that discards what the C runtime still brings, as the size ratio of that form is read.
-SHAPE_CASES = {("coop", "nostd"): "pico-client-coop-nostd", ("coop", "std"): "pico-client-coop",
-               ("tokio", "std"): "pico-default"}
+SHAPE_CASES = {("coop", "nostd"): "pico-client-coop-nostd"}
+#: The tokio engine's library links `std` and unwinds, which no size case of the pico ABI builds any more (its
+#: C library has no `std` form): it is built by the shipping profile with no configuration file, as the size
+#: gate builds the zenoh-c ABI on the same engine.
+TOKIO_SHAPE = "the tokio engine's own build"
+
+
+def shape_name(engine: str, stdlib: str) -> str:
+    """What arm W's form is built as, for a record and a line: its size case, or the tokio engine's own build."""
+    if (engine, stdlib) == ("tokio", "std"):
+        return TOKIO_SHAPE
+    shape = SHAPE_CASES.get((engine, stdlib))
+    if shape is None:
+        raise Refused(f"no size case builds wz-capi-pico on the {engine} engine with {stdlib}")
+    return shape
 
 
 def bench_stdlib(stated: str, released: tuple[str, ...]) -> str:
@@ -987,11 +1000,11 @@ def bench_case(arm: str, engine: str, stdlib: str, named: list[str]):
     (Refused)."""
     import capability_cost_gate as cost
 
-    shape = SHAPE_CASES.get((engine, stdlib))
-    if shape is None:
-        raise Refused(f"no size case builds wz-capi-pico on the {engine} engine with {stdlib}")
+    shape = shape_name(engine, stdlib)
+    features = ",".join(named)
+    if shape == TOKIO_SHAPE:
+        return cost.Case(f"perf-{arm}", "wz-capi-pico", "libwz_capi_pico.so", features, 0)
     base = {case.id: case for case in cost.CASES}[shape]
-    features = ",".join((["default"] if engine == "tokio" else []) + list(named))
     return cost.Case(f"perf-{arm}", base.package, base.lib, features, 0, profile=base.profile,
                      cargo_configs=base.cargo_configs)
 
@@ -1049,13 +1062,13 @@ def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
               "reference_refused": refused, "reference_link_args": list(link), "reference_cflags": list(cflags),
               "wz_features": sorted(features), "wz_program_transport_features": sorted(program_features),
               "wz_engine": engine, "wz_stdlib": stdlib,
-              "wz_build": {"size_case": SHAPE_CASES[(engine, stdlib)], "profile": shape.profile,
+              "wz_build": {"size_case": shape_name(engine, stdlib), "profile": shape.profile,
                            "cargo_configs": list(shape.cargo_configs), "link_args": list(plan.link_args)}}
     (out / "reference.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"perf-matrix: reference zenoh-pico {pin[:12]} as the same build ({toolchain}); "
           f"{len(asked)} switches set from the declaration; linked with {list(link)} and compiled with "
           f"{list(cflags)} beyond the rule's, as the size gate builds the reference of "
-          f"{SHAPE_CASES[(engine, stdlib)]}", flush=True)
+          f"{shape_name(engine, stdlib)}", flush=True)
     if refused:
         print(f"perf-matrix: pico built {', '.join(refused)} otherwise than asked, so the two builds differ "
               f"there (reference.json says so)", flush=True)
@@ -1111,7 +1124,7 @@ def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: lis
     shutil.copytree(reference_include, inc, symlinks=True)
     (inc / "zenoh-pico" / "config.h").write_text(header, encoding="utf-8")
     print(f"perf-matrix: arm {arm}: wz-capi-pico on the {engine} engine, {stdlib}, built as the size gate's "
-          f"{SHAPE_CASES[(engine, stdlib)]} (profile {case.profile}, {list(case.cargo_configs) or 'no'} cargo "
+          f"{shape_name(engine, stdlib)} (profile {case.profile}, {list(case.cargo_configs) or 'no'} cargo "
           f"configuration, linker arguments {list(plan.link_args)}), {len(named)} feature(s) named, under "
           f"{len(plan.limits)} limit and policy value(s) of its ABI's own preset", flush=True)
     return 0
@@ -1158,7 +1171,7 @@ def cmd_preset_arm(out: pathlib.Path, original: str, stdlib: str) -> int:
     shutil.copy2(plan.lib, lib / plan.lib.name)
     print(f"wz_build=-p {case.package} --features {case.features}; stdlib {stdlib}, profile {case.profile}, "
           f"cargo configuration {list(case.cargo_configs) or 'none'}, linker arguments {list(plan.link_args)} "
-          f"(the size gate's {SHAPE_CASES[(engine, stdlib)]})", flush=True)
+          f"(the size gate's {shape_name(engine, stdlib)})", flush=True)
     print(f"wz_build_env={' '.join(plan.limits)}", flush=True)
     return 0
 
@@ -1763,9 +1776,10 @@ def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, targe
         stdlib = pwp.stdlib_of(manifest)
     except pwp.Refusal as why:
         raise Refused(f"the package's manifest: {why}") from None
-    if (stdlib == "std") != ("std" in enabled):
-        raise Refused(f"the package's manifest says it is built {stdlib}, and its features turn `std` "
-                      f"{'on' if 'std' in enabled else 'off'}")
+    try:
+        wz_config.engine_stdlib(engine, stdlib)
+    except wz_config.PresetError as why:
+        raise Refused(f"the package's manifest says it is built {stdlib}: {why}") from None
     return {"wz_features": sorted(features), "wz_engine": engine, "wz_stdlib": stdlib,
             "reference_switches": wz_config.pico_reference(decl, enabled)}
 
@@ -2100,16 +2114,19 @@ def cmd_selftest() -> int:
            and cases[SHAPE_CASES[("coop", "nostd")]].profile == "capi-nostd"
            and cost.NOSTD_CONFIG in cases[SHAPE_CASES[("coop", "nostd")]].cargo_configs
            and cost.DISCARD_UNWIND_CONFIG in cases[SHAPE_CASES[("coop", "nostd")]].cargo_configs
-           and all(cost.NOSTD_CONFIG not in cases[SHAPE_CASES[(engine, "std")]].cargo_configs
-                   for engine in ENGINES)
-           and set(SHAPE_CASES) == {(e, s) for e in ENGINES for s in STDLIBS} - {("tokio", "nostd")})
-    bare = bench_case("W", "coop", "nostd", ["os-posix", "link-udp"])
-    expect("arm W's case is its form's case with the bench's features, and on the tokio engine over the defaults",
-           bare.features == "os-posix,link-udp" and bare.profile == "capi-nostd"
+           and set(SHAPE_CASES) == {("coop", "nostd")})
+    bare = bench_case("W", "coop", "nostd", ["os-host", "link-udp"])
+    on_tokio = bench_case("Wapp", "tokio", "std", ["engine-tokio", "app-transport"])
+    expect("arm W's case is its form's case with the bench's features, and the tokio engine's is its own build",
+           bare.features == "os-host,link-udp" and bare.profile == "capi-nostd"
            and bare.cargo_configs == cases["pico-client-coop-nostd"].cargo_configs and bare.id == "perf-W"
-           and bench_case("Wapp", "tokio", "std", ["app-transport"]).features == "default,app-transport"
-           and bench_case("W", "tokio", "std", []).features == "default")
-    expect("a form no size case builds is refused", refused_call(lambda: bench_case("W", "tokio", "nostd", [])))
+           and on_tokio.features == "engine-tokio,app-transport" and on_tokio.package == "wz-capi-pico"
+           and on_tokio.profile == cost.SHIP_PROFILE and on_tokio.cargo_configs == ()
+           and shape_name("tokio", "std") == TOKIO_SHAPE
+           and shape_name("coop", "nostd") == "pico-client-coop-nostd")
+    expect("a form no size case builds is refused",
+           refused_call(lambda: bench_case("W", "tokio", "nostd", []))
+           and refused_call(lambda: bench_case("W", "coop", "std", [])))
     with contextlib.redirect_stdout(io.StringIO()) as said:
         not_pico = cmd_preset_arm(pathlib.Path("."), "zenoh-c", "nostd")
     expect("the parity's preset arm is built for an original of the pico ABI only, and refuses another unbuilt",
@@ -2412,8 +2429,8 @@ def cmd_selftest() -> int:
            json.loads(table_document("W/P", {}, 0.05, "coop", "linux", "nostd"))["stdlib"] == "nostd")
 
     # -- the plan of a run on Windows ------------------------------------------------------------------------
-    feature_table = {"default": ["engine-tokio"], "std": [], "engine-tokio": ["std"], "engine-coop": ["std"],
-                     "os-windows": [], "advanced": [], "app-transport": ["advanced"]}
+    feature_table = {"default": ["os-host"], "engine-tokio": [], "os-host": [], "advanced": [],
+                     "app-transport": ["advanced"]}
     switch_rows = {"switches": [
         {"original": "zenoh-pico", "switch": "Z_FEATURE_ADVANCED_PUBLICATION", "class": "maps",
          "anchor": "wz-capi-pico/advanced"},
@@ -2422,18 +2439,18 @@ def cmd_selftest() -> int:
         {"original": "zenoh-pico", "switch": "BATCH_UNICAST_SIZE", "class": "maps", "anchor": "wz-capi-pico/x"},
         {"original": "zenoh-c", "switch": "Z_FEATURE_SHARED_MEMORY", "class": "always"}]}
     x64 = "x86_64-pc-windows-msvc"
-    package_manifest = {"target": x64, "features": ["engine-coop", "app-transport"], "stdlib": "std"}
+    package_manifest = {"target": x64, "features": ["os-host", "app-transport"], "stdlib": "nostd"}
     planned = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64)
     expect("a plan pairs the package's library with pico built with the switches its features answer",
            planned["reference_switches"] == {"Z_FEATURE_ADVANCED_PUBLICATION": 1, "Z_FEATURE_MATCHING": 1,
                                              "Z_FEATURE_RAWETH_TRANSPORT": 0}
-           and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "engine-coop"]
-           and planned["wz_stdlib"] == "std")
-    bare_manifest = {"target": x64, "features": ["os-windows", "app-transport"], "stdlib": "nostd"}
-    bare_plan = windows_plan(bare_manifest, {"engine": "coop"}, feature_table, switch_rows, x64)
-    expect("a package without std is planned on the cooperative engine, its reference the same build",
-           bare_plan["wz_stdlib"] == "nostd" and bare_plan["wz_engine"] == "coop"
-           and bare_plan["reference_switches"] == planned["reference_switches"])
+           and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "os-host"]
+           and planned["wz_stdlib"] == "nostd")
+    tokio_manifest = {"target": x64, "features": ["engine-tokio", "app-transport"], "stdlib": "std"}
+    tokio_plan = windows_plan(tokio_manifest, {"engine": "tokio"}, feature_table, switch_rows, x64)
+    expect("a package on the tokio engine is planned with std, its reference the same build",
+           tokio_plan["wz_stdlib"] == "std" and tokio_plan["wz_engine"] == "tokio"
+           and tokio_plan["reference_switches"] == planned["reference_switches"])
 
     def plan_refused(manifest, statement):
         try:
@@ -2446,7 +2463,10 @@ def cmd_selftest() -> int:
            plan_refused(dict(package_manifest, target="i686-pc-windows-msvc"), {"engine": "coop"})
            and plan_refused(dict(package_manifest, features=[]), {"engine": "coop"}))
     expect("a package that names a feature the crate does not have is refused",
-           plan_refused(dict(package_manifest, features=["engine-coop", "gone"]), {"engine": "coop"}))
+           plan_refused(dict(package_manifest, features=["os-host", "gone"]), {"engine": "coop"}))
+    expect("a package whose manifest states a standard library its engine's library does not have is refused",
+           plan_refused(dict(package_manifest, stdlib="std"), {"engine": "coop"})
+           and plan_refused(dict(tokio_manifest, stdlib="nostd"), {"engine": "tokio"}))
     expect("a statement whose engine is not the one the package's features run is refused",
            plan_refused(package_manifest, {"engine": "tokio"})
            and plan_refused(dict(package_manifest, features=["engine-tokio"]), {"engine": "coop"})

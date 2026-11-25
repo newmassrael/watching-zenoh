@@ -9,7 +9,6 @@
 pico-client 66
 pico-client-small 55
 pico-client-udp 26
-pico-client-coop 31
 pico-client-coop-nostd 33
 pico-client-coop-unstable 11
 pico-client-coop-local 12

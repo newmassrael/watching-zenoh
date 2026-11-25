@@ -216,6 +216,25 @@ SHIP_PROFILE = "ship"
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
 NOSTD_CONFIG = ".cargo/capi-nostd.toml"
+# The crate a C program links for a case's ABI crate, and the name that crate's manifest gives its
+# dependency on the ABI: the pico ABI is an rlib (`wz-capi-pico`), and its C library is
+# `wz-capi-pico-lib`, which takes the ABI's capabilities through its dependency `abi`. A case names
+# the ABI crate, whose manifest and features it reads; its build names the artifact.
+ARTIFACT_OF_PACKAGE: dict[str, tuple[str, str]] = {"wz-capi-pico": ("wz-capi-pico-lib", "abi")}
+
+
+def artifact_package(package: str) -> str:
+    """The crate cargo builds for the C library of `package`: its artifact crate, or itself."""
+    return ARTIFACT_OF_PACKAGE.get(package, (package, ""))[0]
+
+
+def artifact_features(package: str, features: str) -> str:
+    """`features`, a comma list of `package`'s, as the build of its artifact crate names them:
+    each through the artifact's dependency on the ABI crate, or as they are where the package is
+    its own C library."""
+    through = ARTIFACT_OF_PACKAGE.get(package, (package, ""))[1]
+    named = [f.strip() for f in features.split(",") if f.strip()]
+    return ",".join(f"{through}/{f}" if through else f for f in named)
 # The Linux C ABI library with its relative relocations packed (DT_RELR,
 # `crates/.cargo/capi-packed-relocs.toml`, docs/c-abi-size-diet.md T6): a glibc 2.36 loader. The
 # linker argument is the file's; a case whose configuration gives it is held to a library that has
@@ -282,7 +301,7 @@ CONNECTIVITY = r"^(z_info_transports|z_declare_transport_events_listener)$"
 MULTICAST = r"multicast_glue|multicast_pipeline|MulticastLinkDriver"
 # The standard library's own runtime: its panic hook's backtrace symbolizer and the demangler and
 # decompressor it reads debug information with, which a library built with `std` links whatever its
-# panic strategy, and one built without it (`os-posix`, docs/c-abi-engine-and-memory.md P4) has none
+# panic strategy, and one built without it (`os-host`, docs/c-abi-engine-and-memory.md P4) has none
 # of.
 STD_RUNTIME = r"std::backtrace_rs::|rustc_demangle::|addr2line::"
 # The Keccak permutation of zenoh's SHAKE128 derivation of a session's initial sequence number,
@@ -304,7 +323,7 @@ HEAP_ABORT = r"handle_alloc_error"
 # with why: the selftest holds every other forbidden pattern to a case that requires it. A pattern
 # leaves this table in the commit that adds its control.
 CONTROL_PENDING: dict[str, str] = {}
-# The engine a pico build runs its sessions on (`engine-tokio` / `engine-coop`,
+# The engine a pico build runs its sessions on (`engine-tokio` / `os-host`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
 COOP_ENGINE = r"wz_capi_coop::"
@@ -632,8 +651,9 @@ CASES: tuple[Case, ...] = (
          # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
          # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
-         require=(SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK, STD_RUNTIME),
+         require=(SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
               "no UDP, no clock, no unstable API. 1,794,085 measured, down from 1,868,267 "
               "with the unstable API and the connectivity plane. Hosted reads run higher than "
@@ -700,8 +720,9 @@ CASES: tuple[Case, ...] = (
          # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
          # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
-         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK, STD_RUNTIME),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="1,894,361 on hosted CI on 2026-10-26, 1,889,713 before the key set's gate: the "
               "same growth as pico-client's, whose note attributes it. 1,910,913 on hosted CI on "
               "2026-10-27 (head `f4bdeaee5`, +16,552), the growth pico-client's note states. "
@@ -809,90 +830,12 @@ CASES: tuple[Case, ...] = (
     # return. Each coop case below moves by its own reading.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +15,600 on
     # one machine.
-    Case("pico-client-coop", "wz-capi-pico", "libwz_capi_pico.so", "engine-coop,link-udp",
-         # 2026-11-21 -- the fifth PoC set: +8,732 on one host against main b58b71c19, by symbol:
-         # a droppable publish behind a held session is dropped per face and owed to the other faces
-         # (`fan_out` 1,667, `publish` +1,558, `send_handed` 735, `for_held` +507, the owed leg's
-         # clone 761), the ABI object pools' slot release and registry (about 800); the owed queue is
-         # taken whole rather than drained, which kept 3,700 of a drain's code out.
-         # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
-         # 1,047,506 hosted, +9,488 on one machine.
-         1_060_500,
-         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
-         # HEAP_ABORT: the control of the form without std, which forbids it. The standard
-         # library's own runtime allocates as it cannot fail, so a build with std links the abort.
-         require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME, HEAP_ABORT),
-         # 442 exports: `wz_ext_callbacks_refused` (d80d315d1), the callbacks a full thread table
-         # leaves unrun.
-         exports=442, cargo_configs=(PACKED_RELOCS_CONFIG,),
-         note="Linked for a glibc 2.36 loader with its relative relocations packed "
-              "(`capi-packed-relocs.toml`, DT_RELR), and so is its zenoh-pico reference; "
-              "the form without that file is the one for an older loader, 2,215 relative "
-              "relocations (53,160 bytes of `.rela.dyn`) larger in the std form read on "
-              "2026-11-22, where the packed table reads 632. "
-              "441 exports: the config doors of the open's policies "
-              "(`wz_ext_config_policy`, `wz_ext_config_profile`) and the conformance digest's "
-              "door (`wz_ext_conformance_digest`, decision C15) are the `config-policy` and "
-              "`conformance-digest` capabilities, which this case's features leave out as the "
-              "zenoh-pico preset does (444 with all three, which a build that names nothing and "
-              "the host-peer-ext preset have). "
-              "The single-threaded client of pico-client-udp on the cooperative engine: "
-              "888,223 measured, 2.20 times the same pico, against pico-client-udp's 4.63. It "
-              "grew from 867,811 by what pico's client has by default and it lacked: the "
-              "KeepAlive and Close codecs, a lost link dialled again with the session's "
-              "declarations sent again over it (881,043), and a read that waits on its link "
-              "outside the session's lock. 897,831 on 2026-10-25 (budget 895,000 before), "
-              "read bisected on the commits of that day: 893,251 with the timestamp policy "
-              "(`d6d659a10`), 894,515 with the faces the port reports on both engines "
-              "(`944fad43c`), 895,491 with a Push's frame sized from its message "
-              "(`77df225a7`, the commit that crossed the old budget); the 2,340 bytes between "
-              "that and the head are one commit: 895,531 before and 897,795 with the "
-              "per-link replay cursor over the six declaration lists (`5024d4e0f`, +2,264); "
-              "905,204 on hosted CI on 2026-10-26, +204 over the old budget of 905,000, with the "
-              "key set's gate and the engine port's advanced plane (pico-client's note above). Its "
-              "exports are pico-client's 441: the runtime's critical "
-              "sections are a lock of the process (`host-lock`), so no `critical-section` "
-              "implementation is linked, whose two symbols a cdylib exported beside the C ABI "
-              "(443 before). 912,823 on pc2 on 2026-10-26 against 899,119 at the commit before "
-              "the engine held its session on the slot observer and one link's peer tables "
-              "(+13,704, the budget moved over it): on the build machine the text grew 12,696 "
-              "(965,003 to 977,699 in the scout build), the symbols gained or lost netting "
-              "+4,472 (the observer's dispatch, 11,831 for the application observer's 11,951, "
-              "the peer tables' construction and drop and the subscriber reconcile, which the "
-              "application observer did as it was told) and those kept growing 5,802 (the "
-              "subscriber table's owned dispatch +4,402 and the Put's owned form +3,567, less "
-              "what shrank), which is where the compiler placed code it had inlined elsewhere. "
-              "930,067 on pc2 on 2026-10-27 against 912,823 before the engine held its links as a "
-              "table of faces (+17,244, the budget moved over it; 928,843 with the observer's "
-              "dispatch reading the other faces through a trait object, 1,224 less, and "
-              "monomorphic over them it is the slot images' for free, whose other faces are none): "
-              "+15,585 in the scout build on "
-              "the build machine (978,075 to 993,660) before that choice, whose symbols say what a "
-              "second face costs: "
-              "the observer's dispatch that counts the other faces' declarations is 11,962 "
-              "against 11,831, the polling of every link 4,163 against the one link's 3,487, the "
-              "face tables' drop 1,814 against the peer tables' 886, the two matching-listener "
-              "declarations that were inline 1,674, the filter's read over every face's peer "
-              "+1,369, the loss flush +1,621, and the removal of a face and of the accepted ones "
-              "about 1,000. 931,511 on pc2 after the policy that states the width of the sequence "
-              "numbers (`1549a936f`) read the width where the handshake had a literal: 1,444 more "
-              "in this case (the next seven cases read +1,200 to +1,500), and every cooperative "
-              "budget keeps about 1,200 over its reading since. 934,883 on pc2 on 2026-10-27, "
-              "2,183 over the old budget of 932,700, the day the listening role came: the "
-              "engine's shared entropy, the handshake run in either role and the wait on "
-              "several links are in a build that listens to nothing, with the main of that day "
-              "merged; the two are not measured apart. The budget follows the hosted reading, "
-              "which reads 3,300 to 4,400 over pc2, so it is moved to the pc2 reading and "
-              "5,500, an estimate the first hosted run replaces; the listening build's own "
-              "text is a case of the step that gives pico a listener"),
-    # The same client built as the host library without `std` (`os-posix`, phase P4 of
-    # docs/c-abi-engine-and-memory.md): the same capabilities and C symbols, no standard library,
-    # the C library's heap and `abort` in its place, and no unwinding (`capi-nostd`, whose
-    # configuration drops the unwind tables). The budget is pico-client-coop's, a ceiling the
-    # form sits under by construction until its first reading sets its own; its ceiling row is
-    # unfilled until then (`--measure pico-client-coop-nostd` prints both).
-    Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-posix,link-udp",
+    # The single-threaded cooperative client as every pico library is built: on the host's own calls
+    # without `std` (`os-host`; docs/win-budget/std-heap.md, S1: a C library has no `std` form), the
+    # C library's heap and `abort` in its place, and no unwinding (`capi-nostd`, whose configuration
+    # drops the unwind tables). The dated notes above read the same client built with `std`, a form
+    # the crate no longer has; its row went with it, and this case is the client's own ceiling row.
+    Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-host,link-udp",
          1_049_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
@@ -926,10 +869,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,680 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,159,413 hosted, +9,488 on one machine.
-         "engine-coop,link-udp,unstable-api", 1_172_500,
+         "os-host,link-udp,unstable-api", 1_172_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the unstable API: 894,893 measured against its "
               "891,491, 2.21 times the same pico (404,880), and 448 exports against its 441. "
               "916,041 on pc2 on 2026-10-26 against 902,337 before the slot observer "
@@ -948,10 +892,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,524 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,054,174 hosted, +9,592 on one machine.
-         "engine-coop,link-udp,local-subscriber", 1_067_300,
+         "os-host,link-udp,local-subscriber", 1_067_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build that delivers a put to its own subscribers: 898,019 "
               "measured against its 891,519, 2.22 times the same pico (405,414). 919,291 on pc2 "
               "on 2026-10-26 against 905,671 before the slot observer (+13,620, as "
@@ -969,10 +914,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,572 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,229,265 hosted, +9,580 on one machine.
-         "engine-coop,link-udp,unstable-api,connectivity", 1_242_400,
+         "os-host,link-udp,unstable-api,connectivity", 1_242_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
                  TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the unstable API and the connectivity plane: "
               "950,729 measured against the unstable build's 882,019, 2.16 times the same pico "
               "(439,791), and 563 exports against its 448. 985,013 on pc2 on 2026-10-26 "
@@ -991,10 +937,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,429 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,420,192 hosted, +10,054 on one machine.
-         "engine-coop,link-udp,admin-space", 1_433_800,
+         "os-host,link-udp,admin-space", 1_433_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the answering end, the unstable API and the "
               "admin space: 1,091,379 measured, 2.46 times the same pico (444,284), and 493 "
               "exports. 1,115,141 on the bench host on 2026-10-26 against 1,114,729 at the "
@@ -1029,10 +976,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,868 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,373,248 hosted, +10,300 on one machine.
-         "engine-coop,link-udp,query,queryable", 1_387_100,
+         "os-host,link-udp,query,queryable", 1_387_100,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the requesting and answering ends of a query: "
               "1,137,368 measured against pico-client-coop's 875,843, 2.60 times the same pico "
               "(437,624), and 541 exports against its 441. 1,161,344 on 2026-10-25, with the "
@@ -1057,10 +1005,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,304 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,389,476 hosted, +10,324 on one machine.
-         "engine-coop,link-udp,query,queryable,local-queryable", 1_403_300,
+         "os-host,link-udp,query,queryable,local-queryable", 1_403_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop-query build with the get delivered to the session's own "
               "queryables: 1,151,161 measured against its 1,137,368 (+13,793), 2.62 times the "
               "same pico (440,160). 1,175,052 on 2026-10-25, the same growth. 1,199,576 on pc2 "
@@ -1082,10 +1031,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,660 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,131,749 hosted, +9,444 on one machine.
-         "engine-coop,link-udp,scout", 1_144_700,
+         "os-host,link-udp,scout", 1_144_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the scouting window: 961,479 measured against "
               "pico-client-coop's 875,843 (+85,636), 2.34 times the same pico (410,391), and 464 "
               "exports. 981,698 measured on pc2 on 2026-10-26 against the earlier 981,000 budget; "
@@ -1109,10 +1059,11 @@ CASES: tuple[Case, ...] = (
          # 2026-11-21 -- the fifth PoC set, as pico-client-coop's note says: +8,788 on one host.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 1,195,275 hosted, +9,544 on one machine.
-         "engine-coop,link-udp,peer", 1_208_400,
+         "os-host,link-udp,peer", 1_208_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop-scout build with the listening role, which `peer` brings "
               "with the scouting window: 1,057,120 measured on pc2 on 2026-10-27, 2.54 times the "
               "same pico (415,527), and 464 exports, as the scout build's. The budget is that "
@@ -1162,6 +1113,7 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="peer implies scout and with it the UDP group"),
     # 2026-11-03, the SCE pins -- 4,356,318 on hosted run 41589047498 (4,355,414 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
@@ -1205,10 +1157,13 @@ CASES: tuple[Case, ...] = (
          # tokio engine's until the first reading on it moves them.
          # Gossip is off in the preset (decision Q7), and the tokio engine's own planes (its
          # accept loop, responder and scouting glue) are not linked.
-         forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK),
-         require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN, STD_RUNTIME),
-         # 812 exports: `wz_ext_callbacks_refused` (d80d315d1).
-         exports=812,
+         forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
+                 STD_RUNTIME),
+         require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
+         profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
+         # 813 exports: `wz_ext_callbacks_refused` (d80d315d1), and `rust_eh_personality`, which the
+         # library without `std` defines (pico-client-coop-nostd's note).
+         exports=813,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
               "(`header_internals`: `_z_cancellation_token_clear`, "
@@ -1240,8 +1195,10 @@ CASES: tuple[Case, ...] = (
                  ROUTER_NODE, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          # The tokio engine's own marks, which the pico client required while its default was that
          # engine: the zenoh-c drop-in still runs on it, with zenoh's derivation of the initial
-         # sequence number and the runtime's `log` facade.
-         require=(TOKIO_ENGINE, KECCAK, LOG_FACADE)),
+         # sequence number and the runtime's `log` facade. It links `std`, so it is the control of
+         # the standard library's runtime and of the allocator's abort, which every pico case forbids
+         # or leaves out now that the pico C library has no `std` form.
+         require=(TOKIO_ENGINE, KECCAK, LOG_FACADE, STD_RUNTIME, HEAP_ABORT)),
     # 2026-11-03, the SCE pins -- 1,974,779 on hosted run 41589047498 (1,973,891 on hkl001 at the
     # head), the growth pico-client-coop's note of this day attributes; that and 3,500.
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +19,522 on
@@ -1758,14 +1715,18 @@ class StatementCase:
     lib: str
     features: str
     env: tuple[tuple[str, str], ...]
+    # The pico C library has no `std` and does not unwind, so it is built with the profile that
+    # aborts (`capi-nostd`); a library with `std` takes the dev profile.
+    profile: str = "dev"
     note: str = field(default="", compare=False)
 
 
 STATEMENT_CASES: tuple[StatementCase, ...] = (
     StatementCase("statement-pico-stated", "wz-capi-pico", "libwz_capi_pico.so",
-                  "engine-coop,link-udp,conformance-digest",
+                  "os-host,link-udp,conformance-digest",
                   (("WZ_LIMIT_MAX_SUBSCRIPTIONS", "32"), ("WZ_POLICY_SN_RESOLUTION", "bits-16")),
-                  note="the pico client on the cooperative engine (pico-client-coop's features "
+                  profile="capi-nostd",
+                  note="the pico client on the cooperative engine (pico-client-coop-nostd's features "
                        "and the digest's door, which the pico preset leaves out) with a limit and "
                        "a policy stated off their defaults"),
     StatementCase("statement-capic-shm-arm", "wz-capi-c", "libwz_capi_c.so",
@@ -1811,10 +1772,20 @@ def case_limits(case: Case | StatementCase) -> dict[str, str]:
 
 def build_statement_case(case: StatementCase, base: Mapping[str, str]) -> tuple[str, ...]:
     """Build a statement case and return the conformance digests its library carries."""
-    subprocess.run(["cargo", "build", "-p", case.package, "--quiet", "--no-default-features",
-                    "--features", case.features, "--target-dir", str(STATEMENT_TARGET)],
-                   cwd=CRATES, env=statement_env(case, base), check=True)
-    return digests_in((STATEMENT_TARGET / "debug" / case.lib).read_bytes())
+    subprocess.run(statement_cmd(case), cwd=CRATES, env=statement_env(case, base), check=True)
+    return digests_in((STATEMENT_TARGET / statement_profile_dir(case) / case.lib).read_bytes())
+
+
+def statement_cmd(case: StatementCase) -> list[str]:
+    """The cargo command (from `crates/`) that builds a statement case's C library."""
+    return ["cargo", "build", "--profile", case.profile, "-p", artifact_package(case.package), "--quiet",
+            "--no-default-features", "--features", artifact_features(case.package, case.features),
+            "--target-dir", str(STATEMENT_TARGET)]
+
+
+def statement_profile_dir(case: StatementCase) -> str:
+    """The directory of the target directory cargo leaves a statement case's library in."""
+    return "debug" if case.profile == "dev" else case.profile
 
 
 def grade_statement(case: StatementCase, got: tuple[str, ...], stated: str,
@@ -2219,7 +2190,7 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
     (this host's when not given), whose `rustc --print cfg` lines are `cfg` (rustc's when not
     given), so their flags reach the library's crates and not the build scripts."""
     stated = case_limits(case) if limits is None else dict(limits)
-    cmd = ["cargo", "build", "--profile", case.profile, "-p", case.package, "--quiet",
+    cmd = ["cargo", "build", "--profile", case.profile, "-p", artifact_package(case.package), "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
     flags = list(GATE_RUSTFLAGS)
@@ -2231,7 +2202,7 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
     if case.features is not None:
         cmd += ["--no-default-features"]
         if case.features:
-            cmd += ["--features", case.features]
+            cmd += ["--features", artifact_features(case.package, case.features)]
     return CaseBuild(tuple(cmd), {**with_rustflags(limit_env(env, stated), flags),
                                   **wz_package.ship_debug_env(case.profile)},
                      lib_dir / case.lib, tuple(link_args(flags)),
@@ -2749,10 +2720,13 @@ def cmd_selftest() -> int:
            link_args(["-C", "force-unwind-tables=no", "-C", "link-arg=-Wl,-z,x",
                       "-Clink-arg=-Wl,-y", "--cfg", "link-arg=z", "-C"]) == ["-Wl,-z,x", "-Wl,-y"])
     by_case = {c.id: c for c in CASES}
-    expect("the two Linux C ABI size cases of the pico client are linked packed",
-           PACKED_RELOCS_CONFIG in by_case["pico-client-coop"].cargo_configs
-           and by_case["pico-client-coop-nostd"].cargo_configs[:2]
-           == (NOSTD_CONFIG, PACKED_RELOCS_CONFIG))
+    expect("the Linux C ABI size case of the pico client is linked packed",
+           by_case["pico-client-coop-nostd"].cargo_configs[:2] == (NOSTD_CONFIG, PACKED_RELOCS_CONFIG))
+    expect("no pico case is built with std: each takes an aborting profile, and no ship one",
+           all(c.profile in ("capi-nostd", "capi-small") for c in CASES if c.package == "wz-capi-pico")
+           and all(NOSTD_CONFIG in c.cargo_configs for c in CASES
+                   if c.package == "wz-capi-pico" and c.profile == "capi-nostd")
+           and "pico-client-coop" not in by_case)
     asked_relr = Measured(900, [], 3, link_args=(PACKED_RELOCS_LINK,), relr=True, relr_need=True)
     expect("a library linked packed with DT_RELR and the version need is linked as asked",
            link_findings("t", asked_relr) == [])
@@ -2789,12 +2763,25 @@ def cmd_selftest() -> int:
     # The plan of a case's build, which the performance matrix builds its arm W by.
     plain = case_build(Case("t", "wz-capi-pico", "libt.so", "a,b", 1), {}, limits={})
     expect("a case of no configuration file is built for the default target, by the gate's linker",
-           plain.cmd[:6] == ("cargo", "build", "--profile", SHIP_PROFILE, "-p", "wz-capi-pico")
-           and plain.cmd[-3:] == ("--no-default-features", "--features", "a,b")
+           plain.cmd[:6] == ("cargo", "build", "--profile", SHIP_PROFILE, "-p", "wz-capi-pico-lib")
+           and plain.cmd[-3:] == ("--no-default-features", "--features", "abi/a,abi/b")
            and "--target" not in plain.cmd and plain.lib == TARGET / SHIP_PROFILE / "libt.so"
            and plain.link_args == (GNU_LD,)
            and plain.env == {build_normalization.ENCODED_RUSTFLAGS: "\x1f".join(GATE_RUSTFLAGS),
                              **wz_package.ship_debug_env(SHIP_PROFILE)})
+    expect("a package that is its own C library is built as it is named, its features as given",
+           artifact_package("wz-capi-c") == "wz-capi-c"
+           and artifact_features("wz-capi-c", "a, b") == "a,b"
+           and artifact_package("wz-capi-pico") == "wz-capi-pico-lib"
+           and artifact_features("wz-capi-pico", "") == "")
+    pico_statement = next(s for s in STATEMENT_CASES if s.package == "wz-capi-pico")
+    capic_statement = next(s for s in STATEMENT_CASES if s.package == "wz-capi-c")
+    expect("the pico statement case builds the C library by the aborting profile, through the ABI",
+           statement_cmd(pico_statement)[2:6] == ["--profile", "capi-nostd", "-p", "wz-capi-pico-lib"]
+           and "abi/conformance-digest" in statement_cmd(pico_statement)[9].split(",")
+           and statement_profile_dir(pico_statement) == "capi-nostd"
+           and statement_cmd(capic_statement)[2:6] == ["--profile", "dev", "-p", "wz-capi-c"]
+           and statement_profile_dir(capic_statement) == "debug")
     expect("a case of the crate's default features names none",
            "--features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd
            and "--no-default-features" not in case_build(Case("t", "p", "l", None, 1), {}).cmd)
@@ -2929,7 +2916,7 @@ def cmd_selftest() -> int:
                     reference_key("other", "cc", flags, rule),
                     reference_key("pin", "other", flags, rule)}) == 4)
     expect("a case's features are its package's as cargo resolves them",
-           "engine-coop" in case_features(next(c for c in CASES if c.id == "pico-client"))
+           "os-host" in case_features(next(c for c in CASES if c.id == "pico-client"))
            and not {"engine-tokio", "serial-drive-own-thread", "rx-busy-poll"}
            & case_features(next(c for c in CASES if c.id == "pico-client"))
            and "peer" in case_features(next(c for c in CASES if c.id == "pico-default"))
