@@ -406,12 +406,15 @@ mod callback_depth {
 /// How many of the program's callbacks each thread is running, without `std`: one entry for each
 /// thread in a callback, keyed by the thread's word, in a table of the process whose room is fixed
 /// by the build, because an MCU kernel gives a Rust image no thread-local storage and a session
-/// takes no heap after it opens. Compiled for the host's tests too, so the table is run where the
-/// tests run.
+/// takes no heap after it opens. It is asked on every delivery, so it takes no lock: a thread
+/// claims a free entry with one compare-and-swap and is then the only one to write it until it
+/// frees it, and a thread looks for nothing but its own word, which only its own writes put in the
+/// table. Compiled for the host's tests too, so the table is run where the tests run.
 #[cfg(any(not(feature = "std"), test))]
 mod callback_table {
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
     use wz_capi_port::os;
-    use wz_capi_port::sync::Lock;
     #[cfg(feature = "multi-thread")]
     use wz_session_core::caps;
 
@@ -425,115 +428,191 @@ mod callback_table {
     #[cfg(not(feature = "multi-thread"))]
     const ROOM: usize = 1;
 
-    static IN_CALLBACK: Lock<Threads<ROOM>> = Lock::new(Threads::new());
+    static IN_CALLBACK: Threads<ROOM> = Threads::new();
 
-    /// The threads running one of the program's callbacks: the first `len` of `entries`, each a
-    /// thread's word ([`os::current_word`], never 0) and how many callbacks it runs, nested, and
-    /// how many callbacks a thread past the room did not run.
+    /// What a free entry holds: no thread's word is 0.
+    const NO_THREAD: usize = 0;
+
+    /// The threads running one of the program's callbacks, and how many callbacks a thread past
+    /// the room did not run. Entries are claimed from the front, so a search ends at `used`, the
+    /// most entries ever claimed, rather than at the room.
     pub(super) struct Threads<const N: usize> {
-        entries: [(usize, usize); N],
-        len: usize,
-        refused: usize,
+        entries: [Entry; N],
+        used: AtomicUsize,
+        refused: AtomicUsize,
+    }
+
+    /// One thread inside callbacks: its word ([`os::current_word`]), [`NO_THREAD`] while the
+    /// entry is free, and how many callbacks it runs, nested, which only that thread touches.
+    struct Entry {
+        thread: AtomicUsize,
+        depth: AtomicUsize,
+    }
+
+    impl Entry {
+        const fn free() -> Self {
+            Self {
+                thread: AtomicUsize::new(NO_THREAD),
+                depth: AtomicUsize::new(0),
+            }
+        }
+
+        /// Take the entry for `thread`, one callback counted, if it is free.
+        fn claim(&self, thread: usize) -> bool {
+            // The load first, so an entry another thread holds is passed by without a locked
+            // operation. Acquire: the thread that freed the entry wrote its depth before it let go.
+            if self.thread.load(Ordering::Relaxed) != NO_THREAD
+                || self
+                    .thread
+                    .compare_exchange(NO_THREAD, thread, Ordering::Acquire, Ordering::Relaxed)
+                    .is_err()
+            {
+                return false;
+            }
+            self.depth.store(1, Ordering::Relaxed);
+            true
+        }
     }
 
     impl<const N: usize> Threads<N> {
         pub(super) const fn new() -> Self {
             Self {
-                entries: [(0, 0); N],
-                len: 0,
-                refused: 0,
+                entries: [const { Entry::free() }; N],
+                used: AtomicUsize::new(0),
+                refused: AtomicUsize::new(0),
             }
         }
 
-        /// Count one more callback of `thread`: `false`, counting nothing, when `thread` runs
-        /// none yet and `N` others do.
-        pub(super) fn enter(&mut self, thread: usize) -> bool {
-            let len = self.len;
-            if let Some(entry) = self
-                .entries
-                .iter_mut()
-                .take(len)
-                .find(|entry| entry.0 == thread)
-            {
-                entry.1 = entry.1.saturating_add(1);
-                return true;
+        /// Count one more callback of `thread`: the entry that counts it, or `None`, counting
+        /// nothing but the refusal, when `thread` runs none yet and `N` others do.
+        pub(super) fn enter(&self, thread: usize) -> Option<usize> {
+            if let Some((at, entry)) = self.held_by(thread) {
+                let depth = entry.depth.load(Ordering::Relaxed);
+                entry
+                    .depth
+                    .store(depth.saturating_add(1), Ordering::Relaxed);
+                return Some(at);
             }
-            let Some(free) = self.entries.get_mut(len) else {
-                self.refused = self.refused.saturating_add(1);
-                return false;
-            };
-            *free = (thread, 1);
-            self.len = len + 1;
-            true
+            let claimed = self.claim(thread);
+            if claimed.is_none() {
+                // Saturating, so the program never reads fewer than were refused.
+                let _ =
+                    self.refused
+                        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |refused| {
+                            refused.checked_add(1)
+                        });
+            }
+            claimed
+        }
+
+        /// A free entry claimed for `thread`: the first free one among those claimed before, or
+        /// else the next one past them, none past the room.
+        fn claim(&self, thread: usize) -> Option<usize> {
+            loop {
+                let used = self.used.load(Ordering::Relaxed);
+                if let Some(at) = self
+                    .entries
+                    .iter()
+                    .take(used)
+                    .position(|entry| entry.claim(thread))
+                {
+                    return Some(at);
+                }
+                let at = self
+                    .used
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                        (used < N).then_some(used + 1)
+                    })
+                    .ok()?;
+                if self.entries.get(at)?.claim(thread) {
+                    return Some(at);
+                }
+                // The entry is searched from the moment `used` passes it, so another thread
+                // claimed it first: look again.
+            }
         }
 
         pub(super) fn refused(&self) -> usize {
-            self.refused
+            self.refused.load(Ordering::Relaxed)
         }
 
         pub(super) fn here(&self, thread: usize) -> bool {
-            self.entries
-                .iter()
-                .take(self.len)
-                .any(|entry| entry.0 == thread)
+            self.held_by(thread).is_some()
         }
 
-        /// Count one callback of `thread` less; its entry goes with its last, the last entry
-        /// taking its place.
-        pub(super) fn leave(&mut self, thread: usize) {
-            let Some(held) = self.entries.get_mut(..self.len) else {
+        /// The entry `thread` holds. Relaxed: a thread looks for its own word, which it wrote
+        /// itself, below a `used` it reads no lower than when it claimed the entry.
+        fn held_by(&self, thread: usize) -> Option<(usize, &Entry)> {
+            let used = self.used.load(Ordering::Relaxed);
+            self.entries
+                .iter()
+                .take(used)
+                .enumerate()
+                .find(|(_, entry)| entry.thread.load(Ordering::Relaxed) == thread)
+        }
+
+        /// Count one callback less in the entry at `at`, which [`Self::enter`] gave the calling
+        /// thread; the entry is freed with its last.
+        pub(super) fn leave(&self, at: usize) {
+            let Some(entry) = self.entries.get(at) else {
                 return;
             };
-            let Some(at) = held.iter().position(|entry| entry.0 == thread) else {
-                return;
-            };
-            let Some(&last) = held.last() else {
-                return;
-            };
-            let Some(entry) = held.get_mut(at) else {
-                return;
-            };
-            entry.1 = entry.1.saturating_sub(1);
-            if entry.1 == 0 {
-                *entry = last;
-                self.len = self.len.saturating_sub(1);
+            let depth = entry.depth.load(Ordering::Relaxed);
+            if depth > 1 {
+                entry.depth.store(depth - 1, Ordering::Relaxed);
+            } else {
+                // Release: the thread that claims the entry next writes its depth after this one.
+                entry.thread.store(NO_THREAD, Ordering::Release);
             }
         }
     }
 
-    /// One callback of the calling thread, from [`enter`] to drop.
+    /// One callback of the calling thread, from [`enter`] to drop: the entry that counts it.
     pub(super) struct Entered {
-        thread: usize,
+        at: usize,
     }
 
-    // Out of line, as `here` and the drop are: each takes the table's lock, and every door that
-    // calls into C or waits for a callback would otherwise hold its own copy of the take.
+    // Out of line, as `here` and the drop are: every door that calls into C or waits for a
+    // callback would otherwise hold its own copy of the search.
     #[inline(never)]
     pub(super) fn enter() -> Option<Entered> {
-        let thread = os::current_word();
         // Built only once counted: an `Entered` dropped leaves the table.
-        if IN_CALLBACK.with(|threads| threads.enter(thread)) {
-            Some(Entered { thread })
-        } else {
-            None
-        }
+        let at = IN_CALLBACK.enter(os::current_word())?;
+        Some(Entered { at })
     }
 
     #[inline(never)]
     pub(super) fn here() -> bool {
-        let thread = os::current_word();
-        IN_CALLBACK.with(|threads| threads.here(thread))
+        IN_CALLBACK.here(os::current_word())
     }
 
     pub(super) fn refused() -> usize {
-        IN_CALLBACK.with(|threads| threads.refused())
+        IN_CALLBACK.refused()
     }
 
     impl Drop for Entered {
         #[inline(never)]
         fn drop(&mut self) {
-            let thread = self.thread;
-            IN_CALLBACK.with(|threads| threads.leave(thread));
+            IN_CALLBACK.leave(self.at);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{Ordering, Threads};
+
+        #[test]
+        fn the_refused_count_stops_at_its_largest() {
+            let threads = Threads::<0>::new();
+            threads.refused.store(usize::MAX - 1, Ordering::Relaxed);
+            assert!(threads.enter(1).is_none(), "a table of no room refuses");
+            assert_eq!(threads.refused(), usize::MAX);
+            assert!(threads.enter(1).is_none());
+            assert_eq!(
+                threads.refused(),
+                usize::MAX,
+                "the count stays at its largest rather than going back to 0"
+            );
         }
     }
 }
@@ -544,6 +623,7 @@ use callback_table as callback_depth;
 #[cfg(test)]
 mod tests {
     use super::callback_table;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn the_callback_table_counts_each_thread_on_its_own() {
@@ -564,29 +644,78 @@ mod tests {
 
     #[test]
     fn a_full_callback_table_refuses_a_new_thread_and_takes_a_nested_callback() {
-        let mut threads = callback_table::Threads::<2>::new();
-        assert!(threads.enter(1));
-        assert!(threads.enter(2));
+        let threads = callback_table::Threads::<2>::new();
+        let one = threads
+            .enter(1)
+            .expect("the first thread takes the first entry");
+        let two = threads
+            .enter(2)
+            .expect("the second thread takes the second");
+        assert_eq!((one, two), (0, 1), "entries are claimed from the front");
         assert!(
-            !threads.enter(3),
+            threads.enter(3).is_none(),
             "a third thread is refused while two run callbacks"
         );
         assert!(!threads.here(3), "the refused thread is not counted");
         assert_eq!(threads.refused(), 1, "the callback not run is counted");
-        assert!(
-            threads.enter(1),
-            "a nested callback takes no entry of its own"
+        let nested = threads
+            .enter(1)
+            .expect("a nested callback takes no entry of its own");
+        assert_eq!(
+            nested, one,
+            "a nested callback counts in its thread's entry"
         );
-        threads.leave(1);
+        threads.leave(nested);
         assert!(threads.here(1), "the outer callback still runs");
-        threads.leave(1);
+        threads.leave(one);
         assert!(!threads.here(1));
         assert!(threads.here(2), "the other thread keeps its entry");
-        assert!(
-            threads.enter(3),
-            "the entry let go of takes the refused thread"
-        );
+        let three = threads
+            .enter(3)
+            .expect("the entry let go of takes the refused thread");
+        assert_eq!(three, one, "the freed entry is claimed before any past it");
         assert!(threads.here(3));
+        assert_eq!(threads.refused(), 1, "nothing more was refused");
+    }
+
+    /// Threads entering and leaving at once, more of them than the table has room for: each finds
+    /// its own entry and no other's, a nested callback is never refused, and every callback either
+    /// ran or is counted refused.
+    #[test]
+    fn threads_entering_at_once_each_keep_an_entry_of_their_own() {
+        const THREADS: usize = 6;
+        const ROUNDS: usize = 2_000;
+        let table = callback_table::Threads::<4>::new();
+        let ran = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            for word in 1..=THREADS {
+                let (table, ran) = (&table, &ran);
+                scope.spawn(move || {
+                    for _ in 0..ROUNDS {
+                        let Some(outer) = table.enter(word) else {
+                            assert!(!table.here(word), "a refused thread is not counted");
+                            continue;
+                        };
+                        ran.fetch_add(1, Ordering::Relaxed);
+                        assert!(table.here(word), "the thread finds its entry");
+                        let inner = table
+                            .enter(word)
+                            .expect("a nested callback is never refused");
+                        assert_eq!(inner, outer, "a nested callback counts in the same entry");
+                        table.leave(inner);
+                        assert!(table.here(word), "the outer callback still runs");
+                        table.leave(outer);
+                        assert!(!table.here(word), "the thread left its last callback");
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            ran.load(Ordering::Relaxed) + table.refused(),
+            THREADS * ROUNDS,
+            "every callback ran or was counted refused"
+        );
+        assert!((1..=THREADS).all(|word| !table.here(word)));
     }
 }
 
