@@ -613,19 +613,24 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     );
 
     let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
-    assert_eq!(row(&dialling, "link port datagram slots").count, 0);
-    assert_eq!(
-        Some(row(&dialling, "udp port peers").entry_bytes),
-        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(0),
-        "a session that listens on nothing keeps no peer row"
-    );
+    for part in [
+        "link port datagram flags",
+        "link port datagram slots",
+        "udp port peers",
+        "udp port queue",
+    ] {
+        assert!(
+            dialling.rows().all(|laid| laid.part() != part),
+            "a session that listens on nothing lays out no {part}"
+        );
+    }
 }
 
-/// A session that listens on `tcp/` alone binds no udp port, so it is lent no datagram slot and
-/// keeps no peer row of a port, as one that listens on nothing; a `udp/` endpoint beside it lends
-/// the slots. Each row is printed, so a run with `--nocapture` shows the bytes the tcp listener
-/// does not reserve. Turned red by slots planned from the count of listeners rather than of the
-/// `udp/` ones.
+/// A session that listens on `tcp/` alone binds no udp port, so its plan lays out none of the
+/// ports' rows, as one that listens on nothing; a `udp/` endpoint beside it lends the slots. Each
+/// row is printed, so a run with `--nocapture` shows the bytes the tcp listener does not reserve.
+/// Turned red by port rows planned from the count of listeners rather than of the `udp/` ones,
+/// or laid out empty for a session with no port.
 #[cfg(feature = "listen")]
 #[test]
 fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
@@ -647,23 +652,16 @@ fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
         "udp port peers",
         "udp port queue",
     ] {
-        std::println!(
-            "{part}: tcp alone {:?} B, beside a udp port {:?} B",
-            row(&tcp, part).bytes(),
-            row(&both, part).bytes()
+        std::println!("{part}: beside a udp port {:?} B", row(&both, part).bytes());
+        assert!(
+            tcp.rows().all(|laid| laid.part() != part),
+            "a session with no udp port lays out no {part}"
         );
     }
     std::println!(
         "reserved: tcp alone {:?} B, beside a udp port {:?} B",
         tcp.reserved_bytes(),
         both.reserved_bytes()
-    );
-    assert_eq!(row(&tcp, "link port datagram slots").count, 0);
-    assert_eq!(row(&tcp, "link port datagram flags").count, 0);
-    assert_eq!(
-        Some(row(&tcp, "udp port peers").entry_bytes),
-        wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(0),
-        "a session with no udp port keeps no peer row of one"
     );
     assert_eq!(
         row(&both, "link port datagram slots").count,
@@ -1104,11 +1102,13 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
+    // Two handshakes at once where the build admits them: a build at a preset of one admits one.
+    let handshakes = caps::MAX_ACCEPT_PENDING.min(2);
     let listening = ArenaPlan::of(
         &CoopConfig {
             listen: vec!["tcp/127.0.0.1:0".to_owned()],
             max_faces: 3,
-            accept_pending: 2,
+            accept_pending: handshakes,
             ..client_config()
         },
         &SessionLimits::defaults(),
@@ -1145,10 +1145,10 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         "every face's peer tables are the same"
     );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
-    assert_eq!(link_places(&listening), 3 + 2);
+    assert_eq!(link_places(&listening), 3 + handshakes);
     assert_eq!(
         row(&listening, "link receive buffers").count,
-        pooled(caps::RX_POOL_BUFFERS, 3 + 2),
+        pooled(caps::RX_POOL_BUFFERS, 3 + handshakes),
         "the links share a pool of receive buffers"
     );
     assert_eq!(
@@ -1174,11 +1174,13 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
 #[cfg(feature = "listen")]
 #[test]
 fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
+    // Two handshakes at once where the build admits them: a build at a preset of one admits one.
+    let handshakes = caps::MAX_ACCEPT_PENDING.min(2);
     let listener = |endpoints: Vec<String>| CoopConfig {
         endpoints,
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 3,
-        accept_pending: 2,
+        accept_pending: handshakes,
         ..client_config()
     };
     let plan = |config: &CoopConfig| {
@@ -1189,8 +1191,8 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
     assert!(!crate::arena::dials(&only) && crate::arena::dials(&dialling));
     let (only, dialling) = (plan(&only), plan(&dialling));
     let own = usize::from(cfg!(feature = "local-queryable"));
-    assert_eq!(link_places(&only), 3 + 2);
-    assert_eq!(link_places(&dialling), 1 + 3 + 2);
+    assert_eq!(link_places(&only), 3 + handshakes);
+    assert_eq!(link_places(&dialling), 1 + 3 + handshakes);
     assert_eq!((only.peers().tables, only.gets().tables), (3, 3 + own));
     assert_eq!(
         (dialling.peers().tables, dialling.gets().tables),
@@ -2541,19 +2543,27 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             theirs.part()
         );
     }
-    assert!(
-        peer.reserved_bytes()
-            < ArenaPlan::of(
-                &CoopConfig {
-                    listen: vec!["tcp/127.0.0.1:0".to_owned()],
-                    ..client_config()
-                },
-                &SessionLimits::defaults(),
-            )
-            .expect("lays an arena out")
-            .reserved_bytes(),
-        "a peer at the preset reserves less than a listener at the build's defaults"
-    );
+    let at_the_build = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out")
+    .reserved_bytes();
+    // A build made at the preset has the preset's values as its defaults, and so no more to lower.
+    if limits == SessionLimits::defaults() {
+        assert!(
+            peer.reserved_bytes() <= at_the_build,
+            "a peer at the preset reserves no more than a listener at a build of the preset"
+        );
+    } else {
+        assert!(
+            peer.reserved_bytes() < at_the_build,
+            "a peer at the preset reserves less than a listener at the build's defaults"
+        );
+    }
 }
 
 /// The rows of the arena a session reserves at its open, item by item, for a client and a peer at
@@ -2889,7 +2899,9 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
 /// rooms, the ABI's handle and its places for every kind of entity among them, holds exactly
 /// `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in whichever build. A group
 /// that puts a row it does not count, or counts one it does not put, turns this red. A build that
-/// joins groups names one, since a config that names none plans no group receive table. Each of
+/// joins groups names one, since a config that names none plans no group receive table, and a build
+/// that listens listens on a `udp/` endpoint, since a session with no port plans none of the
+/// ports' rows. Each of
 /// those rows names a part of its own, which a report finds it by: a part named as another, or a
 /// table laid out under the part of its flags twice, turns this red too.
 #[test]
@@ -2923,10 +2935,16 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .with_lodgings(place, 1);
     // Faces that share their pools where the build takes faces beside its dial role's, so the
     // table of tokens the faces that went owe is put too.
+    let listen = if cfg!(feature = "listen") {
+        vec!["udp/127.0.0.1:0".to_owned()]
+    } else {
+        Vec::new()
+    };
     let mut plan = ArenaPlan::of(
         &CoopConfig {
             max_faces: BESIDE_DIAL,
             groups: vec![join; groups],
+            listen,
             ..client_config()
         },
         &SessionLimits::defaults(),

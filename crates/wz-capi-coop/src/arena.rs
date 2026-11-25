@@ -1854,26 +1854,28 @@ impl ArenaPlan {
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
-            let listens = shape.udp_listens > 0;
-            let slots = if listens { slots } else { 0 };
-            self.transport.port_rx = (slots, link_bytes);
-            self.put_table(
-                [
-                    ArenaPart::LinkPortDatagramFlags,
-                    ArenaPart::LinkPortDatagramSlots,
-                ],
-                slots,
-                link_bytes,
-            );
-            // The ports' book of their peers, a row for each link the session may hold, and of
-            // the datagrams sorted for them, a row for each slot a datagram holds while it waits
-            // (`TransportRows::lent_from`).
-            let peers = if listens { links } else { 0 };
-            self.transport.port_peers = peers;
-            let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(peers));
-            self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
-            let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
-            self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+            // A plan of a session with no udp port lays none of the ports' rows out, as one that
+            // names no group lays out no group's: their tables are lent no rows and take no byte
+            // of the arena (`TransportRows::links_from`, `TransportRows::lent_from`).
+            if shape.udp_listens > 0 {
+                self.transport.port_rx = (slots, link_bytes);
+                self.put_table(
+                    [
+                        ArenaPart::LinkPortDatagramFlags,
+                        ArenaPart::LinkPortDatagramSlots,
+                    ],
+                    slots,
+                    link_bytes,
+                );
+                // The ports' book of their peers, a row for each link the session may hold, and
+                // of the datagrams sorted for them, a row for each slot a datagram holds while it
+                // waits (`TransportRows::lent_from`).
+                self.transport.port_peers = links;
+                let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
+                self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
+                let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+                self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+            }
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
         // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
