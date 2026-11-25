@@ -147,14 +147,14 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     // could name itself.
     type IterationWork = ();
 
-    // The session's holders are one task at a time: its handles are not `Send`, and an engine
-    // that hands a session to another thread does so behind a lock of its own. So what they write
-    // without a lock is a cell (no atomic instruction, and none of 64 bits that an ARMv6-M or a
-    // Cortex-M7 lacks), and what they reach one at a time needs no lock either.
-    type Flag = core::cell::Cell<bool>;
-    type Word = core::cell::Cell<u64>;
+    // What the session's holders write without a lock, and what they reach one at a time, are the
+    // lock kind's (`LockKind::Flag`, `Word`, `Local`): cells where one task holds them (no atomic
+    // instruction, and none of 64 bits that an ARMv6-M or a Cortex-M7 lacks), atomics and a lock of
+    // each value where several threads do.
+    type Flag = K::Flag;
+    type Word = K::Word;
     type Local<T>
-        = core::cell::RefCell<T>
+        = K::Local<T>
     where
         T: Send + 'static;
 
@@ -162,14 +162,14 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     where
         T: Send + 'static,
     {
-        core::cell::RefCell::new(value)
+        K::new_local(value)
     }
 
     fn with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U
     where
         T: Send + 'static,
     {
-        f(&mut *local.borrow_mut())
+        K::with_local(local, f)
     }
 
     // R311ja — the MCU action handle is counted without atomics, not an `Arc`:

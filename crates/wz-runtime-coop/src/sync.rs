@@ -127,6 +127,67 @@ pub trait LockKind: 'static {
         mutex: &Self::Mutex<T>,
         f: impl FnOnce(&mut T) -> U,
     ) -> Option<U>;
+
+    /// How the handles on what a session of this kind shares are counted: for one task at a
+    /// time, or across threads. Its table flag is [`Self::Flag`], so a handle of either kind
+    /// is placed in a cell of a table the session lends.
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type Count: crate::link_cells::CountKind<Flag = Self::Flag>;
+
+    /// A flag the session's holders write without a lock, and the flag of a table's cell
+    /// (`SessionRuntime::Flag`): a cell where one task holds them, an atomic where threads do.
+    #[cfg(feature = "session-unicast")]
+    type Flag: wz_session_core::byte_cells::CellFlag + Send;
+
+    /// A word the session's holders write without a lock (`SessionRuntime::Word`), in the form
+    /// [`Self::Flag`] is.
+    #[cfg(feature = "session-unicast")]
+    type Word: wz_session_core::runtime_cell::WordCell + Send;
+
+    /// A value the session's holders reach one at a time (`SessionRuntime::Local`): a
+    /// `RefCell` where one task holds them, a lock of its own where threads do.
+    #[cfg(feature = "session-unicast")]
+    type Local<T>
+    where
+        T: Send + 'static;
+
+    /// `value` in a new [`Self::Local`].
+    #[cfg(feature = "session-unicast")]
+    fn new_local<T: Send + 'static>(value: T) -> Self::Local<T>;
+
+    /// Run `f` on the value of `local`, which no other holder reaches meanwhile.
+    #[cfg(feature = "session-unicast")]
+    fn with_local<T: Send + 'static, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U;
+}
+
+/// What one task at a time holds ([`Shared`] and [`Confined`]): handles counted with plain loads
+/// and stores, flags and words that are cells, a value reached through a `RefCell`. A session's
+/// handles are not `Send` here, so nothing written without a lock is reached by two threads.
+#[cfg(feature = "session-unicast")]
+macro_rules! one_task_holders {
+    () => {
+        #[cfg(not(feature = "session-slot"))]
+        type Count = crate::link_cells::OneTask;
+        type Flag = core::cell::Cell<bool>;
+        type Word = core::cell::Cell<u64>;
+        type Local<T>
+            = core::cell::RefCell<T>
+        where
+            T: Send + 'static;
+
+        #[inline]
+        fn new_local<T: Send + 'static>(value: T) -> Self::Local<T> {
+            core::cell::RefCell::new(value)
+        }
+
+        #[inline]
+        fn with_local<T: Send + 'static, U>(
+            local: &Self::Local<T>,
+            f: impl FnOnce(&mut T) -> U,
+        ) -> U {
+            f(&mut *local.borrow_mut())
+        }
+    };
 }
 
 /// The profile's lock ([`Mutex`]): a critical section, or on a host (`host-lock`) the value's
@@ -182,6 +243,9 @@ impl LockKind for Shared {
             mutex.try_with(f)
         }
     }
+
+    #[cfg(feature = "session-unicast")]
+    one_task_holders!();
 }
 
 /// The owner of every value a runtime of [`Confined<Self>`](Confined) lends: an engine that
@@ -229,6 +293,77 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
         f: impl FnOnce(&mut T) -> U,
     ) -> Option<U> {
         Some(mutex.with(f))
+    }
+
+    #[cfg(feature = "session-unicast")]
+    one_task_holders!();
+}
+
+/// Several threads of a host, each reaching a session's values on its own: each value has its own
+/// lock ([`crate::cs::HostMutex`]), the handles on what the session shares are counted as an
+/// `Arc`'s are, and its flags and words are atomics. What an engine whose sessions are driven by
+/// several threads at once lends, where [`Shared`] stays the kind of a single-core build, whose
+/// one task holds its handles and pays no atomic instruction for them.
+#[cfg(all(
+    feature = "runtime",
+    feature = "host-lock",
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+))]
+pub enum ManyThreads {}
+
+#[cfg(all(
+    feature = "runtime",
+    feature = "host-lock",
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+))]
+impl LockKind for ManyThreads {
+    type Mutex<T>
+        = crate::cs::HostMutex<T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn wrap<T: Send + 'static>(value: T) -> Self::Mutex<T> {
+        crate::cs::HostMutex::new(value)
+    }
+
+    #[inline]
+    fn with<T: Send + 'static, U>(mutex: &Self::Mutex<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        mutex.with(f)
+    }
+
+    #[inline]
+    fn try_with<T: Send + 'static, U>(
+        mutex: &Self::Mutex<T>,
+        f: impl FnOnce(&mut T) -> U,
+    ) -> Option<U> {
+        mutex.try_with(f)
+    }
+
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type Count = crate::link_cells::Atomic;
+    #[cfg(feature = "session-unicast")]
+    type Flag = core::sync::atomic::AtomicBool;
+    #[cfg(feature = "session-unicast")]
+    type Word = core::sync::atomic::AtomicU64;
+    #[cfg(feature = "session-unicast")]
+    type Local<T>
+        = crate::cs::HostMutex<T>
+    where
+        T: Send + 'static;
+
+    #[cfg(feature = "session-unicast")]
+    #[inline]
+    fn new_local<T: Send + 'static>(value: T) -> Self::Local<T> {
+        crate::cs::HostMutex::new(value)
+    }
+
+    #[cfg(feature = "session-unicast")]
+    #[inline]
+    fn with_local<T: Send + 'static, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> U {
+        local.with(f)
     }
 }
 
@@ -452,6 +587,60 @@ pub(crate) mod tests {
         }));
         assert!(unwound.is_err());
         assert_eq!(Held::with(&value, |held| *held), 3);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "host-lock",
+    feature = "session-unicast",
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+))]
+mod many_threads_tests {
+    use super::{LockKind, ManyThreads};
+    use wz_session_core::runtime_cell::{FlagCell, WordCell};
+
+    type Kind = ManyThreads;
+
+    /// What a session of several threads holds crosses threads, and a value reached one holder
+    /// at a time, a flag and a word written by four threads at once keep every write. Turned red
+    /// by a kind whose flag, word or local is a cell, which is not `Sync` and loses writes.
+    #[test]
+    fn what_several_threads_hold_keeps_every_write() {
+        extern crate std;
+        fn crosses<T: Send + Sync>() {}
+        crosses::<<Kind as LockKind>::Flag>();
+        crosses::<<Kind as LockKind>::Word>();
+        crosses::<<Kind as LockKind>::Local<u32>>();
+        crosses::<<Kind as LockKind>::Mutex<u32>>();
+        let local = Kind::new_local(0u32);
+        let word = <<Kind as LockKind>::Word as WordCell>::new(0);
+        let flag = <<Kind as LockKind>::Flag as FlagCell>::new(false);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1000 {
+                        Kind::with_local(&local, |count| *count += 1);
+                        word.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    flag.store(true, core::sync::atomic::Ordering::Release);
+                });
+            }
+        });
+        assert_eq!(Kind::with_local(&local, |count| *count), 4000);
+        assert_eq!(word.load(core::sync::atomic::Ordering::Relaxed), 4000);
+        assert!(flag.load(core::sync::atomic::Ordering::Acquire));
+    }
+
+    /// The handles of a session of several threads are counted as an `Arc`'s are. Turned red by
+    /// a kind that counts them for one task.
+    #[cfg(not(feature = "session-slot"))]
+    #[test]
+    fn a_session_of_several_threads_counts_its_handles_atomically() {
+        use crate::link_cells::{Atomic, CellRc};
+        let handle: CellRc<u32, <Kind as LockKind>::Count> = CellRc::<u32, Atomic>::shared(5);
+        assert_eq!(*handle, 5);
     }
 }
 
