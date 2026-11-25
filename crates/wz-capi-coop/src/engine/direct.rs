@@ -682,14 +682,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 return Ok(());
             };
             let effects = life.input(input, now_us);
-            if effects.let_go() {
-                slot.dial = None;
-                slot.opened = None;
-                slot.drop_pump();
-                core.transport
-                    .links
-                    .put_link(0, Link::Waiting { at_us: u64::MAX });
-            }
+            // A close is told to the life by the slot alone, which lets go of what it holds
+            // itself (`DirectSlot::let_go`): no input told here asks for that.
+            debug_assert!(!effects.let_go(), "a close told to the life past the slot");
             // A dial the life gave up on before the network answered it is its endpoint's refusal
             // for want of an answer in time, as a build whose links are tasks names it.
             if effects.dial().is_some() || effects.backs_off() || effects.ends_session() {
@@ -745,8 +740,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             if effects.bring_up() {
                 core.bring_up(0, now_us);
             }
+            // The dial under way, if any, was taken above.
             if effects.ends_session() {
-                slot.dial = None;
                 return Err(slot.last.take().unwrap_or(OpenError::NoEndpoint));
             }
             input = if effects.begin_handshake() {
