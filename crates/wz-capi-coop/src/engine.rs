@@ -3280,9 +3280,15 @@ enum Dialled {
     /// A link answered, and its handshake was begun in the face.
     Opened,
     /// No link was opened: every endpoint from the first dialled on was refused, or the face
-    /// dials no other. The reason the last one gave.
-    Exhausted(OpenError),
+    /// dials no other. The reason the last one gave is left where the dial was told to keep it.
+    Exhausted,
 }
+
+/// The session ends, for the reason the caller's `last` was left holding: what the moves of the
+/// links answer (`Core::poll_links`, `Core::dial`). The reason holds an endpoint's text, the
+/// largest value of a move, so it is written once where the caller keeps it rather than handed
+/// back through every call between.
+struct SessionEnds;
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// Run a session over `opened` as face `face`, in `role`: the handshake begun, its task
@@ -3384,9 +3390,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// face is dialled once. A dial names its endpoint by its row of the session's endpoint texts,
     /// which holds the text.
     ///
-    /// [`Dialled::Exhausted`] with the reason the last endpoint tried gave (`last` when none
-    /// is); the face keeps the link it held then. `Err` only with
-    /// [`OpenError::EntropyUnavailable`], when the platform gives no cookie key for the attempt.
+    /// [`Dialled::Exhausted`] with the reason the last endpoint tried gave in `last` (kept as it
+    /// was when none is tried); the face keeps the link it held then. `Err` only with
+    /// [`OpenError::EntropyUnavailable`] in `last`, when the platform gives no cookie key for the
+    /// attempt.
     ///
     /// The link is put in its face where it is made, and not handed back: the link is the
     /// largest value of the dial, and each caller that put it would move it once more. Out of
@@ -3399,8 +3406,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         face: FaceId,
         mut start: DialStart<L::Pump>,
         walks: bool,
-        mut last: OpenError,
-    ) -> Result<Dialled, OpenError> {
+        last: &mut OpenError,
+    ) -> Result<Dialled, SessionEnds> {
         // Which row is dialled next is the transport's walk to say; each turn moves the row past
         // the one it handed back, so the walk ends.
         loop {
@@ -3412,7 +3419,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     answer,
                 } => (endpoint, next, deadline_us, answer),
                 DialStart::Row(from) => {
-                    let walked = self.transport.walk_dials(from, &mut last);
+                    let walked = self.transport.walk_dials(from, last);
                     let deadline_us = self.open_deadline_us();
                     match walked {
                         DialWalk::Dialing { dial, next } => {
@@ -3431,7 +3438,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                             next,
                             answer,
                         } => (Some(endpoint), next, deadline_us, answer),
-                        DialWalk::Ended => return Ok(Dialled::Exhausted(last)),
+                        DialWalk::Ended => return Ok(Dialled::Exhausted),
                     }
                 }
             };
@@ -3453,19 +3460,25 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     );
                     return Ok(Dialled::Opened);
                 }
-                Err(OpenError::EntropyUnavailable) => return Err(OpenError::EntropyUnavailable),
-                // A task refused is not the endpoint's: the next one would be refused the same.
-                Err(refused) if walks && !matches!(refused, OpenError::NoTask(_)) => {
-                    last = refused;
+                Err(refused) => {
+                    let ends = matches!(refused, OpenError::EntropyUnavailable);
+                    // A task refused is not the endpoint's: the next one would be refused the same.
+                    let again = walks && !matches!(refused, OpenError::NoTask(_));
+                    *last = refused;
+                    if ends {
+                        return Err(SessionEnds);
+                    }
+                    if !again {
+                        return Ok(Dialled::Exhausted);
+                    }
                     start = DialStart::Row(next);
                 }
-                Err(refused) => return Ok(Dialled::Exhausted(refused)),
             }
         }
     }
 
-    /// The dial role's face at `at`, whose dial came to no link for `last`: it waits
-    /// `redial_ms` to dial every endpoint again, or the session ends with `last` when it redials
+    /// The dial role's face at `at`, whose dial came to no link: it waits `redial_ms` to dial
+    /// every endpoint again, or the session ends, for the reason the dial left, when it redials
     /// none; the face keeps the link it held then.
     ///
     /// The wait is counted from the end of the dials, read from the clock after them. A dial
@@ -3474,14 +3487,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// counted from before the dials would then already be over, the next read would dial again at
     /// once, and the session would be held through dial after dial with no room for a publish or
     /// a close to take it.
-    fn redial_later(
-        &mut self,
-        at: usize,
-        last: OpenError,
-        redial_ms: Option<u64>,
-    ) -> Result<(), OpenError> {
+    fn redial_later(&mut self, at: usize, redial_ms: Option<u64>) -> Result<(), SessionEnds> {
         let Some(ms) = redial_ms else {
-            return Err(last);
+            return Err(SessionEnds);
         };
         let ended_us = self.now_us();
         self.transport.links.put_link(
@@ -3498,8 +3506,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// through the faces' table, and no face is due by `now_us` ([`LinksSettled`]). A session
     /// whose links are all up, and stay so, then looks at each face's task alone, one load a face,
     /// and turns no face's value, replay or dial until one of those comes. `Err` as
-    /// [`Self::poll_links`].
-    fn move_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
+    /// [`Self::poll_links`], the reason in `last`.
+    fn move_links(
+        &mut self,
+        redial_ms: Option<u64>,
+        now_us: u64,
+        last: &mut OpenError,
+    ) -> Result<(), SessionEnds> {
         let links = &self.transport.links;
         if self.links_settled.is_some_and(|settled| {
             settled.moves == links.moves()
@@ -3511,7 +3524,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             return Ok(());
         }
         self.links_settled = None;
-        self.poll_links(redial_ms, now_us)?;
+        self.poll_links(redial_ms, now_us, last)?;
         self.links_settled = self.links_settle();
         Ok(())
     }
@@ -3549,8 +3562,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
 
     /// Move every face's link on, after the session was stepped, against the step's reading of the
     /// clock, `now_us`; see [`Self::poll_face`]. `Err` when the session ends, which only the dial
-    /// role's face can bring about.
-    fn poll_links(&mut self, redial_ms: Option<u64>, now_us: u64) -> Result<(), OpenError> {
+    /// role's face can bring about, the reason in `last`.
+    fn poll_links(
+        &mut self,
+        redial_ms: Option<u64>,
+        now_us: u64,
+        last: &mut OpenError,
+    ) -> Result<(), SessionEnds> {
         #[cfg(test)]
         self.link_polls.set(self.link_polls.get() + 1);
         // Each link's stack is read at the next step, whatever a wait found there since the last
@@ -3566,7 +3584,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // From the last face to the first: a face that is gone is removed, which moves none of the
         // ones before it.
         for at in (0..self.transport.links.places()).rev() {
-            self.poll_face(at, redial_ms, now_us)?;
+            self.poll_face(at, redial_ms, now_us, last)?;
         }
         Ok(())
     }
@@ -3579,7 +3597,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// what its peer declared with it and is dialled again. Any other face is not dialled again:
     /// its lost or failed link takes the face with it. `Err` when the session ends: the dial
     /// role's link was lost, or no endpoint answered, and `redial_ms` is `None`; or the platform
-    /// gave no entropy.
+    /// gave no entropy. The reason is left in `last`.
     ///
     /// What became of the link, and what the session does about it, is the face's value to say
     /// (`wz_runtime_coop::face_life`); the link stays in its face while that is done here.
@@ -3588,7 +3606,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         at: usize,
         redial_ms: Option<u64>,
         now_us: u64,
-    ) -> Result<(), OpenError> {
+        last: &mut OpenError,
+    ) -> Result<(), SessionEnds> {
         let now_ms = now_us / 1000;
         let Some(face) = self.transport.links.face(at) else {
             return Ok(());
@@ -3621,14 +3640,14 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let step = self
             .transport
             .face_step(at, id, redial_ms.is_some(), now_us, &mut answer);
-        self.carry_out(at, step, &mut answer, redial_ms, now_us)
+        self.carry_out(at, step, &mut answer, redial_ms, now_us, last)
     }
 
     /// Carry out what the face at `at` does at a step (`step`): what its value decided, with the
     /// answer of its dial, taken from `answer` where the step wrote it, and the endpoint of a dial
     /// that is over, moved out of the dial as the arm that needs it lets the dial go. The session's part of its value's decision. `Err` when the session
     /// ends: the dial role's link was lost, or no endpoint answered, and `redial_ms` is `None`;
-    /// or the platform gave no entropy.
+    /// or the platform gave no entropy. The reason is left in `last`.
     fn carry_out(
         &mut self,
         at: usize,
@@ -3636,12 +3655,13 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         answer: &mut DialAnswer<L::Pump>,
         redial_ms: Option<u64>,
         now_us: u64,
-    ) -> Result<(), OpenError> {
+        last: &mut OpenError,
+    ) -> Result<(), SessionEnds> {
         let FaceStep { life, effect } = step;
         let id = life.id();
-        // Every arm that does not end here names what follows and the reason the last endpoint
-        // gave, and one call carries them out.
-        let (then, last) = match effect {
+        // Every arm that does not end here writes the reason the last endpoint gave in `last` and
+        // names what follows, and one call carries it out.
+        let then = match effect {
             FaceEffect::Stay => return Ok(()),
             // The face table decides whether the node is held already, and installs the link
             // itself.
@@ -3655,19 +3675,19 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             // `return _zp_unicast_failed_result(ztu, executor);`).
             FaceEffect::Lose { then } => {
                 self.lose_face_link(at, id, now_us);
-                let last = if then == Next::EndSession {
+                *last = if then == Next::EndSession {
                     OpenError::Unreachable(EndpointRefusal::new("", Refusal::LinkLost))
                 } else {
                     OpenError::NoEndpoint
                 };
-                (then, last)
+                then
             }
             // The link's task, told to stop, ends in the pass of the tasks before its link goes.
             FaceEffect::Fail { then } => {
                 let why = self.transport.end_handshake(at);
                 self.run_tasks();
-                let last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
-                (then, last)
+                *last = OpenError::from(self.transport.handshake_failed(at, &then, why, now_us));
+                then
             }
             // The dial under way was asked, never waited for: its link's handshake begins once
             // it is made. Refused, or not answered by its deadline, the dial role's face dials the
@@ -3675,11 +3695,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             FaceEffect::Handshake { next, deadline_us } => {
                 let endpoint = self.transport.links.end_dial(at, now_us);
                 let Some(answer) = answer.take() else {
-                    let last = OpenError::Unreachable(EndpointRefusal::new(
+                    *last = OpenError::Unreachable(EndpointRefusal::new(
                         self.transport.endpoint_text(endpoint.as_ref()),
                         Refusal::NoAnswerInTime,
                     ));
-                    return self.follow(at, life.after_failure(next), last, redial_ms);
+                    return self.follow(at, life.after_failure(next), redial_ms, last);
                 };
                 let start = DialStart::Answer {
                     endpoint,
@@ -3688,12 +3708,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     answer,
                 };
                 let walks = life.role() == FaceRole::Dial;
-                match self.dial(at, id, start, walks, OpenError::NoEndpoint)? {
+                *last = OpenError::NoEndpoint;
+                match self.dial(at, id, start, walks, last)? {
                     Dialled::Pending | Dialled::Opened => return Ok(()),
-                    Dialled::Exhausted(last) if walks => {
-                        return self.redial_later(at, last, redial_ms);
-                    }
-                    Dialled::Exhausted(last) => (life.after_failure(next), last),
+                    Dialled::Exhausted if walks => return self.redial_later(at, redial_ms),
+                    Dialled::Exhausted => life.after_failure(next),
                 }
             }
             FaceEffect::DialFailed { then } => {
@@ -3702,23 +3721,26 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                     Some(Err(refused)) => Refusal::Link(refused),
                     _ => Refusal::NoAnswerInTime,
                 };
-                let last = OpenError::Unreachable(EndpointRefusal::new(
+                *last = OpenError::Unreachable(EndpointRefusal::new(
                     self.transport.endpoint_text(endpoint.as_ref()),
                     why,
                 ));
-                (then, last)
+                then
             }
             // A face whose wait is over, or whose node no other face holds now (with `listen`):
             // the face that held the node is gone, and so is any link in the making to it. Read
             // from the face table each step and not told by the face that goes, so a link that
             // dies in its handshake frees the node as well.
-            FaceEffect::Dial { from } => (Next::DialFrom { from }, OpenError::NoEndpoint),
+            FaceEffect::Dial { from } => {
+                *last = OpenError::NoEndpoint;
+                Next::DialFrom { from }
+            }
         };
-        self.follow(at, then, last, redial_ms)
+        self.follow(at, then, redial_ms, last)
     }
 
     /// What follows a link of the face at `at` that failed or was lost (`then`), `last` the
-    /// reason of the last endpoint tried: the face goes, the session ends with `last`, the face
+    /// reason of the last endpoint tried: the face goes, the session ends for `last`, the face
     /// dials from an endpoint (and waits `redial_ms` to dial them all again when none answers),
     /// or it stands by for a node another face holds. A face goes, and the dial role stands by,
     /// only in a session that takes faces besides its dial (`listen`).
@@ -3726,9 +3748,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         at: usize,
         then: Next,
-        last: OpenError,
         redial_ms: Option<u64>,
-    ) -> Result<(), OpenError> {
+        last: &mut OpenError,
+    ) -> Result<(), SessionEnds> {
         // Only a face taken beside the dial role's goes, and the dial role's stands by only for a
         // node such a face holds: a build without `listen` has neither decision, and a session
         // whose table holds the dial role's face alone is asked neither (`FacePlaces::TAKES`).
@@ -3740,11 +3762,11 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 }
                 Ok(())
             }
-            Next::EndSession => Err(last),
+            Next::EndSession => Err(SessionEnds),
             Next::DialFrom { from } => {
                 match self.dial(at, DIAL_FACE, DialStart::Row(from), true, last)? {
                     Dialled::Pending | Dialled::Opened => Ok(()),
-                    Dialled::Exhausted(last) => self.redial_later(at, last, redial_ms),
+                    Dialled::Exhausted => self.redial_later(at, redial_ms),
                 }
             }
             // The dial role's link reached a node another face holds or is bringing up: the node
@@ -4864,9 +4886,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             core.transport.endpoints.listens(),
             core.config.groups.len(),
         ) {
-            if let Dialled::Exhausted(last) =
-                core.dial(0, DIAL_FACE, DialStart::Row(0), true, OpenError::NoEndpoint)?
-            {
+            let mut last = OpenError::NoEndpoint;
+            let dialled = core.dial(0, DIAL_FACE, DialStart::Row(0), true, &mut last);
+            if !matches!(dialled, Ok(Dialled::Pending | Dialled::Opened)) {
                 return Err(last);
             }
             // Open once the dial's link is up, or once the node it reached is held by a face that
@@ -4877,7 +4899,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
                 core.transport.links.waited(wait);
                 core.run_tasks();
                 let now_us = core.now_us();
-                core.poll_links(None, now_us)?;
+                if core.poll_links(None, now_us, &mut last).is_err() {
+                    return Err(last);
+                }
             }
         }
         // What the open spawned has its cells: from here a spawn finds a free cell or is refused.
@@ -6684,7 +6708,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
             }
         }
         let redial_ms = core.config.redial_ms;
-        if core.move_links(redial_ms, now_us).is_err() {
+        // Why the session ends is no reader's here: a handle finds it closed.
+        let mut last = OpenError::NoEndpoint;
+        if core.move_links(redial_ms, now_us, &mut last).is_err() {
             // A handle reads the session closed from its row from here on, as after a close.
             self.reach.end();
             self.closed.store(true, Ordering::Release);
@@ -7591,12 +7617,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine
         // A declaration a link refuses is not made, and the links that took it take it back; one
         // made while a link is down, or that a replay has not reached, is sent in its turn. A link
         // refuses one it cannot carry.
-        let place = core.place_of(DeclaredRow::of(declared.handle));
-        let taken = core.announce_or_undo_at(
-            place,
-            &|actions: &LinkActions<C>| actions.send_declare_keyexpr(id, keyexpr).is_ok(),
-            &undeclare_kexpr::<C>(id),
-        );
+        // Each link is told it from the row, as every declaration is.
+        let taken =
+            core.announce_or_undo(DeclaredRow::of(declared.handle), &undeclare_kexpr::<C>(id));
         if !taken {
             tables_mut(&mut core.session.registry).undeclare_keyexpr(declared.handle);
             return Err(Declined::ExceedsCapacity);

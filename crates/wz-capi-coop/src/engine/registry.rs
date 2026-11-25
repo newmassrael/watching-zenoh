@@ -79,7 +79,7 @@ use wz_session_core::session_tables::{PeerDeclarations, Plane};
 
 #[allow(unused_imports)]
 use crate::prelude::*;
-use core::mem::MaybeUninit;
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ptr::{self, addr_of_mut};
 
 #[cfg(any(
@@ -434,7 +434,8 @@ pub(super) type Registry = RegistryOf<BuildHolders>;
 /// The application layer of one session, its faces held as `H` holds them. See the module
 /// documentation.
 pub(super) struct RegistryOf<H: Holders> {
-    pub(super) app: App,
+    /// Dropped by the registry's own drop (`let_go`), as `sets` is.
+    pub(super) app: ManuallyDrop<App>,
     /// Where a sample the application's subscribers match goes: the session's round of
     /// deliveries, handed to each dispatch of the application's tables.
     delivery: RoundDelivery,
@@ -447,7 +448,7 @@ pub(super) struct RegistryOf<H: Holders> {
     /// and always held by it, then the faces to come. A face past them is refused
     /// (`FacesFull`), so the session's memory is the arena alone. A set no face holds is kept,
     /// emptied, for the next face.
-    sets: BoundedVec<FaceTables, MAX_FACE_SETS, Lent>,
+    sets: ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, Lent>>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
     /// the first. The place is the face's in every table of the session (its link's, its room's).
@@ -598,9 +599,9 @@ impl<H: Holders> RegistryOf<H> {
         ))]
         let decl_watches = DeclWatches::under(limits, &delivery.round)?;
         Ok(Self {
-            app,
+            app: ManuallyDrop::new(app),
             delivery,
-            sets,
+            sets: ManuallyDrop::new(sets),
             holders,
             #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
             owed,
@@ -1348,6 +1349,43 @@ fn lend_set(
         ceiling: at,
     })?;
     set.lend(arena, keys, pools, gets, peer, limits)
+}
+
+/// The engine is generic over its links, so the crate that names them drops the registry, and a
+/// type's drop glue is instantiated anew in every crate that drops it: the application's tables
+/// and the faces' sets, the most of that glue, are dropped by one body of this crate instead
+/// (`let_go`). A `Drop` of the registry alone would not do it: the glue of its fields would
+/// still follow it in the dropping crate, so the two are held in `ManuallyDrop`.
+///
+/// They go first, the tables before the sets as their fields lie, and the registry's other fields
+/// after them in their order: what lay between the two (the round's handles, a test's handles of
+/// the pools) has nothing to drop. The registry lies in the session's state, which is dropped
+/// before the session's arena, so every row either part was lent is let go of while the memory it
+/// lies in is still the session's.
+impl<H: Holders> Drop for RegistryOf<H> {
+    fn drop(&mut self) {
+        // SAFETY: the registry is being dropped: neither part is read again, and this is the one
+        // place either is dropped.
+        unsafe { let_go(&mut self.app, &mut self.sets) };
+    }
+}
+
+/// Drop the application's tables, then the faces' sets: the one body every drop of a registry
+/// runs, whichever crate drops it (see the `Drop` of `RegistryOf`), so never inlined.
+///
+/// # Safety
+///
+/// Neither part is used, or dropped, again.
+#[inline(never)]
+unsafe fn let_go(
+    app: &mut ManuallyDrop<App>,
+    sets: &mut ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, Lent>>,
+) {
+    // SAFETY: the caller's contract.
+    unsafe {
+        ManuallyDrop::drop(app);
+        ManuallyDrop::drop(sets);
+    }
 }
 
 #[cfg(test)]
@@ -2667,5 +2705,76 @@ mod tests {
         );
         assert_eq!(one.registry.holders.rows(), &[DIAL_FACE]);
         assert_eq!(one.registry.sets.len(), 1);
+    }
+
+    /// A registry dropped gives back the key of every row its faces' peers wrote, while the arena
+    /// it was lent from is still the session's: the faces' sets are dropped by the registry's own
+    /// drop (`let_go`), and not by their fields' glue. The CONTROL is the key the face's
+    /// subscriber holds before the drop. Turned red by a drop that leaves the sets.
+    #[test]
+    fn a_dropped_registry_gives_back_the_keys_of_its_faces() {
+        let mut held = held(1);
+        declare_on(&mut held.registry, DIAL_FACE, 1, "demo/dropped/face");
+        assert!(
+            held.keys.counts().used > 0,
+            "CONTROL: the face's subscriber keeps its key in the session's key arena"
+        );
+        let Held {
+            registry,
+            arena,
+            keys,
+            ..
+        } = held;
+        drop(registry);
+        assert_eq!(
+            keys.counts().used,
+            0,
+            "the face's key went with the registry"
+        );
+        drop(arena);
+    }
+
+    /// As `a_dropped_registry_gives_back_the_keys_of_its_faces`, for the application's tables:
+    /// the key of the session's own liveliness subscriber goes with the registry. Turned red by a
+    /// drop that leaves the application's tables.
+    #[cfg(all(feature = "std", feature = "liveliness"))]
+    #[test]
+    fn a_dropped_registry_gives_back_the_keys_of_its_application() {
+        use wz_capi_port::{LivelinessSink, WireKey};
+        use wz_session_core::declare::liveliness_sample::LivelinessSample;
+        use wz_session_core::session_tables::KeyForm;
+
+        let mut held = held(1);
+        held.registry
+            .app
+            .tables
+            .declare_liveliness_subscriber(
+                "demo/dropped/**",
+                false,
+                KeyForm::default(),
+                super::super::LivelinessRow::new(
+                    WireKey::literal().into_anchor(),
+                    LivelinessSink::shared(|_: LivelinessSample<'_>| {}),
+                ),
+            )
+            .map_err(|refused| refused.why)
+            .expect("the subscriber is declared");
+        assert!(
+            held.keys.counts().used > 0,
+            "CONTROL: the subscriber keeps its key in the session's key arena"
+        );
+        let Held {
+            registry,
+            arena,
+            keys,
+            ..
+        } = held;
+        drop(registry);
+        assert_eq!(
+            keys.counts().used,
+            0,
+            "the subscriber's key went with the registry"
+        );
+        drop(arena);
     }
 }
