@@ -38,7 +38,9 @@ A feature no leg turns on is a FAILURE unless `EXEMPT` holds a row for it, and e
 
 A row is STALE, and fails, when its feature is not declared, is a default, or is turned on by a leg:
 the table can only shrink by the work it names. A leg that names a feature its crate does not declare
-fails too, as cargo would refuse it, but before any build.
+fails too, as cargo would refuse it, but before any build. A leg's `dep/feature` is a feature of
+the crate's dependency `dep`, which cargo turns on for the crate's build: it is held to a
+dependency the crate's manifest names and to a feature that dependency's manifest declares.
 
 ## What it does NOT see
 
@@ -134,6 +136,86 @@ EXEMPT: dict[tuple[str, str], Exemption] = {
         (
             (".github/workflows/platform.yml", "WZ_PICO_FORM: nostd"),
             ("scripts/pico-c-program.sh", '*-windows-*) host_form="os-windows" ;;'),
+        ),
+    ),
+    # The session's transport state, which the cooperative engine holds in this runtime
+    # (`transport::TransportState`), has no test of its own: each feature below is the engine's
+    # feature of the same name, forwarded here, and the engine's legs run the tests that read it.
+    ("wz-runtime-coop", "connectivity"): Exemption(
+        "lane",
+        "the rows of the links a session's transport state reports, which the "
+        "cooperative engine forwards its `connectivity` to; the engine's legs with it "
+        "run the tests that read the rows",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", 'connectivity = ["wz-runtime-coop/connectivity"]'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|app-transport,group,connectivity|tests::group::"',
+            ),
+        ),
+    ),
+    ("wz-runtime-coop", "group"): Exemption(
+        "lane",
+        "the groups a session's transport state holds, which the cooperative engine "
+        "forwards its `group` to; the engine's legs with it run the group tests",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/group"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|app-transport,group|tests::group::"',
+            ),
+        ),
+    ),
+    ("wz-runtime-coop", "listen"): Exemption(
+        "lane",
+        "the ports a session's transport state listens on and its say on a second "
+        "link to a node, which the cooperative engine forwards its `listen` to; the "
+        "engine's legs with it run the listening tests",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/listen"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|connectivity,listen,liveliness,liveliness-get,local-queryable,local-subscriber,query,queryable,scout,ticker,tls-mbedtls,transport-stats|"',
+            ),
+        ),
+    ),
+    ("wz-runtime-coop", "query"): Exemption(
+        "lane",
+        "the faces a get asks, read off a session's transport state, which the "
+        "cooperative engine forwards its `query` to; the engine's legs with it run "
+        "the get tests",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/query"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|app-transport,group,query,queryable|tests::group::"',
+            ),
+        ),
+    ),
+    ("wz-runtime-coop", "queryable"): Exemption(
+        "lane",
+        "where an answer to a query goes, read off a session's transport state, which "
+        "the cooperative engine forwards its `queryable` to; the engine's legs with "
+        "it run the queryable tests",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/queryable"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|app-transport,group,query,queryable|tests::group::"',
+            ),
+        ),
+    ),
+    ("wz-runtime-coop", "shared-key-ids"): Exemption(
+        "lane",
+        "the key-wire form of each link a session's transport state holds, which the "
+        "cooperative engine forwards its `shared-key-ids` to; the engine's leg with "
+        "it runs the shared key id tests",
+        (
+            ("crates/wz-capi-coop/Cargo.toml", '"wz-runtime-coop/shared-key-ids"'),
+            (
+                "scripts/lib/nondefault-tests-gate.sh",
+                '"wz-capi-coop|hook|listen,liveliness,liveliness-get,query,queryable,shared-key-ids|tests::shared_key_ids::"',
+            ),
         ),
     ),
 }
@@ -322,7 +404,9 @@ def verdict(
             findings.append(f"{crate}: no leg of {LEGS_FILE} runs it")
         for leg in crate_legs:
             for name in leg.features:
-                if name not in feats:
+                if "/" in name:
+                    findings += _dep_feature_findings(tree, crate, text, name)
+                elif name not in feats:
                     findings.append(f"{crate}: a leg names `{name}`, which the crate does not declare")
         covered[crate] = _covered(tree, crate, table, manifests) or set()
 
@@ -418,6 +502,43 @@ def _forward_findings(
     return out
 
 
+_DEP_TABLE = re.compile(r"\[(?:target\..+\.)?(?:dev-|build-)?dependencies\]")
+
+
+def _depends_on(manifest: str, dep: str) -> bool:
+    """Whether `manifest` names `dep` in a table of its dependencies, of any kind or target."""
+    key = re.compile(rf"{re.escape(dep)}\s*=")
+    table = re.compile(rf"\[(?:target\..+\.)?(?:dev-|build-)?dependencies\.{re.escape(dep)}\]")
+    in_table = False
+    for raw in manifest.splitlines():
+        line = _strip_comment(raw).strip()
+        if line.startswith("["):
+            if table.fullmatch(line):
+                return True
+            in_table = _DEP_TABLE.fullmatch(line) is not None
+        elif in_table and key.match(line):
+            return True
+    return False
+
+
+def _dep_feature_findings(tree: Tree, crate: str, manifest: str, name: str) -> list[str]:
+    """A leg's `dep/feature` (the module doc): `crate` names `dep` as a dependency, and `dep`'s
+    manifest declares `feature`, so a misspelt one fails here as one of the crate's own does."""
+    dep, feat = name.split("/", 1)
+    if not _depends_on(manifest, dep):
+        return [f"{crate}: a leg names `{name}`, but the crate names no dependency `{dep}`"]
+    text = tree.read(f"crates/{dep}/Cargo.toml")
+    if text is None:
+        return [f"{crate}: a leg names `{name}`, a crate with no manifest under crates/"]
+    try:
+        declared = manifest_features(text)
+    except ValueError as e:
+        return [f"{crate}: a leg names `{name}`, whose manifest is not read: {e}"]
+    if feat not in declared:
+        return [f"{crate}: a leg names `{name}`, which {dep} does not declare"]
+    return []
+
+
 def _evidence_findings(tree: Tree, label: str, feature: str, row: Exemption) -> list[str]:
     if not row.evidence:
         return [f"{label}: a `{row.kind}` row with no evidence"]
@@ -511,6 +632,17 @@ def selftest() -> int:
 
     report = verdict(_fake({**files, LEGS_FILE: _legs('    "a|hook|z,w,nope|"')}), gov, {})
     expect("a leg naming an undeclared feature fails", any("`nope`" in f for f in report.findings), report.findings)
+
+    dep_leg = _legs('    "a|hook|z,w,b/q|"', '    "b|hook|q|"')
+    report = verdict(_fake({**files, LEGS_FILE: dep_leg}), gov, {})
+    expect("a dependency's declared feature passes", report.findings == [], report.findings)
+    report = verdict(_fake({**files, LEGS_FILE: _legs('    "a|hook|z,w,b/nope|"', '    "b|hook|q|"')}), gov, {})
+    expect("a dependency's undeclared feature fails", any("`b/nope`" in f for f in report.findings), report.findings)
+    report = verdict(_fake({**files, LEGS_FILE: _legs('    "a|hook|z,w,c/q|"', '    "b|hook|q|"')}), gov, {})
+    expect("a crate it does not depend on fails", any("`c/q`" in f for f in report.findings), report.findings)
+    expect("a dev table names a dependency", _depends_on("[dev-dependencies]\nb = \"1\"\n", "b"), "")
+    expect("a dependency's own table names it", _depends_on("[dependencies.b]\npath = \"../b\"\n", "b"), "")
+    expect("a feature list names none", not _depends_on("[features]\nb = []\n", "b"), "")
 
     report = verdict(_fake({**files, LEGS_FILE: _legs()}), gov, {})
     expect("an empty table fails", any("no leg" in f for f in report.findings), report.findings)
