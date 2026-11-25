@@ -19,7 +19,9 @@ A BOOT is one image running every workload once, each program started afresh:
                --warmup-s the subscriber's reports of --window-s seconds are read: the boot's
                throughput is their median (messages a second), and the CPU of both processes over the
                same window (/proc/<pid>/stat) divided by what the median rate delivers in it is the
-               CPU per message (nanoseconds);
+               CPU per message (nanoseconds); a window short of the subscriber's reports is lost with
+               the publisher's own reports beside them where it prints any (zenoh-pico's does), so a
+               subscriber that stopped receiving under the flood is told from a host that was busy;
   * pubsub     z_sub listens, z_put connects, puts once and leaves; the subscriber must print the sample;
   * query      z_queryable listens, z_get connects and must print a reply;
   * heap       pubsub, query and thr at the largest size run again with heap_peak.so preloaded: the
@@ -104,6 +106,28 @@ LAUNCH_WAIT_S = 5.0
 
 class Lost(Exception):
     """A workload that did not give a valid figure: the reason is the message."""
+
+
+def rates(lines: list[str]) -> list[float]:
+    """The positive rates among the lines a throughput program printed."""
+    found = [float(m.group(1)) for m in map(BARE_NUMBER.match, lines) if m]
+    return [r for r in found if r > 0]
+
+
+def shortfall(before: list[float], window: list[float], published: list[float]) -> str:
+    """Why a throughput window holds fewer than MIN_REPORTS rates of the subscriber, from its rates
+    before the window and in it and the publisher's own rates in it. zenoh-pico's z_pub_thr prints its
+    rate as its subscriber does (zenoh-c's and zenoh's print none), and a publisher that goes on
+    reporting while its subscriber is silent is a pair whose link stopped delivering: a failure of the
+    pair under the flood, which a busy host or a slow start does not explain and a retry does not cure."""
+    said = f"the subscriber reported {len(window)} rates in the window, fewer than {MIN_REPORTS}"
+    if len(published) < MIN_REPORTS:
+        return said
+    if before:
+        return (f"{said}, and {len(before)} before it, while the publisher reported {len(published)} in "
+                "the window: the subscriber stopped receiving while the publisher went on putting")
+    return (f"{said} and none before it, while the publisher reported {len(published)} in the window: "
+            "nothing the publisher put was received")
 
 
 def endpoint() -> str:
@@ -342,22 +366,23 @@ class Boot:
                 pub = self.start("z_pub_thr", pub_thr_args(self.family, size, where), "client", f"thr{size}")
                 time.sleep(args.warmup_s)
                 lines0 = len(sub.text().splitlines())
+                pub0 = len(pub.text().splitlines())
                 cpu0 = (pub.cpu_seconds(), sub.cpu_seconds())
                 t0 = time.monotonic()
                 time.sleep(args.window_s)
                 cpu1 = (pub.cpu_seconds(), sub.cpu_seconds())
                 t1 = time.monotonic()
                 lines = sub.text().splitlines()
+                pub_lines = pub.text().splitlines()
             finally:
                 if pub is not None:
                     pub.stop()
                 sub.stop()
             if None in cpu0 or None in cpu1:
                 raise Lost("a side of the throughput pair ended inside the window")
-            reports = [float(m.group(1)) for m in map(BARE_NUMBER.match, lines[lines0:]) if m]
-            reports = [r for r in reports if r > 0]
+            reports = rates(lines[lines0:])
             if len(reports) < MIN_REPORTS:
-                raise Lost(f"the subscriber reported {len(reports)} rates in the window, fewer than {MIN_REPORTS}")
+                raise Lost(shortfall(rates(lines[:lines0]), reports, rates(pub_lines[pub0:])))
             rate = statistics.median(reports)
             cpu = (cpu1[0] - cpu0[0]) + (cpu1[1] - cpu0[1])
             return {f"throughput_{size}B": rate,
@@ -586,6 +611,16 @@ def cmd_selftest() -> int:
         expect("control: the maxrss of a child this runner reaps itself carries the runner's resident set",
                bare.rusage is not None and int(bare.rusage.ru_maxrss) >= held)
         expect("a program started without the launcher is refused a peak RSS", rss_or_none(bare) is None)
+
+    expect("a throughput program's rates are its positive bare numbers, with or without msg/s",
+           rates(["3965575.130", "0.000", "Received 5 msg/s", "12 msg/s", "Stats being dropped"]) == [3965575.13, 12.0])
+    flood = [1.5e7] * 100
+    expect("a subscriber that reported and went silent while its publisher reported is a link that stopped",
+           "stopped receiving while the publisher went on putting" in shortfall([3.9e6] * 4, [], flood))
+    expect("a subscriber that never reported while its publisher did received nothing",
+           "nothing the publisher put was received" in shortfall([], [], flood))
+    expect("without the publisher's rates the shortfall is the subscriber's count alone",
+           shortfall([3.9e6] * 4, [1.0], []) == f"the subscriber reported 1 rates in the window, fewer than {MIN_REPORTS}")
     print(f"  parity selftest: {ok}/{ok + bad} arm(s) pass")
     return 0 if bad == 0 else 1
 
