@@ -269,9 +269,9 @@ pub(crate) fn face_event_rows(max_faces: usize, groups: usize) -> usize {
 }
 #[cfg(feature = "connectivity")]
 mod told;
-use wz_session_core::face::{FaceEventKind, FaceLinkRow};
+use wz_session_core::face::{FaceEventKind, FaceLinkRow, FaceRowSink};
 #[cfg(feature = "connectivity")]
-use wz_session_core::face::{FaceEventSink, FaceRowSink, FaceSnapshot};
+use wz_session_core::face::{FaceEventSink, FaceSnapshot};
 #[cfg(feature = "local-queryable")]
 use wz_session_core::query::QueryEnvelope;
 #[cfg(feature = "connectivity")]
