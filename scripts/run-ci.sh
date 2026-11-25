@@ -22550,6 +22550,12 @@ run: bash scripts/build-zenoh-pico-cli.sh)"
     _runci_guarded_test "M cooperative groups on the host's sockets" 2 \
         cargo test -p wz-capi-coop --features group-host --lib host_group:: \
         -- --ignored --test-threads=1 || return 1
+    # The same groups in the form of one thread (no `threads`): no read task, each session opened,
+    # called and read on a thread of its own. 2 = the joiner's `#[ignore]`d test and the engine's
+    # twin of the one above (`tests::host_group`).
+    _runci_guarded_test "M cooperative groups on the host's sockets, one thread" 2 \
+        cargo test -p wz-capi-coop --no-default-features --features std,group-host \
+        --lib host_group:: -- --ignored --test-threads=1 || return 1
     # The `scout` role of a `--sessions` driver: one process answers Scouts from a
     # `scouting.multicast` block, a second asks from inside its own session and
     # prints the Hello it hears. It needs a multicast route and nothing else.
