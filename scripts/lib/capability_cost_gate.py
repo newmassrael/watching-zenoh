@@ -792,7 +792,9 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME),
-         exports=441, cargo_configs=(PACKED_RELOCS_CONFIG,),
+         # 442 exports: `wz_ext_callbacks_refused` (d80d315d1), the callbacks a full thread table
+         # leaves unrun.
+         exports=442, cargo_configs=(PACKED_RELOCS_CONFIG,),
          note="Linked for a glibc 2.36 loader with its relative relocations packed "
               "(`capi-packed-relocs.toml`, DT_RELR), and so is its zenoh-pico reference; "
               "the form without that file is the one for an older loader, 2,215 relative "
@@ -866,7 +868,8 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
-         exports=442, profile="capi-nostd",
+         # 443 exports: `wz_ext_callbacks_refused` (d80d315d1).
+         exports=443, profile="capi-nostd",
          cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
          note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
               "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
@@ -1173,7 +1176,8 @@ CASES: tuple[Case, ...] = (
          # accept loop, responder and scouting glue) are not linked.
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN, STD_RUNTIME),
-         exports=811,
+         # 812 exports: `wz_ext_callbacks_refused` (d80d315d1).
+         exports=812,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
               "(`header_internals`: `_z_cancellation_token_clear`, "
