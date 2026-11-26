@@ -114,10 +114,19 @@ pub(crate) fn outbound_key(key: &str) -> Result<(), ZResult> {
 ///
 /// The key it takes is handed back judged, so a door that keeps the judgement with the text judges
 /// it once.
-#[inline(never)]
+#[inline]
 pub(crate) fn canon_key(text: &str) -> Result<CanonKey<'_>, ZResult> {
+    judge_canon(text, true)
+}
+
+/// The judgement [`canon_key`] makes, with the bound held to the text only where `bounded`: a key
+/// a view lends where the caller keeps it is not held to the bound of a key the build stores. The
+/// one body of the canon walk's judgement for every door, the constructors' ([`key_from`])
+/// included, so the walk's fast path for a literal key is not copied into each.
+#[inline(never)]
+fn judge_canon(text: &str, bounded: bool) -> Result<CanonKey<'_>, ZResult> {
     // The bound first: whether a text past it is judged canon depends on the profile's scratch.
-    if !fits(text) {
+    if bounded && !fits(text) {
         Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
     } else {
         CanonKey::judge(text, KeyexprDialect::Pico).ok_or(Z_EINVAL)
@@ -1044,17 +1053,6 @@ fn non_wild_prefix(literal: &str) -> &str {
     literal.get(..len).unwrap_or_default()
 }
 
-/// Whether `text` is a key expression in canon form, as pico's
-/// `_z_keyexpr_is_canon` answers it: valid, and already what canonizing it
-/// would produce. The one judgement [`key_from`] makes of a text, for every door that checks one.
-fn is_pico_canon(text: &str) -> bool {
-    // Judged without writing the canonical form, so a view of a key allocates nothing.
-    wz_session_core::keyexpr_canon::is_canon(
-        text,
-        wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
-    )
-}
-
 /// What a door that makes a key of a caller's text, or judges or canonizes the text, does with
 /// it: the flags [`key_from`] reads, the whole difference between those doors.
 mod how {
@@ -1076,7 +1074,7 @@ mod how {
 /// The one body of every door that makes a key of a caller's text (the view and owned
 /// constructors, checked, unchecked and canonizing) or judges or canonizes the text where it lies,
 /// as `flags` ([`how`]) says. Each such door is a call of it, so each step of the walk is reached
-/// from one place: the canon judgement ([`is_pico_canon`]), the in-place canonizer and the
+/// from one place: the canon judgement ([`judge_canon`]), the in-place canonizer and the
 /// canonizing store ([`store_canonized`]), where each door carried the copy it reached inlined.
 ///
 /// The doors' answers: `Z_ERR_NULL` for no object, no length or no text, and for a text an owned
@@ -1169,15 +1167,11 @@ unsafe fn key_from(
             None => return Z_ERR_INVALID,
         }
     };
+    // An owned key is held to the bound the build stores; a view and a judgement alone are not.
     if has(how::CHECK) {
-        // The bound first, as [`canon_key`] judges it: whether a text past it is judged canon
-        // depends on the profile's scratch.
-        if has(how::OWNED) && !fits(form) {
-            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
-        }
-        if !is_pico_canon(form) {
+        if let Err(code) = judge_canon(form, has(how::OWNED)) {
             return if has(how::VIEW | how::OWNED) {
-                Z_EINVAL
+                code
             } else {
                 Z_ERR_INVALID
             };
@@ -3287,6 +3281,37 @@ mod bound_tests {
             canon_key(&key_of(MAX_KEYEXPR_BYTES + 1)),
             Err(Z_ERR_SYSTEM_OUT_OF_MEMORY)
         );
+    }
+
+    /// The bound is the owned key's, not the view's: a key past it is out of memory for the
+    /// owned constructor, while a view of it and the judgement alone answer what the canon walk
+    /// answers of it on this profile. Turned red by the view or the judgement held to the bound
+    /// of a stored key, which answers them out of memory.
+    #[test]
+    fn a_key_past_the_bound_is_refused_only_where_it_is_stored() {
+        let past = key_of(MAX_KEYEXPR_BYTES + 1);
+        let walked = wz_session_core::keyexpr_canon::is_canon(&past, KeyexprDialect::Pico);
+        assert_eq!(judge_canon(&past, true), Err(Z_ERR_SYSTEM_OUT_OF_MEMORY));
+        assert_eq!(judge_canon(&past, false).is_ok(), walked);
+        let mut view = z_view_keyexpr_t {
+            _start: core::ptr::null(),
+            _len: 0,
+            _pad: [0usize; 4],
+        };
+        // SAFETY: a view and an owned key of this frame, and a text that outlives the view.
+        unsafe {
+            assert_eq!(
+                z_view_keyexpr_from_substr(&mut view, past.as_ptr().cast(), past.len()),
+                if walked { Z_OK } else { Z_EINVAL }
+            );
+            assert_eq!(
+                z_keyexpr_is_canon(past.as_ptr().cast(), past.len()),
+                if walked { Z_OK } else { Z_ERR_INVALID }
+            );
+            let (code, key) = owned(&past);
+            assert_eq!(code, Z_ERR_SYSTEM_OUT_OF_MEMORY);
+            assert!(!z_internal_keyexpr_check(&key));
+        }
     }
 
     /// The canonizing doors read a text of any length and hold only its form to the bound, as
