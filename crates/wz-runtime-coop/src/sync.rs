@@ -643,6 +643,21 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         }
     }
 
+    /// Run `f` on what the place holds, a transport or none, when no other thread holds the face
+    /// now, and wait for nothing: `None`, with `f` not run, while another thread holds it or the
+    /// calling thread is inside a hold of it, as [`Self::try_lend`] finds it. What a holder that
+    /// must not wait for the face (one that holds the session's lock) puts in the place or takes
+    /// out of it goes through here.
+    pub fn try_with_place<U>(&self, f: impl FnOnce(&mut Option<X>) -> U) -> Option<U> {
+        if !K::WAITS && self.lent.load(core::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        K::try_with(&self.place, |place| {
+            let _lent = LentMark::enter::<K>(&self.lent);
+            f(place)
+        })
+    }
+
     /// Lend the transport to `f`, waiting for whatever holds the face now; `None`, with `f` not
     /// run, while the place holds none. A debug build fails a wait made under a lock that bars
     /// one ([`NoFaceWait`]): the session's lock is waited on inside a face's lend, so its holder

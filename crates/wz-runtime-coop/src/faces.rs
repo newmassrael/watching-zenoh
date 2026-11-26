@@ -478,6 +478,34 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         self.place.take()
     }
 
+    /// [`Self::hold`] that waits for nothing: the parts the place held, or `parts` handed back
+    /// while another thread holds the place or the calling thread is inside a hold of it
+    /// ([`FacePlace::try_with_place`]). A holder of the session's lock changes a face's link
+    /// through here, since a holder of the place may wait for that lock.
+    pub fn try_hold(&self, parts: FaceHeld<P>) -> Result<Option<FaceHeld<P>>, FaceHeld<P>> {
+        let mut carried = Some(parts);
+        let held = self.place.try_with_place(|place| {
+            self.owed.store(0, Ordering::SeqCst);
+            carried.take().and_then(|parts| place.replace(parts))
+        });
+        match (held, carried) {
+            // Not run: the parts are still the caller's.
+            (None, Some(parts)) => Err(parts),
+            (held, _) => Ok(held.flatten()),
+        }
+    }
+
+    /// [`Self::take`] that waits for nothing: the parts the place held, [`Lend::Empty`] when it
+    /// held none, and [`Lend::Held`] while another thread holds the place or the calling thread is
+    /// inside a hold of it ([`FacePlace::try_with_place`]).
+    pub fn try_take(&self) -> Lend<FaceHeld<P>> {
+        match self.place.try_with_place(Option::take) {
+            None => Lend::Held,
+            Some(None) => Lend::Empty,
+            Some(Some(parts)) => Lend::Lent(parts),
+        }
+    }
+
     /// Lend the parts to `f`, waiting for whatever holds the place now ([`FacePlace::lend`]),
     /// and pay what is owed before letting go. `None`, with `f` not run, while the place holds
     /// no parts.
@@ -3170,6 +3198,55 @@ mod tests {
         site.pay_after();
         assert_eq!(paid.load(Ordering::SeqCst), 4, "the late debt is paid once");
         assert_eq!(site.owed.load(Ordering::SeqCst), 0, "and owed no more");
+    }
+
+    /// A change of a site that waits for nothing: a try of the place takes the parts out or puts
+    /// new ones in while the place is free, and finds it held inside the calling thread's own lend,
+    /// which it leaves as it found it, the parts it could not put handed back. So for a kind no
+    /// other thread reaches and for a kind of a lock of the value's own. Turned red by a try that
+    /// waits for the place (`FacePlace::try_with_place` taking the lock), reads a held place as
+    /// free, or loses the parts it could not put (`FaceSite::try_hold`).
+    #[test]
+    fn a_site_changed_by_a_try_finds_a_held_place_and_hands_the_parts_back() {
+        a_site_is_changed_by_a_try::<crate::sync::Confined<TestOwner>>();
+        #[cfg(feature = "host-lock")]
+        a_site_is_changed_by_a_try::<crate::sync::Shared>();
+    }
+
+    /// [`a_site_changed_by_a_try_finds_a_held_place_and_hands_the_parts_back`] on a site of kind
+    /// `K`.
+    fn a_site_is_changed_by_a_try<K: LockKind>() {
+        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<K, ApartParts>::empty();
+        assert!(
+            matches!(site.try_take(), Lend::Empty),
+            "an empty place gives nothing up"
+        );
+        assert!(
+            matches!(
+                site.try_hold(paying_parts(&aborted, &ended, &paid)),
+                Ok(None)
+            ),
+            "a free place takes the parts"
+        );
+        let inside = site.lend(|_| {
+            let taken = matches!(site.try_take(), Lend::Held);
+            let next = paying_parts(&aborted, &ended, &paid);
+            (taken, site.try_hold(next).is_err())
+        });
+        assert_eq!(
+            inside,
+            Some((true, true)),
+            "a place inside its own lend is found held, and the parts handed back"
+        );
+        assert!(
+            matches!(site.try_take(), Lend::Lent(_)),
+            "a free place gives its parts up"
+        );
+        assert!(
+            site.take().is_none(),
+            "CONTROL: the try left the place empty"
+        );
     }
 
     impl LendsSession for ApartWire {
