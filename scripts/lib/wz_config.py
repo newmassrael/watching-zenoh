@@ -296,6 +296,15 @@ COPYRIGHT = "SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael"
 # ---------------------------------------------------------------------------------------------
 
 
+# A key of a table header as the reader takes it: bare, or quoted with no escape in it.
+TOML_HEADER_KEY = r"[A-Za-z0-9_-]+|'[^'\n]*'|\"[^\"\\\n]*\""
+
+
+def _header_key(written: str) -> str:
+    """The key a header names: a quoted one without its quotes."""
+    return written[1:-1] if written[:1] in ("'", '"') else written
+
+
 def read_decl_toml(text: str) -> dict:
     """The declaration file's TOML, read without `tomllib`.
 
@@ -303,9 +312,11 @@ def read_decl_toml(text: str) -> dict:
     Layer C0 on the first hosted run of the reader this one grew from. The declaration uses one
     small shape and this reads exactly that: `[table]` and `[[array of tables]]` headers, and
     `[array.table]`, a table of the last element of an array of tables opened before it (a
-    profile's `[profile.policies]`), or of a table; `key = value` on ONE line, the value a string,
-    an integer, a boolean, an array of strings or a non-empty array of integers (a limit's
-    `range`), or an inline table of bare keys to integers (a policy's `wire_codes`); a `'''`
+    profile's `[profile.policies]`), or of a table, which it defines when nothing has, as TOML
+    does (a cargo configuration's `[target.<triple>]`); a header's key bare, or quoted with no
+    escape in it (`[target.'cfg(unix)']`), the quotes not part of it; `key = value` on ONE
+    line, the value a string, an integer, a boolean, an array of strings or a non-empty array of
+    integers (a limit's `range`), or an inline table of bare keys to integers (a policy's `wire_codes`); a `'''`
     literal string whose lines run to the closing `'''` (the newline right after the opening
     delimiter is not part of it, as TOML says), or one closed on the line it opens (`'''text'''`,
     with no `'''` inside); `#` comments on lines of their own. Anything else is refused by line
@@ -313,7 +324,8 @@ def read_decl_toml(text: str) -> dict:
     `--selftest` holds it to `tomllib` wherever the interpreter has one.
 
     It is the repository's one reader of TOML for a script that runs on the floor interpreter:
-    a ledger round's descriptor (`round_descriptor.py`) is read with it too.
+    a ledger round's descriptor (`round_descriptor.py`) and the cargo configuration files a size
+    case names (`capability_cost_gate.read_config_tables`) are read with it too.
     """
     root: dict = {}
     table = root
@@ -325,24 +337,34 @@ def read_decl_toml(text: str) -> dict:
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        header = re.fullmatch(r"\[\[([A-Za-z0-9_-]+)\]\]|\[([A-Za-z0-9_-]+)\]", line)
+        header = re.fullmatch(rf"\[\[({TOML_HEADER_KEY})\]\]|\[({TOML_HEADER_KEY})\]", line)
         if header:
-            if header.group(1):
+            if header.group(1) is not None:
+                name = _header_key(header.group(1))
+                tables = root.setdefault(name, [])
+                if not isinstance(tables, list):
+                    raise ValueError(f"line {number}: `[[{name}]]` names a key set before it as "
+                                     "no array of tables")
                 table = {}
-                root.setdefault(header.group(1), []).append(table)
+                tables.append(table)
             else:
-                table = root.setdefault(header.group(2), {})
+                name = _header_key(header.group(2))
+                table = root.setdefault(name, {})
+                if not isinstance(table, dict):
+                    raise ValueError(f"line {number}: `[{name}]` names a key set before it as "
+                                     "no table")
             continue
-        sub = re.fullmatch(r"\[([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]+)\]", line)
+        sub = re.fullmatch(rf"\[({TOML_HEADER_KEY})\.({TOML_HEADER_KEY})\]", line)
         if sub:
-            parent = root.get(sub.group(1))
+            name, child = _header_key(sub.group(1)), _header_key(sub.group(2))
+            parent = root.setdefault(name, {})
             owner = parent[-1] if isinstance(parent, list) and parent else parent
             if not isinstance(owner, dict):
-                raise ValueError(f"line {number}: `[{sub.group(1)}.{sub.group(2)}]` names no table "
-                                 f"or array of tables opened before it")
-            if sub.group(2) in owner:
-                raise ValueError(f"line {number}: `{sub.group(2)}` of `{sub.group(1)}` is set twice")
-            table = owner[sub.group(2)] = {}
+                raise ValueError(f"line {number}: `[{name}.{child}]` names a value, not a table "
+                                 f"or an array of tables")
+            if child in owner:
+                raise ValueError(f"line {number}: `{child}` of `{name}` is set twice")
+            table = owner[child] = {}
             continue
         pair = re.fullmatch(r"([A-Za-z0-9_-]+)\s*=\s*(.+)", line)
         if not pair:
@@ -6793,8 +6815,16 @@ def cmd_selftest() -> int:
            == [{"eager-flush": "off", "wire-mode": "os-default"}, {"eager-flush": "on"}])
     expect("a `[a.b]` table of a plain table is read as TOML reads it",
            read_decl_toml('[t]\nk = "v"\n[t.u]\nw = 1\n') == {"t": {"k": "v", "u": {"w": 1}}})
-    expect("a `[a.b]` table before any `a` is refused",
-           _refuses_toml('[p.q]\nk = "v"\n') and _refuses_toml('n = 3\n[n.q]\n'))
+    expect("a `[a.b]` table before any `a` defines `a`, as TOML does, and one of a value is refused",
+           read_decl_toml('[p.q]\nk = "v"\n') == {"p": {"q": {"k": "v"}}}
+           and _refuses_toml('n = 3\n[n.q]\n') and _refuses_toml('n = []\n[n.q]\n'))
+    expect("an array of tables over a table, and a table over one, are refused, as TOML refuses them",
+           _refuses_toml('[p.q]\n[[p]]\n') and _refuses_toml('[[p]]\n[p]\n')
+           and _refuses_toml('[p]\n[[p]]\n') and _refuses_toml('p = 1\n[p]\n'))
+    expect("a header key quoted with no escape is read as TOML reads it, its dots its own",
+           read_decl_toml("[t.'cfg(a.b = \"c\")']\nk = 1\n[\"u\"]\n")
+           == {"t": {'cfg(a.b = "c")': {"k": 1}}, "u": {}}
+           and _refuses_toml("[t.'x]\n") and _refuses_toml('[t."a\\"b"]\n'))
     expect("a `[a.b]` table set twice on one element is refused",
            _refuses_toml('[[p]]\n[p.q]\nk = "v"\n[p.q]\n')
            and not _refuses_toml('[[p]]\n[p.q]\nk = "v"\n[[p]]\n[p.q]\nk = "w"\n'))

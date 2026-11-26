@@ -71,10 +71,14 @@ added to that variable after the rule's (`config_rustflags`), and is built for t
 to cargo with `--config`: cargo joins every configured table that matches the target, the
 caller's own configuration among them, so a linker chosen there (`-fuse-ld=`) would link such a
 case with another linker than the cases beside it, while the variable replaces every configured
-table. The workspace's own configuration has flags for windows-msvc only. What the rule does not
-remove is the toolchain: a host with another C compiler or linker builds other bytes from the
-same tree, and its reading is comparable only to readings made with that toolchain. So every
-library and every reference is linked by the same linker, GNU ld through the C compiler
+table. A linker such a file names for that target (`target.<triple>.linker`,
+`read_config_tables`) goes in the variable cargo reads that key from, which outranks every
+configuration file as the key named with `--config` would; the gate's own `-C linker=cc` is in
+the flags beside it, and a library another linker wrote is a finding (below). The workspace's own
+configuration has flags for windows-msvc only. What the rule does not remove is the toolchain: a
+host with another C compiler or linker builds other bytes from the same tree, and its reading is
+comparable only to readings made with that toolchain. So every library and every reference is
+linked by the same linker, GNU ld through the C compiler
 (`GATE_RUSTFLAGS`, `reference_build`; a host without it is refused by name, `gnu_ld_version`),
 and each pico case prints the linker of both of its libraries as each library's `.comment` names
 it (`linker_of`); a library another linker wrote is a finding (`link_findings`).
@@ -149,8 +153,8 @@ import datetime
 import argparse
 import functools
 import hashlib
+import importlib
 import io
-import json
 import os
 import pathlib
 import re
@@ -370,8 +374,8 @@ class Case:
     # library that names no C library leaves its calls unversioned, and the loader binds an
     # unversioned call to the oldest version of the symbol.
     require_needed: tuple[str, ...] = ()
-    # The cargo configuration files whose flags the build takes (paths from `crates/`, read by
-    # `config_rustflags`), with the host's own target named (`--target`), so that what a file
+    # The cargo configuration files whose flags and linker the build takes (paths from `crates/`,
+    # read by `case_config`), with the host's own target named (`--target`), so that what a file
     # gives the library's crates does not reach the build scripts. Empty: the profile alone.
     cargo_configs: tuple[str, ...] = ()
     note: str = field(default="", compare=False)
@@ -1911,41 +1915,57 @@ def host_triple() -> str:
     raise RuntimeError("rustc -vV names no host target")
 
 
-# A table header of a configuration file a case names: `[target.<triple>]` or
-# `[target.'cfg(...)']`, and the one line of flags each holds.
-CONFIG_TABLE = re.compile(r"\[target\.(?:'([^']+)'|([A-Za-z0-9_.-]+))\]")
-CONFIG_FLAGS = re.compile(r"rustflags\s*=\s*(\[.*\])")
+# The keys a `[target.<key>]` table of a configuration file a case names may set: the ones this
+# gate hands the build (`case_config`).
+CONFIG_TABLE_KEYS = ("rustflags", "linker")
 # The words of a `cfg(...)` predicate: a name, a string, or one of `( ) , =`.
 CFG_TOKEN = re.compile(r'\s*(?:([A-Za-z_][A-Za-z0-9_]*)|("[^"\\]*")|([(),=]))')
 
 
-def read_config_rustflags(text: str) -> list[tuple[str, list[str]]]:
-    """The `rustflags` of each `[target.<key>]` table of a cargo configuration file, in file
-    order. The files a case names hold those tables and nothing else; any other line is refused by
-    number rather than skipped, so a setting this gate would not pass on cannot sit in one
-    unnoticed."""
-    tables: list[tuple[str, list[str]]] = []
-    key: str | None = None
-    for number, raw in enumerate(text.splitlines(), 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        header = CONFIG_TABLE.fullmatch(line)
-        if header:
-            key = header.group(1) or header.group(2)
-            continue
-        flags = CONFIG_FLAGS.fullmatch(line)
-        if key is None or not flags:
-            raise ValueError(f"line {number}: not a `[target.<key>]` header or the one-line "
-                             f"`rustflags` array of one: {line!r}")
-        try:
-            value = json.loads(flags.group(1))
-        except ValueError:
-            value = None
-        if not isinstance(value, list) or not all(isinstance(f, str) for f in value):
-            raise ValueError(f"line {number}: `rustflags` is not a one-line array of strings")
-        tables.append((key, value))
-        key = None
+@dataclass(frozen=True)
+class ConfigTable:
+    """One `[target.<key>]` table of a cargo configuration file: its key (a target triple or
+    `cfg(...)`), its `rustflags` and its `linker`."""
+    key: str
+    rustflags: tuple[str, ...] = ()
+    linker: str | None = None
+
+
+def read_config_tables(text: str) -> list[ConfigTable]:
+    """The `[target.<key>]` tables of a cargo configuration file, in file order, read as TOML by
+    the floor interpreter's reader (`wz_config.read_decl_toml`). The files a case names hold
+    those tables and nothing else, each setting only `CONFIG_TABLE_KEYS`; anything else is refused
+    by name rather than skipped, so a setting this gate would not pass on cannot sit in one
+    unnoticed. A linker is a program name, in a triple's table: cargo resolves a path against the
+    file's place and takes a triple's linker over a `cfg(...)` table's, which the variable this
+    gate hands it in (`target_linker_env`) would not reproduce."""
+    doc = wz_config.read_decl_toml(text)
+    for name in doc:
+        if name != "target":
+            raise ValueError(f"`{name}` is not a `[target.<key>]` table, the only kind this gate "
+                             "passes on to the build")
+    target = doc.get("target", {})
+    if not isinstance(target, dict):
+        raise ValueError("`target` is not a table of `[target.<key>]` tables")
+    tables: list[ConfigTable] = []
+    for key, table in target.items():
+        if not isinstance(table, dict):
+            raise ValueError(f"`target.{key}` is not a table")
+        for name in table:
+            if name not in CONFIG_TABLE_KEYS:
+                raise ValueError(f"`[target.{key}]` sets `{name}`, which this gate does not pass "
+                                 "on to the build")
+        flags = table.get("rustflags", [])
+        if not isinstance(flags, list) or not all(isinstance(f, str) for f in flags):
+            raise ValueError(f"`rustflags` of `[target.{key}]` is not an array of strings")
+        linker = table.get("linker")
+        if linker is not None:
+            if key.startswith("cfg("):
+                raise ValueError(f"`[target.{key}]` sets `linker`, which this gate passes for a "
+                                 "target triple's table only")
+            if not isinstance(linker, str) or not linker or "/" in linker or "\\" in linker:
+                raise ValueError(f"`linker` of `[target.{key}]` is not a program name")
+        tables.append(ConfigTable(key, tuple(flags), linker))
     return tables
 
 
@@ -2007,12 +2027,24 @@ def config_rustflags(text: str, triple: str, cfg: set[str]) -> list[str]:
     """The flags a cargo configuration file gives the crates of a build for `triple`, whose
     `rustc --print cfg` lines are `cfg`: its `[target.<triple>]` table's, then those of each
     `[target.'cfg(...)']` table that holds, joined as cargo joins them."""
-    tables = read_config_rustflags(text)
-    flags = [f for key, table in tables if key == triple for f in table]
-    for key, table in tables:
+    tables = read_config_tables(text)
+    flags = [f for table in tables if table.key == triple for f in table.rustflags]
+    for table in tables:
+        key = table.key
         if key.startswith("cfg(") and key.endswith(")") and cfg_matches(key[4:-1], cfg):
-            flags += table
+            flags += table.rustflags
     return flags
+
+
+def config_linker(text: str, triple: str) -> str | None:
+    """The linker a cargo configuration file names for `triple` (`[target.<triple>] linker`),
+    or None."""
+    return next((t.linker for t in read_config_tables(text) if t.key == triple and t.linker), None)
+
+
+def target_linker_env(triple: str) -> str:
+    """The variable cargo reads `target.<triple>.linker` from."""
+    return f"CARGO_TARGET_{re.sub(r'[-.]', '_', triple).upper()}_LINKER"
 
 
 def target_cfg(triple: str) -> set[str]:
@@ -2022,16 +2054,27 @@ def target_cfg(triple: str) -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
-def case_config_flags(case: Case, triple: str, cfg: set[str]) -> list[str]:
-    """The flags the case's configuration files give its library's crates, in the order it names
-    the files."""
+def merged_config(files: list[tuple[str, str]], triple: str,
+                  cfg: set[str]) -> tuple[list[str], str | None]:
+    """What the configuration files `files` (each its name and its text) give a build for
+    `triple`: their flags in the order given, and the linker of the last that names one, as cargo
+    merges `--config` files left to right. A file that cannot be read is refused by its name."""
     flags: list[str] = []
-    for path in case.cargo_configs:
+    linker: str | None = None
+    for name, text in files:
         try:
-            flags += config_rustflags((CRATES / path).read_text(encoding="utf-8"), triple, cfg)
+            flags += config_rustflags(text, triple, cfg)
+            linker = config_linker(text, triple) or linker
         except ValueError as e:
-            raise ValueError(f"crates/{path}: {e}") from e
-    return flags
+            raise ValueError(f"{name}: {e}") from e
+    return flags, linker
+
+
+def case_config(case: Case, triple: str, cfg: set[str]) -> tuple[list[str], str | None]:
+    """What the case's configuration files give its library (`merged_config`), in the order it
+    names them."""
+    return merged_config([(f"crates/{path}", (CRATES / path).read_text(encoding="utf-8"))
+                          for path in case.cargo_configs], triple, cfg)
 
 
 def with_rustflags(env: Mapping[str, str], extra: list[str]) -> dict[str, str]:
@@ -2194,15 +2237,23 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
     tables as the shipping entry builds a release (`wz_package.ship_debug_env` of the case's
     profile). A case that names configuration files is built for the host's own target, `triple`
     (this host's when not given), whose `rustc --print cfg` lines are `cfg` (rustc's when not
-    given), so their flags reach the library's crates and not the build scripts."""
+    given), so their flags reach the library's crates and not the build scripts. A linker they
+    name for that target goes in the variable cargo reads that key from (`target_linker_env`),
+    which outranks every configuration file, the caller's among them, as the key named with
+    `--config` would, and reaches the build scripts as the key does."""
     stated = case_limits(case) if limits is None else dict(limits)
     cmd = ["cargo", "build", "--profile", case.profile, "-p", artifact_package(case.package), "--quiet",
            "--target-dir", str(TARGET)]
     lib_dir = TARGET / case.profile
     flags = list(GATE_RUSTFLAGS)
+    linker: dict[str, str] = {}
     if case.cargo_configs:
         triple = triple or host_triple()
-        flags += case_config_flags(case, triple, target_cfg(triple) if cfg is None else cfg)
+        config_flags, config_link = case_config(case, triple,
+                                                target_cfg(triple) if cfg is None else cfg)
+        flags += config_flags
+        if config_link is not None:
+            linker[target_linker_env(triple)] = config_link
         cmd += ["--target", triple]
         lib_dir = TARGET / triple / case.profile
     if case.features is not None:
@@ -2210,7 +2261,7 @@ def case_build(case: Case, env: Mapping[str, str], triple: str | None = None,
         if case.features:
             cmd += ["--features", artifact_features(case.package, case.features)]
     return CaseBuild(tuple(cmd), {**with_rustflags(limit_env(env, stated), flags),
-                                  **wz_package.ship_debug_env(case.profile)},
+                                  **wz_package.ship_debug_env(case.profile), **linker},
                      lib_dir / case.lib, tuple(link_args(flags)),
                      tuple(f"{k}={v}" for k, v in stated.items()))
 
@@ -2689,29 +2740,85 @@ def cmd_selftest() -> int:
     expect("the triple's table, then each cfg table that holds",
            config_rustflags(sample, "x86_64-unknown-linux-gnu", linux_gnu) == ["-C", "t", "u"]
            and config_rustflags(sample, "x86_64-pc-windows-msvc", windows_msvc) == ["w"])
+    win = "x86_64-pc-windows-msvc"
+    linked = (f'[target.{win}]\nlinker = "rust-lld"\nrustflags = ["-C", "linker-flavor=lld-link"]\n'
+              "[target.'cfg(unix)']\nrustflags = [\"u\"]\n")
+    expect("a triple's linker is that triple's alone, with its flags beside it",
+           config_rustflags(linked, "x86_64-unknown-linux-gnu", linux_gnu) == ["u"]
+           and config_linker(linked, "x86_64-unknown-linux-gnu") is None
+           and config_rustflags(linked, win, windows_msvc) == ["-C", "linker-flavor=lld-link"]
+           and config_linker(linked, win) == "rust-lld"
+           and config_linker(sample, win) is None)
     for shape in ("[build]\nrustflags = [\"x\"]\n", "[target.'cfg(unix)']\nlinker = \"cc\"\n",
                   "rustflags = [\"x\"]\n", "[target.'cfg(unix)']\nrustflags = \"-C x\"\n",
-                  "[target.'cfg(unix)']\nrustflags = [\"x\"]\nrustflags = [\"y\"]\n"):
+                  "[target.'cfg(unix)']\nrustflags = [\"x\"]\nrustflags = [\"y\"]\n",
+                  f'[target.{win}]\nrunner = "wine"\n', f'[target.{win}]\nlinker = "bin/lld"\n',
+                  f'[target.{win}]\nlinker = 1\n', f'[target.{win}]\nlinker = ""\n',
+                  '[env]\nX = "1"\n', '[target]\nrustflags = ["x"]\n',
+                  '[[target]]\nrustflags = ["x"]\n', 'target = "x"\n',
+                  "[target.'cfg(unix)']\nrustflags = [\n  \"x\",\n]\n"):
         try:
-            read_config_rustflags(shape)
+            read_config_tables(shape)
             expect(f"the configuration {shape!r} is refused", False)
         except ValueError:
             expect(f"the configuration {shape!r} is refused", True)
+    try:
+        read_config_tables(f'[target.{win}]\nlinker = "rust-lld"\nrunner = "wine"\n')
+        unknown_key = ""
+    except ValueError as e:
+        unknown_key = str(e)
+    expect("a key this gate does not pass on is refused by its name and its table's",
+           "`runner`" in unknown_key and win in unknown_key)
+    expect("cargo's variable of a triple's linker is named as cargo names it",
+           target_linker_env(win) == "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"
+           and target_linker_env("thumbv8m.main-none-eabihf")
+           == "CARGO_TARGET_THUMBV8M_MAIN_NONE_EABIHF_LINKER")
+    expect("files merged join their flags in order, and the last linker named is the one",
+           merged_config([("a", f'[target.{win}]\nlinker = "a-ld"\nrustflags = ["x"]\n'),
+                          ("b", f'[target.{win}]\nlinker = "b-ld"\nrustflags = ["y"]\n')],
+                         win, windows_msvc) == (["x", "y"], "b-ld")
+           and merged_config([("a", f'[target.{win}]\nlinker = "a-ld"\n'),
+                              ("b", "[target.'cfg(windows)']\nrustflags = [\"y\"]\n")],
+                             win, windows_msvc) == (["y"], "a-ld")
+           and merged_config([], win, windows_msvc) == ([], None))
+    try:
+        merged_config([("crates/x.toml", "[build]\n")], win, windows_msvc)
+        refused_by = ""
+    except ValueError as e:
+        refused_by = str(e)
+    expect("a file merged that cannot be read is refused by its name",
+           refused_by.startswith("crates/x.toml: ") and "`build`" in refused_by)
     nostd = (CRATES / NOSTD_CONFIG).read_text(encoding="utf-8")
     expect("the configuration without std drops the unwind tables on a POSIX host only",
            config_rustflags(nostd, "x86_64-unknown-linux-gnu", linux_gnu)
            == ["-C", "force-unwind-tables=no"]
-           and config_rustflags(nostd, "x86_64-pc-windows-msvc", windows_msvc) == [])
+           and config_linker(nostd, "x86_64-unknown-linux-gnu") is None)
+    expect("the configuration without std links a Windows library by the toolchain's own linker",
+           all(config_rustflags(nostd, t, windows_msvc) == ["-C", "linker-flavor=lld-link"]
+               and config_linker(nostd, t) == "rust-lld"
+               for t in (win, "i686-pc-windows-msvc")))
 
     def readable(path: str) -> bool:
         try:
-            read_config_rustflags((CRATES / path).read_text(encoding="utf-8"))
+            read_config_tables((CRATES / path).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return False
         return True
 
+    named_configs = sorted({p for c in CASES for p in c.cargo_configs})
     expect("every configuration file a case names is one this gate reads",
-           all(readable(p) for c in CASES for p in c.cargo_configs))
+           named_configs != [] and all(readable(p) for p in named_configs))
+    # Where the interpreter has `tomllib` (3.11+; the hosted floor does not, so the import is by
+    # name), the floor reader must read each such file as TOML does.
+    try:
+        stdlib_toml = importlib.import_module("tomllib")
+    except ImportError:
+        stdlib_toml = None
+    if stdlib_toml is not None:
+        for path in named_configs:
+            text = (CRATES / path).read_text(encoding="utf-8")
+            expect(f"crates/{path} reads as tomllib reads it",
+                   wz_config.read_decl_toml(text) == stdlib_toml.loads(text))
     expect("the linker a library's .comment names is the one printed",
            comment_linker("String dump of section '.comment':\n  [     0]  rustc version 1.97.0\n"
                           "  [    2d]  Linker: LLD 22.1.6 (/checkout/src/llvm 08c84e)\n")
@@ -2820,7 +2927,20 @@ def cmd_selftest() -> int:
            and "force-unwind-tables=no"
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and discards_unwind_tables(bare_build.link_args)
-           and PACKED_RELOCS_LINK in bare_build.link_args)
+           and PACKED_RELOCS_LINK in bare_build.link_args
+           and not any(k.endswith("_LINKER") for k in bare_build.env))
+    win_build = case_build(by_case["pico-client-coop-nostd"],
+                           {target_linker_env(win): "link.exe"}, win, windows_msvc, limits={})
+    expect("a case built for a target its file names a linker for is linked by it, over the caller's",
+           win_build.env[target_linker_env(win)] == "rust-lld"
+           and "linker-flavor=lld-link"
+           in win_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
+           and "force-unwind-tables=no"
+           not in win_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f"))
+    gnu_linker = target_linker_env("x86_64-unknown-linux-gnu")
+    expect("a caller's linker for a target no file names one for is left as cargo would leave it",
+           case_build(by_case["pico-client-coop-nostd"], {gnu_linker: "clang"},
+                      "x86_64-unknown-linux-gnu", linux_gnu, limits={}).env[gnu_linker] == "clang")
     expect("a case is built with its line tables by its own profile's variable, and no flag",
            bare_build.env["CARGO_PROFILE_CAPI_NOSTD_DEBUG"] == wz_package.SHIP_DEBUG
            and plain.env["CARGO_PROFILE_SHIP_DEBUG"] == wz_package.SHIP_DEBUG
