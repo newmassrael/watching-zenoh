@@ -186,9 +186,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         ) {
             // The read turns the face from its next turn on, which takes the dial into its place.
             #[cfg(not(wz_round))]
-            if let Some(face) = self.direct.face_at(at) {
-                face.hold_face(true);
-            }
+            self.direct.hold_face(at, true);
             let now_us = core.now_us();
             if let Some(face) = core.transport.links.face_mut(at) {
                 let _ = face.life.input(LinkInput::Open, now_us);

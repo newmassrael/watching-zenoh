@@ -713,6 +713,48 @@ fn a_listeners_read_passes_over_its_resting_dial_face() {
     );
 }
 
+/// A listener's read walks its face table up to the last row that holds a face and no further:
+/// with one client, the dial role's row and the client's, whatever rows the table keeps for faces
+/// to come. A second client moves the bound to its row, and the bound comes back as each client's
+/// face goes. Turned red by walks of every row of the table (`DirectFaces::walked`), or a bound
+/// that a face's going leaves where it was (`DirectFaces::hold_face`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_listeners_walk_ends_at_its_last_held_row() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 3);
+    assert_eq!(
+        listener.walked_rows(),
+        1,
+        "with no client, the dial role's row alone"
+    );
+    let first = client(&endpoint, 0xc1);
+    eventually("the first face", || listener.faces_up() == 1);
+    assert!(
+        listener.direct_faces().0 >= 3,
+        "CONTROL: the table keeps a row for each face it admits beside the dial role's"
+    );
+    assert_eq!(
+        listener.walked_rows(),
+        2,
+        "the dial role's row and the first client's"
+    );
+    let second = client(&endpoint, 0xc2);
+    eventually("the second face", || listener.faces_up() == 2);
+    assert_eq!(
+        listener.walked_rows(),
+        3,
+        "the bound moves to the second client's row"
+    );
+    drop(second);
+    eventually("the second client's face to go", || {
+        listener.walked_rows() == 2
+    });
+    drop(first);
+    eventually("the first client's face to go", || {
+        listener.walked_rows() == 1
+    });
+}
+
 /// A session whose one link is a stream waits on that link's input with nothing of the session
 /// held, and the step after the wait reads what came: each put a listener makes reaches it after
 /// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.

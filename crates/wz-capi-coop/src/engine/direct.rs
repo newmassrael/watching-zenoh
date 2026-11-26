@@ -1235,12 +1235,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
         }
     }
 
-    /// Mark whether the face table's row of the face holds a face (`Self::holds_face`).
-    #[cfg(feature = "listen")]
-    pub(super) fn hold_face(&self, holds: bool) {
-        self.holds_face.store(holds, Ordering::Release);
-    }
-
     /// Show when the face is next due by `slot`, its read slot, held: written only when it
     /// changed, as a step of the pump moves it with nearly every record.
     #[cfg(any(feature = "listen", feature = "group"))]
@@ -1281,6 +1275,10 @@ pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> 
     dial: DirectFace<L, C>,
     #[cfg(feature = "listen")]
     taken: TakenFaces<L, C>,
+    /// The rows of `taken` up to the last that holds a face (`Self::hold_face`): the rows past it
+    /// hold none, and a read walks the faces several times, so its walks end there.
+    #[cfg(feature = "listen")]
+    held_rows: core::sync::atomic::AtomicUsize,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C> {
@@ -1336,7 +1334,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
                 lend,
             );
             #[cfg(feature = "listen")]
-            addr_of_mut!((*at).taken).write(taken);
+            {
+                addr_of_mut!((*at).taken).write(taken);
+                addr_of_mut!((*at).held_rows).write(core::sync::atomic::AtomicUsize::new(0));
+            }
         }
     }
 
@@ -1359,23 +1360,60 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
 
     /// The faces a read turns, in the order of the face table's rows: the dial role's, whose life
     /// dials the session's endpoints whether or not it holds a link, then each past it whose row
-    /// holds a face (`DirectFace::hold_face`).
+    /// holds a face (`Self::hold_face`).
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     pub(super) fn turned(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         #[cfg(feature = "listen")]
         {
-            core::iter::once(&self.dial).chain(
-                self.taken
-                    .iter()
-                    .filter(|face| face.holds_face.load(Ordering::Acquire)),
-            )
+            self.walked()
+                .filter(|face| face.holds_face.load(Ordering::Acquire))
         }
         // Every face that may hold a link is the dial role's alone (`Self::iter`).
         #[cfg(not(feature = "listen"))]
         {
             self.iter()
         }
+    }
+
+    /// The faces a read walks, in the order of the face table's rows: the dial role's, then each
+    /// row past it up to the last that holds a face (`Self::hold_face`), held or not.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[inline(always)]
+    pub(super) fn walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
+        #[cfg(feature = "listen")]
+        {
+            core::iter::once(&self.dial).chain(
+                self.taken
+                    .iter()
+                    .take(self.held_rows.load(Ordering::Acquire)),
+            )
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            self.iter()
+        }
+    }
+
+    /// Mark whether the face table's row `at`, past the dial role's, holds a face, and move the
+    /// bound of the rows a read walks (`Self::walked`) with it. Called under the session's lock,
+    /// as every change of a row's face is made, so its writes are one at a time; a read sees a row
+    /// held once it sees the bound that reaches it.
+    #[cfg(feature = "listen")]
+    pub(super) fn hold_face(&self, at: usize, holds: bool) {
+        let Some(face) = at.checked_sub(1).and_then(|row| self.taken.get(row)) else {
+            return;
+        };
+        face.holds_face.store(holds, Ordering::Release);
+        let rows = if holds {
+            self.held_rows.load(Ordering::Relaxed).max(at)
+        } else {
+            self.taken
+                .iter()
+                .rposition(|face| face.holds_face.load(Ordering::Relaxed))
+                .map_or(0, |row| row.saturating_add(1))
+        };
+        self.held_rows.store(rows, Ordering::Release);
     }
 
     /// The face of the face table's row `at`: the dial role's at the first, each past it in its
@@ -1943,7 +1981,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(any(feature = "listen", feature = "group"))]
     fn faces_due_us(&self) -> u64 {
         self.direct
-            .iter()
+            .walked()
             .map(|face| face.due_us.load(Ordering::Relaxed))
             .min()
             .unwrap_or(u64::MAX)
@@ -2275,7 +2313,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // then its record and its tables.
             #[cfg(feature = "listen")]
             if effects.removes() {
-                face.hold_face(false);
+                self.direct.hold_face(slot.at(), false);
                 slot.clear(&face.site);
                 core.remove_face(slot.at());
                 return Ok(());
@@ -2539,7 +2577,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if placed.is_err() {
                 core.remove_face(at);
             } else {
-                face.hold_face(true);
+                self.direct.hold_face(at, true);
                 let now_us = core.now_us();
                 if let Some(record) = core.transport.links.face_mut(at) {
                     // A taken link's handshake asks for nothing of the session.
@@ -2914,6 +2952,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(not(any(feature = "listen", feature = "group")))]
         let turned = rows;
         (rows, turned)
+    }
+
+    /// The rows a read walks (`DirectFaces::walked`): the dial role's, and each past it up to the
+    /// last that holds a face.
+    #[cfg(all(test, feature = "std", feature = "listen"))]
+    pub(crate) fn walked_rows(&self) -> usize {
+        self.direct.walked().count()
     }
 
     /// How many legs a publish's walk of the faces hands out (`Self::on_faces`), and how many
