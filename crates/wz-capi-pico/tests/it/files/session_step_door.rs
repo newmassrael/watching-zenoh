@@ -72,6 +72,7 @@ unsafe fn put_once(session: &z_owned_session_t) {
 
 #[test]
 fn a_session_opened_without_its_read_task_is_stepped_by_the_program() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let locator = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: each call is handed what the C API asks of it, as a C program hands it.
