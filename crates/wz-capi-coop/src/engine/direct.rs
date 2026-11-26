@@ -2078,6 +2078,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         } = slot;
         let due_us = *pump_due_us;
         let records = records.as_mut()?;
+        // Read before the step: a link the step establishes is brought up by the next look at its
+        // life, before which nothing behind its handshake is read.
+        let settled = records.actions.is_established();
         // SAFETY: the records are held exactly while the pump is written in its place.
         let pump = unsafe { pump.assume_init_mut() };
         let mut sink = DirectSink {
@@ -2091,7 +2094,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 break 'step true;
             }
             let took = lend.lend_for(router, || {
-                self.take_held_input(&mut *pump, now_ms, &mut sink)
+                self.take_held_input(&mut *pump, now_ms, settled, &mut sink)
             });
             !took && pump.service_due(now_ms, &mut sink).is_some()
         };
@@ -2101,20 +2104,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Some((ended, due_us))
     }
 
-    /// Hand the pump the link's next unit of input at `now_ms`, then every unit the link already
-    /// took from its stack behind it: the wait, the look at the life and the gathering of the
-    /// pump's deadlines are paid once for what one receive brought, not once a batch, as
-    /// zenoh-pico's read of a peer's socket processes what the read left behind its first batch
-    /// before it waits again (`vendor/zenoh-pico/src/transport/unicast/read.c` @
-    /// `static z_result_t _zp_unicast_process_peer_event(`).
-    /// What the link holds bounds the run, so the next unit read from the stack waits for the next
-    /// read, which serves what fell due first. A run ends once a callback closed the session.
-    /// Whether a unit was taken.
+    /// Hand the pump the link's next unit of input at `now_ms`, then, on a link whose session was
+    /// `settled` (established) before the step, every unit the link already took from its stack
+    /// behind it: the wait, the look at the life and the gathering of the pump's deadlines are paid
+    /// once for what one receive brought, not once a batch, as zenoh-pico's read of a peer's socket
+    /// processes what the read left behind its first batch before it waits again
+    /// (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+    /// `static z_result_t _zp_unicast_process_peer_event(`). What the link holds bounds the run,
+    /// so the next unit read from the stack waits for the next read, which serves what fell due
+    /// first. A unit of a link in its handshake is the last of its read: the life brings the link
+    /// up at its next look, and what follows the handshake is read after that. A run ends once a
+    /// callback closed the session. Whether a unit was taken.
     #[inline(always)]
     fn take_held_input<F: EventSink>(
         &self,
         pump: &mut DirectPump<L, C>,
         now_ms: u64,
+        settled: bool,
         sink: &mut F,
     ) -> bool {
         let mut took = false;
@@ -2122,7 +2128,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             took = true;
             #[cfg(test)]
             self.takes.pump_reads.fetch_add(1, Ordering::Relaxed);
-            if !pump.link().holds_input() || self.closed.load(Ordering::Acquire) {
+            if !settled || !pump.link().holds_input() || self.closed.load(Ordering::Acquire) {
                 break;
             }
         }
