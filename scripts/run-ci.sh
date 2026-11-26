@@ -13158,9 +13158,10 @@ layer_c1cf_reduced_features() {
 # `capability_cost_gate.py` builds each case in its table with exactly its features and grades
 # size, the absence of the planes it leaves out, the presence of the planes it has, and the
 # pinned export count of the default build, and holds each pico case's ratio to zenoh-pico
-# under its row of `deploy/pico_host_ceiling.json` (docs/upstream-parity.md D9). Eight release
-# builds and two `capi-small` builds (panics abort) of two cdylibs, run as ONE lane because
-# each case replaces the previous one's artifact in the target directory of its profile. Each library must also carry the conformance
+# under its row of `deploy/pico_host_ceiling.json` (docs/upstream-parity.md D9). Release builds
+# of two cdylibs, each case in a target directory of its own, built side by side as many at once
+# as the run's cores and memory allow (`BX_GRANT_CORES`, `BX_GRANT_MEM_MB`) and graded in the
+# table's order (the gate's "The builds at once"). Each library must also carry the conformance
 # digest of its statement. Two more dev builds in a target directory of their own (the statement
 # cases) state a limit and a policy and turn the zenoh-c shared-memory arm on, which no size case
 # does, and are graded on that digest alone. Every build, and the zenoh-pico reference, runs under
@@ -13169,8 +13170,7 @@ layer_c1cf_reduced_features() {
 #
 # The hosted lane is a matrix of `WZ_C1CS_SHARDS` jobs, each building the cases the gate deals to
 # its `WZ_C1CS_SHARD` by their measured seconds (`c1cs_case_weights.tsv`): one job read 1,114 s
-# of its 1200 s budget at run 45051019628. Each shard is a runner of its own, so the one-lane rule
-# above holds inside it. Unset, every case is built here, as before.
+# of its 1200 s budget at run 45051019628. Unset, every case is built here.
 #
 # The second leg is the size ledger (docs/c-abi-architecture.md P9): `size_ledger_gate.py` reads
 # each case of its ledger the cost gate just built, one feature bundle each, and its zenoh-pico

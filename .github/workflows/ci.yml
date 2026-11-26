@@ -2338,9 +2338,9 @@ jobs:
 
   # R3397 -- Layer C1cs, what a capability costs in the two C ABI binaries.
   #
-  # ITS OWN JOB, because it is eight release builds of two cdylibs (each case replaces the
-  # previous one's artifact in the same target directory, so they cannot overlap) and no other
-  # job owes that time. Measured on the build host, warm: about 70-90 s per case, so ~12 min
+  # ITS OWN JOB, because it is release builds of two cdylibs, a case a build, and no other job
+  # owes that time. Each case builds in a target directory of its own, side by side with the others
+  # as the runner's cores and memory allow (capability_cost_gate.py "The builds at once"). Measured on the build host, warm: about 70-90 s per case, so ~12 min
   # cold on a hosted runner. MEASURED on the hosted runner (runs 39520157857, 39543071425,
   # 39557807679): 378 s, 384 s and 313 s, which is 17-21% of the 1800 s this job was given and
   # tripped the margin step's 20% floor ("Nothing failed"). 1200 s puts those at 26-32% and the
@@ -2353,8 +2353,8 @@ jobs:
   # cases and two statement cases, each a release build, and the job had read 1,084 to 1,132 s in
   # five of the six runs before it. The cases are now dealt by measured cost, heaviest first to the least
   # loaded shard (`capability_cost_gate.py --shards`, over `c1cs_case_weights.tsv`), which puts
-  # 611 and 607 s of a 1,218 s four-core reading in the two. Each shard is a runner of its own, so
-  # the cases of one shard still build one after another in one target directory. PREDICTION, for
+  # 611 and 607 s of a 1,218 s four-core reading in the two. Each shard is a runner of its own, and
+  # builds its cases side by side on it. PREDICTION, made when they built one after another, for
   # the next run to judge: each shard near 660 s with its setup, 55 percent of the budget; a shard
   # under 240 s (the 20 percent floor) hands budget back. Each case prints its seconds, which is
   # what the table is refreshed from.

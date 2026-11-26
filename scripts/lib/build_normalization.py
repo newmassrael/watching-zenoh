@@ -231,25 +231,50 @@ def _joined(have: str, flags: list[str]) -> str:
     return " ".join([have, *flags]) if have else " ".join(flags)
 
 
-def normalized_env(base: Mapping[str, str], p: Prefixes, epoch: str | None) -> dict[str, str]:
-    """The environment `base` with the flags added (the module doc says how) and the epoch set.
-    An epoch of None leaves whatever `base` holds for it. `base` itself is not changed."""
+def _added(base: Mapping[str, str], rust: list[str], c: list[str]) -> dict[str, str]:
+    """`base` with `rust` after the rustc flags cargo reads and `c` after every C flags spelling
+    (the module doc says how). `base` itself is not changed."""
     env = dict(base)
-    rust = rustflags(p)
     if ENCODED_RUSTFLAGS in env:
         have = env[ENCODED_RUSTFLAGS]
         env[ENCODED_RUSTFLAGS] = "\x1f".join(([have] if have else []) + rust)
     else:
         env[RUSTFLAGS] = _joined(env.get(RUSTFLAGS, ""), rust)
-    c = cflags(p)
     for name in sorted(env):
         if _C_FLAGS_SPELLING.match(name):
             env[name] = _joined(env[name], c)
     for name in C_FLAGS:
         env[name] = _joined(env.get(name, ""), c)
+    return env
+
+
+def normalized_env(base: Mapping[str, str], p: Prefixes, epoch: str | None) -> dict[str, str]:
+    """The environment `base` with the flags added (the module doc says how) and the epoch set.
+    An epoch of None leaves whatever `base` holds for it. `base` itself is not changed."""
+    env = _added(base, rustflags(p), cflags(p))
     if epoch is not None:
         env[EPOCH] = epoch
     return env
+
+
+def relocated_env(base: Mapping[str, str], directory: str, standing: str,
+                  p: Prefixes) -> dict[str, str]:
+    """`base`, an environment of `normalized_env` for `p`, in which a build made in the directory
+    `directory` writes every path under it as a build made in `standing` would: the directory is
+    mapped to what `standing` becomes under the rule. Builds that run at the same time each need a
+    directory of their own, and without this map the name of that directory would be in their
+    bytes, so one case measured in two directories would read two sizes. The map comes after the
+    rule's, so it is the one that matches below `directory`. Refused when `standing` is under no
+    prefix of the rule: the build would then read as a path of this host."""
+    src = _clean(directory, "build directory")
+    stand = _clean(standing, "directory a build directory stands for")
+    maps = mappings(p)
+    if not any(stand.startswith(prefix) for prefix, _ in maps):
+        raise NormalizationError(
+            f"the directory {stand!r} is under none of the prefixes the rule maps, so a build "
+            f"made in {src!r} and mapped to it would carry a path of this host")
+    dst = _remapped(stand, maps)
+    return _added(base, [f"--remap-path-prefix={src}={dst}"], [f"-ffile-prefix-map={src}={dst}"])
 
 
 def env_lines(base: Mapping[str, str], env: Mapping[str, str]) -> list[str]:
@@ -415,6 +440,25 @@ def selftest() -> int:
     expect("without an epoch the caller's is left as it was",
            normalized_env({EPOCH: "5"}, rooted, None)[EPOCH] == "5"
            and EPOCH not in normalized_env({}, rooted, None))
+    stands = "/var/out/crates/target"
+    moved_dir = f"{stands}/cases/a"
+    moved = relocated_env(normalized_env({"CFLAGS": "-O2"}, rooted, None), moved_dir, stands, rooted)
+    expect("a build directory reads as the directory it stands for, its map after the rule's",
+           moved["RUSTFLAGS"].split()
+           == [*rust, f"--remap-path-prefix={moved_dir}=/wz/crates/target"]
+           and moved["CFLAGS"].split()
+           == ["-O2", *cflags(rooted), f"-ffile-prefix-map={moved_dir}=/wz/crates/target"]
+           and moved["CXXFLAGS"].split()
+           == [*cflags(rooted), f"-ffile-prefix-map={moved_dir}=/wz/crates/target"]
+           and _remapped(f"{moved_dir}/ship/build/x/out/gen.rs",
+                         [*mappings(rooted), (moved_dir, "/wz/crates/target")])
+           == "/wz/crates/target/ship/build/x/out/gen.rs")
+    try:
+        relocated_env({}, moved_dir, "/elsewhere/target", rooted)
+        expect("a build directory standing for a directory under no prefix is refused", False)
+    except NormalizationError as e:
+        expect("a build directory standing for a directory under no prefix is refused, by name",
+               "/elsewhere/target" in str(e))
     lines = env_lines(base, env)
     exported = [shlex.split(line) for line in lines]
     expect("the export lines name what changed, once each, and read back to the values",

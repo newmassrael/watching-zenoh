@@ -4,8 +4,10 @@
 #
 # Read 2026-11-23 from one `--measure` of every case in the gate's order on four cores of a build
 # machine, an empty artifact root and a warm cargo home: 1,218 s together, where the one hosted job
-# of run 45051019628 read 1,013 s. The first case of a run also builds the dependencies; refresh
-# the rows from a hosted shard's lines, which carry that cost where the plan put it.
+# of run 45051019628 read 1,013 s, the cases built one after another and the first of them building
+# the dependencies. Each case now builds in a target directory of its own, side by side with the
+# others, so a case's seconds carry its own dependencies and the builds beside it; refresh the rows
+# from a hosted shard's lines.
 pico-client 66
 pico-client-small 55
 pico-client-udp 26
