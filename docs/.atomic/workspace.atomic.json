@@ -8286,6 +8286,25 @@
       "carry_forward_bullets": [
         "a key placed before its payload fails to place stays in the round's key table until the table empties."
       ]
+    },
+    "Round 4678": {
+      "decision_summary": "Pay four gate reds main carried. Two names the tree now carries lose their\nabsent rows; the drop-in header gate takes --check as the hook's call does\nand now judges the header; a dial-only plan reads the policy its creator\nholds; and each public-surface feature the census found undecided is decided\nby a probe, a prose row or a deferral with its reason.",
+      "changes_bullets": [
+        "prose-name: ABSENT rows of GIT_DIR and GIT_INDEX_FILE dropped.",
+        "drop_in_header_gate: --check accepted.",
+        "capi-coop: PlanShape::dial_only takes the creator's policy; pico's PRESET is a constructor site.",
+        "public-surface census: rows for runtime-coop, session-mcu, app-schema, capi-coop, capi-port; an unused tokio accessor removed."
+      ],
+      "verification_bullets": [
+        "feature_public_surface_census --check and --selftest, prose_named_identifier_gate, policy_read_gate, drop_in_header_gate pass; python floor lint clean.",
+        "wz-capi-coop arena and wz-capi-pico lib tests pass; nondefault-features clean for both."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
