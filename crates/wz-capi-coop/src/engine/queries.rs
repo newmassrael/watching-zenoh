@@ -31,7 +31,7 @@ use wz_session_core::driver_loop::{InPlaceRecord, IterationEvent, OwedToProjecti
 use wz_session_core::query::pinned::{PinnedQuery, QueryRoom};
 use wz_session_core::wireexpr_resolve::KeyexprBuf;
 
-use super::direct::FaceRecords;
+use super::direct::{FaceRecords, RecordActions};
 use super::query::QueryableCall;
 
 impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
@@ -40,9 +40,9 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// Final; a Request the lent form does not represent by its owned projection. A Request no
     /// queryable is handed (no Query, its key unresolved, past the bounds or the Finals the face
     /// holds) sends what its dispatch owes. A closed session hands nothing.
-    pub(super) fn hand_lent_query(
+    pub(super) fn hand_lent_query<A: RecordActions>(
         &self,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         record: &InPlaceRecord<'_, '_>,
         event: &IterationEvent<'_, '_>,
     ) {
@@ -78,10 +78,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// projection, read under `held`, handed as one the copying receive decoded. Out of line, so
     /// the lent walk's frame does not hold the projection's.
     #[inline(never)]
-    fn hand_projected_query(
+    fn hand_projected_query<A: RecordActions>(
         &self,
         held: LiveCore<'_, L, C>,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         record: &InPlaceRecord<'_, '_>,
     ) {
         if let Some(request) = wz_session_core::query::pinned::project_request(record) {
@@ -95,10 +95,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// no queryable is handed sends what its dispatch owes. Out of line, so the room the query's
     /// parts lie in is in a frame of its own.
     #[inline(never)]
-    pub(super) fn hand_owned_query(
+    pub(super) fn hand_owned_query<A: RecordActions>(
         &self,
         mut held: LiveCore<'_, L, C>,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         request: &wz_session_core::wire::RequestOwned,
     ) {
         let mut room = QueryRoom::default();
@@ -122,10 +122,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// reaches, one call at a time with the session let go of: each callback's replies go out as
     /// it makes them and its hold on the Final is let go of after it (`run_queryable`). Then the
     /// query owes its Final, sent at once unless a callback keeps the query.
-    fn hand_query(
+    fn hand_query<A: RecordActions>(
         &self,
         held: LiveCore<'_, L, C>,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         query: &mut PinnedQuery<'_>,
     ) {
         let generation = records.generation;

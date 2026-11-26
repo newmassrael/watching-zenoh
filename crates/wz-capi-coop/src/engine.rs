@@ -4323,7 +4323,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
     type Dispatch = FaceDispatch<C>;
     // What the read hands each step of the link it steps itself (`direct`).
     #[cfg(not(wz_round))]
-    type Dispatch = direct::FaceRecords<C>;
+    type Dispatch = direct::LinkRecords<C>;
     type Session = LinkSession<C>;
 
     fn link_made(&mut self, face: FaceId, actions: &LinkHandle<C>, key_form: Option<KeyWireForm>) {
@@ -5390,9 +5390,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         join: GroupJoin,
     ) -> Result<(GroupFace<L::Waits>, group::GroupPump<C>), OpenError> {
         let joining = self.group_joining(face, join)?;
+        // SAFETY: the plane is read by the group's read slot, which the session lets go of at its
+        // links' end (`Core::end_links`), or a read that holds it lets go of once it finds the
+        // session closed, before the session's state, which owns the plane, is dropped.
+        #[cfg(feature = "queryable")]
+        let plane = unsafe { self.session.plane.share() };
         let (group, pump) = GroupFace::join(
             self.local.runtime().clone(),
             joining,
+            #[cfg(feature = "queryable")]
+            plane,
             self.rooms.waits().clone(),
         );
         // A droppable publish that finds the session held asks the group's socket for room as it
@@ -9365,8 +9372,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         if asked == 0 {
             return Ok(0);
         }
+        #[cfg(wz_round)]
         core.run_tasks();
         drop(guard);
+        // Where the read steps each group's session itself, the step is this call's, made with
+        // the session let go of as a read makes it; one asked from a callback's call leaves the
+        // JOIN to the next read.
+        #[cfg(not(wz_round))]
+        self.read_groups();
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();
         Ok(asked)

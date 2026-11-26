@@ -89,9 +89,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// frame's dispatch takes it. What the frame's other planes take follows
     /// (`Planes::BesideSubscribers`). A session closed meanwhile takes no record after the one
     /// whose callback closed it.
-    pub(super) fn hand_copied_records(
+    pub(super) fn hand_copied_records<A: super::direct::RecordActions>(
         &self,
-        records: &super::direct::FaceRecords<C>,
+        records: &super::direct::FaceRecords<A>,
         messages: &[wz_session_core::network_message::NetworkMessage],
         reliable: bool,
     ) {
@@ -112,7 +112,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 held.0
                     .session
                     .registry
-                    .dispatch_declare_message(face, message, || records.actions.peer_session_zid());
+                    .dispatch_declare_message(face, message, || records.actions.record_peer());
                 drop(held);
                 self.deliver();
                 let Some(again) = self.live() else {

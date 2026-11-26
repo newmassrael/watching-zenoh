@@ -48,6 +48,7 @@ use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
 use super::registry::Planes;
 #[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::bounded::{BoundedVec, Lent};
+use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
 /// The pump of the session's one link, which the read steps itself.
 type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink, LinkCount>>;
@@ -108,37 +109,110 @@ impl LinkEnd for DirectEnd {
     }
 }
 
-/// What the read hands each step of the one link's pump with, beside the engine: the face the
-/// link serves, the link's actions, and the session's planes the dispatch of a record writes
-/// ([`FaceDispatch`] in a build whose links run as tasks).
-pub(crate) struct FaceRecords<C: ClockSource + 'static> {
+/// What the records a read hands out of a face are answered through, beside the session's
+/// tables: a link's actions, which answer its one peer, or a group's replies, which answer its
+/// members on the group's stage.
+pub(crate) trait RecordActions {
+    /// What the dispatch of the face's records stages its replies and its answers on.
+    type Sink: ResponseSink + DeclareReplySink + LivelinessGetPrune;
+
+    /// The sink the face's records are answered through.
+    fn sink(&self) -> &Self::Sink;
+
+    /// The peer the face's records come from, as a declaration watch hears it.
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn record_peer(&self) -> Option<wz_session_core::session_zid::SessionZid>;
+
+    /// Keep the key form of each query `event` carries by an id of the shared dictionary, so a
+    /// reply on its key mirrors it.
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    fn keep_request_keys(&self, event: &IterationEvent<'_, '_>);
+}
+
+/// A link's records are answered by its session's actions, to its one peer.
+impl<C: ClockSource + 'static> RecordActions for LinkHandle<C> {
+    type Sink = <LinkHandle<C> as core::ops::Deref>::Target;
+
+    #[inline(always)]
+    fn sink(&self) -> &Self::Sink {
+        self
+    }
+
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn record_peer(&self) -> Option<wz_session_core::session_zid::SessionZid> {
+        self.peer_session_zid()
+    }
+
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    fn keep_request_keys(&self, event: &IterationEvent<'_, '_>) {
+        self.note_requests(event);
+    }
+}
+
+/// A group's records are answered on the group's stage, to its members, none of which is the
+/// one peer a declaration watch is told of, and none of which names a key by the shared
+/// dictionary a reply mirrors.
+#[cfg(feature = "group")]
+impl RecordActions for super::group::GroupReplies {
+    type Sink = Self;
+
+    #[inline(always)]
+    fn sink(&self) -> &Self {
+        self
+    }
+
+    #[cfg(any(
+        feature = "remote-declaration-watch",
+        feature = "declarations-synced-event"
+    ))]
+    fn record_peer(&self) -> Option<wz_session_core::session_zid::SessionZid> {
+        None
+    }
+
+    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    fn keep_request_keys(&self, _event: &IterationEvent<'_, '_>) {}
+}
+
+/// What the read hands each step of a face's pump with, beside the engine: the face the pump
+/// serves, what its records are answered through (a link's actions, a group's replies), and the
+/// session's planes the dispatch of a record writes ([`FaceDispatch`] in a build whose links run
+/// as tasks).
+pub(crate) struct FaceRecords<A> {
     pub(super) face: HeldFace,
-    pub(super) actions: LinkHandle<C>,
+    pub(super) actions: A,
     #[cfg(feature = "queryable")]
     pub(super) plane: PlacedRef<QueryPlane>,
-    /// The link's generation, which the queries it carries are answered under.
+    /// The face's generation, which the queries it carries are answered under.
     #[cfg(feature = "queryable")]
     pub(super) generation: u64,
     /// Whether Pushes were dispatched whose drains are still owed ([`EventSink::end_records`]).
     pub(super) after_pushes: bool,
 }
 
-impl<C: ClockSource + 'static> FaceRecords<C> {
+/// The records of a link, answered by its session's actions.
+pub(super) type LinkRecords<C> = FaceRecords<LinkHandle<C>>;
+
+impl<A: RecordActions> FaceRecords<A> {
     /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
     /// `planes` names of the face's tables in `registry`, the held session's, and send what it
     /// staged.
     #[cfg(feature = "queryable")]
     fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
         let face = self.face;
-        let actions = &*self.actions;
-        // What the declaration watches are told of this frame is this link's peer's.
+        // What the declaration watches are told of this frame is this face's peer's.
         #[cfg(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        registry.hear_decl_link(|| actions.peer_session_zid());
+        registry.hear_decl_link(|| self.actions.record_peer());
         registry.dispatch_event_to(face, event, planes);
-        registry.flush_pending_replies(face, actions);
+        registry.flush_pending_replies(face, self.actions.sink());
         self.owe_finals(registry);
     }
 
@@ -151,15 +225,15 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
         }
     }
 
-    /// The query `rid` of the face's link owes its `Final`, of `qos`: sent now when nothing
-    /// holds it, and otherwise once the last callback or kept query holding it lets go.
+    /// The query `rid` of the face owes its `Final`, of `qos`: sent now when nothing holds it,
+    /// and otherwise once the last callback or kept query holding it lets go.
     #[cfg(feature = "queryable")]
     pub(super) fn owe_final(&self, rid: wz_session_core::wire_id::RequestId, qos: QosLevel) {
         if self
             .plane
             .with_holds(|holds| holds.owe(self.generation, rid, qos))
         {
-            self.actions.send_response_final(rid, qos);
+            self.actions.sink().send_response_final(rid, qos);
         }
     }
 
@@ -167,7 +241,7 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
     /// reply on its key mirrors it.
     #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
     pub(super) fn note_requests(&self, event: &IterationEvent<'_, '_>) {
-        self.actions.note_requests(event);
+        self.actions.keep_request_keys(event);
     }
 
     /// A build without the shared key ids keeps no key form of a query.
@@ -177,26 +251,27 @@ impl<C: ClockSource + 'static> FaceRecords<C> {
     /// See the build with queryables: one without has no query to owe a Final.
     #[cfg(not(feature = "queryable"))]
     fn dispatch(&self, registry: &mut Registry, event: IterationEvent<'_, '_>, planes: Planes) {
-        let actions = &*self.actions;
-        // What the declaration watches are told of this frame is this link's peer's.
+        // What the declaration watches are told of this frame is this face's peer's.
         #[cfg(any(
             feature = "remote-declaration-watch",
             feature = "declarations-synced-event"
         ))]
-        registry.hear_decl_link(|| actions.peer_session_zid());
-        registry.dispatch_to(self.face, event, planes, actions);
+        registry.hear_decl_link(|| self.actions.record_peer());
+        registry.dispatch_to(self.face, event, planes, self.actions.sink());
     }
 }
 
 /// What a step of the one link's pump hands its records to: each dispatched under the session's
 /// lock, which is let go of before the record is handed out, so its callback finds the session
 /// free and the next record is read after the callback returned.
-struct DirectSink<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
+struct DirectSink<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A> {
     engine: &'a CoopEngine<L, C>,
-    records: &'a mut FaceRecords<C>,
+    records: &'a mut FaceRecords<A>,
 }
 
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSink<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
+    DirectSink<'_, L, C, A>
+{
     /// The drains a run of Pushes put off ([`Registry::settle`]), once for the run: at the end of
     /// the frame, or before the first record of it that is not a Push (`within_frame`), which a
     /// test counts as a build whose links are tasks does (`FaceDispatch`).
@@ -213,7 +288,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSink<'_, L,
             if within_frame {
                 registry.count_drain_within_frame();
             }
-            registry.settle(self.records.face, &*self.records.actions);
+            registry.settle(self.records.face, self.records.actions.sink());
         }
         #[cfg(not(all(test, feature = "std", feature = "queryable")))]
         let _ = within_frame;
@@ -221,7 +296,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSink<'_, L,
     }
 }
 
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EventSink for DirectSink<'_, L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions> EventSink
+    for DirectSink<'_, L, C, A>
+{
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         let push = lent_push(&event);
         // What the Pushes before this record put off is done before it, as it was after each.
@@ -590,7 +667,7 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The pump of the link, written while `records` is held.
     pump: MaybeUninit<DirectPump<L, C>>,
     /// What each step of the pump is handed, held exactly while the pump is written.
-    records: Option<FaceRecords<C>>,
+    records: Option<LinkRecords<C>>,
     /// The session's one Router, which the pump's receive is lent for each read.
     router: SessionReassembly,
     /// Where the Router is lent to the pump's receive.
@@ -1125,6 +1202,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let core = &mut core.0;
             core.transport.listen_on_config()?;
             core.join_groups()?;
+        }
+        // Each group's first step sends its first JOIN, with the session let go of as a read
+        // steps it; a group whose link did not open fails the open.
+        #[cfg(feature = "group")]
+        self.first_group_steps()?;
+        {
+            let mut core = self.core.lock();
+            let core = &mut core.0;
             if !crate::arena::dials_of(
                 core.transport.endpoints.dials(),
                 core.transport.endpoints.listens(),
@@ -1253,6 +1338,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 accepts |= turn.accepts;
             }
         }
+        // Each group's session is stepped after the faces, with no face's slot but the dial
+        // role's held (`Self::read_groups`).
+        #[cfg(feature = "group")]
+        if read.is_ok() {
+            self.read_groups();
+        }
         if let Some(wait) = wait {
             if let Some(mut held) = self.live() {
                 held.0.transport.links.waited(wait);
@@ -1280,6 +1371,103 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return Err(SessionClosed);
         }
         read
+    }
+
+    /// Step each group's session once (`Self::step_groups`) and read what the steps left
+    /// (`Self::poll_groups`), the dial role's read slot held across them, so a read from a
+    /// callback of a group's record finds the faces held and reads nothing. A slot found held is
+    /// a read under way on this thread, whose callback this is called from: nothing is stepped.
+    #[cfg(feature = "group")]
+    pub(super) fn read_groups(&self) {
+        if let Some(_reading) = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot) {
+            self.step_groups();
+            self.poll_groups();
+        }
+    }
+
+    /// Step each group's session once, its read slot taken out of the session for the step and
+    /// put back after it (`Core::group_pumps`): each record the step reads is dispatched under
+    /// the session's lock, which is let go of before it is handed out (`DirectSink`), as a
+    /// face's are. A slot whose session ended at its step is let go of, with the session let go of
+    /// too, its end left for the session to read (`Self::poll_groups`); one a read finds the
+    /// session closed after is stepped once more, which tells the group it leaves.
+    #[cfg(feature = "group")]
+    fn step_groups(&self) {
+        let mut at = 0;
+        loop {
+            let pump = {
+                let Some(mut held) = self.live() else {
+                    return;
+                };
+                let Some(slot) = held.0.group_pumps.get_mut(at) else {
+                    return;
+                };
+                slot.take()
+            };
+            let Some(mut pump) = pump else {
+                at += 1;
+                continue;
+            };
+            let ended = pump.step(&mut |records, event| {
+                DirectSink {
+                    engine: self,
+                    records,
+                }
+                .event(event);
+            });
+            DirectSink {
+                engine: self,
+                records: pump.records(),
+            }
+            .end_records();
+            let ended_pump = {
+                let Some(mut held) = self.live() else {
+                    pump.leave();
+                    return;
+                };
+                match held.0.group_pumps.get_mut(at) {
+                    Some(slot) if !ended => {
+                        *slot = Some(pump);
+                        None
+                    }
+                    _ => Some(pump),
+                }
+            };
+            drop(ended_pump);
+            at += 1;
+        }
+    }
+
+    /// Read the end of each group's session a step left, and join again each group whose time
+    /// came (`Core::poll_groups`), under the session's lock.
+    #[cfg(feature = "group")]
+    fn poll_groups(&self) {
+        if let Some(mut held) = self.live() {
+            let redial_ms = held.0.config.redial_ms;
+            held.0.poll_groups(redial_ms);
+        }
+    }
+
+    /// The open's first step of each group it joined (`Self::step_groups`), which sends the
+    /// group's first JOIN. [`OpenError::Group`] for the first group whose session ended at it:
+    /// its link did not open.
+    #[cfg(feature = "group")]
+    fn first_group_steps(&self) -> Result<(), OpenError> {
+        self.step_groups();
+        let held = self.live().ok_or(OpenError::NoEndpoint)?;
+        match held
+            .0
+            .transport
+            .groups
+            .iter()
+            .find(|group| group.has_ended())
+        {
+            Some(group) => Err(OpenError::Group(EndpointRefusal::new(
+                &group.group_join().endpoint,
+                Refusal::GroupLinkDidNotOpen,
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// One turn of the face `face`, its read slot held as `slot`, the open's and, where the dial
@@ -1672,9 +1860,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// token answering a pending liveliness get is that get's alone, handed to it as a reply is.
     /// A closed session hands nothing.
     #[cfg(feature = "liveliness")]
-    fn hand_lent_declare(
+    fn hand_lent_declare<A: RecordActions>(
         &self,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         record: &wz_session_core::driver_loop::InPlaceRecord<'_, '_>,
         event: IterationEvent<'_, '_>,
     ) {

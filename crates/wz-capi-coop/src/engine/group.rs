@@ -61,7 +61,7 @@ use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
     multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
-#[cfg(any(wz_round, feature = "connectivity"))]
+#[cfg(any(wz_round, feature = "connectivity", feature = "queryable"))]
 use wz_session_core::placed::PlacedRef;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
@@ -75,6 +75,9 @@ use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
 #[cfg(not(wz_round))]
 use wz_session_mcu::group_drive::MulticastSessionPlace;
+
+#[cfg(not(wz_round))]
+use super::direct::FaceRecords;
 #[cfg(wz_round)]
 use wz_session_mcu::group_drive::{try_spawn_multicast_session_seeded, GroupInputGate};
 use wz_session_mcu::group_drive::{
@@ -691,35 +694,43 @@ impl<W: LinkWaits> GroupFace<W> {
     }
 
     /// Join the group `joining` names, whose tables the registry holds already: the face, and the
-    /// group's session in the place its read steps it (`GroupPump`), on `runtime`'s clock. The
+    /// group's session in the place its read steps it (`GroupPump`), on `runtime`'s clock, a
+    /// member's query held in `plane` (`queryable`). The
     /// session opens the transport as its link now; one that does not open is told by the first
     /// step. The group's socket is waited on with `waits`, those of the session's stack.
     #[cfg(not(wz_round))]
     pub(super) fn join<C: ClockSource + 'static>(
         runtime: CoopRuntime<C>,
         joining: GroupJoining,
+        #[cfg(feature = "queryable")] plane: PlacedRef<super::query::QueryPlane>,
         waits: W,
     ) -> (Self, GroupPump<C>) {
         let (mut face, seed) = Self::made(joining, waits);
         let end = Rc::new(GroupEnd::default());
         face.end = Some(Rc::clone(&end));
         let reads = GroupReads {
-            face: face.face,
             members: Rc::clone(&face.members),
             keyexprs: Rc::clone(&face.keyexprs),
             join_ask: face.join_ask.clone(),
             tx: face.tx.clone(),
-            replies: MulticastReplySink::new(face.tx.clone()),
             stop: Rc::clone(&face.stop),
             end,
             #[cfg(feature = "connectivity")]
             events: Rc::clone(&face.events),
+        };
+        let records = FaceRecords {
+            face: face.face,
+            actions: MulticastReplySink::new(face.tx.clone()),
+            #[cfg(feature = "queryable")]
+            plane,
             #[cfg(feature = "queryable")]
             generation: face.generation,
+            after_pushes: false,
         };
         let pump = GroupPump {
             place: MulticastSessionPlace::new(runtime, seed),
             reads,
+            records,
         };
         (face, pump)
     }
@@ -1519,22 +1530,17 @@ pub(super) struct GroupEnd {
 }
 
 /// What the read of a group shares with the group's face: the members, the keyexpr asks, the JOIN
-/// ask, the stage and the sink of the group's replies, its stop, and where its end is left.
+/// ask, the stage, its stop, and where its end is left.
 #[cfg(not(wz_round))]
-pub(super) struct GroupReads {
-    face: HeldFace,
+struct GroupReads {
     members: Rc<RefCell<MemberRows>>,
     keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
     join_ask: JoinAsk,
     tx: GroupTxStage,
-    replies: GroupReplies,
     stop: Rc<Cell<bool>>,
     end: Rc<GroupEnd>,
     #[cfg(feature = "connectivity")]
     events: Rc<MemberEvents>,
-    /// The generation a member's query is held and answered under (`queryable`).
-    #[cfg(feature = "queryable")]
-    generation: u64,
 }
 
 /// The read slot of a group (`docs/c-abi-architecture.md` 8.8): the group's session, in the
@@ -1545,32 +1551,27 @@ pub(super) struct GroupReads {
 pub(super) struct GroupPump<C: ClockSource + 'static> {
     place: MulticastSessionPlace<C, GroupLink<Watched>, GROUP_MEMBERS>,
     reads: GroupReads,
+    /// What each record is handed out with: the group's face, the sink of its replies, and the
+    /// generation a member's query is answered under.
+    records: FaceRecords<GroupReplies>,
 }
 
 #[cfg(not(wz_round))]
 impl<C: ClockSource + 'static> GroupPump<C> {
-    /// The face the group's tables are in.
-    pub(super) fn face(&self) -> HeldFace {
-        self.reads.face
-    }
-
-    /// The sink a member's query is answered through and what the dispatch of the group's events
-    /// stages its replies on.
-    pub(super) fn replies(&self) -> &GroupReplies {
-        &self.reads.replies
-    }
-
-    /// The generation a member's query is held and answered under (`queryable`).
-    #[cfg(feature = "queryable")]
-    pub(super) fn generation(&self) -> u64 {
-        self.reads.generation
+    /// What the group's records are handed out with, which the read ends a step's records with.
+    pub(super) fn records(&mut self) -> &mut FaceRecords<GroupReplies> {
+        &mut self.records
     }
 
     /// One step of the group's session: each event it yields noted against the group (its
-    /// members, the asks of its members) and then handed to `hand`, as it is read. Whether the
-    /// session ended at this step, its end left for the session to read.
-    pub(super) fn step(&mut self, hand: &mut dyn FnMut(IterationEvent<'_, '_>)) -> bool {
+    /// members, the asks of its members) and then handed to `hand` with the group's records, as
+    /// it is read. Whether the session ended at this step, its end left for the session to read.
+    pub(super) fn step(
+        &mut self,
+        hand: &mut dyn FnMut(&mut FaceRecords<GroupReplies>, IterationEvent<'_, '_>),
+    ) -> bool {
         let reads = &self.reads;
+        let records = &mut self.records;
         let mut on_event = |event: IterationEvent<'_, '_>| {
             answer_asks(&event, &reads.keyexprs, &reads.join_ask, &reads.tx);
             note_members(
@@ -1579,7 +1580,7 @@ impl<C: ClockSource + 'static> GroupPump<C> {
                 #[cfg(feature = "connectivity")]
                 &reads.events,
             );
-            hand(event);
+            hand(&mut *records, event);
         };
         let mut should_stop = || reads.stop.get();
         // Everything the group sends is pushed onto its stage, which the face and the session
@@ -1601,7 +1602,7 @@ impl<C: ClockSource + 'static> GroupPump<C> {
     /// leaves; what that step reads is handed to no one, the session being closed.
     pub(super) fn leave(mut self) {
         self.reads.stop.set(true);
-        let _ = self.step(&mut |_event| {});
+        let _ = self.step(&mut |_records, _event| {});
     }
 }
 
