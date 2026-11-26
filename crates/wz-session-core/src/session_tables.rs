@@ -1926,6 +1926,16 @@ fn release_keyexpr<P: Storage>(
     Some(id)
 }
 
+/// The declaration the wire names by `id` and its row: the one search of the declarations by id,
+/// which every lookup that knows only the id reads.
+#[inline(never)]
+fn keyexpr_row_by_id<P: Storage>(
+    keyexprs: &Keyexprs<P>,
+    id: ExprId,
+) -> Option<(KeyexprHandle, &KeyexprRow<P::Key, P::KeyLen>)> {
+    keyexprs.iter().find(|(_, row)| row.id() == id)
+}
+
 /// Remove the entity `handle` names from `table`, and its holds of the declarations it names.
 // What the caller drops is taken out of the row here (`hand`), once for every caller, so the
 // whole row is moved no further than this.
@@ -2000,11 +2010,10 @@ impl<P: Storage> Declaring<'_, P> {
             .and_then(|own| Some((own, self.keyexprs.get(own)?.holds())));
         let named = Self::holdable(stated.or_else(|| {
             match form.retraction {
-                Retraction::Named(named) if named.mapping_id != 0 => self
-                    .keyexprs
-                    .iter()
-                    .find(|(_, row)| row.id() == named.mapping_id)
-                    .map(|(handle, row)| (handle, row.holds())),
+                Retraction::Named(named) if named.mapping_id != 0 => {
+                    keyexpr_row_by_id(&*self.keyexprs, named.mapping_id)
+                        .map(|(handle, row)| (handle, row.holds()))
+                }
                 _ => None,
             }
         }))?;
@@ -2319,17 +2328,24 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// row. Ids are minted apart from every declared one, so either way finds the same row. `None`
     /// for the id `0`, which names no declaration.
     pub fn keyexpr_at(&self, declared: KeyexprRef) -> Option<KeyexprHandle> {
+        self.keyexpr_row_at(declared).map(|(handle, _)| handle)
+    }
+
+    /// [`Self::keyexpr_at`] with the row it found: the one lookup of a declaration a holder names,
+    /// which a reader of the row's key reads it in, with no second look at the handle.
+    #[inline(never)]
+    fn keyexpr_row_at(
+        &self,
+        declared: KeyexprRef,
+    ) -> Option<(KeyexprHandle, &KeyexprRow<P::Key, P::KeyLen>)> {
         if declared.id == 0 {
             return None;
         }
-        declared
-            .row
-            .filter(|&row| {
-                self.keyexprs
-                    .get(row)
-                    .is_some_and(|kept| kept.id() == declared.id)
-            })
-            .or_else(|| self.keyexpr_by_id(declared.id))
+        let kept = declared.row.and_then(|row| {
+            let kept = self.keyexprs.get(row)?;
+            (kept.id() == declared.id).then_some((row, kept))
+        });
+        kept.or_else(|| keyexpr_row_by_id(&self.keyexprs, declared.id))
     }
 
     /// The declaration in row `row` when it declares the first bytes of `key`: its id and how many
@@ -2347,10 +2363,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// The declaration the wire names by `id`: a search of the declarations, which a holder that
     /// keeps the row it found ([`Self::keyexpr_at`]) does not make.
     pub fn keyexpr_by_id(&self, id: ExprId) -> Option<KeyexprHandle> {
-        self.keyexprs
-            .iter()
-            .find(|(_, row)| row.id() == id)
-            .map(|(handle, _)| handle)
+        keyexpr_row_by_id(&self.keyexprs, id).map(|(handle, _)| handle)
     }
 
     /// The form of an entity's key whose wire names the declaration `mapping_id` (`0` for none):
@@ -2475,7 +2488,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// that row still holds the id ([`Self::keyexpr_at`]).
     pub fn named_at<'k>(&self, key: &'k str, declared: KeyexprRef) -> Option<NamedKey<'k>> {
         let prefix = MappedId::new(declared.id).and_then(|mapped| {
-            let row = self.keyexprs.get(self.keyexpr_at(declared)?)?;
+            let (_, row) = self.keyexpr_row_at(declared)?;
             Some(Prefix::of(mapped, text(&row.key)))
         });
         NamedKey::under_or_whole(key, prefix)

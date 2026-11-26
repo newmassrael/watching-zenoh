@@ -4550,3 +4550,63 @@ fn growable_rows_stay_where_they_were_put_past_the_builds_bound() {
     assert_eq!(tables.keyexprs().len(), past + 1, "no declaration refused");
     assert_eq!(at(&tables), before, "the first row is where it was put");
 }
+
+/// A holder's reference finds a declaration by one lookup, whichever reader asks: the row it kept
+/// while that row still holds its id, else the declaration of its id, else none. A slot freed and
+/// taken by a new declaration is read as the new one only by the new id. Turned red by a lookup
+/// that takes a row whose id is another's, or that reads the key off a row other than the one it
+/// found.
+#[test]
+fn a_reference_finds_its_declaration_by_one_lookup_for_every_reader() {
+    use crate::named_key::NamedKey;
+    let mut tables = Tables::new();
+    let first = tables.declare_keyexpr("demo/a").unwrap();
+    let old = tables.declare_keyexpr("demo/k").unwrap();
+    let last = tables.declare_keyexpr("demo/z").unwrap();
+    assert_eq!(tables.retract_keyexpr(old.handle), Some(old.id));
+    let new = tables.declare_keyexpr("demo/k").unwrap();
+    assert_ne!(new.id, old.id);
+    assert_eq!(
+        new.handle.place(),
+        old.handle.place(),
+        "the freed slot is taken again"
+    );
+
+    let kept_old = KeyexprRef {
+        id: new.id,
+        row: Some(old.handle),
+    };
+    assert_eq!(
+        tables.keyexpr_at(kept_old),
+        Some(new.handle),
+        "found by its id"
+    );
+    assert_eq!(
+        tables.named_at("demo/k/x", kept_old),
+        tables.named_by("demo/k/x", new.id)
+    );
+    assert_ne!(
+        tables.named_at("demo/k/x", kept_old),
+        NamedKey::literal("demo/k/x")
+    );
+
+    let stale = KeyexprRef {
+        id: old.id,
+        row: Some(new.handle),
+    };
+    assert_eq!(tables.keyexpr_at(stale), None, "a row of another id");
+    assert_eq!(tables.keyexpr_by_id(old.id), None);
+    assert_eq!(
+        tables.named_at("demo/k/x", stale),
+        NamedKey::literal("demo/k/x")
+    );
+
+    for kept in [first, last] {
+        let at = KeyexprRef {
+            id: kept.id,
+            row: Some(kept.handle),
+        };
+        assert_eq!(tables.keyexpr_at(at), Some(kept.handle));
+        assert_eq!(tables.keyexpr_by_id(kept.id), Some(kept.handle));
+    }
+}
