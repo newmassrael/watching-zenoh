@@ -2145,15 +2145,18 @@ pub(crate) enum WalkedRecord<'r, 'f> {
 /// (`judge_push_chains`, `judge_request_chains`, `judge_response_chains`), so an
 /// extension a participant must refuse ends the walk at the same record on both
 /// forms.
-// Read by the walk tests, each of which needs records to lend.
+// Read by the walk tests, each of which needs records to lend and a heap to keep what it saw.
 #[cfg(all(
     feature = "codec-frame",
     test,
+    feature = "alloc",
     any(
         feature = "codec-push",
         all(feature = "codec-request", feature = "codec-response"),
         all(
             feature = "rx-lent-control",
+            feature = "rx-control",
+            feature = "rx-response",
             feature = "codec-declare",
             feature = "declare-final",
             feature = "codec-response-final"
