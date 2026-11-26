@@ -653,15 +653,17 @@ zenoh-pico at the same place.
 
 S3 is gone from the reading (G1). What stands past zenoh-pico is, by size: S1b's count (373.0), a
 second run of the Push's writer that pico does not make; the read thread's drop of the put's own
-datagram (235.7 against 87.0: `recvfrom` 64.0, `PosixUdpSocket::receive` 120.9, the sender's
-address read into the kernel's form 28.0); the write filter above the groups' publish (84 past
-pico's); and the two empty looks G2 and G3 take. The frame itself, the Push written once and the
+datagram (235.7 against 87.0, each own datagram paying, by function alone: the system call
+`recvfrom` 31.9 with its cancellation marks, `PosixUdpSocket::receive` 45.0 and the source read
+back into a `SocketAddr` 11.0, the wait loop of `await_member` 77.0 and the clock read to work out
+what is left of the wait 40.0); the write filter above the groups' publish (84 past pico's); and
+the two empty looks G2 and G3 take. The frame itself, the Push written once and the
 send are below pico's.
 
 | row | change | takes | files | state |
 |---|---|---|---|---|
 | G4 | the size a group's publication is pushed with worked out from its parts where no body field rides (`lent_push::publication_len`, the arithmetic of `plain_put_len` for a Put and a Del), the writer run to count it only where a field rides | S1b, 373.0 | `wz-session-core/src/lent_push.rs`, `multicast_tx.rs` | this lane |
-| P3 | the own-sender drop of the read thread made before the sender's address is put in the kernel's form: the datagram's source compared as the kernel hands it | read thread, up to 148 | `wz-runtime-posix/src/multicast.rs`, `net.rs` | design |
+| P3 | the read thread's drop of the group's own datagram made with what pico's read task pays for it: the source compared in the kernel's form against the send socket's, read once at the join, and what is left of the wait worked out without a clock reading for each own datagram, the read's deadline still kept | read thread, up to 148 | `wz-runtime-posix/src/multicast.rs`, `net.rs` | design: the deadline must hold under a stream of own datagrams |
 
 Expected after G2, G3 and G4: the put at about 2,390 against 2,555.0 (0.94), the read thread's
 148 still above pico's. T4 stays a design: the transport is erased where a stack opens a group
