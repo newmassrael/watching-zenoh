@@ -11,6 +11,15 @@
 //! door: this harness declares that it runs as many programs at once as libtest runs tests at
 //! once, and reserves that many programs' share before `main`, so before any test makes an object.
 //! The target requires the door for that (`Cargo.toml`).
+//!
+//! The count is libtest's own, read by its rule from where libtest reads it, so the share covers
+//! every test libtest runs at once whatever the run names: a share smaller than that would leave
+//! the tests started together to find a pool empty by how they fall, a result that moves with the
+//! thread count. Before `main` the command line is read from the system's own copy of it, which
+//! needs nothing of the standard library's reading, and a test holds the reservation to libtest's
+//! count read again once `main` runs.
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use wz_capi_pico::object_pool::{
     wz_ext_object_pool_bytes, wz_ext_object_pool_counts_t, wz_ext_object_pool_reserve,
@@ -18,19 +27,78 @@ use wz_capi_pico::object_pool::{
 use wz_capi_pico::Z_OK;
 use wz_session_core::caps;
 
+/// How many programs the share was reserved for, as the reservation before `main` counted them.
+static RESERVED_FOR: AtomicUsize = AtomicUsize::new(0);
+
+/// How many tests libtest runs at once, by its own rule over `args` (a command line, the
+/// program's name first), `env` (the value of `RUST_TEST_THREADS`) and `host` (the threads the
+/// host runs in parallel): the count `--test-threads` names, else the variable's, else the host's;
+/// one at least. A count that is not a positive number is passed over, as libtest runs no test
+/// with one.
+fn threads_of(args: impl IntoIterator<Item = String>, env: Option<&str>, host: usize) -> usize {
+    let positive = |count: &str| count.parse::<usize>().ok().filter(|count| *count > 0);
+    let mut args = args.into_iter();
+    let mut stated = None;
+    while let Some(arg) = args.next() {
+        let count = if arg == "--test-threads" {
+            args.next()
+        } else {
+            arg.strip_prefix("--test-threads=").map(str::to_owned)
+        };
+        if let Some(count) = count.as_deref().and_then(positive) {
+            stated = Some(count);
+            break;
+        }
+    }
+    stated
+        .or_else(|| env.and_then(positive))
+        .unwrap_or(host)
+        .max(1)
+}
+
+/// The threads the host runs in parallel, as libtest counts them when nothing names a count.
+fn host_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
+/// The command line of this process, its name first, from the kernel's copy of it: the standard
+/// library reads its own copy from a constructor the loader orders against this harness's only on
+/// some systems, and not at all before `main` on others. A kernel that shows none leaves the
+/// standard library's.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn command_line() -> Vec<String> {
+    match std::fs::read("/proc/self/cmdline") {
+        Ok(line) => line
+            .split(|byte| *byte == 0)
+            .map(|arg| String::from_utf8_lossy(arg).into_owned())
+            .collect(),
+        Err(_) => std_command_line(),
+    }
+}
+
+/// The command line of this process, its name first, as the standard library reads it from the
+/// system on each call (`GetCommandLineW` on Windows, `_NSGetArgv` on Apple's systems), before
+/// `main` as after it.
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn command_line() -> Vec<String> {
+    std_command_line()
+}
+
+/// The command line as the standard library holds it.
+fn std_command_line() -> Vec<String> {
+    std::env::args_os()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect()
+}
+
 /// How many programs this executable runs at once, which is the harness's declaration of how
-/// many share the process: the larger of `RUST_TEST_THREADS` and the threads the host runs in
-/// parallel, libtest's own count when its command line names none; one at least. Read before
-/// `main`, where the loader's order of constructors does not promise that the standard library
-/// has read the command line, so a `--test-threads` past this runs more programs than are
-/// reserved for, and a test past the share is refused as out of memory.
+/// many share the process: as many as libtest runs tests at once, read before `main`.
 fn programs() -> usize {
-    let stated = std::env::var("RUST_TEST_THREADS")
-        .ok()
-        .and_then(|count| count.parse::<usize>().ok())
-        .unwrap_or(0);
-    let host = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
-    stated.max(host).max(1)
+    threads_of(
+        command_line(),
+        std::env::var("RUST_TEST_THREADS").ok().as_deref(),
+        host_threads(),
+    )
 }
 
 /// The counts of `programs` programs, each holding what the build reserves for one: its
@@ -69,13 +137,15 @@ fn share(programs: usize) -> wz_ext_object_pool_counts_t {
 /// Reserve the share of the programs this executable runs at once. A refusal leaves every test
 /// to fail on a pool it does not find, so it ends the process before any runs, with the code.
 extern "C" fn reserve_the_programs_share() {
-    let counts = share(programs());
+    let programs = programs();
+    let counts = share(programs);
     // SAFETY: `counts` is a live struct of this build's size, `struct_size` first.
     let code = unsafe { wz_ext_object_pool_reserve(&counts) };
     if code != Z_OK {
         eprintln!("the test harness could not reserve the share of its programs: {code}");
         std::process::abort();
     }
+    RESERVED_FOR.store(programs, Ordering::Relaxed);
 }
 
 // Run by the loader before `main`, as the platform's C runtime runs its constructors.
@@ -155,4 +225,54 @@ fn the_share_is_one_programs_held_values_times_the_programs() {
     let code = unsafe { wz_ext_object_pool_bytes(&share(programs()), &mut bytes) };
     assert_eq!(code, Z_OK);
     assert!(bytes > 0);
+}
+
+/// The count is read as libtest reads it: `--test-threads` in either spelling first, then
+/// `RUST_TEST_THREADS`, then the host's threads, a count that is not positive passed over, one at
+/// least. Turned red by a reading that leaves the command line out, or that takes the larger of the
+/// variable and the host's count in place of the variable alone.
+#[test]
+fn the_program_count_is_read_as_libtest_reads_it() {
+    let line = |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
+    assert_eq!(
+        threads_of(line(&["it", "--test-threads=3"]), Some("7"), 5),
+        3,
+        "the command line first"
+    );
+    assert_eq!(
+        threads_of(line(&["it", "--test-threads", "40", "files::"]), None, 5),
+        40,
+        "in its spaced spelling, past the host's count"
+    );
+    assert_eq!(
+        threads_of(line(&["it", "files::"]), Some("2"), 5),
+        2,
+        "then the variable, below the host's count"
+    );
+    assert_eq!(threads_of(line(&["it"]), None, 5), 5, "then the host's");
+    assert_eq!(
+        threads_of(line(&["it", "--test-threads=0"]), Some("none"), 6),
+        6,
+        "a count that is not positive is passed over"
+    );
+    assert_eq!(
+        threads_of(line(&["it", "--test-threads-x=9"]), None, 2),
+        2,
+        "no other flag names the count"
+    );
+    assert_eq!(threads_of(line(&["it"]), None, 0), 1, "one at least");
+}
+
+/// The share was reserved before `main` for as many programs as libtest runs at once, its count
+/// read again from the command line the standard library holds once `main` runs. Turned red by a
+/// reading before `main` that leaves the command line out, in a run that names a
+/// `--test-threads` other than the host's count.
+#[test]
+fn the_share_is_reserved_for_as_many_programs_as_libtest_runs_at_once() {
+    let libtest = threads_of(
+        std::env::args(),
+        std::env::var("RUST_TEST_THREADS").ok().as_deref(),
+        host_threads(),
+    );
+    assert_eq!(RESERVED_FOR.load(Ordering::Relaxed), libtest);
 }
