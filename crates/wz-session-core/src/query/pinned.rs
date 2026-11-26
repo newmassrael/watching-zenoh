@@ -20,6 +20,9 @@
 //! (`QueryPeer::pin_request`), what the Request does not hold itself (a key composed past the
 //! bounded buffer, a value read out of shared memory, the shared ranges of the frame) kept in a
 //! [`QueryRoom`] of the read's frame.
+//!
+//! [`PinnedQuery`]: crate::query::pinned::PinnedQuery
+//! [`QueryRoom`]: crate::query::pinned::QueryRoom
 
 use crate::keyexpr_match::KeyFacts;
 use crate::query_mode::QueryTarget;

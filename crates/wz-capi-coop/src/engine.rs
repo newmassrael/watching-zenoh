@@ -1931,8 +1931,8 @@ enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 unsafe impl<T> Send for Confined<T> {}
 
 /// The network stacks an engine opens its links over: those that serve sessions whose handles are
-/// counted as [`SessionLock`] counts a link's parts ([`LinkCount`]), so the form's choice of lock
-/// reaches every stack the engine is built over.
+/// counted as the engine's `SessionLock` counts a link's parts ([`LinkCount`]), so the form's
+/// choice of lock reaches every stack the engine is built over.
 pub trait CoopLinks: SessionLinks<LinkCount> {}
 
 impl<L: SessionLinks<LinkCount> + ?Sized> CoopLinks for L {}

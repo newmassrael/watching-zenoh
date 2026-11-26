@@ -72,18 +72,18 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the tables that keep their keys in it. A
-//!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
-//!   declaration its heap cannot hold;
+//!   ([`wz_session_core::key_arena::KeySpace`]), lent after the record and before the tables
+//!   that keep their keys in it. A peer's key that finds no room there is dropped and counted, as
+//!   zenoh-pico drops a declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
 //!   and the places it keeps its objects of the session's entities in, one for each row the
 //!   session keeps of each kind it names ([`HeldPlaces`]), so what the ABI holds of a session is
 //!   reserved with the session, sized by the session's own limits, and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
-//! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
-//! ([`Quota::lent_under`]): a stage after the build chooses within the memory the build fixes and
-//! never adds to it, so a value over the build's refuses the open.
+//! ([`wz_session_core::bounded::Lent`]), and its count the value of its limit the open resolved,
+//! under the build's value ([`Quota::lent_under`]): a stage after the build chooses within the
+//! memory the build fixes and never adds to it, so a value over the build's refuses the open.
 //!
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
 //! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them

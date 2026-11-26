@@ -18,6 +18,11 @@
 //! ([`SessionLinks::begin_initiator`]), and a listener takes one invitation at a time, as
 //! upstream's does, and gives up on one its dialer does not confirm within
 //! [`HANDSHAKE_TIMEOUT_US`], which upstream's listener has no bound for.
+//!
+//! [`FifoOpen`]: crate::unixpipe_link::FifoOpen
+//! [`HANDSHAKE_TIMEOUT_US`]: crate::unixpipe_link::HANDSHAKE_TIMEOUT_US
+//! [`PipeStream`]: crate::unixpipe_link::PipeStream
+//! [`SessionLinks::begin_initiator`]: crate::session_drive::SessionLinks::begin_initiator
 
 use alloc::boxed::Box;
 use alloc::format;

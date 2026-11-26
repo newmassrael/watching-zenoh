@@ -100,6 +100,10 @@
 //! that is not mandatory and has no body rule, such as a Push's QoS) with no call, and the
 //! verdict on a chain whose every entry reads (`judge_end`), which a caller that names its
 //! carrier as a constant reads as a constant.
+//!
+//! [`judge_ext_entries`]: crate::ext_admit::judge_ext_entries
+//! [`judge_ext_chain`]: crate::ext_admit::judge_ext_chain
+//! [`ExtAdmission::MalformedExt`]: crate::ext_admit::ExtAdmission::MalformedExt
 
 use crate::ext_header::{ext_eid, EXT_ENC_MASK, EXT_FLAG_M};
 use wz_codecs::wire_const;

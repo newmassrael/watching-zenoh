@@ -13,6 +13,14 @@
 //! ([`RethLocator::frame_budget`]). What this module adds is the device, the host's raw socket on
 //! the endpoint's interface ([`RawEthOpen`], [`RawEthDevice`]), and the joiner that opens it for
 //! a `reth/` group and hands every other group to the joiner it wraps ([`RawethJoiner`]).
+//!
+//! [`GroupTransport`]: crate::group_transport::GroupTransport
+//! [`RawEthOpen`]: crate::raweth_group::RawEthOpen
+//! [`RawEthDevice`]: crate::raweth_group::RawEthDevice
+//! [`RawethJoiner`]: crate::raweth_group::RawethJoiner
+//! [`RethLocator::admit`]: wz_session_core::raweth_link::RethLocator::admit
+//! [`RethLocator::frame_budget`]: wz_session_core::raweth_link::RethLocator::frame_budget
+//! [`RethRoutes`]: wz_session_core::raweth_link::RethRoutes
 
 use alloc::boxed::Box;
 use core::net::SocketAddr;

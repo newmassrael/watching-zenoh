@@ -36,6 +36,7 @@
 //! threads asks of the cells its shared handles are placed in.
 //!
 //! [`LentByteCells`]: crate::byte_cells::LentByteCells
+//! [`CellFlag`]: crate::byte_cells::CellFlag
 
 use core::cell::{Cell, UnsafeCell};
 use core::ptr::NonNull;
