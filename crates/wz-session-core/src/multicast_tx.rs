@@ -1652,6 +1652,45 @@ pub fn multicast_tx_bytes(item: &MulticastTxItem) -> usize {
     }
 }
 
+/// How many datagrams a push of `item` can take on a group of `params`, never fewer than it
+/// takes: one for a message that fits one frame, its fragment count for one that does not,
+/// measured over the body the push encodes and the frame budget it cuts by
+/// ([`chain_frames`](crate::frame_encode::chain_frames)). Without `transport-fragmentation` no
+/// message is cut, so every message counts one. What a sender that reserves the room of a whole
+/// chain on a group's lanes before it pushes asks for, as the unicast send asks its link for the
+/// room of every frame of a chain.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_frames(
+    item: &MulticastTxItem,
+    params: &crate::multicast_params::MulticastParams,
+) -> usize {
+    #[cfg(feature = "transport-fragmentation")]
+    {
+        multicast_tx_item_body(item, |encode| {
+            #[cfg(feature = "transport-tx-lend")]
+            let body_len = crate::tx_buf::try_encoded_len(encode);
+            #[cfg(not(feature = "transport-tx-lend"))]
+            let body_len = {
+                let mut buf = Vec::new();
+                let written = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut buf);
+                    encode(&mut sink)
+                };
+                written.map(|()| buf.len())
+            };
+            // A body the codec cannot write is refused by the push itself; one frame is asked.
+            body_len.map_or(1, |len| {
+                crate::frame_encode::chain_frames(len, params.frame_budget())
+            })
+        })
+    }
+    #[cfg(not(feature = "transport-fragmentation"))]
+    {
+        let _ = (item, params);
+        1
+    }
+}
+
 /// The bound of a multicast group's outbound queue, lane by lane, and zenoh's congestion mark on
 /// each lane: the lanes the tokio engine's group pipeline is shaped into, kept for a queue whose
 /// producers and writer take turns on one thread (the cooperative engine's group).
@@ -3001,6 +3040,49 @@ mod push_tests {
             reliable,
             priority: Priority::DEFAULT,
         }
+    }
+
+    /// What a sender that reserves the room of a whole chain on a group asks for: one datagram
+    /// for a message that fits a frame, and for one past the group's batch no fewer datagrams
+    /// than its push puts on the queue or asks room for. Turned red by a count of one for every
+    /// message, which leaves each fragment after the first to ask for room no reservation holds.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_push_is_counted_no_fewer_datagrams_than_it_puts_on_the_queue() {
+        assert_eq!(multicast_tx_frames(&put(true, b"x"), &params(2_048)), 1);
+
+        let narrow = params(64);
+        let item = put(true, &[0x5a; 400]);
+        let counted = multicast_tx_frames(&item, &narrow);
+        let mut queue = Scripted::default();
+        let mut tx_sn = MulticastTxConduits::new(mask_from_res(narrow.seq_num_res));
+        assert_eq!(
+            multicast_tx_push(item, &mut tx_sn, &narrow, &narrow.tx_queue, &mut queue),
+            PushOutcome::Pushed
+        );
+        let pushed = queue.enqueued.len();
+        assert!(
+            pushed >= 2,
+            "400 bytes at a batch of 64 is a chain: {pushed}"
+        );
+        assert!(counted >= pushed, "counted {counted}, pushed {pushed}");
+        assert!(
+            counted >= queue.asks.len(),
+            "counted {counted}, asked {}",
+            queue.asks.len()
+        );
+    }
+
+    /// A build that cuts no chain sends every message as one frame, so one datagram is all a
+    /// reservation of it holds, however long the message.
+    #[cfg(not(feature = "transport-fragmentation"))]
+    #[test]
+    fn without_fragmentation_every_push_is_counted_one_datagram() {
+        assert_eq!(multicast_tx_frames(&put(true, b"x"), &params(2_048)), 1);
+        assert_eq!(
+            multicast_tx_frames(&put(true, &[0x5a; 400]), &params(64)),
+            1
+        );
     }
 
     /// A lane lets messages on while it holds less than its bound, `sizes` batches of the group's
