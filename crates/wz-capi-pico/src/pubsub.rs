@@ -380,6 +380,8 @@ impl SampleMarshal {
     }
 
     /// The loaned view of the sample's attachment, null when it carried none.
+    // Out of line: its door and `Self::bind_views` share this one body of the view's write.
+    #[inline(never)]
     fn attachment_view(&self) -> *const z_loaned_bytes_t {
         let Some(attachment) = self.parts().attachment else {
             return core::ptr::null();
@@ -395,6 +397,8 @@ impl SampleMarshal {
     }
 
     /// The loaned view of the sample's encoding, null when it carried none.
+    // Out of line: its door and `Self::bind_views` share this one body of the view's write.
+    #[inline(never)]
     fn encoding_view(&self) -> *const crate::encoding::z_loaned_encoding_t {
         let Some((packed_id, schema)) = self.parts().encoding else {
             return core::ptr::null();
@@ -413,6 +417,8 @@ impl SampleMarshal {
     }
 
     /// The sample's timestamp, null when it carried none or is not shown.
+    // Out of line: its door and `Self::bind_views` share this one body of the view's write.
+    #[inline(never)]
     fn timestamp_view(&self) -> *const z_timestamp_t {
         let Some((time, zid)) = self.timestamp_parts() else {
             return core::ptr::null();
