@@ -50,9 +50,9 @@ the group arm is read as the unicast one is:
 
 | cell | wz (W) | zenoh-pico (P) | source |
 |---|---:|---:|---|
-| M1 receive, Ir per message | 5,548.2 | 3,531.0 | subprofile, callgrind (third reading, section 1.2) |
-| M2 send, Ir per put | 5,830.3 | 2,554.8 | opprofile put (third reading; net of the paced loop 5,664.9 against 2,389.6) |
-| M3 receive, system calls per message by kind | `recvfrom` 1.18 (0.18 of them `EAGAIN`), `poll` 0.18 | `recvfrom` 1.01 | subprofile, strace (third reading) |
+| M1 receive, Ir per message | 4,808.0 | 3,531.9 | subprofile, callgrind (fourth reading, section 1.2) |
+| M2 send, Ir per put | 3,814.5 | 2,554.8 | opprofile put (fourth reading; net of the paced loop 3,650.3 against 2,390.2) |
+| M3 receive, system calls per message by kind | strace: `recvfrom` 1.00, no `poll`; callgrind: 2.06 `recvfrom` calls a message (the datagram, then one that finds none) | `recvfrom` 1.00 | subprofile, strace and callgrind (fourth reading) |
 | M4 send, functions per put | section 7.7 | section 7.7 | opprofile put |
 | M5 receive, functions per message | section 7.6 | section 7.6 | subprofile, callgrind |
 
@@ -82,6 +82,9 @@ message and 608.3 a put, which R4 and T3 are the changes between, and section 7 
 The third reading (the lane's tip `0247f2e81`, the same arm) reads M1 at 5,548.2 against 3,531.0
 (1.57) and M2 at 5,830.3 against 2,554.8 (2.28): D3 to D6 and D8 took 2,432.6 a received message,
 and the put did not move. Sections 7.6 and 7.7 read the two by function.
+The fourth reading (the lane's tip `88710f3c2`, the same arm) reads M1 at 4,808.0 against 3,531.9
+(1.36) and M2 at 3,814.5 against 2,554.8 (1.49): D7a, D7b, P1 and D9 took 740.2 a received message
+and 2,015.8 a put. Section 7.9 reads the two by function.
 
 The rows that reach the receive path's executor turn and system calls (R1, R2, R3) and T4 rest
 on the round-5a lane's rewrite of `engine/group.rs`, `group_drive.rs` and the engine's read,
@@ -471,13 +474,51 @@ where the concrete type belongs.
 
 | row | change | takes | files | state |
 |---|---|---|---|---|
-| D7a | the group's transport split: its send half in the link cell the face shares, its receive half held by the pump alone | what lets D7b let the session's lock go around a blocking receive | `wz-runtime-coop/src/group_transport.rs`, `wz-runtime-posix/src/multicast.rs`, `group_drive/stage.rs`, `engine/group.rs`, every joiner | design |
-| D7b | the read of a threads build blocks in the group's receive half when the group is its only input and the stage holds nothing, the lock let go around the system call, each receive bounded by what is left of the read's deadline | receive: the wait 689.4, the face turn 698.7, the step's own 692.9 and the empty receive, once a deadline instead of once a datagram | `engine/direct.rs`, `group_drive.rs`, `wz-runtime-posix/src/multicast.rs`, `net.rs` | after D7a |
-| P1 | the own-sender drop of D7b's receive goes on to the next datagram within the bound | put: 2,163.4 of the read thread | `wz-runtime-posix/src/multicast.rs` | with D7b |
-| D9 | the record each datagram dispatches beside its Push (section 7.6, item 2) named, and dispatched where it writes no face's tables without `split`'s count, so the ledger is not owed and the matching listeners not read again by it | receive: that dispatch, 390.0, and the face turn's bookkeeping (`read_matching` 60.9, the sweeps, the settle) | `engine/direct.rs`, `engine/registry.rs`, `wz-session-core/src/multicast_rx.rs` | the record to name first |
-| P2 | a put of a session with no face whose link is up goes to the groups' leg alone | put: about 750 of the calling thread | `engine.rs`, `engine/direct.rs` | design |
+| D7a | the group's transport split: its send half in the link cell the face shares, its receive half held by the pump alone | what lets D7b let the session's lock go around a blocking receive | `wz-runtime-coop/src/group_transport.rs`, `wz-runtime-posix/src/multicast.rs`, `group_drive/stage.rs`, `engine/group.rs`, every joiner | this lane (`3b4384cc6`) |
+| D7b | the read of a threads build blocks in the group's receive half when the group is its only input and the stage holds nothing, the lock let go around the system call, each receive bounded by what is left of the read's deadline | receive: the wait 689.4, the face turn 698.7, the step's own 692.9 and the empty receive, once a deadline instead of once a datagram | `engine/direct.rs`, `group_drive.rs`, `wz-runtime-posix/src/multicast.rs`, `net.rs` | this lane (`88710f3c2`); its reads made once a deadline by D10 |
+| P1 | the own-sender drop of D7b's receive goes on to the next datagram within the bound | put: 2,163.4 of the read thread | `wz-runtime-posix/src/multicast.rs` | this lane (`88710f3c2`) |
+| D9 | the record each datagram dispatches beside its Push (section 7.6, item 2) named, and dispatched where it writes no face's tables without `split`'s count, so the ledger is not owed and the matching listeners not read again by it | receive: that dispatch, 390.0, and the face turn's bookkeeping (`read_matching` 60.9, the sweeps, the settle) | `engine/direct.rs`, `engine/registry.rs`, `wz-session-core/src/multicast_rx.rs` | this lane (`e46da4fcf`: the member a walk names ahead of each datagram's records) |
+| D10 | a waiting read reads its group to the read's deadline: a datagram a step, each waited for in the receive half from the reading after the last, the read's turn taken again only at the deadline, at a wait that kept nothing, or where the read owes the session its bookkeeping or a job (`read_awaited`) | receive: the read's layers once a datagram, 1,276 (section 7.9) | `engine/group.rs`, `engine/direct.rs`, `wz-runtime-coop/src/group_transport.rs`, `wz-runtime-posix/src/multicast.rs` | this lane |
+| P2 | the groups' leg of a put made without the faces' work: no try of a face's send place that holds no parts, no `send_on_links`, and no `leg_of` lookup of the key in the session's tables, of which the groups' leg reads only the `SendAs` | put: about 420 of the calling thread (section 7.9) | `engine.rs` (`fan_out_in`, `leg_of`), `engine/direct.rs` (`on_faces`) | design: what a key `named_at` refuses must stay refused on the groups' leg |
 | T4 | the concrete transport, named by the receive half's type | tens of Ir a message | as section 7.4 | after D7a |
 
 By the counts above, D7a, D7b and P1 bring the receive within zenoh-pico's and the put's read
 thread to its; the put's calling thread then stands at about 2,830 against 2,468 with P2, and the
 groups' leg (section 2's S1 to S4) is what is left to take for the put's 1.0.
+
+### 7.9 The fourth reading, function by function
+
+The receive (12,473 reads for 12,000 messages, so still one read a datagram):
+
+| layer (wz) | function | Ir per message | the layer alone |
+|---|---|---:|---:|
+| the read thread | `wz_host_sync::unix::entry` | 4,808.5 | 262.1 |
+| the read task's read, its delivery | `run_body` of `start_read_task` | 4,546.4 | 75.2 |
+| the wait's deadlines gathered, no `poll` made | `CoopEngine::link_wait` | 549.6 | 549.6 |
+| the dial role's face, at rest, turned for the bookkeeping | `CoopEngine::face_turn` | 389.9 | 389.9 |
+| the groups' step: the wait in the receive, the pump out of its place and back | `CoopEngine::step_groups` | 3,531.7 | 746.9 |
+| the pump's step outside its receives | `GroupPump::step` | 2,784.8 | 313.8 |
+| the receive half: the kept datagram, then a receive that finds none | `HostGroupReceive::recv_with` | 2,471.0 | 221.0 |
+| the walk: the member, the SN gate, the frame, the records | `MulticastPump::step_reading`'s receive closure | 2,250.0 | 2,250.0 |
+
+The walk is below zenoh-pico's handling of the transport message (2,692.0). The excess of 1,276.1
+is, to within a unit, what a read costs and a datagram pays, since D7b's wait returns to the read after the one
+datagram it kept: the read thread's and task's own 337.3, the deadlines gathered 549.6, the face
+turn 389.9. Inside the groups' step a datagram pays the wait in the receive (309.4 with its
+blocking `recvfrom`), the pump moved out of its place and back (93.5, 37,419 `memcpy` calls), the
+registry's settle (49.9) and two takes of the session (46.2), and the step's receive after the kept
+datagram, which finds none (24,483 receives for 12,000 datagrams). D10 reads the group to the
+read's deadline in the one read: each datagram is waited for in the receive and stepped alone, so
+none is followed by a receive that finds none, and the read's own layers and the pump's move are
+paid once a deadline, with one take of the session a datagram to ask whether the read is owed its
+turn. Expected where the reader keeps up: the walk, the step's own part, one blocking `recvfrom`
+and one clock reading a datagram, about 3,350 against zenoh-pico's 3,531.9.
+
+The put (the calling thread `op_put` 3,418.0 against zenoh-pico's 2,306.0; the read thread 234.7
+against 87.0, which P1 took from 2,250.4): `publish_to_link` 2,714.0 holds the groups' leg
+(`publish_to_groups` 1,961.0) and around it work for the faces: `try_leg` of the two faces'
+send places, each holding no parts (136.0), the key looked up in the session's tables
+(`leg_of` 233.0), of which the groups' leg reads only the `SendAs`, `send_on_links` over no
+link that is up (48.0), `live_to_publish` (37.0) and the run's marks. The write filter before it
+(`PublisherState::publish` 3,250.0 against `publish_everywhere` 2,750.0) is 500.0. What stays
+past those is the groups' leg against zenoh-pico's `_z_write` 1,670.0, section 2's S1 to S4.
