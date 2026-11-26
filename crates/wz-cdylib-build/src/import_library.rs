@@ -112,9 +112,9 @@ fn short_import(machine: Machine, symbol: &str, dll: &str) -> Vec<u8> {
 /// An archive member's header: name, date, owner, group, mode and size, space-padded.
 fn member_header(out: &mut Vec<u8>, name: &str, size: usize) {
     let mut text = String::with_capacity(60);
-    write!(
+    writeln!(
         text,
-        "{name:<16}{:<12}{:<6}{:<6}{:<8}{size:<10}`\n",
+        "{name:<16}{:<12}{:<6}{:<6}{:<8}{size:<10}`",
         0, 0, 0, 644
     )
     .expect("a string");
