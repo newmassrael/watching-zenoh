@@ -3741,6 +3741,9 @@ mod get;
 // Each member is stepped by its read task.
 #[cfg(all(feature = "group", feature = "app-transport", feature = "threads"))]
 mod group;
+// A full group's stage, in both forms of the engine's calls.
+#[cfg(all(feature = "group", feature = "app-transport"))]
+mod group_congested;
 #[cfg(all(feature = "group", feature = "app-transport"))]
 mod group_stack;
 mod held_keys;
