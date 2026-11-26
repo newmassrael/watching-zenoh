@@ -8250,6 +8250,23 @@
         "audit each newly declared lane with lane_input_closure --run (strace) for an input the declaration misses.",
         "the reader still misses three build shapes: a cargo path argv, a printed argv run by the shell, cargo-mutants."
       ]
+    },
+    "Round 4676": {
+      "decision_summary": "A bounded peer space's reads no longer carry the heap arms a bounded policy\ncan never make: the storage policy names its heap form, uninhabited for the\nbounded policies, so those arms compile out. Measured about -400 B on the\npico client build. The win budget now reads each area of the pico preset\nagainst the zenoh-pico functions that do the same work.",
+      "changes_bullets": [
+        "session-core: Storage::HeapForm; the Map and Ours arms of a peer space exist only under the heap policy.",
+        "docs/win-budget/size.md: per-area table against zenoh-pico and the next designs (doors, sessions, transport)."
+      ],
+      "verification_bullets": [
+        "size ledger check passes; area sum 660 B below main3f90 (size-5's 257 included).",
+        "wz-session-core heap form and wireexpr_resolve tests; nondefault-features clean; citation anchors pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "doors: compose each door from one request read and one out-of-line engine body (about 10,100 B vs zenoh-pico 1,300 B)."
+      ]
     }
   },
   "inventory_entries": {
