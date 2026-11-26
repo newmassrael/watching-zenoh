@@ -344,11 +344,12 @@ enum Round {
     MessagePayload,
     SharedKeyIds,
     LinkUdp,
+    TimeBaseAdvanced,
 }
 
 impl Round {
     /// Every round, in the order they are counted.
-    const ALL: [Round; 34] = [
+    const ALL: [Round; 35] = [
         Round::Idle,
         Round::PublisherDeclare,
         Round::PutSmall,
@@ -383,6 +384,7 @@ impl Round {
         Round::MessagePayload,
         Round::SharedKeyIds,
         Round::LinkUdp,
+        Round::TimeBaseAdvanced,
     ];
 
     /// The stage whose pair the round calls through.
@@ -391,6 +393,7 @@ impl Round {
             Round::GroupReceive => Stage::Group,
             Round::SharedKeyIds => Stage::SharedKeyIds,
             Round::LinkUdp => Stage::Udp,
+            Round::TimeBaseAdvanced => Stage::TimeBase,
             _ => Stage::Pipe,
         }
     }
@@ -420,6 +423,7 @@ impl Round {
             Round::MessagePayload => cfg!(feature = "message-payload"),
             Round::SharedKeyIds => cfg!(feature = "shared-key-ids"),
             Round::LinkUdp => cfg!(all(feature = "link-udp", feature = "peer")),
+            Round::TimeBaseAdvanced => cfg!(feature = "time-base"),
             Round::InstanceKey => {
                 cfg!(all(
                     feature = "instance-key",
@@ -457,7 +461,7 @@ enum Part {
 }
 
 /// The operation families the gate holds, each named as `deploy/no_heap_ratchet.json` names it.
-const FAMILIES: [(&str, Round, Part); 38] = [
+const FAMILIES: [(&str, Round, Part); 39] = [
     ("idle", Round::Idle, Part::All),
     ("publisher-declare", Round::PublisherDeclare, Part::All),
     ("put-small", Round::PutSmall, Part::Calling),
@@ -525,6 +529,9 @@ const FAMILIES: [(&str, Round, Part); 38] = [
     ("shared-key-ids", Round::SharedKeyIds, Part::All),
     // A put over a unicast UDP link of the host's sockets and its delivery to the listener.
     ("link-udp", Round::LinkUdp, Part::All),
+    // The program's word that its time moved on, to two sessions on its time base, and what their
+    // read tasks do when it wakes them.
+    ("time-base-advanced", Round::TimeBaseAdvanced, Part::All),
 ];
 
 /// The allocations and bytes of `part` of what a window saw.
@@ -1594,7 +1601,10 @@ impl Bench {
                 self.put_and_hear(&mut bytes);
             }
             Round::Get => self.get_and_reply(),
-            Round::GroupReceive | Round::SharedKeyIds | Round::LinkUdp => {
+            Round::GroupReceive
+            | Round::SharedKeyIds
+            | Round::LinkUdp
+            | Round::TimeBaseAdvanced => {
                 unreachable!("{round:?} runs on its own stage's pair")
             }
             Round::KeyexprDeclare => self.keyexpr_declare(),
@@ -2386,11 +2396,19 @@ enum Stage {
     SharedKeyIds,
     /// Two sessions over the host's UDP sockets on the loopback.
     Udp,
+    /// Two sessions over the program's pipe whose timers run on a time base the program supplies.
+    TimeBase,
 }
 
 impl Stage {
     /// Every stage, in the order its pair is opened.
-    const ALL: [Stage; 4] = [Stage::Pipe, Stage::Group, Stage::SharedKeyIds, Stage::Udp];
+    const ALL: [Stage; 5] = [
+        Stage::Pipe,
+        Stage::Group,
+        Stage::SharedKeyIds,
+        Stage::Udp,
+        Stage::TimeBase,
+    ];
 
     /// The stage's pair, open; `None` in a build without the stage's capability, whose rounds are
     /// then all unbuilt.
@@ -2427,6 +2445,16 @@ impl Stage {
                     None
                 }
             }
+            Stage::TimeBase => {
+                #[cfg(feature = "time-base")]
+                {
+                    Some(Open::TimeBase(TimeBasePair::open()))
+                }
+                #[cfg(not(feature = "time-base"))]
+                {
+                    None
+                }
+            }
         }
     }
 }
@@ -2440,6 +2468,8 @@ enum Open {
     SharedKeyIds(Pair),
     #[cfg(all(feature = "link-udp", feature = "peer"))]
     Udp(UdpPair),
+    #[cfg(feature = "time-base")]
+    TimeBase(TimeBasePair),
 }
 
 impl Open {
@@ -2453,6 +2483,8 @@ impl Open {
             Open::SharedKeyIds(pair) => pair_put_and_hear(pair),
             #[cfg(all(feature = "link-udp", feature = "peer"))]
             Open::Udp(pair) => pair.put_and_hear(),
+            #[cfg(feature = "time-base")]
+            Open::TimeBase(pair) => pair.advance(),
         }
     }
 
@@ -2472,6 +2504,8 @@ impl Open {
             Open::SharedKeyIds(pair) => pair.close(),
             #[cfg(all(feature = "link-udp", feature = "peer"))]
             Open::Udp(pair) => pair.close(),
+            #[cfg(feature = "time-base")]
+            Open::TimeBase(pair) => pair.close(),
         }
     }
 }
@@ -2647,6 +2681,100 @@ impl UdpPair {
         wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
         pipe_pair::close(listener);
         (closures_dropped(&counts), true)
+    }
+}
+
+/// The program's time the time base pair's sessions run on, in nanoseconds: it moves only when a
+/// round of the `time-base-advanced` family moves it.
+#[cfg(feature = "time-base")]
+static PROGRAM_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// How far a round moves the program's time: far short of every deadline of the sessions (their
+/// lease, their keep-alive), so a round is the word alone and the read tasks' turns it wakes.
+#[cfg(feature = "time-base")]
+const PROGRAM_STEP_NS: u64 = 1_000;
+
+/// The time base the time base pair's configs are given while the pair opens; null otherwise.
+#[cfg(feature = "time-base")]
+static PAIR_TIME_BASE: std::sync::atomic::AtomicPtr<
+    wz_capi_pico::time_base::wz_ext_owned_time_base_t,
+> = std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+/// The program's read of its time.
+#[cfg(feature = "time-base")]
+unsafe extern "C" fn program_now_ns(_context: *mut std::ffi::c_void) -> u64 {
+    PROGRAM_NS.load(Ordering::SeqCst)
+}
+
+/// Hand a config of the time base pair the time base the pair holds.
+#[cfg(feature = "time-base")]
+unsafe fn on_the_pairs_time_base(config: &mut wz_capi_pico::z_owned_config_t) {
+    use wz_capi_pico::time_base::{wz_ext_config_time_base, wz_ext_time_base_loan};
+    let time_base = PAIR_TIME_BASE.load(Ordering::SeqCst);
+    assert!(!time_base.is_null(), "the pair's time base is made first");
+    assert_eq!(
+        wz_ext_config_time_base(
+            wz_capi_pico::z_config_loan_mut(config),
+            wz_ext_time_base_loan(time_base)
+        ),
+        Z_OK,
+        "the config takes the time base"
+    );
+}
+
+/// Two sessions over the program's pipe whose configs name one time base the program supplies, so
+/// each holds a watch of it, and the time base itself.
+#[cfg(feature = "time-base")]
+struct TimeBasePair {
+    pair: Pair,
+    time_base: Box<wz_capi_pico::time_base::wz_ext_owned_time_base_t>,
+}
+
+#[cfg(feature = "time-base")]
+impl TimeBasePair {
+    /// The time base, and the pair opened on it with its route made.
+    unsafe fn open() -> Self {
+        use wz_capi_pico::time_base::{
+            wz_ext_owned_time_base_t, wz_ext_time_base_new, wz_ext_time_base_t,
+        };
+        let mut time_base: Box<wz_ext_owned_time_base_t> = Box::new(std::mem::zeroed());
+        let calls = wz_ext_time_base_t {
+            context: std::ptr::null_mut(),
+            now_ns: Some(program_now_ns),
+            drop: None,
+        };
+        assert_eq!(
+            wz_ext_time_base_new(&mut *time_base, &calls),
+            Z_OK,
+            "the program's time base is made"
+        );
+        PAIR_TIME_BASE.store(&mut *time_base, Ordering::SeqCst);
+        let pair = Pair::open_shaped(true, on_the_pairs_time_base);
+        PAIR_TIME_BASE.store(std::ptr::null_mut(), Ordering::SeqCst);
+        Self { pair, time_base }
+    }
+
+    /// One round: the program's time moves on and the program says so.
+    unsafe fn advance(&self) {
+        use wz_capi_pico::time_base::{wz_ext_time_base_advanced, wz_ext_time_base_loan};
+        PROGRAM_NS.fetch_add(PROGRAM_STEP_NS, Ordering::SeqCst);
+        assert_eq!(
+            wz_ext_time_base_advanced(wz_ext_time_base_loan(&*self.time_base)),
+            Z_OK,
+            "the word is taken"
+        );
+    }
+
+    /// Close the pair, then let the program's time base go.
+    unsafe fn close(self) -> (bool, bool) {
+        use wz_capi_pico::time_base::{wz_ext_time_base_drop, wz_ext_time_base_move};
+        let Self {
+            pair,
+            mut time_base,
+        } = self;
+        let closed = pair.close();
+        wz_ext_time_base_drop(wz_ext_time_base_move(&mut *time_base));
+        closed
     }
 }
 
