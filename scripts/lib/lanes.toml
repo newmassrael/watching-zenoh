@@ -340,6 +340,8 @@ id = "C1bf"
 fn = "layer_c1bf_cargo_clippy_all_features"
 class = "E"
 reason = "it runs zephyr, which the machine provides and the key does not hold"
+# It clippies every member of crates/, one plan line each, and the python it runs reads the graph.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1bn"
@@ -375,6 +377,9 @@ id = "C1st"
 fn = "layer_c1st_abi_stamp"
 class = "E"
 reason = "it traces with the machine's strace and bwrap, which the key does not hold"
+# wz_package.py builds the artifacts capi-pico, capi-c, ap-demo and declared-node, whose packages
+# (deploy/wz-config.toml) are these; the other builders it reaches build nothing in its runs.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-c", "crates:wz-capi-pico-lib", "deploy/host-slot-node:host-slot-node"]
 
 [[lane]]
 id = "C1sp"
@@ -419,6 +424,8 @@ id = "C1bz"
 fn = "layer_c1bz_docs_resolve"
 class = "E"
 reason = "it runs zephyr, which the machine provides and the key does not hold"
+# It documents every member of crates/ that cargo metadata lists.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1bzr"
@@ -440,12 +447,16 @@ id = "C1bm"
 fn = "layer_c1bm_cargo_test_pico_failfast"
 class = "E"
 reason = "it runs shellcheck, which the machine provides and the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico"]
 
 [[lane]]
 id = "C1pc"
 fn = "layer_c1pc_capi_pico_engines"
 class = "E"
 reason = "it runs shellcheck, which the machine provides and the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico"]
 
 [[lane]]
 id = "C1x"
@@ -542,17 +553,23 @@ id = "C1co"
 fn = "layer_c1co_pico_client_dials_a_listener"
 class = "E"
 reason = "it runs shellcheck, which the machine provides and the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico", "crates:wz-integration-tests"]
 
 [[lane]]
 id = "C1p32"
 fn = "layer_c1p32_pico_i686"
 class = "E"
 reason = "it builds 32-bit programs with the machine's C compiler mode (gcc-multilib), which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-abi-stamp", "crates:wz-app-frame", "crates:wz-app-schema", "crates:wz-capi-coop", "crates:wz-capi-core", "crates:wz-capi-pico", "crates:wz-capi-port", "crates:wz-codecs", "crates:wz-ext-pubsub", "crates:wz-host-net", "crates:wz-node-time", "crates:wz-routing-graph", "crates:wz-runtime-coop", "crates:wz-runtime-core", "crates:wz-runtime-posix", "crates:wz-runtime-tokio", "crates:wz-session-core", "crates:wz-session-mcu", "crates:wz-storage", "crates:wz-workload"]
 
 [[lane]]
 id = "C1nh"
 fn = "layer_c1nh_no_heap_after_open"
 class = "D"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico", "crates:wz-capi-pico-lib", "crates:zenoh-pico-sys"]
 
 [[lane]]
 id = "C1cn"
@@ -597,6 +614,8 @@ id = "C1ns"
 fn = "layer_c1ns_nostd_members_isolated"
 class = "E"
 reason = "it runs zephyr, which the machine provides and the key does not hold"
+# Its members are the no_std ones of crates/ that nostd_workspace_members.py reads from the graph.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1s"
@@ -717,18 +736,24 @@ id = "C1cc"
 fn = "layer_c1cc_api_compat_c"
 class = "E"
 reason = "it runs the C ABI tests under the machine's valgrind, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-c", "crates:wz-capi-core", "crates:wz-capi-pico-lib", "crates:wz-integration-tests"]
 
 [[lane]]
 id = "C1ce"
 fn = "layer_c1ce_api_compat_c_unstable_oracle"
 class = "E"
 reason = "its hosted job (capi-c-arms) provisions what it runs against on the machine, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-c", "crates:wz-integration-tests"]
 
 [[lane]]
 id = "C1cd"
 fn = "layer_c1cd_api_compat_c_attachment"
 class = "E"
 reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-c", "crates:wz-integration-tests"]
 
 [[lane]]
 id = "C1by"
@@ -741,6 +766,8 @@ id = "Epico"
 fn = "layer_epico_library_oracles"
 class = "E"
 reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico-ext", "crates:wz-capi-pico-lib", "crates:wz-integration-tests", "crates:zenoh-pico-sys"]
 
 [[lane]]
 id = "Ewire"
@@ -771,6 +798,8 @@ id = "E"
 fn = "layer_e_ap_demo_round_trip"
 class = "E"
 reason = "its hosted job (e2e-demo-pico) provisions what it runs against on the machine, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-pico-lib", "crates:wz-e2e-silent-peer", "crates:wz-integration-tests"]
 
 [[lane]]
 id = "E2"
@@ -801,6 +830,8 @@ id = "E5"
 fn = "layer_e5_router_forward"
 class = "E"
 reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-pico-lib", "crates:wz-integration-tests"]
 
 [[lane]]
 id = "E5u"
@@ -1005,24 +1036,32 @@ id = "Vcov"
 fn = "layer_vcov_coverage"
 class = "E"
 reason = "it runs rustup's pinned nightly, which the machine provides and the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico-lib", "crates:zenoh-pico-sys"]
 
 [[lane]]
 id = "Vtsan"
 fn = "layer_vtsan_thread_sanitizer"
 class = "E"
 reason = "it runs rustup's pinned nightly and the machine's C toolchain, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico-lib", "crates:zenoh-pico-sys"]
 
 [[lane]]
 id = "Vasan"
 fn = "layer_vasan_address_sanitizer"
 class = "E"
 reason = "it runs rustup's pinned nightly and the machine's C toolchain, which the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico-lib", "crates:zenoh-pico-sys"]
 
 [[lane]]
 id = "Vmiri"
 fn = "layer_vmiri_interpreter"
 class = "E"
 reason = "it runs rustup's pinned nightly, which the machine provides and the key does not hold"
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico-lib", "crates:zenoh-pico-sys"]
 
 [[lane]]
 id = "G"
@@ -1104,3 +1143,5 @@ fn = "layer_s_pico_stability"
 class = "S"
 reason = "it is a stress sample of the pico C ABI under the host's scheduler, timed"
 nondet = ["scheduler", "wall-clock", "cores"]
+# The builders it reaches are imported by the selftest of wz_config.py alone, which builds nothing.
+packages = ["crates:wz-capi-pico", "crates:wz-capi-pico-lib", "crates:wz-integration-tests"]
