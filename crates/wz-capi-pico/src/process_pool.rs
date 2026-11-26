@@ -1243,10 +1243,56 @@ impl Drop for Pools {
     }
 }
 
+/// A stage's pools, or none reserved: an `Option<Pools>` whose empty value is a tag of zero. The
+/// niche an `Option` would take in `Pools` makes its `None` a word of ones, which put the process's
+/// reservation of no stage among the library's initial data; with the empty value zero it is no
+/// initial byte of the file.
+#[repr(u8)]
+enum StagePools {
+    Empty = 0,
+    Laid(Pools) = 1,
+}
+
+impl StagePools {
+    /// The pools, when the stage holds some.
+    fn get(&self) -> Option<&Pools> {
+        match self {
+            Self::Laid(pools) => Some(pools),
+            Self::Empty => None,
+        }
+    }
+
+    /// [`Self::get`], to change them.
+    fn get_mut(&mut self) -> Option<&mut Pools> {
+        match self {
+            Self::Laid(pools) => Some(pools),
+            Self::Empty => None,
+        }
+    }
+
+    /// `pools` held here, over whatever was, and lent back.
+    fn insert(&mut self, pools: Pools) -> &mut Pools {
+        *self = Self::Laid(pools);
+        match self {
+            Self::Laid(pools) => pools,
+            // SAFETY: the value was written as `Laid` on the line above, as `Option::insert` reads it.
+            Self::Empty => unsafe { core::hint::unreachable_unchecked() },
+        }
+    }
+
+    /// The pools held here, leaving none.
+    fn take(&mut self) -> Option<Pools> {
+        match core::mem::replace(self, Self::Empty) {
+            Self::Laid(pools) => Some(pools),
+            Self::Empty => None,
+        }
+    }
+}
+
 /// The pools reserved now: each stage's, in [`Stage::ALL`]'s order, or every pool in the open
 /// stage's place when a program's door reserved them all at once.
 struct Reserved {
-    stages: [Option<Pools>; STAGES],
+    stages: [StagePools; STAGES],
     /// A program's door reserved every pool, in the open stage's place; read through
     /// [`Self::whole`].
     whole: bool,
@@ -1257,7 +1303,7 @@ struct Reserved {
 impl Reserved {
     /// None reserved.
     const NONE: Self = Self {
-        stages: [const { None }; STAGES],
+        stages: [const { StagePools::Empty }; STAGES],
         whole: false,
         fixed: false,
     };
@@ -1276,10 +1322,10 @@ impl Reserved {
         let at = if self.whole() { Stage::Open } else { stage };
         let fixed = self.fixed;
         let held = self.stages.get_mut(at as usize)?;
-        if held.is_none() && !fixed {
+        if held.get().is_none() && !fixed {
             return lay_stage(held, first_plan()?, at).ok();
         }
-        held.as_mut()
+        held.get_mut()
     }
 
     /// The first open's reservation: each stage not reserved yet, its pools of `reserve`, after
@@ -1313,9 +1359,9 @@ impl Reserved {
             };
             // A stage not reserved is read as pools of no slot, so each value is one reading
             // whether its stage is reserved or not.
-            let pools = match self.stages.get(stage as usize) {
-                Some(Some(pools)) => &pools.pools,
-                _ => NO_POOLS,
+            let pools = match self.stages.get(stage as usize).and_then(StagePools::get) {
+                Some(pools) => &pools.pools,
+                None => NO_POOLS,
             };
             row.pool >= POOLS || pools.get(row.pool).is_some_and(|pool| count <= pool.slots)
         })
@@ -1329,7 +1375,7 @@ impl Reserved {
     fn give_back(&mut self, place: NonNull<u8>) -> bool {
         self.stages
             .iter_mut()
-            .flatten()
+            .filter_map(StagePools::get_mut)
             .find(|pools| pools.lies_in(place))
             .is_some_and(|pools| pools.give_back(place))
     }
@@ -1351,13 +1397,13 @@ enum Unlaid {
 /// first open.
 #[inline(never)]
 fn lay_stage<'a>(
-    held: &'a mut Option<Pools>,
+    held: &'a mut StagePools,
     plan: &Plan,
     stage: Stage,
 ) -> Result<&'a mut Pools, Unlaid> {
     // Asked first, so no pools are ever laid over others, nor the old ones let go here.
-    if held.is_some() {
-        return held.as_mut().ok_or(Unlaid::Empty);
+    if held.get().is_some() {
+        return held.get_mut().ok_or(Unlaid::Empty);
     }
     let pools = held.insert(Pools::unlaid(NonNull::dangling(), Origin::Unfound));
     // SAFETY: the pools are unlaid and hold no object; their memory is set below before anything
@@ -1381,14 +1427,14 @@ fn lay_stage<'a>(
             return Err(why);
         }
     }
-    held.as_mut().ok_or(Unlaid::NoMemory)
+    held.get_mut().ok_or(Unlaid::NoMemory)
 }
 
 /// Reserve the pools `plan` makes for `stage` in `held` where it holds none yet ([`lay_stage`]):
 /// `false` only when the heap has not the memory, as a stage of no object in this build holds no
 /// pool. Left to be inlined: the first open asks it of each stage, and beside its call to
 /// `lay_stage` an asking holds only the reading of the answer, which a call of its own outweighs.
-fn lay_missing(held: &mut Option<Pools>, plan: &Plan, stage: Stage) -> bool {
+fn lay_missing(held: &mut StagePools, plan: &Plan, stage: Stage) -> bool {
     !matches!(lay_stage(held, plan, stage), Err(Unlaid::NoMemory))
 }
 
@@ -1832,7 +1878,7 @@ pub(crate) fn lies_in_pools(place: NonNull<u8>) -> bool {
         reserved
             .stages
             .iter()
-            .flatten()
+            .filter_map(StagePools::get)
             .any(|pools| pools.lies_in(place))
     })
 }
@@ -1844,7 +1890,7 @@ pub(crate) fn lies_in_payloads(place: NonNull<u8>) -> bool {
         reserved
             .stages
             .iter()
-            .flatten()
+            .filter_map(StagePools::get)
             .any(|pools| pools.lies_in_payloads(place))
     })
 }
@@ -1896,7 +1942,7 @@ pub(crate) fn plan_of(stated: &Counts) -> Result<Plan, Unplanned> {
 #[cfg(feature = "object-pool")]
 unsafe fn install(base: NonNull<u8>, plan: &Plan, origin: Origin) -> Result<(), Refused> {
     let refused = RESERVED.with(|reserved| {
-        if reserved.stages.iter().any(Option::is_some) {
+        if reserved.stages.iter().any(|stage| stage.get().is_some()) {
             return true;
         }
         let Some(held) = reserved.stages.get_mut(Stage::Open as usize) else {
@@ -1950,7 +1996,7 @@ pub(crate) fn report(class: usize) -> ClassReport {
         };
         // Each kind lies in one stage, so what is in use adds up; the stages' high-water marks,
         // each reached at a moment of its own, add up to at most the most held at once.
-        for pools in reserved.stages.iter().flatten() {
+        for pools in reserved.stages.iter().filter_map(StagePools::get) {
             let stage = pools.report(class);
             report.slots = report.slots.saturating_add(stage.slots);
             report.bytes = report.bytes.saturating_add(stage.bytes);
@@ -1969,7 +2015,7 @@ pub(crate) fn release() -> bool {
         if reserved
             .stages
             .iter()
-            .flatten()
+            .filter_map(StagePools::get)
             .any(|pools| pools.held() > 0)
         {
             (None, true)
@@ -3317,7 +3363,7 @@ mod tests {
         assert_eq!(pools.pools[Kind::Sample as usize].slots, 0);
         assert_eq!(pools.pools[Kind::Keyexpr as usize].slots, 0);
         assert!(pools.pools.iter().skip(KINDS).all(|pool| pool.slots == 0));
-        assert!(reserved.stages[Stage::Open as usize].is_none());
+        assert!(reserved.stages[Stage::Open as usize].get().is_none());
         assert!(!reserved.fixed, "a config fixes nothing");
     }
 
@@ -3535,26 +3581,48 @@ mod tests {
             ..Counts::default()
         };
         let plan = Plan::laid(&configs_only);
-        let mut held = None;
+        let mut held = StagePools::Empty;
         assert_eq!(
             lay_stage(&mut held, &plan, Stage::Open).map(|_| ()),
             Err(Unlaid::Empty)
         );
-        assert!(held.is_none());
+        assert!(held.get().is_none());
         assert!(lay_stage(&mut held, &plan, Stage::Config).is_ok());
-        assert!(held.is_some());
+        assert!(held.get().is_some());
 
         let too_many = Counts {
             samples: usize::MAX / 2,
             ..Counts::default()
         };
         let plan = Plan::laid(&too_many);
-        let mut held = None;
+        let mut held = StagePools::Empty;
         assert_eq!(
             lay_stage(&mut held, &plan, Stage::Open).map(|_| ()),
             Err(Unlaid::NoMemory)
         );
-        assert!(held.is_none());
+        assert!(held.get().is_none());
+    }
+
+    /// A stage of no pools is a tag of zero, so the reservation of none is no initial byte of the
+    /// library's file; a stage laid reads as its pools. Turned red by an empty value given another
+    /// tag, or a stage that reads as none once laid.
+    #[test]
+    fn an_empty_stage_is_a_tag_of_zero() {
+        let empty = StagePools::Empty;
+        // SAFETY: a `repr(u8)` enum begins with its tag, a byte every value has.
+        let tag = unsafe { *core::ptr::addr_of!(empty).cast::<u8>() };
+        assert_eq!(tag, 0);
+        let mut held = StagePools::Empty;
+        let configs_only = Plan::laid(&Counts {
+            configs: 1,
+            ..Counts::NONE
+        });
+        let base = lay_stage(&mut held, &configs_only, Stage::Config)
+            .map(|pools| pools.base)
+            .expect("the test's heap has the memory");
+        assert_eq!(held.get().map(|pools| pools.base), Some(base));
+        assert_eq!(held.take().map(|pools| pools.base), Some(base));
+        assert!(held.get().is_none(), "a stage taken holds none");
     }
 
     /// Every pool is reserved at once only by a program's door, which a build without
@@ -3577,11 +3645,11 @@ mod tests {
             configs: 1,
             ..Counts::NONE
         });
-        let mut held = None;
+        let mut held = StagePools::Empty;
         assert!(lay_missing(&mut held, &configs_only, Stage::Open));
-        assert!(held.is_none(), "a stage of no slot holds no pools");
+        assert!(held.get().is_none(), "a stage of no slot holds no pools");
         assert!(lay_missing(&mut held, &configs_only, Stage::Config));
-        let laid = held.as_ref().map(|pools| pools.base);
+        let laid = held.get().map(|pools| pools.base);
         assert!(laid.is_some());
         let too_many = Plan::laid(&Counts {
             samples: usize::MAX / 2,
@@ -3589,7 +3657,7 @@ mod tests {
         });
         assert!(lay_missing(&mut held, &too_many, Stage::Open));
         assert_eq!(
-            held.as_ref().map(|pools| pools.base),
+            held.get().map(|pools| pools.base),
             laid,
             "a held stage stays"
         );
