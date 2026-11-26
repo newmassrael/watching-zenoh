@@ -8708,7 +8708,7 @@ layer_c1az_cargo_test_rest_sse() {
 # of zenoh's zero-copy SHM payload (a descriptor on the wire + an mmap'd /dev/shm
 # segment). R3a: the no_std core (extshm: ShmDescriptor + VLE codec, the 0x2
 # Put-body marker, the ShmResolver trait) + the AP provider (shm_provider: memmap2
-# ShmBackedPayload + PosixShmResolver). R3b: the live TX swap (build_push_shm_literal
+# ShmBackedPayload; the reader is zenoh-shm's, shm_reader). R3b: the live TX swap (build_push_shm_literal
 # emits the descriptor + marker), the RX un-swap (pubsub resolves via the
 # registry-stored resolver), the scoped Z_EXT_SHM 0x2 establishment negotiation (a
 # UNIT capability `&=`, NOT zenoh's challenge-response -- deferred), publish_shm +
@@ -8723,7 +8723,7 @@ layer_c1az_cargo_test_rest_sse() {
 #   3. runs the shm_e2e integration tests (gated all(session-extshm,
 #      transport-unicast, transport-link-tcp)): wz<->wz negotiate SHM over real TCP
 #      + deliver a Put ZERO-COPY (the publisher writes /dev/shm, the descriptor
-#      rides the wire, the acceptor's PosixShmResolver mmaps + reads it byte-exact),
+#      rides the wire, the acceptor's zenoh-shm reader mmaps + reads it byte-exact),
 #      plus the negotiation `&=` (one-sided offer -> both off);
 #   4. clippy-gates the cfg under --all-targets (the provider + the live swap);
 #   5. clippy-gates BOTH bare cores standalone: --features transport-shm (the inert
@@ -8943,7 +8943,9 @@ layer_c1af_cargo_test_shm() {
     # by its mutation, and the real interleaving on four sweeping threads).
     # 44 -> 45, the session keys counted as a session's (aff700b6c4), printed by hosted run
     # 43914611055 and pc5.
-    _runci_guarded_test C1af 45 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # 45 -> 43 (2026-11-26, printed by guarded_count_gate.py --range 72ce26dae..HEAD): the two
+    # tests of the engine's data segment cache went with the cache, zenoh-shm's reader reading now.
+    _runci_guarded_test C1af 43 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3106 -- the segment module's own tests (`posix_shm`), which no lane counted: the cleanup
     # that removes a segment no one holds and keeps one a process holds, and whether a mapping may

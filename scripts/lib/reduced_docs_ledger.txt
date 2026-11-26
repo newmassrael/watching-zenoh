@@ -187,7 +187,6 @@ wz-runtime-tokio	wz-runtime-tokio/src/quic_pipeline.rs	1	error: unresolved link 
 wz-runtime-tokio	wz-runtime-tokio/src/reassembly.rs	1	error: unresolved link to `crate::multicast_glue::drive_multicast_session`: no item named `multicast_glue` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/reconnect.rs	1	error: unresolved link to `crate::reconnect_scout::ScoutedGroup`: no item named `reconnect_scout` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/router_forward.rs	1	error: unresolved link to `LinkstateNetView`: no item named `LinkstateNetView` in scope
-wz-runtime-tokio	wz-runtime-tokio/src/runtime_impl.rs	1	error[E0046]: not all trait items implemented, missing: `EntropyDraw`, `ActionsHandle`, `wrap_actions`: missing `EntropyDraw`, `ActionsHandle`, `wrap_actions` in implementation
 wz-runtime-tokio	wz-runtime-tokio/src/scouting_autoconnect.rs	2	error: unresolved link to `crate::scouting_responder`: no item named `scouting_responder` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/scouting_fanout.rs	2	error: unresolved link to `crate::scouting_responder::bind_reply_sockets`: no item named `scouting_responder` in module `wz_runtime_tokio`
 wz-runtime-tokio	wz-runtime-tokio/src/serial_pipeline.rs	1	error: unresolved link to `crate::udp_pipeline`: no item named `udp_pipeline` in module `wz_runtime_tokio`

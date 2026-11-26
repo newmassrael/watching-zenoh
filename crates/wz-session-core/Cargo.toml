@@ -36,6 +36,11 @@ authors.workspace = true
 repository.workspace = true
 readme.workspace = true
 description = "R311di proper — runtime-agnostic Session / SessionLinkActions / helper surface (Phase W §5.P + §5.C consumer)."
+# The build script states which items of `link::SessionRuntime` this build declares, as metadata
+# a crate that implements the trait reads (`DEP_WZ_SESSION_CORE_<KEY>`, see `build.rs`): Cargo
+# unifies this crate's features across the graph, so no feature of the implementing crate can say
+# whether they are declared.
+links = "wz_session_core"
 
 [features]
 # Batteries-included default (standard Rust opt-out idiom, same shape as

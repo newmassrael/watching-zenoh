@@ -4331,8 +4331,8 @@ pub struct OpenStance {
     /// this field existed. The session builds ONE clock from it, for the role it dials as, and
     /// every session of the node shares that clock.
     pub timestamping: TimestampingEnabled,
-    /// R3065 -- the shared-memory reader this session was opened over: the clients its node's
-    /// storage resolved into, or `None` for the default reader (POSIX alone). It reaches the
+    /// R3065 -- the shared-memory reader this session was opened over: its node's client
+    /// storage, or `None` for the reader of the process (its global storage). It reaches the
     /// registry, which gives it to the plane and to every face session. The list its auth segment
     /// advertises is [`Self::offer`]'s, and the two are set together by [`Self::with_shm_clients`]
     /// so that a node never lists a protocol its reader cannot resolve.
@@ -4502,21 +4502,23 @@ pub use wz_capi_port::group::{GroupDeclarations, GroupJoin, GroupProfile};
 
 #[cfg(feature = "session-extshm")]
 impl OpenStance {
-    /// This stance for a session opened over the client `set`: the reader is the set, and the
-    /// protocols the offer advertises are exactly the set's. `Err` when the set names more
-    /// protocols than an auth segment has slots for.
+    /// This stance for a session opened over the client `storage`: the reader is the storage's,
+    /// and the protocols the offer advertises are exactly the storage's. `Err` when the storage
+    /// names more protocols than an auth segment has slots for.
     pub fn with_shm_clients(
         mut self,
-        set: Arc<wz_runtime_tokio::shm_clients::ShmClientSet>,
-    ) -> Result<Self, wz_runtime_tokio::shm_clients::TooManyShmProtocols> {
-        self.offer = self.offer.with_shm_protocols(set.advertised()?);
-        self.shm_clients = Some(crate::faces::ShmReader::Clients(set));
+        storage: Arc<wz_runtime_tokio::shm_reader::ShmClientStorage>,
+    ) -> Result<Self, wz_runtime_tokio::shm_reader::TooManyShmProtocols> {
+        self.offer = self
+            .offer
+            .with_shm_protocols(wz_runtime_tokio::shm_reader::advertised(&storage)?);
+        self.shm_clients = Some(crate::faces::ShmReader::Clients(storage));
         Ok(self)
     }
 
     /// This stance for a session whose shared-memory reader is the host's own: `make` builds the
     /// resolver of each session. The offer lists the default protocols (POSIX alone), so the
-    /// resolver must read POSIX chunks; a host that reads others supplies a set of clients
+    /// resolver must read POSIX chunks; a host that reads others supplies a client storage
     /// ([`Self::with_shm_clients`]) instead.
     pub fn with_shm_resolver(
         mut self,

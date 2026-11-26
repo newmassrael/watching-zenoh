@@ -1306,6 +1306,12 @@ fn publish_shm_aliased_without_negotiated_shm_sends_the_bytes_under_the_declared
         !session.actions().is_shm(),
         "the fixture negotiated nothing"
     );
+    // The id is declared first, as `Session::publish_aliased` requires: a session names a key by
+    // an id only once it has declared it, and sends the literal otherwise.
+    session
+        .actions()
+        .send_declare_keyexpr(7, "home/temp")
+        .expect("hardcoded canonical literal keyexpr");
     let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
     payload.write(b"bytes");
     let opts = PublishOptions::put().with_locality(Locality::Remote);
@@ -1315,7 +1321,8 @@ fn publish_shm_aliased_without_negotiated_shm_sends_the_bytes_under_the_declared
         .publish_shm_aliased(7, None, "home/temp", &payload, opts.clone())
         .expect("publish");
 
-    let frame = driver.frame_bytes(0);
+    // Frame 0 is the declaration.
+    let frame = driver.frame_bytes(1);
     let expected = encoded(
         &wz_session_core::push_build::build_push_aliased_with_meta(7, None, b"bytes", &meta)
             .expect("build"),

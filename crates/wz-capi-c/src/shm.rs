@@ -110,7 +110,10 @@ use crate::abi::{z_loaned_bytes_t, z_owned_bytes_t, Handle};
 use crate::bytes::BytesState;
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
-use wz_runtime_tokio::shm_clients::{ShmClientSet, ShmDataClient, ShmDataSegment};
+use wz_runtime_tokio::shm_reader::{
+    global_client_storage, ChunkID, PosixShmClient, ProtocolID, SegmentID, ShmClient,
+    ShmClientStorage, ShmSegment, WithProtocolID, ZResult as ClientResult,
+};
 
 /// `z_owned_shm_t` / `z_loaned_shm_t` / `z_owned_shm_mut_t` /
 /// `z_loaned_shm_mut_t` — 80 bytes at align 8, measured by upstream's own
@@ -6918,11 +6921,13 @@ mod foreign_backend_tests {
 // ## What makes this NOT a dead arm, measured rather than argued
 //
 // `z_posix_shm_client_new` is the POSIX member of the default client set, and
-// wz already owns the segment protocol it attaches by: `wz-runtime-tokio`'s
-// `posix_shm` makes and opens a segment the way upstream does (`{id}.zenoh`).
-// wz's POSIX client attaches through THAT type, so a segment one half of this
-// workspace publishes is one the other half can read. The test proves that with
-// a segment the runtime made rather than a file written by hand.
+// it is `zenoh-shm`'s POSIX client, the one the process's reader attaches by
+// (`wz_runtime_tokio::shm_reader`): it opens a segment by upstream's name
+// (`{id}.zenoh`), which is the name `wz-runtime-tokio`'s `posix_shm` makes a
+// segment under, so a segment one half of this workspace publishes is one the
+// other half can read. The test proves that with a segment the runtime made
+// rather than a file written by hand. A storage is `zenoh-shm`'s
+// `ShmClientStorage` and a C client one of its `ShmClient`s, as zenoh-c's are.
 //
 // ⚠ The item 607 premise this round REFUTED, recorded where the next reader of
 // this plane will be standing: the register said the client half's witness is
@@ -7023,16 +7028,8 @@ impl AttachedSegment {
     /// R2973 — `pub(crate)`, not `pub`. This crate's contract under
     /// `zenoh-c-shared-memory` is a C ABI, and the census that holds that claim
     /// (`OFF_AXIS`'s `ABI_CONTRACT` reading) refuses a strictly-`pub` fn with no
-    /// `#[no_mangle]`: a Rust caller can name it. Nothing outside this file did
-    /// (the type is not named anywhere else in the workspace), so the claim was
-    /// false only by an accident of spelling. The census could not see it until
-    /// it read whole attributes, because the module's gate spans several lines.
-    ///
-    /// R3065 -- the session maps through it: a session opened over a client storage
-    /// ([`z_open_with_custom_shm_clients`]) reads every chunk of a client's protocol with it, so
-    /// this is no longer a path built ahead of its consumer, and the `allow(dead_code)` that said
-    /// it was is gone.
-    pub(crate) fn map(&self, chunk: z_chunk_id_t) -> *mut u8 {
+    /// `#[no_mangle]`: a Rust caller can name it.
+    pub(crate) fn address(&self, chunk: z_chunk_id_t) -> *mut u8 {
         let Some(map_fn) = self.map_fn else {
             return std::ptr::null_mut();
         };
@@ -7043,32 +7040,38 @@ impl AttachedSegment {
     }
 }
 
-/// What an owned `z_owned_shm_client_t`'s handle points at.
-struct ShmClientState {
-    context: Arc<DroppableContext>,
-    callbacks: zc_shm_client_callbacks_t,
-    /// R3065 -- whether this is wz's own POSIX client, which the runtime reader has built in and
-    /// maps itself (that mapping also serves writes), rather than a client whose callbacks the
-    /// reader calls. Marked at construction because a function pointer is not a thing to compare.
-    builtin_posix: bool,
+impl std::fmt::Debug for AttachedSegment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachedSegment")
+            .field("maps", &self.map_fn.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
-impl ShmClientState {
-    /// The protocol id this client answers for.
-    ///
-    /// A client with no `id_fn` cannot be routed to, so it reports the reserved
-    /// id 0 and [`z_shm_client_storage_new`] refuses it rather than filing it
-    /// under a number it did not choose.
-    fn protocol(&self) -> z_protocol_id_t {
-        let Some(id_fn) = self.callbacks.id_fn else {
-            return 0;
-        };
-        // SAFETY: as `AttachedSegment::map`.
-        unsafe { id_fn(self.context.ptr) }
+/// A segment a C client attached, as a segment of the process's reader: a session opened over a
+/// client storage ([`z_open_with_custom_shm_clients`]) maps every chunk of the client's protocol
+/// through it. A null address is the reader's refusal, as zenoh-c's segment wrapper makes it.
+impl ShmSegment for AttachedSegment {
+    fn map(&self, chunk: ChunkID) -> ClientResult<*mut u8> {
+        let address = self.address(chunk);
+        if address.is_null() {
+            return Err("the segment's map_fn mapped no address for the chunk".into());
+        }
+        Ok(address)
     }
+}
 
+/// A client a C program supplied (`z_shm_client_new`), as a client of the process's reader: its
+/// `attach_fn` attaches a segment, and what it attaches is mapped through the `map_fn` it
+/// supplied.
+struct CClient {
+    context: Arc<DroppableContext>,
+    callbacks: zc_shm_client_callbacks_t,
+}
+
+impl CClient {
     /// One attach attempt.
-    fn attach(&self, segment: z_segment_id_t) -> Option<AttachedSegment> {
+    fn attach_segment(&self, segment: z_segment_id_t) -> Option<AttachedSegment> {
         let attach_fn = self.callbacks.attach_fn?;
         let mut out = z_shm_segment_t {
             context: zc_threadsafe_context_t {
@@ -7083,7 +7086,7 @@ impl ShmClientState {
         // (divergence 1): upstream hands the callback a `MaybeUninit`, so a
         // callback that returns `true` without writing has upstream reading
         // uninitialised memory. Here it reads a null `map_fn` and every later
-        // map returns null.
+        // map is refused.
         //
         // SAFETY: `out` is a live local, and the context pointer is the
         // caller's own.
@@ -7100,6 +7103,46 @@ impl ShmClientState {
     }
 }
 
+impl std::fmt::Debug for CClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CClient")
+            .field("protocol", &self.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl WithProtocolID for CClient {
+    /// The protocol id this client answers for. A client with no `id_fn` reports the reserved id
+    /// 0, and [`z_shm_client_storage_new`] refuses it rather than file it under a number it did
+    /// not choose.
+    fn id(&self) -> ProtocolID {
+        let Some(id_fn) = self.callbacks.id_fn else {
+            return 0;
+        };
+        // SAFETY: as `AttachedSegment::address`.
+        unsafe { id_fn(self.context.ptr) }
+    }
+}
+
+impl ShmClient for CClient {
+    fn attach(&self, segment: SegmentID) -> ClientResult<Arc<dyn ShmSegment>> {
+        match self.attach_segment(segment) {
+            Some(attached) => Ok(Arc::new(attached)),
+            None => Err("the client's attach_fn attached no segment".into()),
+        }
+    }
+}
+
+/// What an owned `z_owned_shm_client_t`'s handle points at: a client of the process's reader,
+/// zenoh-c's `Arc<dyn ShmClient>`.
+#[derive(Clone)]
+struct ShmClientState {
+    client: Arc<dyn ShmClient>,
+    /// Whether the client names its protocol: a C client with no `id_fn` does not, and a storage
+    /// refuses it.
+    names_its_protocol: bool,
+}
+
 impl z_shm_segment_t {
     /// The destructor the attacher supplied, if any.
     fn delete_fn_of(&self) -> Option<unsafe extern "C" fn(*mut c_void)> {
@@ -7110,97 +7153,45 @@ impl z_shm_segment_t {
 /// What an owned `zc_owned_shm_client_list_t`'s handle points at: clients in
 /// the order they were added.
 struct ShmClientListState {
-    clients: Vec<Arc<ShmClientState>>,
+    clients: Vec<ShmClientState>,
 }
 
-/// What an owned `z_owned_shm_client_storage_t`'s handle points at: the
-/// resolved registry.
+/// What an owned `z_owned_shm_client_storage_t`'s handle points at: the process's reader's
+/// storage of clients, zenoh-c's `Arc<ShmClientStorage>`.
 ///
 /// `Arc` because [`z_shm_client_storage_clone`] is a SHALLOW copy upstream --
-/// two handles naming one registry, released once when the second goes.
+/// two handles naming one storage, released once when the second goes.
 struct ShmClientStorageState {
-    by_protocol: Vec<(z_protocol_id_t, Arc<ShmClientState>)>,
-}
-
-impl ShmClientStorageState {
-    /// The client registered for `protocol`, if one is.
-    fn client(&self, protocol: z_protocol_id_t) -> Option<&Arc<ShmClientState>> {
-        self.by_protocol
-            .iter()
-            .find(|(id, _)| *id == protocol)
-            .map(|(_, c)| c)
-    }
+    storage: Arc<ShmClientStorage>,
 }
 
 /// Attach `segment` through whichever client `storage` has for `protocol`.
 ///
-/// wz's own entry point for ONE attach, which this file's tests drive to witness the registry.
-/// R3065: it is no longer the storage's only reader. A session opened over a storage reads
-/// through [`storage_clients`], which hands the runtime's reader every client at once; this
-/// stays as the single-attach view the registry tests are written against. Not `#[no_mangle]`:
-/// upstream has no such symbol, and inventing one would put a name in wz's surface the reference
-/// lacks, which the census reads as a defect in the other direction.
+/// wz's own entry point for ONE attach, which this file's tests drive to witness the storage. A
+/// session opened over a storage reads through the process's reader, which attaches through the
+/// same clients. Not `#[no_mangle]`: upstream has no such symbol, and inventing one would put a
+/// name in wz's surface the reference lacks, which the census reads as a defect in the other
+/// direction.
 ///
 /// R2973 — `pub(crate)`, for the reason this crate's contract under the feature is a C ABI: a
 /// strictly-`pub` fn with no `#[no_mangle]` is a Rust path a caller can name. Its callers are this
-/// file's tests, so a non-test build has no reader for it and it carries `allow(dead_code)`.
-#[cfg_attr(not(test), allow(dead_code))]
+/// file's tests, so it is built for them alone.
+#[cfg(test)]
 pub(crate) fn z_shm_client_storage_attach(
     storage: &z_loaned_shm_client_storage_t,
     protocol: z_protocol_id_t,
     segment: z_segment_id_t,
-) -> Option<AttachedSegment> {
+) -> Option<Arc<dyn ShmSegment>> {
     let state = storage_state(storage)?;
-    state.client(protocol)?.attach(segment)
+    state.storage.client(protocol)?.attach(segment).ok()
 }
 
-/// R3065 -- a C client as the runtime reader's client: its `attach_fn` attaches the segment, and
-/// what it attaches is mapped through the `map_fn` it supplied.
-struct CClient(Arc<ShmClientState>);
-
-/// R3065 -- a segment a C client attached, as the runtime reader's segment.
-struct CSegment(AttachedSegment);
-
-impl ShmDataSegment for CSegment {
-    fn map(&self, chunk: u32) -> *mut u8 {
-        self.0.map(chunk)
-    }
-}
-
-impl ShmDataClient for CClient {
-    fn protocol(&self) -> u32 {
-        self.0.protocol()
-    }
-
-    fn attach(&self, segment: u32) -> Option<Arc<dyn ShmDataSegment>> {
-        self.0
-            .attach(segment)
-            .map(|attached| Arc::new(CSegment(attached)) as Arc<dyn ShmDataSegment>)
-    }
-}
-
-/// R3065 -- the reader a storage stands for: wz's built-in POSIX client when the storage holds it,
-/// and every other client as a client of the runtime's reader. This is the storage's reader, which
-/// until now was a test: a session opened over it reads what its peers send through these
-/// clients and advertises exactly their protocols.
-///
-/// `None` when the storage is not a live loan, or its clients cannot form a set (two for one
-/// protocol, which `z_shm_client_storage_new` refuses, so a storage built through the ABI cannot
-/// reach it).
+/// R3065 -- the storage a loaned handle stands for, which a session opened over it reads through
+/// and whose protocols it advertises. `None` when the storage is not a live loan.
 pub(crate) fn storage_clients(
     storage: &z_loaned_shm_client_storage_t,
-) -> Option<Arc<ShmClientSet>> {
-    let state = storage_state(storage)?;
-    let mut posix = false;
-    let mut clients: Vec<Arc<dyn ShmDataClient>> = Vec::new();
-    for (_, client) in &state.by_protocol {
-        if client.builtin_posix {
-            posix = true;
-        } else {
-            clients.push(Arc::new(CClient(client.clone())));
-        }
-    }
-    ShmClientSet::new(posix, clients).ok().map(Arc::new)
+) -> Option<Arc<ShmClientStorage>> {
+    storage_state(storage).map(|state| Arc::clone(&state.storage))
 }
 
 /// Constructs and opens a session over a client storage (zenoh-c `z_open_with_custom_shm_clients`,
@@ -7233,7 +7224,7 @@ pub unsafe extern "C" fn z_open_with_custom_shm_clients(
             return Z_ENULL;
         }
         // SAFETY: the caller's contract -- a live loan.
-        let Some(set) = storage_clients(unsafe { &*shm_clients }) else {
+        let Some(storage) = storage_clients(unsafe { &*shm_clients }) else {
             return Z_EINVAL;
         };
         // SAFETY: the caller's contract, delegated.
@@ -7241,26 +7232,18 @@ pub unsafe extern "C" fn z_open_with_custom_shm_clients(
             crate::session::open_session(
                 this_,
                 config,
-                Some(wz_capi_core::faces::ShmReader::Clients(set)),
+                Some(wz_capi_core::faces::ShmReader::Clients(storage)),
             )
         }
     })
 }
 
-/// The default clients every `z_ref_shm_client_storage_global` storage shares, made once: upstream's
-/// global storage is ONE `Arc` that every reference clones, so two references name the same
-/// clients.
-fn global_clients() -> &'static [(z_protocol_id_t, Arc<ShmClientState>)] {
-    static GLOBAL: std::sync::OnceLock<Vec<(z_protocol_id_t, Arc<ShmClientState>)>> =
-        std::sync::OnceLock::new();
-    GLOBAL.get_or_init(|| vec![(POSIX_PROTOCOL_ID, Arc::new(default_posix_client()))])
-}
-
 /// Reference the global client storage (zenoh-c `z_ref_shm_client_storage_global`): the storage
 /// every session that is not given one reads through, which holds the default client set.
 ///
-/// A reference, not a copy of the clients: what it holds is the process's one set, so a program
-/// that opens a session over it (`z_open_with_custom_shm_clients`) reads exactly as `z_open` does.
+/// A reference, not a copy of the clients: upstream's global storage is ONE `Arc` that every
+/// reference clones, so a program that opens a session over it
+/// (`z_open_with_custom_shm_clients`) reads exactly as `z_open` does.
 ///
 /// # Safety
 /// `this_` must be valid and writable.
@@ -7271,7 +7254,7 @@ pub unsafe extern "C" fn z_ref_shm_client_storage_global(this_: *mut z_owned_shm
             return;
         }
         let handle = Box::into_raw(Box::new(ShmClientStorageState {
-            by_protocol: global_clients().to_vec(),
+            storage: global_client_storage(),
         })) as Handle;
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_shm_client_storage_t::from_handle(handle) };
@@ -7287,44 +7270,6 @@ fn storage_state(storage: &z_loaned_shm_client_storage_t) -> Option<&ShmClientSt
     // `ShmClientStorageState` and is not freed while a loan exists.
     Some(unsafe { &*(storage.handle as *const ShmClientStorageState) })
 }
-
-/// A POSIX segment this process has mapped read-only.
-///
-/// The segment is opened by the runtime's one implementation of upstream's segment
-/// (`wz_runtime_tokio::posix_shm`), so the NAME is upstream's `{id}.zenoh` on every
-/// platform: a `/dev/shm` file on Unix, a named file mapping on Windows. A segment a
-/// zenoh peer or this workspace's own provider publishes is therefore one this client
-/// finds. An earlier form of this type mapped `/dev/shm/wz-shm-{id:08x}.wz` by hand,
-/// a naming the runtime stopped publishing when it adopted upstream's (R2862), so it
-/// attached the files its own test wrote and none a provider made.
-struct PosixSegment {
-    segment: wz_runtime_tokio::posix_shm::PeerSegment,
-}
-
-impl PosixSegment {
-    /// Map the segment read-only, or `None` when it is not there or is empty.
-    fn open(segment_id: z_segment_id_t) -> Option<Self> {
-        let segment = wz_runtime_tokio::posix_shm::PeerSegment::open(u64::from(segment_id)).ok()?;
-        if segment.bytes().is_empty() {
-            return None;
-        }
-        Some(Self { segment })
-    }
-
-    /// The segment's first byte. The mapping is read-only, so a write through the
-    /// pointer faults, as it did when this type called `mmap` itself.
-    fn base(&self) -> *mut u8 {
-        self.segment.bytes().as_ptr().cast_mut()
-    }
-}
-
-/// wz's POSIX protocol id.
-///
-/// Upstream's POSIX client uses `0`, and wz matches it so the default client
-/// set means the same thing on both sides. It is a value the wire never
-/// carries in this build -- see the divergence note -- but it IS what a C
-/// program comparing against `z_posix_shm_client_new`'s id will read.
-const POSIX_PROTOCOL_ID: z_protocol_id_t = 0;
 
 /// Create a client for a C-supplied protocol (zenoh-c `z_shm_client_new`,
 /// `zenoh_commons.h:5744-5746`).
@@ -7352,10 +7297,13 @@ pub unsafe extern "C" fn z_shm_client_new(
         }
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_shm_client_t::null_value() };
+        let names_its_protocol = callbacks.id_fn.is_some();
         let handle = Box::into_raw(Box::new(ShmClientState {
-            context: Arc::new(dropped),
-            callbacks,
-            builtin_posix: false,
+            client: Arc::new(CClient {
+                context: Arc::new(dropped),
+                callbacks,
+            }),
+            names_its_protocol,
         })) as Handle;
         // SAFETY: `this_` was checked non-null above.
         unsafe { *this_ = z_owned_shm_client_t::from_handle(handle) };
@@ -7365,9 +7313,9 @@ pub unsafe extern "C" fn z_shm_client_new(
 /// Create the POSIX client (zenoh-c `z_posix_shm_client_new`,
 /// `zenoh_commons.h:4784`).
 ///
-/// It attaches by upstream's segment naming through `wz-runtime-tokio`'s
-/// `posix_shm`, so a segment either half of this workspace publishes is one this
-/// client can read.
+/// It is `zenoh-shm`'s POSIX client, the one in the default client set, so a segment
+/// either half of this workspace publishes, or a zenoh peer does, is one this client
+/// can read.
 ///
 /// # Safety
 /// `this_` must be valid and writable.
@@ -7380,92 +7328,12 @@ pub unsafe extern "C" fn z_posix_shm_client_new(this_: *mut z_owned_shm_client_t
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_shm_client_t::null_value() };
         let handle = Box::into_raw(Box::new(ShmClientState {
-            context: Arc::new(DroppableContext {
-                ptr: std::ptr::null_mut(),
-                delete_fn: None,
-            }),
-            callbacks: zc_shm_client_callbacks_t {
-                attach_fn: Some(posix_attach),
-                id_fn: Some(posix_id),
-            },
-            builtin_posix: true,
+            client: Arc::new(PosixShmClient),
+            names_its_protocol: true,
         })) as Handle;
         // SAFETY: `this_` was checked non-null above.
         unsafe { *this_ = z_owned_shm_client_t::from_handle(handle) };
     })
-}
-
-/// The POSIX client's protocol id.
-///
-/// # Safety
-/// Called only through [`ShmClientState::protocol`] with this client's own
-/// context, which is null and unread.
-unsafe extern "C" fn posix_id(_context: *mut c_void) -> z_protocol_id_t {
-    POSIX_PROTOCOL_ID
-}
-
-/// Map a POSIX segment by upstream's naming rule.
-///
-/// # Safety
-/// `out_segment` must be valid and writable; called only through
-/// [`ShmClientState::attach`], which supplies a live local.
-unsafe extern "C" fn posix_attach(
-    out_segment: *mut z_shm_segment_t,
-    segment_id: z_segment_id_t,
-    _context: *mut c_void,
-) -> bool {
-    if out_segment.is_null() {
-        return false;
-    }
-    let Some(mapped) = PosixSegment::open(segment_id) else {
-        return false;
-    };
-    let boxed = Box::into_raw(Box::new(mapped)) as *mut c_void;
-    // SAFETY: the caller's contract -- a writable out-parameter.
-    unsafe {
-        *out_segment = z_shm_segment_t {
-            context: zc_threadsafe_context_t {
-                context: zc_threadsafe_context_data_t { ptr: boxed },
-                delete_fn: Some(posix_segment_delete),
-            },
-            callbacks: zc_shm_segment_callbacks_t {
-                map_fn: Some(posix_map),
-            },
-        }
-    };
-    true
-}
-
-/// Release a mapped POSIX segment.
-///
-/// # Safety
-/// `context` must be the `Box::into_raw`ed [`PosixSegment`] [`posix_attach`]
-/// wrote, run once (the `DroppableContext` contract).
-unsafe extern "C" fn posix_segment_delete(context: *mut c_void) {
-    if context.is_null() {
-        return;
-    }
-    // SAFETY: the caller's contract.
-    drop(unsafe { Box::from_raw(context as *mut PosixSegment) });
-}
-
-/// The address of a chunk inside a mapped POSIX segment.
-///
-/// wz's scoped model is ONE payload per segment (`extshm.rs` collapses
-/// upstream's `MetadataDescriptor{id,index}` to a single `segment_id`), so
-/// every chunk id names offset 0. A non-zero id is not an error -- upstream
-/// lets a backend number its chunks however it likes -- it is simply an
-/// address this segment does not have, and null is what says so.
-///
-/// # Safety
-/// `context` must be the [`PosixSegment`] [`posix_attach`] wrote.
-unsafe extern "C" fn posix_map(chunk: z_chunk_id_t, context: *mut c_void) -> *mut u8 {
-    if context.is_null() || chunk != 0 {
-        return std::ptr::null_mut();
-    }
-    // SAFETY: the caller's contract; the segment outlives this call because
-    // `delete_fn` runs only after the last holder of the context drops.
-    unsafe { &*(context as *const PosixSegment) }.base()
 }
 
 /// Add `client` to `this_` (zenoh-c `zc_shm_client_list_add_client`,
@@ -7495,7 +7363,7 @@ pub unsafe extern "C" fn zc_shm_client_list_add_client(
         let Some(list_state) = list_state_mut(list) else {
             return Z_EINVAL;
         };
-        list_state.clients.push(Arc::from(state));
+        list_state.clients.push(*state);
         Z_OK
     })
 }
@@ -7542,8 +7410,7 @@ pub unsafe extern "C" fn zc_shm_client_list_new(this_: *mut zc_owned_shm_client_
 /// `zenoh_commons.h:5779-5781`).
 ///
 /// A client whose `id_fn` is absent reports the reserved id 0 and is REFUSED
-/// rather than filed under a number it did not choose -- see
-/// [`ShmClientState::protocol`]. An EMPTY list is refused too, as zenoh-c refuses it.
+/// rather than filed under a number it did not choose. An EMPTY list is refused too, as zenoh-c refuses it.
 /// A protocol id that appears twice is NOT an error: the later client replaces the earlier,
 /// and a listed client replaces the default set's, as zenoh's storage builder extends a map
 /// keyed by protocol (measured: `z_api_shm_test` lists the POSIX client and asks for the
@@ -7574,45 +7441,31 @@ pub unsafe extern "C" fn z_shm_client_storage_new(
         if list.clients.is_empty() {
             return Z_EINVAL;
         }
-        let mut by_protocol: Vec<(z_protocol_id_t, Arc<ShmClientState>)> = Vec::new();
-        if add_default_client_set {
-            by_protocol.push((POSIX_PROTOCOL_ID, Arc::new(default_posix_client())));
-        }
+        let mut clients = Vec::with_capacity(list.clients.len());
         for client in &list.clients {
-            let protocol = client.protocol();
-            if protocol == 0 && client.callbacks.id_fn.is_none() {
+            if !client.names_its_protocol {
                 return Z_EINVAL;
             }
-            // A client of a protocol that is already there REPLACES it, the way zenoh's
-            // `ShmClientStorageBuilder::with_clients` extends a map keyed by protocol: the
-            // list wins over the default set, and a later entry over an earlier one. A
-            // program that lists the POSIX client and asks for the default set as well
-            // (`z_api_shm_test`) is not in error.
-            match by_protocol.iter_mut().find(|(id, _)| *id == protocol) {
-                Some(slot) => slot.1 = client.clone(),
-                None => by_protocol.push((protocol, client.clone())),
-            }
+            clients.push(Arc::clone(&client.client));
         }
-        let handle = Box::into_raw(Box::new(ShmClientStorageState { by_protocol })) as Handle;
+        // A client of a protocol that is already there REPLACES it: zenoh's builder extends a
+        // map keyed by protocol, so the list wins over the default set, and a later entry over
+        // an earlier one. A program that lists the POSIX client and asks for the default set as
+        // well (`z_api_shm_test`) is not in error.
+        let builder = ShmClientStorage::builder();
+        let storage = if add_default_client_set {
+            builder.with_default_client_set().with_clients(&clients)
+        } else {
+            builder.with_clients(&clients)
+        }
+        .build();
+        let handle = Box::into_raw(Box::new(ShmClientStorageState {
+            storage: Arc::new(storage),
+        })) as Handle;
         // SAFETY: `this_` was checked non-null above.
         unsafe { *this_ = z_owned_shm_client_storage_t::from_handle(handle) };
         Z_OK
     })
-}
-
-/// The POSIX client, as the default client set's single member.
-fn default_posix_client() -> ShmClientState {
-    ShmClientState {
-        context: Arc::new(DroppableContext {
-            ptr: std::ptr::null_mut(),
-            delete_fn: None,
-        }),
-        callbacks: zc_shm_client_callbacks_t {
-            attach_fn: Some(posix_attach),
-            id_fn: Some(posix_id),
-        },
-        builtin_posix: true,
-    }
 }
 
 /// Create a storage holding only the default client set (zenoh-c
@@ -7629,7 +7482,11 @@ pub unsafe extern "C" fn z_shm_client_storage_new_default(
             return;
         }
         let handle = Box::into_raw(Box::new(ShmClientStorageState {
-            by_protocol: vec![(POSIX_PROTOCOL_ID, Arc::new(default_posix_client()))],
+            storage: Arc::new(
+                ShmClientStorage::builder()
+                    .with_default_client_set()
+                    .build(),
+            ),
         })) as Handle;
         // SAFETY: the caller's contract.
         unsafe { *this_ = z_owned_shm_client_storage_t::from_handle(handle) };
@@ -7639,7 +7496,7 @@ pub unsafe extern "C" fn z_shm_client_storage_new_default(
 /// Shallow-copy a storage (zenoh-c `z_shm_client_storage_clone`,
 /// `zenoh_commons.h:5752-5753`).
 ///
-/// SHALLOW is the contract: the two handles name one registry, and each client
+/// SHALLOW is the contract: the two handles name one storage, and each client
 /// is released once, when the second handle goes.
 ///
 /// # Safety
@@ -7663,7 +7520,7 @@ pub unsafe extern "C" fn z_shm_client_storage_clone(
             return;
         };
         let handle = Box::into_raw(Box::new(ShmClientStorageState {
-            by_protocol: src.by_protocol.clone(),
+            storage: Arc::clone(&src.storage),
         })) as Handle;
         // SAFETY: `this_` was checked non-null above.
         unsafe { *this_ = z_owned_shm_client_storage_t::from_handle(handle) };
@@ -7861,6 +7718,9 @@ mod client_registry_tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use wz_runtime_tokio::posix_shm::{next_candidate_id, OwnedSegment};
 
+    /// The protocol of the default client set's POSIX client.
+    const POSIX_PROTOCOL_ID: z_protocol_id_t = 0;
+
     /// A segment the RUNTIME makes, with `bytes` written into it, and the id a peer
     /// is told. It is gone when the returned segment drops.
     ///
@@ -7900,8 +7760,9 @@ mod client_registry_tests {
         let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
         let attached = z_shm_client_storage_attach(loaned, POSIX_PROTOCOL_ID, segment_id)
             .expect("the POSIX client attaches a segment that is there");
-        let base = attached.map(0);
-        assert!(!base.is_null(), "chunk 0 is the segment's first byte");
+        let base = attached
+            .map(0)
+            .expect("chunk 0 is the segment's first byte");
         // SAFETY: `base` points into a live mapping of at least `payload.len()`.
         let seen = unsafe { std::slice::from_raw_parts(base, payload.len()) };
         assert_eq!(seen, payload, "the bytes come off the shared page");
@@ -8068,7 +7929,7 @@ mod client_registry_tests {
         let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
         let attached = z_shm_client_storage_attach(loaned, 7, 1).expect("protocol 7 is registered");
         assert_eq!(attaches.load(Ordering::SeqCst), 1, "the C client attached");
-        let base = attached.map(0);
+        let base = attached.map(0).expect("its own `map_fn` maps the chunk");
         assert_eq!(maps.load(Ordering::SeqCst), 1, "its own `map_fn` ran");
         // SAFETY: `base` is the context's live byte.
         assert_eq!(unsafe { *base }, 0x5a);
@@ -8117,7 +7978,7 @@ mod client_registry_tests {
         let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
         let attached = z_shm_client_storage_attach(loaned, 11, 1).expect("it said true");
         assert!(
-            attached.map(0).is_null(),
+            attached.map(0).is_err(),
             "a segment whose `map_fn` was never written maps nothing"
         );
         assert_eq!(maps.load(Ordering::SeqCst), 0, "no callback ran");

@@ -112,6 +112,9 @@ shared-memory = [
     # The engine's side of shared memory: the handshake offer and the buffers a message is sent
     # from and read into (`api::shm::transport`).
     "wz-capi-core?/session-extshm",
+    # The one reader of the process (`wz_runtime_tokio::shm_reader`), named by this crate's
+    # adapter, so its feature is stated here rather than reached through another crate's.
+    "wz-runtime-tokio?/transport-shm",
     "dep:wz-session-core",
 ]
 # `unstable` carries the timestamp instrumentation of a message, which records on the timestamp
