@@ -345,6 +345,31 @@ impl ReplyBounds {
             stated
         }
     }
+
+    /// Whether the reply `parts` describes is within these bounds as a stage of the policy `P`
+    /// holds it, or [`ReplyError::PayloadTooLarge`]: the bounds a peer's query must not be able
+    /// to move, the payload and attachment lengths the session states, on every policy, and the
+    /// identity lengths a row can hold, on the fixed one. The growable policy has no identity cap,
+    /// and no payload cap until one is stated. The one check a stage and a pass
+    /// ([`crate::reply_pass::ReplyPass`]) refuse a reply's length by.
+    pub(crate) fn admit<P: Storage>(self, parts: &ReplyParts<'_>) -> Result<(), ReplyError> {
+        let (payload_len, attachment_len) = parts.bounded_lengths();
+        let payload_most = self.payload_most::<P>();
+        let identity_too_long = parts
+            .responder
+            .is_some_and(|(zid, _)| zid.len() > ZID_BYTES)
+            || matches!(
+                &parts.kind,
+                PartsKind::Reply { timestamp: Some(ts), .. } if ts.zid.len() > ZID_BYTES
+            );
+        if !payload_most.admits(payload_len)
+            || !payload_most.admits(attachment_len)
+            || (P::ENFORCES_CAPACITY && identity_too_long)
+        {
+            return Err(ReplyError::PayloadTooLarge);
+        }
+        Ok(())
+    }
 }
 
 /// The offset a stage of policy `P` addresses its arena with.
@@ -788,10 +813,12 @@ impl ReplyStage<crate::bounded::Region> {
     /// [`ReplyStageRows`] at `rows`.
     pub const fn places(at: usize, rows: usize) -> [crate::bounded::SeqPlace; 2] {
         [
-            crate::bounded::SeqPlace::of::<Row<crate::bounded::Region>>(
+            crate::bounded::SeqPlace::of_room::<
+                Row<crate::bounded::Region>,
+                { caps::MAX_PENDING_REPLIES },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, rows)),
                 rows.wrapping_add(core::mem::offset_of!(ReplyStageRows, rows)),
-                caps::MAX_PENDING_REPLIES,
             ),
             crate::bounded::SeqPlace::of::<u8>(
                 at.wrapping_add(core::mem::offset_of!(Self, arena)),
@@ -848,23 +875,9 @@ impl<P: Storage> ReplyStaging for ReplyStage<P> {
             self.refusals.staging_full = self.refusals.staging_full.saturating_add(1);
             return Err(ReplyError::StagingFull);
         }
-        // The bounds a peer's query must not be able to move: the payload length the session
-        // states, on every policy, and the identity lengths the row can hold, on the fixed one.
-        // The growable policy has no identity cap, and no payload cap until one is stated.
-        let payload_most = self.bounds.payload_most::<P>();
-        let identity_too_long = parts
-            .responder
-            .is_some_and(|(zid, _)| zid.len() > ZID_BYTES)
-            || matches!(
-                &parts.kind,
-                PartsKind::Reply { timestamp: Some(ts), .. } if ts.zid.len() > ZID_BYTES
-            );
-        if !payload_most.admits(payload_len)
-            || !payload_most.admits(attachment_len)
-            || (P::ENFORCES_CAPACITY && identity_too_long)
-        {
+        if let Err(refused) = self.bounds.admit::<P>(&parts) {
             self.refusals.payload_too_large = self.refusals.payload_too_large.saturating_add(1);
-            return Err(ReplyError::PayloadTooLarge);
+            return Err(refused);
         }
         // Sized and bounded as the handler described it, in every build: what a build's features
         // keep of a reply (`RowKind`) decides what goes out, not which replies a handler is told
@@ -1121,10 +1134,12 @@ impl FinalStage<crate::bounded::Region> {
     /// places this stage's rows, the stage at `at` in the region and its [`FinalStageRows`] at
     /// `rows`.
     pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
-        crate::bounded::SeqPlace::of::<(crate::wire_id::RequestId, QosLevel)>(
+        crate::bounded::SeqPlace::of_room::<
+            (crate::wire_id::RequestId, QosLevel),
+            { caps::MAX_PENDING_FINALS },
+        >(
             at.wrapping_add(core::mem::offset_of!(Self, rows)),
             rows.wrapping_add(core::mem::offset_of!(FinalStageRows, rows)),
-            caps::MAX_PENDING_FINALS,
         )
     }
 }

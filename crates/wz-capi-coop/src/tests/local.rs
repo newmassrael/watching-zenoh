@@ -616,3 +616,239 @@ fn an_undeclare_inside_another_sessions_callback_waits_for_the_call() {
         "the callback was let go of when the undeclare returned"
     );
 }
+
+/// A subscriber a callback declares while a sample is handed out is handed the samples after it
+/// and not that one: the rows a sample reaches are those the session's tables held when it was
+/// taken, as zenoh-pico's delivery calls the subscriptions it took under its lock
+/// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`). The
+/// CONTROL is the next put, which reaches the new subscriber. Turned red by a delivery that looks
+/// for the rows after a call in the tables as the call left them.
+#[cfg(not(wz_round))]
+#[test]
+fn a_subscriber_declared_inside_a_callback_is_handed_the_next_sample_and_not_that_one() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let (first, late) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+    let declared: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/snap/**", WireKey::literal(), Locality::Any, None, {
+            let (first, late, declared) = (first.clone(), late.clone(), declared.clone());
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                first.fetch_add(1, Ordering::SeqCst);
+                let mut declared = declared.lock().unwrap();
+                if declared.is_some() {
+                    return;
+                }
+                if let Some(engine) = session.upgrade() {
+                    let late = late.clone();
+                    let id = engine
+                        .declare_subscriber_on_wire(
+                            "demo/snap/**",
+                            WireKey::literal(),
+                            Locality::Any,
+                            None,
+                            SubscriberSink::shared(move |_: &dyn SampleView| {
+                                late.fetch_add(1, Ordering::SeqCst);
+                            }),
+                        )
+                        .expect("a callback declares a subscriber")
+                        .id;
+                    *declared = Some(id);
+                }
+            })
+        })
+        .expect("declared");
+    assert_eq!(
+        put_own(&engine, "demo/snap/a", b"v"),
+        Ok(1),
+        "the put reached the one subscriber there was"
+    );
+    assert!(
+        declared.lock().unwrap().is_some(),
+        "the callback declared the second"
+    );
+    assert_eq!(
+        late.load(Ordering::SeqCst),
+        0,
+        "the subscriber declared inside the call was not handed that sample"
+    );
+    assert_eq!(
+        put_own(&engine, "demo/snap/b", b"v"),
+        Ok(2),
+        "CONTROL: the next put reaches both"
+    );
+    assert_eq!(
+        (first.load(Ordering::SeqCst), late.load(Ordering::SeqCst)),
+        (2, 1)
+    );
+}
+
+/// A subscriber a callback undeclares while a sample is handed out is still handed it, by its own
+/// callback, when its turn comes: its row keeps its slot until that call ended, so a subscriber
+/// the same callback declares does not take it, and the row is let go of once the call ended,
+/// before the put returns. The put after reaches the first and the new subscriber alone. Turned
+/// red by a slot given to a declaration while a call pinned on it is owed, where the new
+/// subscriber's callback is called in the place of the undeclared one's.
+#[cfg(not(wz_round))]
+#[test]
+fn a_subscriber_undeclared_inside_a_callback_is_handed_that_sample_and_keeps_its_slot() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let (first, gone, late) = (
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+        Arc::new(AtomicUsize::new(0)),
+    );
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let undeclared: Arc<Mutex<Option<SubId>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/slot/**", WireKey::literal(), Locality::Any, None, {
+            let (first, late, undeclared) = (first.clone(), late.clone(), undeclared.clone());
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                first.fetch_add(1, Ordering::SeqCst);
+                let Some(id) = undeclared.lock().unwrap().take() else {
+                    return;
+                };
+                if let Some(engine) = session.upgrade() {
+                    engine.undeclare_subscriber(id);
+                    let late = late.clone();
+                    engine
+                        .declare_subscriber_on_wire(
+                            "demo/slot/**",
+                            WireKey::literal(),
+                            Locality::Any,
+                            None,
+                            SubscriberSink::shared(move |_: &dyn SampleView| {
+                                late.fetch_add(1, Ordering::SeqCst);
+                            }),
+                        )
+                        .expect("a callback declares a subscriber");
+                }
+            })
+        })
+        .expect("declared");
+    let guard = Dropped(dropped.clone());
+    let id = engine
+        .declare_subscriber_on_wire("demo/slot/**", WireKey::literal(), Locality::Any, None, {
+            let gone = gone.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _held = &guard;
+                gone.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("declared")
+        .id;
+    *undeclared.lock().unwrap() = Some(id);
+    assert_eq!(
+        put_own(&engine, "demo/slot/a", b"v"),
+        Ok(2),
+        "the put reached both subscribers it found"
+    );
+    assert_eq!(
+        (
+            first.load(Ordering::SeqCst),
+            gone.load(Ordering::SeqCst),
+            late.load(Ordering::SeqCst)
+        ),
+        (1, 1, 0),
+        "the undeclared subscriber's own callback was handed the sample, the new one's was not"
+    );
+    assert_eq!(
+        dropped.load(Ordering::SeqCst),
+        1,
+        "the undeclared subscriber was let go of once its call ended, before the put returned"
+    );
+    assert_eq!(
+        put_own(&engine, "demo/slot/b", b"v"),
+        Ok(2),
+        "CONTROL: the next put reaches the first and the new subscriber"
+    );
+    assert_eq!(
+        (
+            first.load(Ordering::SeqCst),
+            gone.load(Ordering::SeqCst),
+            late.load(Ordering::SeqCst)
+        ),
+        (2, 1, 1)
+    );
+}
+
+/// A put to the session's own subscribers takes the session's lock as often for three subscribers
+/// as for one: every row a sample reaches is pinned in the one hold that reads it, and the calls
+/// after it take the lock no more. Turned red by a delivery that takes the lock again after each
+/// call to find the next row.
+#[cfg(not(wz_round))]
+#[test]
+fn a_put_takes_the_session_as_often_for_three_subscribers_as_for_one() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let (_, one) = subscribe(&engine, "demo/takes/one", Locality::Any);
+    let three: Vec<Arc<AtomicUsize>> = (0..3)
+        .map(|_| subscribe(&engine, "demo/takes/three", Locality::Any).1)
+        .collect();
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    assert_eq!(
+        put_own(&engine, "demo/takes/one", b"v"),
+        Ok(1),
+        "CONTROL: one subscriber reached"
+    );
+    let for_one = takes() - before;
+    let before = takes();
+    assert_eq!(
+        put_own(&engine, "demo/takes/three", b"v"),
+        Ok(3),
+        "CONTROL: three subscribers reached"
+    );
+    let for_three = takes() - before;
+    assert_eq!(one.load(Ordering::SeqCst), 1);
+    assert!(three.iter().all(|count| count.load(Ordering::SeqCst) == 1));
+    assert_eq!(
+        for_three, for_one,
+        "the subscribers a put reaches add no take of the session"
+    );
+}
+
+/// A callback that closes its session leaves the subscribers after its own unhanded, though every
+/// row the sample reaches was pinned before the first call: no callback runs after the close. The
+/// CONTROL is the first subscriber, which ran. Turned red by a delivery that makes the calls it
+/// pinned without asking whether the session is still open.
+#[cfg(not(wz_round))]
+#[test]
+fn a_callback_that_closes_its_session_leaves_the_subscribers_after_it_unhanded() {
+    use wz_capi_port::SessionDrive;
+
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let closing = Arc::new(AtomicUsize::new(0));
+    let session = EngineHold::downgrade(&engine);
+    engine
+        .declare_subscriber_on_wire("demo/close/**", WireKey::literal(), Locality::Any, None, {
+            let closing = closing.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                closing.fetch_add(1, Ordering::SeqCst);
+                if let Some(engine) = session.upgrade() {
+                    SessionDrive::close(&*engine);
+                }
+            })
+        })
+        .expect("declared");
+    let (_, after) = subscribe(&engine, "demo/close/**", Locality::Any);
+    assert_eq!(
+        put_own(&engine, "demo/close/a", b"v"),
+        Ok(1),
+        "the put handed the one subscriber before the close"
+    );
+    assert_eq!(
+        closing.load(Ordering::SeqCst),
+        1,
+        "CONTROL: the first subscriber ran and closed the session"
+    );
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        0,
+        "no callback after the close"
+    );
+}

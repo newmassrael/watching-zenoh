@@ -269,15 +269,19 @@ impl<D: DeclSink, U: UndeclSink> DeclObserverPair<D, U, crate::bounded::Region> 
         rows: usize,
     ) -> crate::bounded::RegionLines<DECL_OBSERVER_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of::<KeyedSink<D>>(
+            .seq(crate::bounded::SeqPlace::of_room::<
+                KeyedSink<D>,
+                { caps::MAX_DECL_OBSERVERS },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, on_decl)),
                 rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_decl)),
-                caps::MAX_DECL_OBSERVERS,
             ))
-            .seq(crate::bounded::SeqPlace::of::<KeyedSink<U>>(
+            .seq(crate::bounded::SeqPlace::of_room::<
+                KeyedSink<U>,
+                { caps::MAX_DECL_OBSERVERS },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, on_undecl)),
                 rows.wrapping_add(core::mem::offset_of!(DeclObserverRows<D, U>, on_undecl)),
-                caps::MAX_DECL_OBSERVERS,
             ))
     }
 }

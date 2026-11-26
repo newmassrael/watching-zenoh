@@ -1354,12 +1354,12 @@ impl<C: ReplySink> ReplyRegistry<C, crate::bounded::Region> {
         rows: usize,
     ) -> crate::bounded::RegionLines<REPLY_REGISTRY_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of::<
+            .seq(crate::bounded::SeqPlace::of_room::<
                 Pending<C, crate::bounded::Region>,
+                { caps::MAX_PENDING_QUERIES },
             >(
                 at.wrapping_add(core::mem::offset_of!(Self, pending)),
                 rows.wrapping_add(core::mem::offset_of!(ReplyRegistryRows<C>, pending)),
-                caps::MAX_PENDING_QUERIES,
             ))
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
     }

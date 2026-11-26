@@ -136,17 +136,14 @@ impl core::fmt::Display for HostError {
 
 impl core::error::Error for HostError {}
 
-/// How many gets a subscriber holds in flight at once: as many as its session holds pending, since
-/// the session refuses a get past them anyway.
-const GETS_IN_FLIGHT: usize = caps::MAX_PENDING_QUERIES;
-
 /// What every callback and job of one subscriber shares.
 struct Shared<E: EngineHolder> {
     /// Held weakly: the engine holds the callbacks that hold this.
     engine: E::Handle,
-    /// The gets in flight. Before the token, so a fan is never dropped after the token it is
-    /// registered on.
-    gets: [GetSlot<E>; GETS_IN_FLIGHT],
+    /// The gets in flight, a row for each get the build's sessions hold pending at most, since a
+    /// session refuses a get past them anyway. Before the token, so a fan is never dropped after
+    /// the token it is registered on.
+    gets: [GetSlot<E>; caps::MAX_PENDING_QUERIES],
     state: Mutex<State>,
     /// The cancellation of the gets in flight, and what teardown cancels through.
     token: CancellationToken,

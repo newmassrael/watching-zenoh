@@ -606,8 +606,8 @@ const _: LimitDomain = MaxRemoteDecls::DOMAIN;
 /// A table the bound limits keeps it so, and asks it [`Limited::admits`].
 pub type MaxRemoteDeclsHeld = Limited<MaxRemoteDecls, { MaxRemoteDecls::HELD }>;
 
-/// `MAX_PENDING_REPLIES`: The replies a session's queryables may have ready to send between
-/// two sends.
+/// `MAX_PENDING_REPLIES`: The replies a dispatch that calls a session's queryables under
+/// the session's lock holds back until the lock is let go and they are sent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaxPendingReplies;
 

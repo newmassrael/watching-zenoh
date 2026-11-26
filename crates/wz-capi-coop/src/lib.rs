@@ -111,7 +111,9 @@ compile_error!(
      with `scout-datagram` over its own stack"
 );
 
-#[cfg(feature = "listen")]
+// What holds an accepted link's input back from the work form's task until the face is up; a read
+// that steps each face where it lies brings the face up before it reads past the handshake.
+#[cfg(all(feature = "listen", wz_round))]
 mod admission_gate;
 // The memory a session's open reserves for what its limits size, and the rows it is laid out by.
 pub mod arena;

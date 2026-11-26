@@ -901,7 +901,7 @@
               "x-wz-wire": "none"
             },
             "MAX_PENDING_REPLIES": {
-              "description": "The replies a session's queryables may have ready to send between two sends.",
+              "description": "The replies a dispatch that calls a session's queryables under the session's lock holds back until the lock is let go and they are sent.",
               "oneOf": [
                 {
                   "type": "integer",

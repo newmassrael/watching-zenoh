@@ -80,6 +80,18 @@ impl LinkSnapshot {
         }
     }
 
+    /// The link of `row` as [`Self::of_row`] reads it, with what its snapshot says beyond the row
+    /// (`facts`): the same link [`FaceSnapshot::of_actions`] reads, where `facts` were read off
+    /// the same session (`LinkFacts::of_actions`).
+    pub fn of_row_with(row: &FaceLinkRow, facts: &LinkFacts) -> Option<Self> {
+        let mut link = Self::of_row(row)?;
+        link.interfaces = facts.interfaces.clone();
+        link.cert_common_name = facts.cert_common_name.clone();
+        link.priorities = facts.priorities;
+        link.reliable = facts.reliable;
+        Some(link)
+    }
+
     /// The link of `row`, `None` for the row of a face alone: what a watcher of snapshots told
     /// through rows builds a face's links from. What a row does not hold reads as not known (the
     /// NICs, the name on the peer's certificate, the band and the class the handshake
@@ -158,6 +170,67 @@ pub struct GroupLink {
     pub endpoint: String,
 }
 
+/// What a link's snapshot says beyond its row ([`FaceLinkRow`]), none of which changes while the
+/// link lives: what a session that keeps its faces' rows reads off a link as it makes a snapshot
+/// of it ([`LinkSnapshot::of_row_with`]). The names it holds are on the heap, as a snapshot's
+/// are, so a session that takes no heap after its open keeps the rows alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LinkFacts {
+    /// As [`LinkSnapshot::interfaces`].
+    pub interfaces: Option<Vec<String>>,
+    /// As [`LinkSnapshot::cert_common_name`].
+    pub cert_common_name: Option<String>,
+    /// As [`LinkSnapshot::priorities`].
+    pub priorities: Option<(u8, u8)>,
+    /// As [`LinkSnapshot::reliable`].
+    pub reliable: Option<bool>,
+}
+
+#[cfg(feature = "session-unicast")]
+impl LinkFacts {
+    /// What the link of the session `actions` are the end of says beyond its row: what its
+    /// transport's subject names, and the band and the class the handshake's QoS extension
+    /// carried.
+    pub fn of_actions<R: SessionRuntime, T: TimeSource>(
+        actions: &SessionLinkActions<R, T>,
+    ) -> Self {
+        let subject = actions.link_subject();
+        let (priorities, reliable) = negotiated_band(actions);
+        Self {
+            interfaces: subject.and_then(|s| s.interfaces.clone()),
+            cert_common_name: subject.and_then(|s| s.cert_common_name.clone()),
+            priorities,
+            reliable,
+        }
+    }
+}
+
+/// The band and the class the QoS extension of the handshake of the session `actions` carried
+/// for its links, as a link's snapshot states them (`LinkSnapshot::priorities`,
+/// `LinkSnapshot::reliable`).
+#[cfg(feature = "session-unicast")]
+fn negotiated_band<R: SessionRuntime, T: TimeSource>(
+    actions: &SessionLinkActions<R, T>,
+) -> (Option<(u8, u8)>, Option<bool>) {
+    #[cfg(feature = "session-extqos")]
+    {
+        let negotiated = actions.qos_link_metadata();
+        (
+            negotiated
+                .priorities
+                .map(|band| (band.start() as u8, band.end() as u8)),
+            negotiated
+                .reliability
+                .map(|class| matches!(class, crate::reliability::Reliability::Reliable)),
+        )
+    }
+    #[cfg(not(feature = "session-extqos"))]
+    {
+        let _ = actions;
+        (None, None)
+    }
+}
+
 /// One ESTABLISHED face, plus the links under it.
 ///
 /// The transport half is the identity and the negotiated booleans a transport value carries;
@@ -220,20 +293,7 @@ impl FaceSnapshot {
         let mtu = u16::try_from(actions.negotiated_batch_mtu()).unwrap_or(u16::MAX);
         // What the handshake negotiated for the links of the transport: the band and the class the
         // QoS extension carried, which the links of the face share.
-        #[cfg(feature = "session-extqos")]
-        let (priorities, reliable) = {
-            let negotiated = actions.qos_link_metadata();
-            (
-                negotiated
-                    .priorities
-                    .map(|band| (band.start() as u8, band.end() as u8)),
-                negotiated
-                    .reliability
-                    .map(|class| matches!(class, crate::reliability::Reliability::Reliable)),
-            )
-        };
-        #[cfg(not(feature = "session-extqos"))]
-        let (priorities, reliable) = (None, None);
+        let (priorities, reliable) = negotiated_band(actions);
         let links = actions
             .link_endpoints_all()
             .into_iter()
@@ -936,6 +996,38 @@ impl FaceSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A link read from its row with the facts kept beside it carries every fact the row does not
+    /// hold, and the row's own. Turned red by a fact of [`LinkFacts`] left out of
+    /// `LinkSnapshot::of_row_with`, which reads as not known.
+    #[test]
+    fn a_link_read_from_its_row_keeps_the_facts_kept_beside_it() {
+        let face = FaceSnapshot {
+            zid: [9; 16],
+            whatami: 1,
+            is_qos: true,
+            is_multicast: false,
+            is_shm: false,
+            links: alloc::vec![LinkSnapshot::unicast("tcp/a:1", "tcp/b:2", None, 1024)],
+        };
+        let row = FaceLinkRow::of_snapshot(&face, 0).expect("the face's one link");
+        let facts = LinkFacts {
+            interfaces: Some(alloc::vec![String::from("eth0")]),
+            cert_common_name: Some(String::from("peer")),
+            priorities: Some((1, 6)),
+            reliable: Some(true),
+        };
+        let link = LinkSnapshot::of_row_with(&row, &facts).expect("a row of a link");
+        assert_eq!(link.interfaces, facts.interfaces);
+        assert_eq!(link.cert_common_name, facts.cert_common_name);
+        assert_eq!(link.priorities, Some((1, 6)));
+        assert_eq!(link.reliable, Some(true));
+        assert_eq!(
+            (link.src.as_str(), link.dst.as_str()),
+            ("tcp/a:1", "tcp/b:2")
+        );
+        assert_eq!(link.mtu, 1024);
+    }
 
     /// A face of one TCP link from `src` to `dst`, and a group member's link.
     fn face_of(src: &str, dst: &str) -> FaceSnapshot {

@@ -958,6 +958,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-session-core/src/reply/in_place.rs` | S2 | |
 | `crates/wz-session-core/src/reply_acceptance.rs` | S2 | |
 | `crates/wz-session-core/src/reply_hold.rs` | S2 | |
+| `crates/wz-session-core/src/reply_pass.rs` | S2 | |
 | `crates/wz-session-core/src/reply_sink.rs` | S2 | |
 | `crates/wz-session-core/src/reply_stage.rs` | S2 | |
 | `crates/wz-session-core/src/request_build.rs` | S2 | |

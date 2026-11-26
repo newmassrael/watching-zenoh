@@ -31,18 +31,18 @@ use wz_session_core::driver_loop::{InPlaceRecord, IterationEvent, OwedToProjecti
 use wz_session_core::query::pinned::{PinnedQuery, QueryRoom};
 use wz_session_core::wireexpr_resolve::KeyexprBuf;
 
-use super::direct::FaceRecords;
+use super::direct::{FaceRecords, RecordActions};
 use super::query::QueryableCall;
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the query of the Request `record`, the record `event` of the face `records` reads,
     /// to each queryable it reaches, one call at a time with the session let go of, then owe its
     /// Final; a Request the lent form does not represent by its owned projection. A Request no
     /// queryable is handed (no Query, its key unresolved, past the bounds or the Finals the face
     /// holds) sends what its dispatch owes. A closed session hands nothing.
-    pub(super) fn hand_lent_query(
+    pub(super) fn hand_lent_query<A: RecordActions>(
         &self,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         record: &InPlaceRecord<'_, '_>,
         event: &IterationEvent<'_, '_>,
     ) {
@@ -78,10 +78,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// projection, read under `held`, handed as one the copying receive decoded. Out of line, so
     /// the lent walk's frame does not hold the projection's.
     #[inline(never)]
-    fn hand_projected_query(
+    fn hand_projected_query<A: RecordActions>(
         &self,
         held: LiveCore<'_, L, C>,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         record: &InPlaceRecord<'_, '_>,
     ) {
         if let Some(request) = wz_session_core::query::pinned::project_request(record) {
@@ -95,10 +95,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// no queryable is handed sends what its dispatch owes. Out of line, so the room the query's
     /// parts lie in is in a frame of its own.
     #[inline(never)]
-    pub(super) fn hand_owned_query(
+    pub(super) fn hand_owned_query<A: RecordActions>(
         &self,
         mut held: LiveCore<'_, L, C>,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         request: &wz_session_core::wire::RequestOwned,
     ) {
         let mut room = QueryRoom::default();
@@ -123,10 +123,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     /// in the face's open frame and its hold on the Final is let go of after it (`run_queryable`).
     /// Then the query owes its Final, sent at once unless a callback keeps the query, and what
     /// was held leaves with it.
-    fn hand_query(
+    fn hand_query<A: RecordActions>(
         &self,
         held: LiveCore<'_, L, C>,
-        records: &FaceRecords<C>,
+        records: &FaceRecords<A>,
         query: &mut PinnedQuery<'_>,
     ) {
         let generation = records.generation;
@@ -135,7 +135,8 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         // The callbacks' replies wait in the face's open frame for the Final, and the two leave
         // in one send once it is owed. No window is open meanwhile: what else is sent, on this
         // thread or another, goes at once.
-        let replies = records.actions.hold_replies();
+        let replies =
+            wz_session_core::response_sink::ResponseSink::hold_replies(records.actions.sink());
         // A read a callback makes reads nothing, so no record is handed out inside another's call.
         self.deliveries.within(|_| {
             while let Some(call) = next.take() {
@@ -158,7 +159,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(_held) = self.live() {
             records.owe_final(query.rid(), query.qos());
         }
-        records.actions.release_replies(replies);
+        wz_session_core::response_sink::ResponseSink::release_replies(
+            records.actions.sink(),
+            replies,
+        );
     }
 
     /// The next queryable `query` reaches under `held`, with a hold taken on the query's Final

@@ -682,8 +682,9 @@ mod tests {
     }
 
     /// The door answers the count of the build's own marking of threads in callbacks: a build
-    /// with std marks every thread, so it refuses none, however many callbacks run at once.
-    #[cfg(feature = "std")]
+    /// with std (the tokio engine's, which keeps the count in thread-local storage) marks every
+    /// thread, so it refuses none, however many callbacks run at once.
+    #[cfg(feature = "engine-tokio")]
     #[test]
     fn the_refused_callbacks_door_answers_none_in_a_build_with_std() {
         let entered: std::vec::Vec<_> = (0..4).map(|_| super::callback_depth::enter()).collect();

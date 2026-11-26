@@ -19,6 +19,7 @@ use wz_capi_port::{
 };
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::qos::CongestionControl;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::session_init_params::SessionZid;
@@ -292,11 +293,16 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
         // Long enough that a batch holds a few, so a sample read into another link's buffer
         // would show in its bytes.
         let payload = vec![tag ^ at; 200 + usize::from(at)];
+        // Blocking: under the clients' pico profile a droppable put that finds its link's send
+        // held by the client's own read task (a keep-alive) is dropped and told, and every sample
+        // is what the listener's links are read for here.
         peer.publish_on_wire_all(
             "demo/full/x",
             &WireKey::literal(),
             &payload,
-            &PublishOptions::put().with_locality(Locality::Remote),
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Block),
         )
         .expect("a put the link carries");
         payload
@@ -563,10 +569,14 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 }
 
 /// A read whose step left a link holding input goes on with it at once, with no wait worked out
-/// for it: here a second batch lies whole in the stream link's buffer behind the first, and the
-/// one read hands both out, the session taken once for its wait and once a batch, and moves the
-/// links once at most, after the second. Turned red by a read that ends after the first batch
-/// while the link holds the second, or one that moves the links after each batch.
+/// for it: here a second batch lies whole in the stream link's buffer behind the first. Where the
+/// session keeps a round, the one read hands both out, the session taken once for its wait and
+/// once a batch, and moves the links once at most, after the second. Where the read steps the
+/// link itself (`direct`), the one step of the face takes both, one take a batch, so the wait, the
+/// look at the life and the pump's deadlines are paid once for the two. Turned red by a read that
+/// ends after the first batch while the link holds the second, or one that moves the links after
+/// each batch; with `direct`, by a step that takes one batch a read
+/// (`CoopEngine::take_held_input`).
 #[test]
 fn a_read_goes_on_with_the_input_its_step_left_held() {
     let engine = open_with(CoopConfig {
@@ -626,17 +636,151 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
         "the second batch is written"
     );
     std::thread::sleep(Duration::from_millis(100));
-    let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
-    let (before, polls) = (takes(&engine), engine.link_polls());
+    #[cfg(wz_round)]
+    {
+        let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
+        let (before, polls) = (takes(&engine), engine.link_polls());
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            (takes(&engine) - before, received.load(Ordering::SeqCst)),
+            (3, 2 * PUTS),
+            "the read works out its wait, steps once a batch and hands both batches out"
+        );
+        assert!(
+            engine.link_polls() - polls <= 1,
+            "one move of the links at most, after the second batch"
+        );
+    }
+    #[cfg(not(wz_round))]
+    {
+        let takes = engine.takes.pump_reads.load(Ordering::SeqCst);
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            2 * PUTS,
+            "the one read hands out both batches, the one held behind the first too"
+        );
+        assert_eq!(
+            engine.takes.pump_reads.load(Ordering::SeqCst) - takes,
+            2,
+            "one take a batch, in the one step"
+        );
+    }
+}
+
+/// A listener's read turns the face that holds its client's link and passes over the dial role's
+/// face, which dials nothing and holds no link: a look at it would move nothing, and the client's
+/// face's look serves the session's own bookkeeping. With no client, the dial role's face is the
+/// one a read turns all the same. Turned red by a read that turns a face at rest beside another
+/// (`DirectFace::rests` in `CoopEngine::read_faces`, or a dial role that dials nothing not
+/// noted at rest by the open), or one that turns no face when every face rests.
+#[cfg(not(wz_round))]
+#[test]
+fn a_listeners_read_passes_over_its_resting_dial_face() {
+    let engine = open_with(CoopConfig {
+        whatami: WhatAmI::Peer,
+        zid: config_zid(0xa2),
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        ..client_config()
+    });
+    let endpoint = engine.listening().pop().expect("one port is bound");
+    let turns = |engine: &Engine| engine.takes.face_turns.load(Ordering::SeqCst);
+    let before = turns(&engine);
     let _ = SessionDrive::read(&*engine, false);
     assert_eq!(
-        (takes(&engine) - before, received.load(Ordering::SeqCst)),
-        (3, 2 * PUTS),
-        "the read works out its wait, steps once a batch and hands both batches out"
+        turns(&engine) - before,
+        1,
+        "with no client the dial role's face is turned all the same"
     );
+    let dialing = std::thread::spawn(move || client(&endpoint, 0xc2));
+    reads_until(&engine, "the client's face", || engine.faces_up() == 1);
+    let _peer = dialing.join().expect("the client opens");
+    std::thread::sleep(Duration::from_millis(100));
+    for _ in 0..4 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        engine.direct_faces().1,
+        2,
+        "CONTROL: the dial role's face and the client's are both in the read's walk"
+    );
+    let before = turns(&engine);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        turns(&engine) - before,
+        1,
+        "the client's face alone is turned"
+    );
+}
+
+/// A listener's read walks its face table up to the last row that holds a face and no further:
+/// with one client, the dial role's row and the client's, whatever rows the table keeps for faces
+/// to come. A second client moves the bound to its row, and the bound comes back as each client's
+/// face goes. Turned red by walks of every row of the table (`DirectFaces::walked`), or a bound
+/// that a face's going leaves where it was (`DirectFaces::hold_face`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_listeners_walk_ends_at_its_last_held_row() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 3);
+    assert_eq!(
+        listener.walked_rows(),
+        1,
+        "with no client, the dial role's row alone"
+    );
+    let first = client(&endpoint, 0xc1);
+    eventually("the first face", || listener.faces_up() == 1);
     assert!(
-        engine.link_polls() - polls <= 1,
-        "one move of the links at most, after the second batch"
+        listener.direct_faces().0 >= 3,
+        "CONTROL: the table keeps a row for each face it admits beside the dial role's"
+    );
+    assert_eq!(
+        listener.walked_rows(),
+        2,
+        "the dial role's row and the first client's"
+    );
+    let second = client(&endpoint, 0xc2);
+    eventually("the second face", || listener.faces_up() == 2);
+    assert_eq!(
+        listener.walked_rows(),
+        3,
+        "the bound moves to the second client's row"
+    );
+    drop(second);
+    eventually("the second client's face to go", || {
+        listener.walked_rows() == 2
+    });
+    drop(first);
+    eventually("the first client's face to go", || {
+        listener.walked_rows() == 1
+    });
+}
+
+/// A row a face left is noted at rest by that face's last look, and the face an attach gives it
+/// next wakes it: the attached dial lies in the face's record until the face's own look takes it
+/// into the slot, so a read that passed the row over would never dial. CONTROL: the row's first
+/// face, taken off the port, comes up and goes. Turned red by a row given a face and left at rest
+/// (`DirectFaces::hold_face` not ending `DirectFace::rests`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_row_a_face_left_wakes_for_the_face_an_attach_gives_it() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 1);
+    let first = client(&endpoint, 0xc1);
+    eventually("CONTROL: the taken face", || listener.faces_up() == 1);
+    drop(first);
+    eventually("the taken face to go", || {
+        listener.faces_up() == 0 && listener.walked_rows() == 1
+    });
+    let (other, other_endpoint) = listening(|config| config.zid = config_zid(0xa3));
+    listener
+        .attach_face(&other_endpoint)
+        .expect("the attach takes the row the taken face left");
+    eventually("the attached face, in the row the taken face left", || {
+        listener.faces_up() == 1 && other.faces_up() == 1
+    });
+    assert_eq!(
+        listener.walked_rows(),
+        2,
+        "the attached face holds the one row past the dial role's"
     );
 }
 

@@ -167,22 +167,22 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
     let rooms = rooms(&answers);
     rooms.hold(0, answers.face(10, true));
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000, None),
         Room::Held(7)
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Holder::Publish, 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Publish, 1_000, None),
         Room::Free,
         "a publish between its sends is tried again"
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Holder::Step, 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Step, 1_000, None),
         Room::Stepping,
         "a holder that is not a publish is waited for"
     );
     assert!(answers.asked(10).is_empty(), "the link was asked for room");
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, None),
         Room::Free,
         "CONTROL: zenoh's profile asks the link"
     );
@@ -201,20 +201,65 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
     rooms.hold(0, answers.face(10, true));
     for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
         assert_eq!(
-            rooms.for_held(profile, Holder::Waiting, 1_000),
+            rooms.for_held(profile, Holder::Waiting, 1_000, None),
             Room::Free,
             "{profile:?} tries the session again"
         );
     }
     assert!(answers.asked(10).is_empty(), "no link was asked for room");
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, None),
         Room::Free
     );
     assert_eq!(
         answers.asked(10),
         [1_000],
         "CONTROL: behind a read step zenoh's profile asks the link"
+    );
+}
+
+/// A leg that holds the send place of its one face answers behind a held session for that face
+/// alone: under zenoh's profile it asks that face, and no other, for room, and is dropped on it
+/// when it took none; under pico's it is dropped at once only behind a send on that face, and
+/// tries the session again behind a send on another. CONTROL: a publish that holds no face asks
+/// every face. Turned red by a leg that asks every face's room, where a full face it is not sent
+/// on drops it, or by one dropped behind another face's send.
+#[test]
+fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(11, true));
+    assert_eq!(
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, Some(1)),
+        Room::Free,
+        "the leg's own face has room"
+    );
+    assert!(
+        answers.asked(10).is_empty(),
+        "the full face the leg is not sent on was asked"
+    );
+    assert_eq!(answers.asked(11), [1_000]);
+    assert_eq!(
+        congested(rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, Some(0))),
+        Some(vec![0]),
+        "the leg's own face took no bytes"
+    );
+    assert_eq!(
+        congested(rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, None)),
+        Some(vec![0]),
+        "CONTROL: a publish that holds no face asks every face"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(0), 1_000, Some(1)),
+        Room::Free,
+        "behind a send on another face the leg tries the session again"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(1), 1_000, Some(1)),
+        Room::Held(1),
+        "behind a send on its own face the leg is dropped at once"
     );
 }
 
@@ -268,7 +313,7 @@ fn a_faces_room_lies_at_its_own_place() {
 /// publish is not sent it. A face that holds no place is named as every face, which drops the
 /// publish on all. Turned red by a place reused without its mark, or a face with no place the set
 /// leaves out.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 #[test]
 fn a_face_that_takes_a_place_after_a_drop_is_not_sent_it() {
     let answers = Answers::default();
@@ -353,6 +398,65 @@ fn the_sessions_message_reading_counts_what_its_link_received() {
 /// The engine over a link whose peer took the connection, brought the session up and then read
 /// nothing more: what the session sends fills the stream, and a blocking publish waits on it.
 // Its publisher and peers are stepped by their read tasks.
+/// A droppable publish that finds the send place of the session's one face held by another
+/// thread is not held behind it: under the pico profile, which the tests' sessions open with, it
+/// is dropped at once and its caller told, as pico's put fails when its try of the transmit lock
+/// finds it held. CONTROL: with the place free the same publish is sent. Turned red by a droppable
+/// leg that waits for the place as a blocking one does (`CoopEngine::on_faces`).
+#[cfg(all(
+    feature = "threads",
+    not(wz_round),
+    not(any(feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_droppable_publish_behind_the_one_faces_held_send_place_is_dropped_at_once() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use wz_capi_port::{FanoutError, SessionEngine, WireKey};
+    use wz_session_core::locality::Locality;
+    use wz_session_core::publish_options::PublishOptions;
+    use wz_session_core::qos::CongestionControl;
+    use wz_session_core::session_init_params::HeldDrop;
+
+    assert_eq!(
+        super::client_config().tx_queue.held_drop,
+        HeldDrop::DropAtOnce,
+        "CONTROL: the tests' sessions drop at once"
+    );
+    let router = super::Router::start(super::CatchAll::None);
+    let engine = super::open(&router);
+    let publish = |engine: &crate::EngineHold<super::Engine>| {
+        engine.publish_on_wire_all(
+            "demo/held",
+            &WireKey::literal(),
+            b"v",
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Drop),
+        )
+    };
+    assert!(
+        publish(&engine).is_ok(),
+        "CONTROL: with the place free the publish is sent"
+    );
+    let (told, answer) = mpsc::channel();
+    let held = engine.holding_the_dial_send_place(|| {
+        let publisher = engine.clone();
+        let thread = std::thread::spawn(move || {
+            let _ = told.send(publish(&publisher));
+        });
+        (thread, answer.recv_timeout(Duration::from_secs(2)))
+    });
+    let (thread, dropped) = held.expect("CONTROL: the one face's place holds its link");
+    thread.join().expect("the publishing thread ends");
+    assert_eq!(
+        dropped,
+        Ok(Err(FanoutError::HeldConduit)),
+        "the publish was dropped at once and told, not held behind the place"
+    );
+}
+
 #[cfg(all(feature = "listen", feature = "threads"))]
 mod stalled_link {
     use std::sync::atomic::{AtomicUsize, Ordering};
