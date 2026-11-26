@@ -8160,6 +8160,23 @@
         "a cooperative build without object-pool does not refuse a session past HELD_SESSIONS.",
         "wz-capi-coop tests::round compiles in no host test build (wz_round needs a target without 64-bit atomics)."
       ]
+    },
+    "Round 4671": {
+      "decision_summary": "The capability cost and size ledger gates read a case's cargo configuration\nas TOML through the repository's floor-interpreter reader, take each target\ntable's rustflags and linker, and pass a linker as cargo's own variable for\nthe triple it names. Any other key is still refused by name, so a setting the\ngate would not pass on cannot sit in the file unseen. The Windows linker key\nhad made both gates fail on main.",
+      "changes_bullets": [
+        "capability_cost_gate: read_config_tables reads rustflags and linker; CARGO_TARGET_<TRIPLE>_LINKER carries the linker.",
+        "wz_config: read_decl_toml reads quoted header keys and makes implicit parent tables, refusing table and value overlaps."
+      ],
+      "verification_bullets": [
+        "selftests: capability-cost 133/133, size-ledger 107/107, wz-config 528/528; python floor lint 0 findings at 3.10.",
+        "size_ledger_gate --check and capability_cost_gate --check pico-client-coop-nostd pass on this branch."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
