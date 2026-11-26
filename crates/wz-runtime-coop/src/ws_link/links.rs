@@ -570,16 +570,19 @@ where
 
     // A stack that places its links on the heap has the WebSocket links placed there too. A cell
     // holds a link or the handshake of a dial that becomes one.
-    fn link_cell_bytes(&self) -> usize {
-        match self.links.link_cell_bytes() {
+    const LINK_CELL_BYTES: usize =
+        match S::LINK_CELL_BYTES {
             0 => 0,
-            links => links
-                .max(CellRc::<
-                    StreamDriver<Stream<O>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, WsFraming>,
-                >::cell_bytes())
-                .max(CellRc::<DialCell<O, N>>::cell_bytes()),
-        }
-    }
+            links => crate::link_cells::larger_cell(
+                crate::link_cells::larger_cell(
+                    links,
+                    CellRc::<
+                        StreamDriver<Stream<O>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, WsFraming>,
+                    >::cell_bytes(),
+                ),
+                CellRc::<DialCell<O, N>>::cell_bytes(),
+            ),
+        };
 
     fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
         self.shape.place.cells = Some(cells);

@@ -1523,12 +1523,10 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
     }
 
     /// The larger cell of these links' two: a datagram link's and a stream link's.
-    fn link_cell_bytes(&self) -> usize {
-        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes()
-            .max(CellRc::<
-            StreamDriver<AppStreamSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>,
-        >::cell_bytes())
-    }
+    const LINK_CELL_BYTES: usize = crate::link_cells::larger_cell(
+        CellRc::<UdpDriver<AppDatagramSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+        CellRc::<StreamDriver<AppStreamSocket, RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+    );
 
     /// Every link opened from now on, and every one a listener opened after this takes, is placed
     /// in a cell of `cells`.

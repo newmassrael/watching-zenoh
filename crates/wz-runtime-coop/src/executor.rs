@@ -398,30 +398,52 @@ pub(crate) struct StoreLayout {
 impl StoreLayout {
     /// The block of `count` cells, each with `bytes` behind the cells at steps of the cells'
     /// alignment when `bytes` is given, bare otherwise. `AT_MOST_ONE`: a count past one is held
-    /// to one.
-    pub(crate) fn of<const AT_MOST_ONE: bool>(count: usize, bytes: Option<usize>) -> Self {
-        let count = if AT_MOST_ONE { count.min(1) } else { count };
+    /// to one. A `const fn`, so the span a runtime is placed in is a constant where its rows are
+    /// (`crate::runtime_impl::CoopRuntime::placed_layout`).
+    pub(crate) const fn of<const AT_MOST_ONE: bool>(count: usize, bytes: Option<usize>) -> Self {
+        let count = if AT_MOST_ONE && count > 1 { 1 } else { count };
         let (count, cells_layout) = match Layout::array::<TaskCell>(count) {
             Ok(layout) => (count, layout),
             Err(_) => (0, Layout::new::<[TaskCell; 0]>()),
         };
-        let reserved = bytes.and_then(|bytes| {
-            let stride = round_up(bytes.max(1), CELL_ALIGN);
-            let tail = Layout::from_size_align(stride.checked_mul(count)?, CELL_ALIGN).ok()?;
-            let (layout, offset) = cells_layout.extend(tail).ok()?;
-            Some((layout, offset, stride, bytes))
-        });
+        let reserved = match bytes {
+            Some(bytes) => Self::bytes_after(cells_layout, count, bytes),
+            None => None,
+        };
+        let (layout, reserved) = match reserved {
+            Some((layout, offset, stride, bytes)) => (layout, Some((offset, stride, bytes))),
+            None => (cells_layout, None),
+        };
         Self {
             count,
-            layout: reserved
-                .map_or(cells_layout, |(layout, ..)| layout)
-                .pad_to_align(),
-            reserved: reserved.map(|(_, offset, stride, bytes)| (offset, stride, bytes)),
+            layout: layout.pad_to_align(),
+            reserved,
+        }
+    }
+
+    /// The block of `count` cells laid out as `cells` with `bytes` behind each, at steps of the
+    /// cells' alignment: the block, where the first cell's bytes start, the step and `bytes`.
+    /// `None` past the address space.
+    const fn bytes_after(
+        cells: Layout,
+        count: usize,
+        bytes: usize,
+    ) -> Option<(Layout, usize, usize, usize)> {
+        let stride = round_up(if bytes > 1 { bytes } else { 1 }, CELL_ALIGN);
+        let Some(tail_bytes) = stride.checked_mul(count) else {
+            return None;
+        };
+        let Ok(tail) = Layout::from_size_align(tail_bytes, CELL_ALIGN) else {
+            return None;
+        };
+        match cells.extend(tail) {
+            Ok((layout, offset)) => Some((layout, offset, stride, bytes)),
+            Err(_) => None,
         }
     }
 
     /// The block's bytes and alignment.
-    pub(crate) fn layout(&self) -> Layout {
+    pub(crate) const fn layout(&self) -> Layout {
         self.layout
     }
 }

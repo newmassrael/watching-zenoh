@@ -756,12 +756,13 @@ where
     }
 
     // A stack that places its links on the heap has the unixpipe links placed there too.
-    fn link_cell_bytes(&self) -> usize {
-        match self.links.link_cell_bytes() {
-            0 => 0,
-            links => links.max(CellRc::<PipeDriver<O::Fifo, N::Flag>>::cell_bytes()),
-        }
-    }
+    const LINK_CELL_BYTES: usize = match S::LINK_CELL_BYTES {
+        0 => 0,
+        links => crate::link_cells::larger_cell(
+            links,
+            CellRc::<PipeDriver<O::Fifo, N::Flag>>::cell_bytes(),
+        ),
+    };
 
     fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
         self.shape.cells = Some(cells);
