@@ -1,0 +1,19 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+A build that answers no Interest (wz-capi-coop without interest-answer) links
+no initial interest Final, since such a build only ever meets peers as a
+client. Peer builds keep the Final unchanged. Measured about -370 B on the
+client-only pico build.
+'''
+changes = '''
+- capi-coop: the initial Final's state, owing and send are built with interest-answer only.
+- tests: a build without interest-answer sends no initial Final to a peer.
+'''
+verification = '''
+- wz-capi-coop replay tests (default, listen, app-transport+group); clippy default, listen, host-sys; wz-capi-pico lib 538.
+- size ledger check passes; pico-client-coop-nostd area sum 628 B below main3f90 (size-5's 257 included).
+- subprofile receive W 3,078.3 vs P 4,049.4 Ir per message.
+'''
+carry = '''
+- none for this lane.
+'''
