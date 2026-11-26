@@ -264,6 +264,45 @@ impl TxBuf for CountTxBuf {
     }
 }
 
+/// What writes one network message into a sink: the writer a send hands its dispatch, as a trait
+/// object of its own and not `dyn Fn`, whose table would also hold the closure's `FnMut` and
+/// `FnOnce` shims, each of which can carry another copy of the writer's body. Every closure that
+/// writes a message is one, so a writer is still written as a closure.
+pub trait WireWrite {
+    /// Write the message into `sink`, or refuse it with the codec's error. Called through the
+    /// trait object's `write_body`.
+    fn write_wire(&self, sink: &mut TxSink<'_>) -> Result<(), CodecError>;
+}
+
+impl<F> WireWrite for F
+where
+    F: Fn(&mut TxSink<'_>) -> Result<(), CodecError>,
+{
+    fn write_wire(&self, sink: &mut TxSink<'_>) -> Result<(), CodecError> {
+        self(sink)
+    }
+}
+
+impl dyn WireWrite + '_ {
+    /// Write the message into `sink`, or refuse it. Every call of a writer handed over is this
+    /// one line, so the stack bound's rule for the call through the writer's table claims it by
+    /// its place here (`deploy/stack_call_contracts.json`, `tx-encoder`).
+    #[inline(always)]
+    pub fn write_body(&self, sink: &mut TxSink<'_>) -> Result<(), CodecError> {
+        self.write_wire(sink)
+    }
+}
+
+/// `body` as the closure a generic frame writer takes: one closure type for every writer handed
+/// over as a [`WireWrite`], so each such frame writer is compiled once for all of them and not
+/// once per call site.
+#[inline(always)]
+pub fn wire_body<'a>(
+    body: &'a dyn WireWrite,
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + 'a {
+    move |sink| body.write_body(sink)
+}
+
 /// The bytes `encode` writes, counted with nothing written ([`CountTxBuf`]): the length a send
 /// asks its link to lend for a message whose encoder is the one its dispatch then runs. Zero for
 /// a message the encoder refuses, which the dispatch's own run refuses with the same error.
@@ -271,7 +310,7 @@ impl TxBuf for CountTxBuf {
 /// Present where the encoders write through `dyn TxBuf` ([`EncodeBuf`]), which is what lets one
 /// compiled encoder serve the count and the slot.
 #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
-pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -> usize {
+pub fn encoded_len(encode: &dyn WireWrite) -> usize {
     try_encoded_len(encode).unwrap_or(0)
 }
 
@@ -282,11 +321,9 @@ pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -
 /// again into each.
 #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
 #[inline(never)]
-pub fn try_encoded_len(
-    encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>,
-) -> Result<usize, CodecError> {
+pub fn try_encoded_len(encode: &dyn WireWrite) -> Result<usize, CodecError> {
     let mut count = CountTxBuf::new();
-    encode(&mut TxSink::new(&mut count))?;
+    encode.write_body(&mut TxSink::new(&mut count))?;
     Ok(count.len)
 }
 
@@ -780,7 +817,10 @@ mod tests {
             Err(CodecError::LengthOutOfRange)
         });
         assert_eq!(refused, 0);
-        assert_eq!(encoded_len(&|_: &mut TxSink<'_>| Ok(())), 0);
+        assert_eq!(
+            encoded_len(&|_: &mut TxSink<'_>| Ok::<(), CodecError>(())),
+            0
+        );
     }
 
     #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
@@ -796,7 +836,44 @@ mod tests {
             Err(CodecError::LengthOutOfRange)
         });
         assert_eq!(refused, Err(CodecError::LengthOutOfRange));
-        assert_eq!(try_encoded_len(&|_: &mut TxSink<'_>| Ok(())), Ok(0));
+        assert_eq!(
+            try_encoded_len(&|_: &mut TxSink<'_>| Ok::<(), CodecError>(())),
+            Ok(0)
+        );
+    }
+
+    /// A writer handed over as a [`WireWrite`], whole or as the closure `wire_body` makes of it,
+    /// writes what its closure writes and refuses what its closure refuses. Turned red by the
+    /// blanket writer or `wire_body` calling anything but the closure it holds.
+    #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+    #[test]
+    fn a_writer_handed_over_writes_what_its_closure_writes() {
+        let write = |sink: &mut TxSink<'_>| {
+            sink.write_u8(0x5d)?;
+            sink.write_bytes(&[1, 2, 3])
+        };
+        let writer: &dyn WireWrite = &write;
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        writer
+            .write_body(&mut TxSink::new(&mut buf))
+            .expect("the writer writes");
+        assert_eq!(buf.as_slice(), &[0x5d, 1, 2, 3]);
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        wire_body(writer)(&mut TxSink::new(&mut buf)).expect("the closure writes");
+        assert_eq!(
+            buf.as_slice(),
+            &[0x5d, 1, 2, 3],
+            "the closure of the writer"
+        );
+        let refuse = |_: &mut TxSink<'_>| Err::<(), CodecError>(CodecError::LengthOutOfRange);
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        assert_eq!(
+            wire_body(&refuse)(&mut TxSink::new(&mut buf)),
+            Err(CodecError::LengthOutOfRange)
+        );
     }
 
     #[cfg(not(feature = "session-slot"))]
