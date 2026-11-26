@@ -2673,24 +2673,25 @@ pub struct SharedSession {
     next_ticker_id: std::sync::atomic::AtomicU64,
 }
 
-/// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
-/// storage resolved into, or `None` for the default reader (POSIX alone), which every session
-/// had before the C ABI could be given one. Without the SHM feature there is no reader to
-/// configure and the type is a unit struct that carries nothing.
+/// R3065 -- the shared-memory reader a session is opened over: a client storage of the node's,
+/// or `None` for the reader of the process (its global storage, which holds the default client
+/// set), which every session had before the C ABI could be given one. Without the SHM feature
+/// there is no reader to configure and the type is a unit struct that carries nothing.
 #[cfg(feature = "transport-shm")]
 pub type OpenShmClients = Option<ShmReader>;
 
 /// How a session reads a shared-memory descriptor it was sent, when its host chose.
 ///
-/// The engine's reader maps a chunk through the clients of a set, one for each protocol, and
-/// hands the application a view of the page. A host whose application holds its own types for a
-/// chunk of shared memory (the Rust API's `ZShm`) needs the reader to hand it THOSE, so it
-/// supplies the resolver itself and keeps what a chunk is to itself.
+/// The reader is the process's one (`wz_runtime_tokio::shm_reader`): `zenoh-shm`'s, over a
+/// client storage, which maps a chunk through the client of its protocol and hands the
+/// application a view of the page that is the buffer itself. A host may still make the resolver
+/// of each session itself, when what it hands its sessions is not the storage the session
+/// advertises.
 #[cfg(feature = "transport-shm")]
 #[derive(Clone)]
 pub enum ShmReader {
-    /// The reader is the engine's, over this set of clients.
-    Clients(Arc<wz_runtime_tokio::shm_clients::ShmClientSet>),
+    /// The reader is the process's, over this storage of clients.
+    Clients(Arc<wz_runtime_tokio::shm_reader::ShmClientStorage>),
     /// The reader is the host's: this makes one for each session. The protocols the session
     /// offers are the default (POSIX alone), so a resolver of this kind reads POSIX chunks.
     Host(
@@ -2917,7 +2918,7 @@ impl SessionResources {
 }
 
 /// Give `session` the node's shared-memory reader when it has one of its own; without one the
-/// session keeps the default POSIX reader every session is built with.
+/// session keeps the reader of the process every session is built with.
 #[cfg(feature = "transport-shm")]
 fn install_shm_reader(session: &TokioSession, clients: &OpenShmClients) {
     if let Some(resolver) = shm_resolver_of(clients) {
@@ -2932,8 +2933,8 @@ fn shm_resolver_of(
     clients: &OpenShmClients,
 ) -> Option<Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync>> {
     match clients {
-        Some(ShmReader::Clients(clients)) => Some(Box::new(
-            wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
+        Some(ShmReader::Clients(storage)) => Some(Box::new(
+            wz_runtime_tokio::shm_reader::ShmReaderResolver::new(Arc::clone(storage)),
         )),
         Some(ShmReader::Host(make)) => Some(make()),
         None => None,
@@ -2945,15 +2946,15 @@ fn shm_resolver_of(
 fn install_shm_reader(_session: &TokioSession, _clients: &OpenShmClients) {}
 
 /// The reader a router node's own session reads a descriptor with: the one it was opened over,
-/// as each session of a registry reads with its own ([`install_shm_reader`]), and the default
-/// POSIX reader a session is built with when it was opened over none. A node holds no session of
+/// as each session of a registry reads with its own ([`install_shm_reader`]), and the reader of
+/// the process a session is built with when it was opened over none. A node holds no session of
 /// its own to keep a default in, so the default is named here.
 #[cfg(all(feature = "transport-shm", feature = "router-node"))]
 pub(crate) fn node_shm_resolver(
     clients: &OpenShmClients,
 ) -> Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync> {
     shm_resolver_of(clients)
-        .unwrap_or_else(|| Box::new(wz_runtime_tokio::shm_provider::PosixShmResolver))
+        .unwrap_or_else(|| Box::new(wz_runtime_tokio::shm_reader::ShmReaderResolver::global()))
 }
 
 impl SharedSession {

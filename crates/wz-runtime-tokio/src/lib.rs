@@ -2105,16 +2105,16 @@ pub mod shm_backend;
 pub mod shm_posix_backend;
 // transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
 // `ShmProvider` (a backend, a busy list, allocation policies) +
-// `ShmBackedPayload` (owner alloc/write) + `PosixShmResolver` (the reader-side
-// impl of the no_std `wz_session_core::extshm::ShmResolver` seam). The std mmap
-// half of the scoped same-host SHM transport; the descriptor + 0x2 marker codec
-// live in the no_std core.
+// `ShmBackedPayload` (owner alloc/write). The std mmap half of the scoped
+// same-host SHM transport; the descriptor + 0x2 marker codec live in the no_std
+// core.
 #[cfg(feature = "transport-shm")]
 pub mod shm_provider;
-// R3065 -- the reader's clients: how a received chunk is mapped, by the protocol its header
-// names. Its docs are inside the module, for the reason the note on `shm_backend` gives.
+// The reader of the process, `zenoh-shm`'s over a client storage, as the engine's
+// `ShmResolver`. Its docs are inside the module, for the reason the note on `shm_backend`
+// gives.
 #[cfg(feature = "transport-shm")]
-pub mod shm_clients;
+pub mod shm_reader;
 // What a node that forwards a message holds while it routes it: the chunks of its
 // shared-memory slices. Its docs are inside the module, for the reason the note on
 // `shm_backend` gives.
