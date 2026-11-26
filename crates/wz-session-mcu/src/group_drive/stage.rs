@@ -1328,6 +1328,9 @@ impl MulticastTxQueue for StageQueue<'_> {
             len: 0,
         };
         let bytes = &datagram.bytes;
+        // A frame built apart from its lane's storage (where the push lends no slot, a window's
+        // frame) leaves from where it was copied as a lent one does, so a build without the lend
+        // seam writes through as well.
         let queued = self.lanes.borrow_mut().queue(
             record,
             bytes.len(),
@@ -1335,7 +1338,7 @@ impl MulticastTxQueue for StageQueue<'_> {
                 slot.copy_from_slice(bytes);
                 Some(bytes.len())
             },
-            None,
+            self.through,
         );
         // Every datagram was let on by a push's run free in its lane's storage, and a reply by
         // the runs of its datagrams (`GroupTxStage::admit_reply`): one finds room by the sizing.
@@ -1545,8 +1548,9 @@ mod tests {
     use wz_session_core::multicast_params::{GroupJoinRule, MulticastDriveConfig, MulticastParams};
     use wz_session_core::multicast_reply_sink::MulticastReplyEnqueue;
     use wz_session_core::multicast_tx::{
-        multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxEncoded,
-        MulticastTxFraming, MulticastTxItem, MulticastTxTally,
+        multicast_put_literal, multicast_tx_encoded_conduit, MulticastTxDatagram,
+        MulticastTxEncoded, MulticastTxFraming, MulticastTxItem, MulticastTxQueue,
+        MulticastTxTally,
     };
     use wz_session_core::policy::SessionPolicy;
     use wz_session_core::qos::Priority;
@@ -1556,7 +1560,9 @@ mod tests {
     use wz_session_core::wire_const::T_MID_JOIN;
     use wz_session_core::WhatAmI;
 
-    use super::{next_out, GroupLink, GroupTxPace, GroupTxStage, Lanes, Record};
+    use super::{
+        next_out, GroupLink, GroupTxPace, GroupTxStage, Lanes, Record, StageQueue, Through,
+    };
     use crate::group_drive::MulticastPump;
     use wz_session_core::limits::MaxMulticastRepliesHeld;
 
@@ -1796,9 +1802,11 @@ mod tests {
     /// A message pushed through the session's open link onto empty lanes leaves from where it was
     /// written: the socket takes it in the push and nothing is put on a lane. On a link not open,
     /// or a socket with no room, it goes on its lane, and a push while a datagram is held goes on
-    /// its lane behind it; each leaves in the order it was pushed. Turned red by a datagram
-    /// offered at once with one queued or held ahead of it (`Lanes::queue`, `Through::offer`), or
-    /// by one the socket took that is put on its lane too.
+    /// its lane behind it; each leaves in the order it was pushed. It holds whether the push's frame
+    /// is encoded into its lane's storage or built apart and copied there, which is the frame of a
+    /// build that lends no slot. Turned red by a datagram offered at once with one queued or held
+    /// ahead of it (`Lanes::queue`, `Through::offer`), by one the socket took that is put on its
+    /// lane too, or by a copied frame never offered (`StageQueue::enqueue`).
     #[test]
     fn a_push_onto_empty_lanes_leaves_from_where_it_was_written() {
         let wire = Rc::new(RefCell::new(Wire::default()));
@@ -1846,6 +1854,61 @@ mod tests {
         wire.borrow_mut().room = 1;
         link.write_staged(&stage);
         assert_eq!(taken(&wire), ["first", "second", "third", "first"]);
+        assert!(stage.is_empty() && !stage.holds());
+    }
+
+    /// A frame built apart from its lane's storage and copied onto it (`StageQueue::enqueue`, the
+    /// path of a push that is lent no slot) leaves from where it was copied as a lent one does:
+    /// taken by the socket with nothing put on a lane where every lane is empty, put on its lane
+    /// where the socket has no room, and put behind a datagram queued ahead of it whatever room
+    /// the socket has; the write after sends them in that order. Turned red by a copied frame that
+    /// is never offered at once (`StageQueue::enqueue`), or by one offered past a datagram queued
+    /// ahead of it (`Lanes::queue`).
+    #[test]
+    fn a_frame_built_apart_leaves_from_where_it_was_copied() {
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let link = GroupLink::new(Socket(Rc::clone(&wire)));
+        let mut session_side = link.clone();
+        assert!(session_side.open());
+        let stage = GroupTxStage::new(&params());
+        let inner = &*stage.inner;
+        let datagram = |payload: &str, sn: u64| MulticastTxDatagram {
+            priority: Priority::DEFAULT,
+            reliable: true,
+            sn,
+            bytes: payload.as_bytes().to_vec(),
+        };
+        let mut queue = StageQueue {
+            lanes: &inner.lanes,
+            pace: None,
+            reply: false,
+            through: Some(Through {
+                socket: &*link.0,
+                writer: &inner.writer,
+            }),
+        };
+        let queued = || inner.lanes.borrow().order;
+
+        wire.borrow_mut().room = 1;
+        queue.enqueue(datagram("first", 0));
+        assert_eq!(taken(&wire), ["first"], "taken from where it was copied");
+        assert_eq!(queued(), 0, "with nothing put on a lane");
+
+        queue.enqueue(datagram("second", 1));
+        assert_eq!(taken(&wire), ["first"]);
+        assert_eq!(queued(), 1, "a socket with no room: on its lane");
+
+        wire.borrow_mut().room = 2;
+        queue.enqueue(datagram("third", 2));
+        assert_eq!(
+            taken(&wire),
+            ["first"],
+            "not offered ahead of the datagram on its lane"
+        );
+        assert_eq!(queued(), 2, "behind it, on its lane");
+
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["first", "second", "third"]);
         assert!(stage.is_empty() && !stage.holds());
     }
 
