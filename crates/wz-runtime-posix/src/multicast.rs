@@ -1539,8 +1539,6 @@ mod tests {
         /// took (`HostGroupTransport::open`).
         #[test]
         fn a_groups_receive_half_reads_apart_from_its_send_half() {
-            use wz_runtime_coop::group_transport::GroupReceive;
-
             let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let read = PosixUdpSocket::bind(loopback).expect("a reading socket");
             let write = PosixUdpSocket::bind(loopback).expect("a sending socket");
@@ -1587,7 +1585,6 @@ mod tests {
         #[test]
         fn a_groups_receive_half_waits_in_its_receive_past_its_own_datagrams() {
             use std::time::{Duration, Instant};
-            use wz_runtime_coop::group_transport::GroupReceive;
 
             let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
             let read = PosixUdpSocket::bind(loopback).expect("a reading socket");
