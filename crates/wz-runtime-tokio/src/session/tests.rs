@@ -8035,10 +8035,11 @@ fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
     assert_eq!(session.reply_bounds, ReplyBounds::of(&limits));
 
     let mut handed = 0usize;
-    let mut replies = ReplyPass::new(session.reply_bounds, |_parts: ReplyParts<'_>| {
-        handed += 1;
-    });
+    // The pass borrows the count for as long as it stands, so it stands in this block alone.
     {
+        let mut replies = ReplyPass::new(session.reply_bounds, |_parts: ReplyParts<'_>| {
+            handed += 1;
+        });
         let mut responder = wz_session_core::query::QueryResponder::new(
             1,
             String::from("home/temp"),
@@ -8052,7 +8053,6 @@ fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
         );
         assert_eq!(responder.try_reply(b"ab"), Ok(()));
     }
-    drop(replies);
     assert_eq!(handed, 1, "the refused reply was not handed on");
 }
 

@@ -15497,8 +15497,18 @@ layer_c1bf_cargo_clippy_all_features() {
         }
     }
     _c1bf_clippy() {
-        local crate label args_line started ran=0
-        local -a args failed_sets=()
+        local crate label args_line started ran=0 standins
+        local -a args failed_sets=() zephyr_values=()
+        # A Zephyr image's configuration (`wz-capi-pico`'s `zephyr` set) reads values `west
+        # build` passes from Kconfig, a tick rate among them, and is clippied with the stand-ins
+        # the no-allocator census builds those images with, as Layer C1bzr and the reduced points'
+        # clippy (`scripts/lib/reduced_points_gate.py`) do: they set constants, and no item or lint
+        # of the crate depends on them.
+        standins="$(python3 scripts/lib/no_allocator_link_gate.py --zephyr-build-values)" || {
+            echo "  C1bf FAIL: no Zephyr build values for an image's set (the line above says why)"
+            return 1
+        }
+        mapfile -t zephyr_values <<<"$standins"
         # A here-string and not a pipe, so the loop runs in this shell and its counts survive it.
         while read -r crate label args_line; do
             [[ -n "$crate" ]] || continue
@@ -15506,7 +15516,7 @@ layer_c1bf_cargo_clippy_all_features() {
             started=$SECONDS
             # The plan line carries the targets before the features: `--all-targets`, or the
             # selectors the set declares (`clippy-targets`).
-            if ! (cd crates && cargo clippy -p "$crate" "${args[@]}" \
+            if ! (cd crates && env "${zephyr_values[@]}" cargo clippy -p "$crate" "${args[@]}" \
                 --quiet -- -D warnings); then
                 failed_sets+=("$crate ($label)")
             fi
