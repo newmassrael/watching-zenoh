@@ -5231,6 +5231,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         if !face_ended(stands, established) {
             return;
         }
+        self.mark_facts_ended(at);
+    }
+
+    /// Mark the facts of the face at `at` as those of a face that no longer stands
+    /// (`Self::end_closed_facts`). Out of line and cold: a link's session ends once, and every
+    /// look at a face before that keeps inline only its look at whether it did.
+    #[cfg(not(wz_round))]
+    #[cold]
+    #[inline(never)]
+    fn mark_facts_ended(&mut self, at: usize) {
         if let Some(facts) = self
             .transport
             .links
