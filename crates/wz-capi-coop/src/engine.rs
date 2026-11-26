@@ -1446,8 +1446,9 @@ pub(crate) struct Takes {
     /// queryable a query reached.
     #[cfg(all(feature = "queryable", not(wz_round)))]
     pub(crate) pinned_queries: core::sync::atomic::AtomicUsize,
-    /// The turns of an answer that held their link's replies from the first reply and let them go
-    /// after the Final (`CoopEngine::answer`).
+    /// The turns of an answer that held their link's replies and let them go after the Final: from
+    /// the first reply (`CoopEngine::answer`), or across the callbacks of a query the read hands
+    /// out itself (`queries`).
     #[cfg(feature = "queryable")]
     pub(crate) held_answers: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)

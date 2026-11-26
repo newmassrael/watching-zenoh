@@ -163,6 +163,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             records.actions.sink(),
             replies,
         );
+        #[cfg(test)]
+        if replies {
+            self.takes.held_answers.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// The next queryable `query` reaches under `held`, with a hold taken on the query's Final
