@@ -28,6 +28,7 @@
 //! which [`ShmReaderResolver::protocols`] reads and from which the offer is built.
 
 use std::any::Any;
+use std::mem::ManuallyDrop;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
@@ -154,12 +155,16 @@ impl ShmResolver for ShmReaderResolver {
 /// A buffer this process holds as a receiver: the storage a received payload is a range of, and
 /// the view a receiver of the session that sent a buffer holds of its own.
 pub struct ReceivedBuffer {
-    buffer: Arc<ShmBufInner>,
+    /// Let go of by hand in `Drop`, before the providers the process keeps are looked at: one kept
+    /// for this buffer can go only once this reference is given back.
+    buffer: ManuallyDrop<Arc<ShmBufInner>>,
 }
 
 impl ReceivedBuffer {
     pub(crate) fn new(buffer: Arc<ShmBufInner>) -> Self {
-        Self { buffer }
+        Self {
+            buffer: ManuallyDrop::new(buffer),
+        }
     }
 
     /// The buffer itself, for a host whose application holds it as its own type.
@@ -175,9 +180,17 @@ impl ReceivedBuffer {
     }
 }
 
+impl Drop for ReceivedBuffer {
+    fn drop(&mut self) {
+        // SAFETY: dropped here, once, and not used after: `self` is being dropped.
+        unsafe { ManuallyDrop::drop(&mut self.buffer) };
+        crate::shm_buffer::sweep_orphans();
+    }
+}
+
 impl RxStorage for ReceivedBuffer {
     fn as_slice(&self) -> &[u8] {
-        AsRef::<[u8]>::as_ref(&*self.buffer)
+        AsRef::<[u8]>::as_ref(&**self.buffer)
     }
 
     fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {

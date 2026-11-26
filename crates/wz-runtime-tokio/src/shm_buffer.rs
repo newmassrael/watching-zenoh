@@ -26,12 +26,16 @@
 //! of the provider the moment the put returns would then lose the message. An [`IssuedBuffer`]
 //! holds its provider, and one that drops while some receiver still holds a reference of its
 //! buffer leaves the provider with the process, which lets go of it once the header says every
-//! receiver has let go, or that the watchdog gave up on them.
+//! receiver has let go, or that the watchdog gave up on them: at once when the last holder in this
+//! process lets go, and on the reactor's clock ([`REACTOR_INTERVAL`]) for a holder in another
+//! process. The same reactor polls the handoff counters of the transport.
 
 use std::any::Any;
 use std::io;
 use std::mem::ManuallyDrop;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use wz_session_core::extshm::{ShmDescriptor, ShmReservation, ShmSendBuffer, ShmSendHandle};
 use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
@@ -525,14 +529,10 @@ impl Drop for IssuedBuffer {
         // The owner's own reference is still counted here; any other is a receiver's.
         if self.buffer.ref_count() > 1 {
             if let Some(provider) = provider.take() {
-                orphans()
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .push(Orphan {
-                        info: self.buffer.info.clone(),
-                        _provider: provider,
-                    });
-                crate::shm_watchdog::start();
+                keep(Orphan {
+                    info: self.buffer.info.clone(),
+                    _provider: provider,
+                });
             }
         }
         // SAFETY: the buffer is dropped here, once, and not used after: `self` is being dropped.
@@ -589,9 +589,26 @@ fn orphans() -> &'static Mutex<Vec<Orphan>> {
     ORPHANS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Let go of every kept provider no receiver needs any more. Run when a buffer is issued and when
-/// one drops, and on the handoff's clock, for a receiver that lets go after its sender has.
+/// How many providers are kept, written under the lock of [`orphans`] and read without it: a
+/// buffer of this process that drops sweeps, and nearly always has nothing to sweep.
+static KEPT: AtomicUsize = AtomicUsize::new(0);
+
+/// Keep `orphan`'s provider until no receiver needs it.
+fn keep(orphan: Orphan) {
+    let mut kept = orphans().lock().unwrap_or_else(|e| e.into_inner());
+    kept.push(orphan);
+    KEPT.store(kept.len(), Ordering::Release);
+    drop(kept);
+    start_reactor();
+}
+
+/// Let go of every kept provider no receiver needs any more. Run when a buffer of this process is
+/// issued or dropped, owned or received, and on the reactor's clock for a receiver in another
+/// process.
 pub(crate) fn sweep_orphans() {
+    if KEPT.load(Ordering::Acquire) == 0 {
+        return;
+    }
     // A provider that drops reclaims its slots, which takes the storage's locks, so the finished
     // ones are taken out under this lock and dropped after it.
     let finished: Vec<Orphan> = {
@@ -600,6 +617,7 @@ pub(crate) fn sweep_orphans() {
             .into_iter()
             .partition(Orphan::is_finished);
         *kept = live;
+        KEPT.store(kept.len(), Ordering::Release);
         finished
     };
     drop(finished);
@@ -608,7 +626,40 @@ pub(crate) fn sweep_orphans() {
 /// How many providers the process keeps for buffers a receiver still holds. A diagnostic: the
 /// witness that a provider is kept while it is needed and let go of after.
 pub fn orphans_held() -> usize {
-    orphans().lock().map(|kept| kept.len()).unwrap_or(0)
+    KEPT.load(Ordering::Acquire)
+}
+
+/// How often the reactor runs: upstream's validator period, the interval its handoff reactor
+/// sleeps (`commons/zenoh-shm/src/watchdog/validator.rs` @
+/// `WatchdogValidator::new(Duration::from_millis(100));`).
+pub const REACTOR_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Start the reactor of the transport's shared-memory bookkeeping, once per process, on the first
+/// thing that needs a clock: a kept provider, or a transmit handoff. The watchdog of the segments
+/// is `zenoh-shm`'s confirmator and validator (`docs/shm-transport.md`, section 6); what runs here
+/// is the transport's own, which upstream runs on its handoff reactor.
+pub(crate) fn start_reactor() {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| {
+        // A thread that cannot be spawned leaves the bookkeeping to the buffers' own events: a
+        // provider is then let go of when a buffer of this process next comes or goes, and a
+        // handoff keeps what it sent until its link lets go of it.
+        let _ = std::thread::Builder::new()
+            .name("wz-shm-reactor".to_owned())
+            .spawn(|| loop {
+                std::thread::sleep(REACTOR_INTERVAL);
+                reactor_tick();
+            });
+    });
+}
+
+/// One pass of the reactor: the kept providers, and with the handshake the poll of the handoff
+/// counters, which lets a sender release a chunk its receiver has acknowledged. The thread calls
+/// this every [`REACTOR_INTERVAL`]; a test calls it to make a window pass.
+pub(crate) fn reactor_tick() {
+    sweep_orphans();
+    #[cfg(feature = "session-extshm")]
+    crate::shm_auth_segment::poll_tx_handoffs();
 }
 
 /// A copy of `bytes` in a buffer of `provider`, as the transport's and not the application's: a
@@ -776,11 +827,10 @@ mod tests {
         assert_eq!(view.as_slice(), b"held");
 
         drop(view);
-        sweep_orphans();
         assert_eq!(
             reference_state(&descriptor),
             Some(ReferenceState::Reclaimed),
-            "the provider goes once nobody holds its buffer"
+            "the provider goes the moment the last holder in this process lets go"
         );
     }
 
@@ -799,11 +849,15 @@ mod tests {
             Some(ReferenceState::Held(1)),
             "the descriptor in flight is not made stale"
         );
+        assert!(orphans_held() >= 1, "the provider is kept for the receiver");
+        // Read as another process reads it, and let go of as another process lets go: nothing
+        // of this process's comes or goes, so the reactor's clock is what notices.
         let read = ShmReaderResolver::of_default_set()
-            .resolve(&descriptor)
+            .read(&descriptor)
             .expect("the receiver reads what was sent");
-        assert_eq!(read, b"in flight");
-        sweep_orphans();
+        assert_eq!(AsRef::<[u8]>::as_ref(&*read), b"in flight");
+        drop(read);
+        reactor_tick();
         assert_eq!(
             reference_state(&descriptor),
             Some(ReferenceState::Reclaimed)

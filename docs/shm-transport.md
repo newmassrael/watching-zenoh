@@ -104,7 +104,7 @@ and it is the one `Session::get_shm_provider` hands out.
 |---|---|---|
 | descriptor, body marker, establishment codecs, `ShmAuthDispatch` | `wz_session_core::extshm` | the no_std half: the wire and the state machine of section 3, and the seams `ShmSendBuffer`, `ShmReservation`, `ShmResolver`, `ShmHandoff` |
 | receive state of a registry | `wz_session_core::extshm::ShmReceiveState` | the negotiated flag, the resolver, the handoff, the drop counters, the un-swap of a Put, a value and a reply |
-| auth segment and handoff counters | `wz_runtime_tokio::shm_auth_segment`, `shm_watchdog` | the transport's own segment, the counters, and their poll |
+| auth segment and handoff counters | `wz_runtime_tokio::shm_auth_segment` | the transport's own segment and the counters; their poll runs on the reactor of `shm_buffer` |
 | the engine's buffers | `wz_runtime_tokio::shm_buffer` | the one send buffer over `zenoh-shm`'s `ShmBufInner` (`ShmBuffer`), the owner of a buffer a provider of the process issued (`IssuedBuffer`), which keeps that provider while a receiver still holds the buffer, and the transport's copy (`transport_copy`) |
 | the reader of the process | `wz_runtime_tokio::shm_reader` (`ShmReaderResolver`) | `zenoh-shm`'s `ShmReader` over a `ShmClientStorage`, as the engine's `ShmResolver`: what every session reads a descriptor with, the engine's, the C ABI's (whose client storages are `ShmClientStorage`s of `ShmClient`s, as zenoh-c's are) and the top crate's |
 | the router's relay pass | `wz_runtime_tokio::shm_relay` | holds the chunks of a message while it is routed and re-expresses them per face |
@@ -298,6 +298,13 @@ The order, each step landing whole with its tests:
    issued when it drops, which turns a descriptor in flight stale).
 4. The watchdog: the segment watchdog of `shm_watchdog` goes in favour of `zenoh-shm`'s confirmator
    and validator; the poll of the handoff counters stays, it is the transport's.
+   Landed: `shm_watchdog` is gone. A holder confirms through `zenoh-shm`'s confirmator and a
+   provider's slots are validated by its validator, the sender's hold of a chunk until it is
+   acknowledged included (`ShmBufHardRef`). What the transport runs beside them is one reactor
+   in `shm_buffer`, started by the first transmit handoff or kept provider, at the validator's
+   interval: the poll of the handoff counters and the release of a provider kept for a receiver
+   in another process. A provider kept for a receiver in this process goes the moment that
+   receiver lets go, without the reactor.
 5. The adapter of the top crate folds into the engine's implementation.
 
 `wz-runtime-tokio` then depends on `crates/wz-zenoh-shm`, which the layer gates allow (it is a crate

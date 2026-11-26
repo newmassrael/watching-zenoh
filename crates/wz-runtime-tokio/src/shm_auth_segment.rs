@@ -391,8 +391,8 @@ fn live_tx_handoffs() -> Vec<Arc<TxInner>> {
     registry.iter().filter_map(Weak::upgrade).collect()
 }
 
-/// One poll of every transmit handoff of the process: run by the watchdog thread on the validator's
-/// clock, which is the interval upstream's reactor sleeps.
+/// One poll of every transmit handoff of the process: run by the reactor of `crate::shm_buffer`
+/// on the validator's clock, which is the interval upstream's reactor sleeps.
 pub(crate) fn poll_tx_handoffs() {
     for handoff in live_tx_handoffs() {
         handoff.poll();
@@ -428,7 +428,7 @@ impl PosixTxHandoff {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(Arc::downgrade(&inner));
-        crate::shm_watchdog::start();
+        crate::shm_buffer::start_reactor();
         Some(Self { inner })
     }
 }

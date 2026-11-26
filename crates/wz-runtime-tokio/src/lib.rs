@@ -2105,11 +2105,6 @@ pub mod shm_reader;
 // `shm_buffer` gives.
 #[cfg(feature = "transport-shm")]
 pub mod shm_relay;
-// The clock of the transport's shared-memory bookkeeping: the poll of the handoff counters and
-// the release of the providers kept for buffers a receiver still holds. Its docs are inside the
-// module, for the reason the note on `shm_buffer` gives.
-#[cfg(feature = "transport-shm")]
-pub mod shm_watchdog;
 
 /// session-extshm (R311y507) — the POSIX AUTH SEGMENT behind zenoh's SHM
 /// establishment challenge-response: a `/dev/shm/{id}.zenoh` object holding a
