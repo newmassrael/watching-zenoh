@@ -275,6 +275,14 @@ RELR_VERSION_NEED = "GLIBC_ABI_DT_RELR"
 DISCARD_UNWIND_CONFIG = ".cargo/capi-discard-unwind-tables.toml"
 DISCARD_UNWIND_SCRIPT = "wz-capi-pico/link/discard-unwind-tables.ld"
 DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
+# The library without `std` on Linux with the code a traced run of the perf matrix executed laid out
+# together ahead of the rest of its text (`crates/.cargo/capi-run-text.toml`,
+# docs/win-budget/rss.md section 5.4): where functions lie, not what they are, so a size reading
+# moves by alignment alone. The order is wz's own: its zenoh-pico reference is not linked with the
+# script (`reference_build` passes on no argument it does not name).
+RUN_TEXT_CONFIG = ".cargo/capi-run-text.toml"
+RUN_TEXT_SCRIPT = "wz-capi-pico/link/run-text.ld"
+RUN_TEXT_LINK = f"-Wl,-T,{RUN_TEXT_SCRIPT}"
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
@@ -867,7 +875,7 @@ CASES: tuple[Case, ...] = (
          require_needed=(r"^libc\.so",),
          # 443 exports: `zext_callbacks_refused` (d80d315d1).
          exports=443, profile="capi-nostd",
-         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
+         cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG, RUN_TEXT_CONFIG),
          note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
               "its zenoh-pico reference: 1,590 relative relocations (38,160 bytes of "
               "`.rela.dyn`) in the form read on 2026-11-22, a packed table of 440. Linked "
@@ -2978,6 +2986,14 @@ def cmd_selftest() -> int:
     expect("the script the discard names is in the tree, as the linker reads it from crates/",
            (CRATES / DISCARD_UNWIND_SCRIPT).is_file()
            and DISCARD_UNWIND_LINK.split(",")[-1] == DISCARD_UNWIND_SCRIPT)
+    run_text = (CRATES / RUN_TEXT_CONFIG).read_text(encoding="utf-8")
+    expect("the run-text file links a Linux library with its script and nothing else, and the "
+           "script is in the tree",
+           config_rustflags(run_text, "x86_64-unknown-linux-gnu", linux_gnu)
+           == ["-C", f"link-arg={RUN_TEXT_LINK}"]
+           and config_rustflags(run_text, "x86_64-pc-windows-msvc", windows_msvc) == []
+           and (CRATES / RUN_TEXT_SCRIPT).is_file()
+           and RUN_TEXT_LINK.split(",")[-1] == RUN_TEXT_SCRIPT)
     expect("only the library without std, which never unwinds, discards the unwind tables",
            all(c.profile == "capi-nostd" and NOSTD_CONFIG in c.cargo_configs
                for c in CASES if DISCARD_UNWIND_CONFIG in c.cargo_configs)
@@ -3043,6 +3059,11 @@ def cmd_selftest() -> int:
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args
            and not any(k.endswith("_LINKER") for k in bare_build.env))
+    expect("the pico client without std is laid out by the run-text script, and its reference is not",
+           RUN_TEXT_CONFIG in by_case["pico-client-coop-nostd"].cargo_configs
+           and RUN_TEXT_LINK in bare_build.link_args
+           and not any(RUN_TEXT_SCRIPT in arg for arg in reference_build(bare_build.link_args)[0])
+           and discards_unwind_tables(reference_build(bare_build.link_args)[0]))
     win_build = case_build(by_case["pico-client-coop-nostd"],
                            {target_linker_env(win): "link.exe"}, win, windows_msvc, limits={})
     expect("a case built for a target its file names a linker for is linked by it, over the caller's",
