@@ -787,7 +787,7 @@ impl Plan {
                 objects.liveliness_subscribers,
             );
         }
-        plan = plan.with::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
+        plan = plan.with::<crate::pubsub::KeptSample>(Kind::Sample, objects.samples);
         #[cfg(feature = "query")]
         {
             plan = plan.with::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
@@ -2381,7 +2381,7 @@ mod tests {
             ..counts()
         };
         let plan = Plan::of(&objects).expect("three samples and two configs");
-        let sample_size = slot_size::<crate::pubsub::SampleMarshal>();
+        let sample_size = slot_size::<crate::pubsub::KeptSample>();
         let config_size = slot_size::<crate::config::ConfigState>();
         assert_eq!(plan.slots[Kind::Sample as usize], 3);
         assert_eq!(plan.sizes[Kind::Sample as usize], sample_size);
@@ -2684,7 +2684,7 @@ mod tests {
         row(
             "sample",
             Kind::Sample,
-            core::mem::size_of::<crate::pubsub::SampleMarshal>(),
+            core::mem::size_of::<crate::pubsub::KeptSample>(),
         );
         #[cfg(feature = "query")]
         row(

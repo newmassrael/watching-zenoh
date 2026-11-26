@@ -142,9 +142,7 @@ use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_moved_bytes_t};
 use crate::ffi::{guard_val, guarded, CClosure as FfiClosure};
 use crate::keyexpr::wire_key_of;
 use crate::prelude::*;
-use crate::pubsub::{
-    sample_kind_of, z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, Z_SAMPLE_KIND_PUT,
-};
+use crate::pubsub::{z_closure_drop_callback_t, z_loaned_sample_t, SampleMarshal, SampleParts};
 use crate::refusal::{refusal_code, Door};
 use crate::reply_keyexpr::{parameters_has_anyke, z_reply_keyexpr_t};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
@@ -222,8 +220,8 @@ pub struct z_loaned_reply_err_t {
 
 /// The owned marshal behind a borrowed `z_loaned_reply_t` during one callback.
 ///
-/// Owns copies of the reply's bytes so they outlive the wz [`ReplyView`] borrow.
-/// The Ok arm reuses [`SampleMarshal`] because `z_reply_ok` must hand back a
+/// Its sample reads the reply's parts where the wz [`ReplyView`] holds them, and a kept reply
+/// copies them ([`Self::deep_copy`]). The Ok arm reuses [`SampleMarshal`] because `z_reply_ok` must hand back a
 /// `z_loaned_sample_t` — so the sample accessors serve this plane unchanged.
 ///
 /// Valid for exactly the duration of one `call`, the same scope pico gives its
@@ -237,6 +235,8 @@ pub(crate) struct ReplyMarshal {
     is_ok: bool,
     /// The Put/Del body, present iff [`Self::is_ok`].
     sample: SampleMarshal,
+    /// The parts `sample` views: the reply's as its view holds them, or a kept reply's copy.
+    parts: SampleParts,
     /// The Err blob, meaningful iff `!is_ok`.
     err_payload: crate::bytes::ByteBuf,
     loaned_err_payload: z_loaned_bytes_t,
@@ -244,7 +244,7 @@ pub(crate) struct ReplyMarshal {
 
 impl ReplyMarshal {
     /// Build the marshal for one inbound reply, cached views still UNBOUND —
-    /// [`Self::bind`] must run at the final address (see [`SampleMarshal::bind`]). Its payload and
+    /// [`Self::bind`] must run at the final address (see [`SampleMarshal::bind_over`]). Its payload and
     /// attachment are read where the view holds them, as a subscriber's sample's are; what is
     /// kept past the call is copied when it is kept ([`Self::deep_copy`]).
     ///
@@ -256,47 +256,49 @@ impl ReplyMarshal {
         // A Del reply carries no payload bytes; an Err's payload is the error
         // blob and belongs on the err arm, not the sample.
         let (sample_payload, err_payload) = match kind {
-            ReplyKind::Put => (
-                crate::bytes::ByteBuf::lent(view.payload()),
-                crate::bytes::ByteBuf::new(),
-            ),
-            ReplyKind::Del => (crate::bytes::ByteBuf::new(), crate::bytes::ByteBuf::new()),
-            ReplyKind::Err => (
-                crate::bytes::ByteBuf::new(),
-                crate::bytes::ByteBuf::lent(view.payload()),
-            ),
+            ReplyKind::Put => (view.payload(), crate::bytes::ByteBuf::new()),
+            ReplyKind::Del => (&[][..], crate::bytes::ByteBuf::new()),
+            ReplyKind::Err => (&[][..], crate::bytes::ByteBuf::lent(view.payload())),
         };
         let sample_kind = match kind {
             // Only Put/Del reach a sample; the Err arm's value is inert (the C
             // side must gate on `z_reply_is_ok` before `z_reply_ok`).
-            ReplyKind::Del => sample_kind_of(wz_session_core::sample::SampleKind::Del),
-            _ => Z_SAMPLE_KIND_PUT,
+            ReplyKind::Del => wz_session_core::sample::SampleKind::Del,
+            _ => wz_session_core::sample::SampleKind::Put,
         };
+        let mut sample = wz_session_core::sink::SampleRef::new(
+            view.keyexpr(),
+            sample_payload,
+            sample_kind,
+            wz_session_core::reliability::Reliability::default(),
+        );
+        // The reply's own metadata rides its sample: an attachment, a value
+        // encoding and a body timestamp are all carried on a Put reply's
+        // inner body, and dropping them here made a foreign queryable's
+        // attachment invisible to upstream's own `z_get_attachment.c`.
+        //
+        // An ERROR's encoding is the one exception to "rides the inner body":
+        // it rides the error itself, and `ReplyView::err_encoding` is the only
+        // reader of it. `z_reply_err_encoding` answers from this sample, so
+        // reading `put_encoding` for an error answered the default encoding
+        // whatever the peer sent (pico's answers what the error carried:
+        // `vendor/zenoh-pico/src/api/api.c` @ `z_reply_err_encoding`).
+        sample.attachment = view.attachment();
+        sample.encoding = if is_ok {
+            view.put_encoding()
+        } else {
+            view.err_encoding()
+        };
+        // Read where the view holds them: every view states its stamp as parts.
+        sample.timestamp = view.timestamp_parts().map(|stamp| (stamp.time, stamp.zid));
+        // A reply carries a source identity: `has_source_info` is computed off the shared
+        // push-body `_commons` before the `_is_put` split
+        // (`vendor/zenoh-pico/src/protocol/codec/message.c:259-261`).
+        sample.source_info = view.source_info();
         Self {
             is_ok,
-            // The reply's own metadata rides its sample: an attachment, a value
-            // encoding and a body timestamp are all carried on a Put reply's
-            // inner body, and dropping them here made a foreign queryable's
-            // attachment invisible to upstream's own `z_get_attachment.c`.
-            //
-            // An ERROR's encoding is the one exception to "rides the inner body":
-            // it rides the error itself, and `ReplyView::err_encoding` is the only
-            // reader of it. `z_reply_err_encoding` answers from this sample, so
-            // reading `put_encoding` for an error answered the default encoding
-            // whatever the peer sent (pico's answers what the error carried:
-            // `vendor/zenoh-pico/src/api/api.c` @ `z_reply_err_encoding`).
-            sample: SampleMarshal::lent_key(view.keyexpr(), sample_payload, sample_kind)
-                .with_reply_metadata(
-                    view.attachment(),
-                    if is_ok {
-                        view.put_encoding()
-                    } else {
-                        view.err_encoding()
-                    },
-                    // Read where the view holds them: every view states its stamp as parts.
-                    view.timestamp_parts().map(|stamp| (stamp.time, stamp.zid)),
-                    view.source_info(),
-                ),
+            sample: SampleMarshal::unbound(),
+            parts: SampleParts::lent(sample),
             err_payload,
             loaned_err_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),
@@ -309,18 +311,19 @@ impl ReplyMarshal {
     /// the marshal sits at its FINAL address, as the sample's views point into it;
     /// `loaned_err_payload` is a borrowed copy of the error payload's words.
     fn bind(&mut self) {
-        self.sample.bind();
+        self.sample.bind_over(&mut self.parts);
         self.loaned_err_payload = z_loaned_bytes_t::borrowed(&self.err_payload);
     }
 
     /// An INDEPENDENT copy, for `z_reply_take_from_loaned` to escape the
     /// callback with. Cached views stay UNBOUND until [`Self::bind`] runs at
-    /// the copy's final address — see [`SampleMarshal::deep_copy`]. Refused when there is no
+    /// the copy's final address — see [`SampleParts::kept`]. Refused when there is no
     /// room for the bytes the view lent.
     fn deep_copy(&self) -> Result<Self, crate::bytes::NoRoom> {
         Ok(Self {
             is_ok: self.is_ok,
-            sample: self.sample.deep_copy()?,
+            sample: SampleMarshal::unbound(),
+            parts: SampleParts::kept(&self.sample)?,
             err_payload: self.err_payload.try_clone()?,
             loaned_err_payload: z_loaned_bytes_t {
                 handle: core::ptr::null_mut(),

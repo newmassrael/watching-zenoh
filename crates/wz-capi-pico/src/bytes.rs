@@ -288,8 +288,8 @@ impl Block {
 
     /// One block holding each of `parts` copied one after another, the start of each written to
     /// the entry of `starts` at its index: the one copy a value kept past its callback makes of
-    /// what was lent to it, whose parts then each hold a share of the block. `None` when there
-    /// is no room for all of them.
+    /// what was lent to it, which then reads its parts there. `None` when there is no room for
+    /// all of them.
     pub(crate) fn kept_parts(parts: &[&[u8]], starts: &mut [*const u8]) -> Option<Self> {
         let room = parts
             .iter()
@@ -630,6 +630,7 @@ impl ByteBuf {
     /// # Safety
     /// For a `like` that is not empty, `block` is one and the bytes at `start` lie in its own room
     /// and are written.
+    #[cfg(test)]
     unsafe fn part_of(
         block: Option<&Block>,
         start: *const u8,
@@ -643,32 +644,6 @@ impl ByteBuf {
             },
             _ => Self::new(),
         })
-    }
-
-    /// Whether the payload holds a share of a block, which a holder that keeps it may share
-    /// rather than copy: not a lent one, whose bytes are its lender's, nor an empty one.
-    pub(crate) fn holds_block(&self) -> bool {
-        self.block.is_some()
-    }
-
-    /// This payload as a value kept past its callback holds it: a share of the block it holds, or
-    /// for a lent one the part of `block` at `start` that the one copy of what was lent wrote its
-    /// bytes to ([`Self::part_of`]). Out of line: a kept sample keeps its payload and its
-    /// attachment through it.
-    ///
-    /// # Safety
-    /// For a payload that holds no block, as [`Self::part_of`] with this payload as `like`.
-    #[inline(never)]
-    pub(crate) unsafe fn kept_in(
-        &self,
-        block: Option<&Block>,
-        start: *const u8,
-    ) -> Result<Self, NoRoom> {
-        if self.holds_block() {
-            self.try_clone()
-        } else {
-            Self::part_of(block, start, self)
-        }
     }
 
     /// How many bytes the payload is.
@@ -742,7 +717,7 @@ impl ByteBuf {
     }
 
     /// The block, for a holder that keeps it: a lent payload's bytes, and those of a part of a
-    /// block that holds more ([`Self::part_of`]), whose holder reads the block from its start, are
+    /// block that holds more (`Self::part_of`), whose holder reads the block from its start, are
     /// copied into one of their own first; an empty payload has none.
     fn into_block(mut self) -> Result<Option<Block>, NoRoom> {
         if self
@@ -777,7 +752,7 @@ impl ByteBuf {
             .ok_or(NoRoom)?;
         if let Some(block) = &self.block {
             // Written after its bytes only where they start the block, as a part of a block that
-            // holds more does not ([`Self::part_of`]).
+            // holds more does not (`Self::part_of`).
             if block.is_unique()
                 && !block.is_alias()
                 && block_start(block) == self.start
@@ -2465,13 +2440,6 @@ impl ByteBuf {
         self.block
             .as_ref()
             .map_or(0, |block| block.head().refs.load(Ordering::Relaxed))
-    }
-
-    /// Set how many hold this payload's block, for a test that has a share of it refused.
-    pub(crate) fn set_holders(&self, holders: usize) {
-        if let Some(block) = &self.block {
-            block.head().refs.store(holders, Ordering::Relaxed);
-        }
     }
 }
 

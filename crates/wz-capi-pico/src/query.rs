@@ -616,7 +616,7 @@ impl QueryMarshal {
     /// The copy owns everything the accessors read, so it stays valid for as
     /// long as the C program keeps it; the cached views stay UNBOUND until
     /// [`Self::bind`] runs at the copy's final address (see
-    /// [`crate::pubsub::SampleMarshal::deep_copy`]). It holds no responder of
+    /// [`crate::pubsub::SampleParts::kept`]). It holds no responder of
     /// the dispatch: its replies go through `held`. `texts` ([`Self::kept_texts`]), `payload`
     /// and `attachment` are the copy's own, made before the hold is taken, so that no room for
     /// them holds nothing open.
