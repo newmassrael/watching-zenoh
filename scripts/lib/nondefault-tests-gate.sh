@@ -519,8 +519,9 @@ object-pool|files::ext_handles_across_threads::"
     "wz-capi-pico|hook|config-document,shared-key-ids|config_policy::tests::"
     "wz-capi-pico|hook|shared-key-ids|key_ids::"
     # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
-    # transport (`app_transport_doors`) and puts and gets by a shared id (`key_ids_tokio`), each
-    # file behind its feature on top of the default peer, query and queryable.
+    # transport (`app_transport_doors`), behind its feature on top of the default peer, query and
+    # queryable. The puts and gets by a shared id (`key_ids_tokio`) are the tokio engine's alone, so
+    # their leg is the lane's, over that engine's list (`files::key_ids_tokio::`, above).
     "wz-capi-pico|hook|app-transport,object-pool|--test=app_transport_doors"
     # The same transport on the cooperative engine, with no tokio engine in the build: the
     # library's unit tests of the door and the file of sessions over the pipe, whose datagram pair
@@ -560,7 +561,6 @@ object-pool|files::ext_handles_across_threads::"
     # stack, here the host's: an open that names no locator scouts for the budget and finds nobody,
     # where a build that cannot scout answers at once. The C1co lane runs the same file with `scout`.
     "wz-capi-pico|hook|-default,os-host,link-udp,scout-mcu,object-pool|--test=open_scouts_for_a_locator"
-    "wz-capi-pico|hook|shared-key-ids,object-pool|--test=key_ids_tokio"
     # A session's batch size stated by its config's document (`wz/limits`) through the document door:
     # three pairs of sessions open at once in one process, each held on the wire to its own size, and a
     # size past the build's ceiling refused by name (`batch_size_per_session`, behind `config-document`
@@ -661,9 +661,14 @@ object-pool|files::ext_handles_across_threads::"
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
     # names its peer and the sync is told; and the first alone, where the sync never is, which is
-    # what the target asserts of a build without `declarations-synced-event`.
+    # what the target asserts of a build without `declarations-synced-event`. The target is the
+    # tokio engine's alone, so both of its builds are the lane's, over that engine's list: both
+    # capabilities here, and the first alone with the tokio legs above (`files::decl_watch_doors::`).
     "wz-capi-pico|hook|remote-declaration-watch,declarations-synced-event|"
-    "wz-capi-pico|hook|remote-declaration-watch,object-pool|--test=decl_watch_doors"
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,remote-declaration-watch,declarations-synced-event,object-pool|\
+files::decl_watch_doors::"
     # The most memory a session holds (`wz_ext_session_memory`, `_row`): the unit tests of the rows
     # this ABI adds and of how a row is handed over (`session_memory::`), and the doors over a
     # listener and a session that dials it (`files::session_memory_door::`), on each engine: the
