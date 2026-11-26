@@ -1404,9 +1404,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Step each group's session once, its read slot taken out of the session for the step and
     /// put back after it (`Core::group_pumps`): each record the step reads is dispatched under
     /// the session's lock, which is let go of before it is handed out (`DirectSink`), as a
-    /// face's are. A slot whose session ended at its step is let go of, with the session let go of
-    /// too, its end left for the session to read (`Self::poll_groups`); one a read finds the
-    /// session closed after is stepped once more, which tells the group it leaves.
+    /// face's are. A session that ended at its step is let go of, its place put back for the
+    /// group's next join and its end left for the session to read (`Self::poll_groups`); a slot
+    /// whose session ended is not stepped. One a read finds the session closed after is stepped
+    /// once more, which tells the group it leaves.
     #[cfg(feature = "group")]
     fn step_groups(&self) {
         let mut at = 0;
@@ -1418,7 +1419,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 let Some(slot) = held.0.group_pumps.get_mut(at) else {
                     return;
                 };
-                slot.take()
+                if slot
+                    .as_ref()
+                    .is_some_and(super::group::GroupPump::holds_session)
+                {
+                    slot.take()
+                } else {
+                    None
+                }
             };
             let Some(mut pump) = pump else {
                 at += 1;
@@ -1436,20 +1444,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 records: pump.records(),
             }
             .end_records();
-            let ended_pump = {
+            // The ended session's transport goes before the session's poll joins the group again
+            // (`Self::poll_groups`), a join that takes what the transport held of the stack's.
+            if ended {
+                pump.let_go();
+            }
+            let unplaced = {
                 let Some(mut held) = self.live() else {
                     pump.leave();
                     return;
                 };
                 match held.0.group_pumps.get_mut(at) {
-                    Some(slot) if !ended => {
+                    Some(slot) => {
                         *slot = Some(pump);
                         None
                     }
-                    _ => Some(pump),
+                    None => Some(pump),
                 }
             };
-            drop(ended_pump);
+            drop(unplaced);
             at += 1;
         }
     }

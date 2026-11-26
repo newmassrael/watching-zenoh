@@ -2361,7 +2361,9 @@ where
 ///
 /// The session's parts lie in one place made when the first session is, and a session made again
 /// over it ([`Self::rejoin`]) is built in that place: a group joined again takes no memory the
-/// first join did not.
+/// first join did not. A session that ended is let go of with the place kept ([`Self::leave`]),
+/// so a holder whose next join needs what the last session's transport holds (a receive buffer
+/// of the stack's) has it back before that join is made.
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 pub struct MulticastSessionPlace<
     C: ClockSource + 'static,
@@ -2369,6 +2371,8 @@ pub struct MulticastSessionPlace<
     const MAX_PEERS: usize,
 > {
     cell: core::ptr::NonNull<HeldSession<C, T, MAX_PEERS>>,
+    /// Whether the place holds a session: from each build to the next `Self::leave`.
+    holds: bool,
     /// The JOIN the holder asks between two beacons, taken before each step.
     join_ask: Option<JoinAsk>,
     /// Where each step that leaves the session running says when it is next due.
@@ -2503,54 +2507,82 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         let (join_ask, due) = unsafe { cell.as_ref().build(seed) };
         Self {
             cell,
+            holds: true,
             join_ask,
             due,
         }
     }
 
     /// Let go of the session the place holds, which tells its transport it is let go of, and
-    /// build the one `seed` holds in the same place, as [`Self::new`] builds it.
+    /// keep the place for the next session ([`Self::rejoin`]). A place that holds none is left as
+    /// it is. Until the next session is built a step steps nothing.
+    pub fn leave(&mut self) {
+        if !core::mem::replace(&mut self.holds, false) {
+            return;
+        }
+        // SAFETY: the place held the session the last build made, and `&mut self` is the one
+        // handle on it, so nothing borrows it. It is marked empty before it is cleared, so a
+        // clear that does not return leaves no session to be let go of twice.
+        unsafe { self.cell.as_ref().clear() };
+        self.join_ask = None;
+        self.due = None;
+    }
+
+    /// Build the session `seed` holds in the place, as [`Self::new`] builds it, the session the
+    /// place still holds let go of first ([`Self::leave`]).
     pub fn rejoin(&mut self, seed: MulticastSessionSeed<T, MAX_PEERS>) {
-        // SAFETY: the place holds the session the last build made, and `&mut self` is the one
-        // handle on it, so nothing borrows it; the place is empty when the next is built.
-        let (join_ask, due) = unsafe {
-            let cell = self.cell.as_ref();
-            cell.clear();
-            cell.build(seed)
-        };
+        self.leave();
+        // SAFETY: the place holds no session now, and `&mut self` is the one handle on it.
+        let (join_ask, due) = unsafe { self.cell.as_ref().build(seed) };
+        self.holds = true;
         self.join_ask = join_ask;
         self.due = due;
     }
 
-    fn pump(&mut self) -> &mut MulticastPump<'static, C, T, MAX_PEERS> {
-        // SAFETY: the place holds a session from the handle's making to its drop, and `&mut self`
-        // is the place's one reference.
-        unsafe { (*self.cell.as_ref().pump.get()).assume_init_mut() }
+    /// Whether the place holds a session: from its making or a rejoin to the next leave.
+    pub fn holds_session(&self) -> bool {
+        self.holds
     }
 
-    fn pump_ref(&self) -> &MulticastPump<'static, C, T, MAX_PEERS> {
+    fn pump(&mut self) -> Option<&mut MulticastPump<'static, C, T, MAX_PEERS>> {
+        if !self.holds {
+            return None;
+        }
+        // SAFETY: the place holds a session (`holds`), and `&mut self` is the place's one
+        // reference.
+        Some(unsafe { (*self.cell.as_ref().pump.get()).assume_init_mut() })
+    }
+
+    fn pump_ref(&self) -> Option<&MulticastPump<'static, C, T, MAX_PEERS>> {
+        if !self.holds {
+            return None;
+        }
         // SAFETY: as in `Self::pump`; `&self` lets no step run while the borrow lasts.
-        unsafe { (*self.cell.as_ref().pump.get()).assume_init_ref() }
+        Some(unsafe { (*self.cell.as_ref().pump.get()).assume_init_ref() })
     }
 
-    /// The session's peer table ([`MulticastPump::dispatcher`]).
-    pub fn dispatcher(&self) -> &MulticastDispatcher<MAX_PEERS> {
-        self.pump_ref().dispatcher()
+    /// The session's peer table ([`MulticastPump::dispatcher`]); `None` while the place holds
+    /// no session.
+    pub fn dispatcher(&self) -> Option<&MulticastDispatcher<MAX_PEERS>> {
+        self.pump_ref().map(|pump| pump.dispatcher())
     }
 
-    /// When the session next has work no datagram brings ([`MulticastPump::next_due_us`]).
-    pub fn next_due_us(&self) -> u64 {
-        self.pump_ref().next_due_us()
+    /// When the session next has work no datagram brings ([`MulticastPump::next_due_us`]);
+    /// `None` while the place holds no session.
+    pub fn next_due_us(&self) -> Option<u64> {
+        self.pump_ref().map(|pump| pump.next_due_us())
     }
 
-    /// How many datagrams the session's data emit lost ([`MulticastPump::tx_lost`]).
-    pub fn tx_lost(&self) -> u32 {
-        self.pump_ref().tx_lost()
+    /// How many datagrams the session's data emit lost ([`MulticastPump::tx_lost`]); `None`
+    /// while the place holds no session.
+    pub fn tx_lost(&self) -> Option<u32> {
+        self.pump_ref().map(|pump| pump.tx_lost())
     }
 
     /// Advance the session by one step ([`MulticastPump::step`]): a JOIN the holder asked for is
     /// sent at it, and a step that leaves the session running says when it is next due.
-    /// `Some(outcome)` once the session is finished.
+    /// `Some(outcome)` once the session is finished; a place that holds no session steps nothing
+    /// and answers [`MulticastOutcome::Stopped`].
     pub fn step<'s, 'g, F, G>(
         &mut self,
         on_event: &mut F,
@@ -2562,16 +2594,16 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
         let asked = self.join_ask.as_ref().is_some_and(JoinAsk::take);
-        let pump = self.pump();
+        let Some(pump) = self.pump() else {
+            return Some(MulticastOutcome::Stopped);
+        };
         if asked {
             pump.join_now();
         }
         let outcome = pump.step(on_event, next_tx, should_stop);
-        if outcome.is_none() {
-            let due_us = self.pump_ref().next_due_us();
-            if let Some(due) = &self.due {
-                due.publish(due_us);
-            }
+        let running_due_us = outcome.is_none().then(|| pump.next_due_us());
+        if let (Some(due_us), Some(due)) = (running_due_us, &self.due) {
+            due.publish(due_us);
         }
         outcome
     }
@@ -2582,12 +2614,10 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
     for MulticastSessionPlace<C, T, MAX_PEERS>
 {
     fn drop(&mut self) {
-        // SAFETY: the place holds the session the last build made, which nothing borrows, and
-        // was made by `Box::leak` in `Self::new`, freed here once the session is let go of.
-        unsafe {
-            self.cell.as_ref().clear();
-            drop(alloc::boxed::Box::from_raw(self.cell.as_ptr()));
-        }
+        self.leave();
+        // SAFETY: the place holds no session now, and was made by `Box::leak` in `Self::new`,
+        // freed here once.
+        unsafe { drop(alloc::boxed::Box::from_raw(self.cell.as_ptr())) };
     }
 }
 
@@ -3216,6 +3246,78 @@ mod tests {
             "the first hears nothing more"
         );
         assert_eq!(again.due_us(), Some(1_000_000));
+    }
+
+    /// A session let go of in its place lets its transport go at once and keeps the place: a step
+    /// of the empty place steps nothing and answers `Stopped`, and the next session is built in
+    /// it with one allocation fewer than the first took, the place's own. The CONTROL is the
+    /// first session's making, which takes its place from the heap. Turned red by a leave that
+    /// keeps the transport, a step of an empty place that reaches the pump, or a rejoin that makes
+    /// a place of its own.
+    #[test]
+    fn a_session_let_go_of_in_its_place_leaves_the_place_for_the_next_join() {
+        use super::MulticastOutcome;
+        use crate::test_heap::counted;
+
+        let seed = |wire: &Rc<RefCell<Wire>>, due: &GroupDue| {
+            MulticastSessionSeed::<Socket, 4>::new(
+                MulticastConfig::new(5_000),
+                Socket(Rc::clone(wire)),
+                MulticastParams {
+                    join_interval_ms: 1_000,
+                    ..params()
+                },
+                SessionPolicy::defaults(),
+                5,
+            )
+            .with_due(due.clone())
+        };
+        let first = Rc::new(RefCell::new(Wire {
+            room: 8,
+            ..Wire::default()
+        }));
+        let second = Rc::new(RefCell::new(Wire {
+            room: 8,
+            ..Wire::default()
+        }));
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let (due, again) = (GroupDue::default(), GroupDue::default());
+        let (first_seed, second_seed) = (seed(&first, &due), seed(&second, &again));
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut nothing = || None::<MulticastTxItem>;
+
+        let (mut place, made) = counted(move || MulticastSessionPlace::new(runtime, first_seed));
+        assert!(
+            made >= 1,
+            "CONTROL: the first session's place is taken from the heap"
+        );
+        assert!(place.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&first), ["join"], "the first session beacons");
+
+        place.leave();
+        assert!(!place.holds_session());
+        assert_eq!(
+            Rc::strong_count(&first),
+            1,
+            "the session let go of let its transport go"
+        );
+        assert_eq!(
+            place.step(&mut quiet, &mut nothing, None),
+            Some(MulticastOutcome::Stopped),
+            "an empty place steps nothing"
+        );
+        assert_eq!(place.next_due_us(), None);
+
+        let ((), rejoined) = counted(|| place.rejoin(second_seed));
+        assert_eq!(
+            rejoined + 1,
+            made,
+            "the next session is built in the place the first took"
+        );
+        assert!(place.holds_session());
+        assert!(place.step(&mut quiet, &mut nothing, None).is_none());
+        assert_eq!(taken(&second), ["join"], "the next session beacons");
+        assert_eq!(taken(&first), ["join"], "the first hears nothing more");
     }
 
     /// The reply queue the loop pulls from hands its items out in the order they were queued,

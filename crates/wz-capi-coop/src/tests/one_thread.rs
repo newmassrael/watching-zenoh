@@ -501,6 +501,7 @@ mod group {
 
     use super::super::group_stack::{member_config, open_member, Network, GROUP};
     use super::{eventually, hearing, payload, put, OwnThread};
+    use crate::CoopConfig;
 
     /// Two members of one thread, each on a thread of its own, learn each other by their JOINs,
     /// which each one's reads beacon and take, and a put of the first crosses the group; the second,
@@ -568,5 +569,63 @@ mod group {
         eventually("the first member to lose the second", || {
             first.call(|engine| engine.group_member_zids()).is_empty()
         });
+    }
+
+    /// A member of one thread whose stack loses its group link joins the group again a redial
+    /// period later, its new session built in the place of the read slot its first join was
+    /// given: the members learn each other again and a put crosses the group joined again, and
+    /// the member made one place for the group's session in all. Turned red by a join again that
+    /// gives the group's session a place of its own (`Core::seat_group`). Twin of
+    /// `group::a_member_whose_group_link_is_lost_joins_the_group_again`.
+    #[test]
+    fn a_member_of_one_thread_whose_group_link_is_lost_joins_again_in_the_same_place() {
+        let network = Arc::new(Network::default());
+        let member = |id: u8| {
+            let network = Arc::clone(&network);
+            OwnThread::open(move || {
+                let config = CoopConfig {
+                    redial_ms: Some(100),
+                    ..member_config(id, GROUP)
+                };
+                open_member(&network, id, config).expect("the member joins")
+            })
+        };
+        let first = member(1);
+        let second = member(2);
+        eventually("each member to list the other", || {
+            first.call(|engine| engine.group_member_zids()) == [vec![2u8; 4]]
+                && second.call(|engine| engine.group_member_zids()) == [vec![1u8; 4]]
+        });
+        assert_eq!(network.joins_of(2), 1);
+        assert_eq!(
+            second.call(|engine| engine.group_places_made()),
+            1,
+            "CONTROL: the first join made the group's place"
+        );
+
+        network.cut(2);
+        eventually(
+            "the second member's stack to be asked to join again",
+            || network.joins_of(2) == 2,
+        );
+        eventually("each member to list the other again", || {
+            first.call(|engine| engine.group_member_zids()) == [vec![2u8; 4]]
+                && second.call(|engine| engine.group_member_zids()) == [vec![1u8; 4]]
+        });
+        let heard = hearing(&second, "demo/group/**", payload);
+        eventually("a put to cross the group joined again", || {
+            put(&first, "demo/group/b", b"after-the-loss");
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|got| got == b"after-the-loss")
+        });
+        assert_eq!(network.joins_of(2), 2, "joined again once, and only once");
+        assert_eq!(
+            second.call(|engine| engine.group_places_made()),
+            1,
+            "the join again built its session in the place of the first"
+        );
     }
 }

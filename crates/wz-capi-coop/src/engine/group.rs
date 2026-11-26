@@ -693,18 +693,18 @@ impl<W: LinkWaits> GroupFace<W> {
         Ok(face)
     }
 
-    /// Join the group `joining` names, whose tables the registry holds already: the face, and the
-    /// group's session in the place its read steps it (`GroupPump`), on `runtime`'s clock, a
-    /// member's query held in `plane` (`queryable`). The
-    /// session opens the transport as its link now; one that does not open is told by the first
-    /// step. The group's socket is waited on with `waits`, those of the session's stack.
+    /// Join the group `joining` names, whose tables the registry holds already: the face, and
+    /// what the group's read slot takes of this join (`GroupSeat`), a member's query held in
+    /// `plane` (`queryable`). The session is built in the slot's place when the seat is taken
+    /// (`GroupPump::new`, `GroupPump::rejoin`), and opens the transport as its link then; one
+    /// that does not open is told by the first step. The group's socket is waited on with
+    /// `waits`, those of the session's stack.
     #[cfg(not(wz_round))]
-    pub(super) fn join<C: ClockSource + 'static>(
-        runtime: CoopRuntime<C>,
+    pub(super) fn join(
         joining: GroupJoining,
         #[cfg(feature = "queryable")] plane: PlacedRef<super::query::QueryPlane>,
         waits: W,
-    ) -> (Self, GroupPump<C>) {
+    ) -> (Self, GroupSeat) {
         let (mut face, seed) = Self::made(joining, waits);
         let end = Rc::new(GroupEnd::default());
         face.end = Some(Rc::clone(&end));
@@ -727,12 +727,12 @@ impl<W: LinkWaits> GroupFace<W> {
             generation: face.generation,
             after_pushes: false,
         };
-        let pump = GroupPump {
-            place: MulticastSessionPlace::new(runtime, seed),
+        let seat = GroupSeat {
+            seed,
             reads,
             records,
         };
-        (face, pump)
+        (face, seat)
     }
 
     /// The face of the group `joining` names, and the seed of its session, which holds what the
@@ -1543,10 +1543,21 @@ struct GroupReads {
     events: Rc<MemberEvents>,
 }
 
+/// What one join of a group gives the group's read slot: the seed of the join's session, what
+/// the read notes each event against, and what it hands each record out with.
+#[cfg(not(wz_round))]
+pub(super) struct GroupSeat {
+    seed: MulticastSessionSeed<GroupLink<Watched>, GROUP_MEMBERS>,
+    reads: GroupReads,
+    records: FaceRecords<GroupReplies>,
+}
+
 /// The read slot of a group (`docs/c-abi-architecture.md` 8.8): the group's session, in the
 /// place its read steps it, and what that read notes each event against before it is handed out.
 /// It lies apart from the group's face, which the session's state holds, so that the read steps
 /// it with the session let go of and takes the session's lock once for each record it dispatches.
+/// The place is made once for the group, at the session's open: a session that ended is let go of
+/// with the place kept (`Self::let_go`), and each join again builds its session there.
 #[cfg(not(wz_round))]
 pub(super) struct GroupPump<C: ClockSource + 'static> {
     place: MulticastSessionPlace<C, GroupLink<Watched>, GROUP_MEMBERS>,
@@ -1558,6 +1569,45 @@ pub(super) struct GroupPump<C: ClockSource + 'static> {
 
 #[cfg(not(wz_round))]
 impl<C: ClockSource + 'static> GroupPump<C> {
+    /// The read slot of the group's first join, `seat`, its session built on `runtime`'s clock
+    /// in a place of its own, the one place the group's joins take.
+    pub(super) fn new(runtime: CoopRuntime<C>, seat: GroupSeat) -> Self {
+        let GroupSeat {
+            seed,
+            reads,
+            records,
+        } = seat;
+        Self {
+            place: MulticastSessionPlace::new(runtime, seed),
+            reads,
+            records,
+        }
+    }
+
+    /// Take the group's next join, `seat`, into the slot: its session built in the place the
+    /// last one lay in, that one let go of first if the slot still holds it.
+    pub(super) fn rejoin(&mut self, seat: GroupSeat) {
+        let GroupSeat {
+            seed,
+            reads,
+            records,
+        } = seat;
+        self.place.rejoin(seed);
+        self.reads = reads;
+        self.records = records;
+    }
+
+    /// Whether the slot holds a session a read steps: from a join to the session's end.
+    pub(super) fn holds_session(&self) -> bool {
+        self.place.holds_session()
+    }
+
+    /// Let go of the session, which ended: its transport goes now, so the group's next join finds
+    /// what it held of the stack's free, and the place stays for that join.
+    pub(super) fn let_go(&mut self) {
+        self.place.leave();
+    }
+
     /// What the group's records are handed out with, which the read ends a step's records with.
     pub(super) fn records(&mut self) -> &mut FaceRecords<GroupReplies> {
         &mut self.records
@@ -1599,8 +1649,12 @@ impl<C: ClockSource + 'static> GroupPump<C> {
     }
 
     /// End the group's session: its stop asked, and its last step taken, which tells the group it
-    /// leaves; what that step reads is handed to no one, the session being closed.
+    /// leaves; what that step reads is handed to no one, the session being closed. A slot whose
+    /// session ended already has nothing to tell.
     pub(super) fn leave(mut self) {
+        if !self.holds_session() {
+            return;
+        }
         self.reads.stop.set(true);
         let _ = self.step(&mut |_records, _event| {});
     }
