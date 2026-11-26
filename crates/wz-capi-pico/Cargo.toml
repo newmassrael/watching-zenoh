@@ -970,6 +970,11 @@ getrandom = "0.2"
 # platform (1 on Linux, 6 on macOS), so hand-writing the constant would be a
 # portability bug. Already in this workspace's graph — wz-runtime-tokio deps it
 # optionally — so this adds no new third-party crate.
+# A POSIX host's alone: on Windows the crate names the C runtime as a Visual Studio
+# library (`msvcrt`, `legacy_stdio_definitions`), where the library without `std` links
+# none, and the Windows layer imports the runtime's heap by DLL name instead
+# (`src/os/windows.rs`).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 # The Windows host layer (`src/os/windows.rs`). pico's own Windows backend types its

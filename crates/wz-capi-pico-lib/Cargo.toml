@@ -56,5 +56,12 @@ default = ["abi/default"]
 # Named `abi`, since this artifact's library is `wz_capi_pico` too, the name C programs link.
 abi = { package = "wz-capi-pico", path = "../wz-capi-pico", default-features = false }
 
+# On the MSVC targets the library without `std` links its C runtime from this crate rather than
+# from Visual Studio, so it links with the toolchain's own linker and the DLL imports no C runtime
+# DLL. Named by the build that does not unwind alone (`src/lib.rs`); a build with `std` links the
+# C runtime and leaves this crate out.
+[target.'cfg(all(windows, target_env = "msvc"))'.dependencies]
+wz-msvc-runtime = { path = "../wz-msvc-runtime" }
+
 [lints]
 workspace = true

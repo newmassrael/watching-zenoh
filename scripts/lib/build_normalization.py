@@ -59,7 +59,7 @@ cargo reads `CARGO_ENCODED_RUSTFLAGS` when it is present and `RUSTFLAGS` otherwi
 takes the place of the `rustflags` of a configuration file. The flags are appended to whichever
 of the two cargo will read, after what the caller had: the caller's flags still apply, and for
 the same prefix the later mapping, this one, wins. The only configuration-file `rustflags` of
-this tree are for windows-msvc (`.cargo/config.toml`), which no lane that measures bytes builds.
+this tree are the C libraries' own (`crates/.cargo/capi-*.toml`), named on a build's command line.
 
 The cc crate reads four spellings of each C flags variable: with the target appended, with the
 target appended in underscores, with a HOST or TARGET kind prefixed, and bare. The release this

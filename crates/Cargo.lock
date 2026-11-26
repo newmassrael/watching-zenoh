@@ -4029,6 +4029,7 @@ version = "0.1.0"
 dependencies = [
  "wz-capi-pico",
  "wz-cdylib-build",
+ "wz-msvc-runtime",
 ]
 
 [[package]]
@@ -4343,6 +4344,10 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-session-core",
 ]
+
+[[package]]
+name = "wz-msvc-runtime"
+version = "0.1.0"
 
 [[package]]
 name = "wz-node-time"

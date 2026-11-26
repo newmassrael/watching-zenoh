@@ -49,6 +49,9 @@ members = [
     "wz-capi-pico",
     # The pico C library: the artifact of wz-capi-pico without `std` that a C program links.
     "wz-capi-pico-lib",
+    # The C runtime that library links on the MSVC targets in Visual Studio's place, so it links
+    # with the toolchain's own linker and imports no C runtime DLL.
+    "wz-msvc-runtime",
     # The doors of wz-capi-pico's additional features as a library of their own, built from the
     # same sources over the core library's C ABI: the second form of the pico library
     # (docs/capi-pico-additional-library.md).

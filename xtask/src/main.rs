@@ -52,6 +52,14 @@ use wz_switchboard_codegen::{
 #[cfg(feature = "switchboards")]
 use wz_switchboard_schema::SwitchboardSpec;
 
+// libxml2 2.13 and later seeds its random numbers from `BCryptGenRandom`, and the `libxml` crate's
+// vcpkg link metadata does not name `bcrypt` (`LNK2019: unresolved external symbol
+// BCryptGenRandom` on windows-msvc). This program is the one that links libxml2 (`sce-build`), so
+// it names the library here, for its own link alone. Remove once the `libxml` crate declares it.
+#[cfg(all(windows, target_env = "msvc"))]
+#[link(name = "bcrypt")]
+extern "system" {}
+
 /// Codec SCXMLs to emit, in dependency order (leaves first, composers last) so
 /// the importer validates each `<sce:import>` target before its composer. The
 /// FULL superset — xtask emits every codec unconditionally; the per-codec
