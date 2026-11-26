@@ -1650,66 +1650,61 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// Step each group's session once, its read slot taken out of the session for the step and
-    /// put back after it (`Core::group_pumps`): each record the step reads is dispatched under
-    /// the session's lock, which is let go of before it is handed out (`DirectSink`), as a
-    /// face's are. A session that ended at its step is let go of, its place put back for the
-    /// group's next join and its end left for the session to read (`Self::poll_groups`); a slot
-    /// whose session ended is not stepped. One a read finds the session closed after is stepped
-    /// once more, which tells the group it leaves.
+    /// Step each group's session, its read slot taken out of the session for its steps and put
+    /// back after them (`Core::group_pumps`): each record a step reads is dispatched under the
+    /// session's lock, which is let go of before it is handed out (`DirectSink`), as a face's
+    /// are. A step takes one datagram of the group's socket, and one that took one is followed by
+    /// another at once, up to `GROUP_READS_PER_MOVE` steps in a row, so a burst is read by one
+    /// read and the links are moved once, after it, as a link's one receive is read. A session
+    /// that ended at its step is let go of, its place put back for the group's next join and its
+    /// end left for the session to read (`Self::poll_groups`); a slot whose session ended is not
+    /// stepped. One a read finds the session closed after is stepped once more, which tells the
+    /// group it leaves.
     #[cfg(feature = "group")]
     fn step_groups(&self) {
         let mut at = 0;
         loop {
-            let pump = {
+            let (pump, reads_per_move) = {
                 let Some(mut held) = self.live() else {
                     return;
                 };
+                let reads_per_move = held.0.config.limits.group_reads_per_move();
                 let Some(slot) = held.0.group_pumps.get_mut(at) else {
                     return;
                 };
-                if slot
+                let pump = if slot
                     .as_ref()
                     .is_some_and(super::group::GroupPump::holds_session)
                 {
                     slot.take()
                 } else {
                     None
-                }
+                };
+                (pump, reads_per_move)
             };
             let Some(mut pump) = pump else {
                 at = at.saturating_add(1);
                 continue;
             };
-            // A group's session is of one thread's types, which it shares with the group's face in
-            // the session's state (the stage, the link, the members' rows, the end): with other
-            // threads (`threads`) it is stepped with the session's lock held, as every reach of
-            // that face is, so they are reached by one thread at a time (`UnderCoreLock`). The
-            // lock is let go of only while a record the step read is handed out, which takes it
-            // again for the record's dispatch (`DirectSink`) and calls its callbacks with it let
-            // go of. With no other thread nothing else reaches them meanwhile, and nothing is held.
-            #[cfg(feature = "threads")]
-            let mut held = Some(self.core.lock());
-            let ended = pump.step(&mut |records, event| {
-                #[cfg(feature = "threads")]
-                drop(held.take());
-                DirectSink {
-                    engine: self,
-                    records,
+            let mut steps: usize = 0;
+            let ended = loop {
+                let ended = self.step_group(&mut pump);
+                steps = steps.saturating_add(1);
+                // The mark of a datagram taken is left for the next read's wait once the bound
+                // is reached, so that read does not wait for what the socket already gave.
+                let again = !ended
+                    && steps < reads_per_move
+                    && self.live().is_some_and(|held| {
+                        held.0
+                            .transport
+                            .groups
+                            .get(at)
+                            .is_some_and(|group| group.took_input())
+                    });
+                if !again {
+                    break ended;
                 }
-                .event(event);
-                #[cfg(feature = "threads")]
-                {
-                    held = Some(self.core.lock());
-                }
-            });
-            #[cfg(feature = "threads")]
-            drop(held);
-            DirectSink {
-                engine: self,
-                records: pump.records(),
-            }
-            .end_records();
+            };
             // What the slot shares with the group's face is let go of, stepped or put back under
             // the session's lock, closed or not: a close let go of the face's handles under it.
             let mut core = self.core.lock();
@@ -1733,6 +1728,43 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             drop(core);
             at = at.saturating_add(1);
         }
+    }
+
+    /// One step of a group's session, `pump` its read slot taken out of the session: what it
+    /// reads handed out as it is read, and the drains its Pushes put off made after it. Whether
+    /// the session ended at it.
+    #[cfg(feature = "group")]
+    fn step_group(&self, pump: &mut super::group::GroupPump<C>) -> bool {
+        // A group's session is of one thread's types, which it shares with the group's face in
+        // the session's state (the stage, the link, the members' rows, the end): with other
+        // threads (`threads`) it is stepped with the session's lock held, as every reach of
+        // that face is, so they are reached by one thread at a time (`UnderCoreLock`). The
+        // lock is let go of only while a record the step read is handed out, which takes it
+        // again for the record's dispatch (`DirectSink`) and calls its callbacks with it let
+        // go of. With no other thread nothing else reaches them meanwhile, and nothing is held.
+        #[cfg(feature = "threads")]
+        let mut held = Some(self.core.lock());
+        let ended = pump.step(&mut |records, event| {
+            #[cfg(feature = "threads")]
+            drop(held.take());
+            DirectSink {
+                engine: self,
+                records,
+            }
+            .event(event);
+            #[cfg(feature = "threads")]
+            {
+                held = Some(self.core.lock());
+            }
+        });
+        #[cfg(feature = "threads")]
+        drop(held);
+        DirectSink {
+            engine: self,
+            records: pump.records(),
+        }
+        .end_records();
+        ended
     }
 
     /// Read the end of each group's session a step left, join again each group whose time came
