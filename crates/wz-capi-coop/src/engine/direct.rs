@@ -310,7 +310,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
 {
     /// The drains a run of Pushes put off ([`Registry::settle`]), once for the run: at the end of
     /// the frame, or before the first record of it that is not a Push (`within_frame`), which a
-    /// test counts as a build whose links are tasks does (`FaceDispatch`).
+    /// test counts as a build whose links are tasks does (`FaceDispatch`). What the drains leave
+    /// to hand out is the read's to hand out, once after every face and group it stepped
+    /// (`CoopEngine::read_faces`, `CoopEngine::read_dial`), or the next record's of the frame.
     fn drain_pushes(&mut self, within_frame: bool) {
         if !core::mem::take(&mut self.records.after_pushes) {
             return;
@@ -328,7 +330,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
         }
         #[cfg(not(all(test, feature = "std", feature = "queryable")))]
         let _ = within_frame;
-        self.engine.deliver();
     }
 }
 
@@ -1660,7 +1661,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 read = Err(SessionClosed);
                 return false;
             };
-            self.deliver();
             if turn.ended.is_some() {
                 read = Err(SessionClosed);
                 return false;
@@ -1703,6 +1703,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if read.is_ok() {
             self.read_groups();
         }
+        // What the faces' and the groups' records left to hand out, handed out once for the read
+        // rather than once a face and once a run of Pushes: no slot is held, and a callback's read
+        // reads nothing inside the delivery (`Self::read_direct`).
+        self.deliver();
         if let Some(wait) = wait {
             if let Some(mut held) = self.live() {
                 held.0.transport.links.waited(wait);
@@ -2000,19 +2004,28 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .unwrap_or(u64::MAX)
     }
 
-    /// What a read waits for, worked out under the session's lock: nothing while a link holds
-    /// input it already took from its stack, else the links' input, or the earliest of the faces'
+    /// What a read waits for: nothing while a link holds input it already took from its stack,
+    /// else, worked out under the session's lock, the links' input, or the earliest of the faces'
     /// deadline `due_us` and the session's. `None` once the session closed.
     fn link_wait(&self, due_us: u64) -> Option<IdleWait> {
+        // Each face's read tells its facts outside the session (`SiteFacts`), and the faces'
+        // records read the same facts under it: a face found holding input here answers the wait
+        // with nothing of the session taken, a wait that is none needing no deadline. A group's
+        // datagram taken is the session's to read, under its lock below.
+        if self.faces_hold_input() {
+            if self.closed.load(Ordering::Acquire) {
+                return None;
+            }
+            #[cfg(test)]
+            self.takes.held_input_reads.fetch_add(1, Ordering::Relaxed);
+            return Some(IdleWait::None);
+        }
         let mut held = self.live()?;
         held.0.link_due_us = due_us;
         // Input the link holds is read at once, so no deadline is gathered and the clock is not
         // read for a wait that would be none. What falls due meanwhile is served by the look at
         // the life that follows, which reads the clock whether or not the read waited.
-        let holds = held.0.transport.holds_input();
-        #[cfg(test)]
-        let holds = holds || self.takes.input_held.load(Ordering::Relaxed);
-        if holds {
+        if held.0.transport.holds_input() {
             #[cfg(test)]
             self.takes.held_input_reads.fetch_add(1, Ordering::Relaxed);
             return Some(IdleWait::None);
@@ -2021,6 +2034,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // held for the wait tries it again at once (`LinkRooms::for_held`).
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);
         Some(held.0.idle_wait())
+    }
+
+    /// Whether a face the read may turn holds input its link already took from its stack, as the
+    /// face's read last told it (`DirectSlot::tell_facts`), read with nothing of the session
+    /// held. A test may have every read find it so (`Takes::input_held`).
+    #[inline(always)]
+    fn faces_hold_input(&self) -> bool {
+        #[cfg(test)]
+        if self.takes.input_held.load(Ordering::Relaxed) {
+            return true;
+        }
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            self.direct
+                .walked()
+                .any(|face| face.site.facts().read().holds_input)
+        }
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        {
+            self.direct.dial.site.facts().read().holds_input
+        }
     }
 
     /// A look at the link's life under the session's lock, the read's `wait` handed back first

@@ -1058,3 +1058,84 @@ fn a_read_waits_for_the_due_its_faces_hold() {
         assert_ne!(held, u64::MAX, "a link that is up is due at its keep-alive");
     }
 }
+
+/// A read hands out what its records left to hand out once, after every face it turned and every
+/// group it stepped: a batch of Pushes enters the deliveries once for the read, not once for the
+/// face's turn and again for the drain of the batch's run. Turned red by a drain of a run of
+/// Pushes that delivers itself (`DirectSink::drain_pushes`), or a read that delivers after each
+/// face it turns (`CoopEngine::read_faces`). The CONTROL is the subscriber's count of the batch.
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_enters_the_deliveries_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let received = received.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let delivers = engine.takes.delivers.load(Ordering::SeqCst);
+    router.send(Command::PushBatch("demo/in", COUNT));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut reads = 0usize;
+    while received.load(Ordering::SeqCst) < usize::from(COUNT) {
+        assert!(Instant::now() < deadline, "the batch did not arrive");
+        let _ = SessionDrive::read(&*engine, false);
+        reads += 1;
+    }
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        usize::from(COUNT),
+        "CONTROL: the batch reached the subscriber"
+    );
+    assert_eq!(
+        engine.takes.delivers.load(Ordering::SeqCst) - delivers,
+        reads,
+        "one delivery a read"
+    );
+}
+
+/// A read that finds a face's link holding input it already took from its stack waits for
+/// nothing and takes nothing of the session for that wait: the session is taken once, for the
+/// look at the face's life, where a read that waits takes it for the wait too. The CONTROL is the
+/// count of the reads that found input held. Turned red by a wait that takes the session's lock
+/// before it reads the faces' facts (`CoopEngine::link_wait`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_on_held_input_takes_nothing_of_the_session_for_its_wait() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let _ = SessionDrive::read(&*engine, false);
+    let waiting = takes() - before;
+    engine.takes.input_held.store(true, Ordering::SeqCst);
+    let (before, held_before) = (
+        takes(),
+        engine.takes.held_input_reads.load(Ordering::SeqCst),
+    );
+    let _ = SessionDrive::read(&*engine, false);
+    let on_held = takes() - before;
+    let held = engine.takes.held_input_reads.load(Ordering::SeqCst) - held_before;
+    engine.takes.input_held.store(false, Ordering::SeqCst);
+    assert_eq!(held, 1, "CONTROL: the read found the input held");
+    assert_eq!(
+        on_held + 1,
+        waiting,
+        "the read on held input took the session for its wait"
+    );
+}

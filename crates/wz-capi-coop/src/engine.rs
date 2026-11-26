@@ -1433,6 +1433,10 @@ pub(crate) struct Takes {
     /// its pump (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) face_turns: core::sync::atomic::AtomicUsize,
+    /// The deliveries entered (`CoopEngine::deliver`): a read enters one, after every face and
+    /// group it stepped (`direct`).
+    #[cfg(not(wz_round))]
+    pub(crate) delivers: core::sync::atomic::AtomicUsize,
     /// Set by a test so that every read finds the one link holding input, whatever the link holds
     /// (`direct`): a stream that never lets the read wait, made without a peer that sends one.
     #[cfg(not(wz_round))]
@@ -7497,6 +7501,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// inside itself, waiting on its own lock.
     /// Whether this call handed anything out: none inside the delivery it is already making.
     fn deliver(&self) -> bool {
+        #[cfg(all(test, not(wz_round)))]
+        self.takes.delivers.fetch_add(1, Ordering::Relaxed);
         self.deliveries
             .within(|entered| entered && self.hand_out_entered())
     }
