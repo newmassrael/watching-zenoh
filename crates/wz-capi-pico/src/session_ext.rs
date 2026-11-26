@@ -23,6 +23,8 @@
 //! - with `admin-space`, the session's ADMIN SPACE, which pico also keeps in the
 //!   session (`_admin_space_queryable_id`) and clears with it.
 
+#[cfg(feature = "admin-space")]
+use crate::prelude::String;
 #[cfg(feature = "connectivity")]
 use wz_capi_port::face_rows::{row_sink_of, RowWatcher};
 #[cfg(feature = "connectivity")]
