@@ -34,6 +34,13 @@
 //! fails, as a socket whose peer stopped reading does. Only this engine copies a remainder:
 //! the tokio engine's writer keeps its own offset.
 //!
+//! The remainder is the stream's send buffer, so the stream's room is the room left in it: a
+//! frame has room while the remainder leaves room for the largest frame within the bound, whether
+//! or not the program takes bytes this moment, as a socket is writable while its send buffer has
+//! room ([`AppLinkTable::poll_stream_room`](wz_session_core::app_link_table::AppLinkTable::poll_stream_room)).
+//! A message that may be dropped is dropped only once that room is gone for its wait, and a
+//! blocking one waits only then, as zenoh drops and waits only on a queue that is full.
+//!
 //! # Waiting
 //!
 //! A wait for input, and an open the program finishes later, are made on the host by parking the
@@ -81,6 +88,10 @@ use crate::udp_link::{datagram_ends_fit, DatagramSocket, Received, UdpDriver, UD
 /// The longest an open waits for the program to report the link up, in milliseconds: the
 /// connect timeout of a zenoh-pico session, which this engine's dial is held to as a whole.
 const OPEN_WAIT_MS: u64 = 10_000;
+
+/// The most a stream link writes in one frame: a batch of the largest length its prefix states,
+/// with the prefix. A stream has room while what it holds for the program leaves room for one.
+const FRAME_MAX: usize = STREAM_RX_CAPACITY;
 
 /// Why a call on a link over the program's transport failed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -564,6 +575,21 @@ impl Held {
         )
     }
 
+    /// Wait up to `timeout_ms` for a stream's room for a frame ([`FRAME_MAX`]), offering what is
+    /// held on the way: `true` once the table answers that the remainder leaves room for one within
+    /// the link's bound, or the link has ended, which the send that follows reports.
+    fn wait_room(&self, timeout_ms: u64) -> bool {
+        let mut room = false;
+        self.waits.wait_while(timeout_ms, |waker| {
+            let _ = self.flush();
+            room = self
+                .transport
+                .with(|table| table.poll_stream_room(self.handle, FRAME_MAX, waker));
+            !room
+        });
+        room
+    }
+
     /// What a read just made let the program know of: the links it refused that are read down.
     fn tell_drained(&self) {
         let drained = self.transport.with(|table| table.take_drained());
@@ -724,10 +750,11 @@ impl StreamSocket for AppStreamSocket {
         self.held.wait_readable(timeout_ms);
     }
 
-    // The program's would-block is the stream's full buffer: a link that holds bytes for the
-    // program takes no more until the program says it is writable. The wait keeps no clock.
+    // The remainder is the stream's send buffer: a frame has room while it leaves room for one
+    // within the link's bound, whether or not the program takes bytes now. The wait keeps no
+    // clock.
     fn wait_writable(&self, timeout_us: u64) -> (bool, u64) {
-        let room = self.held.wait_writable(timeout_us.div_ceil(1_000));
+        let room = self.held.wait_room(timeout_us.div_ceil(1_000));
         (room, if room { 0 } else { timeout_us })
     }
 
@@ -1866,6 +1893,56 @@ mod tests {
         assert_eq!(stream.try_read(&mut buf), Ok(None));
         assert_eq!(script.sent.lock().unwrap().as_slice(), b"abcdef");
         assert!(!transport.with(|table| table.holds_remainder(stream.held.handle)));
+    }
+
+    /// A stream whose program would block has room for the next frame while what it holds leaves
+    /// room for one within the link's bound: the frame is held behind the rest and leaves in order
+    /// once the program is writable. The CONTROL is a link whose bound holds no whole frame, which
+    /// has no room while it holds anything. Turned red by a room that reads the program's
+    /// would-block as a full stream.
+    #[test]
+    fn a_stream_whose_program_would_block_has_room_while_its_remainder_leaves_a_frame() {
+        let (small_script, small_over) = transport();
+        *small_script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
+        let small = AppStreamDial {
+            transport: session(&small_over, 64),
+            waits: AppWaits::new(Arc::clone(&small_over)),
+            open_bound: None,
+        }
+        .dial(PEER)
+        .unwrap();
+        assert_eq!(small.write(b"abc"), Ok(3), "held, not failed");
+        assert_eq!(
+            small.wait_writable(0),
+            (false, 0),
+            "CONTROL: a bound below a frame has no room behind what is held"
+        );
+
+        let (script, over) = transport();
+        *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
+        let stream = AppStreamDial {
+            transport: session(&over, 2 * FRAME_MAX),
+            waits: AppWaits::new(Arc::clone(&over)),
+            open_bound: None,
+        }
+        .dial(PEER)
+        .unwrap();
+        assert_eq!(stream.write(b"abc"), Ok(3), "held, not failed");
+        assert_eq!(
+            stream.wait_writable(0),
+            (true, 0),
+            "room for a frame behind what is held"
+        );
+        assert_eq!(stream.write(b"def"), Ok(3));
+        assert!(
+            script.sent.lock().unwrap().is_empty(),
+            "nothing is offered to a program that would block"
+        );
+        over.event(stream.held.handle, ProgramEvent::Writable)
+            .unwrap();
+        let mut buf = [0u8; 4];
+        assert_eq!(stream.try_read(&mut buf), Ok(None));
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"abcdef");
     }
 
     #[test]

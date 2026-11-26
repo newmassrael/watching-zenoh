@@ -1306,6 +1306,42 @@ impl AppLinkTable {
         }
     }
 
+    /// Whether a writer that holds what the program does not take ([`Self::hold_remainder`]) has
+    /// room on stream `handle` for a frame of up to `frame` bytes now: the link is up and holds
+    /// nothing for a program that takes bytes, or what it holds leaves room for `frame` more
+    /// within its bound, whether or not the program takes bytes this moment. That is a socket's
+    /// room, whose send buffer is writable while it has room and not only once it is empty: the
+    /// bytes wait behind what is held and leave once the program is writable. `waker` is kept when
+    /// there is none, and woken when the program reports the link writable, up or closed, or a
+    /// drain empties what is held. A link that is closing, closed or unknown answers `true`: the
+    /// send that follows meets its end. A link that is not a stream has the room of
+    /// [`Self::poll_writable`].
+    pub fn poll_stream_room(
+        &mut self,
+        handle: LinkHandle,
+        frame: usize,
+        waker: Option<&Waker>,
+    ) -> bool {
+        let Some(link) = self.link_mut(handle) else {
+            return true;
+        };
+        let behind =
+            link.kind.is_stream() && link.admits(link.remainder.len().saturating_add(frame));
+        match link.state() {
+            AppLinkState::Open if link.remainder.is_empty() => true,
+            AppLinkState::Open | AppLinkState::Blocked if behind => true,
+            AppLinkState::Closing | AppLinkState::Closed => true,
+            AppLinkState::Opening => {
+                keep(&mut link.opener, waker);
+                false
+            }
+            AppLinkState::Open | AppLinkState::Blocked => {
+                keep(&mut link.writer, waker);
+                false
+            }
+        }
+    }
+
     /// Whether a send on `handle` may go to the program now. `waker` is kept when it may not and
     /// will later.
     pub fn begin_send(&mut self, handle: LinkHandle, waker: Option<&Waker>) -> SendGate {
@@ -2037,6 +2073,77 @@ mod tests {
         let _ = closed.event(gone, ProgramEvent::Closed).expect("closed");
         assert!(
             closed.poll_writable(gone, None),
+            "a closed link answers at once"
+        );
+    }
+
+    /// A stream that holds bytes for the program, or would block, has room for a frame while what
+    /// it holds leaves room for one more within its bound, as a socket's send buffer with room is
+    /// writable while its peer is slow; past that it has none until the program takes bytes, and
+    /// the writer is woken by the program's writable. A bound that holds no whole frame gives room
+    /// only to a link that holds nothing. The CONTROL is the writable poll of the blocked link,
+    /// which still answers that the program takes nothing now. Turned red by a room that reads the
+    /// program's would-block as a full stream, or one that lets a frame past the bound.
+    #[test]
+    fn a_stream_has_room_for_a_frame_while_its_remainder_leaves_one_within_its_bound() {
+        const FRAME: usize = 8;
+        let mut table = AppLinkTable::new();
+        let handle = open_stream_under(&mut table, Quota::at_most(4 * FRAME));
+        assert!(
+            table.poll_stream_room(handle, FRAME, None),
+            "an open link with nothing held"
+        );
+        let SendGate::Go(ticket) = table.begin_send(handle, None) else {
+            panic!("an open link takes a send");
+        };
+        let (step, _) = table.send_answered(ticket, FRAME, ProgramSend::WouldBlock);
+        assert_eq!(step, SendStep::Blocked);
+        table
+            .hold_remainder(handle, &[0; FRAME])
+            .expect("held within the bound");
+        assert!(
+            !table.poll_writable(handle, None),
+            "CONTROL: the program takes nothing now"
+        );
+        assert!(
+            table.poll_stream_room(handle, FRAME, None),
+            "room for a frame behind what is held"
+        );
+        table
+            .hold_remainder(handle, &[0; 2 * FRAME])
+            .expect("held within the bound");
+        assert!(
+            table.poll_stream_room(handle, FRAME, None),
+            "three frames held, room for the fourth"
+        );
+        table.hold_remainder(handle, &[0; 1]).expect("held");
+        let (count, waker) = counter();
+        assert!(
+            !table.poll_stream_room(handle, FRAME, Some(&waker)),
+            "no room for a whole frame more"
+        );
+        assert_eq!(
+            wakes(&mut table, |table| table
+                .event(handle, ProgramEvent::Writable)
+                .unwrap()),
+            1
+        );
+        assert_eq!(count.0.load(Ordering::SeqCst), 1, "the writer is woken");
+
+        let small = open_stream_under(&mut table, Quota::at_most(FRAME - 1));
+        assert!(
+            table.poll_stream_room(small, FRAME, None),
+            "a bound below a frame: room while nothing is held"
+        );
+        table.hold_remainder(small, &[0; 1]).expect("held");
+        assert!(
+            !table.poll_stream_room(small, FRAME, None),
+            "and none once anything is"
+        );
+        let gone = open_stream(&mut table);
+        let _ = table.event(gone, ProgramEvent::Closed).expect("closed");
+        assert!(
+            table.poll_stream_room(gone, FRAME, None),
             "a closed link answers at once"
         );
     }
