@@ -264,7 +264,7 @@ const EXT_MEMBER: &str = "zext";
 const RETIRED_MEMBER: &str = "wz";
 
 /// Why a statement under [`RETIRED_MEMBER`] is refused, in the words of the other ABIs' reader.
-const RETIRED_REFUSAL: &str = "the document states the member `zext`, which is not read: the \
+const RETIRED_REFUSAL: &str = "the document states the member `wz`, which is not read: the \
                                statements it holds belong in the member `zext`";
 
 /// The path under the member that `key` names under `member` (`""` for the member itself), or
