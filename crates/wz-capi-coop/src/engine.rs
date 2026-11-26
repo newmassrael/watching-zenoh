@@ -4619,7 +4619,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The link is now one the session's sends go through: what was planned over the links
         // before it no longer holds (`LinkSupervisor::generation`).
         self.transport.links.establish(at);
-        if self.begin_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
+        if self.begin_link_replay(at, &actions, now_us / 1000) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
         }
         if self.session.faces_watched() {
