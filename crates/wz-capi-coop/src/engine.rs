@@ -5920,9 +5920,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                if face.link.wire().is_none() {
-                    return None;
-                }
+                face.link.wire()?;
                 // A link in its handshake names no peer yet: its facts come with it up.
                 let up = face.up().is_some();
                 let peer = decl_watch::named(|| {
@@ -5954,9 +5952,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                if face.link.wire().is_none() {
-                    return None;
-                }
+                face.link.wire()?;
                 // A link in its handshake names no peer yet: its facts come with it up.
                 let up = face.up().is_some();
                 let peer = decl_watch::named(|| {
@@ -7026,26 +7022,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The waits for room a publish that finds the session held asks. Compiled where its
-    /// readers are: the group tests over the program's transport, each member stepped by its read
-    /// task (`tests::group`).
-    #[cfg(all(
-        test,
-        feature = "group",
-        feature = "app-transport",
-        feature = "threads"
-    ))]
+    /// readers are: the tests of a full group's stage over the program's transport, in both forms
+    /// of the engine's calls (`tests::group_congested`).
+    #[cfg(all(test, feature = "group", feature = "app-transport"))]
     pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
-    #[cfg(all(
-        test,
-        feature = "group",
-        feature = "app-transport",
-        feature = "threads"
-    ))]
+    #[cfg(all(test, feature = "group", feature = "app-transport"))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
             core.0

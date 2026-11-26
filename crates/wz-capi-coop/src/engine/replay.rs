@@ -196,7 +196,9 @@ impl Replay {
     }
 
     /// Whether a turn is owed and due at `now_ms` (`Self::next_turn_ms`): never, in a build that
-    /// reaches no pace.
+    /// reaches no pace. Asked by the read that steps each face itself (`direct`), which a build
+    /// that keeps the round has not.
+    #[cfg(any(test, not(wz_round)))]
     pub(super) fn turn_due(&self, now_ms: u64) -> bool {
         self.next_turn_ms().is_some_and(|due_ms| now_ms >= due_ms)
     }
