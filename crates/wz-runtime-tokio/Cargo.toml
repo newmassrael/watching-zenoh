@@ -1178,12 +1178,12 @@ routing-routes = ["routing-peer"]
 # R311qr — pulls `wz-codecs/codec-linkstate` so the driver's `forward`
 # (c3) can name the decoded `LinkstateListOwned` the graph ingests.
 # R311qu — pulls `wz-session-core/codec-linkstate` for the OAM-LINKSTATE
-# carrier (`try_parse_linkstate_oam`) the `linkstate_forward` driver (c3)
+# carrier (`try_parse_linkstate_oam`) the router forwarder (`RouterForwarder`)
 # decodes inbound topology with.
 routing-peer = [
     "routing-accept",
-    # R2386 — a routing peer ANSWERS interests: `linkstate_forward` and
-    # `router_forward` both close a CURRENT dump with
+    # R2386 — a routing peer ANSWERS interests: `router_forward` closes a
+    # CURRENT dump with
     # `build_declare_final_reply`, and that builder is now gated on the atom
     # named after it rather than on `codec-declare`. The edge was always real;
     # it just used to be satisfied by the `codec-declare` line below happening
@@ -1307,7 +1307,7 @@ router-multicast-faces = [
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain
 # SEAM (InterceptorChain / InterceptorContext / InterceptorFlow / the
-# per-face admit in linkstate_forward) stays under `routing-peer`, so all
+# per-face admit in router_forward) stays under `routing-peer`, so all
 # three imply it; an empty config — or a routing-peer build that selects
 # none of these — is access control disabled (every message admitted).
 # `access-acl` additionally pulls the pure policy ENGINE crate

@@ -706,8 +706,7 @@ pub use wz_session_core::query_sink;
 /// The session lifecycle as a QUERY: close a session and be answered with a
 /// verdict, and ask which lifecycle verbs a node has. Re-exported so a host that
 /// binds the `session-close-ingress` seam names it beside `query_sink`; the
-/// directories over this runtime's face tables are
-/// `linkstate_forward::LinkstateSessionDirectory` and
+/// directory over this runtime's face tables is
 /// `router_forward::RouterSessionDirectory`.
 #[cfg(feature = "session-close-ingress")]
 pub use wz_session_core::lifecycle_query;
@@ -2472,15 +2471,19 @@ pub mod node_stats;
 #[cfg(feature = "resource-snapshot")]
 pub mod resource_snapshot_host;
 
-// The link-state routing cores the region-hat forwarder is built from (the data and
+// The link-state route cores the region-hat forwarder is built from (the data and
 // query routes over a `wz_routing_graph` net and its interest tables, the query
-// return synthesis, the graph handle) and the re-exports a deploy names its policy
-// and configuration by. The single-net peer forwarder that lived here retired with
-// open-debt item 751 step 7: a peer node is the region-hat forwarder at node mode
-// Peer. Gated on `routing-router-hat`, the forwarder these cores have no caller
-// without.
+// return synthesis, the graph handle). Crate-private: nothing outside the crate
+// names a route core. Gated on `routing-router-hat`, the forwarder these cores have
+// no caller without.
 #[cfg(feature = "routing-router-hat")]
-pub mod linkstate_forward;
+pub(crate) mod linkstate_routes;
+
+/// The types a deploy states its routing policy and configuration in: node identity
+/// and role, the autoconnect policy, the configured link weights and the interceptor
+/// configuration. Gated on `routing-router-hat`, the forwarder a deploy hands them to.
+#[cfg(feature = "routing-router-hat")]
+pub mod routing_policy;
 
 /// R2721 — the AP binding for the lifecycle grammar's `open` verb: resolve the
 /// key's target through the link-state directory and ask the face loop to dial

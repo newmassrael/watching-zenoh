@@ -9143,8 +9143,8 @@ layer_c1ag_cargo_test_transport_compose() {
 #       comment — the guard constants below are gated by pre-push gate 4b, and
 #       NOTHING gates the paragraph that explains them.
 #   (c) a ROUTING leg. The forward-path stamp lives in `route_push`
-#       (router_forward.rs) and `forward_push` (linkstate_forward.rs), which are
-#       compiled only under the routing features. No lane composed
+#       (router_forward.rs), which is compiled only under the routing
+#       features. No lane composed
 #       `time-hlc` WITH routing before this round, so the seam could have failed
 #       to compile — or been cfg'd out entirely — with every lane still green.
 #       C4 builds preset-ap-full (which carries both) but is build-only and
@@ -11169,7 +11169,7 @@ layer_c1x_cargo_test_routing_routes() {
 #      accept-and-hold units + the 2 new peer_loop dial+accept units);
 #   1b. R311qv/qw: runs the linkstate-peer routing tests — the topology-graph
 #      kernel crate `wz-routing-graph` (lifted out in R311qw) AND the
-#      `linkstate_forward` driver units in this crate (the `--lib linkstate`
+#      `linkstate_*` module units in this crate (the `--lib linkstate`
 #      filter), which the `accept_loop` filter had silently excluded;
 #   2. clippy-gates `wz-routing-graph` + the `routing-peer` cfg (`--all-targets`);
 #   3. clippy-gates the LIB under `--no-default-features --features routing-peer`
@@ -25969,7 +25969,7 @@ layer_e6c_peer_multilink() {
 # observed (a black-box subscriber cannot see which link carried the Put, and a green result
 # does not distinguish qos-on from qos-off), NOR the y219b joined-secondary DELIVERY fix
 # (`data_seen` is upstream of the drop gate; guarded deterministically by the
-# linkstate_forward library unit test), NOR band-selection correctness (the y219a in-process
+# joined_link_tests library unit test), NOR band-selection correctness (the y219a in-process
 # `session_multilink_deploy_e2e`). wz<->wz loopback (no
 # pico/zenohd prereq), so no SKIP guard; the `wz_peer_` prefix keeps the default Layer E
 # sweep's `--skip wz_peer` from double-running it.

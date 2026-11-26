@@ -1485,8 +1485,8 @@ enum Space {
 /// against the table so far, then binds `id -> literal` (zenoh registers the
 /// mapping under the declaring face's resource table); an `UndeclKexpr` drops
 /// the binding. Any other declaration body is a no-op here. Before this moved
-/// to `wz-session-core` (R311y196) a byte-identical copy lived in
-/// `wz-runtime-tokio::linkstate_forward`; the multicast ingress plane needs the
+/// to `wz-session-core` (R311y196) a byte-identical copy lived in the
+/// wz-runtime-tokio forwarder; the multicast ingress plane needs the
 /// same absorb from the no_std session core, so the one definition lives here.
 ///
 /// R2385 — the declared keyexpr's own scope goes through

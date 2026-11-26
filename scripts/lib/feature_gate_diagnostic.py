@@ -376,8 +376,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # route R2571 records above and R2454 before it: the claim was true
             # when written and THIS round falsified it. Serving `linkstate/peers`
             # from a plain peer needed the render seam to be reachable from the
-            # peer tier, so `LinkstateForwarder` gained
-            # `#[cfg(feature = "adminspace-router-linkstate")] pub fn net_view`
+            # peer tier, so the peer forwarder gained a `net_view` method, and
+            # `RouterForwarder` carries the same shape today:
+            # `#[cfg(feature = "adminspace-router-linkstate")] pub fn peers_net_view`
             # — a `#[cfg]` in this package attaching the feature to a publicly
             # visible item, which is exactly what this list denies.
             #
@@ -618,8 +619,8 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # the adopting round paying a ratchet it did not feed.
                 # R2684 — `adminspace-router-linkstate` is NOT here, and the
                 # round that nearly put it here records why. It left this
-                # package's `NO_PUBLIC_PATH` when `LinkstateForwarder::net_view`
-                # falsified that claim, and `@defer impl-method` was the obvious
+                # package's `NO_PUBLIC_PATH` when a forwarder's `net_view` (today
+                # `RouterForwarder::peers_net_view`) falsified that claim, and `@defer impl-method` was the obvious
                 # next home: a `pub fn` in an `impl` has no `module::name` path.
                 # Then gating the view TYPE on this feature — the repair for the
                 # dead-code the diagnostic's own probe build found — gave it two

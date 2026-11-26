@@ -292,7 +292,7 @@ pub use wz_session_core::link::BoxedLinkDriver;
 // outcome type to name its return.
 pub use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 // R2259 (open-debt item 593) — the two link facts the C link-events plane
-// reports, beside the trait that produces them. `linkstate_forward` already
+// reports, beside the trait that produces them. `routing_policy` also
 // re-exports `InterceptorLink`, but it is a ROUTING module and a consumer that
 // needs the link's protocol has no business depending on the routing tier; the
 // pair belongs where `BoxedLinkDriver::link_ends` is named.

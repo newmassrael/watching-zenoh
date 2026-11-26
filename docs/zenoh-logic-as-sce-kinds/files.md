@@ -612,7 +612,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/link_rx_window.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/link_socket.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/link_tx_pool.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/linkstate_forward.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/linkstate_routes.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/linkstate_interest.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/linkstate_pending.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/liveness.rs` | S4 | |
@@ -669,6 +669,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/router_forward/table_sharing_pair_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/tables_cell.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/routing_policy.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/routing_region.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/runtime_impl.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/runtime_pool.rs` | S5 | |
