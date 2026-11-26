@@ -6,7 +6,7 @@
 //! (`wz_runtime_coop::sync::NoFaceWait`), which a debug build on a host fails at once. The one
 //! wait between the two runs from a face to the session's lock, so no cycle closes.
 
-use wz_runtime_coop::sync::{FacePlace, Lend};
+use wz_runtime_coop::sync::{FacePlace, Lend, LockKind};
 
 use super::{open, CatchAll, Router};
 use crate::form::SessionLock;
@@ -36,8 +36,10 @@ fn the_sessions_lock_is_taken_inside_a_faces_lend() {
 }
 
 /// A face is tried under the session's lock, the way a step sends, and a wait on it there fails,
-/// which leaves the lock held to the step and free after it. Turned red by a check that refuses
-/// a try under the session's lock, or one that lets a wait through (`CoreGuard`'s mark).
+/// which leaves the lock held to the step and free after it. A build whose values all lie under
+/// the session's one lock (no value locks) makes a face's lend no wait, so it runs there. Turned
+/// red by a check that refuses a try under the session's lock, or one that lets a wait through
+/// (`CoreGuard`'s mark), or fails a lend that cannot wait.
 #[cfg(feature = "threads")]
 #[test]
 fn a_face_is_tried_and_not_waited_on_under_the_sessions_lock() {
@@ -56,8 +58,8 @@ fn a_face_is_tried_and_not_waited_on_under_the_sessions_lock() {
     assert_eq!(tried, Lend::Lent(5));
     assert_eq!(
         waited,
-        Some(true),
-        "a wait on a face under the session's lock"
+        Some(<SessionLock as LockKind>::WAITS),
+        "a wait on a face under the session's lock fails where a face's lend waits"
     );
     assert!(engine.session_is_free(), "the step let the lock go");
     assert_eq!(
