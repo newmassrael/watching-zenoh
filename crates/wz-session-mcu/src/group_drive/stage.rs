@@ -1009,6 +1009,14 @@ impl GroupTxStage {
         self.inner.dropped.get()
     }
 
+    /// Whether a write of the stage would find nothing to offer the socket: no lane holds a
+    /// datagram. A datagram the writer holds is among them, since it stays at the front of its
+    /// lane until the writer lets it go (`Self::finish`); what a push keeps while another holds
+    /// the conduits is not, as that push frames it.
+    fn has_nothing_to_write(&self) -> bool {
+        self.inner.lanes.borrow().is_empty()
+    }
+
     /// Whether nothing is queued on the stage for the group's pump to write.
     pub fn is_empty(&self) -> bool {
         self.inner.lanes.borrow().is_empty() && self.inner.staged.borrow().held.is_empty()
@@ -1431,7 +1439,11 @@ impl<T: GroupTransport> GroupLink<T> {
         pace: &dyn GroupTxPace,
     ) -> PushOutcome {
         let outcome = stage.push_encoded_through(message, pace, Some(&*self.0 as &dyn SendNow));
-        self.write_staged(stage);
+        // A push whose every datagram left from where it was written leaves the lanes as empty as
+        // it found them, and a write after it would offer the socket nothing.
+        if !stage.has_nothing_to_write() {
+            self.write_staged(stage);
+        }
         outcome
     }
 }
@@ -1829,6 +1841,66 @@ mod tests {
         link.write_staged(&stage);
         assert_eq!(taken(&wire), ["first", "second", "third", "first"]);
         assert!(stage.is_empty() && !stage.holds());
+    }
+
+    /// The write after a push runs where the push left a datagram on a lane, and the stage holds
+    /// nothing a write would offer where every datagram left from where it was written. A push on
+    /// a link not open goes on its lane; once the link is open, the next push goes behind it and
+    /// the write after that push sends both; a push onto empty lanes leaves nothing to write; one
+    /// the socket refuses is held, and still on its lane. Turned red by a push that skips the
+    /// write after a datagram it put on a lane (`GroupLink::push_encoded`), or by a stage that
+    /// says it has nothing to write while a lane holds a datagram (`has_nothing_to_write`).
+    #[test]
+    fn the_write_after_a_push_runs_only_where_a_lane_holds_a_datagram() {
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let link = GroupLink::new(Socket(Rc::clone(&wire)));
+        let stage = GroupTxStage::new(&params());
+
+        assert_eq!(
+            push_through(&link, &stage, Put::of("first")),
+            PushOutcome::Pushed
+        );
+        assert!(taken(&wire).is_empty(), "a link not open is not written");
+        assert!(!stage.has_nothing_to_write(), "the datagram is on its lane");
+
+        let mut session_side = link.clone();
+        assert!(session_side.open());
+        wire.borrow_mut().room = 2;
+        assert_eq!(
+            push_through(&link, &stage, Put::of("second")),
+            PushOutcome::Pushed
+        );
+        assert_eq!(
+            taken(&wire),
+            ["first", "second"],
+            "the write after the push sent the lane's datagram and the push's"
+        );
+        assert!(stage.has_nothing_to_write());
+
+        wire.borrow_mut().room = 1;
+        assert_eq!(
+            push_through(&link, &stage, Put::of("third")),
+            PushOutcome::Pushed
+        );
+        assert_eq!(taken(&wire), ["first", "second", "third"]);
+        assert!(
+            stage.has_nothing_to_write() && !stage.holds(),
+            "a push that wrote through leaves nothing to write"
+        );
+
+        assert_eq!(
+            push_through(&link, &stage, Put::of("fourth")),
+            PushOutcome::Pushed
+        );
+        assert!(stage.holds(), "a socket with no room: the datagram is held");
+        assert!(
+            !stage.has_nothing_to_write(),
+            "and stays on its lane while it is held"
+        );
+        wire.borrow_mut().room = 1;
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["first", "second", "third", "fourth"]);
+        assert!(stage.has_nothing_to_write() && !stage.holds());
     }
 
     /// Push `put` onto `stage` as a message of the session whose lane has room: it is queued
