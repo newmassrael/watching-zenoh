@@ -130,12 +130,13 @@ fn a_get_is_answered_and_ends_with_its_final() {
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 
-/// A get of the link's peer alone reads the session's timestamp policy and holds its leg under one
-/// hold of the session, and takes one more to find that no other face is up. The CONTROL is the
-/// leg's end, which says the get was asked. Turned red by the policy read under a hold of its own,
-/// before the walk of the faces.
+/// A get of the link's peer alone reads the session's timestamp policy, holds its leg and finds that
+/// no other link is up under one hold of the session; a build that asks groups takes one more to
+/// find that no group is asked. The CONTROL is the leg's end, which says the get was asked. Turned
+/// red by the policy read under a hold of its own, before the walk of the faces, or by a hold taken
+/// after the last leg only to find no face left.
 #[test]
-fn a_get_of_one_peer_reads_the_policy_in_the_hold_of_its_leg() {
+fn a_get_of_one_peer_holds_the_session_once_for_its_links() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
@@ -145,8 +146,9 @@ fn a_get_of_one_peer_reads_the_policy_in_the_hold_of_its_leg() {
     let held = takes() - before;
     assert_eq!(issued, Ok(1), "one leg: the link's peer");
     assert_eq!(
-        held, 2,
-        "one hold for the policy and the leg, one to find no other face"
+        held,
+        1 + usize::from(cfg!(feature = "group")),
+        "one hold for the policy, the leg and the walk of the links"
     );
     until(&engine, "CONTROL: the leg to end", || {
         leg.lock().unwrap().ended

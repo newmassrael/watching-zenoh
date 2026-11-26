@@ -9635,11 +9635,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 unheld = unheld.saturating_add(1);
                 continue;
             }
+            // Whether a face after this one is up, read in this hold, so that none is taken only
+            // to learn that no face is left.
+            let more = core.transport.next_up_face(remote, asked).is_some();
             drop(guard);
             issued = issued.saturating_add(1);
             // A fan cancelled while the legs are issued stops the issuing.
             if self.cut_short(fan, tag) {
                 return Ok(issued);
+            }
+            if !more {
+                break;
             }
         }
         // And one leg for each group the session asks queries of
