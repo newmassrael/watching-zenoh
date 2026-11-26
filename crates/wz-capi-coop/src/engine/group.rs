@@ -29,11 +29,16 @@ use core::net::SocketAddr;
 
 use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
+#[cfg(wz_round)]
 use wz_runtime_coop::executor::SpawnRefusal;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::transport::GroupRecord;
-use wz_runtime_coop::{ClockSource, CoopLocalJoinHandle, CoopLocalSet};
+use wz_runtime_coop::ClockSource;
+#[cfg(not(wz_round))]
+use wz_runtime_coop::CoopRuntime;
+#[cfg(wz_round)]
+use wz_runtime_coop::{CoopLocalJoinHandle, CoopLocalSet};
 use wz_session_core::bounded::{BoundedVec, Static};
 use wz_session_core::caps;
 use wz_session_core::declare_form::{GroupDeclaration, GroupKey, RetractionKey};
@@ -56,6 +61,7 @@ use wz_session_core::multicast_tx::{
     multicast_tx_declaration, multicast_tx_group_announcement, multicast_tx_group_retraction,
     multicast_tx_interest, multicast_tx_publication, MulticastTxEncoded,
 };
+#[cfg(any(wz_round, feature = "connectivity"))]
 use wz_session_core::placed::PlacedRef;
 use wz_session_core::policy::SessionPolicy;
 use wz_session_core::qos::Priority;
@@ -67,9 +73,12 @@ use wz_session_core::session_tables::WireForm;
 use wz_session_core::stats::TransportStats;
 use wz_session_core::tx_deadline::PushOutcome;
 use wz_session_core::wire_id::{EntityId, ExprId};
+#[cfg(not(wz_round))]
+use wz_session_mcu::group_drive::MulticastSessionPlace;
+#[cfg(wz_round)]
+use wz_session_mcu::group_drive::{try_spawn_multicast_session_seeded, GroupInputGate};
 use wz_session_mcu::group_drive::{
-    try_spawn_multicast_session_seeded, GroupDue, GroupInputGate, GroupLink, GroupTxPace,
-    GroupTxStage, JoinAsk, MulticastSessionSeed,
+    GroupDue, GroupLink, GroupTxPace, GroupTxStage, JoinAsk, MulticastSessionSeed,
 };
 #[cfg(feature = "connectivity")]
 use {
@@ -89,6 +98,7 @@ use {
 use crate::prelude::*;
 
 use super::registry::{FaceId, HeldFace};
+#[cfg(wz_round)]
 use crate::round::Round;
 
 /// The rows of each group's member table (`MAX_GROUP_MEMBERS`): a member whose JOIN finds them all
@@ -386,9 +396,13 @@ struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
     took: Rc<Cell<bool>>,
     /// The session's round of deliveries.
+    #[cfg(wz_round)]
     lane: PlacedRef<Round>,
 }
 
+// A read that hands each record out as it is read leaves nothing in the buffer the transport
+// gives back, which goes with the transport.
+#[cfg(wz_round)]
 impl Drop for Watched {
     fn drop(&mut self) {
         if let Some(buf) = self.inner.give_back_rx() {
@@ -437,6 +451,9 @@ impl GroupTransport for Watched {
     }
 
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        #[cfg(not(wz_round))]
+        let took = self.inner.recv_with(f);
+        #[cfg(wz_round)]
         let took = if self.inner.lends_until_next_receive() {
             let lane = &self.lane;
             self.inner.recv_with(&mut |datagram, from| {
@@ -486,15 +503,34 @@ pub(super) trait Pace {
 }
 
 /// The session's own tasks and clock, as a group's waits use them.
+#[cfg(wz_round)]
 pub(super) struct SessionPace<C: ClockSource> {
     pub(super) local: CoopLocalSet<C>,
     pub(super) clock: C,
 }
 
+#[cfg(wz_round)]
 impl<C: ClockSource> Pace for SessionPace<C> {
     fn pass(&self) {
         self.local.run_until_idle();
     }
+
+    fn now_us(&self) -> u64 {
+        self.clock.now_us()
+    }
+}
+
+/// The session's clock, as a group's waits use it where the read steps the group's session
+/// itself: a wait for room runs no task, the group's own write of its stage
+/// (`GroupTxPace::pass`) being what frees it.
+#[cfg(not(wz_round))]
+pub(super) struct ClockPace<C: ClockSource> {
+    pub(super) clock: C,
+}
+
+#[cfg(not(wz_round))]
+impl<C: ClockSource> Pace for ClockPace<C> {
+    fn pass(&self) {}
 
     fn now_us(&self) -> u64 {
         self.clock.now_us()
@@ -511,9 +547,11 @@ pub(super) struct GroupJoining {
     pub(super) transport: alloc::boxed::Box<dyn GroupTransport>,
     /// Whether the session has room for what the group delivers: the round's room for one record
     /// of the group's batch.
+    #[cfg(wz_round)]
     pub(super) input_gate: GroupInputGate,
     /// The session's round of deliveries, which reads what the group's transport lends where it
     /// lies and keeps the buffer it gives back while a record still reads it.
+    #[cfg(wz_round)]
     pub(super) lane: PlacedRef<Round>,
     pub(super) params: MulticastParams,
     pub(super) policy: SessionPolicy,
@@ -534,7 +572,12 @@ pub(super) struct GroupFace<W> {
     face: HeldFace,
     join: GroupJoin,
     /// The group's session; `None` once the session's end was read ([`Self::take_outcome`]).
+    #[cfg(wz_round)]
     task: Option<CoopLocalJoinHandle<MulticastOutcome>>,
+    /// Where the read that steps the group's session leaves how it ended; `None` once that end
+    /// was read ([`Self::take_outcome`]).
+    #[cfg(not(wz_round))]
+    end: Option<Rc<GroupEnd>>,
     /// When the group, whose session ended on its own, is joined again.
     rejoin_at_us: Option<u64>,
     /// The group's stage, which the session's messages and the group's replies are pushed onto,
@@ -604,6 +647,7 @@ impl<W: LinkWaits> GroupFace<W> {
     /// session's runtime has no cell for the task (its tables are reserved when the session
     /// opens), the transport let go of with what the task was to be made of. The group's socket is
     /// waited on with `waits`, those of the session's stack.
+    #[cfg(wz_round)]
     pub(super) fn join<C, D>(
         local: &CoopLocalSet<C>,
         joining: GroupJoining,
@@ -614,11 +658,88 @@ impl<W: LinkWaits> GroupFace<W> {
         C: ClockSource + 'static,
         D: FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static,
     {
+        let (mut face, seed) = Self::made(joining, waits);
+        let on_event = {
+            let members = Rc::clone(&face.members);
+            let replies = MulticastReplySink::new(face.tx.clone());
+            let keyexprs = Rc::clone(&face.keyexprs);
+            let join_ask = face.join_ask.clone();
+            let tx = face.tx.clone();
+            #[cfg(feature = "connectivity")]
+            let events = Rc::clone(&face.events);
+            let mut dispatch = dispatch;
+            move |event: IterationEvent<'_, '_>| {
+                answer_asks(&event, &keyexprs, &join_ask, &tx);
+                note_members(
+                    &event,
+                    &members,
+                    #[cfg(feature = "connectivity")]
+                    &events,
+                );
+                dispatch(event, &replies);
+            }
+        };
+        let should_stop = {
+            let stop = Rc::clone(&face.stop);
+            move || stop.get()
+        };
+        // Everything the group sends is pushed onto its stage, which the face and the task write
+        // from: the task's pull seam yields nothing.
+        let task = try_spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop)?;
+        face.task = Some(task);
+        Ok(face)
+    }
+
+    /// Join the group `joining` names, whose tables the registry holds already: the face, and the
+    /// group's session in the place its read steps it (`GroupPump`), on `runtime`'s clock. The
+    /// session opens the transport as its link now; one that does not open is told by the first
+    /// step. The group's socket is waited on with `waits`, those of the session's stack.
+    #[cfg(not(wz_round))]
+    pub(super) fn join<C: ClockSource + 'static>(
+        runtime: CoopRuntime<C>,
+        joining: GroupJoining,
+        waits: W,
+    ) -> (Self, GroupPump<C>) {
+        let (mut face, seed) = Self::made(joining, waits);
+        let end = Rc::new(GroupEnd::default());
+        face.end = Some(Rc::clone(&end));
+        let reads = GroupReads {
+            face: face.face,
+            members: Rc::clone(&face.members),
+            keyexprs: Rc::clone(&face.keyexprs),
+            join_ask: face.join_ask.clone(),
+            tx: face.tx.clone(),
+            replies: MulticastReplySink::new(face.tx.clone()),
+            stop: Rc::clone(&face.stop),
+            end,
+            #[cfg(feature = "connectivity")]
+            events: Rc::clone(&face.events),
+            #[cfg(feature = "queryable")]
+            generation: face.generation,
+        };
+        let pump = GroupPump {
+            place: MulticastSessionPlace::new(runtime, seed),
+            reads,
+        };
+        (face, pump)
+    }
+
+    /// The face of the group `joining` names, and the seed of its session, which holds what the
+    /// face shares with it: the one body both forms of the join make them in.
+    fn made(
+        joining: GroupJoining,
+        waits: W,
+    ) -> (
+        Self,
+        MulticastSessionSeed<GroupLink<Watched>, GROUP_MEMBERS>,
+    ) {
         let GroupJoining {
             face,
             join,
             transport,
+            #[cfg(wz_round)]
             input_gate,
+            #[cfg(wz_round)]
             lane,
             params,
             policy,
@@ -657,11 +778,12 @@ impl<W: LinkWaits> GroupFace<W> {
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
-        // Shared by the task, which opens it as the session's link, and the face, which writes on
-        // it what the session pushes.
+        // Shared by the session, which opens it as its link, and the face, which writes on it
+        // what the session pushes.
         let link = GroupLink::new(Watched {
             inner: transport,
             took: Rc::clone(&took),
+            #[cfg(wz_round)]
             lane,
         });
         let seed = MulticastSessionSeed::<GroupLink<Watched>, GROUP_MEMBERS>::new(
@@ -673,8 +795,11 @@ impl<W: LinkWaits> GroupFace<W> {
         )
         .with_join_ask(join_ask.clone())
         .with_tx_stage(tx.clone())
-        .with_due(due.clone())
-        .with_input_gate(input_gate);
+        .with_due(due.clone());
+        // The round's room for a record of the group's batch gates what the group is handed; a
+        // read that hands each record out as it is read needs no room for it.
+        #[cfg(wz_round)]
+        let seed = seed.with_input_gate(input_gate);
         #[cfg(feature = "transport-stats")]
         let seed = seed.with_stats(Rc::clone(&stats));
         #[cfg(feature = "resource-snapshot")]
@@ -682,30 +807,14 @@ impl<W: LinkWaits> GroupFace<W> {
         #[cfg(feature = "resource-snapshot")]
         let seed = seed.with_meter(Rc::clone(&messages));
         let keyexprs = Rc::new(RefCell::new(GroupKeyexprAnswers::default()));
-        let on_event = answering_asks(
-            noting_members(
-                Rc::clone(&members),
-                MulticastReplySink::new(tx.clone()),
-                dispatch,
-                #[cfg(feature = "connectivity")]
-                Rc::clone(&events),
-            ),
-            Rc::clone(&keyexprs),
-            join_ask.clone(),
-            tx.clone(),
-        );
         let keyexpr_ask_owed = Cell::new(join.declarations.declares_keyexprs());
-        let should_stop = {
-            let stop = Rc::clone(&stop);
-            move || stop.get()
-        };
-        // Everything the group sends is pushed onto its stage, which the face and the task write
-        // from: the task's pull seam yields nothing.
-        let task = try_spawn_multicast_session_seeded(local, seed, on_event, || None, should_stop)?;
-        Ok(Self {
+        let face = Self {
             face,
             join,
-            task: Some(task),
+            #[cfg(wz_round)]
+            task: None,
+            #[cfg(not(wz_round))]
+            end: None,
             rejoin_at_us: None,
             #[cfg(feature = "queryable")]
             generation,
@@ -733,7 +842,8 @@ impl<W: LinkWaits> GroupFace<W> {
             announced: RefCell::new(Vec::new()),
             #[cfg(feature = "connectivity")]
             events,
-        })
+        };
+        (face, seed)
     }
 
     /// Push `message`, a message of the session written from its parts and lent for the call, onto
@@ -941,9 +1051,19 @@ impl<W: LinkWaits> GroupFace<W> {
     /// Whether the group's session has ended: it left the group, lost its link, or could not
     /// open it.
     pub(super) fn has_ended(&self) -> bool {
-        match &self.task {
-            Some(task) => task.is_finished(),
-            None => true,
+        self.finished().unwrap_or(true)
+    }
+
+    /// Whether the group's session finished, while its end is still to be read: `None` once it
+    /// was.
+    fn finished(&self) -> Option<bool> {
+        #[cfg(wz_round)]
+        {
+            self.task.as_ref().map(|task| task.is_finished())
+        }
+        #[cfg(not(wz_round))]
+        {
+            self.end.as_ref().map(|end| end.finished.get())
         }
     }
 
@@ -951,14 +1071,17 @@ impl<W: LinkWaits> GroupFace<W> {
     /// The members it held go with it, and so does its transport, whose last holder the face is
     /// once the task's output is taken: the group's receive buffer goes back to the session before
     /// the group is joined again, which takes one of the same table.
-    pub(super) fn take_outcome<C: ClockSource + 'static>(
+    pub(super) fn take_outcome(
         &mut self,
-        local: &CoopLocalSet<C>,
+        #[cfg(wz_round)] local: &CoopLocalSet<impl ClockSource + 'static>,
     ) -> Option<MulticastOutcome> {
-        if !self.task.as_ref()?.is_finished() {
+        if !self.finished()? {
             return None;
         }
+        #[cfg(wz_round)]
         let task = self.task.take()?;
+        #[cfg(not(wz_round))]
+        let end = self.end.take()?;
         // The members go with the group's link, and a watcher of the faces is told each went. Those
         // a replaying listener was told stand stay as tombs until it was told they went.
         let gone = core::mem::take(&mut *self.members.borrow_mut());
@@ -972,7 +1095,10 @@ impl<W: LinkWaits> GroupFace<W> {
         #[cfg(not(feature = "connectivity"))]
         let _ = gone;
         // A finished task's output is taken without stepping anything.
+        #[cfg(wz_round)]
         let outcome = local.block_on_local(task).ok();
+        #[cfg(not(wz_round))]
+        let outcome = end.outcome.take();
         self.link = None;
         outcome
     }
@@ -1021,14 +1147,14 @@ impl<W: LinkWaits> GroupFace<W> {
     /// tick offers it again; once its end was read, when it is joined again. `None`: nothing is
     /// due.
     pub(super) fn due_us(&self) -> Option<u64> {
-        match &self.task {
-            Some(task) if task.is_finished() => Some(0),
-            Some(_) if self.tx.holds() => {
+        match self.finished() {
+            Some(true) => Some(0),
+            Some(false) if self.tx.holds() => {
                 let tick_us = self.pace.now_us().saturating_add(GROUP_TICK_US);
                 Some(self.due.due_us().map_or(0, |due_us| due_us.min(tick_us)))
             }
-            Some(_) if !self.tx.is_empty() => Some(0),
-            Some(_) => Some(self.due.due_us().unwrap_or(0)),
+            Some(false) if !self.tx.is_empty() => Some(0),
+            Some(false) => Some(self.due.due_us().unwrap_or(0)),
             None => self.rejoin_at_us,
         }
     }
@@ -1383,6 +1509,102 @@ impl<W: LinkWaits> GroupFace<W> {
     }
 }
 
+/// How a group's session ended, left by the read that stepped it for the session to read
+/// ([`GroupFace::take_outcome`]).
+#[cfg(not(wz_round))]
+#[derive(Default)]
+pub(super) struct GroupEnd {
+    finished: Cell<bool>,
+    outcome: RefCell<Option<MulticastOutcome>>,
+}
+
+/// What the read of a group shares with the group's face: the members, the keyexpr asks, the JOIN
+/// ask, the stage and the sink of the group's replies, its stop, and where its end is left.
+#[cfg(not(wz_round))]
+pub(super) struct GroupReads {
+    face: HeldFace,
+    members: Rc<RefCell<MemberRows>>,
+    keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
+    join_ask: JoinAsk,
+    tx: GroupTxStage,
+    replies: GroupReplies,
+    stop: Rc<Cell<bool>>,
+    end: Rc<GroupEnd>,
+    #[cfg(feature = "connectivity")]
+    events: Rc<MemberEvents>,
+    /// The generation a member's query is held and answered under (`queryable`).
+    #[cfg(feature = "queryable")]
+    generation: u64,
+}
+
+/// The read slot of a group (`docs/c-abi-architecture.md` 8.8): the group's session, in the
+/// place its read steps it, and what that read notes each event against before it is handed out.
+/// It lies apart from the group's face, which the session's state holds, so that the read steps
+/// it with the session let go of and takes the session's lock once for each record it dispatches.
+#[cfg(not(wz_round))]
+pub(super) struct GroupPump<C: ClockSource + 'static> {
+    place: MulticastSessionPlace<C, GroupLink<Watched>, GROUP_MEMBERS>,
+    reads: GroupReads,
+}
+
+#[cfg(not(wz_round))]
+impl<C: ClockSource + 'static> GroupPump<C> {
+    /// The face the group's tables are in.
+    pub(super) fn face(&self) -> HeldFace {
+        self.reads.face
+    }
+
+    /// The sink a member's query is answered through and what the dispatch of the group's events
+    /// stages its replies on.
+    pub(super) fn replies(&self) -> &GroupReplies {
+        &self.reads.replies
+    }
+
+    /// The generation a member's query is held and answered under (`queryable`).
+    #[cfg(feature = "queryable")]
+    pub(super) fn generation(&self) -> u64 {
+        self.reads.generation
+    }
+
+    /// One step of the group's session: each event it yields noted against the group (its
+    /// members, the asks of its members) and then handed to `hand`, as it is read. Whether the
+    /// session ended at this step, its end left for the session to read.
+    pub(super) fn step(&mut self, hand: &mut dyn FnMut(IterationEvent<'_, '_>)) -> bool {
+        let reads = &self.reads;
+        let mut on_event = |event: IterationEvent<'_, '_>| {
+            answer_asks(&event, &reads.keyexprs, &reads.join_ask, &reads.tx);
+            note_members(
+                &event,
+                &reads.members,
+                #[cfg(feature = "connectivity")]
+                &reads.events,
+            );
+            hand(event);
+        };
+        let mut should_stop = || reads.stop.get();
+        // Everything the group sends is pushed onto its stage, which the face and the session
+        // write from: the session's pull seam yields nothing.
+        let outcome = self.place.step(
+            &mut on_event,
+            &mut || None,
+            Some(&mut should_stop as &mut dyn FnMut() -> bool),
+        );
+        let Some(outcome) = outcome else {
+            return false;
+        };
+        *reads.end.outcome.borrow_mut() = Some(outcome);
+        reads.end.finished.set(true);
+        true
+    }
+
+    /// End the group's session: its stop asked, and its last step taken, which tells the group it
+    /// leaves; what that step reads is handed to no one, the session being closed.
+    pub(super) fn leave(mut self) {
+        self.reads.stop.set(true);
+        let _ = self.step(&mut |_event| {});
+    }
+}
+
 /// What the session's transport reads of the group (`wz_runtime_coop::transport`): each a reading
 /// of the group's own.
 impl<W: LinkWaits> GroupRecord for GroupFace<W> {
@@ -1471,73 +1693,60 @@ impl<W: LinkWaits> GroupTxPace for GroupFace<W> {
     }
 }
 
-/// The `on_event` of a group's session, around `inner`: a member's interest in what is declared
-/// now asks the group for a JOIN first, as zenoh-pico pushes one (`asks_for_declarations`), and a
-/// member's ask for the session's keyexprs is answered ahead of the session's other declarations
-/// (`GroupKeyexprAnswers`), as the tokio engine's group answers both.
-fn answering_asks<E>(
-    mut inner: E,
-    keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
-    join_ask: JoinAsk,
-    tx: GroupTxStage,
-) -> impl FnMut(IterationEvent<'_, '_>) + 'static
-where
-    E: FnMut(IterationEvent<'_, '_>) + 'static,
-{
-    move |event| {
-        if asks_for_declarations(&event) {
-            // What is queued below, and what the dispatch queues, leaves after the JOIN the
-            // group's next step sends: a step sends its beacon before what is queued.
-            join_ask.ask();
-            // A reply is put on the stage without waiting, so the answers go as they are taken.
-            let mut keyexprs = keyexprs.borrow_mut();
-            keyexprs.asked(&event);
-            keyexprs.take_answers(|reply| tx.enqueue_reply(reply));
-        }
-        inner(event);
+/// What a group's session's event asks of the group before it is dispatched: a member's interest
+/// in what is declared now asks the group for a JOIN first, as zenoh-pico pushes one
+/// (`asks_for_declarations`), and a member's ask for the session's keyexprs is answered ahead of
+/// the session's other declarations (`GroupKeyexprAnswers`), as the tokio engine's group answers
+/// both.
+fn answer_asks(
+    event: &IterationEvent<'_, '_>,
+    keyexprs: &RefCell<GroupKeyexprAnswers>,
+    join_ask: &JoinAsk,
+    tx: &GroupTxStage,
+) {
+    if asks_for_declarations(event) {
+        // What is queued below, and what the dispatch queues, leaves after the JOIN the group's
+        // next step sends: a step sends its beacon before what is queued.
+        join_ask.ask();
+        // A reply is put on the stage without waiting, so the answers go as they are taken.
+        let mut keyexprs = keyexprs.borrow_mut();
+        keyexprs.asked(event);
+        keyexprs.take_answers(|reply| tx.enqueue_reply(reply));
     }
 }
 
-/// The `on_event` of a group's session: the members its JOINs admit and the ones it loses are
-/// noted, each told to the session's watchers of its faces (`connectivity`), and then the event
-/// goes through `dispatch` with the sink the group's replies are queued on.
-fn noting_members<D>(
-    members: Rc<RefCell<MemberRows>>,
-    replies: GroupReplies,
-    mut dispatch: D,
-    #[cfg(feature = "connectivity")] events: Rc<MemberEvents>,
-) -> impl FnMut(IterationEvent<'_, '_>) + 'static
-where
-    D: FnMut(IterationEvent<'_, '_>, &GroupReplies) + 'static,
-{
-    move |event| {
-        match &event {
-            IterationEvent::MulticastPeerArrived(arrived) => {
-                let member = MulticastMember {
-                    peer: arrived.peer,
-                    whatami: arrived.whatami,
-                    locator: arrived.locator,
-                };
-                // The session's member table has as many rows, so it admits no member past them.
-                let noted = members.borrow_mut().push(member);
-                debug_assert!(noted, "a member past the group's rows was admitted");
-                #[cfg(feature = "connectivity")]
-                if noted {
-                    events.tell(FaceEventKind::Up, &member);
-                }
+/// Note the member a group's session's event admits or loses, each told to the session's
+/// watchers of its faces (`connectivity`), before the event is dispatched.
+fn note_members(
+    event: &IterationEvent<'_, '_>,
+    members: &RefCell<MemberRows>,
+    #[cfg(feature = "connectivity")] events: &MemberEvents,
+) {
+    match event {
+        IterationEvent::MulticastPeerArrived(arrived) => {
+            let member = MulticastMember {
+                peer: arrived.peer,
+                whatami: arrived.whatami,
+                locator: arrived.locator,
+            };
+            // The session's member table has as many rows, so it admits no member past them.
+            let noted = members.borrow_mut().push(member);
+            debug_assert!(noted, "a member past the group's rows was admitted");
+            #[cfg(feature = "connectivity")]
+            if noted {
+                events.tell(FaceEventKind::Up, &member);
             }
-            IterationEvent::MulticastPeerLost(lost) => {
-                let gone = members.borrow_mut().remove(&lost.peer);
-                #[cfg(feature = "connectivity")]
-                if let Some(member) = gone {
-                    events.tell(FaceEventKind::Down, &member);
-                }
-                #[cfg(not(feature = "connectivity"))]
-                let _ = gone;
-            }
-            _ => {}
         }
-        dispatch(event, &replies);
+        IterationEvent::MulticastPeerLost(lost) => {
+            let gone = members.borrow_mut().remove(&lost.peer);
+            #[cfg(feature = "connectivity")]
+            if let Some(member) = gone {
+                events.tell(FaceEventKind::Down, &member);
+            }
+            #[cfg(not(feature = "connectivity"))]
+            let _ = gone;
+        }
+        _ => {}
     }
 }
 
@@ -1589,7 +1798,7 @@ pub(super) struct GroupPut<'a> {
 /// the `ResponseFinal`s it owes held for the queries a callback is still to answer, as a link's
 /// is, and what it staged queued on the group. A member's query is held under the group's own
 /// `generation`, so the answer it is owed is the group's and no link's.
-#[cfg(feature = "queryable")]
+#[cfg(all(wz_round, feature = "queryable"))]
 pub(super) fn dispatch(
     registry: super::RegistryLend,
     face: HeldFace,
@@ -1614,7 +1823,7 @@ pub(super) fn dispatch(
 
 /// The dispatch of a group whose session has no queryable: the registry's, with everything it
 /// staged queued on the group at once.
-#[cfg(not(feature = "queryable"))]
+#[cfg(all(wz_round, not(feature = "queryable")))]
 pub(super) fn dispatch(
     registry: super::RegistryLend,
     face: HeldFace,
