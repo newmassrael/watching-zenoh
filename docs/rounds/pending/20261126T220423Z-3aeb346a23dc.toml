@@ -1,0 +1,23 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Build the cooperative engine's round form on a host by one environment word
+(WZ_COOP_VALUE_LOCKS=off withholds the per-value locks, so the existing rule
+turns the round on), and run its tests as a leg of the non-default tests
+gate. The form had compiled in no host test build, and running it found two
+defects: a part the round cannot place stopped a debug build instead of being
+counted, and the round's own put skipped a row pinned before its callback
+undeclared it.
+'''
+changes = '''
+- capi-coop build.rs: WZ_COOP_VALUE_LOCKS=off builds the round form on a host; any other value is refused.
+- session-core round: a part the round cannot place is counted, not a defect.
+- capi-coop: the round's local put hands each pinned row through hand_pinned, as the direct form does.
+- gates: legs for tests::round and the whole crate in the round form.
+'''
+verification = '''
+- round form whole crate: 471 passed, 32 tests::round listed; default lib 261; session-core round 27.
+- clippy of wz-capi-coop in both forms and of wz-session-core.
+'''
+carry = '''
+- a key placed before its payload fails to place stays in the round's key table until the table empties.
+'''
