@@ -1669,23 +1669,31 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
     }
 
-    /// A Response or a ResponseFinal of one session, handed to `requesters` alone, the peer's keys
-    /// resolved through the two id spaces as [`Self::dispatch_event`] resolves them: no other
-    /// plane reads a reply, so a caller that tells the record's kind hands it here and spares the
-    /// fan over every plane, as zenoh-pico's dispatch picks a reply's handler by the message's
-    /// kind (`vendor/zenoh-pico/src/session/rx.c` @ `case _Z_N_RESPONSE_FINAL:`).
-    #[cfg(any(feature = "codec-response", feature = "codec-response-final"))]
-    #[inline(never)]
-    pub fn dispatch_reply<Q: RequesterTables, T: Storage>(
+    /// A Response or a ResponseFinal of one session lent where its frame lies, handed to the
+    /// session's pending gets `replies` alone, the peer's keys resolved through the two id spaces
+    /// as [`Self::dispatch_event`] resolves them: no other plane reads a reply, so a caller that
+    /// tells the record's kind hands it here and spares the fan over every plane, as zenoh-pico's
+    /// dispatch picks a reply's handler by the message's kind
+    /// (`vendor/zenoh-pico/src/session/rx.c` @ `case _Z_N_RESPONSE_FINAL:`). The table's ids each
+    /// name one entry ([`ReplyRegistry::dispatch_lent_reply`]).
+    #[cfg(any(
+        feature = "codec-response",
+        all(
+            feature = "rx-lent-control",
+            feature = "codec-frame",
+            feature = "codec-response-final"
+        )
+    ))]
+    pub fn dispatch_reply<R: ReplySink, Q: Storage, T: Storage>(
         &self,
         peers: &PeerTables<T>,
-        requesters: &mut Q,
-        event: IterationEvent<'_, '_>,
+        replies: &mut ReplyRegistry<R, Q>,
+        record: &crate::driver_loop::InPlaceRecord<'_, '_>,
     ) {
         let peer_table = peers
             .subscribers
             .mapping_spaces_over(self.tables.own_space());
-        requesters.dispatch_iteration_event(event, peer_table);
+        replies.dispatch_lent_reply(record, peer_table);
     }
 
     /// The planes that tell what a peer declares (its subscribers, its queryables and its tokens),

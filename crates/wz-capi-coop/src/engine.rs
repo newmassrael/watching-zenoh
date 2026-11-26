@@ -3052,21 +3052,48 @@ struct LegAsk<'a, 'o> {
 }
 
 /// Where one leg of a get is held pending (`CoopEngine::hold_leg`): in the table of `face` (a
-/// link's, a group's, or the session's own, `LOCAL_FACE`) under `rid`, the leg's id `leg`, owed
-/// `finals` Finals.
+/// link's, a group's, or the session's own, `LOCAL_FACE`) under the id `rid` makes, the leg's id
+/// `leg`, owed `finals` Finals.
 #[cfg(feature = "query")]
 struct LegEntry {
     face: FaceId,
     leg: u64,
-    rid: wz_session_core::wire_id::RequestId,
+    rid: LegRid,
     finals: u32,
+}
+
+/// The request id a leg is held under (`CoopEngine::hold_leg`).
+#[cfg(feature = "query")]
+enum LegRid {
+    /// A serial the face's counter gave, the row the leg's entry takes in the face's table put
+    /// below it (`request_id_at`), so the answer that names the id names the row and the table
+    /// finds the entry there with no walk.
+    Serial(wz_session_core::wire_id::RequestId),
+    /// An id taken before the leg is held, which it is held under as it is: the session's own,
+    /// which its held Final was taken under.
+    #[cfg(feature = "local-queryable")]
+    Taken(wz_session_core::wire_id::RequestId),
+}
+
+#[cfg(feature = "query")]
+impl LegRid {
+    /// The id of a leg whose entry takes row `row`.
+    fn at(self, row: usize) -> wz_session_core::wire_id::RequestId {
+        match self {
+            Self::Serial(serial) => wz_session_core::wire_id::request_id_at(serial, row),
+            #[cfg(feature = "local-queryable")]
+            Self::Taken(rid) => rid,
+        }
+    }
 }
 
 /// What came of holding a leg of a get pending (`CoopEngine::hold_leg`).
 #[cfg(feature = "query")]
 enum LegHeld {
-    /// Held, owed its Finals: its request may go out.
-    Held,
+    /// Held under `rid`, owed its Finals: its request may go out, under that id.
+    Held {
+        rid: wz_session_core::wire_id::RequestId,
+    },
     /// The table is no longer the session's: the leg is asked of nobody.
     Gone,
     /// No row of the table, or of the plane's callbacks, was free: no callback was minted.
@@ -3260,11 +3287,15 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
     feature = "query",
     any(feature = "threads", feature = "listen", feature = "group")
 ))]
-fn lent_reply(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bool {
-    matches!(
-        event,
-        wz_session_core::driver_loop::IterationEvent::InPlace(record) if record.is_reply()
-    )
+fn lent_reply<'e, 'a, 'f>(
+    event: &'e wz_session_core::driver_loop::IterationEvent<'a, 'f>,
+) -> Option<&'e wz_session_core::driver_loop::InPlaceRecord<'a, 'f>> {
+    match event {
+        wz_session_core::driver_loop::IterationEvent::InPlace(record) if record.is_reply() => {
+            Some(record)
+        }
+        _ => None,
+    }
 }
 
 /// The `on_event` of a link's session: the registry's dispatch for the face the link serves. A
@@ -3316,12 +3347,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         // A Response or a ResponseFinal is read by the pending gets alone: it is handed to them by
         // its kind, as a Push is to the subscribers, and what follows it is put off alike.
         #[cfg(feature = "query")]
-        if lent_reply(&event) {
+        if let Some(record) = lent_reply(&event) {
             #[cfg(debug_assertions)]
             let _gated = Gated::over(&self.lane);
             let dispatched = self
                 .registry
-                .with(|registry| registry.dispatch_reply(face, event));
+                .with(|registry| registry.dispatch_reply(face, record));
             debug_assert!(dispatched.is_some(), "{UNLENT}");
             self.after_pushes = true;
             return;
@@ -3382,12 +3413,12 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
         // A Response or a ResponseFinal is read by the pending gets alone: it is handed to them by
         // its kind, as a Push is to the subscribers, and what follows it is put off alike.
         #[cfg(feature = "query")]
-        if lent_reply(&event) {
+        if let Some(record) = lent_reply(&event) {
             #[cfg(debug_assertions)]
             let _gated = Gated::over(&self.lane);
             let dispatched = self
                 .registry
-                .with(|registry| registry.dispatch_reply(face, event));
+                .with(|registry| registry.dispatch_reply(face, record));
             debug_assert!(dispatched.is_some(), "{UNLENT}");
             self.after_pushes = true;
             return;
@@ -7625,12 +7656,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // Rounded up, so a get whose deadline the sweep reads in whole milliseconds never ends
         // before its timeout.
         let deadline_ms = (timeout_ms > 0).then(|| leg_deadline_ms(now_us, timeout_ms));
-        // A get no row holds is refused before its leg's callback is minted.
-        match registry.gets_mut(face).map(|gets| gets.replies.has_room()) {
-            Some(true) => {}
-            Some(false) => return LegHeld::NoRoom,
+        // A get no row holds is refused before its leg's callback is minted; the row it takes is
+        // what its id carries.
+        let rid = match registry.gets_mut(face) {
+            Some(gets) if gets.replies.has_room() => rid.at(gets.replies.next_row()),
+            Some(_) => return LegHeld::NoRoom,
             None => return LegHeld::Gone,
-        }
+        };
         // The leg's callback, in a row of the plane's the entry's sink holds.
         let Some(row) = self.gets.open_leg(&mut *ask.mint, ask.expose) else {
             return LegHeld::NoRoom;
@@ -7654,7 +7686,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         match registered {
             Some(Ok(_)) => {
                 ledger.owe_leg_due(deadline_ms);
-                LegHeld::Held
+                LegHeld::Held { rid }
             }
             Some(Err(RegisterError::TableFull)) => LegHeld::Refused { table_full: true },
             Some(Err(_)) | None => LegHeld::Refused { table_full: false },
@@ -9534,11 +9566,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             let Some(actions) = core.transport.up_actions(face).cloned() else {
                 continue;
             };
-            // A request id the face's actions allocate, so its peer's answer names it.
-            let rid = actions.alloc_next_request_id();
             // One Final: the face's peer's. Held before the request goes out, so no answer can
-            // arrive before its entry.
-            match self.hold_leg(
+            // arrive before its entry, under a request id of the face's actions' serial and the
+            // entry's row, so its peer's answer names both.
+            let rid = match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
                 &mut core.ledger,
@@ -9546,11 +9577,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 LegEntry {
                     face,
                     leg: leg_id,
-                    rid,
+                    rid: LegRid::Serial(actions.alloc_next_request_id()),
                     finals: 1,
                 },
             ) {
-                LegHeld::Held => {}
+                LegHeld::Held { rid } => rid,
                 LegHeld::Gone => continue,
                 LegHeld::NoRoom => {
                     unheld = unheld.saturating_add(1);
@@ -9563,7 +9594,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     self.end_leg_now(leg_id);
                     continue;
                 }
-            }
+            };
             // The link names the key as its own key-wire form says.
             let wire = on_link(&actions, keyexpr, wire);
             let (mapping_id, suffix) = if wire.is_literal() {
@@ -9639,10 +9670,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             if finals == 0 {
                 continue;
             }
-            // A request id the group allocates, so a member's answer names it on this face.
-            let rid = group.alloc_request_id();
-            // Held before the query is queued, as a link's leg is before it is sent.
-            match self.hold_leg(
+            // Held before the query is queued, as a link's leg is before it is sent, under a
+            // request id of the group's serial and the entry's row, so a member's answer names it
+            // on this face.
+            let rid = match self.hold_leg(
                 core.clock.now_us(),
                 &mut core.session.registry,
                 &mut core.ledger,
@@ -9650,11 +9681,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 LegEntry {
                     face,
                     leg: leg_id,
-                    rid,
+                    rid: LegRid::Serial(group.alloc_request_id()),
                     finals,
                 },
             ) {
-                LegHeld::Held => {}
+                LegHeld::Held { rid } => rid,
                 LegHeld::Gone => continue,
                 LegHeld::NoRoom => {
                     unheld = unheld.saturating_add(1);
@@ -9666,7 +9697,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     self.end_leg_now(leg_id);
                     continue;
                 }
-            }
+            };
             if !group.ask(rid, keyexpr, wire, request) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.session.registry.face_mut(face) {
@@ -9707,11 +9738,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 LegEntry {
                     face: LOCAL_FACE,
                     leg: leg_id,
-                    rid,
+                    rid: LegRid::Taken(rid),
                     finals: 1,
                 },
             ) {
-                LegHeld::Held => {
+                LegHeld::Held { .. } => {
                     if !core.session.note_pending(PendingGet {
                         face: LOCAL_FACE,
                         leg: leg_id,

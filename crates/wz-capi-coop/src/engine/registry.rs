@@ -1568,9 +1568,13 @@ impl<H: Holders> RegistryOf<H> {
         feature = "query",
         any(feature = "threads", feature = "listen", feature = "group")
     ))]
-    pub(super) fn dispatch_reply(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
+    pub(super) fn dispatch_reply(
+        &mut self,
+        face: HeldFace,
+        record: &wz_session_core::driver_loop::InPlaceRecord<'_, '_>,
+    ) {
         if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
-            app.dispatch_reply(&face.peer, &mut face.gets, event);
+            app.dispatch_reply(&face.peer, &mut face.gets.replies, record);
         }
         #[cfg(all(test, feature = "std"))]
         {
