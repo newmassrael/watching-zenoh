@@ -8054,6 +8054,11 @@
       "source": "open-debt register",
       "reason": "OPEN (M): the four y653 assertions PIN A POLICY. Rewriting them to \"a live viewer wants the first frame of a flow\" reds by design, which is the signal to spend a round on it. A marker more than a debt."
     },
+    "debt-c1ay-router-forward-count-drift": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: Layer C1ay's guard `C1AY router_forward 356` (scripts/run-ci.sh, cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward) reads 359 passed, 0 failed on main 20ee0c0a1 (2026-11-26, a build host), so the lane reds when hosted reaches it; hosted run 45654176488 stopped earlier in the job (unused imports SessionFsmUnicastEvent and SessionFsmUnicastState). The three new tests are not Round 4616's. The guards below it in the same layer likely moved by the same three; each is to be run and set to the number its command prints (count guards with filters are bound by nothing static)."
+    },
     "debt-c1cc-init-open-before-link": {
       "status": "active",
       "source": "open-debt register",
@@ -8465,10 +8470,20 @@
       "source": "open-debt register",
       "reason": "OPEN, UNREPRODUCED: Layer E6h test wz_storage_host_plugins_section_from_a_config_file_serves_via_pico read an empty answer once on a hosted run (the key boot/a was not served) and passed on the next head. Commits between the passing and the failing head touched none of the runtime, session-core, demo and storage crates, so the cause is a race inside the host: the storage host applies the config file's plugins section on the FIRST client session and serves ONE client session at a time, so either the put reached the first session before the storage started on it, or the second session was bound after the query was answered. Round 4444 made the final assertion print the host's whole log; the item closes when a failing run's log names which order occurred and the order is fixed in the host (not in the test), or when a stress run on the build machine shows it cannot happen."
     },
+    "debt-face-loop-debug-frames": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: debug stack frames of the face loop and the dial, measured on the --all-features lib test binary of wz-runtime-tokio (objdump prologues, 2026-11-22): accept_loop FaceLoopIo::new 84,168 bytes (the loop's state and shell built by value in one frame), session_open dial_locator_on 80,824 bytes (every scheme's arm in one poll frame), and the test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage 151,944 bytes. Round 4609's carry. Closed when each is cut by structure (constructors in frames of their own, each dial arm its own boxed future) and the release text of the C1cs cases is read on one machine against the base."
+    },
     "debt-field-values-window": {
       "status": "deprecated",
       "source": "carry of Round 4385",
       "reason": "CLOSED (c7 integration round): wz_dissect_live_field_values_since_window bounds a values call by max_rows with the fields window's ceiling and hands the next cursor back as window.through_seq; capi-dissect ABI 59. The bound is a work ceiling on the document, not on the selector fold, as the header states."
+    },
+    "debt-group-inline-write-floor-only": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: wz-runtime-tokio writer_queue Lanes::a_sender_may_write (Round 4616) leaves a one-way stream to the writer only on a queue that knows what its link hears (LinkHearing, wired for the TCP stream link alone); the multicast groups' queues (multicast_pipeline GroupInline) have no count, so a group sender still writes its own datagram whenever 8 us passed since the last flush, which an unoptimised build or a slow core always exceeds inside a burst. Closed by counting a group's received datagrams into its queue, or by measuring that a group burst is batched anyway."
     },
     "debt-host-slot-node-let-unit-value": {
       "status": "active",
@@ -8509,6 +8524,11 @@
       "status": "deprecated",
       "source": "carry of Round 4385",
       "reason": "CLOSED (c7 integration round): the memory document counts the values door's ValuesMemory as its own member values (memory document revision 3); with fragment pieces the figure is a lower bound because the per-piece verdict B-tree is not modelled, as the document says."
+    },
+    "debt-multicast-drive-off-the-shared-drive": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, UNDECIDED: wz-runtime-tokio multicast_glue drive_multicast_session_running is a drive loop of its own, generic over its link, clock and closures and so compiled per caller (about 26 KB in pico-default, 2026-11-22), outside the type-erased session drive Round 4609 made (SessionDrive, drive_core, drive_session_dyn). Its machine is the multicast dispatcher, not the unicast session FSM, so the decision is whether it is erased and boxed once per library the way the unicast drive is, measured on every C1cs case on one machine. Round 4609's carry."
     },
     "debt-oversize-publish-refusal-not-reported": {
       "status": "deprecated",
@@ -8570,6 +8590,11 @@
     "debt-sce-codegen-provenance": {
       "status": "active",
       "reason": "Round 1994's open item 468, the half `scripts/lib/sce-codegen-oracle.sh` answers for: an untracked build oracle must record WHAT it was built from, not merely that it exists (Layers B/B2 SKIP-green) or when it was built (R114's mtime, which a backwards pin defeats). The sce-codegen instance is closed and gated; the item stays open for the oracles that still carry no provenance record at all -- `target/zenohd`, `target/zenoh-pico-cli`, the capture fixtures, and `binary_freshness_lint.py`, which grades the sibling class by mtime."
+    },
+    "debt-swappable-link-batching-forwarding": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: wz-session-core reconnect.rs SwappableLink and LocalSwappableLink do not forward BoxedLinkDriver::set_idle_flush or tx_staged to the live link, so a session opened with reconnect (wz-runtime-tokio reconnect.rs open_session_with_reconnect) never turns batching on and writes one message a frame. Forwarding needs a decision first: a link a swap installs that refuses the hook would leave the session batching with no writer that pulls its frames, so the seam must keep the hook, install it on every swap, and say what a refusing link does to the session. link_subject and link_endpoints return references a lock cannot lend and stay unforwarded by shape. Found reading the C1cc batching red of Round 4616. Closed by a forward with that decision and a test that a swapped session still batches."
     },
     "debt-windows-capic-largest-chain-never-arrives": {
       "status": "active",
