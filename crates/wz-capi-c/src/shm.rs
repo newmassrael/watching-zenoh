@@ -7549,6 +7549,11 @@ pub unsafe extern "C" fn zc_shm_client_list_new(this_: *mut zc_owned_shm_client_
 /// keyed by protocol (measured: `z_api_shm_test` lists the POSIX client and asks for the
 /// default set as well, and the real library opens a session over the result).
 ///
+/// A storage resolves at most `SHM_PROTOCOL_SLOTS` protocols, the default set's among them: the
+/// slots of the auth segment a session opened over it lists them in (`wz_session_core::extshm`).
+/// A list that would resolve to more is refused with `Z_EINVAL` and no storage is made, where
+/// zenoh's builder keeps them in a map with no bound and its segment can list 256 of them.
+///
 /// # Safety
 /// `this_` must be valid and writable; `clients` must be a live loan.
 #[no_mangle]
@@ -7590,6 +7595,9 @@ pub unsafe extern "C" fn z_shm_client_storage_new(
             // (`z_api_shm_test`) is not in error.
             match by_protocol.iter_mut().find(|(id, _)| *id == protocol) {
                 Some(slot) => slot.1 = client.clone(),
+                None if by_protocol.len() >= wz_session_core::extshm::SHM_PROTOCOL_SLOTS => {
+                    return Z_EINVAL;
+                }
                 None => by_protocol.push((protocol, client.clone())),
             }
         }
@@ -8085,6 +8093,67 @@ mod client_registry_tests {
             attaches.load(Ordering::SeqCst),
             1,
             "neither miss reached the C client"
+        );
+
+        // SAFETY: live owned values, each moved exactly once.
+        unsafe {
+            z_shm_client_storage_drop(&mut storage as *mut _ as *mut _);
+            zc_shm_client_list_drop(&mut list as *mut _ as *mut _);
+        }
+    }
+
+    /// A storage resolves no more protocols than an auth segment has slots for: a list of as many
+    /// distinct ids as there are slots, one of them repeated, is made into a storage, the repeat
+    /// taking no slot of its own; the same list with the default set beside it is one protocol
+    /// too many and is refused, with no storage left behind. Turned red by a storage that grows
+    /// past the slots, or by a repeated id that counts against them.
+    #[test]
+    fn a_storage_past_the_segments_protocol_slots_is_refused() {
+        use wz_session_core::extshm::SHM_PROTOCOL_SLOTS;
+
+        let attaches = Arc::new(AtomicU32::new(0));
+        let maps = Arc::new(AtomicU32::new(0));
+        let slots = u32::try_from(SHM_PROTOCOL_SLOTS).expect("the slots fit a protocol id");
+        let mut list = zc_owned_shm_client_list_t::null_value();
+        // SAFETY: a live local out-parameter.
+        unsafe { zc_shm_client_list_new(&mut list) };
+        for id in (1..=slots).chain([1]) {
+            let mut client = client_for(id, &attaches, &maps);
+            // SAFETY: a live list and a client moved exactly once.
+            let rc = unsafe {
+                zc_shm_client_list_add_client(
+                    zc_shm_client_list_loan_mut(&mut list),
+                    &mut client as *mut _ as *mut z_moved_shm_client_t,
+                )
+            };
+            assert_eq!(rc, Z_OK);
+        }
+
+        let mut storage = z_owned_shm_client_storage_t::null_value();
+        // SAFETY: live locals.
+        let rc = unsafe {
+            z_shm_client_storage_new(&mut storage, zc_shm_client_list_loan(&list), false)
+        };
+        assert_eq!(rc, Z_OK, "as many protocols as slots, one of them twice");
+        // SAFETY: `storage` is live.
+        let loaned = unsafe { &*z_shm_client_storage_loan(&storage) };
+        assert!(
+            storage_clients(loaned).is_some(),
+            "a storage that fits forms a reader"
+        );
+
+        let mut over = z_owned_shm_client_storage_t::null_value();
+        // SAFETY: live locals.
+        let rc =
+            unsafe { z_shm_client_storage_new(&mut over, zc_shm_client_list_loan(&list), true) };
+        assert_eq!(
+            rc, Z_EINVAL,
+            "the default set is one protocol past the slots"
+        );
+        // SAFETY: a live local.
+        assert!(
+            !unsafe { z_internal_shm_client_storage_check(&over) },
+            "a refused storage is left a gravestone"
         );
 
         // SAFETY: live owned values, each moved exactly once.
