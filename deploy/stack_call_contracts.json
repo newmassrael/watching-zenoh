@@ -165,9 +165,9 @@
     },
     {
       "id": "tx-encoder",
-      "where": {"file": "function.rs"},
-      "callees": "(send_response_final|dispatch_declare_lent|send_reply_parts|send_get_parts)::\\{closure",
-      "why": "a call of the `Fn` the send's dispatch was handed (`as_encoder`, a trait object), made in the dispatch and in the frame writer under it that a batching window uses: the closure of `send_response_final`, of `dispatch_declare_lent` or of `send_reply_parts`, each written at the call that sends and passed by reference for the length of it. The rule is the call's own place in the library (`core::ops::function`) and not the function that makes it, so the calls through a `TxBuf` that sit in the same functions stay the rules of `tx_buf.rs` below; its number of sites is pinned for each image, so another call through a `Fn` is read before it is claimed"
+      "where": {"file": "tx_buf.rs", "anchor": "self.write_wire(sink)"},
+      "callees": "(send_response_final|dispatch_declare_lent|send_reply_parts|send_get_parts|tx_buf::wire_body)::\\{closure",
+      "why": "a call of the writer the send's dispatch was handed (`as_encoder`, a `WireWrite` trait object), made in the dispatch and in the frame writer under it that a batching window uses: the closure of `send_response_final`, of `dispatch_declare_lent` or of `send_reply_parts`, each written at the call that sends and passed by reference for the length of it, reached through its `write_wire`; or the closure `wire_body` makes of such a writer for a frame writer that takes a closure. Every call of a handed writer is the one line of `write_body` (`tx_buf.rs`), inlined where it is called, so the rule is that line's place and not the function that makes the call, and the calls through a `TxBuf` that sit in the same functions stay the rules of `tx_buf.rs` below; its number of sites is pinned for each image, so another call through a writer is read before it is claimed"
     },
     {
       "id": "walk-entry-tables",

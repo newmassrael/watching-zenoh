@@ -49,6 +49,7 @@ fn closed(stream: &mut TcpStream) -> bool {
 
 #[test]
 fn a_silent_link_is_dropped_at_the_accept_timeout_the_build_states() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let bound = Duration::from_millis(PICO_ACCEPT_TIMEOUT_MS as u64);

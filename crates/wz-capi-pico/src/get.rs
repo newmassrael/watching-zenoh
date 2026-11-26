@@ -509,8 +509,9 @@ unsafe impl Sync for CReplyClosure {}
 /// it is the deployment the crate exists for.
 ///
 /// Routed through the SAME intersection SSOT the responder side uses
-/// ([`crate::reply_keyexpr::reply_keyexpr_is_covered`]) rather than re-derived, so the
-/// two halves cannot drift apart.
+/// ([`crate::reply_keyexpr::received_reply_is_covered`] over
+/// [`wz_session_core::reply_acceptance::reply_keyexpr_intersects`]) rather than re-derived, so
+/// the two halves cannot drift apart.
 pub(crate) struct ReplyGate {
     /// The keyexpr the get asked under — pico's `pen_qry->_key`: a block of the session's key
     /// arena, which a key of the same text shares, so the get keeps no copy of its own.
@@ -533,7 +534,7 @@ pub(crate) fn fire_reply(closure: &CReplyClosure, gate: &ReplyGate, view: &dyn R
     };
     // pico drops a reply the query does not accept BEFORE building it
     // (`query.c:121-127`) — the callback never sees it.
-    if !crate::reply_keyexpr::reply_keyexpr_is_covered(
+    if !crate::reply_keyexpr::received_reply_is_covered(
         gate.query_keyexpr.as_str(),
         view.keyexpr(),
         gate.anyke,
@@ -2404,13 +2405,13 @@ mod tests {
             !g.anyke,
             "MATCHING_QUERY is the default and leaves anyke off"
         );
-        assert!(crate::reply_keyexpr::reply_keyexpr_is_covered(
+        assert!(crate::reply_keyexpr::received_reply_is_covered(
             g.query_keyexpr.as_str(),
             "a/b",
             g.anyke
         ));
         assert!(
-            !crate::reply_keyexpr::reply_keyexpr_is_covered(
+            !crate::reply_keyexpr::received_reply_is_covered(
                 g.query_keyexpr.as_str(),
                 "z/b",
                 g.anyke
@@ -2424,7 +2425,7 @@ mod tests {
             g.anyke,
             "Z_REPLY_KEYEXPR_ANY must reach the receive gate too"
         );
-        assert!(crate::reply_keyexpr::reply_keyexpr_is_covered(
+        assert!(crate::reply_keyexpr::received_reply_is_covered(
             g.query_keyexpr.as_str(),
             "z/b",
             g.anyke
@@ -2438,6 +2439,29 @@ mod tests {
             anyke: parameters_has_anyke(&sent(b"_anyke", matching)),
         };
         assert!(g.anyke, "a hand-written _anyke selector must open the gate");
+    }
+
+    /// The receive half reads the answering peer's key as the text it arrived as: a reply keyed
+    /// off canon form is judged by the intersection alone, as pico judges it
+    /// (`vendor/zenoh-pico/src/session/query.c` @ `!pen_qry->_anyke && !_z_keyexpr_intersects(&pen_qry->_key, keyexpr)`).
+    /// Turned red by a gate that refuses what the canon check refuses.
+    #[test]
+    fn the_reply_gate_judges_a_received_key_by_intersection_alone() {
+        let off_canon = "a/**/**";
+        assert!(
+            crate::keyexpr::canon_key(off_canon).is_err(),
+            "the reply's key is off canon form"
+        );
+        for query in ["a/**", "a/b", "z/*"] {
+            assert_eq!(
+                crate::reply_keyexpr::received_reply_is_covered(query, off_canon, false),
+                wz_session_core::reply_acceptance::reply_keyexpr_intersects(query, off_canon),
+                "{query}"
+            );
+        }
+        assert!(crate::reply_keyexpr::received_reply_is_covered(
+            "z/*", off_canon, true
+        ));
     }
 
     /// pico resolves AUTO on the client: `_time=` in the selector → NONE, else

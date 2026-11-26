@@ -87,7 +87,7 @@
       "job": "capi-coop",
       "step": "a single-threaded pico C program on the library without std (observed)",
       "kind": "continue-on-error",
-      "why_soft": "the single-threaded pico C program of the step before it, run against the library built without std (os-posix on Linux, os-windows on Windows, the capi-nostd profile) in a target directory of its own; a new form of the library on both hosts",
+      "why_soft": "the single-threaded pico C program of the step before it, run against the library built without std (os-host on Linux and on Windows, the capi-nostd profile) in a target directory of its own; a new form of the library on both hosts",
       "gate_when": "two consecutive green main runs on the Linux and the Windows row",
       "promote_after_green": 2,
       "allowed_consecutive_red": 1,

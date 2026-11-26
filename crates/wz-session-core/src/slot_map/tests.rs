@@ -419,31 +419,249 @@ fn an_insert_writes_its_row_once_into_a_freed_or_an_added_slot() {
     assert_eq!(drops.get(), 3);
 }
 
-/// The core adds a slot only where both columns have a place for it: refused, the count stays as
-/// it was; given one, the slot after the last is counted; and a freed slot is taken again, at its
-/// next generation, before any is added. Turned red by a core that adds a slot with no place for
-/// it, or adds one while a slot is free.
+/// A slot is taken only off the free list, and is put there only once it was added after every
+/// slot there was: taken, it is live at the generation it was added at; freed, it is taken again
+/// at its next. Turned red by a take that makes a slot live that was never added, or an added slot
+/// that `adopt` counts as holding a row.
 #[test]
-fn the_core_adds_a_slot_only_where_its_row_has_a_place() {
+fn the_core_takes_a_slot_only_off_its_free_list() {
     let mut meta = BoundedVec::<Meta, 4, Static>::default();
     let mut slots = Core::new(4);
-    assert!(slots.take_slot(&mut meta, false).is_none());
-    assert_eq!(slots.held, 0, "nothing is taken");
-    let added = slots
-        .take_slot(&mut meta, true)
-        .expect("a place for the row");
-    assert_eq!((added.at, added.generation, added.grown), (0, 0, true));
+    assert!(slots.take_free(&mut meta).is_none(), "no slot was added");
+    assert!(meta.push(Meta::FREED).is_ok());
+    slots.adopt(&mut meta, 0);
+    assert_eq!(slots.held, 0, "an added slot holds no row");
+    assert_eq!(slots.take_free(&mut meta), Some((0, 0)));
     assert_eq!(slots.held, 1);
     assert!(
-        meta.push(Meta::ADDED).is_ok(),
-        "the place the core was told of"
+        slots.take_free(&mut meta).is_none(),
+        "the one slot is taken"
     );
-    slots.free(&mut meta, added.at);
-    let reused = slots
-        .take_slot(&mut meta, false)
-        .expect("the freed slot needs no new place");
-    assert_eq!((reused.at, reused.generation, reused.grown), (0, 1, false));
+    slots.free(&mut meta, 0);
+    assert_eq!(
+        slots.take_free(&mut meta),
+        Some((0, 1)),
+        "a freed slot is taken again at its next generation"
+    );
     assert_eq!((meta.len(), slots.held), (1, 1));
+}
+
+/// A table at its bound adds no slot to its columns: the refused insert leaves both as they were.
+/// Turned red by a table that grows its columns before it reads its bound.
+#[test]
+fn a_table_at_its_bound_adds_no_slot() {
+    let mut map = Map::<4>::new();
+    map.limit_to(1);
+    assert!(map.insert(1).is_ok());
+    assert!(map.insert(2).is_err());
+    assert_eq!(map.meta.len(), 1, "no slot was added past the bound");
+    assert_eq!(map.rows.len(), 1, "nor a place for its row");
+}
+
+/// The untyped take hands the handle and the place of a free slot's row, which the caller writes
+/// the row at; a table with no free slot takes none until its typed face adds one. Turned red by a
+/// take that adds a slot itself, or answers a place other than the one the table reads the row at.
+#[test]
+fn a_raw_take_answers_a_free_slot_and_the_place_its_row_is_read_at() {
+    let mut map = Map::<4>::new();
+    assert!(map.raw().take().is_none(), "no slot was added");
+    assert_eq!(map.len(), 0);
+    let (handle, place) = map
+        .raw_for_insert()
+        .take()
+        .expect("a slot was added for the take");
+    // SAFETY: the place of the row of the slot just taken, which holds `None`.
+    unsafe { place.cast::<Option<u32>>().as_ptr().write(Some(7)) };
+    let handle = handle.tag::<Test>();
+    assert_eq!(map.get(handle), Some(&7));
+    assert_eq!(map.len(), 1);
+    let stride = map.raw().stride();
+    assert_eq!(stride, core::mem::size_of::<Option<u32>>());
+    let found = map
+        .raw()
+        .get(handle.erase())
+        .expect("the live row is found");
+    assert_eq!(found, place, "found where it was written");
+}
+
+/// A removal through the untyped core frees the slot and leaves the row at its place for the
+/// caller to take out; a pinned row is retired and found by no lookup. Turned red by a removal
+/// that drops the row itself, or one that frees a pinned row's slot.
+#[test]
+fn a_raw_removal_leaves_the_row_for_its_caller_and_retires_a_pinned_one() {
+    let drops = Cell::new(0);
+    let mut map = SlotMap::<Test, Counted<'_>, 4, Static>::new();
+    let (Ok(freed), Ok(pinned)) = (map.insert(Counted(&drops)), map.insert(Counted(&drops))) else {
+        panic!("a table of four refused one of two rows");
+    };
+    let Some(RawRemoval::Freed(place)) = map.raw().remove(freed.erase()) else {
+        panic!("a live row that is not pinned is freed");
+    };
+    assert_eq!(drops.get(), 0, "the removal drops nothing");
+    assert!(
+        map.get(freed).is_none(),
+        "the freed row is found by no lookup"
+    );
+    // SAFETY: the place of the row whose slot was just freed; taken out once, leaving `None`.
+    drop(unsafe { place.cast::<Option<Counted<'_>>>().as_ptr().replace(None) });
+    assert_eq!(drops.get(), 1);
+    let pin = map.pin(pinned).expect("a live row is pinned");
+    assert_eq!(
+        map.raw().remove(pinned.erase()),
+        Some(RawRemoval::AfterCalls)
+    );
+    assert!(
+        map.raw().get(pinned.erase()).is_none(),
+        "a retired row is not live"
+    );
+    assert!(map.holds_slot(pinned), "the retired row keeps its slot");
+    drop(map.unpin(pin));
+    assert_eq!(drops.get(), 2, "the last unpin hands the row back");
+}
+
+/// Two tables of two strides, each reached through its untyped core alone: a row removed from
+/// either and a row taken again land in that table's own freed slot, at its own stride, and a
+/// handle kept across the removal reads nothing. Turned red by a core that reads one table's
+/// stride for another's rows, or a removal that leaves the slot's generation where it was.
+#[test]
+fn two_tables_of_two_strides_each_take_again_their_own_freed_slot() {
+    let mut narrow = SlotMap::<Test, u8, 4, Static>::new();
+    let mut wide = SlotMap::<Test, [u64; 3], 4, Static>::new();
+    let (Ok(narrow_first), Ok(_)) = (narrow.insert(1), narrow.insert(2)) else {
+        panic!("a table of four refused one of two rows");
+    };
+    let (Ok(wide_first), Ok(wide_second)) = (wide.insert([1; 3]), wide.insert([2; 3])) else {
+        panic!("a table of four refused one of two rows");
+    };
+    let stride = wide.raw().stride();
+    assert_ne!(narrow.raw().stride(), stride);
+    let first_place = wide.raw().get(wide_first.erase()).expect("a live row");
+    let second_place = wide.raw().get(wide_second.erase()).expect("a live row");
+    assert_eq!(
+        (second_place.as_ptr() as usize) - (first_place.as_ptr() as usize),
+        stride,
+        "the second row lies one stride of its own table past the first"
+    );
+
+    let Some(RawRemoval::Freed(place)) = narrow.raw().remove(narrow_first.erase()) else {
+        panic!("a live row that is not pinned is freed");
+    };
+    // SAFETY: the place of the row whose slot was just freed; taken out once, leaving `None`.
+    assert_eq!(
+        unsafe { place.cast::<Option<u8>>().as_ptr().replace(None) },
+        Some(1)
+    );
+    let Some(RawRemoval::Freed(place)) = wide.raw().remove(wide_second.erase()) else {
+        panic!("a live row that is not pinned is freed");
+    };
+    assert_eq!(place, second_place);
+    // SAFETY: as above.
+    assert_eq!(
+        unsafe { place.cast::<Option<[u64; 3]>>().as_ptr().replace(None) },
+        Some([2; 3])
+    );
+
+    let (narrow_again, at) = narrow.raw().take().expect("the freed slot is free");
+    assert_eq!(narrow_again.place(), narrow_first.place());
+    // SAFETY: the place of the row of the slot just taken, which holds `None`.
+    unsafe { at.cast::<Option<u8>>().as_ptr().write(Some(9)) };
+    let (wide_again, at) = wide.raw().take().expect("the freed slot is free");
+    assert_eq!(wide_again.place(), wide_second.place());
+    assert_eq!(at, second_place, "taken again at its own table's stride");
+    // SAFETY: as above.
+    unsafe { at.cast::<Option<[u64; 3]>>().as_ptr().write(Some([9; 3])) };
+
+    assert!(
+        narrow.get(narrow_first).is_none(),
+        "a handle kept across the removal"
+    );
+    assert!(
+        wide.get(wide_second).is_none(),
+        "a handle kept across the removal"
+    );
+    assert_eq!(narrow.get(narrow_again.tag::<Test>()), Some(&9));
+    assert_eq!(wide.get(wide_again.tag::<Test>()), Some(&[9; 3]));
+    assert_eq!(
+        wide.get(wide_first),
+        Some(&[1; 3]),
+        "the other row is untouched"
+    );
+}
+
+/// The untyped walk hands each live row once, in slot order, at the place the table reads it at,
+/// and passes over a retired row and a free slot; its pin is the table's. Turned red by a walk
+/// that hands a retired row, or that finds a row at another place than its handle's.
+#[test]
+fn a_raw_walk_hands_each_live_row_where_its_handle_finds_it() {
+    let mut map = Map::<4>::new();
+    let (Ok(first), Ok(freed), Ok(retired), Ok(last)) =
+        (map.insert(1), map.insert(2), map.insert(3), map.insert(4))
+    else {
+        panic!("a table of four refused one of four rows");
+    };
+    assert!(matches!(map.remove(freed), Some(Removal::Taken(2))));
+    assert!(map.raw().pin(retired.erase()), "a live row is pinned");
+    assert!(matches!(map.remove(retired), Some(Removal::AfterCalls)));
+    assert!(!map.raw().pin(freed.erase()), "a freed row is not pinned");
+
+    let raw = map.raw();
+    let mut cursor = 0;
+    let mut walked = std::vec::Vec::new();
+    while let Some((handle, place)) = raw.next_live(&mut cursor) {
+        assert_eq!(raw.get(handle), Some(place));
+        // SAFETY: the place of a live row of this table, read while it is borrowed.
+        walked.push(unsafe { *place.cast::<Option<u32>>().as_ref() });
+    }
+    assert_eq!(walked, [Some(1), Some(4)]);
+    let mut cursor = 0;
+    let typed: std::vec::Vec<_> = core::iter::from_fn(|| map.next_from(&mut cursor)).collect();
+    assert_eq!(
+        typed,
+        [(first, &1), (last, &4)],
+        "the typed walk is the same walk"
+    );
+    let mut cursor = 0;
+    assert_eq!(map.next_retired_from(&mut cursor), Some((retired, &3)));
+    assert_eq!(map.release(retired), Some(3), "its last pin hands it back");
+}
+
+/// Rows of a growable table past its first chunk are found by their handle where they were put,
+/// and stay there as more rows come: the untyped core finds a row through the list of the chunks'
+/// places. Turned red by a row found in another chunk than the one it was written in, or a chunk
+/// that moves when one is added.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_growable_tables_rows_are_found_where_they_were_put_past_its_first_chunk() {
+    let mut map = SlotMap::<Test, u32, 2, crate::bounded::Heap>::new();
+    let count = 2 * CHUNK_ROWS + 3;
+    let mut handles = std::vec::Vec::new();
+    for value in 0..count {
+        handles.push(
+            map.insert(value as u32)
+                .expect("a growable table takes a row"),
+        );
+    }
+    let first = map.get(handles[0]).map(core::ptr::from_ref);
+    for (value, handle) in handles.iter().enumerate() {
+        assert_eq!(map.get(*handle), Some(&(value as u32)));
+        let place = map.raw().get(handle.erase()).expect("a live row");
+        // SAFETY: the place of a live row of this table, read while the table is borrowed.
+        let read = unsafe { *place.cast::<Option<u32>>().as_ptr() };
+        assert_eq!(
+            read,
+            Some(value as u32),
+            "the untyped core finds the same row"
+        );
+    }
+    assert_eq!(map.iter().count(), count);
+    assert_eq!(
+        map.get(handles[0]).map(core::ptr::from_ref),
+        first,
+        "the first row did not move"
+    );
+    let last = *handles.last().expect("rows were put");
+    assert!(matches!(map.remove(last), Some(Removal::Taken(_))));
+    assert!(map.get(last).is_none());
 }
 
 /// A row's rank and the row at a rank are read off the slots, in the order the table's walk hands

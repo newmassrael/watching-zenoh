@@ -11,10 +11,10 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread \
+//!     --features os-host,peer,multi-thread,object-pool \
 //!     --test it files::closed_session_declarations::
 //! ```
-#![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
+#![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 
 use std::ffi::CString;
 
@@ -94,6 +94,7 @@ unsafe fn declare_publisher(
 /// while the session is open.
 #[test]
 fn a_publisher_on_a_declared_key_of_a_closed_session_is_refused_by_its_filter() {
+    let _program = crate::programs::admit();
     // SAFETY: every handle is made here and let go of once.
     unsafe {
         let mut session = open_listening();

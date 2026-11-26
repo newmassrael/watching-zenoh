@@ -41,10 +41,7 @@ pub(crate) enum Unit {
 /// engine port's sleeps are too: `nanosleep` on a Unix, slept again for what a signal cuts short,
 /// and `Sleep` on Windows in whole milliseconds, a part of one rounded up as pico's `z_sleep_us`
 /// rounds.
-#[cfg(all(
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    any(unix, windows)
-))]
+#[cfg(all(any(feature = "engine-tokio", feature = "os-host"), any(unix, windows)))]
 pub(crate) fn sleep(unit: Unit, time: usize) {
     wz_host_sync::sleep_us(micros_of(unit, time));
 }
@@ -52,10 +49,7 @@ pub(crate) fn sleep(unit: Unit, time: usize) {
 /// `count` of `unit` in microseconds; a count past the `u64` microseconds, some half a million
 /// years, is read as the longest sleep there is.
 #[cfg(any(
-    all(
-        any(feature = "std", feature = "os-posix", feature = "os-windows"),
-        any(unix, windows)
-    ),
+    all(any(feature = "engine-tokio", feature = "os-host"), any(unix, windows)),
     test
 ))]
 fn micros_of(unit: Unit, count: usize) -> u64 {
@@ -74,87 +68,70 @@ fn micros_of(unit: Unit, count: usize) -> u64 {
 #[cfg(any(windows, test))]
 mod arith;
 
-// The Unix and Windows layers are a host's, over its C library and its own calls, with `std` or
-// without it (`os-posix` on a POSIX host, `os-windows` on Windows). Which of the two a build
-// without `std` names for which host is held in `src/lib.rs`.
-#[cfg(all(
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    unix
-))]
+// The Unix and Windows layers are a host's, over its C library and its own calls: the library's
+// (`os-host`, without `std`) and the tokio engine's (`engine-tokio`, with it). Which targets
+// `os-host` builds for is held in `src/lib.rs`.
+#[cfg(all(any(feature = "engine-tokio", feature = "os-host"), unix))]
 mod unix;
-#[cfg(all(
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    unix
-))]
+#[cfg(all(any(feature = "engine-tokio", feature = "os-host"), unix))]
 pub(crate) use unix::*;
 
-#[cfg(all(
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    windows
-))]
+#[cfg(all(any(feature = "engine-tokio", feature = "os-host"), windows))]
 mod windows;
-#[cfg(all(
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    windows
-))]
+#[cfg(all(any(feature = "engine-tokio", feature = "os-host"), windows))]
 pub(crate) use windows::*;
+
+// The arena of a session on the cooperative engine, on a host: the system's fresh pages. An image's
+// is its heap's (`wz_capi_coop::arena::AllocatorMemory`).
+#[cfg(all(not(feature = "engine-tokio"), feature = "os-host", any(unix, windows)))]
+mod pages;
+#[cfg(all(not(feature = "engine-tokio"), feature = "os-host", any(unix, windows)))]
+pub(crate) use pages::HostPages;
 
 // What a host build without `std` links in its place: the host's heap as the global allocator,
 // and a panic that aborts. Compiled where the tests run, which take blocks of it.
-#[cfg(any(
-    all(
-        any(feature = "os-posix", feature = "os-windows"),
-        not(feature = "std")
-    ),
-    all(test, any(unix, windows))
-))]
+#[cfg(any(feature = "os-host", all(test, any(unix, windows))))]
 mod no_std_host;
+#[cfg(feature = "os-host")]
+pub use no_std_host::{abort, Heap};
 
 // Zephyr is no target of the compiler's own (an image's Rust is built for the bare core), so the
-// image names it: `os-zephyr`. A host build that also names it (`--all-features`) keeps its host's
-// layer, as features add and the host's library wins.
+// image names it: `os-zephyr`. A build that names a host as well is refused (`src/lib.rs`), and an
+// `--all-features` build, which names the tokio engine too, keeps its host's layer.
 #[cfg(all(
     feature = "os-zephyr",
-    not(feature = "std"),
-    not(feature = "os-posix"),
-    not(feature = "os-windows")
+    not(feature = "engine-tokio"),
+    not(feature = "os-host")
 ))]
 mod zephyr;
 // The Zephyr layer's clock arithmetic, compiled where the tests run as `arith` is.
 #[cfg(any(
     all(
         feature = "os-zephyr",
-        not(feature = "std"),
-        not(feature = "os-posix"),
-        not(feature = "os-windows")
+        not(feature = "engine-tokio"),
+        not(feature = "os-host")
     ),
     test
 ))]
 mod zephyr_arith;
 #[cfg(all(
     feature = "os-zephyr",
-    not(feature = "std"),
-    not(feature = "os-posix"),
-    not(feature = "os-windows")
+    not(feature = "engine-tokio"),
+    not(feature = "os-host")
 ))]
 pub(crate) use zephyr::*;
 
 #[cfg(not(any(
-    all(
-        any(feature = "std", feature = "os-posix", feature = "os-windows"),
-        any(unix, windows)
-    ),
+    all(any(feature = "engine-tokio", feature = "os-host"), any(unix, windows)),
     all(
         feature = "os-zephyr",
-        not(feature = "std"),
-        not(feature = "os-posix"),
-        not(feature = "os-windows")
+        not(feature = "engine-tokio"),
+        not(feature = "os-host")
     )
 )))]
 compile_error!(
     "wz-capi-pico has no host layer for this build: a Unix or Windows host builds it with \
-     `std`, or without it with `os-posix` (a POSIX host) or `os-windows` (Windows), a Zephyr \
-     image with `os-zephyr` and without `std`, and any other system needs src/os/<host>.rs \
+     `os-host` (or the tokio engine's `engine-tokio`), a Zephyr image with `os-zephyr`, and any other system needs src/os/<host>.rs \
      providing the names listed in src/os/mod.rs, modelled on zenoh-pico's \
      system/<host>/system.c"
 );

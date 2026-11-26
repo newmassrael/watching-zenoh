@@ -1230,6 +1230,46 @@ mod tests {
         assert_eq!(plain.header, 0x03, "the bare Query header");
     }
 
+    /// The mode a get's sink consolidates with is the one its Request states, read from the parts
+    /// the Request is written from: with no parameters, with a time range, and with other
+    /// parameters and the reply-keyexpr-any flag, the mode named or not. Where the build carries
+    /// the slot, a time range with no mode named passes every reply and no parameters consolidate
+    /// to the latest. Turned red by a sink mode resolved from other input than the parts', such as
+    /// one that reads no time range.
+    #[cfg(feature = "query-selector-parameters")]
+    #[test]
+    fn a_gets_sink_consolidates_as_its_request_states() {
+        let cases: [&[u8]; 3] = [b"", b"_time=[..]", b"a=b;_anyke"];
+        for params in cases {
+            for named in [None, Some(ConsolidationMode::Monotonic)] {
+                let mut opts = QueryOptionsOf::get().with_parameters_lent(params);
+                opts.consolidation = named;
+                let parts = opts.query_parts();
+                assert_eq!(
+                    parts.sink_consolidation(),
+                    opts.resolved_consolidation(),
+                    "{params:?} {named:?}"
+                );
+                assert_eq!(
+                    parts.consolidation,
+                    opts.wire_consolidation(),
+                    "{params:?} {named:?}"
+                );
+            }
+        }
+        if cfg!(feature = "query-consolidation") {
+            let ranged = QueryOptionsOf::get().with_parameters_lent(b"_time=[..]");
+            assert_eq!(
+                ranged.query_parts().sink_consolidation(),
+                ConsolidationMode::None
+            );
+            assert_eq!(
+                QueryOptionsOf::get().query_parts().sink_consolidation(),
+                ConsolidationMode::Latest
+            );
+        }
+    }
+
     /// Lent parameters with the reply-keyexpr-any flag appended are one state: the parts a link's
     /// get is written from carry the caller's bytes and the flag, and the metadata, the owned
     /// options and the reply acceptance read the parameters as sent, the bytes the owned setter

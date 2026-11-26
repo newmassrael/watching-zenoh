@@ -272,6 +272,10 @@ unsafe impl<T> ZeroEmpty for Option<NonNull<T>> {}
 // SAFETY: a `PhantomData` is no bytes.
 unsafe impl<T: ?Sized> ZeroEmpty for PhantomData<T> {}
 
+// SAFETY: an `AtomicBool` has the layout of a `bool`, whose zero byte is `false`.
+#[cfg(target_has_atomic = "8")]
+unsafe impl ZeroEmpty for core::sync::atomic::AtomicBool {}
+
 /// A value or none, whose all zero bytes are none whatever the value's type: a flag and a place
 /// for the value. An `Option<T>` is `None` at zero bytes only where `T` has a niche the language
 /// guarantees (a reference, `NonNull`, a `NonZero` integer), so a field of a region that may hold
@@ -1568,6 +1572,12 @@ impl SeqPlace {
             room: room as u32,
         }
     }
+
+    /// [`Self::of`] for a table whose rows are `ROOM`, the length of the array the region's type
+    /// keeps them in: a const of the caller's, as the length of any storage is.
+    pub const fn of_room<T, const ROOM: usize>(seq: usize, rows: usize) -> Self {
+        Self::of::<T>(seq, rows, ROOM)
+    }
 }
 
 /// Tell each table `places` names where its rows lie in the region at `region`, and how many: the
@@ -1954,6 +1964,9 @@ pub struct Arena {
     base: NonNull<u8>,
     bytes: usize,
     lent: usize,
+    /// Whether every byte not lent yet is zero ([`Self::over_zeroed`]): a table whose empty state
+    /// is all-zero bytes is then lent as the memory lies.
+    zeroed: bool,
 }
 
 /// Why an [`Arena`] lent no table. A refused lend takes nothing.
@@ -2017,19 +2030,27 @@ impl<'a> TableLender<'a> {
         }
     }
 
-    /// The span of `rows` rows taking `bytes`, at most `ceiling`, as the arena lends it
+    /// The span of `rows` rows of `stride` bytes, at most `ceiling`, as the arena lends it
     /// (`Arena::lend_rows`). Once a table is refused, this one among them, a span of no rows
     /// where the arena has got to, which takes nothing and starts on [`ARENA_ALIGN`] as every span
     /// does: the table made over it holds no value, as a full one, so its maker needs no path of
     /// its own for a refusal.
-    pub(crate) fn lend_rows(
+    ///
+    /// The rows are `stride` bytes each, counted here: every table of a session's open is lent
+    /// through this one body, out of line, and each would carry the count and the refusal's
+    /// bookkeeping of its own.
+    #[inline(never)]
+    pub(crate) fn lend_stride(
         &mut self,
         rows: usize,
         ceiling: usize,
-        bytes: Option<usize>,
+        stride: usize,
     ) -> (NonNull<u8>, u32) {
         if self.refused.is_none() {
-            match self.arena.lend_rows(rows, ceiling, bytes) {
+            match self
+                .arena
+                .lend_rows(rows, ceiling, Arena::stride_bytes(rows, stride))
+            {
                 Ok(span) => return span,
                 Err(why) => self.refused = Some(why),
             }
@@ -2061,9 +2082,9 @@ impl<'a> TableLender<'a> {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        let (at, room) = self.lend_rows(rows, N, Arena::table_bytes::<T>(rows));
-        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before, or a
-        // span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        let (at, room) = self.lend_stride(rows, N, core::mem::size_of::<T>());
+        // SAFETY: `lend_stride` handed out a span of `room` rows of `T` lent to nothing before,
+        // or a span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
         unsafe { BoundedVec::lent_over(at.cast::<T>(), room) }
     }
@@ -2076,13 +2097,24 @@ impl<'a> TableLender<'a> {
 
     /// [`Self::byte_cells`] with flags of the form `F` ([`CellFlag`]).
     pub fn byte_cells_of<F: CellFlag>(&mut self, size: usize, count: usize) -> LentByteCells<F> {
+        let cells = self.cell_spans(size, count);
+        // SAFETY: `cell_spans` answered the spans `Arena::cell_spans` lent, or none of no cell,
+        // whose dangling places a table of no cell never reads.
+        unsafe { cells.table() }
+    }
+
+    /// The spans of a table of `count` buffers of `size` bytes, as [`Arena::cell_spans`] lends
+    /// them; none, of no cell, once a table is refused, this one among them. Untyped and out of
+    /// line, so every form of flag lends through one body.
+    #[inline(never)]
+    fn cell_spans(&mut self, size: usize, count: usize) -> CellSpans {
         if self.refused.is_none() {
-            match self.arena.lend_byte_cells_of::<F>(size, count) {
+            match self.arena.cell_spans(size, count) {
                 Ok(cells) => return cells,
                 Err(why) => self.refused = Some(why),
             }
         }
-        LentByteCells::unlent()
+        CellSpans::NONE
     }
 
     /// A key arena of `bytes` bytes of blocks, as [`Arena::lend_keys`] lends one, as the tables
@@ -2140,6 +2172,24 @@ impl Arena {
             base,
             bytes,
             lent: 0,
+            zeroed: false,
+        }
+    }
+
+    /// An arena of the `bytes` bytes at `base`, none of them lent and every one of them zero: memory
+    /// handed zeroed, as the allocator's zeroed block or a region in `.bss` is. A table it lends
+    /// whose empty state is all-zero bytes is lent as the memory lies and written by nothing, so a
+    /// page no table of it uses stays unwritten. The spans it lends only grow from its start, so
+    /// what it has not lent stays as it was handed.
+    ///
+    /// # Safety
+    /// As [`Self::over`], and every one of the `bytes` bytes is zero.
+    pub const unsafe fn over_zeroed(base: NonNull<u8>, bytes: usize) -> Self {
+        Self {
+            base,
+            bytes,
+            lent: 0,
+            zeroed: true,
         }
     }
 
@@ -2153,6 +2203,7 @@ impl Arena {
             base: NonNull::from(&NO_BYTES).cast::<u8>(),
             bytes: 0,
             lent: 0,
+            zeroed: false,
         }
     }
 
@@ -2178,7 +2229,13 @@ impl Arena {
     /// The bytes a table of `rows` rows of `T` takes in an arena. `None` past the address
     /// space.
     pub const fn table_bytes<T>(rows: usize) -> Option<usize> {
-        match rows.checked_mul(core::mem::size_of::<T>()) {
+        Self::stride_bytes(rows, core::mem::size_of::<T>())
+    }
+
+    /// The bytes `rows` rows of `stride` bytes each take in an arena: [`Self::table_bytes`] of
+    /// rows known by their bytes alone. `None` past the address space.
+    pub const fn stride_bytes(rows: usize, stride: usize) -> Option<usize> {
+        match rows.checked_mul(stride) {
             Some(bytes) => Self::span(bytes),
             None => None,
         }
@@ -2197,7 +2254,8 @@ impl Arena {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        let (at, room) = self.lend_rows(rows, N, Self::table_bytes::<T>(rows))?;
+        let (at, room) =
+            self.lend_rows(rows, N, Self::stride_bytes(rows, core::mem::size_of::<T>()))?;
         // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
         // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
@@ -2353,7 +2411,9 @@ impl Arena {
     /// Lend a table of `count` buffers of `size` bytes, every one free and its bytes zero: the
     /// next span holds the flags that say which are lent, and the one after it their bytes. A
     /// buffer a link claims from it is a [`ByteBuf`](crate::byte_cells::ByteBuf), as one of a
-    /// table the image declares is. Refused, taking nothing, past what is left.
+    /// table the image declares is. An arena over zeroed memory ([`Self::over_zeroed`]) lends the
+    /// table as it lies, since a free flag and a zero byte are both all-zero; any other writes
+    /// them. Refused, taking nothing, past what is left.
     ///
     /// The table's memory is this arena's: whoever owns the arena gives it back only once every
     /// copy of the table and every buffer claimed from it is gone, as it does for a lent table.
@@ -2373,13 +2433,18 @@ impl Arena {
         size: usize,
         count: usize,
     ) -> Result<LentByteCells<F>, LendRefused> {
-        const {
-            assert!(
-                core::mem::size_of::<F>() == core::mem::size_of::<Cell<bool>>()
-                    && core::mem::align_of::<F>() == 1,
-                "a table's flag is one byte with no alignment of its own"
-            )
-        };
+        let cells = self.cell_spans(size, count)?;
+        // SAFETY: `cell_spans` lent both spans to this table alone, its flags zero and its bytes
+        // zero.
+        Ok(unsafe { cells.table() })
+    }
+
+    /// The untyped half of [`Self::lend_byte_cells_of`], compiled once for every form of flag: the
+    /// next span holds `count` flags, each written zero, the byte of a free flag of every form,
+    /// and the one after it `count` buffers of `size` bytes, written zero. Refused, taking
+    /// nothing, past what is left.
+    #[inline(never)]
+    fn cell_spans(&mut self, size: usize, count: usize) -> Result<CellSpans, LendRefused> {
         // `lent` never passes `bytes`.
         let left = self.bytes.wrapping_sub(self.lent);
         let (flags, bytes) = match Self::byte_cells_spans(size, count) {
@@ -2395,26 +2460,67 @@ impl Arena {
         };
         // SAFETY: both spans lie inside the arena past what it has lent, as `lent` only grows, so
         // nothing else uses them. A flag is one byte with no alignment of its own and the bytes are
-        // bytes, so any address in the arena is aligned for them. Each flag is written `false`
-        // and each byte zero before the table is made, which is what `LentByteCells::over` asks.
-        let table = unsafe {
+        // bytes, so any address in the arena is aligned for them. Each flag byte and each buffer
+        // byte is zero before the table is made: written so here, or so already in a zeroed arena,
+        // whose bytes past what it lent are zero, which is a flag's `false` (`CellFlag` is
+        // `ZeroEmpty`).
+        let cells = unsafe {
             let at = self.base.as_ptr().add(self.lent);
-            let taken = at.cast::<F>();
-            for cell in 0..count {
-                taken.add(cell).write(F::new(false));
-            }
             let data = at.add(flags);
-            // `byte_cells_spans` answered, so the product does not overflow.
-            core::ptr::write_bytes(data, 0, count.wrapping_mul(size));
-            LentByteCells::over(
-                NonNull::new_unchecked(taken),
-                NonNull::new_unchecked(data),
+            if !self.zeroed {
+                core::ptr::write_bytes(at, 0, count.wrapping_mul(LentByteCells::FLAG_BYTES));
+                // `byte_cells_spans` answered, so the product does not overflow.
+                core::ptr::write_bytes(data, 0, count.wrapping_mul(size));
+            }
+            CellSpans {
+                taken: NonNull::new_unchecked(at),
+                bytes: NonNull::new_unchecked(data),
                 size,
                 count,
-            )
+            }
         };
         self.lent = self.lent.wrapping_add(flags).wrapping_add(bytes);
-        Ok(table)
+        Ok(cells)
+    }
+}
+
+/// The spans of a table of byte buffers, apart from the form of its flags: what the untyped half of
+/// a lend answers ([`Arena::cell_spans`]) and each form's shell makes its table of.
+#[derive(Clone, Copy)]
+struct CellSpans {
+    taken: NonNull<u8>,
+    bytes: NonNull<u8>,
+    size: usize,
+    count: usize,
+}
+
+impl CellSpans {
+    /// The spans of no cell, which a table made of them never reads.
+    const NONE: Self = Self {
+        taken: NonNull::dangling(),
+        bytes: NonNull::dangling(),
+        size: 0,
+        count: 0,
+    };
+
+    /// The table of the form `F` over these spans.
+    ///
+    /// # Safety
+    /// The spans are [`Self::NONE`], or were lent by [`Arena::cell_spans`] to this table alone:
+    /// `count` flag bytes, each zero, and `count` buffers of `size` bytes, each initialised, in
+    /// memory that outlives every copy of the table and every buffer it lends.
+    #[inline(always)]
+    unsafe fn table<F: CellFlag>(self) -> LentByteCells<F> {
+        const {
+            assert!(
+                core::mem::size_of::<F>() == core::mem::size_of::<Cell<bool>>()
+                    && core::mem::align_of::<F>() == 1,
+                "a table's flag is one byte with no alignment of its own"
+            )
+        };
+        // SAFETY: the caller's; a flag of every form is a `bool` in its byte, whose zero is
+        // `false`, the free flag `LentByteCells::over` asks for.
+        unsafe { LentByteCells::over(self.taken.cast::<F>(), self.bytes, self.size, self.count) }
     }
 }
 
@@ -2815,6 +2921,43 @@ mod tests {
         assert!(keys.space().is_none());
     }
 
+    /// A table of byte buffers lent over memory that held other bytes, for each form of flag: its
+    /// flags are written free and its bytes zero, so each of its cells is claimed once and none past
+    /// its count; a lender that refused a table before lends it no cell. Turned red by a lend that
+    /// leaves the flags' span as it found it, or that answers a count other than the one asked.
+    #[test]
+    fn a_table_of_buffers_lent_over_used_memory_claims_each_cell_once() {
+        fn claims_each_cell_once<F: CellFlag>() {
+            let mut arena = arena_of(1 << 10);
+            // SAFETY: the arena's own bytes, none of them lent yet.
+            unsafe { core::ptr::write_bytes(arena.base.as_ptr(), 0xA5, arena.bytes()) };
+            let mut lend = TableLender::new(&mut arena);
+            let cells = lend.byte_cells_of::<F>(8, 3);
+            assert!(lend.finish().is_ok());
+            assert_eq!((cells.size(), cells.capacity()), (8, 3));
+            let claims: std::vec::Vec<_> = core::iter::from_fn(|| cells.claim()).collect();
+            assert_eq!(
+                claims.len(),
+                3,
+                "every cell is free, and none past the count"
+            );
+            assert!(claims
+                .iter()
+                .all(|cell| cell.as_slice().iter().all(|&b| b == 0)));
+
+            let mut short = arena_of(16);
+            let mut lend = TableLender::new(&mut short);
+            let _past: BoundedVec<u64, 4, Lent> = lend.table(4);
+            let none = lend.byte_cells_of::<F>(8, 3);
+            assert!(lend.finish().is_err());
+            assert_eq!(none.capacity(), 0);
+            assert!(none.claim().is_none());
+        }
+        claims_each_cell_once::<Cell<bool>>();
+        #[cfg(target_has_atomic = "8")]
+        claims_each_cell_once::<core::sync::atomic::AtomicBool>();
+    }
+
     /// A table of each policy with room for its `N`, for the algorithm to run on: the growable
     /// and the static ones as `Default` makes them, a lent one lent `N` rows of an arena of its
     /// own, so the three are filled and refused alike.
@@ -2900,6 +3043,95 @@ mod tests {
             })
         );
         assert_eq!(arena.high_water(), asked, "a refused table takes nothing");
+    }
+
+    /// A table of byte buffers lent from an arena over zeroed memory is lent as the memory lies,
+    /// written by nothing: a region marked with a byte that is not zero, handed to the arena as if
+    /// it were zeroed, keeps its mark after the lend. The CONTROL is the same lend from an arena
+    /// over memory not said to be zero, which writes the flags free and the bytes zero. Turned red
+    /// by a zeroed arena's lend that writes its table.
+    #[test]
+    fn a_zeroed_arena_lends_byte_buffers_without_writing_them() {
+        const MARK: u8 = 0x5a;
+        let asked = Arena::byte_cells_bytes(10, 3).expect("within the address space");
+        let lent_over = |zeroed: bool| {
+            let blocks = asked.div_ceil(ARENA_ALIGN);
+            let region: &'static mut [Block] = std::vec![
+                Block {
+                    _bytes: [MARK; ARENA_ALIGN]
+                };
+                blocks
+            ]
+            .leak();
+            let base = NonNull::from(region).cast::<u8>();
+            // SAFETY: the region is aligned to `ARENA_ALIGN`, holds `asked` bytes and is leaked.
+            // It is not zero: the zeroed arena is told it is to show what its lend writes, and no
+            // table lent from it is used, only the region's raw bytes read.
+            let mut arena = unsafe {
+                if zeroed {
+                    Arena::over_zeroed(base, asked)
+                } else {
+                    Arena::over(base, asked)
+                }
+            };
+            let _table = arena
+                .lend_byte_cells(10, 3)
+                .expect("the arena holds the table");
+            // SAFETY: the region's `asked` bytes, leaked, read after the lend.
+            unsafe { core::slice::from_raw_parts(base.as_ptr(), asked) }.to_vec()
+        };
+        assert!(
+            lent_over(true).iter().all(|byte| *byte == MARK),
+            "the zeroed arena's lend wrote its table"
+        );
+        let written = lent_over(false);
+        let flags = Arena::span(3 * LentByteCells::FLAG_BYTES).expect("a small span");
+        assert!(
+            written[..3].iter().all(|byte| *byte == 0),
+            "CONTROL: flags free"
+        );
+        assert!(
+            written[flags..flags + 30].iter().all(|byte| *byte == 0),
+            "CONTROL: bytes zero"
+        );
+    }
+
+    /// A table lent from an arena over memory that is zero holds free buffers whose bytes are zero,
+    /// with nothing written by the lend: every buffer is claimed once and the one past them is
+    /// refused. Turned red by a flag whose all-zero byte is not `false` (a table that reads as
+    /// all lent), or by a zeroed arena that lends a span it lent before.
+    #[test]
+    fn a_zeroed_arena_lends_free_buffers_of_zero_bytes() {
+        let asked = Arena::byte_cells_bytes(10, 3).expect("within the address space");
+        let blocks = asked.div_ceil(ARENA_ALIGN) * 2;
+        let region: &'static mut [Block] =
+            std::vec![Block { _bytes: [0; ARENA_ALIGN] }; blocks].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds `2 * asked` bytes at least, every
+        // one zero, and is leaked, so nothing else uses it and it outlives every lent table.
+        let mut arena =
+            unsafe { Arena::over_zeroed(NonNull::from(region).cast::<u8>(), blocks * ARENA_ALIGN) };
+        let first = arena
+            .lend_byte_cells(10, 3)
+            .expect("the arena holds the table");
+        let atomic = arena
+            .lend_byte_cells_of::<core::sync::atomic::AtomicBool>(10, 3)
+            .expect("the arena holds a second table");
+        assert_eq!(
+            arena.high_water(),
+            2 * asked,
+            "two tables, each its own span"
+        );
+        let mut held = std::vec::Vec::new();
+        while let Some(mut buffer) = first.claim() {
+            assert!(buffer.as_mut_slice().iter().all(|&b| b == 0), "lent zero");
+            held.push(buffer);
+        }
+        assert_eq!(held.len(), 3, "every buffer free, none past them");
+        let mut atomics = std::vec::Vec::new();
+        while let Some(buffer) = atomic.claim() {
+            atomics.push(buffer);
+        }
+        assert_eq!(atomics.len(), 3, "every atomic flag free");
     }
 
     /// Fill to `N`, then one more: refused with the value handed back on a policy
@@ -3328,6 +3560,43 @@ mod tests {
         ));
     }
 
+    /// A lender counts a table's bytes off the stride of its rows: rows of three bytes take the
+    /// span of their bytes rounded up, so the next table finds the arena full, and rows past the
+    /// address space are refused naming no size. Turned red by a lend that counts a row by another
+    /// figure than its own bytes.
+    #[test]
+    fn a_lender_counts_a_tables_bytes_off_the_stride_of_its_rows() {
+        assert_eq!(Arena::stride_bytes(5, 3), Some(16));
+        assert_eq!(Arena::stride_bytes(5, 3), Arena::table_bytes::<[u8; 3]>(5));
+        assert_eq!(Arena::stride_bytes(usize::MAX, 2), None);
+        let mut arena = arena_of(16);
+        let mut lend = TableLender::new(&mut arena);
+        let rows: BoundedVec<[u8; 3], 8, Lent> = lend.table(5);
+        let past: BoundedVec<u8, 1, Lent> = lend.table(1);
+        assert_eq!(
+            lend.finish(),
+            Err(LendRefused::Exhausted {
+                asked: Some(16),
+                left: 0
+            })
+        );
+        assert_eq!((rows.free_slots(), past.free_slots()), (5, 0));
+        assert_eq!(arena.high_water(), 16);
+
+        let mut wide = arena_of(64);
+        let mut lend = TableLender::new(&mut wide);
+        let none: BoundedVec<u16, { usize::MAX }, Lent> = lend.table(usize::MAX);
+        assert_eq!(
+            lend.finish(),
+            Err(LendRefused::Exhausted {
+                asked: None,
+                left: 64
+            })
+        );
+        assert_eq!(none.free_slots(), 0);
+        assert_eq!(wide.high_water(), 0);
+    }
+
     /// Each span starts aligned, so an arena laid out for its tables is the sum of their spans,
     /// and lending them all brings the high-water mark to its size and no further.
     #[test]
@@ -3548,6 +3817,19 @@ mod tests {
             3,
         ),
     ];
+
+    /// A place whose room is a const of the caller's is the place `SeqPlace::of` makes of that
+    /// room. Turned red by `of_room` placing a room other than `ROOM`.
+    #[test]
+    fn a_place_of_a_const_room_is_the_place_of_that_room() {
+        assert_eq!(
+            SeqPlace::of_room::<u64, 3>(
+                core::mem::offset_of!(TwoTables, words),
+                core::mem::offset_of!(TwoTables, word_rows),
+            ),
+            TWO_TABLES[1]
+        );
+    }
 
     /// A region zeroed by the allocator in one block is every table empty; placed by its
     /// description, each table of the lent shape takes as many values as it has rows and refuses

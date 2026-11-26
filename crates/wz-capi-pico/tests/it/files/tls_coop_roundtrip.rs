@@ -185,6 +185,7 @@ unsafe fn close_session(session: &mut z_owned_session_t) {
 
 #[test]
 fn a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_put_each_way() {
+    let _program = crate::programs::admit();
     unsafe {
         let (cert, key) = localhost_cert_key_pem();
         let port = free_port();
@@ -214,6 +215,7 @@ fn a_dial_that_trusts_the_listeners_certificate_opens_a_session_that_carries_a_p
 
 #[test]
 fn a_dial_that_trusts_another_certificate_does_not_open() {
+    let _program = crate::programs::admit();
     unsafe {
         let (cert, key) = localhost_cert_key_pem();
         let (stranger, _) = localhost_cert_key_pem();

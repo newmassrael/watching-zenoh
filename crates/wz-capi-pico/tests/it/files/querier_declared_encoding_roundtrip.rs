@@ -33,6 +33,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_query, z_closure_reply,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_querier, z_declare_queryable,
@@ -96,6 +97,15 @@ unsafe fn open_with(key: u8, endpoint: &std::ffi::CStr) -> Option<z_owned_sessio
     assert_eq!(z_config_default(&mut cfg), Z_OK);
     assert_eq!(
         zp_config_insert(z_config_loan_mut(&mut cfg), key, endpoint.as_ptr()),
+        Z_OK
+    );
+    // The getter holds two queriers at once, past what a session opens with.
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            WZ_EXT_CONFIG_LIMITS_KEY,
+            c"MAX_QUERIERS=2".as_ptr()
+        ),
         Z_OK
     );
     let mut session: z_owned_session_t = std::mem::zeroed();
@@ -162,6 +172,7 @@ fn wait_for(seen: &Arc<Mutex<Vec<Seen>>>, n: usize) -> Vec<Seen> {
 
 #[test]
 fn a_querier_declared_with_an_encoding_sends_it_as_the_default_of_every_get() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

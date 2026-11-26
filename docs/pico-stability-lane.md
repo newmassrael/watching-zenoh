@@ -106,7 +106,7 @@ The third suite (`crates/wz-capi-pico/tests/allocation_faults.rs`) asks what the
 memory runs out, and how much memory its traffic takes. It is an executable of its own, because its
 global allocator counts every allocation and fails one on request, and it runs on each engine: the
 tokio engine (the default build with `app-transport`) and the cooperative one
-(`--no-default-features --features engine-coop,app-transport,peer,query,queryable,multi-thread`).
+(`--no-default-features --features os-host,app-transport,peer,query,queryable,multi-thread`).
 The two sessions are joined by an in-memory pipe as in the storm, one stream pair, without faults;
 nothing the pipe or the test's closures do on a message's path allocates, so every allocation a
 window counts is the library's.

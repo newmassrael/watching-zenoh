@@ -401,6 +401,7 @@ fn drop_catalog(c: &mut wz_ext_owned_message_catalog_t) {
 
 #[test]
 fn a_payload_of_a_catalog_message_keeps_its_key_and_its_schema() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
@@ -422,6 +423,7 @@ fn a_payload_of_a_catalog_message_keeps_its_key_and_its_schema() {
 
 #[test]
 fn a_schema_or_a_payload_that_cannot_be_made_is_refused_by_code() {
+    let _program = crate::programs::admit();
     let (rc, why) = schema(&[0xFF, 0xFE]).expect_err("refused");
     assert_eq!(
         rc, Z_ERR_CONFIG_INVALID_VALUE,
@@ -490,6 +492,7 @@ fn a_schema_or_a_payload_that_cannot_be_made_is_refused_by_code() {
 
 #[test]
 fn values_set_by_path_encode_to_their_bytes_and_decode_back() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
@@ -588,6 +591,7 @@ fn values_set_by_path_encode_to_their_bytes_and_decode_back() {
 
 #[test]
 fn each_refusal_is_its_own_code_and_leaves_its_sentence() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
@@ -646,6 +650,7 @@ fn each_refusal_is_its_own_code_and_leaves_its_sentence() {
 
 #[test]
 fn a_null_argument_or_a_gravestone_is_refused() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
@@ -683,6 +688,7 @@ fn a_null_argument_or_a_gravestone_is_refused() {
 
 #[test]
 fn a_list_is_counted_and_an_element_cleared() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema(SCHEMA_SET).expect("the schema reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");
@@ -710,6 +716,7 @@ fn a_list_is_counted_and_an_element_cleared() {
 /// values do not fit it leave the payload empty.
 #[test]
 fn a_payload_holds_what_its_storage_was_sized_for_and_refuses_past_it() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema(SCHEMA_SET).expect("the schema reads");
 
@@ -798,6 +805,7 @@ fn a_payload_holds_what_its_storage_was_sized_for_and_refuses_past_it() {
 #[cfg(feature = "proto-text")]
 #[test]
 fn a_schema_read_from_its_text_is_the_compiled_one_and_its_refusals_are_codes() {
+    let _program = crate::programs::admit();
     let mut c = catalog();
     let mut s = schema_text(SCHEMA.as_bytes()).expect("the text reads");
     let mut p = payload(&c, POSE, &s, "syn.door.Pose").expect("the payload is made");

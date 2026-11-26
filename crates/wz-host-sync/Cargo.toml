@@ -50,13 +50,17 @@ libc = { version = "0.2", default-features = false }
 
 # The Windows host's: the wait on an address, the threads and `Sleep` (`System_Threading`), the handle a thread is (`Foundation`) and the attributes `CreateThread`
 # is declared with (`Security`) and the performance counter the monotonic clock reads
-# (`System_Performance`), and the precise system time the wall clock reads (`System_SystemInformation`).
+# (`System_Performance`), the precise system time the wall clock reads (`System_SystemInformation`),
+# the environment block `env_var` reads (`System_Environment`), and the fresh pages a block is
+# mapped in (`System_Memory`: `VirtualAlloc`, `VirtualFree`).
 # Already in this workspace's graph at this version.
 [target.'cfg(windows)'.dependencies.windows-sys]
 version = "0.61"
 features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_System_Environment",
+    "Win32_System_Memory",
     "Win32_System_Performance",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

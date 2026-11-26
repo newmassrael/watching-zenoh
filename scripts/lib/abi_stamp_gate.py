@@ -26,7 +26,10 @@ build: the family's revision, the exact set of layout keys, and each key's value
 ## What must agree
 
 * every profile the lane builds (`debug` and `release`) must carry the SAME stamp: a stamp present
-  or different in one profile is a claim about that build only, and `lto = "thin"` runs in release;
+  or different in one profile is a claim about that build only, and `lto = "thin"` runs in release.
+  The pico C library is the exception: the default build is the cooperative engine's, which has no
+  `std` form, so no profile that unwinds builds it and its one profile is `capi-nostd`, for the
+  host's own target (`target/<triple>/capi-nostd/`);
 * a stamp must survive `strip`, which the gate runs on a copy of each artifact: the note is what a
   consumer reads from a binary it ships stripped;
 * for `capi-c`, whose library has a door that reports the same number (`wz_capi_c_abi_version`),
@@ -77,7 +80,15 @@ EXPECTED = {
     "declared-node": {"revision": 1, "layout": {}},
 }
 
-REQUIRED_PROFILES = {"debug", "release"}
+# The profiles each family is built under. `capi-nostd` is the one profile that builds the pico C
+# library without `std` (it does not unwind).
+DEFAULT_PROFILES = frozenset({"debug", "release"})
+REQUIRED_PROFILES = {
+    "capi-pico": frozenset({"capi-nostd"}),
+    "capi-c": DEFAULT_PROFILES,
+    "ap-demo-surface": DEFAULT_PROFILES,
+    "declared-node": DEFAULT_PROFILES,
+}
 
 # The families whose library answers the same question through a door.
 DOORS = {"capi-c": "wz_capi_c_abi_version"}
@@ -88,14 +99,16 @@ class Fatal(Exception):
 
 
 def profile_of(path: pathlib.Path) -> str:
-    """The cargo profile an artifact was built under, from its place under `target/`."""
-    parts = path.parts
-    if "target" in parts:
-        i = len(parts) - 1 - parts[::-1].index("target")
-        if i + 2 < len(parts):
-            return parts[i + 1]
+    """The cargo profile an artifact was built under, from its place under `target/`: the
+    directory holding it, which is `target/<profile>/` for a build of the host and
+    `target/<triple>/<profile>/` for a build that names its target (`--target`)."""
+    profile = path.parent
+    if profile.name and profile.name != "target" and (
+            profile.parent.name == "target" or profile.parent.parent.name == "target"):
+        return profile.name
     raise Fatal(
-        f"cannot tell which cargo profile {path} was built under: it is not under <...>/target/<profile>/"
+        f"cannot tell which cargo profile {path} was built under: it is not under "
+        f"<...>/target/<profile>/ or <...>/target/<triple>/<profile>/"
     )
 
 
@@ -125,7 +138,7 @@ def stamp_findings(family: str, stamp: dict) -> list[str]:
 def profile_findings(family: str, by_profile: dict[str, dict]) -> list[str]:
     """What is wrong across profiles: a missing profile, or two that disagree."""
     out = []
-    for profile in sorted(REQUIRED_PROFILES - set(by_profile)):
+    for profile in sorted(REQUIRED_PROFILES.get(family, DEFAULT_PROFILES) - set(by_profile)):
         out.append(f"{family}: no {profile} artifact was given; one profile is not a comparison")
     stamps = {p: s for p, s in by_profile.items()}
     first = next(iter(sorted(stamps)), None)
@@ -301,13 +314,23 @@ def selftest() -> int:
            any("differs" in f for f in profile_findings("capi-c", {"debug": a, "release": b})))
     expect("a single profile was accepted",
            any("release" in f for f in profile_findings("capi-c", {"debug": a})))
+    # The pico C library's one profile is the one that builds it without `std`.
+    p = {"schema": 1, "family": "capi-pico", "revision": 6, "layout": {}}
+    expect("the pico library's one profile was reported",
+           profile_findings("capi-pico", {"capi-nostd": p}) == [])
+    expect("a pico library of a profile that unwinds stood in for its own",
+           any("capi-nostd" in f for f in profile_findings("capi-pico", {"debug": p, "release": p})))
+    expect("the profile reader misread a path of a build that names its target",
+           profile_of(pathlib.Path("crates/target/x86_64-unknown-linux-gnu/capi-nostd/libwz_capi_pico.so"))
+           == "capi-nostd")
     expect("the profile reader misread a target path",
            profile_of(pathlib.Path("crates/target/release/libwz_capi_c.so")) == "release")
     # Under WZ_ARTIFACT_ROOT the artifact is the mirrored path below the root,
     # a root whose own name may carry a `target` component.
     expect("the profile reader misread a target path under an artifact root",
            profile_of(pathlib.Path("/srv/target/wz/crates/target/debug/libwz_capi_c.so")) == "debug")
-    for bad in ["libwz_capi_c.so", "crates/target/libwz_capi_c.so", "/tmp/x/lib.so"]:
+    for bad in ["libwz_capi_c.so", "crates/target/libwz_capi_c.so", "/tmp/x/lib.so",
+                "/tmp/x/y/lib.so"]:
         try:
             profile_of(pathlib.Path(bad))
         except Fatal:
@@ -316,6 +339,7 @@ def selftest() -> int:
 
     # The pin is not vacuous, and every family has a door entry or none.
     expect("the pin is empty and agrees with anything", len(EXPECTED) == 4)
+    expect("a pinned family names no profile it is built under", set(REQUIRED_PROFILES) == set(EXPECTED))
     expect("a door is named for a family that is not pinned", set(DOORS) <= set(EXPECTED))
     expect("a pinned revision is not a non-negative integer",
            all(isinstance(v["revision"], int) and v["revision"] >= 0 for v in EXPECTED.values()))
@@ -334,8 +358,9 @@ if __name__ == "__main__":
         if not pairs or not all("=" in a for a in pairs):
             print(
                 "usage: abi_stamp_gate.py [--call-doors] FAMILY=PATH... | --selftest\n"
-                f"  families: {', '.join(sorted(EXPECTED))}; one path per cargo profile "
-                f"({', '.join(sorted(REQUIRED_PROFILES))} are required)",
+                f"  families: {', '.join(sorted(EXPECTED))}; one path per cargo profile, each "
+                f"family's required: "
+                f"{'; '.join(f'{k} {sorted(v)}' for k, v in sorted(REQUIRED_PROFILES.items()))}",
                 file=sys.stderr,
             )
             sys.exit(2)

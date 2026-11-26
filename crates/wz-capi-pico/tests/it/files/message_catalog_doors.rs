@@ -89,6 +89,7 @@ fn entry(this: &wz_ext_owned_message_catalog_t, index: usize) -> (ZResult, wz_ex
 
 #[test]
 fn each_entry_reads_back_as_the_catalog_states_it() {
+    let _program = crate::programs::admit();
     let mut owned = catalog(SYNTHETIC).expect("the synthetic catalog is read");
     let this = unsafe { wz_ext_message_catalog_loan(&owned) };
     unsafe {
@@ -168,6 +169,7 @@ fn each_entry_reads_back_as_the_catalog_states_it() {
 
 #[test]
 fn a_refused_catalog_is_a_code_and_a_reason_that_names_the_rule() {
+    let _program = crate::programs::admit();
     let twice = SYNTHETIC.replace("id: 402", "id: 401");
     let (rc, why) = catalog(&twice).unwrap_err();
     assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
@@ -269,6 +271,7 @@ mod e2e {
 
     #[test]
     fn the_sender_and_receiver_a_catalog_makes_are_those_made_by_hand() {
+        let _program = crate::programs::admit();
         let mut owned = catalog(SYNTHETIC).expect("read");
         let this = unsafe { wz_ext_message_catalog_loan(&owned) };
         unsafe {
@@ -348,6 +351,7 @@ mod e2e {
 
     #[test]
     fn a_piece_the_entry_does_not_give_is_refused_by_code_and_reason() {
+        let _program = crate::programs::admit();
         let mut owned = catalog(SYNTHETIC).expect("read");
         let this = unsafe { wz_ext_message_catalog_loan(&owned) };
         unsafe {
@@ -440,6 +444,7 @@ mod e2e {
     #[cfg(feature = "e2e-sender-demux")]
     #[test]
     fn a_receiver_of_listed_senders_judges_each_in_its_bound_slot() {
+        let _program = crate::programs::admit();
         let mut owned = catalog(SENDERS).expect("read");
         let this = unsafe { wz_ext_message_catalog_loan(&owned) };
         unsafe {
@@ -487,6 +492,7 @@ mod e2e {
     #[cfg(not(feature = "e2e-sender-demux"))]
     #[test]
     fn a_build_without_sender_slots_refuses_a_receiver_of_listed_senders_by_name() {
+        let _program = crate::programs::admit();
         let mut owned = catalog(SENDERS).expect("read");
         let this = unsafe { wz_ext_message_catalog_loan(&owned) };
         unsafe {
@@ -574,6 +580,7 @@ mod supervision {
 
     #[test]
     fn the_rows_a_catalog_adds_supervise_as_the_rows_added_by_hand() {
+        let _program = crate::programs::admit();
         let mut owned = catalog(SYNTHETIC).expect("read");
         let this = unsafe { wz_ext_message_catalog_loan(&owned) };
         let delay = unsafe { wz_ext_message_catalog_supervision_start_delay(this) };

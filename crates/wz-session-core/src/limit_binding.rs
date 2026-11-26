@@ -335,6 +335,37 @@ impl LimitDomain {
         Self::parameter(least, most, capacity).keeping(LimitValue::Integer(value), defaults_only)
     }
 
+    /// The domain of a bound that counts what a session's open reserves memory for, whose build
+    /// value is `value`: no more than `value`, the bound the build sizes for, and every count under
+    /// it in every build, a build that keeps only its defaults included, so an open lays out the
+    /// few it is told to and refuses a count past the bound ([`Self::up_to`]).
+    pub const fn of_count(capacity: Option<usize>, value: Quota) -> Self {
+        Self::bound(capacity).up_to(value.as_value())
+    }
+
+    /// [`Self::of_count`] of a bound whose code holds no count above `most`.
+    pub const fn of_count_within(capacity: Option<usize>, most: usize, value: Quota) -> Self {
+        Self::bound_within(capacity, most).up_to(value.as_value())
+    }
+
+    /// `self` with nothing past `value`, the build's own: `self` itself where `value` is
+    /// `unbounded`, which every count is under. `value` must be inside `self`; a domain that
+    /// leaves it out does not compile.
+    pub const fn up_to(self, value: LimitValue) -> Self {
+        assert!(
+            self.contains(value),
+            "a limit's build value is outside the domain the build allows"
+        );
+        match value {
+            LimitValue::Unbounded => self,
+            LimitValue::Integer(value) => Self {
+                unbounded: false,
+                most: value,
+                ..self
+            },
+        }
+    }
+
     /// `self` where the build keeps every value it allows, or only `value`, the build's own, where
     /// `defaults_only`. `value` must be inside `self`; a domain that leaves it out does not compile.
     pub const fn keeping(self, value: LimitValue, defaults_only: bool) -> Self {
@@ -1185,6 +1216,31 @@ mod tests {
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Pinned4 {
         const WORD: usize = word_after::<Range64, Snapshot>();
+    }
+
+    /// A count's domain is every count up to the build's value, whatever the build keeps of its
+    /// defaults: a few is selectable and one past the value is not, and an `unbounded` build
+    /// value leaves the bound's whole domain. Turned red by a count domain pinned to the build's
+    /// value, or one left open past it.
+    #[test]
+    fn a_counts_domain_is_every_count_up_to_the_builds_value() {
+        let count = LimitDomain::of_count(None, Quota::at_most(8));
+        assert!(count.contains(LimitValue::Integer(0)));
+        assert!(count.contains(LimitValue::Integer(1)));
+        assert!(count.contains(LimitValue::Integer(8)));
+        assert!(!count.contains(LimitValue::Integer(9)));
+        assert!(!count.contains(LimitValue::Unbounded));
+        let within = LimitDomain::of_count_within(None, 65535, Quota::at_most(8));
+        assert!(within.contains(LimitValue::Integer(2)));
+        assert!(!within.contains(LimitValue::Integer(9)));
+        let pinned = LimitDomain::of_bound(None, Quota::at_most(8), true);
+        assert!(
+            !pinned.contains(LimitValue::Integer(1)),
+            "CONTROL: a defaults-only bound keeps its value alone"
+        );
+        let unbounded = LimitDomain::of_count(None, Quota::UNBOUNDED);
+        assert!(unbounded.contains(LimitValue::Unbounded));
+        assert!(unbounded.contains(LimitValue::Integer(1000)));
     }
 
     /// A limit whose domain is more than one value keeps one word, after the limits before it,

@@ -234,6 +234,7 @@ fn eventually(what: &str, mut holds: impl FnMut() -> bool) {
 /// restart is longer than the redial period (a second), so `a`'s redial has had its turn.
 #[test]
 fn a_restarted_peer_that_dials_back_while_its_old_dialler_redials_keeps_one_transport() {
+    let _program = crate::programs::admit();
     // The zids are stated, so which of the two is the lower one is the round's and not a draw: the
     // restarted node's is lower than `a`'s on the even rounds and higher on the odd ones, which
     // is the rule's two arms (a link refused, a held link replaced) on each engine, four rounds
@@ -322,6 +323,7 @@ fn a_restarted_peer_that_dials_back_while_its_old_dialler_redials_keeps_one_tran
 /// for fails the open and does not become an id nobody named.
 #[test]
 fn a_session_opens_on_the_zid_its_config_names_and_refuses_text_that_is_not_one() {
+    let _program = crate::programs::admit();
     // SAFETY: fresh configs and sessions, each closed or never opened.
     unsafe {
         let mut session = open(free_port(), None, c"01020304-0506-0708-090a-0b0c0d0e0f10");

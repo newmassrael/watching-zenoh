@@ -7,7 +7,7 @@ structure change of the pico and zenoh-c presets is judged against.
 
 ## 1. Why a new structure: what is measured
 
-The release form (`os-posix` / `os-windows`, no `std`, `capi-nostd` profile) against zenoh-pico
+The release form (`os-host`, no `std`, `capi-nostd` profile) against zenoh-pico
 built as the same build, function bytes with aliases of one address counted once (int5, 2026-11-23):
 
 | area | wz | zenoh-pico | ratio |
@@ -406,6 +406,23 @@ read slot  ->  send place  ->  session (Core)  ->  a row's latch
   a try, which nothing else holds in a build of one thread. With `threads` the walk holds a place
   whether or not it holds a link (step 4), so a link seated after the walk is held too.
 - A callback is called with no lock held but the read slot of the face its record came from.
+- **Why this order, and not the session first.** The two orders that could be global are the
+  places before the session (this one) and the session before every place, a session hold an
+  operation reuses across its legs. Both are free of deadlock taken alone; what decides is what each
+  costs the direct read and what it lets a holder wait for. Under this order a read holds its own
+  slot and takes the session once a record, never a send place, so no read waits for a send and
+  a send that waits for room on a full link holds no session lock while it waits: every other face
+  is read and every other operation that does not reach that face goes on. With the session first,
+  a send that waits for room would wait under the session, and every read would wait behind it for
+  its next dispatch; the read would also have to let go of the session before any send it makes
+  from a dispatch (a reply, an answer to an Interest), which this order lets it make through a place
+  it does not hold. So an operation that holds the session across several legs (a get's legs, the
+  answer of a query, a declaration and its undeclaration) holds it inside one hold of the places
+  (`CoopEngine::live_on_link`): what it reads of the session before its first leg is read under
+  that leg's hold, the hold of its first face, not under a session hold taken before the places.
+  A reply holds its link's replies (`hold_replies`) through the place it is sent by, and the Final
+  lets them go (`release_replies`) through the same place, so the replies and the Final leave in
+  one send whichever thread answers.
 
 ### 8.5 A callback that calls the session
 
@@ -659,3 +676,198 @@ measurement:
 
 This is not the fast path of one face 8.12 rejects: every face is in the one walk, and a face is
 passed over by what its own slot says, whatever the session's preset.
+
+
+## 9. The win budget: heap, RSS, text and instructions per message under zenoh-pico
+
+Status: decision of the owner, 2026-11-25 (win every LOSS metric against zenoh-pico in the
+shipped form and in the std form, cost ignored). This section is the summary and the index; each
+budget is worked out, stage by stage and row by row, in its own document under
+`docs/win-budget/`. A number here is copied from those documents; where they disagree, the
+document of the budget holds.
+
+### 9.1 Where wz stands
+
+The shipped nostd form is the one of 8.1 (the pico preset's `zenoh-pico_defconfig` limits);
+zenoh-pico is built as the same build. Measured 2026-11-25 unless the cell gives another date; the
+per-operation rows are `scripts/pico-compare.sh opprofile` on main `cf6ca0963`, 2026-11-26 (the run
+`target/pico-compare/opprofile-runs/host-20261125T224055`, `report.txt`), net of the paced loop.
+The receivers' lines of that run (the subscriber's, the queryable peer's) were biased on the pico
+arm: a zenoh-pico peer with no peer wakes every 100 ms and spins its last 1 to 2 ms before each
+wake-up, and the number of those wake-ups differs between the two runs of a slope with the host's
+speed ([ir-receive](win-budget/ir-receive.md) 1). The harness of `f5f8ce646` counts the connected
+window alone, net of an idle run of it; its reading on the same main (2026-11-26) is the second
+figure of each row and the verdict.
+
+| metric | wz | zenoh-pico | target | budget |
+|---|---:|---:|---|---|
+| instructions per received message (8 B payload, callgrind) | 6,097; 4,843.0 on main `cf6ca0963` (biased run); window 4,855.9, net 4,836.7 | 2,941; 2,840.6 (biased); window 4,049.2, net 4,042.4 | design 2,000; gate 4,042 (1.20 now; the biased 1.70 withdrawn) | [ir-receive](win-budget/ir-receive.md) |
+| instructions per put, 8 B | 2,195 | 2,376 | at most zenoh-pico's: met (0.92, the window too); design 460 | [ir-send-query](win-budget/ir-send-query.md) 4.1, 9 |
+| instructions per get, the querier | 19,146 | 11,910 | at most zenoh-pico's (1.61; 1.63 on the window; 1.49 on the branch `decl-row`) | [ir-send-query](win-budget/ir-send-query.md) 4.2 |
+| instructions per get, the queryable peer | 13,221; window 12,883.3 | 2,859 (biased); window 10,167.8 | design 1,880; gate 10,168 (1.27 now) | [ir-send-query](win-budget/ir-send-query.md) 1, 4.2b |
+| instructions per declare and retract: subscriber, publisher, queryable | 15,384; 9,577; 15,027 | 14,121; 11,280; 13,638 | at most zenoh-pico's: 1.09, 0.85, 1.10 on the window; 0.88, 0.67, 0.89 on `decl-row` | [ir-send-query](win-budget/ir-send-query.md) 4.3 |
+| instructions per open and close | 142,795 | 173,336 | at most zenoh-pico's: met (0.82; 0.69 on the window); 1.37 with a heap-lane arena from a reused `calloc` chunk, which rss-zero takes back | [ir-send-query](win-budget/ir-send-query.md) 4.4, [heap](win-budget/heap.md) 7 |
+| heap peak, subscriber program (massif, with the 4,096 B stdio buffer both pay) | 373.1 KB | about 17 KB | at most about 17 KB: wz's own at most 12.9 KB | [heap](win-budget/heap.md) |
+| heap peak, publisher program | 262.8 KB | about 15 KB | at most about 15 KB: wz's own at most 10.9 KB | [heap](win-budget/heap.md) |
+| RSS | 5,774 KiB; std form 1.42 of zenoh-pico's by `perf` (2026-11-26) | 4,888 KiB | at most 4,888 KiB | [heap](win-budget/heap.md) 7, [std-heap](win-budget/std-heap.md) |
+| text, size ledger (`pico-client-coop-nostd`, by DWARF line) | 235,152; areas 218,547 on the sh2 reading (2026-11-26, the C-level root crate, landing); t-ext sessions -982, codec -253; SCE ADR 0137 codec +5,728 | 170,500 | at most 170,500 | [text](win-budget/text.md) 1, P9, 8.1 |
+| text, parity preset (std) | 864,298 | 505,302 | at most 505,302 | [text](win-budget/text.md) 6, [std-heap](win-budget/std-heap.md) |
+| instructions per received message, std form | 6,522 (biased run); window: measure, harness f5f8ce646; CPU per message 1.32 of zenoh-pico's by `perf` | 2,941 (biased); 4,042 on the window | at most 4,042 | [std-heap](win-budget/std-heap.md) |
+
+What closes each gap:
+
+- **Instructions.** On the window harness wz is 1.20 of zenoh-pico (4,837 against 4,042); section
+  8 removes the executor's pass and the round (about 1,170), which alone takes it under. The rest
+  is the read's own stages, each budgeted at or under zenoh-pico's: one blocking read per face,
+  every whole batch handed out in one call, one generated pass from the record header to a flat
+  push view, a declared key resolved by index with no string, the match set kept on the
+  resource row, and the loaned sample the session's own view with no marshal copy.
+- **Instructions per operation.** Put, open and the publisher's declaration already read under
+  zenoh-pico's; on the branch `decl-row` the subscriber's and the queryable's declarations do too
+  (0.88, 0.89). The queryable peer reads 1.27 on the window harness (the biased 4.62 withdrawn);
+  its excess is the executor's pass and the round (2,106 of 13,221) and the reply key's canon check
+  (1,218), which section 8 and the query lane Q-SERVE remove. The querier's 1.63 (1.49 on
+  `decl-row`) is not read by stage yet ([ir-send-query](win-budget/ir-send-query.md) 4.2 and its
+  cells).
+- **Heap.** Every row is reserved at the open at its limit's capacity today. Under the ruling of
+  9.4 it is reserved at the quota the open's configuration states, with small defaults; the
+  rows shrink (the entity slab whose handle is the row, one pending-declaration pool for every
+  face, reassembly into a payload block, no delivery rows once section 8 lands). At the
+  recommended defaults the arena falls from 290,304 B to about 6.5 KB and the process pools
+  from 78,160 B by staging and counting them from the configuration. On a host the arena is fresh
+  pages of the system, never a reused allocator chunk that `calloc` zeroes whole (rss-zero).
+- **RSS.** Resident memory follows the bytes written: an empty row is all-zero, a row is
+  written when it is first taken, and the text and heap targets carry the rest.
+- **Text.** Sessions 2.52, doors 2.16, transport 2.33 and driver 1.81 over zenoh-pico carry the
+  excess; codec (0.99), key expressions (0.71) and language support (0.41) already win and are
+  held. The sh2 reading (2026-11-26) moves the shipped root to a C-level crate, whose Rust-level
+  symbols fat LTO may then make internal: about -15.6 KB with no code changed, the ratio 1.28
+  ([text](win-budget/text.md) P9). A crate's size level does not survive fat LTO (M1, read
+  2026-11-26): cold code is made small as one non-generic body, not by a crate at
+  `opt-level = "s"` ([text](win-budget/text.md) P5). The std form's excess is the unwinder, the symbolizer and the
+  rest of `std` (about 0.6 MB), which the std budget removes by giving the C libraries no std form.
+
+### 9.2 The budgets
+
+| document | what it fixes |
+|---|---|
+| [ir-receive](win-budget/ir-receive.md) | one received message in nine stages (socket and wait, stream framing, batch and frame header, record decode, key resolution, subscriber look-up, hand-out and callback marshal, timers, the executor and round of section 8): each stage's cost in both, its target and the structure that meets it; the SCE generator change it needs |
+| [ir-send-query](win-budget/ir-send-query.md) | the same frame for a put, a get and its replies, a declare and its retraction, an open and its close |
+| [heap](win-budget/heap.md) | the configuration's count keys, each row of the session arena and of the process pools (bytes, sizing formula, target formula, target bytes), resident memory, the refusals |
+| [text](win-budget/text.md) | each area of the size ledger by symbol and owner, its target and the structure that shrinks it; where size and instructions meet |
+| [std-heap](win-budget/std-heap.md) | the std form of the pico preset, the zenoh-c preset and the Rust API against the same four metrics |
+
+### 9.3 Order and lanes
+
+Each budget document names its lanes with the files each owns and what each depends on. The
+order across them:
+
+1. **No dependency, at once.** The measurement lanes (every cell to measure, 9.5); the SCE
+   generator change (ir-receive R3, an SCE session's); the one writer per message kind
+   (ir-send-query S-WRITE) and the gets' deadline index (Q-DEADLINE); the C ABI text rows
+   (text T-ABI) and the generated runtime's inline attributes (T-SCE; its size-level probe, M1, is
+   read: no level survives fat LTO); the std modules off `std` (std-heap SH1).
+2. **After the heap decisions D2 and D3 of 9.4**: the configuration's count table (heap H1),
+   which alone takes the arena to about 60 KB; then the entity slab, the shared
+   pending-declaration pool, reassembly into a payload block and the staged pools (H2, H4, H5,
+   H6), and the text rows that share their files (T-ROWS, T-DECL, T-DOORS, T-OPEN).
+3. **Section 8's steps 3 to 5**, beside step 2's lanes: the put's plan and the get's one hold
+   (S-PLAN, Q-HOLD) need only section 8 step 2, which has landed.
+4. **After section 8's locks (8.11.1) and read tasks (8.11.4)**: socket, wait and framing (R1),
+   key and match (R4), the timers (R6), the tasks an open starts (O-TASKS); after the round goes
+   (8.11.5): direct delivery (R5), the reply's dispatch (Q-REPLY), the group as a face of the
+   plan (S-GROUP), the face and link rows (H3), engine and runtime state (H7), the receive text
+   rows (T-RX, T-READ, T-LINK), no process section per message (SH6). The frame header and
+   record walk (R2) follow the SCE pin of R3.
+5. **The std form** after the nostd lanes it rests on: the feature collapse and panic policy
+   (SH2, SH3), stacks and allocation counts (SH4), all-zero rows after the heap row lanes
+   (SH5), the zenoh-c preset (SH7) and the Rust API (SH8) on section 8's engine.
+
+The files several lanes write are taken in this order, never side by side:
+
+| file | lanes, in order |
+|---|---|
+| `wz-capi-coop/src/engine.rs` | S-PLAN, Q-HOLD, D-AFTER, R5, H7, the open's lanes |
+| `wz-capi-coop/src/engine/direct.rs` | section 8, S-PLAN, H3, T-READ |
+| `wz-capi-coop/src/arena.rs` | H1, H2, H4, H3, T-OPEN, SH5 |
+| `wz-capi-pico/src/process_pool.rs` | H2, H5, H6 |
+| `wz-session-core/src/drive.rs` | R6, R2 |
+| `wz-session-core/src/session_actions.rs` | S-WRITE, R2, T-TX |
+| `wz-runtime-coop/src/stream_link.rs` | S-WRITE, R1, T-LINK |
+| `wz-session-core/src/network_message/push_read.rs` | R2, T-EXT |
+
+A lane is judged by its own reading on the shipped form (the callgrind slope of its path, the
+massif peak and row report, the ledger's area) and lands with its tests; a lane that trades one
+metric for another states both readings (text O2).
+
+### 9.4 The owner's decisions
+
+**Decided** (owner's delegated ruling, 2026-11-26): the heap's capacity is set as DDS sets
+`RESOURCE_LIMITS`, which is the capacity and quota of `limit_binding.rs`.
+
+- A build's limit (the preset's value) is the capacity: the static ceiling its types can hold.
+- What an open reserves is the quota its session's configuration states: wz keys of the open's
+  configuration for the most of each entity kind, of declared key expressions, of faces and of
+  payload blocks, each at most its capacity, or the open is refused under the limit's name.
+- A configuration that states no quota gets a small default, written in the preset's contract,
+  not the capacity.
+- No heap after the open holds: the quota is reserved once at the open, and a declaration past
+  it is refused with the error code zenoh-pico gives when its allocation fails.
+- The process pools (one per process, `process_limits.rs`) take their quotas from the first
+  open's configuration or from a configuration given to the process's initialisation.
+- Smaller rows and nothing reserved twice go on apart from this: they lower each quota's bytes.
+
+**Decided** (2026-11-26 under the owner's delegation, by the main session):
+
+- **No crate is a size boundary** ([text](win-budget/text.md) O1, P5). In `capi-nostd` a crate's
+  `opt-level` does not survive fat LTO (M1: -1,899 / +1,875, and the `&dyn` adapter of the move
+  +880). Cold code is one non-generic body at the root's level, out of line, with no adapter made
+  for it; the rows that leaned on a size level (text S3, S10, R2, D7, X3) are designed on that
+  form. The `capi-nostd` profile rows of `wz-app-schema`, `wz-auth` and `wz-tls-pem` are its
+  residue (text M1b).
+- **A get's ResponseFinal waits in its face's `TxBatch` and the batch is flushed once when the
+  read stage ends** ([ir-send-query](win-budget/ir-send-query.md) D6). No send window is open while
+  a callback runs, and one `send` carries the Response, its final and whatever else the stage
+  wrote to that face. The lane t-tx implements it.
+
+**Open**, each argued and recommended in its document:
+
+| question | documents | recommended there |
+|---|---|---|
+| the data path and a put take no session lock: a record is matched against an epoch-stamped match set, a face's key forms and up state change only under its send place (amends 8.4) | ir-receive D1, ir-send-query D2 | yes |
+| with `threads`, a face's read is one blocking read with no poll and no clock read; liveness is a heard flag (amends 8.9) | ir-receive D2 | yes |
+| the loaned sample is the session's own view behind the opaque C type | ir-receive D3 | yes |
+| the generated decode of one pass is taken by an SCE session, and wz moves its pin | ir-receive D4 | yes |
+| one sequence number per face (a Frame header per face past the first) rather than zenoh-pico's one for all | ir-send-query D1 | per face |
+| a group is a face of the put's plan | ir-send-query D3 | yes |
+| the default quotas of every count (the most one of zenoh-pico's examples holds at once), held replies of a get among them | heap D2, ir-send-query D4 | measured by heap M2 |
+| the numbered key range of the wz counts in `zp_config_insert` and the typed door's name | heap D3 | to be named |
+| the preset's default batch, 2,048 or 1,024 (fewer bytes, more batches for long messages) | heap D4 | 1,024 |
+| one reassembly chain by default, or none | heap D5 | 1 |
+| process pools staged and fixed after the first open, or a segment per later open | heap D6 | to be chosen |
+| the opprofile line per operation, whole process, both forms, is the verdict of an operation | ir-send-query D5 | yes |
+| instructions on the message path never rise for text; at equal instructions, text decides | text O2 | yes |
+| a move of code into tables is graded by `.text` plus `.rodata` | text O4 | yes |
+| the C libraries have no std form; `std` stays in the Rust API and the tools | std-heap 1 | yes |
+| a panic aborts at every C boundary (the parity preset's panic strategy) | std-heap 2, text O3 | yes |
+| the Rust API's budgets are differences against the same program without wz | std-heap 3 | yes |
+| the Rust API runs on the cooperative engine; tokio becomes an adapter | std-heap 4 | yes |
+| thread stacks sized by the stack-bound gate | std-heap 5 | yes |
+| an empty row is all-zero and the open writes no row it does not use | std-heap 6 | yes |
+
+Two of them interact: a batch of 1,024 (heap D4) costs instructions on messages longer than a
+batch, which the receive budget weighs, and the quota defaults (heap D2) decide whether the
+publisher program's last 0.5 KB is won.
+
+### 9.5 Cells to measure
+
+Every cell is read on both arms, shipped nostd form first, then std; none is read in the design.
+
+| document | cells |
+|---|---|
+| all | every receiver's line (subscriber, queryable peer) read in its connected window, net of an idle run: measure, harness f5f8ce646 |
+| ir-receive 14 | M1, M2 each stage's inclusive cost on both arms; M7 the same in the window; M3 the std form; M4 messages per batch and batches per read call; M5 a group member's read; M6 a key with a suffix |
+| ir-send-query 8 | by `pico-opprofile`: the paced loop alone; put at 8 B and 1 KiB; put with a group; put to two faces; get on both sides; declare of subscriber, publisher, queryable; open |
+| heap 11 | M1 the row report of the preset's own features; M2 the counts zenoh-pico's examples hold; M3 zenoh-pico's peak by site; M4 each estimated row after its lane; M5 the lodging places; M6 engine and runtime state by field; M7 the pools by pool; M8 resident memory of both arms, and the open after rss-zero |
+| text 9 | M0 the explain document's build; M1 the size level under fat LTO (read: none), M1b the same on the C-level root and the residual profile rows; M11 coop-resolver-pay and SCE ADR 0138; M12 each text lane's lines on the window harness; M2 the receive and send slopes around each text lane; M3 the explain document of the std case; M4 to M7 the bodies, instances and tables the rows name |
+| std-heap 4 | the std form's RSS, heap and text under the preset's limits; zenoh-pico under the same massif options; the extra copy's caller; the malloc arenas of both; the zenoh-c and upstream zenoh cells; zenoh-pico's read task by the difference of two runs |

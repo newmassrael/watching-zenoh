@@ -220,6 +220,7 @@ unsafe fn drop_keyer(mut k: wz_ext_owned_instance_keyer_t) {
 
 #[test]
 fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_programs() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut storage = vec![0u8; 6 * 16];
         let mut options: wz_ext_instance_keyer_options_t = std::mem::zeroed();
@@ -276,6 +277,7 @@ fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_progr
 
 #[test]
 fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
+    let _program = crate::programs::admit();
     unsafe {
         let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
         let outside = index(&k, &reading(30, 4, b""), 5_000);
@@ -343,6 +345,7 @@ fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
 
 #[test]
 fn a_keyer_is_refused_by_a_code_and_a_reason() {
+    let _program = crate::programs::admit();
     unsafe {
         let (rc, reason) = keyer(&[0xFF, 0xFE], DESCRIPTION, None).unwrap_err();
         assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
@@ -454,6 +457,7 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
 
 #[test]
 fn the_last_value_of_an_instance_is_set_by_the_program() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut storage = vec![0u8; 6 * 4];
         let mut options: wz_ext_instance_keyer_options_t = std::mem::zeroed();
@@ -502,6 +506,7 @@ fn the_last_value_of_an_instance_is_set_by_the_program() {
 #[cfg(feature = "event-ring")]
 #[test]
 fn a_report_of_drops_is_an_event_of_the_nodes_log() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::event_log::*;
     unsafe {
         let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
@@ -652,6 +657,7 @@ mod streams {
 
     #[test]
     fn the_receiver_judges_two_instances_apart_through_the_stream_number() {
+        let _program = crate::programs::admit();
         unsafe {
             let tx_keyer = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
             let rx_keyer = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
@@ -742,6 +748,7 @@ mod streams {
     #[cfg(feature = "e2e-sender-demux")]
     #[test]
     fn a_receiver_kept_per_sender_is_refused_by_the_judging_door() {
+        let _program = crate::programs::admit();
         unsafe {
             let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
             let mut tx = sender(6);
@@ -777,6 +784,7 @@ mod streams {
 #[cfg(feature = "proto-text")]
 #[test]
 fn a_keyer_made_from_the_schemas_text_is_the_compiled_ones() {
+    let _program = crate::programs::admit();
     unsafe {
         let k = keyer_text(SCHEMA, DESCRIPTION).expect("made");
         let mut instances = 0usize;

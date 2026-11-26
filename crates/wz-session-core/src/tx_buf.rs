@@ -87,6 +87,15 @@ pub trait TxBuf {
         let _ = n;
         Ok(None)
     }
+
+    /// Take all the room left as a window the caller fills from its front, the length grown to
+    /// the buffer's end; the caller then gives back what it did not fill with [`Self::truncate`].
+    /// A writer that does not know its message's length writes it in one pass and has it where
+    /// it stopped. `None` for a buffer with no end of its own (a vector grows) or that hands out
+    /// no window: nothing was taken, and the writer measures and [`Self::reserve`]s instead.
+    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        None
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -198,6 +207,14 @@ impl TxBuf for SliceTxBuf<'_> {
         self.len = end;
         Ok(Some(window))
     }
+
+    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        let end = self.storage.len();
+        // `len` never passes the storage's end, so the rest is a window, empty at worst.
+        let window = self.storage.get_mut(self.len..)?;
+        self.len = end;
+        Some(window)
+    }
 }
 
 /// A [`TxBuf`] that keeps no byte and counts the ones written to it.
@@ -247,6 +264,45 @@ impl TxBuf for CountTxBuf {
     }
 }
 
+/// What writes one network message into a sink: the writer a send hands its dispatch, as a trait
+/// object of its own and not `dyn Fn`, whose table would also hold the closure's `FnMut` and
+/// `FnOnce` shims, each of which can carry another copy of the writer's body. Every closure that
+/// writes a message is one, so a writer is still written as a closure.
+pub trait WireWrite {
+    /// Write the message into `sink`, or refuse it with the codec's error. Called through the
+    /// trait object's `write_body`.
+    fn write_wire(&self, sink: &mut TxSink<'_>) -> Result<(), CodecError>;
+}
+
+impl<F> WireWrite for F
+where
+    F: Fn(&mut TxSink<'_>) -> Result<(), CodecError>,
+{
+    fn write_wire(&self, sink: &mut TxSink<'_>) -> Result<(), CodecError> {
+        self(sink)
+    }
+}
+
+impl dyn WireWrite + '_ {
+    /// Write the message into `sink`, or refuse it. Every call of a writer handed over is this
+    /// one line, so the stack bound's rule for the call through the writer's table claims it by
+    /// its place here (`deploy/stack_call_contracts.json`, `tx-encoder`).
+    #[inline(always)]
+    pub fn write_body(&self, sink: &mut TxSink<'_>) -> Result<(), CodecError> {
+        self.write_wire(sink)
+    }
+}
+
+/// `body` as the closure a generic frame writer takes: one closure type for every writer handed
+/// over as a [`WireWrite`], so each such frame writer is compiled once for all of them and not
+/// once per call site.
+#[inline(always)]
+pub fn wire_body<'a>(
+    body: &'a dyn WireWrite,
+) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + 'a {
+    move |sink| body.write_body(sink)
+}
+
 /// The bytes `encode` writes, counted with nothing written ([`CountTxBuf`]): the length a send
 /// asks its link to lend for a message whose encoder is the one its dispatch then runs. Zero for
 /// a message the encoder refuses, which the dispatch's own run refuses with the same error.
@@ -254,7 +310,7 @@ impl TxBuf for CountTxBuf {
 /// Present where the encoders write through `dyn TxBuf` ([`EncodeBuf`]), which is what lets one
 /// compiled encoder serve the count and the slot.
 #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
-pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -> usize {
+pub fn encoded_len(encode: &dyn WireWrite) -> usize {
     try_encoded_len(encode).unwrap_or(0)
 }
 
@@ -265,11 +321,9 @@ pub fn encoded_len(encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>) -
 /// again into each.
 #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
 #[inline(never)]
-pub fn try_encoded_len(
-    encode: &dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError>,
-) -> Result<usize, CodecError> {
+pub fn try_encoded_len(encode: &dyn WireWrite) -> Result<usize, CodecError> {
     let mut count = CountTxBuf::new();
-    encode(&mut TxSink::new(&mut count))?;
+    encode.write_body(&mut TxSink::new(&mut count))?;
     Ok(count.len)
 }
 
@@ -385,6 +439,20 @@ impl<'a, B: TxBuf + ?Sized> TxSink<'a, B> {
     pub fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, B::Error> {
         self.buf.reserve(n)
     }
+
+    /// All the room the buffer has left as a window to fill from its front, or `None` (see
+    /// [`TxBuf::reserve_rest`]). The sink's position counts the whole window as written until
+    /// [`Self::rewind_to`] gives back what was not.
+    pub fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        self.buf.reserve_rest()
+    }
+
+    /// Keep only what this sink wrote up to `position` (its own count, as
+    /// [`SceSink::position`] reads it): the rest of a window [`Self::reserve_rest`] handed out,
+    /// or all of a message refused part way. A position at or past the sink's changes nothing.
+    pub fn rewind_to(&mut self, position: usize) {
+        self.buf.truncate(self.start.saturating_add(position));
+    }
 }
 
 impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B>
@@ -432,6 +500,46 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rest of a slice buffer is one window, up to its hold, which a sink counts as written
+    /// until it gives back what it did not fill. Turned red by a `reserve_rest` that leaves the
+    /// length where it was, or by a `rewind_to` that counts from the buffer's start and not the
+    /// sink's.
+    #[test]
+    fn the_rest_of_a_slice_buffer_is_one_window_and_its_unfilled_tail_is_given_back() {
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.append(&[1, 2]).unwrap();
+        buf.hold_to(6);
+        let mut sink = TxSink::over(&mut buf);
+        let window = sink.reserve_rest().expect("a slice hands its rest out");
+        assert_eq!(window.len(), 4, "the room up to the hold");
+        window[0] = 3;
+        assert_eq!(sink.position(), 4, "the window counts as written");
+        sink.rewind_to(1);
+        assert_eq!(sink.position(), 1);
+        assert_eq!(
+            buf.as_slice(),
+            &[1, 2, 3],
+            "the prefix and the one byte filled"
+        );
+        assert_eq!(buf.remaining(), 3);
+    }
+
+    /// A buffer with no end of its own hands no rest out, and a full one hands out an empty one.
+    #[test]
+    fn a_vector_hands_no_rest_out_and_a_full_slice_an_empty_one() {
+        #[cfg(feature = "alloc")]
+        {
+            let mut vector: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            assert!(vector.reserve_rest().is_none(), "a vector grows");
+        }
+        let mut storage = [0u8; 2];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.append(&[1, 2]).unwrap();
+        assert_eq!(buf.reserve_rest().map(|window| window.len()), Some(0));
+        assert_eq!(buf.len(), 2);
+    }
 
     #[test]
     fn a_slice_buffer_is_a_prefix_of_what_was_written() {
@@ -709,7 +817,10 @@ mod tests {
             Err(CodecError::LengthOutOfRange)
         });
         assert_eq!(refused, 0);
-        assert_eq!(encoded_len(&|_: &mut TxSink<'_>| Ok(())), 0);
+        assert_eq!(
+            encoded_len(&|_: &mut TxSink<'_>| Ok::<(), CodecError>(())),
+            0
+        );
     }
 
     #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
@@ -725,7 +836,44 @@ mod tests {
             Err(CodecError::LengthOutOfRange)
         });
         assert_eq!(refused, Err(CodecError::LengthOutOfRange));
-        assert_eq!(try_encoded_len(&|_: &mut TxSink<'_>| Ok(())), Ok(0));
+        assert_eq!(
+            try_encoded_len(&|_: &mut TxSink<'_>| Ok::<(), CodecError>(())),
+            Ok(0)
+        );
+    }
+
+    /// A writer handed over as a [`WireWrite`], whole or as the closure `wire_body` makes of it,
+    /// writes what its closure writes and refuses what its closure refuses. Turned red by the
+    /// blanket writer or `wire_body` calling anything but the closure it holds.
+    #[cfg(any(feature = "transport-tx-lend", not(feature = "alloc")))]
+    #[test]
+    fn a_writer_handed_over_writes_what_its_closure_writes() {
+        let write = |sink: &mut TxSink<'_>| {
+            sink.write_u8(0x5d)?;
+            sink.write_bytes(&[1, 2, 3])
+        };
+        let writer: &dyn WireWrite = &write;
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        writer
+            .write_body(&mut TxSink::new(&mut buf))
+            .expect("the writer writes");
+        assert_eq!(buf.as_slice(), &[0x5d, 1, 2, 3]);
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        wire_body(writer)(&mut TxSink::new(&mut buf)).expect("the closure writes");
+        assert_eq!(
+            buf.as_slice(),
+            &[0x5d, 1, 2, 3],
+            "the closure of the writer"
+        );
+        let refuse = |_: &mut TxSink<'_>| Err::<(), CodecError>(CodecError::LengthOutOfRange);
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        assert_eq!(
+            wire_body(&refuse)(&mut TxSink::new(&mut buf)),
+            Err(CodecError::LengthOutOfRange)
+        );
     }
 
     #[cfg(not(feature = "session-slot"))]

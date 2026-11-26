@@ -48,13 +48,13 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
     --features pico --engine coop|tokio CONFIG
                                   the same list on a named engine: on the cooperative one (the
                                   base's) the features that select the tokio engine (its drive
-                                  threads, gossip) are left out; on the tokio one `engine-coop`
+                                  threads, gossip) are left out; on the tokio one `os-host`
                                   is replaced by the tokio option's features, so the build is the
                                   header arm's drop-in with the engine under it changed
     --pico-config-h [--engine coop] FEATURES
                                   the reverse: print the zenoh-pico `config.h` of the wz-capi-pico
                                   build of FEATURES (a comma list, empty for none) on the default
-                                  features, or with --engine coop on `engine-coop` alone, rendered
+                                  features, or with --engine coop on `os-host` alone, rendered
                                   from the pinned config.h.in: every Z_FEATURE_* switch as the
                                   build carries it, every value switch a limit maps to at the
                                   WZ_LIMIT_<ID> the environment states, pico's defaults for the
@@ -457,6 +457,7 @@ def validate_decl(data: dict) -> list[str]:
     out += validate_policy_images(data)
     out += validate_switches(data)
     out += validate_limit_presets(data)
+    out += validate_limit_opens(data)
     symbols = [c["kconfig"] for c in data["capability"]] + [l["kconfig"] for l in data["limit"]]
     for pol in data.get("policy", []):
         symbols += policy_symbols(pol)
@@ -935,8 +936,13 @@ def validate_platforms(data: dict) -> list[str]:
 # names its own Cargo.toml, `bin` the binary), the declaration picks its features and constants, and
 # its `os` lists the operating systems the port under it exists for. A platform outside that list is
 # refused by name, with `os_note` as the reason, before anything is built.
+# A library whose ABI crate is an rlib is made by a crate of its own: `build_package` is that crate,
+# which names the ABI crate's features through its dependency on it (`build_dependency`), and a
+# library with no `std` form is built by the profile that does not unwind and its configuration
+# (`cargo_profile`, `cargo_config`, a path from the tree's root).
 ARTIFACT_KEYS = {"id", "package", "kind", "file", "family", "abi", "help", "input", "manifest", "bin",
-                 "os", "os_note"}
+                 "os", "os_note", "build_package", "build_dependency", "cargo_profile", "cargo_config"}
+ARTIFACT_BUILD_PAIRS = (("build_package", "build_dependency"), ("cargo_profile", "cargo_config"))
 ARTIFACT_REQUIRED = {"id", "package", "kind", "file", "family", "help"}
 ARTIFACT_KINDS = ("shared-library", "executable")
 ARTIFACT_INPUTS = ("node",)
@@ -966,6 +972,12 @@ def validate_artifacts(data: dict) -> list[str]:
                 out.append(f"{who}: a library names the ABI whose capabilities it has ({', '.join(ABIS)})")
         elif "abi" in a:
             out.append(f"{who}: only a library has an ABI")
+        for pair in ARTIFACT_BUILD_PAIRS:
+            stated = [k for k in pair if k in a]
+            if stated and len(stated) != len(pair):
+                out.append(f"{who}: `{pair[0]}` and `{pair[1]}` are stated together")
+            if stated and a.get("kind") != "shared-library":
+                out.append(f"{who}: only a library is built by a crate or a profile of its own")
         if "input" in a:
             if a["input"] not in ARTIFACT_INPUTS:
                 out.append(f"{who}: input is `{a['input']}`, not one of {', '.join(ARTIFACT_INPUTS)}")
@@ -1434,7 +1446,7 @@ LIMIT_RANGE_MOST = 4294967295
 LIMIT_KEYS = {"id", "kconfig", "default", "help",
               "storage", "scope", "binding_heap", "binding_fixed", "read", "wire",
               "kind", "driven", "range", "most", "on_heap", "zero_unbounded", "upstream",
-              "pico_preset"}
+              "pico_preset", "pico_open", "open_count", "process_open_count"}
 # Where the machines of a limit's scope read it (deploy/wz-config.toml, "Limits"): from the
 # snapshot their creator hands them, or still from the build's value. A statement of a limit read
 # from the build would be taken and never read, so a reader of a document refuses it by name.
@@ -1455,6 +1467,25 @@ LIMIT_UPSTREAM_NONE = "none"
 # and every other build keeps the defaults.
 LIMIT_PRESET_KEYS = {"value", "reason"}
 LIMIT_PRESET_SWITCH = "WZ_LIMITS_ZENOH_PICO"
+# A limit of a session's snapshot states in `[limit.pico_open]` what a session of the pico ABI
+# opens under while its config states no value of it, as a DDS reader's resource limits default to
+# a few and its QoS names more: `value`, the smallest power of two that holds what zenoh-pico's
+# parity programs declare on one session, and `reason`, the count. The preset's value, or else the
+# default, stays the build's bound: the Kconfig states it and a config may raise the open's value
+# up to it, never past it. The open is laid out from the value it opens under, so a session a
+# program does not size reserves only what those programs need.
+LIMIT_OPEN_KEYS = {"value", "reason"}
+# `open_count = true` marks a bound that counts what a session's open reserves memory for (an
+# entity table, the faces, the pending gets): its domain is every count up to the build's value in
+# every build, a build that keeps only its defaults included, so the build's value is the bound a
+# config is held to and not the one value a session takes. Any other limit (a batch size, a
+# protocol's value) keeps the build's value alone where the build keeps only its defaults.
+# `process_open_count = true` marks a capacity of the process pools the pico ABI reserves once for
+# the whole process (the values a program holds apart from any session, `HELD_*`): the build's
+# value is the most it reserves memory for, and the config the process opens its first session
+# from states the count it reserves, up to that value, after which the pools are fixed. No
+# snapshot holds it and a document still refuses it by name, as any capacity: a document states a
+# session's or a runtime's limits, and these pools belong to neither.
 LIMIT_PRESET_ORIGINAL = "zenoh-pico"
 # A key of zenoh's configuration as a path of its members, `transport/link/tx/lease`.
 UPSTREAM_KEY_RE = re.compile(r"[a-z0-9_]+(?:/[a-z0-9_]+)*")
@@ -1505,6 +1536,89 @@ def validate_limit_presets(data: dict) -> list[str]:
         if lid in anchored:
             out.append(f"{where}: a zenoh-pico value switch anchors to it, so its default is "
                        f"pico's own constant and it has no preset")
+    return out
+
+
+def limit_opens(limits: list[dict]) -> dict[str, int]:
+    """Each limit that states an open value (`[limit.pico_open]`), to that value, in the order the
+    limits are declared."""
+    return {lim["id"]: lim["pico_open"]["value"] for lim in limits
+            if isinstance(lim.get("pico_open"), dict)}
+
+
+def pico_opening_values(limits: list[dict]) -> dict[str, int]:
+    """The value each limit holds in the snapshot a session of the pico ABI opens under
+    (`PICO_PRESET`) where it is not the build's: its open value where it states one, else its pico
+    preset's. The Kconfig keeps the preset's, the bound a config may raise the open's value to."""
+    return {**limit_presets(limits), **limit_opens(limits)}
+
+
+def validate_limit_opens(data: dict) -> list[str]:
+    """A limit's open value is a power of two the limit admits, at most its bound (its pico preset,
+    else its default), with the reason, on a limit a session's snapshot holds: the open lays the
+    session out from it, and a runtime's limit or a capacity is no part of that snapshot."""
+    out: list[str] = []
+    for lim in data["limit"]:
+        if "pico_open" not in lim:
+            continue
+        where = f"limit `{lim.get('id', '?')}`"
+        opened = lim["pico_open"]
+        if not isinstance(opened, dict):
+            out.append(f"{where}: `pico_open` is a table of `value` and `reason`")
+            continue
+        for key in sorted(set(opened) - LIMIT_OPEN_KEYS):
+            out.append(f"{where}: `pico_open.{key}` is not a key an open value has")
+        preset = lim.get("pico_preset")
+        bound = preset.get("value") if isinstance(preset, dict) else lim.get("default")
+        value = opened.get("value")
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            out.append(f"{where}: `pico_open.value` is not a positive integer")
+        elif value & (value - 1):
+            out.append(f"{where}: its open value {value} is not a power of two")
+        elif isinstance(bound, int) and not isinstance(bound, bool) and value > bound:
+            out.append(f"{where}: its open value {value} is past its bound {bound}; a config "
+                       f"raises the open's value to the bound and never past it")
+        elif lim.get("kind") == "parameter" and isinstance(lim.get("range"), list) \
+                and not lim["range"][0] <= value <= lim["range"][-1]:
+            out.append(f"{where}: its open value {value} is outside its `range` {lim['range']}")
+        scope = lim.get("scope")
+        widest = scope[0] if isinstance(scope, list) and scope else scope
+        if widest == "runtime" or lim.get("storage") == "capacity":
+            out.append(f"{where}: it is no limit of a session's snapshot, so no open reads an "
+                       f"open value of it")
+        reason = opened.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            out.append(f"{where}: its open value states no reason")
+        if lim.get("open_count") is not True:
+            out.append(f"{where}: it states an open value but no `open_count = true`, so a build "
+                       f"that keeps only its defaults would leave the open value out")
+    for lim in data["limit"]:
+        if "open_count" not in lim:
+            continue
+        where = f"limit `{lim.get('id', '?')}`"
+        if lim["open_count"] is not True:
+            out.append(f"{where}: `open_count` is `true` or absent")
+        elif lim.get("kind") != "bound":
+            out.append(f"{where}: only a bound counts what an open reserves (`open_count`)")
+        elif lim.get("storage") == "capacity":
+            out.append(f"{where}: a capacity is fixed by the build, so no open counts it")
+    for lim in data["limit"]:
+        if "process_open_count" not in lim:
+            continue
+        where = f"limit `{lim.get('id', '?')}`"
+        scope = lim.get("scope")
+        widest = scope[0] if isinstance(scope, list) and scope else scope
+        if lim["process_open_count"] is not True:
+            out.append(f"{where}: `process_open_count` is `true` or absent")
+        elif lim.get("kind") != "bound":
+            out.append(f"{where}: only a bound counts what the first open reserves "
+                       f"(`process_open_count`)")
+        elif lim.get("storage") != "capacity":
+            out.append(f"{where}: a process pool's count is a capacity no snapshot holds, so a "
+                       f"limit a later stage decides is no `process_open_count`")
+        elif widest != "runtime":
+            out.append(f"{where}: a process pool belongs to no session, so its count is a "
+                       f"runtime's (`process_open_count`)")
     return out
 
 
@@ -2323,13 +2437,14 @@ def cargo_args_of(feats: list[str]) -> str:
 # choice changes the build's feature list (`engine_features`).
 ENGINE_COOP_SYMBOL = "WZ_ENGINE_COOP"
 ENGINE_AXIS = "engine"
-#: The feature of the pico base that names its engine, which the tokio option replaces.
-BASE_ENGINE_FEATURE = "engine-coop"
+#: The feature of the pico base that names its engine, the cooperative one on the host's own calls
+#: without `std`, which the tokio option replaces.
+BASE_ENGINE_FEATURE = "os-host"
 
 
 def engine_option_features(decl: dict, option: str) -> list[str]:
     """The features the option `option` of the engine axis names in the place of the pico base's
-    `engine-coop` (its `features` key). An option the axis lacks is a `KeyError`."""
+    `os-host` (its `features` key). An option the axis lacks is a `KeyError`."""
     for o in decl["options"]:
         if o["axis"] == ENGINE_AXIS and o["id"] == option:
             return list(o.get("features", []))
@@ -2343,7 +2458,7 @@ def tokio_switches() -> list[str]:
 
 def tokio_features(feats: list[str], switches: list[str]) -> list[str]:
     """`feats`, a pico list on the base's cooperative engine, on the tokio engine instead:
-    `engine-coop` replaced, where it stands, by `switches` (the tokio option's features)."""
+    `os-host` replaced, where it stands, by `switches` (the tokio option's features)."""
     out: list[str] = []
     for feat in feats:
         for named in (switches if feat == BASE_ENGINE_FEATURE else [feat]):
@@ -2357,7 +2472,7 @@ def engine_features(abi: str, base: list[str], feats: list[str], coop: bool,
     """`feats`, `abi`'s list for the capabilities a configuration turns on over the ABI's
     `base`, on the engine it chose: for the cooperative one, the pico base's engine, the pico
     crate's list with what selects the tokio engine left out (`coop_features`, over the crate's
-    feature table `table`); for the tokio one, the list with `engine-coop` replaced by
+    feature table `table`); for the tokio one, the list with `os-host` replaced by
     `switches`, the tokio option's features (read from the declaration when not given).
 
     Strict, as the resolution is (C9): a capability the configuration turned on that only the
@@ -2403,7 +2518,7 @@ def coop_features(feats: list[str], table: dict) -> list[str]:
     one, so the cooperative build must name no feature that selects it: one that lists
     `engine-tokio`, or lists a feature that does (the drive threads, gossip). What is left is
     what the engines share, which the crate forwards weakly (`wz-capi-core?/...`) and so selects
-    neither, and `engine-coop` is named in the place `engine-tokio` was. The table is
+    neither, and `os-host` is named in the place `engine-tokio` was. The table is
     READ, not listed here, so a feature that later selects the tokio engine leaves the list by
     itself.
     """
@@ -2420,8 +2535,9 @@ def coop_features(feats: list[str], table: dict) -> list[str]:
                 return True
         return False
 
-    return ["engine-coop"] + [f for f in feats
-                              if f not in ("engine-tokio", "engine-coop") and not selects_tokio(f)]
+    return [BASE_ENGINE_FEATURE] + [f for f in feats
+                                    if f not in ("engine-tokio", BASE_ENGINE_FEATURE)
+                                    and not selects_tokio(f)]
 
 
 def enabled_features(feats: dict, start: list[str]) -> set[str]:
@@ -2476,15 +2592,15 @@ PICO_SOURCE = ROOT / "vendor" / "zenoh-pico"
 def pico_build_features(engine: str, asked: list[str], table: dict) -> set[str]:
     """The wz-capi-pico features a build turns on, as cargo resolves them: `default` is the default
     features and `asked` (`cargo build -p wz-capi-pico --features ...`, the cooperative engine),
-    `coop` is `engine-coop` and `asked` alone (`--no-default-features --features
-    engine-coop,...`), and `tokio` is the default list on the tokio engine and `asked`
+    `coop` is the base's engine feature and `asked` alone (`--no-default-features --features
+    os-host,...`), and `tokio` is the default list on the tokio engine and `asked`
     (`tokio_features`, `--no-default-features`). A name the package lacks is a `KeyError`."""
     asked = [f for f in asked if f]
     if engine == "default":
         return enabled_features(table, ["default"] + asked)
     if engine == "tokio":
         return enabled_features(table, tokio_features(list(table["default"]), tokio_switches()) + asked)
-    return enabled_features(table, ["engine-coop"] + asked)
+    return enabled_features(table, [BASE_ENGINE_FEATURE] + asked)
 
 
 # -- the engine a host bench measures -------------------------------------------------------------------
@@ -2498,14 +2614,17 @@ def pico_build_features(engine: str, asked: list[str], table: dict) -> set[str]:
 PACKAGE_PICO_PROFILE = PROFILES / "host-peer-ext.conf"
 #: The engines a pico build runs its sessions on, by the names a bench and a statement use.
 PICO_ENGINES = ("tokio", "coop")
-#: The standard library a bench builds the pico ABI with: `std`, the host's, or `nostd`, the library
-#: without it on a POSIX host (docs/c-abi-engine-and-memory.md, E4 and phase P4), a form of the
-#: cooperative engine alone. Which one a run measures is the bench's to say
-#: (`scripts/host-bench/perf_matrix.py bench-stdlib`); this is the one place its features are made.
+#: The standard library the pico library a bench builds links, which its engine decides: the cooperative
+#: engine's library on a host is built without `std` (`os-host`, the `capi-nostd` profile;
+#: docs/win-budget/std-heap.md, S1: a C library has no `std` form), and the tokio engine's links it. A
+#: run records it beside the engine (`scripts/host-bench/perf_matrix.py`), so a table read from one form
+#: is not judged against the other.
 PICO_STDLIBS = ("std", "nostd")
-#: The feature that builds the pico ABI without `std` on the POSIX host a bench runs on, named in the
-#: place of `engine-coop`.
-BENCH_NOSTD_FEATURE = "os-posix"
+#: The crate a C program of the pico ABI links (`wz-capi-pico` is an rlib), and the name its manifest
+#: gives its dependency on the ABI crate, through which a build names the ABI's features.
+PICO_ARTIFACT = "wz-capi-pico-lib"
+PICO_ARTIFACT_DEP = "abi"
+PICO_ENGINE_STDLIB = {"tokio": "std", "coop": "nostd"}
 
 
 def bench_engine(stated: str, kconf=None) -> str:
@@ -2522,26 +2641,32 @@ def bench_engine(stated: str, kconf=None) -> str:
     return statement_engine("pico", set(resolved_features(load_decl(), "pico", kconf)))
 
 
-def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str = "std") -> list[str]:
-    """The features a bench's cargo build of wz-capi-pico names, without the default features, on
-    `engine` with the standard library `stdlib`, `table` the crate's feature table: on the tokio
-    engine the default build's list with `engine-coop` replaced by the tokio option's features
-    (`tokio_features`), and `asked`; on the cooperative one the default build's list with what
-    selects the tokio engine left out (`coop_features`), as the package's profile resolves its own,
-    and `asked`; without `std`, that list with `BENCH_NOSTD_FEATURE` in the place of
-    `engine-coop` and `std` left out, as the Windows package without `std` is made from its profile's
-    list. A capability asked that the cooperative engine does not run is refused by name rather than
-    built into a library on the tokio engine, and so is one that turns `std` on, asked of the library
-    without it, rather than built into a library with `std` after all (the crate refuses that build)."""
-    asked = [f for f in asked if f]
+def engine_stdlib(engine: str, stated: str | None = None) -> str:
+    """The standard library the pico library on `engine` links. `stated`, when the caller names one,
+    must be it: a library on the cooperative engine with `std`, or on the tokio engine without it, is
+    no form the crate builds, and is refused by name rather than measured as another."""
     if engine not in PICO_ENGINES:
         raise PresetError(f"`{engine}` is no engine of the pico ABI; one of {', '.join(PICO_ENGINES)}")
-    if stdlib not in PICO_STDLIBS:
-        raise PresetError(f"`{stdlib}` is no standard library a pico build is made with; one of "
+    if stated is not None and stated not in PICO_STDLIBS:
+        raise PresetError(f"`{stated}` is no standard library a pico build is made with; one of "
                           f"{', '.join(PICO_STDLIBS)}")
-    if stdlib == "nostd" and engine != "coop":
-        raise PresetError("the library without `std` is a form of the cooperative engine: measure it on "
-                          "the coop engine")
+    have = PICO_ENGINE_STDLIB[engine]
+    if stated is not None and stated != have:
+        raise PresetError(f"the {engine} engine's library is built {have}, not {stated}: the library "
+                          "without `std` is the cooperative engine's, the one with it the tokio engine's")
+    return have
+
+
+def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None) -> list[str]:
+    """The features a bench's cargo build of wz-capi-pico names, without the default features, on
+    `engine`, `table` the crate's feature table: on the tokio engine the default build's list with the
+    base's engine feature replaced by the tokio option's features (`tokio_features`), and `asked`; on
+    the cooperative one the default build's list with what selects the tokio engine left out
+    (`coop_features`), as the package's profile resolves its own, and `asked`. `stdlib`, when given,
+    is checked against the engine's (`engine_stdlib`). A capability asked that the cooperative engine
+    does not run is refused by name rather than built into a library on the tokio engine."""
+    asked = [f for f in asked if f]
+    engine_stdlib(engine, stdlib)
     if engine == "tokio":
         named = tokio_features(list(table["default"]), tokio_switches())
         return named + [f for f in asked if f not in named]
@@ -2550,37 +2675,22 @@ def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str
     if lost:
         raise PresetError(f"the cooperative engine does not run {', '.join(lost)}: measure "
                           f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
-    if stdlib == "std":
-        return named
-    return nostd_named_features(named, table)
+    return named
 
 
-def nostd_named_features(named: list[str], table: dict) -> list[str]:
-    """`named`, the feature list of a cooperative pico build with `std`, as the library without it,
-    `table` the crate's feature table: `BENCH_NOSTD_FEATURE` in the place of `engine-coop` and `std`
-    left out, as the Windows package without `std` is made from its profile's list. A feature that
-    turns `std` on is refused by name rather than built into a library with `std` after all (the
-    crate refuses that build)."""
-    bare = [BENCH_NOSTD_FEATURE] + [f for f in named if f not in ("engine-coop", "std")]
-    with_std = [f for f in bare if "std" in enabled_features(table, [f])]
-    if with_std:
-        raise PresetError(f"{', '.join(with_std)} turn{'s' if len(with_std) == 1 else ''} `std` on, so the "
-                          "library without it does not carry "
-                          f"{'it' if len(with_std) == 1 else 'them'}: measure "
-                          f"{'it' if len(with_std) == 1 else 'them'} with `std`")
-    return bare
-
-
-def bench_features(engine: str, asked: list[str], table: dict, stdlib: str = "std") -> set[str]:
-    """The wz-capi-pico features a bench's build on `engine` with `stdlib` turns on, as cargo resolves
-    them: what the reference zenoh-pico and the header a probe compiles against are derived from."""
+def bench_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None) -> set[str]:
+    """The wz-capi-pico features a bench's build on `engine` turns on, as cargo resolves them, `stdlib`
+    checked as `bench_named_features` checks it: what the reference zenoh-pico and the header a probe
+    compiles against are derived from."""
     return enabled_features(table, bench_named_features(engine, asked, table, stdlib))
 
 
+
 def bench_cargo_args(engine: str, asked: list[str], table: dict) -> str:
-    """The cargo words of that build, each feature named by its package, so the same words build it
-    beside another package (`-p zenoh-pico-sys -p wz-capi-pico`)."""
-    named = [f"wz-capi-pico/{f}" for f in bench_named_features(engine, asked, table)]
+    """The cargo words of that build of the C library, `-p wz-capi-pico-lib`, each feature named
+    through its dependency on the ABI crate (`abi`), so the same words build it beside another
+    package (`-p zenoh-pico-sys -p wz-capi-pico-lib`)."""
+    named = [f"{PICO_ARTIFACT_DEP}/{f}" for f in bench_named_features(engine, asked, table)]
     words = ["--no-default-features"]
     if named:
         words.append("--features " + ",".join(named))
@@ -2950,7 +3060,11 @@ def limit_spec_rust(lim: dict) -> list[str]:
             f"    const DRIVEN: Option<Driven> = {driven};",
             f"    const READ_FROM_SNAPSHOT: bool = {read};"]
     out += rust_assoc_const("CAPACITY", "Option<usize>", limit_capacity_rust(lim))
-    if bound and "most" in lim:
+    if bound and lim.get("open_count") is True and "most" in lim:
+        domain = f"LimitDomain::of_count_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT)"
+    elif bound and lim.get("open_count") is True:
+        domain = "LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT)"
+    elif bound and "most" in lim:
         domain = (f"LimitDomain::of_bound_within(Self::CAPACITY, {lim['most']}, Self::DEFAULT, "
                   "DEFAULTS_ONLY)")
     elif bound:
@@ -2982,15 +3096,43 @@ def camel_limit(lid: str) -> str:
     return "".join(part.capitalize() for part in lid.lower().split("_"))
 
 
+def preset_snapshot_rust(name: str, lims: list[dict], values: dict[str, int]) -> list[str]:
+    """`pub const <name>: Self`, the build defaults with each limit of `lims` that `values` names
+    kept at that value where the build's domain holds it, in the order of `lims`: a snapshot of the
+    pico preset (`PICO_PRESET`, `PICO_PRESET_BOUND`)."""
+    kept = []
+    for lim in lims:
+        value = values.get(lim["id"])
+        if value is None:
+            continue
+        held_name = camel_limit(lim["id"])
+        held = f"Quota::at_most({value})" if lim["kind"] == "bound" else f"{value}"
+        arg = f"&{held_name}Held::preset_or_build({held}, LimitValue::Integer({value}))"
+        one = f"        limits.keep({arg});"
+        if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
+            kept.append(one)
+        else:
+            # rustfmt overflows the one argument: the preset's call opens on the line and its
+            # arguments go one a line.
+            kept += [f"        limits.keep(&{held_name}Held::preset_or_build(", f"            {held},",
+                     f"            LimitValue::Integer({value}),", "        ));"]
+    if not kept:
+        return [f"    pub const {name}: Self = Self::BUILD;"]
+    return ([f"    pub const {name}: Self = {{", "        let mut limits = Self::BUILD;"]
+            + kept + ["        limits", "    };"])
+
+
 def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
-                        presets: dict[str, int] | None = None) -> list[str]:
+                        presets: dict[str, int] | None = None,
+                        bounds: dict[str, int] | None = None) -> list[str]:
     """The snapshot `snapshot` of `lims`: one array of words, a word for each limit whose domain
     is more than one value, so two snapshots compare as one slice; its build defaults, an accessor
     and a `select_*` per limit, the `LimitField` impl that states which word keeps each limit,
     and the table a reader that names a limit by its id dispatches on, which its `Debug` reads
-    the limits' names from. With `presets` (`limit_presets`), the snapshot of the pico preset
-    too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the build's
-    environment states."""
+    the limits' names from. With `presets` (`pico_opening_values`), the snapshot of the pico
+    preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the
+    build's environment states; with `bounds` (`limit_presets`), its bound, `PICO_PRESET_BOUND`:
+    the preset without the open values, what a config raises an open value to."""
     table = {"SessionLimits": "SESSION_LIMITS", "RuntimeLimits": "RUNTIME_LIMITS"}[snapshot]
     prefix = table[:-len('LIMITS')]
     count = f"{prefix}LIMIT_COUNT"
@@ -3041,31 +3183,21 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
             "    }"]
     if presets is not None and lims:
         out += ["",
-                "    /// The pico preset: each limit `[limit.pico_preset]` states at the preset's value, where the",
-                "    /// build's domain holds it, and the rest at the build's. What an ABI that follows",
-                "    /// zenoh-pico opens a session under before its config states otherwise; laid out when the",
-                "    /// build is compiled, from the declaration and not from the build's environment."]
-        kept = []
-        for lim in lims:
-            value = presets.get(lim["id"])
-            if value is None:
-                continue
-            name = camel_limit(lim["id"])
-            held = f"Quota::at_most({value})" if lim["kind"] == "bound" else f"{value}"
-            arg = f"&{name}Held::preset_or_build({held}, LimitValue::Integer({value}))"
-            one = f"        limits.keep({arg});"
-            if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
-                kept.append(one)
-            else:
-                # rustfmt overflows the one argument: the preset's call opens on the line and its
-                # arguments go one a line.
-                kept += [f"        limits.keep(&{name}Held::preset_or_build(", f"            {held},",
-                         f"            LimitValue::Integer({value}),", "        ));"]
-        if kept:
-            out += ["    pub const PICO_PRESET: Self = {", "        let mut limits = Self::BUILD;"]
-            out += kept + ["        limits", "    };"]
-        else:
-            out.append("    pub const PICO_PRESET: Self = Self::BUILD;")
+                "    /// The pico preset: each limit `[limit.pico_open]` states at its open value, each other",
+                "    /// limit `[limit.pico_preset]` states at the preset's value, where the build's domain holds",
+                "    /// it, and the rest at the build's. What an ABI that follows zenoh-pico opens a session",
+                "    /// under before its config states otherwise; laid out when the build is compiled, from the",
+                "    /// declaration and not from the build's environment."]
+        out += preset_snapshot_rust("PICO_PRESET", lims, presets)
+    if bounds is not None and lims:
+        out += ["",
+                "    /// The bound of the pico preset: each limit `[limit.pico_preset]` states at the preset's",
+                "    /// value, where the build's domain holds it, and the rest at the build's, no open value of",
+                "    /// `[limit.pico_open]` among them. What a config raises an open value to, and what a",
+                "    /// session opens under where its tables are a region the build laid out when it was",
+                "    /// compiled, which no config resizes; laid out from the declaration and not from the",
+                "    /// build's environment."]
+        out += preset_snapshot_rust("PICO_PRESET_BOUND", lims, bounds)
     if lims:
         out += ["",
                 "    /// The limit `L` as the snapshot's words keep it ([`LimitField::WORD`]).",
@@ -3194,6 +3326,7 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
     for lim in lims:
         out += [""] + limit_spec_rust(lim)
     out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds",
+                                      pico_opening_values(decl["limits"]),
                                       limit_presets(decl["limits"]))
     out += [""] + limit_snapshot_rust("RuntimeLimits", runtime, "a node or runtime holds")
     out += [""] + capacity_limits_rust(decl)
@@ -3203,13 +3336,23 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
 def capacity_limits_rust(decl: dict) -> list[str]:
     """`CAPACITY_LIMITS`: the id of every limit that is a capacity alone (the limits `open_limits`
     leaves out), so a reader that names a limit by its id tells a limit only the build sizes from
-    one the build does not have, and refuses each by its own reason."""
-    ids = [rust_word(lim["id"]) for lim in decl["limits"] if lim["storage"] == "capacity"]
+    one the build does not have, and refuses each by its own reason; and `PROCESS_OPEN_COUNTS`,
+    those of them whose count the first open's config states (`process_open_count`)."""
+    capacities = [lim for lim in decl["limits"] if lim["storage"] == "capacity"]
+    ids = [rust_word(lim["id"]) for lim in capacities]
+    counted = [rust_word(lim["id"]) for lim in capacities
+               if lim.get("process_open_count") is True]
     return [
-        "/// Every limit that is a capacity alone, by its id: the build sizes storage by it and no later",
-        "/// stage decides it, so neither snapshot holds it and a document that states it is refused by",
-        "/// name.",
-    ] + rust_static_array(f"pub static CAPACITY_LIMITS: [&str; {len(ids)}] =", ids)
+        "/// Every limit that is a capacity alone, by its id: the build sizes storage by it, so neither",
+        "/// snapshot holds it and a document that states it is refused by name. The build's value is",
+        "/// the storage itself, except for those in [`PROCESS_OPEN_COUNTS`], whose build value is the",
+        "/// most the process reserves.",
+    ] + rust_static_array(f"pub static CAPACITY_LIMITS: [&str; {len(ids)}] =", ids) + [
+        "",
+        "/// The capacities of the process pools whose count the config of the process's first open",
+        "/// states, each up to the build's value, after which the pools are fixed: the build's value is",
+        "/// the most the process reserves, and the first open's config the count it does reserve.",
+    ] + rust_static_array(f"pub static PROCESS_OPEN_COUNTS: [&str; {len(counted)}] =", counted)
 
 
 def first_sentence(text: str) -> str:
@@ -3561,9 +3704,9 @@ def statement_vectors(decl: dict) -> list[dict]:
             add(f"{name} alone", abi, [name], {})
     # The engine and the platform, read from the pico crate's features by the same rule on both
     # sides (`statement_engine`, `statement_platform`).
-    add("the cooperative engine", "pico", ["engine-coop"], {})
+    add("the cooperative engine", "pico", ["os-host"], {})
     add("the zephyr platform", "pico", ["os-zephyr"], {})
-    refuse("the tokio engine beside a cooperative feature", "pico", ["engine-tokio", "engine-coop"])
+    refuse("the tokio engine beside a cooperative feature", "pico", ["engine-tokio", "os-host"])
     for i, lim in enumerate(decl["limits"]):
         if lim["kind"] == "parameter" and lim["default"] == lim["range"][1]:
             add(f"{lim['id']} one below its default", ABIS[i % len(ABIS)], [],
@@ -4849,11 +4992,11 @@ STATEMENT_FORMAT = "wz-conformance-statement"
 STATEMENT_FORMAT_VERSION = 3
 
 # The features of the pico ABI's crate that run its sessions on the cooperative engine
-# (docs/capi-pico-on-coop-engine.md): `engine-coop` on a host, `os-posix` on a POSIX host and
-# `os-windows` on Windows without `std`, `os-zephyr` in a Zephyr image. A build that names none
+# (docs/capi-pico-on-coop-engine.md): `os-host` on a host, `os-zephyr` in a Zephyr image, both
+# without `std` (docs/win-budget/std-heap.md, S1). A build that names none
 # runs them on the tokio engine, and so does every build of the other ABIs, whose crates have no
 # other engine.
-STATEMENT_COOP_FEATURES = ("engine-coop", "os-posix", "os-windows", "os-zephyr")
+STATEMENT_COOP_FEATURES = ("os-host", "os-zephyr")
 # The features that build a library for a platform other than a host, each with the platform's
 # word in the statement; a build that names none is a host's.
 STATEMENT_PLATFORM_FEATURES = (("os-zephyr", "zephyr"),)
@@ -5730,16 +5873,16 @@ def cmd_selftest() -> int:
         pass
     expect("cargo args of nothing", cargo_args(decl, "c", set()) == "--no-default-features")
     expect("cargo args name the base then the closure",
-           cargo_args(decl, "pico", {"peer"}).endswith("engine-coop,link-udp,scout,peer"))
+           cargo_args(decl, "pico", {"peer"}).endswith("os-host,link-udp,scout,peer"))
     # The tokio engine is the base's list with its engine feature replaced where it stands.
     switches = engine_option_features(decl, "tokio")
     expect("the tokio option names the tokio engine and its drive",
            switches[:1] == ["engine-tokio"] and not engine_option_features(decl, "coop")
-           and "engine-coop" not in switches)
-    expect("the tokio list replaces engine-coop by the tokio option's features, in place, once",
-           tokio_features(["std", "engine-coop", "peer"], ["engine-tokio", "rx-busy-poll"])
-           == ["std", "engine-tokio", "rx-busy-poll", "peer"]
-           and tokio_features(["std", "peer"], ["engine-tokio"]) == ["std", "peer"])
+           and BASE_ENGINE_FEATURE not in switches)
+    expect("the tokio list replaces os-host by the tokio option's features, in place, once",
+           tokio_features(["os-host", "link-udp", "peer"], ["engine-tokio", "rx-busy-poll"])
+           == ["engine-tokio", "rx-busy-poll", "link-udp", "peer"]
+           and tokio_features(["link-udp", "peer"], ["engine-tokio"]) == ["link-udp", "peer"])
     expect("an engine option's features are an array of names, on a global axis only",
            any("features" in p for p in validate_images(
                {"axis": [{"id": "engine"}], "axis_option": [{"id": "t", "axis": "engine",
@@ -5766,7 +5909,7 @@ def cmd_selftest() -> int:
     arm = features_for(decl, "pico", {"peer", "query", "raweth-transport", "gossip"})
     coop = coop_features(arm, good)
     expect("the cooperative list names its engine first and not the tokio one",
-           coop[0] == "engine-coop" and "engine-tokio" not in coop)
+           coop[0] == "os-host" and "engine-tokio" not in coop)
     expect("the cooperative list drops what selects the tokio engine",
            not {"serial-drive-own-thread", "rx-busy-poll", "gossip"} & set(coop))
     expect("the cooperative list keeps what the engines share",
@@ -5782,10 +5925,10 @@ def cmd_selftest() -> int:
     shared = features_for(decl, "pico", {"peer", "query"})
     expect("the tokio engine is the list with the base's engine replaced by the tokio option's",
            engine_features("pico", base, arm, False, good, switches) == tokio_features(arm, switches)
-           and "engine-coop" not in engine_features("pico", base, arm, False, good, switches)
+           and "os-host" not in engine_features("pico", base, arm, False, good, switches)
            and "gossip" in engine_features("pico", base, arm, False, good, switches))
-    expect("the base is the cooperative engine's",
-           "engine-coop" in base and "engine-tokio" not in base)
+    expect("the base is the cooperative engine on the host's own calls, and names no std",
+           base == ["os-host"] and BASE_ENGINE_FEATURE == "os-host")
     expect("the cooperative engine is the cooperative list, the base's tokio switches out",
            engine_features("pico", base, shared, True, good) == coop_features(shared, good)
            and "rx-busy-poll" not in engine_features("pico", base, shared, True, good))
@@ -5802,7 +5945,7 @@ def cmd_selftest() -> int:
     expect("the cooperative engine is refused for the zenoh-c ABI",
            ENGINE_COOP_SYMBOL in refusal("c", features_for(decl, "c", set())))
     expect("the cargo arguments of a list are the list's",
-           cargo_args_of(["engine-coop", "std"]) == "--no-default-features --features engine-coop,std"
+           cargo_args_of(["os-host", "peer"]) == "--no-default-features --features os-host,peer"
            and cargo_args_of([]) == "--no-default-features")
 
     def refusal_text(call) -> str:
@@ -5821,51 +5964,45 @@ def cmd_selftest() -> int:
     expect("a bench on the tokio engine builds the default build on that engine",
            bench_features("tokio", [], good) == pico_build_features("tokio", [], good)
            and "engine-tokio" in bench_features("tokio", [], good)
-           and "engine-coop" not in bench_features("tokio", [], good)
+           and "os-host" not in bench_features("tokio", [], good)
            and bench_cargo_args("tokio", [], good).startswith(
-               "--no-default-features --features wz-capi-pico/std,wz-capi-pico/engine-tokio,")
-           and bench_cargo_args("tokio", ["app-transport"], good).endswith(",wz-capi-pico/app-transport"))
+               "--no-default-features --features abi/engine-tokio,")
+           and bench_cargo_args("tokio", ["app-transport"], good).endswith(",abi/app-transport"))
     expect("the default build is the cooperative engine's",
            pico_build_features("default", [], good) == enabled_features(good, ["default"])
-           and "engine-coop" in pico_build_features("default", [], good)
+           and "os-host" in pico_build_features("default", [], good)
            and "engine-tokio" not in pico_build_features("default", [], good))
     on_coop = bench_features("coop", [], good)
     expect("a bench on the cooperative engine builds the default capabilities that engine runs",
-           "engine-coop" in on_coop and "engine-tokio" not in on_coop
+           "os-host" in on_coop and "engine-tokio" not in on_coop
            and not {"serial-drive-own-thread", "rx-busy-poll"} & on_coop
            and set(coop_features(list(good["default"]), good)) <= on_coop
            and bench_cargo_args("coop", [], good).startswith(
-               "--no-default-features --features wz-capi-pico/engine-coop,"))
+               "--no-default-features --features abi/os-host,"))
+    expect("the pico C library takes the ABI crate by the dependency its features are named through",
+           f'{PICO_ARTIFACT_DEP} = {{ package = "wz-capi-pico"'
+           in (ROOT / "crates" / PICO_ARTIFACT / "Cargo.toml").read_text(encoding="utf-8"))
     expect("a capability asked of a bench that only the tokio engine runs is refused by name",
            "gossip" in refusal_text(lambda: bench_named_features("coop", ["gossip"], good))
            and "raweth-transport" in bench_named_features("coop", ["raweth-transport"], good))
-    # Without std: the same capabilities with the POSIX host's form in the place of the engine
-    # feature, so a table read from it compares the libraries alike but for the standard library.
-    on_nostd = bench_features("coop", [], good, "nostd")
-    expect("a bench without std builds the cooperative engine's capabilities on the host's form without it",
-           BENCH_NOSTD_FEATURE in on_nostd and not {"std", "engine-coop", "engine-tokio"} & on_nostd
-           and on_nostd - {BENCH_NOSTD_FEATURE} == on_coop - {"engine-coop", "std"}
-           and bench_named_features("coop", [], good, "nostd")[0] == BENCH_NOSTD_FEATURE
+    # The standard library is the engine's: the cooperative engine's library has no std form and the
+    # tokio engine's has no other, so a bench that names the other form is refused by name.
+    expect("each engine's library has the one standard library its engine decides",
+           engine_stdlib("coop") == "nostd" and engine_stdlib("tokio") == "std"
+           and engine_stdlib("coop", "nostd") == "nostd"
+           and bench_named_features("coop", [], good, "nostd") == bench_named_features("coop", [], good)
+           and bench_features("tokio", [], good, "std") == bench_features("tokio", [], good)
            and "app-transport" in bench_features("coop", ["app-transport"], good, "nostd"))
-    expect("the library without std is the cooperative engine's form, and a standard library is one of two",
+    expect("a form the crate does not build, or a standard library that is none, is refused by name",
            "cooperative" in refusal_text(lambda: bench_named_features("tokio", [], good, "nostd"))
+           and "tokio" in refusal_text(lambda: bench_named_features("coop", [], good, "std"))
            and "alloc" in refusal_text(lambda: bench_named_features("coop", [], good, "alloc"))
-           and bench_named_features("coop", [], good, "std") == bench_named_features("coop", [], good))
-    # No capability of the manifest turns std on any more (the C library has no std form, S1); the
-    # refusal is held on a table where one still does, so a capability that brings std back is named.
-    std_selecting = {name: list(feats) for name, feats in good.items()}
-    std_selecting["clock-source"] = [*std_selecting.get("clock-source", []), "std"]
-    expect("no capability of the manifest turns std on, only the engines' selectors",
-           not {name for name, feats in good.items() if "std" in feats}
-           - {"default", "engine-coop", "engine-tokio"})
-    expect("a capability that turns std on is refused of a bench without it, by name",
-           "clock-source" in refusal_text(
-               lambda: bench_named_features("coop", ["clock-source"], std_selecting, "nostd")))
-    expect("a preset's list without std names the host's form in the engine's place and keeps the rest",
-           nostd_named_features(["std", "engine-coop", "peer", "query"], good)
-           == [BENCH_NOSTD_FEATURE, "peer", "query"]
-           and "clock-source" in refusal_text(
-               lambda: nostd_named_features(["engine-coop", "clock-source"], std_selecting)))
+           and "fast" in refusal_text(lambda: engine_stdlib("fast")))
+    # The C library has no std form (S1): the crate has no `std` feature and none of its features
+    # names one; the tokio engine reaches `std` through its dependencies.
+    expect("the manifest has no std feature, and no feature names one",
+           "std" not in good and not {name for name, feats in good.items() if "std" in feats})
+
     if kconfiglib_module() is not None:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",
@@ -5928,10 +6065,10 @@ def cmd_selftest() -> int:
            == "sha256:1504af20a23a543a7613580140ff56e39f4f6324c8f15588f62ebc5d245da4bf")
     on_coop = conformance_statement(decl, "pico", coop, defaults, upstream, {})
     same_on_tokio = conformance_statement(
-        decl, "pico", ["engine-tokio"] + [f for f in coop if f != "engine-coop"], defaults,
+        decl, "pico", ["engine-tokio"] + [f for f in coop if f != "os-host"], defaults,
         upstream, {})
     on_zephyr = conformance_statement(
-        decl, "pico", ["os-zephyr"] + [f for f in coop if f != "engine-coop"], defaults,
+        decl, "pico", ["os-zephyr"] + [f for f in coop if f != "os-host"], defaults,
         upstream, {})
     expect("a statement names its engine and platform, and each moves the digest alone",
            stated["engine"] == "coop" and stated["platform"] == "host"
@@ -5940,7 +6077,7 @@ def cmd_selftest() -> int:
            and on_coop["digest"] != same_on_tokio["digest"]
            and on_zephyr["engine"] == "coop" and on_zephyr["platform"] == "zephyr"
            and on_zephyr["digest"] != on_coop["digest"]
-           and conformance_statement(decl, "c", ["engine-coop", "os-zephyr"], defaults,
+           and conformance_statement(decl, "c", ["os-host", "os-zephyr"], defaults,
                                      upstream, {})["engine"] == "tokio")
     # The zenoh-c drop-in (decision C15, step 15c): the arm its header selects is in the statement
     # and in the digest, and nothing else of the header is read.
@@ -6124,6 +6261,64 @@ def cmd_selftest() -> int:
            any("not under its default" in p for p in preset_problems({"value": 4, "reason": "r"})))
     expect("a pico preset without a reason is refused",
            any("no reason" in p for p in preset_problems({"value": 2})))
+    def open_problems(opened: object, **lim: object) -> list[str]:
+        return validate_limit_opens({"limit": [{**sample["limit"][0], "open_count": True, **lim,
+                                                "pico_open": opened}]})
+
+    expect("an open value that is a power of two at most the default, with a reason, is held",
+           open_problems({"value": 2, "reason": "two programs"}) == [])
+    expect("an open value past its bound is refused",
+           any("past its bound 4" in p for p in open_problems({"value": 8, "reason": "r"})))
+    expect("an open value past its pico preset is refused, though under the default",
+           any("past its bound 1" in p for p in open_problems(
+               {"value": 2, "reason": "r"}, pico_preset={"value": 1, "reason": "r"})))
+    expect("an open value that is no power of two is refused",
+           any("not a power of two" in p for p in open_problems({"value": 3, "reason": "r"})))
+    expect("an open value without a reason is refused",
+           any("no reason" in p for p in open_problems({"value": 2})))
+    expect("an open value of a limit that is no open count is refused",
+           any("no `open_count = true`" in p
+               for p in validate_limit_opens({"limit": [{**sample["limit"][0],
+                                                         "pico_open": {"value": 2, "reason": "r"}}]})))
+    expect("an open count that is not a bound is refused",
+           any("only a bound" in p for p in open_problems({"value": 2, "reason": "r"},
+                                                           kind="parameter")))
+    counted = decl_of({**sample, "limit": [{**sample["limit"][0], "open_count": True}]})
+    expect("an open count's domain is every count up to the build's value, in every build",
+           "LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT)"
+           in emit_rust_limit_snapshots(counted)
+           and "of_count(" not in emit_rust_limit_snapshots(decl_of(sample)))
+    expect("an open value of a runtime's limit is refused",
+           any("no limit of a session" in p
+               for p in open_problems({"value": 2, "reason": "r"}, scope="runtime")))
+
+    def process_count_problems(**lim: object) -> list[str]:
+        return validate_limit_opens({"limit": [{**sample["limit"][0], "storage": "capacity",
+                                                "scope": "runtime", "process_open_count": True,
+                                                **lim}]})
+
+    expect("a runtime's capacity the first open counts is held",
+           process_count_problems() == [])
+    expect("a process open count of a limit a later stage decides is refused",
+           any("a capacity no snapshot holds" in p for p in process_count_problems(storage="both")))
+    expect("a process open count of a session's limit is refused",
+           any("its count is a runtime's" in p for p in process_count_problems(scope="session")))
+    expect("a process open count that is not a bound is refused",
+           any("only a bound counts what the first open" in p
+               for p in process_count_problems(kind="parameter")))
+    expect("a process open count that is not true is refused",
+           any("`process_open_count` is `true` or absent" in p
+               for p in process_count_problems(process_open_count=False)))
+    opened_limit = {**sample["limit"][0], "pico_preset": {"value": 2, "reason": "r"},
+                    "pico_open": {"value": 1, "reason": "one"}}
+    expect("a session opens under the open value and the Kconfig keeps the preset as its bound",
+           pico_opening_values([opened_limit]) == {sample["limit"][0]["id"]: 1}
+           and "\tdefault 2 if " + LIMIT_PRESET_SWITCH in emit_kconfig_limits({"limits": [opened_limit]}))
+    bound_of_opened = preset_snapshot_rust("PICO_PRESET_BOUND", [opened_limit],
+                                           limit_presets([opened_limit]))
+    expect("the bound of the pico preset keeps the preset's value that the open value lowers",
+           any("LimitValue::Integer(2)" in line for line in bound_of_opened)
+           and not any("LimitValue::Integer(1)" in line for line in bound_of_opened))
     expect("a pico preset of a limit a pico value switch anchors to is refused",
            any("anchors to it" in p for p in validate_limit_presets({
                "limit": [{**sample["limit"][0], "pico_preset": {"value": 2, "reason": "r"}}],
@@ -6887,6 +7082,15 @@ def cmd_selftest() -> int:
     expect("a capacity alone is named in CAPACITY_LIMITS, and a limit a later stage decides is not",
            'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in emit_rust_limit_snapshots(cdecl)
            and "pub static CAPACITY_LIMITS: [&str; 0] = [];" in bsnap)
+    podecl = decl_of(read_decl_toml(
+        limit_text(storage='"capacity"', scope='"runtime"')
+        .replace('kind = "bound"\n', 'kind = "bound"\nprocess_open_count = true\n', 1)))
+    posnap = emit_rust_limit_snapshots(podecl)
+    expect("a capacity the first open counts is named in PROCESS_OPEN_COUNTS and stays a capacity",
+           'pub static PROCESS_OPEN_COUNTS: [&str; 1] = ["MAX_A"];' in posnap
+           and 'pub static CAPACITY_LIMITS: [&str; 1] = ["MAX_A"];' in posnap
+           and "pub static PROCESS_OPEN_COUNTS: [&str; 0] = [];"
+           in emit_rust_limit_snapshots(cdecl))
     expect("a limit read from the snapshot says so in its LimitSpec, and one read from the build",
            "    const READ_FROM_SNAPSHOT: bool = true;\n" in bsnap
            and "    const READ_FROM_SNAPSHOT: bool = false;\n"
@@ -7240,6 +7444,16 @@ def cmd_selftest() -> int:
            caps_refused('abi = "pico"\n', "", "names the ABI"))
     expect("an artifact with an unknown key is refused",
            caps_refused('family = "fam-a"', 'family = "fam-a"\nextra = "x"', "unknown key `extra`"))
+    own_build = 'family = "fam-a"\nbuild_package = "lib-a-c"\nbuild_dependency = "abi"\n' \
+                'cargo_profile = "capi-nostd"\ncargo_config = "crates/.cargo/capi-nostd.toml"'
+    expect("a library built by a crate and a profile of its own validates",
+           validate_decl(read_decl_toml(SAMPLE.replace('family = "fam-a"', own_build))) == [])
+    expect("a build package without the dependency it names features through is refused",
+           caps_refused('family = "fam-a"', 'family = "fam-a"\nbuild_package = "lib-a-c"',
+                        "`build_package` and `build_dependency` are stated together"))
+    expect("a profile of its own without its configuration is refused",
+           caps_refused('family = "fam-a"', 'family = "fam-a"\ncargo_profile = "capi-nostd"',
+                        "`cargo_profile` and `cargo_config` are stated together"))
     expect("a role id outside the vocabulary is refused",
            caps_refused('id = "pico-library"', 'id = "daemon"', "is not one of pico-library"))
     expect("a pico role on a library of another ABI is refused",
@@ -7255,6 +7469,10 @@ def cmd_selftest() -> int:
     expect("an executable that names an ABI is refused",
            any("only a library has an ABI" in p for p in validate_decl(read_decl_toml(
                exe.replace('family = "fam-a"', 'family = "fam-a"\nabi = "pico"')))))
+    expect("an executable built by a profile of its own is refused",
+           any("only a library is built by a crate or a profile of its own" in p
+               for p in validate_decl(read_decl_toml(exe.replace(
+                   'family = "fam-a"', 'family = "fam-a"\ncargo_profile = "p"\ncargo_config = "c"')))))
     expect("a library carrying a facts list is refused",
            caps_refused('artifact = "lib-a"\nid = "pico-library"',
                         'artifact = "lib-a"\nid = "pico-library"\nfacts_list = "x"',

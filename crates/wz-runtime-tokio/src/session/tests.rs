@@ -8002,7 +8002,7 @@ fn a_querier_takes_the_bound_its_sessions_creator_stated() {
     assert_eq!(querier.slots.pending(), 2, "and takes no place");
 }
 
-/// The replies a handler job or a held query stages apart from the observer are held to the
+/// The replies a handler job or a held query hands on apart from the observer are held to the
 /// bounds the session's creator stated to its observer, read when the session is made: a session
 /// over an observer held to a payload of two refuses a reply of three to the handler, and one
 /// over an observer made with no snapshot holds the build's bounds.
@@ -8012,7 +8012,8 @@ fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
     use wz_session_core::limit_binding::{LimitSpec, Quota};
     use wz_session_core::limits::{MaxReplyPayloadBytes, SessionLimits};
     use wz_session_core::query_sink::{ReplyError, ReplyOut};
-    use wz_session_core::reply_stage::{ReplyBounds, ReplyStage};
+    use wz_session_core::reply_pass::ReplyPass;
+    use wz_session_core::reply_stage::{ReplyBounds, ReplyParts};
 
     let (actions, _driver) = recording_actions();
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
@@ -8033,7 +8034,10 @@ fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
     let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
     assert_eq!(session.reply_bounds, ReplyBounds::of(&limits));
 
-    let mut replies = ReplyStage::held_to(session.reply_bounds);
+    let mut handed = 0usize;
+    let mut replies = ReplyPass::new(session.reply_bounds, |_parts: ReplyParts<'_>| {
+        handed += 1;
+    });
     {
         let mut responder = wz_session_core::query::QueryResponder::new(
             1,
@@ -8048,7 +8052,201 @@ fn a_sessions_reply_bounds_are_the_ones_its_creator_stated() {
         );
         assert_eq!(responder.try_reply(b"ab"), Ok(()));
     }
-    assert_eq!(replies.len(), 1, "the refused reply was not staged");
+    drop(replies);
+    assert_eq!(handed, 1, "the refused reply was not handed on");
+}
+
+/// A session whose creator stated `MAX_PENDING_REPLIES` as two, as the pico preset states it,
+/// where the build lets a statement choose it, and the build's value otherwise.
+#[cfg(all(
+    feature = "query-queryable",
+    any(feature = "codec-response-final", feature = "query-get")
+))]
+fn session_stating_two_pending_replies() -> (TokioSession, Arc<RecordingLinkDriver>) {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxPendingReplies, SessionLimits};
+
+    let mut limits = SessionLimits::defaults();
+    if !MaxPendingReplies::DOMAIN.is_singleton() {
+        limits
+            .select_max_pending_replies(Quota::at_most(2))
+            .expect("two is inside the domain");
+    }
+    let (actions, driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    (
+        TokioSession::new(actions, observer, Arc::new(TokioTime::new())),
+        driver,
+    )
+}
+
+/// How many replies the queryables of the tests below make for one query: more than the two rows
+/// the session states, and more than the build's own count of them.
+#[cfg(all(
+    feature = "query-queryable",
+    any(feature = "codec-response-final", feature = "query-get")
+))]
+const TEN_REPLIES: usize = 10;
+
+/// The payload of the `index`-th of those replies: two digits, so no one is a part of another.
+#[cfg(all(
+    feature = "query-queryable",
+    any(feature = "codec-response-final", feature = "query-get")
+))]
+fn nth_reply(index: usize) -> Vec<u8> {
+    format!("reply-{index:02}").into_bytes()
+}
+
+/// A queryable answers one query with every reply it makes, whatever count of rows the session's
+/// creator stated for the replies a dispatch holds back: with two stated, as the pico preset
+/// states them, a handler that answers a wire query ten times is told each was taken, and all ten
+/// leave on the link in the order it made them.
+#[cfg(all(feature = "query-queryable", feature = "codec-response-final"))]
+#[test]
+fn a_queryable_of_a_session_stating_two_pending_replies_sends_all_ten_it_makes() {
+    let (session, driver) = session_stating_two_pending_replies();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let told_in = told.clone();
+    let _q = session
+        .declare_queryable(
+            "home/**",
+            QueryableOptions::default(),
+            move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let mut told = told_in.lock().unwrap();
+                for index in 0..TEN_REPLIES {
+                    told.push(out.try_reply(&nth_reply(index)));
+                }
+            },
+        )
+        .expect("query-queryable on in this lane");
+    let base = driver.frame_count();
+
+    let outcome = query_frame_outcome(make_request_query(21, "home/temp"));
+    session.dispatch_iteration_event(crate::session_glue::IterationEvent::Poll(&outcome));
+
+    assert_eq!(
+        *told.lock().unwrap(),
+        vec![Ok(()); TEN_REPLIES],
+        "no reply was refused to the handler"
+    );
+    let sent: Vec<u8> = (base..driver.frame_count())
+        .flat_map(|index| driver.frame_bytes(index))
+        .collect();
+    let mut after = 0;
+    for index in 0..TEN_REPLIES {
+        let reply = nth_reply(index);
+        let at = sent[after..]
+            .windows(reply.len())
+            .position(|window| window == reply.as_slice())
+            .unwrap_or_else(|| panic!("reply {index} left the session, after the one before it"));
+        after += at + reply.len();
+    }
+}
+
+/// The same for a query the session asked of itself: the ten replies of its own queryable reach
+/// its get, and the get ends once, after them.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn a_local_get_of_a_session_stating_two_pending_replies_hears_all_ten() {
+    let (session, _driver) = session_stating_two_pending_replies();
+    let told = Arc::new(Mutex::new(Vec::new()));
+    let told_in = told.clone();
+    let _q = session
+        .declare_queryable(
+            "home/many",
+            QueryableOptions::default(),
+            move |_query: &dyn QueryView, out: &mut dyn ReplyOut| {
+                let mut told = told_in.lock().unwrap();
+                for index in 0..TEN_REPLIES {
+                    told.push(out.try_reply(&nth_reply(index)));
+                }
+            },
+        )
+        .expect("query-queryable is ON in this test build");
+    let heard = Arc::new(Mutex::new(Vec::new()));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let (h, f) = (heard.clone(), finals.clone());
+    session
+        .query(
+            "home/many",
+            get_opts_in_arrival_order().with_allowed_destination(Locality::SessionLocal),
+            move |reply| {
+                h.lock().unwrap().push(reply.payload().to_vec());
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get is ON in this test build");
+
+    assert_eq!(
+        *told.lock().unwrap(),
+        vec![Ok(()); TEN_REPLIES],
+        "no reply was refused to the handler"
+    );
+    let expected: Vec<Vec<u8>> = (0..TEN_REPLIES).map(nth_reply).collect();
+    assert_eq!(*heard.lock().unwrap(), expected, "every reply, in order");
+    assert_eq!(finals.load(Ordering::SeqCst), 1, "and the get ended once");
+}
+
+/// A query kept past its handler is answered the same way: ten replies made through the held
+/// query all reach the get, however few rows the session states.
+#[cfg(all(feature = "query-get", feature = "query-queryable"))]
+#[test]
+fn a_held_query_of_a_session_stating_two_pending_replies_answers_all_ten() {
+    let (session, _driver) = session_stating_two_pending_replies();
+    let held: Arc<Mutex<Option<HeldQuery>>> = Arc::new(Mutex::new(None));
+    let keep = held.clone();
+    let holder = session.clone();
+    let _queryable = session
+        .declare_queryable(
+            "home/held/many",
+            QueryableOptions::default(),
+            move |query, _out| {
+                *keep.lock().unwrap() = Some(holder.hold_query(query));
+            },
+        )
+        .expect("query-queryable is ON in this test build");
+    let heard = Arc::new(AtomicUsize::new(0));
+    let finals = Arc::new(AtomicUsize::new(0));
+    let (h, f) = (heard.clone(), finals.clone());
+    session
+        .query(
+            "home/held/many",
+            get_opts_in_arrival_order().with_allowed_destination(Locality::SessionLocal),
+            move |_| {
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                f.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("query-get is ON in this test build");
+
+    let mut told = Vec::new();
+    held.lock()
+        .unwrap()
+        .as_ref()
+        .expect("the handler kept the query")
+        .reply(|out| {
+            for index in 0..TEN_REPLIES {
+                told.push(out.try_reply(&nth_reply(index)));
+            }
+        });
+    assert_eq!(told, vec![Ok(()); TEN_REPLIES], "no reply was refused");
+    drop(held.lock().unwrap().take());
+    assert_eq!(
+        finals.load(Ordering::SeqCst),
+        1,
+        "dropping the held query closes it"
+    );
+    assert_eq!(
+        heard.load(Ordering::SeqCst),
+        TEN_REPLIES,
+        "every held reply reached the get"
+    );
 }
 
 /// The aliased querier holds the same bound.
@@ -13650,6 +13848,66 @@ fn a_publisher_matching_listener_is_refused_once_every_interest_id_is_spent() {
     assert_eq!(watches(), 1, "the refused listener's watch is rolled back");
     assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
     drop(control);
+}
+
+/// The matching listeners of a session's publishers and queriers are held to the one
+/// `MAX_MATCHING_LISTENERS` its creator stated: with two held, a third is refused on either
+/// plane before its watch is registered or its Interest emitted, and a listener let go makes room.
+/// Turned red by the publisher or the querier registering without asking
+/// `admits_matching_listener`, or by that answer counting one plane's watches alone.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-queryable"
+))]
+#[test]
+fn a_matching_listener_past_the_sessions_bound_is_refused_on_either_plane() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxMatchingListeners, SessionLimits};
+
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_max_matching_listeners(Quota::at_most(2));
+    if MaxMatchingListeners::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let (actions, driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    mark_session_established(&session);
+    let pubr = session.declare_publisher("demo/bound", PublishOptions::put());
+    let querier = session.declare_querier("demo/bound", QueryOptions::default());
+    let first = pubr
+        .declare_matching_listener(|_| {})
+        .expect("the first listener fits");
+    let _second = querier
+        .declare_matching_listener(|_| {})
+        .expect("the second listener fits");
+    let watches = || {
+        session.observer().lock().unwrap().read_app(|app_half| {
+            app_half.remote_subscribers.matching_listener_len()
+                + app_half.remote_queryables.matching_listener_len()
+        })
+    };
+    assert_eq!(watches(), 2);
+    let frames = driver.frame_count();
+    assert_eq!(
+        pubr.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::TableFull)
+    );
+    assert_eq!(
+        querier.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::TableFull)
+    );
+    assert_eq!(watches(), 2, "no refused watch is registered");
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+
+    assert!(first.undeclare());
+    pubr.declare_matching_listener(|_| {})
+        .expect("a listener let go makes room");
 }
 
 /// A matching listener's watch holds its publisher's key in place: on a key longer than it holds

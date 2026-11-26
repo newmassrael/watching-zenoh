@@ -79,6 +79,13 @@
 // subscriber's declaration arrived counts puts that went nowhere. -M is for the transports that carry
 // declarations; a group of the pico preset carries none and sends every put.
 //
+// Built against wz's library (PERF_WZ_ARM, which a build with PERF_PROGRAM_TRANSPORT needs too), the program
+// states before its open the counts its roles hold on their session at once, PERF_SESSION_LIMITS, by the
+// config key wz_ext.h names (WZ_EXT_CONFIG_LIMITS_KEY): a session of that library opens its tables at the few
+// zenoh-pico's own examples declare and takes no memory after its open, so a role that declares more than the
+// few without saying so has its declaration refused. zenoh-pico grows its lists on the heap and is told
+// nothing.
+//
 // -T NAME (PERF_PROGRAM_TRANSPORT only): every link of the session goes over the program's transport, here an
 // AF_UNIX stream in the abstract namespace under NAME. A tcp/ listen locator is a listening socket of that
 // name, whose accepted streams the program names with wz_ext_transport_accepted; a tcp/ connect locator is a
@@ -134,13 +141,18 @@
 #ifdef _WIN32
 #error "the program transport of perf_probe is an AF_UNIX stream in Linux's abstract namespace; it is not built on Windows"
 #endif
+#ifndef PERF_WZ_ARM
+#error "the program transport is wz's alone, so its build is one against wz's library: define PERF_WZ_ARM too"
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stddef.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#endif
 
+#ifdef PERF_WZ_ARM
 #include "wz_ext.h"
 #endif
 
@@ -157,6 +169,12 @@
 #define PEER_WAIT_MS 10000
 #define SUB_PREPARE_MS 1000
 #define BATCH_CYCLE_NS 1000000ULL
+// The most one role declares on its session at once, stated to wz's library before the open (PERF_WZ_ARM):
+// pong and sub hold two subscribers, ping and pub two publishers, and pong and ping three keys, one for each
+// of their entities. Each count is a power of two at most the pico preset's value, the bound the library
+// holds a statement to. scripts/host-bench/perf_matrix.py --selftest counts the roles' declarations below
+// against it.
+#define PERF_SESSION_LIMITS "MAX_SUBSCRIPTIONS=2,MAX_PUBLISHERS=2,MAX_DECLARED_KEYEXPRS=4"
 
 static volatile sig_atomic_t terminated = 0;
 
@@ -1225,6 +1243,12 @@ int main(int argc, char **argv) {
     if (o.match) {
         fprintf(stderr, "perf_probe: this library is built without Z_FEATURE_MATCHING, so -M cannot be asked\n");
         return 2;
+    }
+#endif
+#ifdef PERF_WZ_ARM
+    if (zp_config_insert(z_config_loan_mut(&config), WZ_EXT_CONFIG_LIMITS_KEY, PERF_SESSION_LIMITS) != Z_OK) {
+        printf("perf_probe %s: unable to state the session's limits (%s)\n", o.role, PERF_SESSION_LIMITS);
+        return 1;
     }
 #endif
     if (o.transport_name != NULL) {

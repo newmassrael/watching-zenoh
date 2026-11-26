@@ -127,7 +127,7 @@ on:
       - "vendor/sce"
       - "crates/Cargo.toml"
       - "crates/Cargo.lock"
-      # The pico library without `std` (`os-windows`): its host's locks, threads and clocks, and
+      # The pico library without `std` (`os-host`): its host's locks, threads and clocks, and
       # the configuration its profile is built with.
       - "crates/wz-host-sync/**"
       - "crates/.cargo/capi-nostd.toml"
@@ -721,6 +721,14 @@ jobs:
               if [ "$built" = PASS ]; then
                 integrated=FAIL
                 (cd crates && cargo test -p "$crate" --tests -- --nocapture) && integrated=PASS
+                # wz-capi-pico's merged executable `it` requires the pools' door, `object-pool` (its
+                # Cargo.toml), so `--tests` above leaves it out and keeps the default build; it runs
+                # here on its own, with the door.
+                if [ "$crate" = wz-capi-pico ] && [ "$integrated" = PASS ]; then
+                  integrated=FAIL
+                  (cd crates && cargo test -p wz-capi-pico --features object-pool --test it \
+                    -- --nocapture) && integrated=PASS
+                fi
               fi
               verdict "$crate integration tests:" "$integrated"
               [ "$integrated" = PASS ] || overall=FAIL
@@ -1029,7 +1037,7 @@ jobs:
           cat "$heap_log"
           verdict "the global allocator of the library without std (os::no_std_host):" "$heap"
           [ "$heap" = PASS ] || overall=FAIL
-          for features in engine-coop engine-coop,app-transport; do
+          for features in os-host os-host,app-transport; do
             built=FAIL
             (cd crates && cargo build -p wz-capi-pico --no-default-features --features "$features") && built=PASS
             verdict "wz-capi-pico builds with ${features}:" "$built"
@@ -1050,7 +1058,7 @@ jobs:
           # filter that selects nothing passes.
           rc=0
           out="$(cd crates && cargo test -p wz-capi-pico --no-default-features \
-            --features engine-coop,peer,multi-thread --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
+            --features os-host,peer,multi-thread,object-pool --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
           echo "$out"
           verdict=FAIL
           if [ "$rc" = 0 ] && grep -q '^test result: ok\. 2 passed' <<<"$out"; then verdict=PASS; fi
@@ -1068,8 +1076,8 @@ jobs:
           WZ_PICO_PROGRAM_ROLES: listen dial
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/tests/c/pico_coop_single_thread.c "a single-threaded pico C program on the cooperative engine" peer,query,queryable
 
-      # The same program against the library without `std` (`WZ_PICO_FORM=nostd`: `os-posix` on
-      # Linux, `os-windows` on Windows, the `capi-nostd` profile for the host's own target), in a
+      # The same program against the library without `std` (`WZ_PICO_FORM=nostd`: `os-host` on
+      # Linux and on Windows, the `capi-nostd` profile for the host's own target), in a
       # target directory of its own, so it replaces no library of the steps above. Not on macOS:
       # the library without `std` there is a form of its own (its profile's flags, a Darwin dynamic
       # library linked without `std`), which nothing in this repository has built yet.
@@ -1099,7 +1107,7 @@ jobs:
   # (`package-windows`), so every example builds the library the package ships: the profile
   # `host-peer-ext` resolved by the pinned Kconfig interpreter, on the engine it chooses (the
   # cooperative one, `WZ_PICO_ENGINE`), in the form a release ships, without `std`
-  # (`WZ_PICO_FORM`: `os-posix` on Linux, `os-windows` on Windows, the `capi-nostd` profile;
+  # (`WZ_PICO_FORM`: `os-host` on Linux and on Windows, the `capi-nostd` profile;
   # owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7), as ONE feature list
   # (`WZ_EXAMPLE_FEATURES`), so the library is built once; the profile example's second run builds
   # it again with the policy's build default on, last, because that build replaces the first. Both
@@ -1181,11 +1189,11 @@ jobs:
         shell: bash
         run: python -m pip install --quiet --no-deps --require-hashes -r scripts/requirements-kconfig.txt
 
-      # The profile's list without `engine-coop` and `std`: scripts/pico-c-program.sh names the
-      # host's layer without `std` in the place of the engine itself, and the library a release
-      # ships carries no `std` (`nostd_features` of scripts/lib/pico_windows_package.py drops it
-      # from the same list). A profile that no longer resolves to that engine fails here, and not as
-      # an example that ran against another build.
+      # The profile's list without `os-host`: scripts/pico-c-program.sh names the engine itself
+      # (`WZ_PICO_ENGINE=coop` puts `os-host` in front of the program's capabilities), and the
+      # library a release ships is built from the same list (`library_features` of
+      # scripts/lib/pico_windows_package.py). A profile that no longer resolves to that engine fails
+      # here, and not as an example that ran against another build.
       - name: the package's feature list
         if: ${{ env.WZ_HOST_SELECTED == 'true' }}
         shell: bash
@@ -1193,11 +1201,10 @@ jobs:
           args="$(python scripts/lib/wz_config.py --resolve-features pico configs/profiles/host-peer-ext.conf)"
           features=",${args#--no-default-features --features },"
           case "$features" in
-            *,engine-coop,*) ;;
+            *,os-host,*) ;;
             *) echo "host-peer-ext does not resolve to the cooperative engine: $args" >&2; exit 1 ;;
           esac
-          features="${features//,engine-coop,/,}"
-          features="${features//,std,/,}"
+          features="${features//,os-host,/,}"
           features="${features#,}"
           features="${features%,}"
           echo "the package's features: $features"
@@ -1318,33 +1325,30 @@ jobs:
   # package a release ships is uploaded with the symbols of both builds (the PDB beside each DLL)
   # whatever those readings say, and a size red can be read function by function from the same run.
   #
-  # The rows `nostd` are the package a release ships (owner, 2026-11-23, docs/c-abi-engine-and-memory.md
-  # E7, and the release workflow's `windows-packages`, which runs the same action on the same rows):
-  # the DLL built without `std` (`os-windows` over the system's own calls, P4), in the one form, the
-  # examples and the check program compiled against it and run, the sizes of the size gate's
-  # client in both forms printed (`pico-client-coop-windows`, `pico-client-coop-nostd-windows`),
-  # which only a Windows host can read, and the release DLL held under zenoh-pico built as the
-  # same build in the same job, by its width's row of `deploy/pico_host_ceiling.json`
-  # (`pico-release-windows-x64`, `pico-release-windows-x86`; docs/upstream-parity.md D9). The
-  # rows `std` are the library with the host's standard library, kept to compare and measure
-  # against, in both forms: `single`, the one DLL, and `split`,
-  # the core and the additional library built apart from the same feature list
-  # (docs/capi-pico-additional-library.md), whose programs link both import libraries; the split form
-  # has no row without `std` because its additional library has no form without it. The examples and
-  # the check program are the same for every row, so each passing them is every form doing what one
-  # program asks of it alike.
+  # Every DLL is the C library without `std` (docs/win-budget/std-heap.md, S1: `os-host` over the
+  # system's own calls), the only form it has. The rows `single` are the package a release ships
+  # (owner, 2026-11-23, docs/c-abi-engine-and-memory.md E7, and the release workflow's
+  # `windows-packages`, which runs the same action on the same rows): the one DLL, the examples and
+  # the check program compiled against it and run, the sizes of the size gate's client printed
+  # (`pico-client-coop-nostd-windows`), which only a Windows host can read, and the release DLL held
+  # under zenoh-pico built as the same build in the same job, by its width's row of
+  # `deploy/pico_host_ceiling.json` (`pico-release-windows-x64`, `pico-release-windows-x86`;
+  # docs/upstream-parity.md D9). The rows `split` are the core and the additional library built
+  # apart from the same feature list (docs/capi-pico-additional-library.md), whose programs link both
+  # import libraries; no release carries them. The examples and the check program are the same for
+  # every row, so each passing them is every form doing what one program asks of it alike.
   #
   # Every row is a GATE: a red here fails the run, as a package no longer builds or a program compiled
-  # against it no longer holds its checks. The `std` rows became one when two consecutive hosted runs
-  # read every row green, each with every verdict line of its test PASS (Platform runs 44891883427 and
-  # 44895098014, from the job logs). The `nostd` rows are one because they are what a release ships:
+  # against it no longer holds its checks. The `split` rows keep the verdict the rows with `std` held
+  # once two consecutive hosted runs read every row green, each with every verdict line of its test
+  # PASS (Platform runs 44891883427 and 44895098014, from the job logs). The `single` rows are one because they are what a release ships:
   # a release run fails on the same red, so the lane that reads every push holds them to the same
   # verdict rather than observing a form the release already judges.
   #
   # No Rust cache: the package is built with full debug information in both profiles, which no
   # entry of the cached workspace was built with.
   package-windows:
-    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} ${{ matrix.stdlib }} (windows-latest)
+    name: pico library package ${{ matrix.arch }} ${{ matrix.form }} (windows-latest)
     runs-on: windows-latest
     timeout-minutes: 120
     if: ${{ inputs.host == '' || inputs.host == 'both' || inputs.host == 'windows' }}
@@ -1353,10 +1357,6 @@ jobs:
       matrix:
         arch: [x64, x86]
         form: [single, split]
-        stdlib: [nostd, std]
-        exclude:
-          - form: split
-            stdlib: nostd
     steps:
       - name: Checkout (with submodules)
         uses: actions/checkout@v4
@@ -1371,24 +1371,22 @@ jobs:
         with:
           arch: ${{ matrix.arch }}
           form: ${{ matrix.form }}
-          stdlib: ${{ matrix.stdlib }}
 
       - name: Upload the package
         uses: actions/upload-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}-${{ matrix.stdlib }}
+          name: pico-windows-package-${{ matrix.arch }}-${{ matrix.form }}
           path: |
             ${{ steps.package.outputs.directory }}/*.zip
             ${{ steps.package.outputs.directory }}/*.zip.sha256
           if-no-files-found: error
           retention-days: 7
 
-      # The size gate's client in both forms, for this width: the DLL's sizes read from its own
-      # section table, and the ratio of the form without `std` to the one with it. Printed, gating
-      # nothing yet; after the package's test and its upload, so a measurement never stands in for
+      # The size gate's client, for this width: the DLL's sizes read from its own section table.
+      # Printed, gating nothing yet; after the package's test and its upload, so a measurement never stands in for
       # the test and a failing one never keeps the package from being uploaded.
-      - name: the sizes of the client with and without std (printed)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+      - name: the sizes of the client (printed)
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
         shell: bash
         env:
           WZ_PACKAGE_ARCH: ${{ matrix.arch }}
@@ -1400,7 +1398,7 @@ jobs:
       # Windows host given the same plan by hand builds it; the judge reads both DLLs and grades the
       # ratio. A finding, an unfilled row or a ratio over its ratchet fails the step.
       - name: the release DLL against zenoh-pico built as the same build, held to its ceiling row (gated)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
         shell: bash
         env:
           WZ_PACKAGE_ARCH: ${{ matrix.arch }}
@@ -1429,7 +1427,7 @@ jobs:
       # on (the judge holds it). It runs whatever the step above found, so a red release row still
       # reads the rows that say where the bytes are; a reading the step above did not leave fails it.
       - name: the release DLL's zenoh-pico features and each door over them, held to their ceiling rows (gated)
-        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.stdlib == 'nostd' }}
+        if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
         shell: bash
         env:
           WZ_PACKAGE_ARCH: ${{ matrix.arch }}
@@ -1500,7 +1498,7 @@ jobs:
       - name: Download the release package of this width
         uses: actions/download-artifact@v4
         with:
-          name: pico-windows-package-${{ matrix.arch }}-single-nostd
+          name: pico-windows-package-${{ matrix.arch }}-single
           path: ${{ runner.temp }}/pico-package
 
       - name: zenoh-pico's own programs on the release DLL (observed)

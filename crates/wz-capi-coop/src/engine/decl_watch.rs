@@ -332,12 +332,13 @@ struct Table {
 impl Table {
     /// A table of no watch, `most` of whose rows hold one (all of them when `most` is more).
     fn holding(most: usize) -> Self {
+        let rows: [Row; caps::MAX_DECL_WATCHES] = core::array::from_fn(|_| Row {
+            watch: None,
+            cell: Cell::empty(),
+        });
         Self {
-            rows: core::array::from_fn(|_| Row {
-                watch: None,
-                cell: Cell::empty(),
-            }),
-            most: most.min(caps::MAX_DECL_WATCHES),
+            most: most.min(rows.len()),
+            rows,
             observers: PlaneObservers::default(),
             next_id: 0,
             hearing: None,
@@ -367,14 +368,15 @@ pub(super) struct DeclWatches {
     shared: Arc<Shared>,
 }
 
-/// How many rows the session's value of a limit admits under the build's `ceiling`. A limit past
-/// the build's is refused, as the open that lays the ABI's places out refuses it.
-fn rows_under(value: Quota, ceiling: usize) -> Result<usize, LendRefused> {
+/// How many rows the session's value of a limit admits under the build's `CEILING`, the rows its
+/// table is sized for. A limit past the build's is refused, as the open that lays the ABI's places
+/// out refuses it.
+fn rows_under<const CEILING: usize>(value: Quota) -> Result<usize, LendRefused> {
     value
-        .lent_under(Quota::at_most(ceiling))
+        .lent_under(Quota::at_most(CEILING))
         .map_err(|_| LendRefused::OverCeiling {
             rows: value.most().unwrap_or(usize::MAX),
-            ceiling,
+            ceiling: CEILING,
         })
 }
 
@@ -752,7 +754,7 @@ impl DeclWatches {
         limits: &SessionLimits,
         round: &PlacedRef<Round>,
     ) -> Result<Self, LendRefused> {
-        let watches = rows_under(limits.max_decl_watches(), caps::MAX_DECL_WATCHES)?;
+        let watches = rows_under::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches())?;
         Ok(Self::holding(watches, round))
     }
 
@@ -778,7 +780,7 @@ impl DeclWatches {
     /// build's.
     #[cfg(not(wz_round))]
     pub(super) fn under(limits: &SessionLimits) -> Result<Self, LendRefused> {
-        let watches = rows_under(limits.max_decl_watches(), caps::MAX_DECL_WATCHES)?;
+        let watches = rows_under::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches())?;
         Ok(Self::holding(watches))
     }
 
@@ -1288,16 +1290,25 @@ fn uninstall<
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(all(
+        feature = "runtime-plan",
+        any(feature = "query", feature = "queryable")
+    ))]
     use crate::arena::{AllocatorMemory, SessionArena};
     #[cfg(any(feature = "query", feature = "queryable", not(wz_round)))]
     use wz_session_core::decl_sink::BorrowedDecl;
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(all(
+        feature = "runtime-plan",
+        any(feature = "query", feature = "queryable")
+    ))]
     use wz_session_core::slot_observer::ObserverRows;
 
     use super::super::registry::CoopSinks;
 
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    #[cfg(all(
+        feature = "runtime-plan",
+        any(feature = "query", feature = "queryable")
+    ))]
     use super::super::registry::App;
 
     /// The application's tables as this engine binds them, in the heap profile's storage: its
@@ -1632,8 +1643,12 @@ mod tests {
     }
 
     /// The observers go into and out of the application tables a session's arena lent, which the
-    /// session's registry holds, as they do into the heap profile's.
-    #[cfg(any(feature = "query", feature = "queryable"))]
+    /// session's registry holds, as they do into the heap profile's. Only where the open lends the
+    /// tables from its arena (`runtime-plan`); a build that places them reads its region's.
+    #[cfg(all(
+        feature = "runtime-plan",
+        any(feature = "query", feature = "queryable")
+    ))]
     #[test]
     fn the_observers_come_and_go_in_the_application_tables_an_arena_lent() {
         let mut arena =

@@ -61,6 +61,14 @@ impl<'a> QueryParts<'a> {
         #[cfg(feature = "pubsub-ts-stack")]
         ts_stack: None,
     };
+
+    /// The mode the asker's sink consolidates the replies with: the one the Request states, and
+    /// [`ConsolidationMode::None`], which passes every reply, where it states none, as a build
+    /// with no consolidation capability writes it. Read from the parts the Request is written
+    /// from, so the parameters are read once and the sink and the wire cannot be told two modes.
+    pub fn sink_consolidation(&self) -> ConsolidationMode {
+        self.consolidation.unwrap_or(ConsolidationMode::None)
+    }
 }
 
 #[cfg(feature = "alloc")]

@@ -26,7 +26,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
-use super::entity_tables::lowered;
+use super::entity_tables::{lowered, open_under};
 use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
@@ -630,6 +630,116 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     );
 }
 
+/// A session that listens on `tcp/` alone binds no udp port, so its plan lays out none of the
+/// ports' rows, as one that listens on nothing; a `udp/` endpoint beside it lends the slots. Each
+/// row is printed, so a run with `--nocapture` shows the bytes the tcp listener does not reserve.
+/// Turned red by port rows planned from the count of listeners rather than of the `udp/` ones,
+/// or laid out empty for a session with no port.
+#[cfg(feature = "listen")]
+#[test]
+fn a_session_that_listens_on_tcp_alone_is_lent_no_port_slot() {
+    let config = |listen: &[&str]| CoopConfig {
+        listen: listen.iter().map(|text| (*text).to_owned()).collect(),
+        max_faces: 2,
+        ..client_config()
+    };
+    let tcp = ArenaPlan::of(&config(&["tcp/127.0.0.1:0"]), &SessionLimits::defaults())
+        .expect("lays an arena out");
+    let both = ArenaPlan::of(
+        &config(&["tcp/127.0.0.1:0", "udp/127.0.0.1:0"]),
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out");
+    for part in [
+        "link port datagram flags",
+        "link port datagram slots",
+        "udp port peers",
+        "udp port queue",
+    ] {
+        std::println!("{part}: beside a udp port {:?} B", row(&both, part).bytes());
+        assert!(
+            tcp.rows().all(|laid| laid.part() != part),
+            "a session with no udp port lays out no {part}"
+        );
+    }
+    std::println!(
+        "reserved: tcp alone {:?} B, beside a udp port {:?} B",
+        tcp.reserved_bytes(),
+        both.reserved_bytes()
+    );
+    assert_eq!(
+        row(&both, "link port datagram slots").count,
+        caps::UDP_PORT_SLOTS
+    );
+    let (Some(tcp_bytes), Some(both_bytes)) = (tcp.reserved_bytes(), both.reserved_bytes()) else {
+        panic!("both plans have a size");
+    };
+    assert!(
+        tcp_bytes < both_bytes,
+        "{tcp_bytes} B is not under {both_bytes} B"
+    );
+}
+
+/// The buffers of a session's links a report of its memory reads (`link_buffers`) are the plan's
+/// rows, count and bytes, for a client and, in a build that listens, a listener: one reckoning
+/// for both. In a build whose links share pools the receive buffers are the pool's, under
+/// `RX_POOL_BUFFERS`; otherwise one for each link. Turned red by a plan that lays its link rows
+/// out by another reckoning than the one a report reads, or a report that counts a buffer for
+/// each link of a pooled build.
+#[test]
+fn the_link_buffers_a_report_reads_are_the_plans_rows() {
+    use crate::arena::{link_buffers, links_of, LINKS_SHARE_POOLS};
+
+    let mut configs = vec![client_config()];
+    if cfg!(feature = "listen") {
+        configs.push(CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        });
+    }
+    let limits = SessionLimits::defaults();
+    for config in configs {
+        let plan = ArenaPlan::of(&config, &limits).expect("lays an arena out");
+        let links = links_of(&config).expect("within the address space");
+        let buffers =
+            link_buffers(links, config.batch_size, &limits).expect("the plan's batch and pools");
+        let receive = row(&plan, "link receive buffers");
+        let transmit = row(&plan, "link transmit slots");
+        assert_eq!(
+            (receive.count, receive.entry_bytes),
+            (buffers.receive, buffers.bytes)
+        );
+        assert_eq!(
+            (transmit.count, transmit.entry_bytes),
+            (buffers.transmit, buffers.bytes)
+        );
+        assert_eq!(buffers.bytes, usize::from(config.batch_size));
+        assert_eq!(plan.reassembly().1, buffers.chains * chain_shares(&plan));
+        if LINKS_SHARE_POOLS {
+            assert!(buffers.receive <= caps::RX_POOL_BUFFERS.min(links));
+        } else {
+            assert_eq!(buffers.receive, links);
+        }
+    }
+}
+
+/// A list of endpoints counts its `udp/` ones, in the host's form and in a source's alike.
+/// Turned red by a count that reads another scheme as udp, or a source's count that drops one.
+#[test]
+fn a_list_of_endpoints_counts_its_udp_ones() {
+    use crate::open_source::{Counted, EndpointList};
+
+    let texts = ["tcp/127.0.0.1:7447", "udp/127.0.0.1:7447", "udp/[::1]:7447"];
+    let host = texts
+        .iter()
+        .map(|text| (*text).to_owned())
+        .collect::<std::vec::Vec<_>>();
+    assert_eq!((host.count(), host.udp()), (3, 2));
+    let counted = Counted::of(texts);
+    assert_eq!((counted.count(), counted.udp()), (3, 2));
+    assert_eq!(Counted::of(None::<&str>), Counted::default());
+}
+
 /// The parts of an arena that only a session that listens lays out: the slots its udp ports read
 /// their datagrams into, and the ports' books of their peers and of the datagrams waiting.
 #[cfg(feature = "listen")]
@@ -1046,11 +1156,13 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
+    // Two handshakes at once where the build admits them: a build at a preset of one admits one.
+    let handshakes = caps::MAX_ACCEPT_PENDING.min(2);
     let listening = ArenaPlan::of(
         &CoopConfig {
             listen: vec!["tcp/127.0.0.1:0".to_owned()],
             max_faces: 3,
-            accept_pending: 2,
+            accept_pending: handshakes,
             ..client_config()
         },
         &SessionLimits::defaults(),
@@ -1087,10 +1199,10 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
         "every face's peer tables are the same"
     );
     assert_eq!(row(&dial, "link receive buffers").count, 1);
-    assert_eq!(link_places(&listening), 3 + 2);
+    assert_eq!(link_places(&listening), 3 + handshakes);
     assert_eq!(
         row(&listening, "link receive buffers").count,
-        pooled(caps::RX_POOL_BUFFERS, 3 + 2),
+        pooled(caps::RX_POOL_BUFFERS, 3 + handshakes),
         "the links share a pool of receive buffers"
     );
     assert_eq!(
@@ -1116,11 +1228,13 @@ fn a_listener_lays_out_the_gets_of_each_face_it_admits() {
 #[cfg(feature = "listen")]
 #[test]
 fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
+    // Two handshakes at once where the build admits them: a build at a preset of one admits one.
+    let handshakes = caps::MAX_ACCEPT_PENDING.min(2);
     let listener = |endpoints: Vec<String>| CoopConfig {
         endpoints,
         listen: vec!["tcp/127.0.0.1:0".to_owned()],
         max_faces: 3,
-        accept_pending: 2,
+        accept_pending: handshakes,
         ..client_config()
     };
     let plan = |config: &CoopConfig| {
@@ -1131,8 +1245,8 @@ fn the_dial_roles_link_and_face_are_laid_out_only_for_a_session_that_dials() {
     assert!(!crate::arena::dials(&only) && crate::arena::dials(&dialling));
     let (only, dialling) = (plan(&only), plan(&dialling));
     let own = usize::from(cfg!(feature = "local-queryable"));
-    assert_eq!(link_places(&only), 3 + 2);
-    assert_eq!(link_places(&dialling), 1 + 3 + 2);
+    assert_eq!(link_places(&only), 3 + handshakes);
+    assert_eq!(link_places(&dialling), 1 + 3 + handshakes);
     assert_eq!((only.peers().tables, only.gets().tables), (3, 3 + own));
     assert_eq!(
         (dialling.peers().tables, dialling.gets().tables),
@@ -1364,33 +1478,37 @@ fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
     }
 }
 
-/// The session is lent one table of reassembly buffers its links share, a buffer for each chain
-/// one peer stages at once and one for the rejoined message the round keeps, however many links
-/// the session may hold, each as long as the
-/// session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
-/// session lowers it to, and a value over the build's refuses the plan under its own name.
-#[test]
-fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length() {
-    use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
+/// The faces whose reads stage their chains apart, a share of the reassembly table each: each set
+/// of face tables of a session that listens and reads each face where it lies, and one otherwise
+/// (`crate::arena::ArenaPlan::lay_out`).
+fn chain_shares(plan: &ArenaPlan) -> usize {
+    if cfg!(wz_round) || !cfg!(feature = "listen") {
+        1
+    } else {
+        plan.peers().sets()
+    }
+}
 
+/// The session is lent one table of reassembly buffers its links share, as many as its
+/// `REASSEMBLY_CHAINS` however many links the session may hold, each as long as the session's
+/// `PICO_FRAG_MAX_BYTES`: the build's count and length for a session that states neither, the
+/// count and the length a session lowers them to, no buffer for a session that states none, and a
+/// value over the build's refuses the plan under its own name. A report reads the same count
+/// (`link_buffers`). Turned red by a table laid out at the build's count whatever the session
+/// states, or one that grows with the links.
+#[test]
+fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_and_length() {
     let config = CoopConfig {
         max_faces: BESIDE_DIAL,
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     // Where the links are tasks they share the one table's chains; where each face's read stages
-    // its chains in a Router of its own (`direct`), the table holds a share for each face read
-    // where it lies, so the chains of one face never take another's buffers: each set of tables
-    // where the session listens, and the dial role's alone otherwise, a group's session staging
-    // its chains itself.
-    let shares = |plan: &ArenaPlan| {
-        if cfg!(wz_round) || !cfg!(feature = "listen") {
-            1
-        } else {
-            plan.peers().sets()
-        }
-    };
-    let chains = SESSION_CHAIN_BUFFERS * shares(&built);
+    // its chains in a Router of its own (`direct`), the table holds the session's count for each
+    // face read where it lies, so the chains of one face never take another's buffers: each set
+    // of tables where the session listens, and the dial role's alone otherwise, a group's session
+    // staging its chains itself.
+    let chains = caps::REASSEMBLY_CHAINS * chain_shares(&built);
     assert_eq!(row(&built, "reassembly buffers").count, chains);
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
@@ -1409,13 +1527,35 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
         one_link.reassembly(),
         (
             caps::PICO_FRAG_MAX_BYTES,
-            SESSION_CHAIN_BUFFERS * shares(&one_link)
+            caps::REASSEMBLY_CHAINS * chain_shares(&one_link)
         ),
         "the table grows with the sets of the faces read where they lie alone"
     );
-    let lowered = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
-    let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
+    let lowered_bytes = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
+    let plan = ArenaPlan::of(&config, &lowered_bytes).expect("lays an arena out");
     assert_eq!(row(&plan, "reassembly buffers").entry_bytes, 1024);
+    let one = lowered(|l| l.select_reassembly_chains(Quota::at_most(1)));
+    let plan = ArenaPlan::of(&config, &one).expect("lays an arena out");
+    let stated = chain_shares(&plan);
+    assert_eq!(
+        plan.reassembly(),
+        (caps::PICO_FRAG_MAX_BYTES, stated),
+        "the count the session states, for each face read where it lies"
+    );
+    assert_eq!(row(&plan, "reassembly buffers").count, stated);
+    assert_eq!(row(&plan, "reassembly flags").count, stated);
+    assert_eq!(
+        crate::arena::link_buffers(1, config.batch_size, &one).map(|buffers| buffers.chains),
+        Ok(1),
+        "a report reads the count the session states"
+    );
+    let none = lowered(|l| l.select_reassembly_chains(Quota::at_most(0)));
+    let plan = ArenaPlan::of(&config, &none).expect("lays an arena out");
+    assert_eq!(
+        plan.reassembly().1,
+        0,
+        "a session that states no chain is lent no buffer"
+    );
     let over = caps::PICO_FRAG_MAX_BYTES + 1;
     let mut raised = SessionLimits::defaults();
     if raised
@@ -1432,6 +1572,98 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
                 },
             })
         );
+    }
+    let more = caps::REASSEMBLY_CHAINS + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised
+        .select_reassembly_chains(Quota::at_most(more))
+        .is_ok()
+    {
+        let refused = ArenaRefused::Limit {
+            limit: ArenaLimit::ReassemblyChains,
+            why: UnlentRows::OverCeiling {
+                value: more,
+                ceiling: caps::REASSEMBLY_CHAINS,
+            },
+        };
+        assert_eq!(ArenaPlan::of(&config, &raised), Err(refused));
+        assert_eq!(
+            crate::arena::link_buffers(1, config.batch_size, &raised).map(|buffers| buffers.chains),
+            Err(refused),
+            "a report is refused as the plan is"
+        );
+    }
+}
+
+/// A session whose config states one reassembly buffer rejoins one chain at a time: a chain of
+/// the other reliability that starts while the first is open is refused as pool exhaustion and
+/// counted by the session's staging, and once the first has rejoined its message and given its
+/// buffer back the next chain begins, uncounted. The CONTROL is a session at the build's count,
+/// where the same second chain begins. Turned red by an open that lends the table at the build's
+/// count whatever the config states, or a refusal the staging does not count.
+#[test]
+fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
+    use wz_session_core::extfragment::FragmentMarkers;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome, RefuseReason};
+
+    /// One fragment of the chain of `reliable` at `sn`, the last of it where `more` is `0`,
+    /// rejoined by the session's Router.
+    fn ingest(engine: &Engine, reliable: bool, sn: u64, more: u8) -> IngestOutcome {
+        engine.with_chain_router(|reassembly, now_ms| {
+            reassembly.ingest(
+                Fragment {
+                    peer_key: &[0x5a; 16],
+                    reliable,
+                    sn,
+                    more,
+                    payload: b"part",
+                    priority: Priority::DEFAULT,
+                    markers: FragmentMarkers::NONE,
+                },
+                wz_session_core::sn::mask_from_res(0x02),
+                now_ms,
+                |_| {},
+            )
+        })
+    }
+    /// The chains the session's staging refused a buffer to.
+    fn refused(engine: &Engine) -> u64 {
+        engine.with_chain_router(|reassembly, _| reassembly.staging().refused())
+    }
+
+    // A router stand-in serves one session, so each session below dials one of its own.
+    let router = Router::start(CatchAll::None);
+    let one = open_under(
+        &router,
+        lowered(|l| l.select_reassembly_chains(Quota::at_most(1))),
+    );
+    assert_eq!(ingest(&one, true, 1, 1), IngestOutcome::Begun);
+    assert_eq!(
+        ingest(&one, false, 1, 1),
+        IngestOutcome::Refused(RefuseReason::PoolExhausted),
+        "the one buffer is the open chain's"
+    );
+    assert_eq!(refused(&one), 1, "the refused chain is counted");
+    assert_eq!(ingest(&one, true, 2, 0), IngestOutcome::Reassembled);
+    assert_eq!(
+        ingest(&one, false, 2, 1),
+        IngestOutcome::Begun,
+        "the buffer given back serves the next chain"
+    );
+    assert_eq!(refused(&one), 1, "a chain served counts nothing");
+    drop(one);
+    drop(router);
+    if caps::REASSEMBLY_CHAINS >= 2 {
+        let router = Router::start(CatchAll::None);
+        let built = open(&router);
+        assert_eq!(ingest(&built, true, 1, 1), IngestOutcome::Begun);
+        assert_eq!(
+            ingest(&built, false, 1, 1),
+            IngestOutcome::Begun,
+            "CONTROL: at the build's count the second chain has a buffer"
+        );
+        assert_eq!(refused(&built), 0);
     }
 }
 
@@ -2537,19 +2769,29 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
             theirs.part()
         );
     }
-    assert!(
-        peer.reserved_bytes()
-            < ArenaPlan::of(
-                &CoopConfig {
-                    listen: vec!["tcp/127.0.0.1:0".to_owned()],
-                    ..client_config()
-                },
-                &SessionLimits::defaults(),
-            )
-            .expect("lays an arena out")
-            .reserved_bytes(),
-        "a peer at the preset reserves less than a listener at the build's defaults"
-    );
+    let at_the_build = ArenaPlan::of(
+        &CoopConfig {
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            ..client_config()
+        },
+        &SessionLimits::defaults(),
+    )
+    .expect("lays an arena out")
+    .reserved_bytes();
+    // A build that admits no more faces and handshakes than the preset, one made at it, lays out
+    // the peer's links and faces at its defaults too, and so has nothing of them to lower.
+    let build = SessionLimits::defaults();
+    if admitted_faces(&build) == Ok(faces) && admitted_handshakes(&build) == Ok(handshakes) {
+        assert!(
+            peer.reserved_bytes() <= at_the_build,
+            "a peer at the preset reserves no more than a listener at a build of the preset"
+        );
+    } else {
+        assert!(
+            peer.reserved_bytes() < at_the_build,
+            "a peer at the preset reserves less than a listener at the build's defaults"
+        );
+    }
 }
 
 /// The rows of the arena a session reserves at its open, item by item, for a client and a peer at
@@ -2885,8 +3127,9 @@ fn the_places_of_link_events_listeners_are_counted_by_their_limit() {
 /// rooms, the ABI's handle and its places for every kind of entity among them, holds exactly
 /// `ARENA_ROWS` rows: the groups' counts are the rows the plan puts, in whichever build. A group
 /// that puts a row it does not count, or counts one it does not put, turns this red. A build that
-/// joins groups names one, since a config that names none plans no group receive table, and a
-/// build that listens names a port, as one that listens on none plans no row of the ports. Each of
+/// joins groups names one, since a config that names none plans no group receive table, and a build
+/// that listens listens on a `udp/` endpoint, since a session with no port plans none of the
+/// ports' rows. Each of
 /// those rows names a part of its own, which a report finds it by: a part named as another, or a
 /// table laid out under the part of its flags twice, turns this red too.
 #[test]
@@ -2911,9 +3154,6 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         declarations: GroupDeclarations::Entities,
     };
     let groups = usize::from(cfg!(feature = "group"));
-    // A build that listens names a port, since a config that listens on none plans no row of
-    // the ports.
-    let listens = usize::from(cfg!(feature = "listen"));
     let place = core::alloc::Layout::new::<u64>();
     let held = EntityKind::ALL
         .into_iter()
@@ -2923,11 +3163,16 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
         .with_lodgings(place, 1);
     // Faces that share their pools where the build takes faces beside its dial role's, so the
     // table of tokens the faces that went owe is put too.
+    let listen = if cfg!(feature = "listen") {
+        vec!["udp/127.0.0.1:0".to_owned()]
+    } else {
+        Vec::new()
+    };
     let mut plan = ArenaPlan::of(
         &CoopConfig {
             max_faces: BESIDE_DIAL,
             groups: vec![join; groups],
-            listen: vec!["udp/127.0.0.1:0".to_owned(); listens],
+            listen,
             ..client_config()
         },
         &SessionLimits::defaults(),
@@ -3116,17 +3361,18 @@ fn preset_client(dials: usize) -> CoopConfig {
     }
 }
 
-/// The pico preset with one limit lowered: limits a region of the preset was not laid out for.
+/// The pico preset with one limit moved off its value: limits a region of the preset was not laid
+/// out for.
 fn other_than_preset() -> SessionLimits {
     let preset = SessionLimits::PICO_PRESET;
-    let fewer = if preset.max_subscriptions() == Quota::at_most(2) {
+    let moved = if preset.max_subscriptions() == Quota::at_most(2) {
         1
     } else {
         2
     };
     let mut other = preset;
     other
-        .select_max_subscriptions(Quota::at_most(fewer))
+        .select_max_subscriptions(Quota::at_most(moved))
         .expect("the build admits a few subscribers");
     assert_ne!(other, preset, "CONTROL: the limits differ from the preset");
     other
@@ -3360,8 +3606,6 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
 #[cfg(not(wz_round))]
 #[test]
 fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
-    use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
-
     let config = CoopConfig {
         max_faces: BESIDE_DIAL,
         ..client_config()
@@ -3377,7 +3621,7 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
     let read = if cfg!(feature = "listen") { sets } else { 1 };
     assert_eq!(
         row(&plan, "reassembly buffers").count,
-        SESSION_CHAIN_BUFFERS * read
+        caps::REASSEMBLY_CHAINS * read
     );
     let direct = plan.rows().find(|row| row.part() == "direct faces");
     if read > 1 {

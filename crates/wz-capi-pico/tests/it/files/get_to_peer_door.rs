@@ -185,6 +185,7 @@ fn finished(get: &Get) {
 
 #[test]
 fn a_get_addressed_to_one_peer_asks_that_peer_alone_or_is_refused_while_the_policy_is_off() {
+    let _program = crate::programs::admit();
     let policy_on = SessionPolicy::from_build().targeted_query();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -277,6 +278,7 @@ fn a_get_addressed_to_one_peer_asks_that_peer_alone_or_is_refused_while_the_poli
 /// A null peer is refused, and the get's callback is consumed all the same.
 #[test]
 fn a_get_to_no_peer_is_refused_and_consumes_its_callback() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: as the test above.

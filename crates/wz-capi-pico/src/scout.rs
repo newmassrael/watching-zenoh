@@ -1542,7 +1542,7 @@ mod tests {
     /// holds it is refused at once, another thread's waits for it and has it once it is given back,
     /// with what is left of its budget, and one whose budget runs out first goes without. Turned red
     /// by a table claimed twice at once, a re-entered scout that waits, or a waiter that is not woken.
-    #[cfg(all(not(feature = "engine-tokio"), feature = "std"))]
+    #[cfg(feature = "os-host")]
     #[test]
     fn the_static_table_is_waited_for_and_refused_only_to_its_own_thread() {
         use std::time::{Duration, Instant};
@@ -1584,7 +1584,7 @@ mod tests {
     /// Two threads that scout at once both complete: the second waits for the table the first
     /// holds, within its own budget, and neither is refused. Over the host's sockets, on a group
     /// nobody answers. Turned red by a scout refused because another thread scouts.
-    #[cfg(all(not(feature = "engine-tokio"), feature = "std"))]
+    #[cfg(feature = "os-host")]
     #[test]
     fn two_threads_that_scout_at_once_both_complete() {
         use core::sync::atomic::{AtomicUsize, Ordering};

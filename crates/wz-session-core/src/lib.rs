@@ -1947,6 +1947,11 @@ pub mod query;
 #[cfg(feature = "storage-profile")]
 pub mod reply_stage;
 
+/// A reply handed on as its queryable makes it, held to the session's payload bound and to no
+/// count of rows: what a callback that runs with no lock of the session held answers through.
+#[cfg(feature = "storage-profile")]
+pub mod reply_pass;
+
 /// What a consolidating get holds back, and the one rule it holds by: the owned replies of one get
 /// on the heap, or the rows of the session's one table of held replies, with no allocation.
 #[cfg(feature = "storage-profile")]

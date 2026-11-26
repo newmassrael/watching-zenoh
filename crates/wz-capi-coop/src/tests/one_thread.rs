@@ -413,7 +413,7 @@ mod shared_key_ids {
 
     use super::super::{client_config, config_zid, Engine, LOOPBACK};
     use super::{eventually, hearing, OwnThread};
-    use crate::{CoopConfig, OpenKeyIds};
+    use crate::{CoopConfig, EngineHold, OpenKeyIds};
 
     /// A session of `config` holding a dictionary of a key and a key below it, which names keys
     /// by their ids on the wire.

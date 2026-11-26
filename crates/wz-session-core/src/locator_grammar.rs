@@ -78,7 +78,7 @@ impl<'a> Iterator for BytePieces<'a> {
 }
 
 /// The config span of an endpoint: everything after its first `#`, empty when it has none, as
-/// zenoh's `config()` reads it (endpoint.rs:49-54). The span [`split_locator_parts`] answers as
+/// zenoh's `config()` reads it (endpoint.rs:49-54). The span `split_locator_parts` answers as
 /// `config` for the endpoint's body, read without splitting the rest.
 pub fn endpoint_config(endpoint: &str) -> &str {
     split_once_byte(endpoint, LOCATOR_CONFIG_SEPARATOR).map_or("", |(_, config)| config)

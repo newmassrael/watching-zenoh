@@ -108,7 +108,11 @@ fn queued_batches(_limits: &SessionLimits) -> usize {
 #[cfg(feature = "engine-tokio")]
 const TX_BASIS: &str = "PICO_TX_QUEUE_SIZE";
 #[cfg(not(feature = "engine-tokio"))]
-const TX_BASIS: &str = "LINK_TX_SLOTS";
+const TX_BASIS: &str = if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+    "TX_POOL_SLOTS"
+} else {
+    "LINK_TX_SLOTS"
+};
 
 /// Opens a listener and a session that dials it, runs `check` on both, and lets them go.
 fn with_two_sessions(check: impl FnOnce(*const z_loaned_session_t, *const z_loaned_session_t)) {
@@ -127,6 +131,7 @@ fn with_two_sessions(check: impl FnOnce(*const z_loaned_session_t, *const z_loan
 /// against.
 #[test]
 fn the_total_is_the_sum_of_the_bounded_rows() {
+    let _program = crate::programs::admit();
     with_two_sessions(|listener, dialer| {
         for (role, session) in [("listener", listener), ("dialer", dialer)] {
             let (summary, rows) = unsafe { report(session) };
@@ -158,6 +163,7 @@ fn the_total_is_the_sum_of_the_bounded_rows() {
 
 #[test]
 fn the_tables_are_the_session_cores_rows_for_the_limits_the_session_opened_under() {
+    let _program = crate::programs::admit();
     with_two_sessions(|_listener, dialer| {
         let (_, rows) = unsafe { report(dialer) };
         // A config that states no limit opens under zenoh-pico's preset, as every session of the
@@ -179,6 +185,7 @@ fn the_tables_are_the_session_cores_rows_for_the_limits_the_session_opened_under
 
 #[test]
 fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
+    let _program = crate::programs::admit();
     with_two_sessions(|listener, dialer| {
         let (_, dialled) = unsafe { report(dialer) };
         let handle = row(&dialled, "session handle");
@@ -197,22 +204,33 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
                 limits.pico_unicast_batch_bytes()
             )
         );
+        let message = limits
+            .pico_frag_max_bytes()
+            .most()
+            .expect("the build bounds a rejoined message");
+        // The tokio engine rejoins the two reliabilities of its one link apart and reads into the
+        // read storage its open states; the cooperative engine stages chains in the session's one
+        // table and reads into a buffer of the batch it advertised, which no agreed batch outgrows.
+        #[cfg(feature = "engine-tokio")]
+        let (chains, rx_bytes) = (2, wz_session_core::session_init_params::RX_BUFFER_SIZE);
+        #[cfg(not(feature = "engine-tokio"))]
+        let (chains, rx_bytes) = (
+            wz_capi_coop::arena::link_buffers(
+                1,
+                u16::try_from(limits.pico_unicast_batch_bytes()).expect("a batch is a u16"),
+                &limits,
+            )
+            .expect("the preset's batch and pools")
+            .chains,
+            limits.pico_unicast_batch_bytes(),
+        );
         let reassembly = row(&dialled, "link reassembly");
         assert_eq!(
             (reassembly.door.count, reassembly.door.entry_bytes),
-            (
-                2,
-                limits
-                    .pico_frag_max_bytes()
-                    .most()
-                    .expect("the build bounds a rejoined message")
-            )
+            (chains, message)
         );
         let buffer = row(&dialled, "link receive buffers");
-        assert_eq!(
-            (buffer.door.count, buffer.door.entry_bytes),
-            (1, wz_session_core::session_init_params::RX_BUFFER_SIZE)
-        );
+        assert_eq!((buffer.door.count, buffer.door.entry_bytes), (1, rx_bytes));
 
         let (listening, listened) = unsafe { report(listener) };
         let reassembly = row(&listened, "link reassembly");
@@ -227,17 +245,38 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         #[cfg(not(feature = "engine-tokio"))]
         {
             let _ = listening;
-            assert_eq!(reassembly.door.bounded, 1);
-            assert!(
-                reassembly.door.count > 2,
-                "a listener holds more links than a dial"
+            assert_eq!(
+                (reassembly.door.bounded, reassembly.door.count),
+                (1, chains),
+                "a listener's links share the session's one table"
             );
+            // The listener's links read and encode into buffers of the advertised batch; where
+            // they share pools, the pools' and not one for each of the ten faces.
+            let batch = limits.pico_unicast_batch_bytes();
+            let (receive, transmit) = (
+                row(&listened, "link receive buffers"),
+                row(&listened, "link transmit queues"),
+            );
+            assert_eq!(
+                (receive.door.entry_bytes, transmit.door.entry_bytes),
+                (batch, batch)
+            );
+            if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+                assert!(receive.door.count <= limits.rx_pool_buffers());
+                assert!(transmit.door.count <= limits.tx_pool_slots());
+                assert!(
+                    receive.door.total_bytes + transmit.door.total_bytes
+                        <= (limits.rx_pool_buffers() + limits.tx_pool_slots()) * batch,
+                    "the links' buffers are the pools' bytes"
+                );
+            }
         }
     });
 }
 
 #[test]
 fn a_row_past_the_last_and_null_arguments_are_refused() {
+    let _program = crate::programs::admit();
     with_two_sessions(|_listener, dialer| unsafe {
         let mut summary = wz_ext_session_memory_t::default();
         assert_eq!(wz_ext_session_memory(dialer, &mut summary), Z_OK);
@@ -279,6 +318,7 @@ const LOWERED_BATCH_BYTES: usize = 1031;
 #[cfg(feature = "config-document")]
 #[test]
 fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::config_policy::wz_ext_config_document;
     use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_capi_pico::z_config_drop;

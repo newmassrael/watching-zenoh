@@ -128,7 +128,6 @@ wz-codecs = { path = "../wz-codecs", features = ["codec-serial"] }
 # the features the crate's default named before the cooperative engine became it; phase P5 moves
 # this measurement to the cooperative engine with the tokio engine's removal from the C library.
 wz-capi-pico = { path = "../wz-capi-pico", default-features = false, features = [
-    "std",
     "engine-tokio",
     "serial-drive-own-thread",
     "rx-busy-poll",

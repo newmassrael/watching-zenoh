@@ -92,6 +92,7 @@ use wz_runtime_tokio_test_support::free_port;
 
 #[test]
 fn subscriber_receives_publish_over_loopback_tcp() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -294,6 +295,7 @@ unsafe extern "C" fn on_drop_flag(ctx: *mut c_void) {
 
 #[test]
 fn publish_from_subscriber_callback_delivers_echo() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -486,6 +488,7 @@ fn publish_from_subscriber_callback_delivers_echo() {
 /// says so.
 #[test]
 fn undeclare_from_inside_a_subscriber_callback_does_not_deadlock() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -1102,6 +1105,7 @@ fn run_queryable_reentrancy_probe(calibrate: bool) {
 /// above [`ReentrantCtx`] for why each plane needs its own.
 #[test]
 fn undeclare_from_inside_a_queryable_callback_does_not_deadlock() {
+    let _program = crate::programs::admit();
     run_queryable_reentrancy_probe(false);
 }
 
@@ -1109,6 +1113,7 @@ fn undeclare_from_inside_a_queryable_callback_does_not_deadlock() {
 /// traffic REQUIRED. Without this, `after == 0` passes equally on a dead link.
 #[test]
 fn the_queryable_reentrancy_probe_window_carries_traffic_when_live() {
+    let _program = crate::programs::admit();
     run_queryable_reentrancy_probe(true);
 }
 
@@ -1228,12 +1233,14 @@ fn run_liveliness_reentrancy_probe(calibrate: bool) {
 /// R311y553 — the LIVELINESS-SUBSCRIBER plane's re-entrancy probe.
 #[test]
 fn undeclare_from_inside_a_liveliness_subscriber_callback_does_not_deadlock() {
+    let _program = crate::programs::admit();
     run_liveliness_reentrancy_probe(false);
 }
 
 /// The vacuity guard for the probe above.
 #[test]
 fn the_liveliness_reentrancy_probe_window_carries_traffic_when_live() {
+    let _program = crate::programs::admit();
     run_liveliness_reentrancy_probe(true);
 }
 
@@ -1350,11 +1357,13 @@ fn run_advanced_reentrancy_probe(calibrate: bool) {
 /// last of the SSOT sinks the debt ledger carried as uninstrumented.
 #[test]
 fn undeclare_from_inside_an_advanced_subscriber_callback_does_not_deadlock() {
+    let _program = crate::programs::admit();
     run_advanced_reentrancy_probe(false);
 }
 
 /// The vacuity guard for the probe above.
 #[test]
 fn the_advanced_reentrancy_probe_window_carries_traffic_when_live() {
+    let _program = crate::programs::admit();
     run_advanced_reentrancy_probe(true);
 }

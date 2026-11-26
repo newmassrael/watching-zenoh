@@ -14,11 +14,11 @@ pico C ABI library.
 every program is compiled with MSVC's cl of the package's width against the package's own headers
 and the import library of every library of its form, as a program of that package is, and run with
 the package's release DLL beside it. That is the release form when the package is the one a release
-ships (`--stdlib nostd`, profile `host-peer-ext`).
+ships (the one library, profile `host-peer-ext`).
 
-`--host-library` runs them on Linux against the library without `std` built here from a registered
-profile (`os-posix` in the place of `engine-coop`, the `capi-nostd` profile and configuration, for
-the host's own target), compiled with `cc` against zenoh-pico's headers with the config.h of that
+`--host-library` runs them on Linux against the C library built here from a registered profile
+(`wz-capi-pico-lib` over the profile's features of the ABI crate, without `std`: `os-host`, the
+`capi-nostd` profile and configuration, for the host's own target), compiled with `cc` against zenoh-pico's headers with the config.h of that
 build, rendered as the package renders it. It is the same run on the host a developer has.
 
 `--sets` narrows the run to some of `tests`, `c11`, `c99` and `windows` (every set the host runs
@@ -118,9 +118,6 @@ HOSTS = ("linux", "windows")
 SETS = ("tests", "c11", "c99", "windows")
 # The sets a host compiles: zenoh-pico's Windows programs call the Windows API, which Linux has not.
 HOST_SETS = {"linux": ("tests", "c11", "c99"), "windows": ("tests", "windows", "c11", "c99")}
-# The library a host without `std` is built with in the place of `engine-coop` (wz-capi-pico's
-# Cargo.toml); Windows has its own, `pico_windows_package.NOSTD_FEATURE`.
-POSIX_FEATURE = "os-posix"
 # The router's locator in a program's arguments, and its port in a witness, filled in when the
 # router is up: a Hello is read as this router's by the port among its locators, since another
 # router on the same network answers a scout too.
@@ -995,11 +992,11 @@ def host_library(profile: str, scratch: pathlib.Path) -> tuple[Library, list[str
     decl = wz_config.load_decl()
     plan = pwp.resolve_profile(decl, profile)
     table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
-    features = pwp.nostd_features(plan["features"], table, POSIX_FEATURE)
+    features = pwp.library_features(plan["features"], table)
     env = {**os.environ, **plan["env"]}
     target = host_triple()
-    report = pwp.run(["cargo", "build", "-p", pwp.CRATE, "--lib", "--no-default-features", "--features",
-                      ",".join(features), "--profile", pwp.NOSTD_PROFILE, "--config", pwp.NOSTD_CONFIG,
+    report = pwp.run(["cargo", "build", "-p", pwp.LIB_CRATE, "--lib", *pwp.library_args(features),
+                      "--profile", pwp.NOSTD_PROFILE, "--config", pwp.NOSTD_CONFIG,
                       "--target", target, "--message-format=json-render-diagnostics"], CRATES, env)
     built = pwp.pick(pwp.artifact_files(report, pwp.LIBRARY), ".so")
     if built is None:

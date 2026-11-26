@@ -36,13 +36,14 @@ crate-type = ["rlib"]
 # the event log, the clock registry, the time base) are `wz-host-sync`'s in its `std` build, which
 # take no memory when first taken on any host.
 # Without it the crate is `no_std` with `alloc`, for the pico C ABI's host library without `std`:
-# the wall clock and the lock are the host's own (`host-sync`), and the bound is the build's
-# `CLOCK_MAX_FORWARD_STEP_MS`, the same default, since a library has no environment of its own.
+# the wall clock, the lock and the environment the bound is read from are the host's own
+# (`host-sync`).
 # With neither the crate has no clock: the per-role switch and a node that holds none, and
 # `time-hlc` asks for one of the two.
 default = ["std"]
 std = ["dep:wz-host-sync", "wz-host-sync/std"]
-# The host's wall clock and lock over its own calls (`wz-host-sync`), for a build without `std`.
+# The host's wall clock, lock and environment over its own calls (`wz-host-sync`), for a build
+# without `std`.
 host-sync = ["dep:wz-host-sync"]
 # The node clock is a Hybrid Logical Clock (zenoh's `Option<Arc<HLC>>` on the Runtime). Off, a node
 # holds none: `NodeHlc` is zero-sized, nothing stamps, and every consumer falls back to the wall

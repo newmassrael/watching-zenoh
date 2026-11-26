@@ -147,6 +147,15 @@ pub struct ApplicationLayerObserver {
     /// reads it here ([`Self::querier_max_pending_queries`]) and holds the querier's places to it
     /// in a [`crate::quota::Quota`]; the pending entries themselves are rows of the requesters.
     querier_max_pending_queries: crate::limits::QuerierMaxPendingQueriesHeld,
+    /// `MAX_MATCHING_LISTENERS` as the session's creator stated it: the one bound of the matching
+    /// listeners of the session's publishers and of its queriers together, whose watches the two
+    /// remote tables keep apart, so neither table can hold it alone
+    /// ([`ObserverApp::admits_matching_listener`]).
+    #[cfg(all(
+        feature = "session-matching",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    matching_listeners: crate::limits::MaxMatchingListenersHeld,
     /// The interest-response chains owed to peers' QUERYABLE Interests, in stage
     /// order, drained through
     /// [`DeclareReplySink::send_declare_queryable_reply`]. Owned (see
@@ -217,6 +226,40 @@ pub struct ObserverApp<'a> {
     /// The observers told that a peer ended its initial declarations.
     #[cfg(feature = "declarations-synced-event")]
     pub declarations_final: &'a mut crate::decl_sink::SyncedSinks,
+    /// `MAX_MATCHING_LISTENERS` as the session's creator stated it, over the watches of both
+    /// remote tables ([`Self::admits_matching_listener`]).
+    #[cfg(all(
+        feature = "session-matching",
+        any(feature = "declare-subscriber", feature = "declare-queryable")
+    ))]
+    pub matching_listeners: crate::limit_binding::Quota,
+}
+
+#[cfg(all(
+    feature = "session-matching",
+    any(feature = "declare-subscriber", feature = "declare-queryable")
+))]
+impl ObserverApp<'_> {
+    /// Whether the session has room for one more matching listener: the watches of its
+    /// publishers and of its queriers together leave room under `MAX_MATCHING_LISTENERS`. Asked
+    /// in the same hold of the observer as the watch is registered in, before anything is asked
+    /// of the peer, as zenoh-pico refuses a listener it cannot allocate before it registers it
+    /// (`vendor/zenoh-pico/src/net/filtering.c` @
+    /// `_z_closure_matching_status_t *ptr = (_z_closure_matching_status_t *)z_malloc(sizeof(_z_closure_matching_status_t));`).
+    pub fn admits_matching_listener(&self) -> bool {
+        #[cfg(feature = "declare-subscriber")]
+        let publishers = self.remote_subscribers.matching_listener_len();
+        #[cfg(not(feature = "declare-subscriber"))]
+        let publishers: usize = 0;
+        #[cfg(feature = "declare-queryable")]
+        let queriers = self.remote_queryables.matching_listener_len();
+        #[cfg(not(feature = "declare-queryable"))]
+        let queriers: usize = 0;
+        // The quota is compared whatever the build fixes: the watches are a growable list, which
+        // no capacity of the build refuses past.
+        self.matching_listeners
+            .admits(publishers.saturating_add(queriers).saturating_add(1))
+    }
 }
 
 /// The application half of an [`ApplicationLayerObserver`], to read ([`ObserverApp`]).
@@ -325,6 +368,13 @@ impl ApplicationLayerObserver {
         observer.peers.limit_to(limits);
         observer.requesters.limit_to(limits);
         observer.querier_max_pending_queries = limits.querier_max_pending_queries_held();
+        #[cfg(all(
+            feature = "session-matching",
+            any(feature = "declare-subscriber", feature = "declare-queryable")
+        ))]
+        {
+            observer.matching_listeners = limits.max_matching_listeners_held();
+        }
         observer
     }
 
@@ -462,6 +512,11 @@ impl ApplicationLayerObserver {
                 liveliness_subscribers: &mut app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
                 declarations_final: &mut self.declarations_final,
+                #[cfg(all(
+                    feature = "session-matching",
+                    any(feature = "declare-subscriber", feature = "declare-queryable")
+                ))]
+                matching_listeners: self.matching_listeners.get(),
             },
             ObserverFace {
                 subscribers: &mut peers.subscribers,
@@ -530,6 +585,11 @@ impl ApplicationLayerObserver {
             peers: PeerTables::new(),
             requesters: Requesters::new(),
             querier_max_pending_queries: crate::limit_binding::Limited::build_default(),
+            #[cfg(all(
+                feature = "session-matching",
+                any(feature = "declare-subscriber", feature = "declare-queryable")
+            ))]
+            matching_listeners: crate::limit_binding::Limited::build_default(),
             #[cfg(all(
                 feature = "alloc",
                 feature = "query-queryable",
@@ -1097,6 +1157,67 @@ mod tests {
         let event = IterationEvent::Lease(crate::lease::LeaseCheckOutcome::WithinLease);
         observer.dispatch_event(event);
         assert_eq!(fired.load(Ordering::SeqCst), 0);
+    }
+
+    /// The matching listeners of the session's publishers and of its queriers are held to ONE
+    /// `MAX_MATCHING_LISTENERS`: a publisher's and a querier's listener fill a bound of two, so
+    /// neither plane has room for a third, and a listener let go makes room again. Turned red by
+    /// `admits_matching_listener` counting one table's watches alone, or by `with_limits` not
+    /// keeping the stated bound.
+    #[cfg(all(
+        feature = "session-matching",
+        feature = "declare-subscriber",
+        feature = "declare-queryable"
+    ))]
+    #[test]
+    fn the_listeners_of_publishers_and_queriers_are_held_to_one_bound() {
+        use crate::declare::matching::BoxedMatchingSink;
+        use crate::declare::queryable::QuerierCriterion;
+        use crate::declare::subscriber::PublisherCriterion;
+        use crate::limit_binding::{LimitSpec, Quota};
+        use crate::limits::{MaxMatchingListeners, SessionLimits};
+
+        let mut limits = SessionLimits::defaults();
+        let stated = limits.select_max_matching_listeners(Quota::at_most(2));
+        if MaxMatchingListeners::DOMAIN.is_singleton() {
+            assert!(stated.is_err(), "a build of one value refuses two");
+            return;
+        }
+        stated.expect("two is inside the domain");
+        let mut observer = ApplicationLayerObserver::with_limits(&limits);
+        let publisher = observer.with_parts(|app, face| {
+            assert!(app.admits_matching_listener(), "an empty session has room");
+            app.remote_subscribers.declare_matching_listener_seeded(
+                &*face.remote_subscribers,
+                PublisherCriterion::any_locality("demo/held").expect("a short key"),
+                false,
+                BoxedMatchingSink::new(|_| {}),
+            )
+        });
+        observer.with_parts(|app, face| {
+            assert!(
+                app.admits_matching_listener(),
+                "one listener of two is held"
+            );
+            app.remote_queryables.declare_matching_listener_seeded(
+                &*face.remote_queryables,
+                QuerierCriterion::new("demo/held", crate::locality::Locality::Any, false)
+                    .expect("a short key"),
+                false,
+                BoxedMatchingSink::new(|_| {}),
+            );
+        });
+        assert!(
+            !observer.with_app(|app| app.admits_matching_listener()),
+            "a publisher's and a querier's listener fill a bound of two"
+        );
+        assert!(observer.with_app(|app| app
+            .remote_subscribers
+            .undeclare_matching_listener(publisher)));
+        assert!(
+            observer.with_app(|app| app.admits_matching_listener()),
+            "a listener let go makes room"
+        );
     }
 
     // ── Shared fixtures ──────────────────────────────────────────────

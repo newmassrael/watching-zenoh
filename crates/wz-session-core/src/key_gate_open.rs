@@ -53,6 +53,13 @@ pub enum PeerOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {}
 
+impl Refusal {
+    /// The counter a refusal is counted in: never asked, there being no refusal.
+    pub const fn counter(self) -> core::num::NonZeroU8 {
+        match self {}
+    }
+}
+
 /// What an admitted key is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admitted {
@@ -148,6 +155,10 @@ impl<'a> KeyGate<'a> {
     pub fn entity_of(&self, _text: &str, _kind: EntityKind) -> Option<EntityId> {
         None
     }
+
+    /// Count a refusal by its counter: nothing, an open gate counting nothing.
+    #[inline]
+    pub fn count_refusal(&mut self, _counter: core::num::NonZeroU8) {}
 
     /// How many keys the gate refused, by reason: none.
     pub const fn refused(&self) -> Refused {

@@ -8,7 +8,7 @@
 //! canon form, made the same way, so a refusal is the text's and not the view's.
 //!
 //! ```text
-//! cargo test -p wz-capi-pico --test it files::noncanon_keys_refused::
+//! cargo test -p wz-capi-pico --features object-pool --test it files::noncanon_keys_refused::
 //! ```
 #![cfg(feature = "peer")]
 
@@ -109,6 +109,7 @@ unsafe fn sample_closure() -> z_owned_closure_sample_t {
 /// Turned red by `z_declare_keyexpr` reading the key without the gate.
 #[test]
 fn a_keyexpr_declaration_refuses_a_key_not_in_canon_form() {
+    let _program = crate::programs::admit();
     // SAFETY: every handle is made here and let go of once.
     unsafe {
         let mut session = open_listening();
@@ -134,6 +135,7 @@ fn a_keyexpr_declaration_refuses_a_key_not_in_canon_form() {
 /// publish body reading the key without the key judgement.
 #[test]
 fn a_put_and_a_delete_refuse_a_key_not_in_canon_form() {
+    let _program = crate::programs::admit();
     // SAFETY: every handle is made here and let go of once.
     unsafe {
         let mut session = open_listening();
@@ -162,6 +164,7 @@ fn a_put_and_a_delete_refuse_a_key_not_in_canon_form() {
 /// declared. Turned red by `z_declare_publisher` reading the key without the gate.
 #[test]
 fn a_publisher_and_a_subscriber_refuse_a_key_not_in_canon_form() {
+    let _program = crate::programs::admit();
     // SAFETY: every handle is made here and let go of once.
     unsafe {
         let mut session = open_listening();
@@ -204,6 +207,7 @@ fn a_publisher_and_a_subscriber_refuse_a_key_not_in_canon_form() {
 #[cfg(feature = "queryable")]
 #[test]
 fn a_queryable_refuses_a_key_not_in_canon_form() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::{
         z_closure_query, z_closure_query_move, z_declare_queryable, z_loaned_query_t,
         z_owned_closure_query_t, z_owned_queryable_t, z_queryable_move, z_undeclare_queryable,
@@ -244,6 +248,7 @@ fn a_queryable_refuses_a_key_not_in_canon_form() {
 #[cfg(feature = "query")]
 #[test]
 fn a_get_and_a_querier_refuse_a_key_not_in_canon_form() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::{
         z_closure_reply, z_closure_reply_move, z_declare_querier, z_get, z_loaned_reply_t,
         z_owned_closure_reply_t, z_owned_querier_t, z_querier_move, z_undeclare_querier,
@@ -290,6 +295,7 @@ fn a_get_and_a_querier_refuse_a_key_not_in_canon_form() {
 #[cfg(feature = "liveliness")]
 #[test]
 fn a_liveliness_token_and_subscriber_refuse_a_key_not_in_canon_form() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::liveliness::{
         z_liveliness_declare_subscriber, z_liveliness_declare_token, z_liveliness_token_drop,
         z_liveliness_token_move, z_owned_liveliness_token_t,

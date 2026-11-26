@@ -29,6 +29,12 @@
 //!
 //! [`OnceLock`] is a process-wide value made by its first caller at run time, in the shape of
 //! `std`'s, filled and read without memory of the heap.
+//!
+//! [`env_var`] reads the text the process's environment holds for a name, from the host's own copy
+//! of it, so a setting stated there means the same to a library without `std` as to one with it.
+//!
+//! [`pages`] maps a block of the system's fresh pages, zero as handed and resident only once
+//! written, for memory whose untouched bytes must read zero without being written.
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -45,6 +51,9 @@ use core::mem::MaybeUninit;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use core::time::Duration;
 
+// Each host's wait and wake on a word are out of line (`#[inline(never)]` in its module): each is a
+// call of the system, beside which a call of a function costs nothing, and a lock, a condition
+// variable or a parker that inlined it would carry a copy of it at every take, release and wait.
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]
@@ -170,8 +179,9 @@ impl RawLock {
 
     /// The lock was held when it was tried: spin a little while its holder has it and nobody
     /// waits, then mark it contended in the same step that takes it if it is free, and otherwise
-    /// sleep until the word moves from the mark.
+    /// sleep until the word moves from the mark. Out of line, so a take inlines its exchange alone.
     #[cold]
+    #[inline(never)]
     fn lock_contended(&self) {
         let mut state = self.spin();
         if state == UNLOCKED {
@@ -222,8 +232,16 @@ impl RawLock {
     /// The calling thread holds the lock.
     pub unsafe fn unlock(&self) {
         if self.state.swap(UNLOCKED, Ordering::Release) == CONTENDED {
-            sys::wake_one(&self.state);
+            self.wake_waiter();
         }
+    }
+
+    /// Wake a thread that waits for the lock. Out of line, so a release inlines its exchange
+    /// alone, as a take does.
+    #[cold]
+    #[inline(never)]
+    fn wake_waiter(&self) {
+        sys::wake_one(&self.state);
     }
 }
 
@@ -265,8 +283,12 @@ impl RawCondvar {
     /// again. A wake may come without a notification, so the caller waits in a loop on its own
     /// condition.
     ///
+    /// Out of line: the wait sleeps, and a caller that inlined it would carry its release, its
+    /// sleep and its take again.
+    ///
     /// # Safety
     /// The calling thread holds `lock`.
+    #[inline(never)]
     pub unsafe fn wait(&self, lock: &RawLock) {
         let seen = self.waiting();
         lock.unlock();
@@ -275,10 +297,12 @@ impl RawCondvar {
     }
 
     /// [`Self::wait`], and no later than when the monotonic clock ([`monotonic_ns`]) reads
-    /// `deadline_ns`: whether a notification came (false: the deadline came first).
+    /// `deadline_ns`: whether a notification came (false: the deadline came first). Out of line,
+    /// as [`Self::wait`] is.
     ///
     /// # Safety
     /// The calling thread holds `lock`.
+    #[inline(never)]
     pub unsafe fn wait_until(&self, lock: &RawLock, deadline_ns: u64) -> bool {
         let seen = self.waiting();
         lock.unlock();
@@ -372,6 +396,7 @@ use std_lock as chosen;
 
 pub mod in_place;
 mod once;
+pub mod pages;
 
 pub use chosen::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use once::OnceLock;
@@ -602,6 +627,15 @@ pub fn current_thread() -> usize {
     sys::current_thread()
 }
 
+/// The text the process's environment holds for `name`, handed to `read` while it reads it, or
+/// `None` for a name the environment does not hold: the C library's `getenv` on a POSIX host, and
+/// the system's copy of the environment block on Windows, whose names are matched without regard
+/// to ASCII case as the system matches them. A program that changes its environment while another
+/// thread reads it races here as it does in C, since no lock of the C library's is reachable.
+pub fn env_var<R>(name: &core::ffi::CStr, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
+    sys::env_var(name, read)
+}
+
 /// Sleep the calling thread for at least `ms` milliseconds.
 pub fn sleep_ms(ms: u64) {
     sys::sleep_ms(ms);
@@ -623,6 +657,19 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
     use std::vec::Vec;
+
+    /// The text the environment holds for a name is handed over whole, and a name it does not hold
+    /// reads as none. Turned red by an `env_var` that answers none, or the text of another name.
+    #[test]
+    fn the_environment_s_text_is_read_by_its_name() {
+        std::env::set_var("WZ_HOST_SYNC_ENV_READ_BACK", "512");
+        assert_eq!(
+            env_var(c"WZ_HOST_SYNC_ENV_READ_BACK", |value| value
+                .map(<[u8]>::to_vec)),
+            Some(b"512".to_vec())
+        );
+        assert!(!env_var(c"WZ_HOST_SYNC_ENV_NEVER_SET", |value| value.is_some()));
+    }
 
     /// A counter behind a lock, shared by threads.
     struct Counted {

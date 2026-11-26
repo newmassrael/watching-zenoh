@@ -495,6 +495,71 @@ pub(crate) fn name_of(
     name.to_socket_addr().ok_or(ws::WSAEAFNOSUPPORT)
 }
 
+/// The addresses Winsock's resolver (`getaddrinfo`, of `ws2_32`, whose sockets the process already
+/// opens) answers for the host `name`, each at its port, written to the front of `found` in its
+/// order: how many, `0` when it answers none, fails, or Winsock does not start. Asked as the POSIX
+/// half asks it, of every family and the stream kind alone, as zenoh-pico asks it on Windows
+/// (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @ `getaddrinfo(`), and walked as
+/// that open walks the answer, in its order.
+pub(crate) fn resolve(
+    name: &wz_runtime_coop::locator_text::NamedHost<'_>,
+    found: &mut [SocketAddr],
+) -> usize {
+    let text = crate::resolve::terminated(name);
+    if startup().is_err() {
+        return 0;
+    }
+    let hints = ws::ADDRINFOA {
+        ai_family: i32::from(ws::AF_UNSPEC),
+        ai_socktype: ws::SOCK_STREAM,
+        ..Default::default()
+    };
+    let mut answers: *mut ws::ADDRINFOA = core::ptr::null_mut();
+    // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
+    // `answers`, which is freed below once read.
+    let failed =
+        unsafe { ws::getaddrinfo(text.as_ptr(), core::ptr::null(), &hints, &mut answers) } != 0;
+    if failed {
+        return 0;
+    }
+    let mut count: usize = 0;
+    let mut next = answers.cast_const();
+    // SAFETY: each answer of the list is the resolver's, live until the list is freed.
+    while let (Some(answer), Some(place)) = (unsafe { next.as_ref() }, found.get_mut(count)) {
+        next = answer.ai_next.cast_const();
+        if let Some(at) = answered_address(answer, name.port()) {
+            *place = at;
+            // `count` names a place of `found`, so the sum does not wrap.
+            count = count.wrapping_add(1);
+        }
+    }
+    // SAFETY: `answers` is the list the call made, freed once, and nothing read of it is held.
+    unsafe { ws::freeaddrinfo(answers) };
+    count
+}
+
+/// The address of one answer of the resolver, at `port`; `None` for a family other than the two.
+fn answered_address(answer: &ws::ADDRINFOA, port: u16) -> Option<SocketAddr> {
+    if answer.ai_addr.is_null() {
+        return None;
+    }
+    let mut raw = RawAddr::empty();
+    let len = answer.ai_addrlen.min(size_of::<ws::SOCKADDR_STORAGE>());
+    // SAFETY: the answer's address holds `ai_addrlen` bytes, and `len` is no more than those nor
+    // than the storage's room.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            answer.ai_addr.cast_const().cast::<u8>(),
+            raw.as_mut_ptr().cast::<u8>(),
+            len,
+        );
+    }
+    *raw.size_mut() = i32::try_from(len).ok()?;
+    let mut at = raw.to_socket_addr()?;
+    at.set_port(port);
+    Some(at)
+}
+
 wz_runtime_coop::with_heap_link_seams! {
 /// A wait of `timeout_ms` milliseconds as `WSAPoll` takes it; a longer one than it can say is the
 /// longest it can.

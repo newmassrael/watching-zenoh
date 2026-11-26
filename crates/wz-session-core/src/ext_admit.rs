@@ -84,6 +84,26 @@
 //! chains by their entries instead, so the held, the lent and the walked forms of
 //! a message refuse the same bodies. A transport chain keeps the header rule: its
 //! bodies are the handshake's to read.
+//!
+//! ## One compiled body of the rule
+//!
+//! Every reader of a chain reaches the rule through ONE function, `judge_entry`, which is
+//! not generic and is kept out of line: it takes an entry as the facts the rule reads
+//! (`JudgedEntry`: the header, and a ZInt or a run of bytes for a body a declared
+//! extension's reader can refuse), never the type a build holds the entry as. The chain
+//! judges ([`judge_ext_chain`], [`judge_ext_entries`]) stay generic over what they walk, so
+//! a held slice, a walk where the frame lies and a single header are all accepted, but each
+//! of their instances is the walk and one call; the carrier lookup, the header rule, the body
+//! rules and their readers are compiled once whatever number of entry types and walks a build
+//! judges. Two parts of the rule are inlined, because they decide without a lookup: the screen
+//! (`may_refuse`), which reads past an entry no reader of any carrier can refuse (an extension
+//! that is not mandatory and has no body rule, such as a Push's QoS) with no call, and the
+//! verdict on a chain whose every entry reads (`judge_end`), which a caller that names its
+//! carrier as a constant reads as a constant.
+//!
+//! [`judge_ext_entries`]: crate::ext_admit::judge_ext_entries
+//! [`judge_ext_chain`]: crate::ext_admit::judge_ext_chain
+//! [`ExtAdmission::MalformedExt`]: crate::ext_admit::ExtAdmission::MalformedExt
 
 use crate::ext_header::{ext_eid, EXT_ENC_MASK, EXT_FLAG_M};
 use wz_codecs::wire_const;
@@ -319,7 +339,9 @@ enum Space {
 
 /// The one mapping from a message to its declarations, which
 /// [`declared_extensions`] and [`declared_identities`] both read. `None` is a
-/// message this build cannot name.
+/// message this build cannot name. Inlined so that `judge_end`, which asks only whether it
+/// is `None`, folds to a constant for a constant carrier.
+#[inline]
 fn space(carrier: ExtCarrier) -> Option<Space> {
     use crate::ext_name::ExtCarrier as Named;
     let named = match carrier {
@@ -406,19 +428,16 @@ fn reads_mandatory(carrier: ExtCarrier, declared: &[u8], eid: u8) -> bool {
 /// upstream's order: its reader fails on the encoding while it reads the body,
 /// and only a body that was read is asked whether it is mandatory.
 pub fn judge_ext_chain(carrier: ExtCarrier, headers: impl IntoIterator<Item = u8>) -> ExtAdmission {
-    let Some(declared) = declared_identities(carrier) else {
-        return ExtAdmission::Unjudged;
-    };
     for header in headers {
-        if let Some(refusal) = judge_header(carrier, declared, header) {
-            return refusal;
+        if let Some(verdict) = judge_one_header(carrier, header) {
+            return verdict;
         }
     }
-    ExtAdmission::Admissible
+    judge_end(carrier)
 }
 
 /// The verdict on one entry's header, `None` for one a participant may read on past: the rule
-/// [`judge_ext_chain`] applies to each header and [`judge_ext_entries`] to each entry.
+/// [`judge_entry`] applies to each entry before its body.
 fn judge_header(carrier: ExtCarrier, declared: &[u8], header: u8) -> Option<ExtAdmission> {
     let eid = ext_eid(header);
     if (eid & EXT_ENC_MASK) == EXT_ENC_MASK {
@@ -446,19 +465,134 @@ pub fn judge_ext_entries<E: crate::ext_view::ExtEntryView>(
     carrier: ExtCarrier,
     entries: impl IntoIterator<Item = E>,
 ) -> ExtAdmission {
-    let Some(declared) = declared_identities(carrier) else {
-        return ExtAdmission::Unjudged;
-    };
     for entry in entries {
-        if let Some(refusal) = judge_header(carrier, declared, entry.header()) {
-            return refusal;
-        }
-        let eid = entry.eid();
-        if body_rule(carrier, eid).is_some_and(|rule| !body_reads(rule, &entry)) {
-            return ExtAdmission::MalformedExt { eid };
+        if let Some(verdict) = judge_one(carrier, &entry) {
+            return verdict;
         }
     }
-    ExtAdmission::Admissible
+    judge_end(carrier)
+}
+
+/// The verdict on one entry, `None` for one a participant reads past: what [`judge_entry`]
+/// answers, asked only of an entry the rule's screen does not pass ([`may_refuse`]). An entry
+/// no reader can refuse (an extension that is not mandatory, of an encoding with a shape, and
+/// with no body rule on any carrier) is read past here, inline, with no call.
+#[inline(always)]
+pub(crate) fn judge_one<E: crate::ext_view::ExtEntryView>(
+    carrier: ExtCarrier,
+    entry: &E,
+) -> Option<ExtAdmission> {
+    if may_refuse(entry.header()) {
+        judge_entry(carrier, JudgedEntry::of(entry))
+    } else {
+        None
+    }
+}
+
+/// [`judge_one`] for an entry judged by its header alone.
+#[inline(always)]
+pub(crate) fn judge_one_header(carrier: ExtCarrier, header: u8) -> Option<ExtAdmission> {
+    if may_refuse(header) {
+        judge_entry(carrier, JudgedEntry::header(header))
+    } else {
+        None
+    }
+}
+
+/// The rule's screen: whether ANY carrier's rule can refuse the entry whose header is `header`.
+/// The header rule refuses only the reserved encoding and a mandatory extension, and a body rule
+/// exists only for the identities of [`BODY_RULED`], so an entry that is none of these is read
+/// past on every message this build names, and on one it cannot name the chain's verdict is
+/// unjudged whatever its entries are (`judge_end`).
+#[inline(always)]
+const fn may_refuse(header: u8) -> bool {
+    let eid = ext_eid(header);
+    (eid & EXT_ENC_MASK) == EXT_ENC_MASK
+        || (eid & EXT_FLAG_M) != 0
+        || (BODY_RULED & eid_bit(eid)) != 0
+}
+
+/// One entry of a chain as the rule reads it: its header, and its body in the shape a declared
+/// extension's reader reads ([`BodyRule`]). What [`judge_entry`] takes, so the one compiled
+/// rule serves every type a build holds an entry as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct JudgedEntry<'a> {
+    header: u8,
+    body: JudgedBody<'a>,
+}
+
+/// The body of a [`JudgedEntry`], as far as a body rule reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JudgedBody<'a> {
+    /// The value of a z64 body.
+    Zint(u64),
+    /// A ZBuf body that is a plain run of bytes.
+    Plain(&'a [u8]),
+    /// No body a rule reads: a unit, a ZBuf this build holds as a list of slices, or an entry
+    /// judged by its header alone.
+    Unread,
+}
+
+impl<'a> JudgedEntry<'a> {
+    /// What the rule reads of `entry`. An entry answers a ZInt or plain bytes, never both, as its
+    /// encoding says.
+    #[inline(always)]
+    fn of<E: crate::ext_view::ExtEntryView>(entry: &'a E) -> Self {
+        let body = if let Some(value) = entry.zint() {
+            JudgedBody::Zint(value)
+        } else if let Some(bytes) = entry.plain_zbuf() {
+            JudgedBody::Plain(bytes)
+        } else {
+            JudgedBody::Unread
+        };
+        Self {
+            header: entry.header(),
+            body,
+        }
+    }
+
+    /// An entry judged by its header alone, as the header rule judges a transport chain.
+    #[inline(always)]
+    const fn header(header: u8) -> Self {
+        Self {
+            header,
+            body: JudgedBody::Unread,
+        }
+    }
+}
+
+/// The verdict on one entry of a chain of the message `carrier` names: `None` for an entry a
+/// participant may read on past, else the verdict on the whole chain, which is
+/// [`ExtAdmission::Unjudged`] for a message this build cannot name. The one body of the rule
+/// every chain reader reaches through the screen ([`judge_one`], [`judge_one_header`]).
+#[inline(never)]
+fn judge_entry(carrier: ExtCarrier, entry: JudgedEntry<'_>) -> Option<ExtAdmission> {
+    let Some(declared) = declared_identities(carrier) else {
+        return Some(ExtAdmission::Unjudged);
+    };
+    if let Some(refusal) = judge_header(carrier, declared, entry.header) {
+        return Some(refusal);
+    }
+    // A header judged alone, the transport chains' case, has no body to look a rule up for.
+    if matches!(entry.body, JudgedBody::Unread) {
+        return None;
+    }
+    let eid = ext_eid(entry.header);
+    body_rule(carrier, eid)
+        .filter(|rule| !body_reads(*rule, entry.body))
+        .map(|_| ExtAdmission::MalformedExt { eid })
+}
+
+/// The verdict on a chain whose every entry [`judge_entry`] read past, an empty one included:
+/// admissible on a message this build names, unjudged on one it cannot. Inlined, so a caller whose
+/// carrier is a constant reads a constant.
+#[inline(always)]
+fn judge_end(carrier: ExtCarrier) -> ExtAdmission {
+    if space(carrier).is_some() {
+        ExtAdmission::Admissible
+    } else {
+        ExtAdmission::Unjudged
+    }
 }
 
 /// How upstream's reader of a declared extension reads its body, for the extensions whose reader
@@ -510,26 +644,20 @@ enum BodyRule {
 /// ([`declared_identities`]); the test `every_body_rule_is_of_a_declared_extension` holds them
 /// to it.
 fn body_rule(carrier: ExtCarrier, eid: u8) -> Option<BodyRule> {
-    use crate::ext_header::{body_eid, ext_identity, network_eid, EXT_ENC_Z64, EXT_ENC_ZBUF};
+    use crate::ext_header::{body_eid, network_eid};
     use DeclarationKind as K;
     use NetworkEnvelope as N;
     use ZenohBody as Z;
-    // `pub type Timestamp = zextzbuf!(0x2, false);` on every network message.
-    const TIMESTAMP: u8 = ext_identity(0x2, false, EXT_ENC_ZBUF);
-    // `pub type TsStack = zextzbuf!(0x7, false);` on a Push, a Request and a Response.
-    const TS_STACK: u8 = ext_identity(0x7, false, EXT_ENC_ZBUF);
-    // `pub type Target = zextz64!(0x4, true);` on a Request.
-    const TARGET: u8 = ext_identity(0x4, true, EXT_ENC_Z64);
-    // `pub type WireExprExt = zextzbuf!(0x0f, true);` on the three undeclarations that carry it.
-    const WIRE_EXPR: u8 = ext_identity(0x0f, true, EXT_ENC_ZBUF);
     let rule = match (carrier, eid) {
-        (ExtCarrier::Network(_), TIMESTAMP) => BodyRule::Timestamp,
-        (ExtCarrier::Network(N::Push | N::Request | N::Response), TS_STACK) => BodyRule::TsStack,
-        (ExtCarrier::Network(N::Request), TARGET) => BodyRule::QueryTarget,
+        (ExtCarrier::Network(_), TIMESTAMP_EID) => BodyRule::Timestamp,
+        (ExtCarrier::Network(N::Push | N::Request | N::Response), TS_STACK_EID) => {
+            BodyRule::TsStack
+        }
+        (ExtCarrier::Network(N::Request), TARGET_EID) => BodyRule::QueryTarget,
         (ExtCarrier::Network(N::Response), network_eid::RESPONDER) => BodyRule::EntityGlobalId,
         (
             ExtCarrier::Declaration(K::UndeclSubscriber | K::UndeclQueryable | K::UndeclToken),
-            WIRE_EXPR,
+            WIRE_EXPR_EID,
         ) => BodyRule::WireExpr,
         (ExtCarrier::Zenoh(Z::Put | Z::Del | Z::Query | Z::Err), body_eid::SOURCE_INFO) => {
             BodyRule::SourceInfo
@@ -540,7 +668,35 @@ fn body_rule(carrier: ExtCarrier, eid: u8) -> Option<BodyRule> {
     Some(rule)
 }
 
-/// Whether the reader `rule` names reads `entry`'s body. A body this build holds as something
+/// `pub type Timestamp = zextzbuf!(0x2, false);` on every network message.
+const TIMESTAMP_EID: u8 =
+    crate::ext_header::ext_identity(0x2, false, crate::ext_header::EXT_ENC_ZBUF);
+/// `pub type TsStack = zextzbuf!(0x7, false);` on a Push, a Request and a Response.
+const TS_STACK_EID: u8 =
+    crate::ext_header::ext_identity(0x7, false, crate::ext_header::EXT_ENC_ZBUF);
+/// `pub type Target = zextz64!(0x4, true);` on a Request.
+const TARGET_EID: u8 = crate::ext_header::ext_identity(0x4, true, crate::ext_header::EXT_ENC_Z64);
+/// `pub type WireExprExt = zextzbuf!(0x0f, true);` on the three undeclarations that carry it.
+const WIRE_EXPR_EID: u8 =
+    crate::ext_header::ext_identity(0x0f, true, crate::ext_header::EXT_ENC_ZBUF);
+
+/// Every identity [`body_rule`] names a reader for, whatever the carrier, one bit per identity:
+/// the identities whose body a reader can refuse. The arms of `body_rule` and this set are held
+/// together by the test `no_entry_the_screen_passes_is_refused`.
+const BODY_RULED: u128 = eid_bit(TIMESTAMP_EID)
+    | eid_bit(TS_STACK_EID)
+    | eid_bit(TARGET_EID)
+    | eid_bit(crate::ext_header::network_eid::RESPONDER)
+    | eid_bit(WIRE_EXPR_EID)
+    | eid_bit(crate::ext_header::body_eid::SOURCE_INFO)
+    | eid_bit(crate::ext_header::body_eid::QUERY_VALUE);
+
+/// The bit of an identity, which is seven bits wide, in a set of identities.
+const fn eid_bit(eid: u8) -> u128 {
+    1u128 << (eid & 0x7f)
+}
+
+/// Whether the reader `rule` names reads `body`. A body this build holds as something
 /// other than the encoding the rule reads (no ZInt for a ZInt rule, no plain bytes for a ZBuf
 /// one) is not this reader's to judge, and reads.
 ///
@@ -550,14 +706,13 @@ fn body_rule(carrier: ExtCarrier, eid: u8) -> Option<BodyRule> {
 /// here where upstream would read on into what follows them, and bytes the fields leave over are
 /// read past here where upstream would read them as the next extension. Both are a sender that
 /// wrote a length its fields do not have.
-fn body_reads<E: crate::ext_view::ExtEntryView>(rule: BodyRule, entry: &E) -> bool {
-    if rule == BodyRule::QueryTarget {
-        return entry.zint().is_none_or(|target| target <= 2);
-    }
-    let Some(body) = entry.plain_zbuf() else {
-        return true;
+fn body_reads(rule: BodyRule, body: JudgedBody<'_>) -> bool {
+    let bytes = match body {
+        JudgedBody::Zint(target) => return rule != BodyRule::QueryTarget || target <= 2,
+        JudgedBody::Unread => return true,
+        JudgedBody::Plain(bytes) => bytes,
     };
-    let mut cursor = sce_forge_runtime::codec::SceCursor::new(body);
+    let mut cursor = sce_forge_runtime::codec::SceCursor::new(bytes);
     let read = match rule {
         BodyRule::Timestamp => read_timestamp(&mut cursor),
         BodyRule::TsStack => read_ts_stack(&mut cursor),
@@ -1252,5 +1407,118 @@ mod tests {
                 assert_eq!(judge_ext_entries(carrier, [unit(header)]), by_header);
             }
         }
+    }
+
+    /// What the one body of the rule is handed of an entry: the ZInt or the plain bytes the entry
+    /// answers, or neither. Turned red by `JudgedEntry::of` handing a ZInt over as no body, which
+    /// would admit a Request whose target is `3`.
+    #[test]
+    fn an_entry_is_judged_by_the_body_it_answers() {
+        assert_eq!(
+            JudgedEntry::of(&zint(0x34, 3)),
+            JudgedEntry {
+                header: 0x34,
+                body: JudgedBody::Zint(3),
+            }
+        );
+        assert_eq!(
+            JudgedEntry::of(&zbuf(0x42, &[0x05])),
+            JudgedEntry {
+                header: 0x42,
+                body: JudgedBody::Plain(&[0x05]),
+            }
+        );
+        assert_eq!(JudgedEntry::of(&unit(0x12)), JudgedEntry::header(0x12));
+    }
+
+    /// The one body answers for one entry: `None` for an entry a participant reads past, the
+    /// refusal for one it refuses, and unjudged for any entry of a message this build cannot name.
+    /// Turned red by `judge_entry` reading on past a body its reader refuses, or answering an
+    /// unnameable message's entry as read.
+    #[test]
+    fn the_one_body_of_the_rule_answers_for_one_entry() {
+        let push = ExtCarrier::Network(NetworkEnvelope::Push);
+        assert_eq!(judge_entry(push, JudgedEntry::header(0x33)), None);
+        assert_eq!(
+            judge_entry(push, JudgedEntry::header(0x14)),
+            Some(ExtAdmission::UnknownMandatory { eid: 0x14 })
+        );
+        assert_eq!(
+            judge_entry(push, JudgedEntry::of(&zbuf(0x42, &[0x05, 0x01, 0x00]))),
+            Some(ExtAdmission::MalformedExt { eid: 0x42 })
+        );
+        assert_eq!(
+            judge_entry(push, JudgedEntry::of(&zbuf(0x42, &[0x05, 0x01, 0x01]))),
+            None
+        );
+        assert_eq!(
+            judge_entry(push, JudgedEntry::header(0x42)),
+            None,
+            "a header judged alone reads no body"
+        );
+        assert_eq!(
+            judge_entry(ExtCarrier::Transport(0x1F), JudgedEntry::header(0x02)),
+            Some(ExtAdmission::Unjudged)
+        );
+    }
+
+    /// A chain whose every entry reads is admissible on a message this build names and unjudged on
+    /// one it cannot, an empty chain included, by both chain judges. Turned red by `judge_end`
+    /// answering admissible whatever the carrier.
+    #[test]
+    fn a_chain_that_reads_through_is_admissible_only_on_a_named_message() {
+        let unnamed = ExtCarrier::Transport(0x1F);
+        assert_eq!(judge_ext_chain(unnamed, []), ExtAdmission::Unjudged);
+        assert_eq!(
+            judge_ext_entries(unnamed, core::iter::empty::<Entry>()),
+            ExtAdmission::Unjudged
+        );
+        assert_eq!(judge_ext_chain(unnamed, [0x02]), ExtAdmission::Unjudged);
+        for carrier in network_carriers() {
+            assert_eq!(
+                judge_ext_chain(carrier, []),
+                ExtAdmission::Admissible,
+                "{carrier:?}"
+            );
+            assert_eq!(
+                judge_ext_entries(carrier, core::iter::empty::<Entry>()),
+                ExtAdmission::Admissible,
+                "{carrier:?}"
+            );
+        }
+    }
+
+    /// The screen passes only entries the rule's body reads past on every carrier: an entry it
+    /// passes is never refused, and every identity a body rule names is screened in. Turned red by
+    /// dropping an identity from `BODY_RULED` (a Del's source info whose body is cut would be
+    /// admitted), or by a screen that passes a mandatory extension.
+    #[test]
+    fn no_entry_the_screen_passes_is_refused() {
+        let carriers = network_carriers()
+            .into_iter()
+            .chain((0u8..0x20).map(ExtCarrier::Transport))
+            .chain((0u8..0x20).map(ExtCarrier::Scouting));
+        for carrier in carriers {
+            for header in 0u8..=0xFF {
+                let eid = ext_eid(header);
+                if body_rule(carrier, eid).is_some() {
+                    assert!(may_refuse(header), "{carrier:?}: {header:#04x}");
+                }
+                if may_refuse(header) {
+                    continue;
+                }
+                for entry in [unit(header), zint(header, 3), zbuf(header, &[])] {
+                    let verdict = judge_entry(carrier, JudgedEntry::of(&entry));
+                    assert!(
+                        matches!(verdict, None | Some(ExtAdmission::Unjudged)),
+                        "{carrier:?}: {header:#04x}: {verdict:?}"
+                    );
+                }
+            }
+        }
+        // A Push's QoS is read past with no call; its timestamp and node id are not.
+        assert!(!may_refuse(0x21));
+        assert!(may_refuse(0x42));
+        assert!(may_refuse(0x33));
     }
 }

@@ -36,6 +36,7 @@
 //! threads asks of the cells its shared handles are placed in.
 //!
 //! [`LentByteCells`]: crate::byte_cells::LentByteCells
+//! [`CellFlag`]: crate::byte_cells::CellFlag
 
 use core::cell::{Cell, UnsafeCell};
 use core::ptr::NonNull;
@@ -43,13 +44,15 @@ use core::ptr::NonNull;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering;
 
+use crate::bounded::ZeroEmpty;
 use crate::runtime_cell::FlagCell;
 
 /// The flag that says a cell of a [`LentByteCells`] table is lent, in the form the table's
 /// holders need: `Cell<bool>` where one task claims and releases, `AtomicBool` where a release
 /// may come from any thread while a claim is made, so a claim takes the flag in one step and a
-/// release is ordered after every use of the bytes it gives back.
-pub trait CellFlag: FlagCell + 'static {
+/// release is ordered after every use of the bytes it gives back. Its all-zero byte is `false`
+/// ([`ZeroEmpty`]), so a table lent from zeroed memory is free as the memory lies.
+pub trait CellFlag: FlagCell + ZeroEmpty + 'static {
     /// Take the flag when it is free: `true` when this call took it, `false` when it was taken.
     fn take(&self) -> bool;
 }
@@ -195,14 +198,6 @@ impl LentByteCells {
 }
 
 impl<F: CellFlag> LentByteCells<F> {
-    /// A table of no buffer: what a lend refused hands its table ([`crate::bounded::TableLender`]),
-    /// which lends nothing and reads no byte.
-    pub(crate) const fn unlent() -> Self {
-        // SAFETY: a table of no cell reads no flag and no byte, so dangling pointers, aligned for
-        // their types, are all it needs.
-        unsafe { Self::over(NonNull::dangling(), NonNull::dangling(), 0, 0) }
-    }
-
     /// The table whose `count` flags are at `taken` and whose `count` cells of `size` bytes each
     /// are at `bytes`, one after the other.
     ///

@@ -318,8 +318,15 @@ impl wz_session_core::epoch::EpochSource for NodeEpoch {
     }
 }
 
-/// The environment variable that states the bound, as `uhlc` names it.
-const MAX_DELTA_VARIABLE: &str = "UHLC_MAX_DELTA_MS";
+/// The environment variable that states the bound, as `uhlc` names it, as the host's environment
+/// is asked for it.
+const MAX_DELTA_NAME: &core::ffi::CStr = c"UHLC_MAX_DELTA_MS";
+
+/// [`MAX_DELTA_NAME`] as text, as `std`'s environment and the refusals name it.
+const MAX_DELTA_VARIABLE: &str = match core::str::from_utf8(MAX_DELTA_NAME.to_bytes()) {
+    Ok(name) => name,
+    Err(_) => panic!("the variable's name is text"),
+};
 
 /// Why a node holds no clock although it was to have one: `UHLC_MAX_DELTA_MS` states a bound the
 /// node does not honour ([`NodeHlc::clock_refused`]).
@@ -401,15 +408,26 @@ fn max_delta_from(
 #[cfg(feature = "time-hlc")]
 enum Stated {
     Absent,
-    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     NotUnicode,
-    #[cfg_attr(not(feature = "std"), allow(dead_code))]
     Text(alloc::string::String),
 }
 
-/// The bound a node opens with under `limits`. With `std` the environment's `UHLC_MAX_DELTA_MS`
-/// may move it, as above. A library without `std` has no environment of its own to read: its
-/// bound is the `CLOCK_MAX_FORWARD_STEP_MS` of `limits`, which a deployment states with that limit.
+/// What the host's environment states for the bound ([`wz_host_sync::env_var`]'s answer), read as
+/// `std::env::var` reads it: bytes that are not UTF-8 are not Unicode.
+#[cfg(all(feature = "time-hlc", any(not(feature = "std"), test)))]
+fn stated_of(value: Option<&[u8]>) -> Stated {
+    match value {
+        None => Stated::Absent,
+        Some(bytes) => match core::str::from_utf8(bytes) {
+            Ok(text) => Stated::Text(alloc::string::String::from(text)),
+            Err(_) => Stated::NotUnicode,
+        },
+    }
+}
+
+/// The bound a node opens with under `limits`, which the environment's `UHLC_MAX_DELTA_MS` may move,
+/// as above: read through `std`, or in a library without it from the host's own environment
+/// (`host-sync`), so a host library honours, and refuses, what a zenoh node does.
 #[cfg(feature = "time-hlc")]
 fn max_delta_at_open(
     limits: &RuntimeLimits,
@@ -420,7 +438,9 @@ fn max_delta_at_open(
     }
     #[cfg(not(feature = "std"))]
     {
-        max_delta_of(Stated::Absent, limits)
+        wz_host_sync::env_var(MAX_DELTA_NAME, |value| {
+            max_delta_of(stated_of(value), limits)
+        })
     }
 }
 

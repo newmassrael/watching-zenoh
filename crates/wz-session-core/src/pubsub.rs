@@ -2333,11 +2333,22 @@ pub(crate) fn admit_from_peer(
     keyexpr: &str,
     class: Option<ClassId>,
 ) -> Admission {
-    match gate.admit_key_from(class, PeerOp::Publish, keyexpr) {
-        Ok(Admitted::Key(key)) => Admission::Numbered(key),
-        Ok(Admitted::Unchecked) => Admission::Matched,
-        Err(_) => Admission::Refused,
-    }
+    peer_admission(gate, keyexpr, class).unwrap_or(Admission::Refused)
+}
+
+/// [`admit_from_peer`], with why a refused key was refused: what an answer that keeps the
+/// refusal keeps, to count each later message on the key by.
+#[inline]
+pub(crate) fn peer_admission(
+    gate: &mut KeyGate<'_>,
+    keyexpr: &str,
+    class: Option<ClassId>,
+) -> Result<Admission, crate::key_gate::Refusal> {
+    gate.admit_key_from(class, PeerOp::Publish, keyexpr)
+        .map(|admitted| match admitted {
+            Admitted::Key(key) => Admission::Numbered(key),
+            Admitted::Unchecked => Admission::Matched,
+        })
 }
 
 /// Deliver a peer's message on a key of the closed key set to the subscribers its selection
@@ -2689,15 +2700,21 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
 /// Deliver a peer's message on a key whose answer `mark` keeps
 /// ([`LocalSubscribers::deliver_from_peer_marked`]), over a table's rows alone: an answer kept at
 /// `epoch` is handed to the rows it names, in the table's order, with nothing matched and the key
-/// gate not asked; any other is asked of the gate (`admitted`, which counts a refusal) and matched
-/// by [`scan_subscribers`], and what it reached is kept when every row it reached has a place in a
-/// set. A key the gate refuses or the matcher cannot match is not kept.
+/// gate not asked, and a refusal kept at `epoch` is counted on `gate` again and delivers nothing;
+/// any other key is asked of `gate` for the peer of `class` ([`peer_admission`]), its refusal
+/// kept, and matched by [`scan_subscribers`], what it reached kept when every row it reached has a
+/// place in a set. A key the matcher cannot match is not kept.
+///
+/// The kept answer is what every message of a key but its first is handed, so it is all that is
+/// inlined into the caller; the rest is [`fire_into_marked_afresh`], out of line.
+#[inline(always)]
 pub(crate) fn fire_into_marked<R: SubscriberRows>(
     rows: &mut R,
     mark: &mut crate::match_set::MatchEntry,
     epoch: u64,
     key: &str,
-    admitted: impl FnOnce() -> bool,
+    gate: &mut KeyGate<'_>,
+    class: Option<ClassId>,
     mut deliver: impl FnMut(R::RowId, RowAccess<'_, R::Sink>),
 ) -> usize {
     if let Some(set) = mark.answer(epoch) {
@@ -2711,7 +2728,27 @@ pub(crate) fn fire_into_marked<R: SubscriberRows>(
         }
         return fired;
     }
-    if !admitted() {
+    fire_into_marked_afresh(rows, mark, epoch, key, gate, class, deliver)
+}
+
+/// [`fire_into_marked`] of a key whose places `mark` does not keep at `epoch`: a refusal kept
+/// there counted again, any other key asked of the gate and matched, and its answer kept.
+#[inline(never)]
+fn fire_into_marked_afresh<R: SubscriberRows>(
+    rows: &mut R,
+    mark: &mut crate::match_set::MatchEntry,
+    epoch: u64,
+    key: &str,
+    gate: &mut KeyGate<'_>,
+    class: Option<ClassId>,
+    deliver: impl FnMut(R::RowId, RowAccess<'_, R::Sink>),
+) -> usize {
+    if let Some(counter) = mark.refusal(epoch) {
+        gate.count_refusal(counter);
+        return 0;
+    }
+    if let Err(why) = peer_admission(gate, key, class) {
+        mark.keep_refused(epoch, why.counter());
         return 0;
     }
     let mut set = crate::match_set::SubscriberSet::EMPTY;
@@ -3126,10 +3163,12 @@ impl SubscriberPeer<crate::bounded::Region> {
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         let lines = lines
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
-            .seq(crate::bounded::SeqPlace::of::<SubInterestReply>(
+            .seq(crate::bounded::SeqPlace::of_room::<
+                SubInterestReply,
+                { caps::MAX_PENDING_DECLARES },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
                 rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
-                caps::MAX_PENDING_DECLARES,
             ));
         #[cfg(not(feature = "storage-profile"))]
         let _ = at;
@@ -4841,9 +4880,10 @@ pub trait LocalSubscribers {
     /// side keeps in `mark` (a key the peer declared, named by its id with no suffix): a table
     /// that keeps answers by [`Self::epoch`] hands the message to the rows `mark` answers at
     /// this epoch with no pattern matched and no key gate asked, and otherwise gates and matches
-    /// it and keeps what it reached in `mark`. A refused key is not kept, so each of its
-    /// messages is refused and counted. A table that keeps no answer delivers as
-    /// `deliver_from_peer` delivers a message read in place and leaves `mark` as it was.
+    /// it and keeps what it reached in `mark`. A refused key keeps its refusal, so each later
+    /// message on it is counted refused with the gate not asked. A table that keeps no answer
+    /// delivers as `deliver_from_peer` delivers a message read in place and leaves `mark` as it
+    /// was.
     fn deliver_from_peer_marked<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,

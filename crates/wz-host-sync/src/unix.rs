@@ -35,6 +35,7 @@ mod futex {
     /// Sleep while `word` reads `expected`, until a wake on it or, with a deadline, until the
     /// monotonic clock reads `deadline_ns`. It may end sooner (a signal, or a wake meant for a
     /// value the word no longer holds): the caller reads the word again.
+    #[inline(never)]
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
         match deadline_ns {
             None => {
@@ -156,6 +157,7 @@ mod futex {
         wake(word, i32::MAX);
     }
 
+    #[inline(never)]
     fn wake(word: &AtomicU32, count: i32) {
         // SAFETY: a wake reads no memory; the address only names the threads asleep on it.
         unsafe {
@@ -191,6 +193,7 @@ mod ulock {
     /// As Linux's (`futex::wait`). The wait takes microseconds left, 0 for no timeout: the
     /// time left is rounded up and is at least 1, so a deadline never reads as none, and a
     /// longer one than the count holds is waited in parts by the caller's loop.
+    #[inline(never)]
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
         let timeout_us = deadline_ns.map_or(0, |deadline| {
             let left = deadline
@@ -219,6 +222,7 @@ mod ulock {
         wake(word, ULF_WAKE_ALL);
     }
 
+    #[inline(never)]
     fn wake(word: &AtomicU32, flags: u32) {
         // SAFETY: a wake reads no memory; the address only names the threads asleep on it.
         unsafe {
@@ -297,6 +301,7 @@ mod pairs {
     /// As Linux's (`futex::wait`): the word is read with its pair's lock held, and a waker
     /// changes the word before it takes that lock to wake, so either this thread reads the
     /// change and does not sleep, or it sleeps before the wake and the wake reaches it.
+    #[inline(never)]
     pub(crate) fn wait(word: &AtomicU32, expected: u32, deadline_ns: Option<u64>) {
         let pair = Pair::of(word);
         // SAFETY: the pair's objects are initialised and never move; `cond` is reached with
@@ -323,6 +328,7 @@ mod pairs {
     }
 
     /// Wake every thread asleep on `word`'s pair.
+    #[inline(never)]
     pub(crate) fn wake_all(word: &AtomicU32) {
         let pair = Pair::of(word);
         // SAFETY: as in `wait`.
@@ -487,6 +493,18 @@ pub(crate) fn current_thread() -> usize {
     unsafe { libc::pthread_self() as usize }
 }
 
+pub(crate) fn env_var<R>(name: &core::ffi::CStr, read: impl FnOnce(Option<&[u8]>) -> R) -> R {
+    // SAFETY: `name` ends with its NUL; a value the C library answers is a string of the
+    // environment's, which ends with its NUL and is read before this returns.
+    let value = unsafe { libc::getenv(name.as_ptr()) };
+    if value.is_null() {
+        read(None)
+    } else {
+        // SAFETY: as above.
+        read(Some(unsafe { core::ffi::CStr::from_ptr(value) }.to_bytes()))
+    }
+}
+
 /// # Safety
 /// `thread` is a started thread that nothing has joined or detached.
 pub(crate) unsafe fn join(thread: Thread) {
@@ -516,4 +534,36 @@ pub(crate) fn sleep_us(us: u64) {
     while unsafe { libc::nanosleep(&ask, &mut left) } != 0 {
         ask = left;
     }
+}
+
+/// `bytes` bytes of an anonymous private mapping, which the system hands zero and makes resident a
+/// page at a time as each is first touched; `None` when it has none to map.
+pub(crate) fn map_pages(bytes: usize) -> Option<core::ptr::NonNull<u8>> {
+    // SAFETY: an anonymous mapping names no file and no address, so it overlays nothing this
+    // process holds; the system picks where it lies.
+    let at = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if at == libc::MAP_FAILED {
+        None
+    } else {
+        core::ptr::NonNull::new(at.cast::<u8>())
+    }
+}
+
+/// Unmap what [`map_pages`] mapped; its pages go back to the system at once.
+///
+/// # Safety
+/// `base` and `bytes` are what one [`map_pages`] mapped, unmapped once, and nothing uses them
+/// after.
+pub(crate) unsafe fn unmap_pages(base: core::ptr::NonNull<u8>, bytes: usize) {
+    // A whole mapping of this process is never refused, so the call's answer says nothing.
+    unsafe { libc::munmap(base.as_ptr().cast::<c_void>(), bytes) };
 }

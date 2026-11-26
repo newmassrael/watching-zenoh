@@ -133,6 +133,7 @@ unsafe fn source_info(zid_bytes: [u8; 16], eid: u32, sn: u32) -> z_source_info_t
 
 #[test]
 fn put_options_source_info_crosses_the_wire_and_null_leaves_it_absent() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -271,6 +272,7 @@ fn put_options_source_info_crosses_the_wire_and_null_leaves_it_absent() {
 /// entry point shows up as a duplicated or missing sn rather than as a pass.
 #[test]
 fn source_info_reaches_the_wire_from_delete_and_both_publisher_paths() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

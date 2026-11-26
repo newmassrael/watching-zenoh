@@ -533,12 +533,39 @@ fn a_bound_that_is_not_a_whole_number_of_milliseconds_is_refused_and_not_default
     );
 }
 
-/// A build without `std` reads no environment: its node opens with nothing stated, which is the
-/// bound of the runtime limits its creator handed it, the one a `std` build opens with when the
-/// variable is unset.
+/// What the host's environment states is read as `std::env::var` reads it: no value is nothing
+/// stated, UTF-8 is its text and other bytes are not Unicode, so a build without `std` opens with
+/// and refuses the bounds a build with it does. Turned red by a `stated_of` that drops the value,
+/// or that reads bytes that are not UTF-8 as text.
+#[cfg(all(feature = "time-hlc", feature = "std"))]
+#[test]
+fn the_host_s_environment_is_read_as_std_reads_it() {
+    let limits = &RuntimeLimits::BUILD;
+    assert_eq!(
+        max_delta_of(stated_of(None), limits),
+        max_delta_from(Err(std::env::VarError::NotPresent), limits)
+    );
+    assert_eq!(
+        max_delta_of(stated_of(Some(b"soon")), limits),
+        Err(MaxDeltaRefused::NotMilliseconds {
+            stated: String::from("soon")
+        })
+    );
+    assert_eq!(
+        max_delta_of(stated_of(Some(&[0xff, 0xfe])), limits),
+        Err(MaxDeltaRefused::NotUnicode)
+    );
+    let build = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS.to_string();
+    let read = max_delta_of(stated_of(Some(build.as_bytes())), limits);
+    assert!(read.is_ok(), "the build's own bound is honoured");
+    assert_eq!(read, max_delta_from(Ok(build), limits));
+}
+
+/// Nothing stated is the bound of the runtime limits the node's creator handed it, the one a node
+/// opens with when the variable is unset.
 #[cfg(feature = "time-hlc")]
 #[test]
-fn nothing_stated_is_the_bound_a_build_without_std_opens_with() {
+fn nothing_stated_is_the_bound_of_the_runtime_limits() {
     use wz_session_core::ntp64::Ntp64;
     let build = wz_session_core::caps::CLOCK_MAX_FORWARD_STEP_MS as u64;
     assert_eq!(

@@ -581,6 +581,10 @@ type SerialDriverOf<D, N> = SerialDriver<
     <N as CountKind>::Shared,
 >;
 
+/// The handle a stack's sessions hold a serial link by: on the cell it is made in, counted as they
+/// count their handles.
+type SerialCellOf<D, N> = CellRc<SerialDriverOf<D, N>, N>;
+
 /// What a listener keeps of its line between the links over it: the line, while the listener
 /// keeps it open and no link holds it, and whether a link holds it now. The line has one owner at
 /// a time: this home, or the one link over it ([`LineLease`]), which gives it back as it ends.
@@ -680,7 +684,7 @@ impl<D, M: CountKind> Drop for LineLease<D, M> {
 
 /// `link`, its handshake made, as the session shell holds a link.
 fn opened<D: SerialDevice + 'static, N: CountKind>(
-    link: CellRc<SerialDriverOf<D, N>, N>,
+    link: SerialCellOf<D, N>,
 ) -> OpenedLink<HeapLink<N>, N> {
     OpenedLink {
         sink: link.clone().into_sink(),
@@ -728,7 +732,7 @@ impl<N: CountKind> SerialShape<N> {
         &self,
         line: LineLease<D, N::Shared>,
         at: SerialLocator,
-    ) -> Result<CellRc<SerialDriverOf<D, N>, N>, LinkOpenError> {
+    ) -> Result<SerialCellOf<D, N>, LinkOpenError> {
         let (rx, tx) = heap_link_buffers(
             self.lent.as_ref(),
             SERIAL_MAX_COBS_BUF,
@@ -752,7 +756,7 @@ impl<N: CountKind> SerialShape<N> {
 /// A `serial/` dial under way ([`SessionLinks::begin_initiator`]): its line open, its `INIT`
 /// written, and the peer's answer asked for at each poll, timed on the opener's clock.
 pub struct SerialDial<O: SerialOpen, N: CountKind = OneTask> {
-    link: Option<CellRc<SerialDriverOf<O::Device, N>, N>>,
+    link: Option<SerialCellOf<O::Device, N>>,
     opener: O,
 }
 
@@ -834,7 +838,7 @@ struct SerialListener<O: SerialOpen, N: CountKind> {
     opener: O,
     at: SerialLocator,
     shape: SerialShape<N>,
-    waiting: RefCell<Option<CellRc<SerialDriverOf<O::Device, N>, N>>>,
+    waiting: RefCell<Option<SerialCellOf<O::Device, N>>>,
     /// Where the line is kept between links when the locator does not release it on close, and
     /// whether a link holds it now ([`LineLease`]).
     home: HomeOf<O::Device, N::Shared>,
@@ -987,6 +991,17 @@ where
     type Dial = SerialLinksDial<S::Dial, O, N>;
 
     const IPV6: bool = S::IPV6;
+
+    // A name is resolved by the network the stack's IP links are opened on.
+    const RESOLVES: bool = S::RESOLVES;
+
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        self.links.resolve(name, found)
+    }
 
     type Waits = S::Waits;
 

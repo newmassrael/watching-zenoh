@@ -269,9 +269,11 @@ config WZ_LIMIT_HELD_SAMPLES
 	default 18
 	help
 	  The owned samples a program of the pico C ABI holds at once (taken out of
-	  a callback, cloned, or held in a channel): the slots of the pool of samples
-	  the library reserves at its first object when the program reserved none
-	  (object-pool). One more is refused, its source untouched.
+	  a callback, cloned, or held in a channel): the most slots of the pool of
+	  samples the library reserves at its first open, the count that open's
+	  config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states
+	  none, unless the program reserved the pools itself (object-pool). One more
+	  is refused, its source untouched.
 
 config WZ_LIMIT_HELD_REPLIES
 	int "HELD_REPLIES"
@@ -279,9 +281,10 @@ config WZ_LIMIT_HELD_REPLIES
 	default 18
 	help
 	  The owned replies and reply errors a program of the pico C ABI holds at
-	  once: the slots of the pool of replies the library reserves at its first
-	  object when the program reserved none (object-pool). One more is refused,
-	  its source untouched.
+	  once: the most slots of the pool of replies the library reserves at its
+	  first open, the count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY)
+	  and this value where it states none, unless the program reserved the pools
+	  itself (object-pool). One more is refused, its source untouched.
 
 config WZ_LIMIT_HELD_QUERIES
 	int "HELD_QUERIES"
@@ -289,9 +292,11 @@ config WZ_LIMIT_HELD_QUERIES
 	default 18
 	help
 	  The owned queries a program of the pico C ABI holds at once, each keeping
-	  its query's answer open: the slots of the pool of queries the library
-	  reserves at its first object when the program reserved none (object-pool).
-	  One more is refused, its source untouched.
+	  its query's answer open: the most slots of the pool of queries the library
+	  reserves at its first open, the count that open's config states
+	  (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none, unless the
+	  program reserved the pools itself (object-pool). One more is refused, its
+	  source untouched.
 
 config WZ_LIMIT_HELD_CONFIGS
 	int "HELD_CONFIGS"
@@ -310,9 +315,11 @@ config WZ_LIMIT_HELD_HELLOS
 	default 16
 	help
 	  The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
-	  with as many locators as a scouting window keeps of one Hello: the slots of
-	  the pool of kept hellos the library reserves at its first object. One more
-	  is refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
+	  with as many locators as a scouting window keeps of one Hello: the most slots
+	  of the pool of kept hellos the library reserves at its first kept hello, or
+	  else at its first open, from the count that open's config states
+	  (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none. One more is
+	  refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 config WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES
 	int "PAYLOAD_SMALL_BLOCK_BYTES"
@@ -346,8 +353,10 @@ config WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS
 	default 256
 	help
 	  The blocks of PAYLOAD_SMALL_BLOCK_BYTES bytes a program of the pico C ABI
-	  holds payload bytes in at once: the smallest of the three pools of payload
-	  blocks the library reserves at its first object. A payload whose bytes no free
+	  holds payload bytes in at once: the most blocks of the smallest of the three
+	  pools of payload blocks the library reserves at its first open, the count
+	  that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it
+	  states none. A payload whose bytes no free
 	  block of a pool that holds them takes is refused with
 	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
@@ -357,8 +366,10 @@ config WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS
 	default 32
 	help
 	  The blocks of PAYLOAD_MEDIUM_BLOCK_BYTES bytes a program of the pico C ABI
-	  holds payload bytes in at once: the middle one of the three pools of payload
-	  blocks the library reserves at its first object. A payload whose bytes no free
+	  holds payload bytes in at once: the most blocks of the middle one of the
+	  three pools of payload blocks the library reserves at its first open, the
+	  count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value
+	  where it states none. A payload whose bytes no free
 	  block of a pool that holds them takes is refused with
 	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
@@ -368,8 +379,10 @@ config WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS
 	default 20
 	help
 	  The blocks a program of the pico C ABI holds its largest payloads in at once:
-	  the largest of the three pools of payload blocks the library reserves at its
-	  first object, each block holding the largest message a session of the build
+	  the most blocks of the largest of the three pools of payload blocks the
+	  library reserves at its first open, the count that open's config states
+	  (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none, each block
+	  holding the largest message a session of the build
 	  delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
 	  PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
 	  block, or one no free block of a pool that holds it takes, is refused with
@@ -381,8 +394,10 @@ config WZ_LIMIT_HELD_ENCODINGS
 	default 16
 	help
 	  The encodings with a schema (z_owned_encoding_t) a program of the pico C ABI
-	  holds at once, each schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the slots
-	  of the pool of encodings the library reserves at its first object. An encoding
+	  holds at once, each schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the most
+	  slots of the pool of encodings the library reserves at its first open, the
+	  count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value
+	  where it states none. An encoding
 	  takes one from the constructor, clone or schema setter that gives it a schema
 	  until it is dropped or moved into the call it describes, and a declared
 	  publisher's for as long as the publisher stands. An encoding of no schema is
@@ -512,11 +527,16 @@ config WZ_LIMIT_MAX_PENDING_REPLIES
 	default 2 if WZ_LIMITS_ZENOH_PICO
 	default 8
 	help
-	  The replies a session's queryables may have ready to send between two
-	  sends. One more is refused and counted, and the handler that made it is
-	  told. The same count bounds the keys whose latest reply the session's
-	  consolidating gets hold until their Final: a reply of a key past them is
-	  handed to the get's callback at once, unconsolidated, and counted.
+	  The replies a dispatch that calls a session's queryables under the
+	  session's lock holds back until the lock is let go and they are sent.
+	  One more is refused and counted, and the handler that made it is told.
+	  A queryable whose callback runs with no lock held, as a threaded
+	  runtime's deferred handler, a held query and the cooperative engine's
+	  queryable do, sends each reply as it makes it, and no count bounds how
+	  many replies it gives one query. The same count bounds the keys whose
+	  latest reply the session's consolidating gets hold until their Final: a
+	  reply of a key past them is handed to the get's callback at once,
+	  unconsolidated, and counted.
 
 config WZ_LIMIT_MAX_PENDING_FINALS
 	int "MAX_PENDING_FINALS"
@@ -844,6 +864,19 @@ config WZ_LIMIT_TX_POOL_SLOTS
 	  takes nothing is: a droppable message is dropped. A pool as large as the links a
 	  session may hold keeps every link's slot its own, and is held to them. At least
 	  1; a session may lower it and never raise it.
+
+config WZ_LIMIT_REASSEMBLY_CHAINS
+	int "REASSEMBLY_CHAINS"
+	default 3
+	help
+	  How many buffers, each as long as PICO_FRAG_MAX_BYTES, the links of a session
+	  share to rejoin fragmented messages in when its engine lends them from the
+	  session's memory at open. A chain holds one from its first fragment until it
+	  ends, and the message it rejoined keeps it until its records are handed out.
+	  A first fragment that finds none free is refused and counted, and its message
+	  is dropped, as zenoh-pico drops one whose buffer it cannot allocate. The
+	  default holds a chain of each reliability and the message the last of them
+	  rejoined; 0 rejoins no fragmented message.
 
 config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
 	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"

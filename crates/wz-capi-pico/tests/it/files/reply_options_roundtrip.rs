@@ -327,6 +327,7 @@ unsafe fn get_once(session: &z_owned_session_t, seen: &Arc<Mutex<Vec<Seen>>>, wa
 
 #[test]
 fn reply_options_metadata_crosses_the_wire_on_both_arms() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -541,6 +542,7 @@ unsafe extern "C" fn on_query_probe(query: *const z_loaned_query_t, ctx: *mut c_
 /// identity on every outbound query would pass the first arm for free.
 #[test]
 fn get_options_source_info_and_encoding_reach_the_queryable() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

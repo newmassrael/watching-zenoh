@@ -175,7 +175,7 @@ pub(crate) fn group_endpoint<'a>(
 /// The batch size a unicast session of this ABI advertises in its InitSyn, on either engine:
 /// pico's `BATCH_UNICAST_SIZE` as the open's snapshot `limits` holds it
 /// (`PICO_UNICAST_BATCH_BYTES`).
-const fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
+pub(crate) const fn pico_unicast_batch(limits: &SessionLimits) -> u16 {
     pico_batch(limits.pico_unicast_batch_bytes())
 }
 
@@ -343,25 +343,93 @@ fn pico_group(
 /// the build's policies and the limits a session opens under ([`opening_limits`],
 /// [`PolicyStatements::compose_into`]); `Z_ERR_CONFIG_INVALID_VALUE` when the build refuses any of
 /// it. The doors check a change through this before they keep it, so they and the open cannot
-/// judge a config differently.
+/// judge a config differently. Only the policies' doors, the scout and the tests resolve a config
+/// apart from an open, which composes in place through `resolve_open`.
+#[cfg(any(
+    test,
+    feature = "config-policy",
+    feature = "scout",
+    feature = "scout-mcu"
+))]
 pub(crate) fn resolve_snapshots(
     policies: &PolicyStatements,
 ) -> Result<(SessionPolicy, SessionLimits), ZResult> {
-    let mut policy = SessionPolicy::defaults();
     let mut limits = opening_limits();
-    policies.compose_into(&mut policy, &mut limits)?;
+    let policy = compose_snapshots(policies, &mut limits)?;
     Ok((policy, limits))
+}
+
+/// The build's policies with `policies` written over them, returned, and the limits they state
+/// written over `limits` in place. The one composition the doors' check and the open share; on a
+/// refusal what was written is no resolution.
+#[inline]
+fn compose_snapshots(
+    policies: &PolicyStatements,
+    limits: &mut SessionLimits,
+) -> Result<SessionPolicy, ZResult> {
+    let mut policy = SessionPolicy::defaults();
+    policies.compose_into(&mut policy, limits)?;
+    Ok(policy)
+}
+
+/// The snapshots `z_open` opens `cfg` under, its limits composed over `stated`, which an open
+/// hands as [`Stated::OPENING`]: the policies its doors state over the build's, returned, and the
+/// limits they state written over `stated`, as `compose_snapshots` composes both, and over them
+/// the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads, the held values
+/// the process pools reserve at the first open among them; `Z_ERR_CONFIG_INVALID_VALUE` when the
+/// build refuses any of it, and then what was written is no resolution, which the caller drops.
+///
+/// Not inlined where `z_open` and the device requirements' judgement share this one body; a
+/// build without those requirements has `z_open`'s open request its one caller, which holds it
+/// inline. The limits are written in place where the caller holds them, not returned and moved
+/// through each layer.
+///
+/// [`Stated::OPENING`]: crate::config_limits::Stated::OPENING
+/// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
+#[cfg_attr(feature = "device-requires", inline(never))]
+pub(crate) fn resolve_open(
+    cfg: &ConfigState,
+    stated: &mut crate::config_limits::Stated,
+) -> Result<SessionPolicy, ZResult> {
+    let policy = compose_snapshots(&cfg.policies, &mut stated.limits)?;
+    let text = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY);
+    crate::config_limits::state_over(text, stated)?;
+    Ok(policy)
 }
 
 /// The limits a session of this ABI opens under before its config states any: zenoh-pico's, as
 /// each ABI opens under its upstream's (`SessionLimits::PICO_PRESET`, each value with its reason in
 /// the declaration's `[limit.pico_preset]`, `deploy/wz-config.toml`), so a listener holds the ten
-/// peers zenoh-pico's `Z_LISTEN_MAX_CONNECTION_NB` admits and not a router's thousand. A config
-/// states more, or less, over them. The process pools are sized by the same
-/// (`crate::process_pool`).
+/// peers zenoh-pico's `Z_LISTEN_MAX_CONNECTION_NB` admits and not a router's thousand. An entity
+/// table opens at what zenoh-pico's parity programs declare (`[limit.pico_open]`), and the preset
+/// is the bound a config raises it to: zenoh-pico grows its lists on the heap, which an open that
+/// takes no memory after it cannot. A config states more, or less, over them. The process pools
+/// are sized by the same (`crate::process_pool`).
+///
+/// A build whose every session opens by the region of its tables laid out when it is compiled
+/// (`OPENS_BY_REGION`) opens each table at that bound instead (`SessionLimits::PICO_PRESET_BOUND`):
+/// no config resizes a region, so a table opened below its bound would never reach it, and a
+/// session of such a build could hold no second querier or liveliness subscriber whatever its
+/// program stated.
 pub(crate) const fn opening_limits() -> SessionLimits {
-    SessionLimits::PICO_PRESET
+    if OPENS_BY_REGION {
+        SessionLimits::PICO_PRESET_BOUND
+    } else {
+        SessionLimits::PICO_PRESET
+    }
 }
+
+/// Whether every session of the build opens by the region of its tables the build lays out when it
+/// is compiled (`PRESET`), its limits the region's and no other: a build of the cooperative engine
+/// that states no policy, listens on nothing and joins no group, whose open walks no plan.
+const OPENS_BY_REGION: bool = cfg!(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+));
 
 #[cfg(test)]
 mod opening_limits_tests {
@@ -370,14 +438,185 @@ mod opening_limits_tests {
     use wz_session_core::limits::SessionLimits;
 
     /// A session of this ABI opens under zenoh-pico's limits: a listener holds the ten peers
-    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten.
-    /// Turned red by an open under the build's defaults.
+    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten. A
+    /// build that opens by its region opens under the preset's bound, any other under the preset.
+    /// Turned red by an open under the build's defaults, or by a region build that opens under
+    /// the open values (`opening_limits` answering `PICO_PRESET` whatever `OPENS_BY_REGION` is).
     #[test]
     fn a_session_opens_under_picos_limits() {
+        #[cfg(not(all(
+            not(feature = "engine-tokio"),
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        )))]
         assert_eq!(opening_limits(), SessionLimits::PICO_PRESET);
+        #[cfg(all(
+            not(feature = "engine-tokio"),
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET_BOUND);
         let mut probe = SessionLimits::defaults();
         if probe.select_max_faces(Quota::at_most(10)).is_ok() {
             assert_eq!(opening_limits().max_faces(), Quota::at_most(10));
+        }
+    }
+
+    /// A session's entity tables open at what zenoh-pico's parity programs declare on one session
+    /// (`[limit.pico_open]`), where the build's domain holds those counts: one subscriber, two
+    /// queryables with the admin space's, one publisher, two declared keys and one get. Turned red
+    /// by a preset that opens them at the bound the Kconfig keeps. A build that opens by its region
+    /// opens at the bound instead (the test below).
+    #[cfg(any(
+        feature = "engine-tokio",
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
+    #[test]
+    fn a_session_opens_its_entity_tables_at_the_parity_programs_counts() {
+        let opening = opening_limits();
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_subscriptions(Quota::at_most(1)).is_ok() {
+            assert_eq!(opening.max_subscriptions(), Quota::at_most(1));
+        }
+        if probe.select_max_queryables(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_queryables(), Quota::at_most(2));
+        }
+        if probe.select_max_publishers(Quota::at_most(1)).is_ok() {
+            assert_eq!(opening.max_publishers(), Quota::at_most(1));
+        }
+        if probe
+            .select_max_declared_keyexprs(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_declared_keyexprs(), Quota::at_most(2));
+        }
+        if probe.select_max_pending_queries(Quota::at_most(1)).is_ok() {
+            assert_eq!(opening.max_pending_queries(), Quota::at_most(1));
+        }
+    }
+
+    /// A session opens two reassembly buffers (`[limit.pico_open]`), where the build's domain
+    /// holds two: one for the reliable chain zenoh-pico's parity programs send and one for the
+    /// message it rejoined while its records are handed out; a config raises it to the bound.
+    /// Turned red by a preset that opens them at the bound the Kconfig keeps.
+    #[cfg(any(
+        feature = "engine-tokio",
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
+    #[test]
+    fn a_session_opens_two_reassembly_buffers() {
+        let mut probe = SessionLimits::defaults();
+        if probe.select_reassembly_chains(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening_limits().reassembly_chains(), Quota::at_most(2));
+        }
+    }
+
+    /// A session of a build that opens by its region opens each entity table at the preset's
+    /// bound, which no config of it can raise past the region: two queriers, two liveliness
+    /// subscribers and tokens, two matching listeners and two pending gets, where the build's
+    /// domain holds two, as a program of such a build that holds two of a kind needs; and never
+    /// below the open values. The CONTROL is the open values themselves, which hold one of each.
+    /// Turned red by a region laid out under `PICO_PRESET`.
+    #[cfg(all(
+        not(feature = "engine-tokio"),
+        not(any(
+            feature = "config-policy",
+            feature = "peer",
+            feature = "multicast-transport"
+        ))
+    ))]
+    #[test]
+    fn a_session_of_a_region_build_opens_each_table_at_the_presets_bound() {
+        let opening = opening_limits();
+        let open = SessionLimits::PICO_PRESET;
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_queriers(Quota::at_most(2)).is_ok() {
+            assert_eq!(
+                open.max_queriers(),
+                Quota::at_most(1),
+                "CONTROL: the open value"
+            );
+            assert_eq!(opening.max_queriers(), Quota::at_most(2));
+        }
+        if probe
+            .select_max_liveliness_subscriptions(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_liveliness_subscriptions(), Quota::at_most(2));
+        }
+        if probe.select_max_local_tokens(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_local_tokens(), Quota::at_most(2));
+        }
+        if probe
+            .select_max_matching_listeners(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_matching_listeners(), Quota::at_most(2));
+        }
+        if probe.select_max_pending_queries(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_pending_queries(), Quota::at_most(2));
+        }
+        let at_least = |bound: Quota, open: Quota| match (bound.most(), open.most()) {
+            (Some(bound), Some(open)) => bound >= open,
+            (bound, _) => bound.is_none(),
+        };
+        for (name, bound, open) in [
+            (
+                "MAX_SUBSCRIPTIONS",
+                opening.max_subscriptions(),
+                open.max_subscriptions(),
+            ),
+            (
+                "MAX_QUERYABLES",
+                opening.max_queryables(),
+                open.max_queryables(),
+            ),
+            (
+                "MAX_PUBLISHERS",
+                opening.max_publishers(),
+                open.max_publishers(),
+            ),
+            ("MAX_QUERIERS", opening.max_queriers(), open.max_queriers()),
+            (
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                opening.max_liveliness_subscriptions(),
+                open.max_liveliness_subscriptions(),
+            ),
+            (
+                "MAX_LOCAL_TOKENS",
+                opening.max_local_tokens(),
+                open.max_local_tokens(),
+            ),
+            (
+                "MAX_MATCHING_LISTENERS",
+                opening.max_matching_listeners(),
+                open.max_matching_listeners(),
+            ),
+            (
+                "MAX_DECLARED_KEYEXPRS",
+                opening.max_declared_keyexprs(),
+                open.max_declared_keyexprs(),
+            ),
+            (
+                "MAX_PENDING_QUERIES",
+                opening.max_pending_queries(),
+                open.max_pending_queries(),
+            ),
+        ] {
+            assert!(
+                at_least(bound, open),
+                "{name}: {bound:?} below the open value {open:?}"
+            );
         }
     }
 }
@@ -603,16 +842,13 @@ fn memory_basis(
     tx_queue: &TxQueueConf,
     limits: &SessionLimits,
 ) -> crate::session_memory::MemoryBasis {
-    let rx = pico_link_rx(limits);
-    crate::session_memory::MemoryBasis {
-        limits: *limits,
-        links: crate::session_memory::links_of(listen, dials, limits),
-        queue_batches: crate::session_memory::link_tx_batches(tx_queue),
-        batch_bytes: usize::from(pico_unicast_batch(limits)),
-        rx_bytes: rx.buffer_size,
-        // `pico_link_rx` hands the engine `usize::MAX` where the snapshot states no bound.
-        message_bytes: limits.pico_frag_max_bytes().most(),
-    }
+    crate::session_memory::MemoryBasis::of(
+        limits,
+        crate::session_memory::links_of(listen, dials, limits),
+        pico_unicast_batch(limits),
+        tx_queue,
+        &pico_link_rx(limits),
+    )
 }
 
 /// The session as the handle holds it. The tokio engine boxes its session out of line so that the
@@ -1174,11 +1410,21 @@ unsafe fn open_request(
     // comes back on another locator is found there and not here. The scout runs under the
     // snapshot of the open it finds a node for, and a config whose policies or limits the
     // build refuses opens nothing and scouts for nothing.
-    let (policy, limits) = resolve_snapshots(&cfg.policies)?;
+    let mut stated = crate::config_limits::Stated::OPENING;
+    let policy = resolve_open(cfg, &mut stated)?;
+    // The first open reserves the process pools it has not found reserved and fixes them, so
+    // nothing of the process is reserved after an open; a later open that states more of a held
+    // value than they hold is refused here, before it takes anything.
+    #[cfg(wz_process_pools)]
+    {
+        if !crate::process_pool::reserve_at_open(&stated.limits, &stated.held) {
+            return Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY);
+        }
+    }
     // The key-wire form, judged for the engine the session opens on, and the key ids every
     // node shares that the config states (`crate::key_ids`).
     #[cfg(feature = "shared-key-ids")]
-    let key_ids = crate::key_ids::admit_at_open(cfg, &policy, &limits)?;
+    let key_ids = crate::key_ids::admit_at_open(cfg, &policy, &stated.limits)?;
     #[cfg(not(feature = "shared-key-ids"))]
     crate::key_ids::admit_at_open(cfg, &policy)?;
     #[cfg(not(feature = "engine-tokio"))]
@@ -1188,7 +1434,7 @@ unsafe fn open_request(
     );
     #[cfg(any(feature = "scout", feature = "scout-mcu"))]
     let scouted: ScoutedLocators = match (connect, listen) {
-        (None, None) => crate::scout::locators_by_scout(cfg, &policy, &limits)?,
+        (None, None) => crate::scout::locators_by_scout(cfg, &policy, &stated.limits)?,
         _ => Vec::new(),
     };
     #[cfg(not(any(feature = "scout", feature = "scout-mcu")))]
@@ -1268,7 +1514,7 @@ unsafe fn open_request(
         #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
         tls,
         policy,
-        limits,
+        limits: stated.limits,
         #[cfg(feature = "app-transport")]
         app_transport,
         #[cfg(any(not(feature = "engine-tokio"), feature = "shared-key-ids"))]
@@ -1576,7 +1822,7 @@ struct OpenRequest {
     /// rustls configs from it, the cooperative engine the Mbed TLS channel's dial and listen.
     #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
     tls: CapiTlsConfig,
-    /// The policies the session runs under ([`resolve_snapshots`]), handed to the engine and kept
+    /// The policies the session runs under ([`resolve_open`]), handed to the engine and kept
     /// with the session's handle.
     policy: SessionPolicy,
     /// The session limits the session runs under, resolved with [`Self::policy`]: the engine's
@@ -2154,15 +2400,17 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let groups: Vec<wz_capi_port::group::GroupJoin> = Vec::new();
     // The unicast endpoints: none beside a group, and otherwise the one the config states or
     // those the scout found to dial, and the one it states to listen on.
-    let unicast_listens = usize::from(listen.is_some() && !joins_a_group);
-    let unicast_dials = if joins_a_group {
-        0
+    let listen_list = wz_capi_coop::open_source::Counted::of(listen.filter(|_| !joins_a_group));
+    let dial_list = if joins_a_group {
+        wz_capi_coop::open_source::Counted::default()
     } else {
-        request
-            .scouted
-            .len()
-            .saturating_add(usize::from(stated.is_some()))
+        wz_capi_coop::open_source::Counted::of(
+            stated
+                .into_iter()
+                .chain(request.scouted.iter().map(String::as_str)),
+        )
     };
+    let (unicast_listens, unicast_dials) = (listen_list.count, dial_list.count);
     let (config, scouted) = (request.config, request.scouted);
     // A datagram link reads into a buffer of the batch the session advertises, as pico's UDP link
     // reads into one of its `BATCH_UNICAST_SIZE`: no peer's batch is larger once the two have
@@ -2225,7 +2473,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // frame, which the open's handshake runs under, holds the maker and what it reads, and never
     // the config.
     let make_config = || wz_capi_coop::CoopConfig {
-        endpoints: wz_capi_coop::open_source::Counted(unicast_dials),
+        endpoints: dial_list,
         whatami: dial_whatami,
         zid,
         // The numbers of pico's value build switches, as the open's snapshot holds them: the
@@ -2251,7 +2499,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         // The bounds of an accept are the session's limits: the faces it holds besides its dial
         // (`MAX_FACES`) and the handshakes under way (`MAX_ACCEPT_PENDING`), at the pico preset
         // pico's own, ten peers and one handshake at a time.
-        listen: wz_capi_coop::open_source::Counted(unicast_listens),
+        listen: listen_list,
         accept_pending,
         max_faces,
         // The group the listen endpoint names, when it names one.
@@ -2326,6 +2574,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         feature = "multicast-transport"
     ))]
     let plan = wz_capi_coop::arena::PlanFrom::Config;
+    // A host's session arena is the system's fresh pages, zero as handed, so the open writes no
+    // row it does not use and a page no row uses is never resident; an image's is its heap's,
+    // written where a row must read empty.
+    #[cfg(all(feature = "os-host", any(unix, windows)))]
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
+    #[cfg(not(all(feature = "os-host", any(unix, windows))))]
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
+        &wz_capi_coop::arena::AllocatorMemory;
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
         clock,
@@ -2334,7 +2590,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         request.key_ids,
         wz_capi_coop::arena::OpenStorage {
-            memory: &wz_capi_coop::arena::AllocatorMemory,
+            memory: arena_memory,
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
             plan,
         },
@@ -3573,12 +3829,19 @@ mod build_numbers {
                 let (tx_queue, _) = pico_link_policy(&SessionPolicy::defaults(), &limits);
                 let basis = memory_basis(None, true, &tx_queue, &limits);
                 assert_eq!(basis.limits, limits);
-                let queue = memory_row(&basis.report(), c"link transmit queues");
+                let memory = basis.report();
+                let queue = memory_row(&memory, c"link transmit queues");
                 assert_eq!(queue.entry_bytes, value);
-                assert_eq!(
-                    queue.count,
-                    Some(crate::session_memory::link_tx_batches(&tx_queue))
-                );
+                // One link: every priority's queue on the tokio engine, its one slot on the
+                // cooperative engine, which also reads into a buffer of the stated batch.
+                #[cfg(feature = "engine-tokio")]
+                assert_eq!(queue.count, Some(tx_queue.sizes.iter().sum::<usize>()));
+                #[cfg(not(feature = "engine-tokio"))]
+                {
+                    assert_eq!(queue.count, Some(wz_capi_coop::arena::LINK_TX_SLOTS));
+                    let receive = memory_row(&memory, c"link receive buffers");
+                    assert_eq!((receive.count, receive.entry_bytes), (Some(1), value));
+                }
             },
         );
     }
@@ -3596,7 +3859,19 @@ mod build_numbers {
             |limits| {
                 let memory = memory_basis(None, true, &tx_queue(&limits), &limits).report();
                 let reassembly = memory_row(&memory, c"link reassembly");
-                assert_eq!((reassembly.count, reassembly.entry_bytes), (Some(2), value));
+                // Two for the dial's link on the tokio engine; the session's one table on the
+                // cooperative engine.
+                #[cfg(feature = "engine-tokio")]
+                let chains = 2;
+                #[cfg(not(feature = "engine-tokio"))]
+                let chains =
+                    wz_capi_coop::arena::link_buffers(1, pico_unicast_batch(&limits), &limits)
+                        .expect("the snapshot's batch")
+                        .chains;
+                assert_eq!(
+                    (reassembly.count, reassembly.entry_bytes),
+                    (Some(chains), value)
+                );
             },
         );
         stated(

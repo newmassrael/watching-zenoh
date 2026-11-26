@@ -44,11 +44,24 @@ impl<'p> Prefix<'p> {
 }
 
 /// A key a session sends: its whole text and the form the wire names it by, which agree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub struct NamedKey<'a> {
     text: KeyText<'a>,
     wire: WireKey<'a>,
+    /// Whether the text passed the wire's pre-emit gate where the session's tables kept it
+    /// (`Self::check_outbound`): set by those tables alone, from the judgement of the row.
+    proven: bool,
 }
+
+/// Two keys are one key when their texts and wire forms are: what is known of the text is not
+/// part of the key.
+impl PartialEq for NamedKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.text == other.text && self.wire == other.wire
+    }
+}
+
+impl Eq for NamedKey<'_> {}
 
 impl<'a> NamedKey<'a> {
     /// `text`, named whole on the wire; `None` for an empty text, which names no key.
@@ -57,6 +70,7 @@ impl<'a> NamedKey<'a> {
             Some(text) => Some(Self {
                 text,
                 wire: WireKey::Literal(text),
+                proven: false,
             }),
             None => None,
         }
@@ -69,6 +83,7 @@ impl<'a> NamedKey<'a> {
         Some(Self {
             text: KeyText::new(text)?,
             wire: WireKey::mapped(prefix.id, KeyText::new(rest)),
+            proven: false,
         })
     }
 
@@ -92,6 +107,7 @@ impl<'a> NamedKey<'a> {
         Some(Self {
             text: KeyText::new(text)?,
             wire: WireKey::Id(MappedId::new(head.id())?),
+            proven: false,
         })
     }
 
@@ -103,6 +119,32 @@ impl<'a> NamedKey<'a> {
     /// The form the wire names it by.
     pub const fn wire(self) -> WireKey<'a> {
         self.wire
+    }
+
+    /// This key, its text proven to pass the wire's pre-emit gate: for the session's tables, which
+    /// judged it once where they kept it ([`crate::session_tables::SessionTables::named`]).
+    pub(crate) const fn proven(self) -> Self {
+        Self {
+            proven: true,
+            ..self
+        }
+    }
+
+    /// Whether the text was proven to pass the wire's pre-emit gate where it was kept.
+    pub const fn is_proven(self) -> bool {
+        self.proven
+    }
+
+    /// The wire's pre-emit gate on the text
+    /// ([`crate::keyexpr_canon::check_outbound_keyexpr_pico_safe`]), judged again only for a key
+    /// not proven where it was kept: every send of a declaration reads it, so a key the tables
+    /// judged when they kept it is not walked again at each link it is announced or replayed on.
+    #[cfg(feature = "storage-profile")]
+    pub fn check_outbound(self) -> Result<(), crate::keyexpr_canon::OutboundKeyexprError> {
+        if self.proven {
+            return Ok(());
+        }
+        crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(self.text())
     }
 }
 
@@ -153,5 +195,27 @@ mod tests {
         );
         assert_eq!(NamedKey::under_or_whole("", Some(prefix)), None);
         assert_eq!(NamedKey::under_or_whole("", None), None);
+    }
+
+    /// A key made by a front end is not proven and is judged by the wire's gate, which refuses a
+    /// text of the family pico aborts on; a key the tables proved is admitted with no walk, and is
+    /// the same key as the unproven one. Turned red by a key proven where it was made
+    /// (`NamedKey::literal`), or by the gate trusting an unproven key.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn only_a_key_the_tables_proved_skips_the_wire_gate() {
+        let refused = NamedKey::literal("**/c/*").unwrap();
+        assert!(!refused.is_proven());
+        assert!(refused.check_outbound().is_err());
+        let plain = NamedKey::literal("home/temp").unwrap();
+        assert!(!plain.is_proven());
+        assert!(plain.check_outbound().is_ok());
+        let proven = plain.proven();
+        assert!(proven.is_proven());
+        assert!(proven.check_outbound().is_ok());
+        assert_eq!(
+            proven, plain,
+            "what is known of the text is not part of the key"
+        );
     }
 }

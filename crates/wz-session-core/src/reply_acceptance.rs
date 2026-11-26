@@ -201,7 +201,17 @@ pub(crate) fn admits_reply(gate: Option<&str>, reply: &dyn ReplyView) -> bool {
     if reply.kind() == ReplyKind::Err {
         return true;
     }
-    reply_keyexpr_intersects(keyexpr, reply.keyexpr())
+    reply_key_admitted(keyexpr, reply.keyexpr())
+}
+
+/// Whether a reply keyed `reply` belongs to a get asked under `gate`: a reply keyed with the
+/// get's own text is covered with nothing split, as zenoh-pico compares the two texts before it
+/// walks them (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `if ((left_len == right_len) && (strncmp(left_start, right_start, left_len) == 0)) {`): the
+/// get's key was judged canon where it was asked, and a key in canon form intersects itself. Any
+/// other is walked as [`reply_keyexpr_intersects`] walks it.
+fn reply_key_admitted(gate: &str, reply: &str) -> bool {
+    reply == gate || reply_keyexpr_intersects(gate, reply)
 }
 
 /// Does a reply keyed `reply` belong to a query asked under `query_keyexpr`?
@@ -227,10 +237,69 @@ pub fn reply_keyexpr_intersects(query_keyexpr: &str, reply: &str) -> bool {
     keyexpr_match::keyexpr_intersects_text(reply, query_keyexpr)
 }
 
+/// [`reply_keyexpr_intersects`] for a reply whose key was judged canon: a reply keyed with its
+/// query's own text is covered with nothing split, since a key in canon form intersects itself;
+/// any other is walked as [`reply_keyexpr_intersects`] walks it. A responder answers with the
+/// query's own key more often than with any other.
+pub fn canon_reply_intersects(
+    query_keyexpr: &str,
+    reply: crate::keyexpr_canon::CanonKey<'_>,
+) -> bool {
+    reply_key_admitted(query_keyexpr, reply.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::selector_params::ANYKE_PARAM;
+
+    /// A reply keyed with its query's own canon text is covered with no walk of either key, and
+    /// any other reply is judged as [`reply_keyexpr_intersects`] judges it. Turned red by a
+    /// shortcut that walks the equal text, or that answers another text as the walk does not.
+    #[test]
+    fn a_reply_keyed_as_its_query_is_covered_with_nothing_split() {
+        use crate::keyexpr_canon::{CanonKey, KeyexprDialect};
+        use crate::keyexpr_match::INTERSECT_WALKS;
+        fn key(text: &str) -> CanonKey<'_> {
+            CanonKey::judge(text, KeyexprDialect::Pico).expect("canon")
+        }
+        let walks = || INTERSECT_WALKS.with(|count| count.get());
+        let before = walks();
+        assert!(canon_reply_intersects("thr", key("thr")));
+        assert!(canon_reply_intersects("demo/**", key("demo/**")));
+        assert_eq!(walks(), before, "the query's own key is not walked");
+        for (query, reply) in [
+            ("demo/**", "demo/a/b"),
+            ("demo/*", "demo/a"),
+            ("demo/a", "demo/b"),
+            ("demo/**", "other/a"),
+        ] {
+            assert_eq!(
+                canon_reply_intersects(query, key(reply)),
+                reply_keyexpr_intersects(query, reply),
+                "{query} {reply}"
+            );
+        }
+        assert!(walks() > before, "a reply keyed otherwise is walked");
+    }
+
+    /// A get admits a reply keyed with its own text before any walk, and judges every other key
+    /// as the walk does: a wildcard covers a key it matches, and a key one chunk shorter or longer
+    /// than the get's, or with another last chunk, is refused. Turned red by the shortcut left
+    /// out (the wildcard key is walked), or by one that compares the shorter length only.
+    #[test]
+    fn a_get_admits_a_reply_keyed_with_its_own_text_before_the_walk() {
+        use crate::keyexpr_match::INTERSECT_WALKS;
+        let walks = || INTERSECT_WALKS.with(|count| count.get());
+        let before = walks();
+        assert!(reply_key_admitted("a/b", "a/b"));
+        assert!(reply_key_admitted("demo/**", "demo/**"));
+        assert_eq!(walks(), before, "the get's own text is not walked");
+        assert!(reply_key_admitted("a/*", "a/b"));
+        assert!(!reply_key_admitted("a/b", "a/c"));
+        assert!(!reply_key_admitted("a/b", "a"));
+        assert!(!reply_key_admitted("a/b", "a/b/c"));
+    }
 
     #[test]
     fn the_default_mode_is_the_guarantee_not_the_opt_out() {

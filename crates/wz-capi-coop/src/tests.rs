@@ -202,8 +202,15 @@ enum Command {
         &'static str,
     ),
     /// Ask a query of request id `.0` naming its key by id `.1` in the sender's space and the
-    /// rest `.2`, which no declaration precedes: an id of the key ids both ends share.
-    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    /// rest `.2`, which no declaration precedes: an id of the key ids both ends share. Sent only
+    /// by the shared key ids' tests (`tests::shared_key_ids`), and compiled where they are.
+    #[cfg(all(
+        feature = "queryable",
+        feature = "shared-key-ids",
+        feature = "listen",
+        feature = "query",
+        feature = "threads"
+    ))]
     QueryById(
         wz_session_core::wire_id::RequestId,
         wz_session_core::wire_id::ExprId,
@@ -347,8 +354,15 @@ impl Router {
     }
 
     /// A stand-in that announces itself a peer, on a free port: a session holding the shared
-    /// key ids names its keys to a peer by them, and to a router by its declarations.
-    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    /// key ids names its keys to a peer by them, and to a router by its declarations. Compiled where
+    /// its readers, the shared key ids' tests (`tests::shared_key_ids`), are.
+    #[cfg(all(
+        feature = "queryable",
+        feature = "shared-key-ids",
+        feature = "listen",
+        feature = "query",
+        feature = "threads"
+    ))]
     fn start_peer() -> Self {
         Self::start_announcing(router_port(), ROUTER_ZID, WhatAmI::Peer, CatchAll::None)
     }
@@ -937,7 +951,13 @@ fn run_router(
                 let _ = actions.send_push_literal(pushed, b"after", true);
                 let _ = actions.batch_stop();
             }
-            #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+            #[cfg(all(
+                feature = "queryable",
+                feature = "shared-key-ids",
+                feature = "listen",
+                feature = "query",
+                feature = "threads"
+            ))]
             Ok(Command::QueryById(rid, id, rest)) => {
                 let _ = actions.send_request_query(rid, id, Some(rest));
             }
@@ -1352,6 +1372,37 @@ fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue
         handed_after + 1,
         "CONTROL: a read step looks under the queue's lock"
     );
+}
+
+/// A subscriber's undeclaration holds the session once: the one hold looks for its row in the
+/// liveliness subscribers' table, which the port's one id space numbers it in too, and then in the
+/// subscribers'. The CONTROL is its declaration, which holds the session once as well. Turned red
+/// by an undeclaration that looks for a liveliness subscriber under a hold of its own (a build
+/// with `liveliness`).
+#[test]
+fn a_subscriber_is_undeclared_in_one_hold_of_the_session() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let id = engine
+        .declare_subscriber_on_wire(
+            "demo/a",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(|_: &dyn SampleView| {}),
+        )
+        .expect("the session declares the subscriber")
+        .id;
+    let declared = takes();
+    assert_eq!(
+        declared - before,
+        1,
+        "CONTROL: one hold for the declaration"
+    );
+    engine.undeclare_subscriber(id);
+    assert_eq!(takes() - declared, 1, "one hold for the undeclaration");
 }
 
 /// Each operation lets the session go as it ends, its round sealed and its lock let go in the one
@@ -3559,8 +3610,9 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
 }
 
 /// A dial refused before any link is made names its endpoint and its cause: a text that names no
-/// address the build reads is refused by the locator, a protocol the links do not carry by the
-/// links. Turned red by a refusal that names the other cause or loses the endpoint.
+/// address the build reads, and no host either, is refused by the locator, a protocol the links do
+/// not carry by the links. Turned red by a refusal that names the other cause or loses the
+/// endpoint.
 #[test]
 fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
     use crate::{EndpointRefusal, OpenError, Refusal};
@@ -3569,7 +3621,7 @@ fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
 
     for (endpoint, why) in [
         (
-            "tcp/localhost:7447",
+            "tcp/127.0.0.256:7447",
             Refusal::Locator(DialRefused::BadAddress),
         ),
         (
@@ -3749,6 +3801,31 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
     assert_eq!(made.listening().len(), 1, "one port is bound");
 }
 
+/// A dial of a host name reaches an address the host's resolver answers for it: a client that
+/// dials `localhost` at the port a TCP listener holds on the loopback address connects to that
+/// listener, where a dial that read the name as no address would be refused before any
+/// connection. No zenoh node answers on the port, so the open itself ends without a session.
+/// Turned red by a name refused at once or dialled at an address its resolver did not answer.
+#[test]
+fn a_dial_of_a_host_name_connects_to_the_address_it_resolves_to() {
+    let listener = std::net::TcpListener::bind(std::net::SocketAddr::from((LOOPBACK, 0)))
+        .expect("a free loopback port");
+    let port = listener.local_addr().expect("the port it holds").port();
+    listener
+        .set_nonblocking(true)
+        .expect("a listener asked without waiting");
+    let refused = open_with_result(CoopConfig {
+        endpoints: vec![format!("tcp/localhost:{port}")],
+        open_timeout_ms: 500,
+        ..client_config()
+    });
+    assert!(refused.is_some(), "no node answers the handshake");
+    assert!(
+        listener.accept().is_ok(),
+        "the dial of the name connected to the listener: {refused:?}"
+    );
+}
+
 /// An open that fails once its engine is built ends what it began: the port it bound before its
 /// dial was refused is let go of, so a listener can bind it again at once.
 #[cfg(feature = "listen")]
@@ -3792,6 +3869,9 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
+// The runtime of a build whose read steps its one link itself, which runs no task.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+mod direct_runtime;
 mod entity_tables;
 // The mark the session's lock makes against a wait on a face is kept in a debug build on `std`'s
 // thread-locals.

@@ -1067,6 +1067,24 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// for that reason, as `Bind::IPV6` is on the slot profile.
     const IPV6: bool = true;
 
+    /// Whether the stack's network answers a host name with its addresses ([`Self::resolve`]).
+    /// `false`, the default, for a network without a resolver: the dial of a name over it is
+    /// refused before any link is begun (`crate::locator_text::DialRefused::NoResolver`).
+    const RESOLVES: bool = false;
+
+    /// The addresses the host `name` stands for on the stack's network, each at its port, written
+    /// to the front of `found` in the order its resolver answers them: how many, `0` for none
+    /// (`crate::udp_link::DatagramSocket::resolve`). Blocks for as long as the resolver takes,
+    /// so it is asked as a dial begins and never on a link's way. The default answers none.
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        let _ = (name, found);
+        0
+    }
+
     /// The waits of this stack's links ([`LinkWaits`]): what every handle its links, ports and
     /// groups name ([`WaitOn`]) is waited on with. The heap profile's, as
     /// [`SessionDatagramLink::input_wait`] is.
@@ -1497,10 +1515,10 @@ impl<
     /// and is gone when it returns.
     ///
     /// `rx-in-place` with `reassembly`: the session stages its fragments into a
-    /// reassembly table of its OWN, allocated here once
-    /// ([`PoolStorage::try_owned`]), and the pump is `None` when the heap has no
-    /// room for it; every other build always makes one. [`Self::with_reassembly_arena`] takes one the
-    /// image placed instead. Under `session-slot` that table is never the
+    /// reassembly table of its OWN, allocated here once (`PoolStorage::try_owned` of
+    /// `reassembly_rx`, with both features), and the pump is `None` when the heap has no
+    /// room for it; every other build always makes one. [`Self::with_reassembly_arena`] takes one
+    /// the image placed instead. Under `session-slot` that table is never the
     /// pump's own heap allocation, so with `reassembly` this constructor is absent
     /// and a pump is made by `PumpSlots::claim` (which places the table in the
     /// pump's cell) or by [`Self::with_reassembly_arena`].

@@ -27,6 +27,7 @@ use crate::link_roundtrip::{payloads_across, PAYLOAD};
 
 #[test]
 fn a_sample_crosses_a_unixpipe_link_between_two_pico_sessions() {
+    let _program = crate::programs::admit();
     let endpoint = format!("unixpipe//tmp/wzpr{}", std::process::id());
     let received = payloads_across(&endpoint, &endpoint);
     assert_eq!(

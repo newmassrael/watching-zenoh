@@ -281,6 +281,43 @@ unsafe fn config(key: u8, endpoint: &str, stated: Option<usize>) -> z_owned_conf
     cfg
 }
 
+/// How long an opening thread is given to dial its peer, and then to return once the peer is
+/// gone: far past an open's own deadlines, so a run slowed by a race detector is inside it, and
+/// well short of the harness's report of a test that runs on.
+const OPEN_BOUND: Duration = Duration::from_secs(30);
+
+/// The connection `opener` dials to `peer`, accepted within [`OPEN_BOUND`], or `None` once
+/// the opening thread has ended without dialling (its open answered before it dialled, or the
+/// thread failed): an accept that waited for a dial no thread will make would wait for ever.
+fn dialled_by<T>(peer: &TcpListener, opener: &JoinHandle<T>) -> Option<TcpStream> {
+    peer.set_nonblocking(true)
+        .expect("a listener the test stops waiting on");
+    let deadline = Instant::now() + OPEN_BOUND;
+    loop {
+        // Read before the accept: a thread that dialled and then ended left its connection
+        // queued, which this accept still takes.
+        let ended = opener.is_finished();
+        match peer.accept() {
+            Ok((stream, _)) => {
+                stream
+                    .set_nonblocking(false)
+                    .expect("a stream read with its own timeout");
+                return Some(stream);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(error) => panic!("the listener fails: {error}"),
+        }
+        if ended {
+            return None;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the opening thread neither dialled nor ended within {OPEN_BOUND:?}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 unsafe fn close(session: &mut z_owned_session_t) {
     z_close(z_session_loan_mut(session), std::ptr::null());
     z_session_drop(z_session_move(session));
@@ -471,6 +508,7 @@ impl Pair {
 
 #[test]
 fn each_session_frames_its_link_to_the_batch_its_document_states() {
+    let _program = crate::programs::admit();
     let ceiling = ceiling();
     let singleton = PicoUnicastBatchBytes::DOMAIN.is_singleton();
     let (taken, refused): (Vec<usize>, Vec<usize>) =
@@ -521,6 +559,7 @@ fn each_session_frames_its_link_to_the_batch_its_document_states() {
 
 #[test]
 fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
+    let _program = crate::programs::admit();
     let ceiling = ceiling();
     let text = document(ceiling + 1);
 
@@ -560,12 +599,19 @@ fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
             "the document door refuses a batch size past the ceiling"
         );
         let mut session: z_owned_session_t = std::mem::zeroed();
-        if z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()) == Z_OK {
+        let opened = z_open(&mut session, z_config_move(&mut cfg), std::ptr::null());
+        if opened == Z_OK {
             z_session_drop(z_session_move(&mut session));
         }
         let _ = done_tx.send(());
+        opened
     });
-    let (mut stream, _) = peer.accept().expect("the session dials");
+    let Some(mut stream) = dialled_by(&peer, &opener) else {
+        match opener.join() {
+            Ok(code) => panic!("the open answered {code} without dialling its peer"),
+            Err(_) => panic!("the opening thread failed before it dialled (its panic is above)"),
+        }
+    };
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .expect("a read timeout");
@@ -578,7 +624,7 @@ fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
     drop(stream);
     drop(peer);
     done_rx
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(OPEN_BOUND)
         .expect("the open returns once its peer is gone");
     opener.join().expect("the opener thread");
     assert_eq!(
@@ -586,4 +632,41 @@ fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
         Some(PICO_UNICAST_BATCH_BYTES),
         "a config whose document was refused opens on the build's batch size: {first:02x?}"
     );
+}
+
+/// A document refused at the door leaves the config with nothing held: the refusal returns, and
+/// an open of that config that nobody answers returns after it, each within [`OPEN_BOUND`] on a
+/// thread of its own. A refusal that left a lock or a reservation behind for the open to wait on
+/// turns this red by the clock, not by a run that never ends.
+#[test]
+fn a_refused_document_and_an_open_nobody_answers_return_within_the_bound() {
+    let _program = crate::programs::admit();
+    let text = document(ceiling() + 1);
+    let (tx, rx) = channel();
+    let opener = std::thread::spawn(move || unsafe {
+        // Nothing listens on port 1, so the dial is refused at once.
+        let mut cfg = config(Z_CONFIG_CONNECT_KEY, "tcp/127.0.0.1:1", None);
+        let refused = CString::new(text).unwrap();
+        let door = wz_ext_config_document(z_config_loan_mut(&mut cfg), refused.as_ptr());
+        let _ = tx.send(door);
+        let mut session: z_owned_session_t = std::mem::zeroed();
+        let opened = z_open(&mut session, z_config_move(&mut cfg), std::ptr::null());
+        if opened == Z_OK {
+            z_session_drop(z_session_move(&mut session));
+        }
+        let _ = tx.send(opened);
+    });
+    let deadline = Instant::now() + OPEN_BOUND;
+    let door = rx
+        .recv_timeout(OPEN_BOUND)
+        .expect("the document door answers within the bound");
+    assert_eq!(
+        door, Z_ERR_CONFIG_INVALID_VALUE,
+        "the document door refuses a batch size past the ceiling"
+    );
+    let opened = rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .expect("an open nobody answers returns within the bound after a refused document");
+    assert_ne!(opened, Z_OK, "nothing listens where the config dials");
+    opener.join().expect("the opening thread");
 }

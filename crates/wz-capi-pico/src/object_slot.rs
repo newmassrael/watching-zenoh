@@ -1297,6 +1297,73 @@ mod tests {
         );
     }
 
+    /// Every kind of entity the build has, whose door it exports, is laid at least one place in
+    /// the arena of a session that opens under the opening limits and states nothing, a client of
+    /// as many endpoints as the build dials; and in a build that opens by its region, whose tables
+    /// no config resizes, a querier and a liveliness subscriber are laid two, where the build's
+    /// domain holds two, so a program holds a second of each. Turned red by a kind left out of the
+    /// rows (`entity_rows` in `wz-capi-coop`) or a region laid out under the open values.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn every_built_kind_is_laid_a_place_by_the_open_of_a_session_that_states_nothing() {
+        use crate::session::{opening_limits, pico_unicast_batch};
+        use wz_capi_coop::arena::{ArenaPlan, PlanShape};
+        let limits = opening_limits();
+        let shape = PlanShape::dial_only(
+            wz_session_core::caps::MAX_STATIC_CONNECT,
+            pico_unicast_batch(&limits),
+        );
+        let rows = ArenaPlan::planned(shape, &limits)
+            .expect("a client of the opening limits lays out")
+            .entities();
+        let built: Vec<(Kind, wz_capi_port::EntityKind)> = BUILT_KINDS
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| Some((kind, entity_place(kind)?.0)))
+            .collect();
+        assert!(
+            built.iter().any(|(kind, _)| *kind == Kind::Publisher),
+            "CONTROL: every build has publishers"
+        );
+        for (kind, entity) in &built {
+            assert!(
+                rows.of_kind(*entity) >= 1,
+                "{kind:?} is a kind the build has, and its session is laid no place for one"
+            );
+        }
+        #[cfg(all(
+            feature = "query",
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        if wz_session_core::limits::SessionLimits::defaults()
+            .select_max_queriers(wz_session_core::limit_binding::Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(rows.of_kind(wz_capi_port::EntityKind::Querier), 2);
+        }
+        #[cfg(all(
+            feature = "liveliness",
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        if wz_session_core::limits::SessionLimits::defaults()
+            .select_max_liveliness_subscriptions(wz_session_core::limit_binding::Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(
+                rows.of_kind(wz_capi_port::EntityKind::LivelinessSubscriber),
+                2
+            );
+        }
+    }
+
     /// What one entity of each kind takes of its session's arena for the ABI's object, printed for
     /// reading beside the engine's own rows of the kind: the place, the object and the session that
     /// lent it, and the flag that says it is lent. Run with `cargo test -p wz-capi-pico --lib
@@ -1315,5 +1382,136 @@ mod tests {
                 layout.size() + flag
             );
         }
+    }
+
+    /// What each part of a publisher's and a subscriber's place takes, printed for choosing which
+    /// part of the places their limits multiply is to be made smaller: the place, the object and
+    /// each value the object holds, in bytes. Run with `cargo test -p wz-capi-pico --lib
+    /// print_the_parts_of_the_publisher_and_subscriber_places -- --ignored --nocapture` under the
+    /// features of the build to read.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn print_the_parts_of_the_publisher_and_subscriber_places() {
+        use core::mem::size_of;
+        let parts: [(&str, usize); 23] = [
+            (
+                "publisher place",
+                InSession::<crate::pubsub::PublisherState>::LAYOUT.size(),
+            ),
+            (
+                "subscriber place",
+                InSession::<crate::pubsub::SubscriberState>::LAYOUT.size(),
+            ),
+            ("PublisherState", size_of::<crate::pubsub::PublisherState>()),
+            ("PlainPublisher", size_of::<crate::pubsub::PlainPublisher>()),
+            ("PublisherQos", size_of::<crate::pubsub::PublisherQos>()),
+            (
+                "Option<OwnedEncoding>",
+                size_of::<Option<crate::encoding::OwnedEncoding>>(),
+            ),
+            ("FilteredKey", size_of::<crate::write_filter::FilteredKey>()),
+            ("WriteFilter", size_of::<crate::write_filter::WriteFilter>()),
+            (
+                "DeclaredKeyexpr",
+                size_of::<crate::keyexpr::DeclaredKeyexpr>(),
+            ),
+            ("KeyText", size_of::<crate::keyexpr::KeyText>()),
+            ("HeldKey", size_of::<wz_capi_port::HeldKey>()),
+            (
+                "Option<WireDeclaration>",
+                size_of::<Option<crate::keyexpr::WireDeclaration>>(),
+            ),
+            ("KeyHold", size_of::<wz_capi_port::KeyHold>()),
+            ("WireKey", size_of::<wz_capi_port::WireKey>()),
+            (
+                "z_loaned_keyexpr_t",
+                size_of::<crate::abi::z_loaned_keyexpr_t>(),
+            ),
+            (
+                "SubscriberState",
+                size_of::<crate::pubsub::SubscriberState>(),
+            ),
+            (
+                "Option<DeclaredSubscriber>",
+                size_of::<Option<crate::pubsub::DeclaredSubscriber>>(),
+            ),
+            ("OpenClosures", size_of::<crate::ffi::OpenClosures>()),
+            ("Option<HeldIn>", size_of::<Option<crate::ffi::HeldIn>>()),
+            ("Lender", size_of::<Lender>()),
+            ("EntityPlace", size_of::<wz_capi_port::EntityPlace>()),
+            ("EngineHold", size_of::<crate::session::EngineHold>()),
+            ("EngineHandle", size_of::<crate::session::EngineHandle>()),
+        ];
+        for (part, bytes) in parts {
+            std::println!("place-part: {part:<28} {bytes:>5} B");
+        }
+    }
+
+    /// The arena a session that listens opens, row by row: its tables' rows and the ABI's places
+    /// as the open lays them out for a listener (and for a dialer) under the build's limits, each
+    /// row's limit, count and the bytes of one, and the bytes a real open of a listener reserved.
+    /// What that open reserved past the listener's rows is the engine's own holds: its links'
+    /// cells, the faces' rooms, the runtime's tables, the engine's place, its planes and the
+    /// admission. Run with `cargo test -p wz-capi-pico --lib
+    /// the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture` under the
+    /// features and limits of the build to read.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn the_arena_a_listening_session_opens_by_row_measured() {
+        use crate::session::{
+            engine_ref, listening_on_loopback, pico_unicast_batch, session_handle, z_session_drop,
+            z_session_loan, z_session_move, SessionPlace,
+        };
+        use wz_capi_coop::arena::{admitted_faces, admitted_handshakes, ArenaPlan, PlanShape};
+        use wz_session_core::limits::SessionLimits;
+
+        let print = |name: &str, plan: &ArenaPlan| {
+            std::println!("arena-rows: {name}");
+            for row in plan.rows() {
+                std::println!(
+                    "arena-rows:   {:<36} {:<52} {:>6} x {:>7} = {:>9}",
+                    row.part(),
+                    row.basis(),
+                    row.count,
+                    row.entry_bytes,
+                    row.bytes().unwrap_or(usize::MAX),
+                );
+            }
+            std::println!(
+                "arena-rows:   reserved {}",
+                plan.reserved_bytes().unwrap_or(usize::MAX)
+            );
+        };
+        let limits = SessionLimits::defaults();
+        let batch = pico_unicast_batch(&limits);
+        let held = held_places(SessionPlace::LAYOUT);
+        let listener = PlanShape {
+            listens: 1,
+            max_faces: admitted_faces(&limits).expect("the build admits its own faces"),
+            accept_pending: admitted_handshakes(&limits).expect("the build admits its handshakes"),
+            ..PlanShape::dial_only(0, batch)
+        };
+        let mut listens = ArenaPlan::planned(listener, &limits).expect("a listener's rows lay out");
+        listens.holding(&held).expect("the places lay out");
+        print("a listener's tables and places", &listens);
+        let mut dials =
+            ArenaPlan::planned(PlanShape::dial_only(1, batch), &limits).expect("a dial lays out");
+        dials.holding(&held).expect("the places lay out");
+        print("a dialer's tables and places", &dials);
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let opened = engine_ref(handle.expect("an open session has its handle")).arena_bytes();
+        let rows = listens.reserved_bytes().unwrap_or(usize::MAX);
+        std::println!(
+            "arena-rows: a listener's open reserved {opened}, its rows {rows}, the engine's own \
+             holds {}",
+            opened.saturating_sub(rows)
+        );
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
     }
 }

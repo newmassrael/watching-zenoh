@@ -74,6 +74,20 @@ features = [
 [dev-dependencies]
 critical-section = { version = "1", features = ["std"] }
 
+# The configurations this crate has, which Layers C1bf and C1bz build in place of
+# `--all-features` (`scripts/lib/doc_feature_sets.py`). `session-slot` names
+# `wz-runtime-coop`'s selector, under which the heap profile's link seams
+# (`wz_runtime_coop::with_heap_link_seams!`) hold no item, so a build of every feature compiles
+# none of this crate's heap links (`ws`, `serial`, `unixpipe`, `raweth`) or their tests. Each
+# profile is a set of its own, with every other feature.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap profile: every feature but the slot selector, every target.
+    { name = "heap", except = ["session-slot"] },
+    # The slot profile, with every other feature beside it: the build `--all-features` makes.
+    { name = "slot", except = [] },
+]
+
 [features]
 # `wz-runtime-coop`'s session tier needs a form of its task pool, and the two forms are mutually
 # exclusive selectors. The default is the heap form, as `wz-runtime-zephyr`'s is, so that a

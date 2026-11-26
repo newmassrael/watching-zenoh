@@ -71,6 +71,28 @@ pub const fn declared_sender_peer_key(sender: u64, wire: u64) -> u64 {
 /// (`commons/zenoh-protocol/src/network/request.rs` @ `pub type RequestId = u32;`).
 pub type RequestId = u32;
 
+/// The low bits of a request id that carry the row its entry was held in, in a table of pending
+/// gets whose ids each name one entry ([`request_id_at`]).
+pub const REQUEST_ROW_BITS: u32 = 8;
+
+/// The mask of the [`REQUEST_ROW_BITS`] of a request id.
+const REQUEST_ROW_MASK: RequestId = (1 << REQUEST_ROW_BITS) - 1;
+
+/// The request id of an entry held in row `row` of its table of pending gets, `serial` being
+/// what the face's counter gave: the serial above the row, so the answer that names the id names
+/// the row, and the table reads that row before it walks any other. The serial is what keeps a
+/// row held again from being named by the id of the entry it held before; it wraps, as upstream's
+/// counter does. A row past the [`REQUEST_ROW_BITS`] is carried cut, which the table reads as a
+/// row that does not hold the id, and walks.
+pub const fn request_id_at(serial: RequestId, row: usize) -> RequestId {
+    (serial << REQUEST_ROW_BITS) | (row as RequestId & REQUEST_ROW_MASK)
+}
+
+/// The row a request id carries ([`request_id_at`]).
+pub const fn request_row(rid: RequestId) -> usize {
+    (rid & REQUEST_ROW_MASK) as usize
+}
+
 /// The id a session declares an entity under: a subscriber, a queryable, a
 /// token (`commons/zenoh-protocol/src/core/mod.rs` @ `pub type EntityId = u32;`).
 pub type EntityId = u32;
@@ -177,5 +199,18 @@ mod tests {
             InterestId::MAX
         );
         assert_eq!(interest_id_as_read(u64::from(InterestId::MAX) + 3), 2);
+    }
+
+    /// A request id carries its row below its serial: the row read back is the row held, two
+    /// serials of one row are two ids, and a row past the carried bits is carried cut. Turned red
+    /// by the serial written over the row, or by the row's bits not masked off the serial.
+    #[test]
+    fn a_request_id_carries_its_row_below_its_serial() {
+        assert_eq!(request_row(request_id_at(5, 3)), 3);
+        assert_eq!(request_row(request_id_at(u32::MAX, 0)), 0);
+        assert_ne!(request_id_at(5, 3), request_id_at(6, 3));
+        assert_eq!(request_id_at(1, 0), 1 << REQUEST_ROW_BITS);
+        assert_eq!(request_row(request_id_at(2, 256 + 7)), 7);
+        assert_eq!(request_id_at(2, 256 + 7) >> REQUEST_ROW_BITS, 2);
     }
 }

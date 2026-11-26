@@ -57,18 +57,41 @@ pub trait WsOpen: WsSource {
 /// The stream a `ws/` link of `O` runs over.
 type Stream<O> = <<O as WsOpen>::Dial as StreamDial>::Stream;
 
-/// What every WebSocket link of a [`WsLinks`] is given besides its connection: the session's
-/// tables and cells when it lent them, the slots its frames are encoded into, and whether its
-/// owner waits.
-struct WsShape<N: CountKind> {
-    lent: Option<LinkTables<N::Flag>>,
+/// Where a WebSocket link of a [`WsLinks`] is placed once its handshake is done: in a cell of the
+/// session's when it lent them, and waited on by its owner when the stack says so.
+struct WsPlace<N: CountKind> {
     cells: Option<LentByteCells<N::Flag>>,
     owner_waits: bool,
+}
+
+// Not derived: a derive would ask `N: Clone` and `N: Default` of a kind of count.
+impl<N: CountKind> Clone for WsPlace<N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<N: CountKind> Copy for WsPlace<N> {}
+
+impl<N: CountKind> Default for WsPlace<N> {
+    fn default() -> Self {
+        Self {
+            cells: None,
+            owner_waits: false,
+        }
+    }
+}
+
+/// What every WebSocket link of a [`WsLinks`] is given besides its connection: the session's
+/// tables when it lent them, the slots its frames are encoded into, and where it is placed.
+struct WsShape<N: CountKind> {
+    lent: Option<LinkTables<N::Flag>>,
+    place: WsPlace<N>,
     tx_slots: usize,
     tx_capacity: usize,
 }
 
-// Not derived: a derive would ask `N: Clone` and `N: Default` of a kind of count.
+// Not derived, as `WsPlace`'s are not.
 impl<N: CountKind> Clone for WsShape<N> {
     fn clone(&self) -> Self {
         *self
@@ -81,8 +104,7 @@ impl<N: CountKind> Default for WsShape<N> {
     fn default() -> Self {
         Self {
             lent: None,
-            cells: None,
-            owner_waits: false,
+            place: WsPlace::default(),
             tx_slots: 0,
             tx_capacity: 0,
         }
@@ -99,7 +121,9 @@ impl<N: CountKind> WsShape<N> {
             self.tx_capacity,
         )
     }
+}
 
+impl<N: CountKind> WsPlace<N> {
     /// The link over `stream`, whose handshake left `held` bytes of its first frames at the front
     /// of `rx`, made in a cell as the stack's links are: [`LinkOpenError::Unsupported`] when the
     /// rows of the build cannot name its ends (a `ws/` text is shorter than the `tcp/` one the
@@ -168,12 +192,18 @@ impl<P: StreamSocket, F: CellFlag> WsDialing<P, F> {
     }
 }
 
+/// The handshake of a `ws/` dial of `O` for sessions that count as `N` does, as a cell holds it:
+/// taken out whole once the server answers.
+type DialCell<O, N> = RefCell<Option<WsDialing<Stream<O>, <N as CountKind>::Flag>>>;
+
 /// A `ws/` dial ([`SessionLinks::begin_initiator`]): asked at each poll, without waiting, until
-/// the server answers its request.
+/// the server answers its request. Its handshake lies in a cell of the table its link is made in,
+/// or on the heap where the stack's links are, so a dial is a handle and its place in a face is
+/// the size of the stack's own dials.
 pub struct WsDial<O: WsOpen, N: CountKind = OneTask> {
-    dialing: Option<WsDialing<Stream<O>, N::Flag>>,
+    dialing: Option<CellRc<DialCell<O, N>, N>>,
     opener: O,
-    shape: WsShape<N>,
+    place: WsPlace<N>,
 }
 
 impl<O: WsOpen, N: CountKind> PendingDial<HeapLink<N>, N> for WsDial<O, N>
@@ -181,10 +211,15 @@ where
     Stream<O>: 'static,
 {
     fn poll(&mut self) -> Option<Result<OpenedLink<HeapLink<N>, N>, LinkOpenError>> {
-        let made = self.dialing.as_mut()?.step()?;
-        let dialing = self.dialing.take()?;
+        let made = self.dialing.as_deref()?.borrow_mut().as_mut()?.step()?;
+        // The dial's cell goes back before its link claims one, so the two hold one cell of the
+        // table between them, as the link alone does.
+        let cell = self.dialing.take()?;
+        let dialing = cell.borrow_mut().take();
+        drop(cell);
+        let dialing = dialing?;
         Some(made.and_then(|held| {
-            self.shape.link(
+            self.place.link(
                 dialing.stream,
                 dialing.rx,
                 held,
@@ -209,7 +244,9 @@ where
                 return made;
             }
             let now = self.opener.now_us();
-            let dialing = self.dialing.as_ref().ok_or(LinkOpenError::Refused)?;
+            let cell = self.dialing.as_deref().ok_or(LinkOpenError::Refused)?;
+            let held = cell.borrow();
+            let dialing = held.as_ref().ok_or(LinkOpenError::Refused)?;
             if now >= deadline {
                 return Err(LinkOpenError::Refused);
             }
@@ -275,22 +312,30 @@ impl<P: StreamSocket, F: CellFlag> WsAccepting<P, F> {
     }
 }
 
+/// A row of a [`WsListener`]'s table: a connection whose request is still to be answered, or free.
+type HandshakeRow<O, N> = Option<WsAccepting<Stream<O>, <N as CountKind>::Flag>>;
+
 /// The accepting end of a `ws/` port: the stream listener of the stack's dial, and the
-/// connections it accepted whose requests are still to be answered, in a table of `handshakes`
-/// rows reserved when it opened.
+/// connections it accepted whose requests are still to be answered, in a table of rows reserved
+/// when it opened, as many as the stack's `handshakes`.
 struct WsListener<O: WsOpen, N: CountKind> {
     listener: Box<dyn StreamListen<Stream = Stream<O>>>,
     opener: O,
     shape: WsShape<N>,
-    /// Never longer than `handshakes`, which its capacity holds, so it never grows after the open.
-    accepting: RefCell<Vec<WsAccepting<Stream<O>, N::Flag>>>,
-    handshakes: usize,
+    /// One row for each handshake that may run at once, a connection or free: its length is
+    /// fixed when the listener opens, so it never grows.
+    accepting: RefCell<Vec<HandshakeRow<O, N>>>,
 }
 
 impl<O: WsOpen, N: CountKind> WsListener<O, N> {
     /// Whether a row of the table is free for the next connection.
     fn has_room(&self) -> bool {
-        self.accepting.borrow().len() < self.handshakes
+        self.accepting.borrow().iter().any(Option::is_none)
+    }
+
+    /// Whether no row holds a handshake.
+    fn idle(&self) -> bool {
+        self.accepting.borrow().iter().all(Option::is_none)
     }
 }
 
@@ -311,49 +356,58 @@ where
         };
         if let Some(stream) = next {
             let (rx, tx) = self.shape.buffers()?;
-            self.accepting.borrow_mut().push(WsAccepting {
-                stream,
-                rx,
-                tx,
-                filled: 0,
-                since_us: self.opener.now_us(),
-            });
+            let since_us = self.opener.now_us();
+            if let Some(row) = self
+                .accepting
+                .borrow_mut()
+                .iter_mut()
+                .find(|row| row.is_none())
+            {
+                *row = Some(WsAccepting {
+                    stream,
+                    rx,
+                    tx,
+                    filled: 0,
+                    since_us,
+                });
+            }
         }
         let now = self.opener.now_us();
-        let mut accepting = self.accepting.borrow_mut();
-        let mut next = 0;
-        while let Some(one) = accepting.get_mut(next) {
+        let mut answered = None;
+        for row in self.accepting.borrow_mut().iter_mut() {
+            let Some(one) = row.as_mut() else {
+                continue;
+            };
+            let since_us = one.since_us;
             match one.step() {
-                None if now.saturating_sub(one.since_us) < OPEN_WAIT_US => next += 1,
+                None if now.saturating_sub(since_us) < OPEN_WAIT_US => {}
                 // A handshake that failed or ran out of time is let go, its connection closed.
-                None | Some(Err(_)) => {
-                    accepting.swap_remove(next);
-                }
+                None | Some(Err(_)) => *row = None,
                 Some(Ok(held)) => {
-                    let one = accepting.swap_remove(next);
-                    drop(accepting);
-                    return match self.shape.link(
-                        one.stream,
-                        one.rx,
-                        held,
-                        one.tx,
-                        WsFraming::server(),
-                    ) {
-                        Ok(link) => Ok(Some(link)),
-                        Err(LinkOpenError::Unsupported) => Ok(None),
-                        Err(refused) => Err(refused),
-                    };
+                    answered = row.take().map(|one| (one, held));
+                    break;
                 }
             }
         }
-        Ok(None)
+        let Some((one, held)) = answered else {
+            return Ok(None);
+        };
+        match self
+            .shape
+            .place
+            .link(one.stream, one.rx, held, one.tx, WsFraming::server())
+        {
+            Ok(link) => Ok(Some(link)),
+            Err(LinkOpenError::Unsupported) => Ok(None),
+            Err(refused) => Err(refused),
+        }
     }
 
     // A connection whose request is still to come is read at the node's own pace: the
     // listener's handle tells only of the next connection, which a table with no row free does
     // not take.
     fn input_wait(&self) -> Option<WaitOn> {
-        if self.accepting.borrow().is_empty() && self.has_room() {
+        if self.idle() && self.has_room() {
             self.listener.input_wait()
         } else {
             None
@@ -393,7 +447,7 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> WsLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.is_none() && self.shape.lent.is_none(),
+            self.shape.place.cells.is_none() && self.shape.lent.is_none(),
             "cells and buffers are lent after the links are made"
         );
         WsLinks {
@@ -401,8 +455,10 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
             opener: self.opener,
             shape: WsShape {
                 lent: None,
-                cells: None,
-                owner_waits: self.shape.owner_waits,
+                place: WsPlace {
+                    cells: None,
+                    owner_waits: self.shape.place.owner_waits,
+                },
                 tx_slots: self.shape.tx_slots,
                 tx_capacity: self.shape.tx_capacity,
             },
@@ -413,7 +469,7 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
     /// WebSocket links whose owner waits for their input, as the stack's links that are told so.
     #[must_use]
     pub fn waited_by_owner(mut self) -> Self {
-        self.shape.owner_waits = true;
+        self.shape.place.owner_waits = true;
         self
     }
 
@@ -426,8 +482,10 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
         self
     }
 
-    /// A dial of `at`: the connection begun, the link's buffers claimed and the client's key and
-    /// mask keys drawn, so what the server answers is read into the link's buffer.
+    /// A dial of `at`: a cell claimed for its handshake, the connection begun, the link's buffers
+    /// claimed and the client's key and mask keys drawn, so what the server answers is read into
+    /// the link's buffer. The cell is claimed first, so a dial the table has no cell for is refused
+    /// before it connects.
     fn dial_ws(&self, at: WsLocator) -> Result<WsDial<O, N>, LinkOpenError>
     where
         O: Clone,
@@ -436,21 +494,28 @@ impl<S, O: WsOpen, N: CountKind> WsLinks<S, O, N> {
         {
             return Err(LinkOpenError::Unsupported);
         }
+        let cell = CellRc::<DialCell<O, N>, N>::claim_of(self.shape.place.cells.as_ref())
+            .ok_or(LinkOpenError::Exhausted)?;
         let (key, keys) = client_keys(&self.opener)?;
         let (rx, tx) = self.shape.buffers()?;
         let stream = self.opener.stream_dial().dial_started(at.at)?;
+        let dialing = cell
+            .made(|place| {
+                place.write(RefCell::new(Some(WsDialing {
+                    stream,
+                    at,
+                    rx,
+                    tx,
+                    key,
+                    keys,
+                    filled: None,
+                })))
+            })
+            .ok_or(LinkOpenError::Exhausted)?;
         Ok(WsDial {
-            dialing: Some(WsDialing {
-                stream,
-                at,
-                rx,
-                tx,
-                key,
-                keys,
-                filled: None,
-            }),
+            dialing: Some(dialing),
             opener: self.opener.clone(),
-            shape: self.shape,
+            place: self.shape.place,
         })
     }
 }
@@ -466,6 +531,17 @@ where
     type Dial = WsLinksDial<S::Dial, O, N>;
 
     const IPV6: bool = S::IPV6;
+
+    // A name is resolved by the network the stack's IP links are opened on.
+    const RESOLVES: bool = S::RESOLVES;
+
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        self.links.resolve(name, found)
+    }
 
     type Waits = S::Waits;
 
@@ -492,18 +568,21 @@ where
         self.links.lend_buffers(tables);
     }
 
-    // A stack that places its links on the heap has the WebSocket links placed there too.
+    // A stack that places its links on the heap has the WebSocket links placed there too. A cell
+    // holds a link or the handshake of a dial that becomes one.
     fn link_cell_bytes(&self) -> usize {
         match self.links.link_cell_bytes() {
             0 => 0,
-            links => links.max(CellRc::<
-                StreamDriver<Stream<O>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, WsFraming>,
-            >::cell_bytes()),
+            links => links
+                .max(CellRc::<
+                    StreamDriver<Stream<O>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, WsFraming>,
+                >::cell_bytes())
+                .max(CellRc::<DialCell<O, N>>::cell_bytes()),
         }
     }
 
     fn lend_cells(&mut self, cells: LentByteCells<N::Flag>) {
-        self.shape.cells = Some(cells);
+        self.shape.place.cells = Some(cells);
         self.links.lend_cells(cells);
     }
 
@@ -534,8 +613,11 @@ where
             listener,
             opener: self.opener.clone(),
             shape: self.shape,
-            accepting: RefCell::new(Vec::with_capacity(self.handshakes)),
-            handshakes: self.handshakes,
+            accepting: RefCell::new(
+                core::iter::repeat_with(|| None)
+                    .take(self.handshakes)
+                    .collect(),
+            ),
         }))
     }
 

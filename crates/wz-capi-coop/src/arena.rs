@@ -48,13 +48,16 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
-//! - with `listen`, for a session that listens, the slots its udp ports read their datagrams into
-//!   and hold them in until the links of their peers take them (`UDP_PORT_SLOTS`, under the
-//!   build's), each a link's batch long, which the ports share, lent with the links' tables;
+//! - with `listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports read
+//!   their datagrams into and hold them in until the links of their peers take them
+//!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
+//!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
-//!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
-//!   each reliability a peer has a chain open in, and one for the rejoined message the round
-//!   reads where its chain lay), each buffer claimed when a chain's first fragment arrives and
+//!   table for the session, as many as its `REASSEMBLY_CHAINS` (under the build's; by default one
+//!   for each reliability a peer has a chain open in and one for the rejoined message the round
+//!   reads where its chain lay, `SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`), a
+//!   first fragment that finds none free refused and counted (`LentStaging::refused` of
+//!   `wz_session_core::chain_staging`), each buffer claimed when a chain's first fragment arrives and
 //!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
@@ -71,18 +74,18 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the tables that keep their keys in it. A
-//!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
-//!   declaration its heap cannot hold;
+//!   ([`wz_session_core::key_arena::KeySpace`]), lent after the record and before the tables
+//!   that keep their keys in it. A peer's key that finds no room there is dropped and counted, as
+//!   zenoh-pico drops a declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
 //!   and the places it keeps its objects of the session's entities in, one for each row the
 //!   session keeps of each kind it names ([`HeldPlaces`]), so what the ABI holds of a session is
 //!   reserved with the session, sized by the session's own limits, and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
-//! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
-//! ([`Quota::lent_under`]): a stage after the build chooses within the memory the build fixes and
-//! never adds to it, so a value over the build's refuses the open.
+//! ([`wz_session_core::bounded::Lent`]), and its count the value of its limit the open resolved,
+//! under the build's value ([`Quota::lent_under`]): a stage after the build chooses within the
+//! memory the build fixes and never adds to it, so a value over the build's refuses the open.
 //!
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
 //! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them
@@ -108,9 +111,10 @@
 //!
 //! # Where the memory comes from
 //!
-//! An [`ArenaMemory`]: on a host the allocator, asked once for the whole arena, whose answer of
-//! none refuses the open rather than ending the process ([`AllocatorMemory`], as the ABI's object
-//! pools reserve theirs); a region an image places is another implementation of it.
+//! An [`ArenaMemory`], asked once for the whole arena, whose answer of none refuses the open rather
+//! than ending the process: the allocator ([`AllocatorMemory`], as the ABI's object pools reserve
+//! theirs), the system's fresh pages, zero as handed, that a host ABI reserves its sessions' arenas
+//! in (`ArenaMemory::reserves_zeroed`), or a region an image places.
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -118,7 +122,6 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
-use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
@@ -373,8 +376,8 @@ impl ArenaPart {
             Self::DirectFaces => ("direct faces", "MAX_FACES"),
             Self::LinkRooms => ("link rooms", ""),
             Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
-            Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
-            Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
+            Self::ReassemblyFlags => ("reassembly flags", "REASSEMBLY_CHAINS"),
+            Self::ReassemblyBuffers => ("reassembly buffers", "REASSEMBLY_CHAINS"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
             Self::HandedLegPlaces => ("handed leg places", "HANDED_LEG_BYTES"),
             Self::HandedLegs => ("handed legs", "HANDED_LEG_BYTES"),
@@ -935,6 +938,7 @@ pub enum ArenaLimit {
     MaxPendingDeclares,
     RxPoolBuffers,
     TxPoolSlots,
+    ReassemblyChains,
     /// The config's limits are not those of the region the build laid out when it was compiled
     /// ([`ArenaRegion`]): the build lays out no arena for any other.
     LimitsDifferFromBuild,
@@ -989,6 +993,7 @@ impl ArenaLimit {
             Self::MaxPendingDeclares => "MAX_PENDING_DECLARES",
             Self::RxPoolBuffers => "RX_POOL_BUFFERS",
             Self::TxPoolSlots => "TX_POOL_SLOTS",
+            Self::ReassemblyChains => "REASSEMBLY_CHAINS",
             Self::LimitsDifferFromBuild => "LIMITS_DIFFER_FROM_BUILD",
             Self::ShapeDiffersFromBuild => "SHAPE_DIFFERS_FROM_BUILD",
         }
@@ -1221,7 +1226,7 @@ pub struct TransportRows {
     link_bytes: usize,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
-    /// How many such buffers, in the one table the session's links share.
+    /// How many such buffers, in the one table the session's links share (`REASSEMBLY_CHAINS`).
     reassembly_chains: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
@@ -1708,10 +1713,9 @@ impl ArenaPlan {
             shape.max_faces,
             tried!(admitted_faces(limits)),
         ));
-        tried!(hold(
+        tried!(hold_under::<{ caps::MAX_STATIC_CONNECT }>(
             ArenaLimit::MaxStaticConnect,
             shape.dials,
-            caps::MAX_STATIC_CONNECT,
         ));
         tried!(hold(
             ArenaLimit::MaxAdminLocators,
@@ -1737,7 +1741,7 @@ impl ArenaPlan {
             tx_slots: links,
             link_bytes,
             reassembly_bytes: 0,
-            reassembly_chains: SESSION_CHAIN_BUFFERS,
+            reassembly_chains: 0,
             endpoint_rows: (shape.dials, shape.listens),
             cell_bytes: NO_CELLS,
             cells_held: HeldBits(0),
@@ -1752,67 +1756,55 @@ impl ArenaPlan {
         };
         // The largest message a link rejoins is decided before the lane that hands it on, so a
         // value over the build's is refused under its own name.
-        self.transport.reassembly_bytes = self.lent(
+        self.transport.reassembly_bytes = self.lent_to::<{ caps::PICO_FRAG_MAX_BYTES }>(
             ArenaLimit::PicoFragMaxBytes,
             limits.pico_frag_max_bytes(),
-            caps::PICO_FRAG_MAX_BYTES,
         );
-        // The links read into a pool they share, a buffer held by a link only while it holds part
-        // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
-        // a pool of more buffers than links would hold one no link can take. They encode their
-        // frames into a pool of slots they share as well, a slot held by a link from its grant to
-        // its send, or until a frame its stream took in part is written
-        // (`wz_runtime_coop::link_storage::PooledTx`). A build that only dials holds its dial and
-        // the faces it attaches, and lends each link a buffer and a slot of its own.
-        #[cfg(feature = "listen")]
-        {
-            let rx_buffers = self.lent(
-                ArenaLimit::RxPoolBuffers,
-                Quota::at_most(limits.rx_pool_buffers()),
-                caps::RX_POOL_BUFFERS,
-            );
-            self.transport.rx_buffers = least(rx_buffers, links);
-            let tx_slots = self.lent(
-                ArenaLimit::TxPoolSlots,
-                Quota::at_most(limits.tx_pool_slots()),
-                caps::TX_POOL_SLOTS,
-            );
-            self.transport.tx_slots = least(tx_slots, links);
+        // The buffers of the session's one table of chains, as a report reads them
+        // (`link_buffers`).
+        match reassembly_chains(limits) {
+            Ok(chains) => self.transport.reassembly_chains = chains,
+            Err(refused) => self.refuse(refused),
+        }
+        // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
+        match pooled_buffers(links, limits) {
+            Ok((rx_buffers, tx_slots)) => {
+                self.transport.rx_buffers = rx_buffers;
+                self.transport.tx_slots = tx_slots;
+            }
+            Err(refused) => self.refuse(refused),
         }
         #[cfg(wz_round)]
         {
             self.session.round = RoundRowCounts {
-                records: self.lent(
+                records: self.lent_to::<{ caps::DELIVERY_LANE_EVENTS }>(
                     ArenaLimit::DeliveryLaneEvents,
                     limits.delivery_lane_events(),
-                    caps::DELIVERY_LANE_EVENTS,
                 ),
-                callbacks: self.lent(
+                callbacks: self.lent_to::<{ caps::DELIVERY_LANE_CALLBACKS }>(
                     ArenaLimit::DeliveryLaneCallbacks,
                     limits.delivery_lane_callbacks(),
-                    caps::DELIVERY_LANE_CALLBACKS,
                 ),
-                longest_key: self.lent(
+                longest_key: self.lent_to::<{ caps::MAX_KEYEXPR_BYTES }>(
                     ArenaLimit::MaxKeyexprBytes,
                     limits.max_keyexpr_bytes(),
-                    caps::MAX_KEYEXPR_BYTES,
                 ),
             };
         }
-        self.session.key_bytes = self.lent(
+        self.session.key_bytes = self.lent_to::<{ caps::KEY_ARENA_BYTES }>(
             ArenaLimit::KeyArenaBytes,
             Quota::at_most(limits.key_arena_bytes()),
-            caps::KEY_ARENA_BYTES,
         );
         let faces = self.sized(shape.faces());
         // Each face's read stages its chains in a Router of its own (`crate::engine::direct`),
         // which holds at most its share of them open and keeps one rejoined message: the table
-        // holds the share of every face read where it lies, so the chains of one face never take
-        // another's buffers.
+        // holds the session's `REASSEMBLY_CHAINS` for every face read where it lies, so the
+        // chains of one face never take another's buffers.
         #[cfg(not(wz_round))]
         {
             let shares = read_faces(FacePeers::sets_of(faces, shape.dial_role()));
-            self.transport.reassembly_chains = match SESSION_CHAIN_BUFFERS.checked_mul(shares) {
+            let share = self.transport.reassembly_chains;
+            self.transport.reassembly_chains = match share.checked_mul(shares) {
                 Some(chains) => chains,
                 None => {
                     self.refuse(ArenaRefused::TooLarge);
@@ -1872,32 +1864,35 @@ impl ArenaPlan {
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent with the links' tables
         // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
-        // session that listens on nothing holds none, and its plan lays none of their rows out,
-        // as one that joins no group lays out no group's buffers.
+        // session that listens on no `udp/` endpoint binds no port and holds none.
         #[cfg(feature = "listen")]
-        if shape.listens > 0 {
-            let slots = self.lent(
+        {
+            let slots = self.lent_to::<{ caps::UDP_PORT_SLOTS }>(
                 ArenaLimit::UdpPortSlots,
                 Quota::at_most(limits.udp_port_slots()),
-                caps::UDP_PORT_SLOTS,
             );
-            self.transport.port_rx = (slots, link_bytes);
-            self.put_table(
-                [
-                    ArenaPart::LinkPortDatagramFlags,
-                    ArenaPart::LinkPortDatagramSlots,
-                ],
-                slots,
-                link_bytes,
-            );
-            // The ports' book of their peers, a row for each link the session may hold, and of
-            // the datagrams sorted for them, a row for each slot a datagram holds while it waits
-            // (`TransportRows::lent_from`).
-            self.transport.port_peers = links;
-            let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
-            self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
-            let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
-            self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+            // A plan of a session with no udp port lays none of the ports' rows out, as one that
+            // names no group lays out no group's: their tables are lent no rows and take no byte
+            // of the arena (`TransportRows::links_from`, `TransportRows::lent_from`).
+            if shape.udp_listens > 0 {
+                self.transport.port_rx = (slots, link_bytes);
+                self.put_table(
+                    [
+                        ArenaPart::LinkPortDatagramFlags,
+                        ArenaPart::LinkPortDatagramSlots,
+                    ],
+                    slots,
+                    link_bytes,
+                );
+                // The ports' book of their peers, a row for each link the session may hold, and
+                // of the datagrams sorted for them, a row for each slot a datagram holds while it
+                // waits (`TransportRows::lent_from`).
+                self.transport.port_peers = links;
+                let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
+                self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
+                let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+                self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+            }
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
         // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
@@ -1950,10 +1945,9 @@ impl ArenaPlan {
         // held is dropped on every face, and the session reserves no place for one.
         #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         {
-            let bytes = self.lent(
+            let bytes = self.lent_to::<{ caps::HANDED_LEG_BYTES }>(
                 ArenaLimit::HandedLegBytes,
                 Quota::at_most(limits.handed_leg_bytes()),
-                caps::HANDED_LEG_BYTES,
             );
             let legs = match (shape.keeps_handed, bytes.checked_div(link_bytes)) {
                 (true, Some(legs)) => legs,
@@ -1979,10 +1973,9 @@ impl ArenaPlan {
         };
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
-        let watchers = self.lent(
+        let watchers = self.lent_to::<{ caps::MAX_DECL_OBSERVERS }>(
             ArenaLimit::MaxDeclObservers,
             limits.max_decl_observers(),
-            caps::MAX_DECL_OBSERVERS,
         );
         // A build of the region's form lays the lists out in its region, at the build's bound; the
         // limit is still held, so a config over the build's is refused under its name either way.
@@ -1997,19 +1990,17 @@ impl ArenaPlan {
         let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_QUERIES }>(
                 ArenaLimit::MaxPendingQueries,
                 limits.max_pending_queries(),
-                caps::MAX_PENDING_QUERIES,
             )
         } else {
             0
         };
         let liveliness_gets = if cfg!(feature = "liveliness-get") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                 ArenaLimit::MaxPendingLivelinessGets,
                 limits.max_pending_liveliness_gets(),
-                caps::MAX_PENDING_LIVELINESS_GETS,
             )
         } else {
             0
@@ -2058,10 +2049,9 @@ impl ArenaPlan {
         // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
-            self.session.held_replies = self.lent(
+            self.session.held_replies = self.lent_to::<{ caps::MAX_PENDING_REPLIES }>(
                 ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
-                caps::MAX_PENDING_REPLIES,
             );
             #[cfg(feature = "runtime-plan")]
             self.put(
@@ -2154,10 +2144,9 @@ impl ArenaPlan {
             );
         }
         self.session.held_queries = if cfg!(feature = "queryable") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_FINALS }>(
                 ArenaLimit::MaxPendingFinals,
                 limits.max_pending_finals(),
-                caps::MAX_PENDING_FINALS,
             )
         } else {
             0
@@ -2388,6 +2377,13 @@ impl ArenaPlan {
                 0
             }
         }
+    }
+
+    /// [`Self::lent`] under `CEILING`, the build's value of the limit: the most rows the build
+    /// sizes the table's storage for, a const of the caller's as every ceiling of storage is
+    /// ([`lent`]), so the build's value is read as that and nothing else.
+    const fn lent_to<const CEILING: usize>(&mut self, limit: ArenaLimit, value: Quota) -> usize {
+        self.lent(limit, value, CEILING)
     }
 
     /// `bytes`, a size `None` past the address space, which is then kept as the plan's refusal
@@ -2655,6 +2651,80 @@ const fn lent_under(
     match value.lent_under(Quota::at_most(ceiling)) {
         Ok(rows) => Ok(rows),
         Err(why) => Err(ArenaRefused::Limit { limit, why }),
+    }
+}
+
+/// Whether a session's links share a pool of receive buffers and one of outbound slots, as a build
+/// that listens lends them (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`), rather than each link holding a
+/// buffer and a slot of its own.
+pub const LINKS_SHARE_POOLS: bool = cfg!(feature = "listen");
+
+/// The buffers a session's links read their batches into and encode their frames into, and the
+/// buffers they stage the chains of fragmented messages in, as the session's plan lays them out
+/// ([`link_buffers`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkBuffers {
+    /// The receive buffers the plan lends the links.
+    pub receive: usize,
+    /// The outbound slots the plan lends the links.
+    pub transmit: usize,
+    /// The bytes of each receive buffer and of each slot: the batch the session advertises.
+    pub bytes: usize,
+    /// The reassembly buffers of the session's one table, which its links share.
+    pub chains: usize,
+}
+
+/// The buffers of the links of a session that holds `links` links at most and advertises `batch`
+/// under `limits`: what its plan lays out for them, from the same reckoning
+/// ([`ArenaPlan::lay_out`]), so a report of the session's memory reads what its open reserves.
+/// Refused as the plan refuses the batch or a pool's limit.
+pub const fn link_buffers(
+    links: usize,
+    batch: u16,
+    limits: &SessionLimits,
+) -> Result<LinkBuffers, ArenaRefused> {
+    let bytes = tried!(link_batch(batch, limits));
+    let (receive, transmit) = tried!(pooled_buffers(links, limits));
+    let chains = tried!(reassembly_chains(limits));
+    Ok(LinkBuffers {
+        receive,
+        transmit,
+        bytes,
+        chains,
+    })
+}
+
+/// The buffers of a session's one table of chains under `limits`, which its links share: its
+/// `REASSEMBLY_CHAINS`, held under the build's value, which a session lowers and never raises, so
+/// a value over it is refused under its own name. However many links the session holds, as a
+/// chain is claimed from the table and not from a link's own buffers.
+const fn reassembly_chains(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::REASSEMBLY_CHAINS }>(ArenaLimit::ReassemblyChains, limits.reassembly_chains())
+}
+
+/// The receive buffers and the outbound slots of `links` links under `limits`. A build that
+/// listens lends pools the links share, each holding a buffer only while it holds part of a batch
+/// or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`) and a slot from
+/// its grant to its send, or until a frame its stream took in part is written
+/// (`wz_runtime_coop::link_storage::PooledTx`): the pool's limit, and no more than the links, as a
+/// buffer no link can take is memory nothing uses. A build that only dials holds its dial and the
+/// faces it attaches, and lends each link a buffer and a slot of its own.
+const fn pooled_buffers(
+    links: usize,
+    limits: &SessionLimits,
+) -> Result<(usize, usize), ArenaRefused> {
+    if LINKS_SHARE_POOLS {
+        let rx = tried!(lent::<{ caps::RX_POOL_BUFFERS }>(
+            ArenaLimit::RxPoolBuffers,
+            Quota::at_most(limits.rx_pool_buffers()),
+        ));
+        let tx = tried!(lent::<{ caps::TX_POOL_SLOTS }>(
+            ArenaLimit::TxPoolSlots,
+            Quota::at_most(limits.tx_pool_slots()),
+        ));
+        Ok((least(rx, links), least(tx, links)))
+    } else {
+        Ok((links, links))
     }
 }
 
@@ -3070,6 +3140,16 @@ const fn hold(limit: ArenaLimit, asked: usize, admitted: usize) -> Result<(), Ar
     Ok(())
 }
 
+/// [`hold`] under `CEILING`, the build's value of the limit: the most rows the build sizes the
+/// table for, where no session's value of it is in reach, a const of the caller's as a ceiling of
+/// storage is ([`lent`]).
+const fn hold_under<const CEILING: usize>(
+    limit: ArenaLimit,
+    asked: usize,
+) -> Result<(), ArenaRefused> {
+    hold(limit, asked, CEILING)
+}
+
 /// Whether a session `config` opens gives its dial role's face a link: it does when it lists an
 /// endpoint to dial, and when it lists none and has neither a port to listen on nor a group to
 /// join, whose open then fails for want of an endpoint (`CoopEngine::open_links`, which asks
@@ -3161,6 +3241,11 @@ pub struct PlanShape {
     pub dials: usize,
     /// The endpoints it listens on (at most `MAX_ADMIN_LOCATORS`).
     pub listens: usize,
+    /// How many of those are `udp/` ones, each a udp port the stack binds, which read into the
+    /// datagram slots the arena lends (`UDP_PORT_SLOTS`): a session that listens on `tcp/` alone
+    /// binds no port and is lent none.
+    #[cfg(feature = "listen")]
+    pub udp_listens: usize,
     /// The multicast groups it joins.
     pub groups: usize,
     /// The faces it admits besides the dial role's ([`CoopConfig::max_faces`]).
@@ -3184,6 +3269,8 @@ impl PlanShape {
         Self {
             dials: config.endpoints.count(),
             listens: config.listen.count(),
+            #[cfg(feature = "listen")]
+            udp_listens: config.listen.udp(),
             groups: config.groups.len(),
             max_faces: config.max_faces,
             accept_pending: config.accept_pending,
@@ -3207,6 +3294,8 @@ impl PlanShape {
         Self {
             dials,
             listens: 0,
+            #[cfg(feature = "listen")]
+            udp_listens: 0,
             groups: 0,
             max_faces: 0,
             accept_pending: 0,
@@ -3296,6 +3385,17 @@ pub trait ArenaMemory: Sync {
     /// Never asked for zero bytes.
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>>;
 
+    /// Whether every block [`Self::reserve`] gives is zero in every byte as it is given, written
+    /// by nothing: the system's fresh pages (an anonymous `mmap`, `VirtualAlloc`) or a region
+    /// of `.bss` no one used before. The arena of such a memory is laid over its block as it lies
+    /// (`Arena::over_zeroed`): its rows are empty as all-zero bytes, so the open writes none of
+    /// them, and a page no row of the session uses is never written, nor on a host with paging
+    /// resident. Any other memory's block is written where a row must read empty (the head of a
+    /// region, the tables of buffers) and nowhere else. `false` unless the memory says so.
+    fn reserves_zeroed(&self) -> bool {
+        false
+    }
+
     /// Give back what [`Self::reserve`] gave.
     ///
     /// # Safety
@@ -3307,7 +3407,9 @@ pub trait ArenaMemory: Sync {
 /// The allocator, asked once for the whole arena and given it back when the session is let go:
 /// the memory of a host library until the operating system's layer reserves it
 /// (`docs/c-abi-engine-and-memory.md`, phase P4). An allocator with none to give is an answer,
-/// not the end of the process.
+/// not the end of the process. Not said to give zeroed blocks (`ArenaMemory::reserves_zeroed`):
+/// a block it hands from memory given back to it before is not zero, and its zeroed allocation
+/// (`calloc`) writes all of such a block where the open writes only the rows that need it.
 pub struct AllocatorMemory;
 
 impl ArenaMemory for AllocatorMemory {
@@ -3422,8 +3524,8 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
 }
 
 /// The span of a session's arena its advanced publishers' caches keep their ring in
-/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life and zeroed then, so
-/// it holds an empty ring, and lent under the engine's lock of its own
+/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life, zero as its table
+/// was lent, so it holds an empty ring, and lent under the engine's lock of its own
 /// (`wz_capi_port::CacheBytes`).
 #[cfg(feature = "advanced-cache")]
 #[derive(Clone, Copy, Debug)]
@@ -3439,15 +3541,15 @@ unsafe impl Send for CacheSpan {}
 
 #[cfg(feature = "advanced-cache")]
 impl CacheSpan {
-    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back,
-    /// and zeroed. Refused as an arena with no room for a table lent no buffer.
+    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back.
+    /// Its bytes are as the table was lent them, zero (`Arena::lend_byte_cells`), and the open
+    /// claims it before anything writes it, so the claim writes none of them and a ring the caches
+    /// never fill is never written. Refused as an arena with no room for a table lent no buffer.
     pub(crate) fn claimed(cells: LentByteCells, bytes: usize) -> Result<Self, ArenaRefused> {
         let (base, len) = claimed(cells).ok_or(ArenaRefused::Lend(LendRefused::Exhausted {
             asked: Some(bytes),
             left: 0,
         }))?;
-        // SAFETY: the buffer is the arena's, claimed by this span alone, and `len` bytes long.
-        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, len) };
         Ok(Self { base, len })
     }
 
@@ -3545,8 +3647,11 @@ impl SessionArena {
 
     /// An arena of `bytes` reserved from `memory` after a head of `head`'s layout, every byte of
     /// the head zero, and where the block starts: the head's place. One body for an arena alone
-    /// (a head of no bytes) and for one beside a region. Refused, having taken nothing, when the
-    /// block is past the address space or the memory has none to give.
+    /// (a head of no bytes) and for one beside a region. A memory that gives its blocks zero
+    /// ([`ArenaMemory::reserves_zeroed`]) has its block written by none of this, so its pages
+    /// are written only by the rows the session uses; any other has its head written zero and its
+    /// arena's tables written as they are lent. Refused, having taken nothing, when the block is
+    /// past the address space or the memory has none to give.
     fn of_bytes_after(
         head: Layout,
         bytes: usize,
@@ -3559,13 +3664,19 @@ impl SessionArena {
         let base = memory.reserve(layout).ok_or(ArenaRefused::NoMemory {
             bytes: offset.saturating_add(bytes),
         })?;
-        // SAFETY: the memory gave `layout` to this call alone: the head's `head.size()` bytes at
-        // its start are inside it, and its arena starts `offset` bytes in, aligned to
-        // `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long, used by nothing else until the
-        // block is given back (`Drop`, or the last count of `Self::keep`).
+        // SAFETY: the memory gave `layout` to this call alone, every byte of it zero where it says
+        // so: the head's `head.size()` bytes at its start are inside it, and its arena starts
+        // `offset` bytes in, aligned to `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long,
+        // used by nothing else until the block is given back (`Drop`, or the last count of
+        // `Self::keep`).
         let arena = unsafe {
-            base.as_ptr().write_bytes(0, head.size());
-            Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes)
+            let at = NonNull::new_unchecked(base.as_ptr().add(offset));
+            if memory.reserves_zeroed() {
+                Arena::over_zeroed(at, bytes)
+            } else {
+                base.as_ptr().write_bytes(0, head.size());
+                Arena::over(at, bytes)
+            }
         };
         Ok((
             Self {
@@ -3701,6 +3812,133 @@ mod tests {
             // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
             unsafe { AllocatorMemory.release(base, layout) }
         }
+    }
+
+    /// The byte [`Marked`] and [`Plain`] write over what they reserve.
+    const MARK: u8 = 0x5a;
+
+    /// A memory that says its blocks are zero and breaks that on purpose: each is written over
+    /// with [`MARK`], so a byte the arena's owner writes after the reservation is a byte that is
+    /// no longer the mark. Only the raw bytes of what it gives are read, never a value laid over
+    /// them.
+    struct Marked;
+
+    impl ArenaMemory for Marked {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            Plain.reserve(layout)
+        }
+
+        fn reserves_zeroed(&self) -> bool {
+            true
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract, handed on to the memory that reserved it.
+            unsafe { Plain.release(base, layout) }
+        }
+    }
+
+    /// [`Marked`]'s blocks from a memory that does not say they are zero, as the allocator's.
+    struct Plain;
+
+    impl ArenaMemory for Plain {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = AllocatorMemory.reserve(layout)?;
+            // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+            unsafe { core::ptr::write_bytes(base.as_ptr(), MARK, layout.size()) };
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
+    }
+
+    /// The bytes of the block `arena` was reserved in.
+    fn block_of(arena: &SessionArena) -> &[u8] {
+        // SAFETY: the block is the arena's, `layout.size()` bytes from `base`, read while the
+        // arena holds it and lends nothing.
+        unsafe { core::slice::from_raw_parts(arena.base.as_ptr(), arena.layout.size()) }
+    }
+
+    /// Whether every byte of the block `arena` was reserved in is still [`MARK`].
+    fn still_marked(arena: &SessionArena) -> bool {
+        block_of(arena).iter().all(|byte| *byte == MARK)
+    }
+
+    /// The block of a region's head and its arena, from a memory that says its blocks are zero, is
+    /// laid out as it lies and written by none of the reservation: every byte is as the memory
+    /// gave it. The CONTROL is the same reservation from a memory that does not say so, whose head
+    /// is written zero and whose arena after it is not. Turned red by a reservation that writes
+    /// the block of a zeroed memory, or by one that leaves the head of any other as it lay.
+    #[test]
+    fn an_arena_of_zeroed_memory_is_written_by_none_of_its_reservation() {
+        let head = Layout::new::<[u8; 41]>();
+        let (arena, base) =
+            SessionArena::of_bytes_after(head, 256, &Marked).expect("the memory answers");
+        assert_eq!(base, arena.base, "the head is the block's start");
+        assert!(still_marked(&arena), "the reservation wrote a byte");
+        drop(arena);
+
+        let (control, _) =
+            SessionArena::of_bytes_after(head, 256, &Plain).expect("the allocator answers");
+        let block = block_of(&control);
+        assert!(
+            block[..head.size()].iter().all(|byte| *byte == 0),
+            "CONTROL: the head of a memory not said zero is written zero"
+        );
+        let arena_start = block.len() - 256_usize.max(ARENA_ALIGN);
+        assert!(
+            block[arena_start..].iter().all(|byte| *byte == MARK),
+            "the reservation wrote the arena of a memory not said zero"
+        );
+    }
+
+    /// The allocator is not said to give zeroed blocks: a block it hands from memory given back
+    /// before is not zero, and its `calloc` would write all of it where the open writes only the
+    /// rows that need it. Turned red by `AllocatorMemory` said zeroed.
+    #[test]
+    fn the_allocator_is_not_said_to_give_zeroed_blocks() {
+        assert!(!AllocatorMemory.reserves_zeroed());
+        assert!(Marked.reserves_zeroed(), "CONTROL: a memory can say so");
+    }
+
+    /// A session's arena over zeroed memory lends its tables of buffers as the block lies: the
+    /// lend writes none of their flags or bytes, so a buffer no link claims is never written.
+    /// Turned red by the arena made over its block as memory not said to be zero (`Arena::over`),
+    /// whose lend writes them.
+    #[test]
+    fn a_session_arena_lends_its_buffers_without_writing_them() {
+        let (mut arena, _) = SessionArena::of_bytes_after(Layout::new::<()>(), 4096, &Marked)
+            .expect("the memory answers");
+        let mut lend = arena.lender();
+        let _cells = lend.byte_cells(1024, 3);
+        lend.finish().expect("the arena holds the table");
+        assert!(arena.arena.high_water() > 3 * 1024, "the table was lent");
+        assert!(still_marked(&arena), "the lend wrote the table");
+    }
+
+    /// The caches' span is claimed as its table lent it and written by nothing more: bytes put in
+    /// the table's one buffer before the claim are still there after it (a buffer of a fresh table
+    /// is lent zero, which the claim then keeps). Turned red by a claim that writes the span over.
+    #[cfg(feature = "advanced-cache")]
+    #[test]
+    fn the_caches_span_is_claimed_as_its_table_lent_it() {
+        let mut arena = SessionArena::of_bytes(4096, &AllocatorMemory).expect("the host has it");
+        let mut lend = arena.lender();
+        let cells = lend.byte_cells(64, 1);
+        lend.finish().expect("the arena holds the table");
+        {
+            let mut buffer = cells.claim().expect("the table's one buffer");
+            assert!(buffer.as_mut_slice().iter().all(|b| *b == 0), "lent zero");
+            buffer.as_mut_slice().fill(MARK);
+        }
+        let span = CacheSpan::claimed(cells, 64).expect("the buffer is free again");
+        // SAFETY: the span is this test's alone, and the arena it lies in stands past its use.
+        let bytes = unsafe { span.bytes() };
+        assert_eq!(bytes.len(), 64, "the table's one buffer");
+        assert!(bytes.iter().all(|b| *b == MARK), "the claim wrote the span");
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.
@@ -4078,6 +4316,7 @@ mod tests {
             MaxPendingDeclares,
             RxPoolBuffers,
             TxPoolSlots,
+            ReassemblyChains,
             LimitsDifferFromBuild,
             ShapeDiffersFromBuild,
         ];

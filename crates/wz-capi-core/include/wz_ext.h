@@ -83,6 +83,27 @@ z_result_t wz_ext_config_profile(z_loaned_config_t *config,
 z_result_t wz_ext_config_document(z_loaned_config_t *config,
                                   const char *json5);
 
+/* The config key (zp_config_insert) whose value states the limits of the
+ * session the pico ABI's z_open opens from the config, in every build of it,
+ * the zenoh-pico preset included. A session opens its tables at a few, the
+ * counts zenoh-pico's parity examples declare, and takes no memory after its
+ * open; a program that holds more names them here before it opens, e.g.
+ * "MAX_SUBSCRIPTIONS=4,MAX_PUBLISHERS=2": NAME=count items separated by
+ * commas, each NAME a session limit's id, a later item over an earlier one.
+ * The build's value of each limit is its bound. An item that is not
+ * NAME=count, a name that is no session limit, a count the build's domain
+ * leaves out and a count past the bound answer _Z_ERR_CONFIG_INVALID_VALUE,
+ * at the insert and at the open, and the config keeps its earlier value. A
+ * declaration past what the session opened with is refused as one that
+ * finds no memory is. Where the library has process pools, NAME may also be
+ * a held value of the process (HELD_SAMPLES, HELD_REPLIES, HELD_QUERIES,
+ * HELD_ENCODINGS, HELD_HELLOS, HELD_SMALL_PAYLOAD_BLOCKS,
+ * HELD_MEDIUM_PAYLOAD_BLOCKS, HELD_LARGE_PAYLOAD_BLOCKS): the process's first
+ * open reserves those pools at the counts its config states, each up to the
+ * build's value, and fixes them; a later open that states more of one is
+ * refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY. */
+#define WZ_EXT_CONFIG_LIMITS_KEY ((uint8_t)0xC0)
+
 /* The limits of the process's runtime, from a zenoh JSON5 document of which
  * only the wz member's wz/limits is read: the limits of the machines the
  * process makes apart from any session, its supervisor

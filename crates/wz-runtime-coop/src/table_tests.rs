@@ -968,6 +968,83 @@ fn a_placed_runtime_takes_nothing_of_the_heap_and_keeps_its_memory_to_its_last_h
 }
 
 /// How many times the memory of a placed runtime's span was given back, in
+/// `a_runtime_that_hosts_no_task_holds_no_cell_and_refuses_a_spawn`.
+static TASKLESS_GIVEN_BACK: AtomicU32 = AtomicU32::new(0);
+
+/// What the last count of that span's memory does: it records that it ran.
+unsafe fn taskless_given_back(_kept: NonNull<Kept>) {
+    TASKLESS_GIVEN_BACK.fetch_add(1, Ordering::SeqCst);
+}
+
+/// A runtime placed for an engine that hosts no task lays out no cell whatever its rows' count,
+/// spanning what one placed for one task of none does, refuses a spawn for want of a cell,
+/// counted, polls nothing, and gives its memory back when its last holder lets go. Turned red by
+/// a form that lays out a cell for the rows' count, or that answers a spawn otherwise than a
+/// table of one cell that holds none.
+#[test]
+fn a_runtime_that_hosts_no_task_holds_no_cell_and_refuses_a_spawn() {
+    static NOW: AtomicU64 = AtomicU64::new(0);
+    let rows = RuntimeRows {
+        tasks: 1,
+        task_bytes: 256,
+        timers: 0,
+    };
+    let form = RuntimeForm::Taskless;
+    let layout = CoopRuntime::<Hand>::placed_layout(rows, form).expect("a span of these rows");
+    assert_eq!(
+        Some(layout),
+        CoopRuntime::<Hand>::placed_layout(RuntimeRows { tasks: 0, ..rows }, RuntimeForm::ForOne),
+        "the span of one task of none"
+    );
+    // SAFETY: the layout is not of zero bytes: it holds the runtime's state.
+    let span = NonNull::new(unsafe { std::alloc::alloc(layout) }).expect("the host has the memory");
+    let memory = NonNull::from(std::boxed::Box::leak(std::boxed::Box::new(Kept::new(
+        taskless_given_back,
+    ))));
+    // SAFETY: the span is the layout's bytes, used by nothing else while a count of its memory is
+    // held; the memory's count is live until it is given back below.
+    let place = unsafe { RuntimePlace::new(span, layout.size(), memory) };
+    let (runtime, local) =
+        CoopRuntime::placed(Hand(&NOW), rows, form, place).expect("the span fits");
+    assert_eq!(
+        local
+            .try_spawn_local(async { 1u8 })
+            .map(|_| ())
+            .map_err(|refused| refused.why),
+        Err(SpawnRefusal::NoTaskCell),
+        "no cell for any task"
+    );
+    assert_eq!(
+        runtime.task_refusals(),
+        Refusals {
+            no_task_cell: 1,
+            too_large: 0,
+            heap_refused: 0,
+        }
+    );
+    local.run_until_idle();
+    assert_eq!(
+        local.live_local_task_count(),
+        0,
+        "nothing was placed to run"
+    );
+    drop(local);
+    drop(runtime);
+    // SAFETY: the memory's own holder lets go of its count, once.
+    unsafe { Kept::release(memory) };
+    assert_eq!(
+        TASKLESS_GIVEN_BACK.load(Ordering::SeqCst),
+        1,
+        "the last holder gives the memory back"
+    );
+    // SAFETY: the memory's last count ran; the span and the count are freed once, here.
+    unsafe {
+        std::alloc::dealloc(span.as_ptr(), layout);
+        drop(std::boxed::Box::from_raw(memory.as_ptr()));
+    }
+}
+
+/// How many times the memory of a placed runtime's span was given back, in
 /// `a_runtime_placed_for_an_open_that_adds_cells_is_refused_by_a_full_heap`.
 static OPENING_GIVEN_BACK: AtomicU32 = AtomicU32::new(0);
 

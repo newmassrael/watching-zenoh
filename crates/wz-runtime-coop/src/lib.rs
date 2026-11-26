@@ -354,6 +354,15 @@ pub mod face_send;
     target_has_atomic = "ptr"
 ))]
 pub mod transport;
+// The one dial of an endpoint: its text read, a host name resolved, and the walk over the host's
+// addresses. Documented in its own `//!`.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot"),
+    target_has_atomic = "ptr"
+))]
+pub mod dial;
 
 // The links above over a transport the program supplies: its streams, datagram links and groups
 // as this engine's seams, and the session shell's links over them, so a session opens no socket

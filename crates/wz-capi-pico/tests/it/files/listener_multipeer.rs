@@ -87,6 +87,7 @@ unsafe extern "C" fn on_drop_flag(ctx: *mut c_void) {
 
 // --- helpers ---------------------------------------------------------------
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_runtime_tokio_test_support::free_port;
 
 unsafe fn open_role(port: u16, key: u8, role: &str) -> z_owned_session_t {
@@ -95,6 +96,15 @@ unsafe fn open_role(port: u16, key: u8, role: &str) -> z_owned_session_t {
     assert_eq!(z_config_default(&mut cfg), Z_OK);
     assert_eq!(
         zp_config_insert(z_config_loan_mut(&mut cfg), key, endpoint.as_ptr()),
+        Z_OK
+    );
+    // A listener here holds two subscribers at once, past what a session opens with.
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            WZ_EXT_CONFIG_LIMITS_KEY,
+            c"MAX_SUBSCRIPTIONS=2".as_ptr()
+        ),
         Z_OK
     );
     let mut session: z_owned_session_t = std::mem::zeroed();
@@ -170,6 +180,7 @@ unsafe fn close_session(session: &mut z_owned_session_t) {
 
 #[test]
 fn listen_open_returns_and_closes_with_no_peer_ever_connected() {
+    let _program = crate::programs::admit();
     // Guards BOTH Round-1 listener divergences. R1's `z_open(listen)` awaited
     // the first peer, so with no dialer it blocked forever — and because no
     // session handle existed yet, `z_close` could not interrupt it (the
@@ -219,6 +230,7 @@ fn listen_open_returns_and_closes_with_no_peer_ever_connected() {
 
 #[test]
 fn declare_before_peer_is_replayed_when_a_peer_connects() {
+    let _program = crate::programs::admit();
     // pico supports declaring subscribers before any peer exists: declarations
     // live in the session's local tables and are pushed to each peer as it
     // connects. Here the listener subscribes with ZERO peers and only then does
@@ -265,6 +277,7 @@ fn declare_before_peer_is_replayed_when_a_peer_connects() {
 
 #[test]
 fn listener_holds_two_concurrent_peers_and_fans_out() {
+    let _program = crate::programs::admit();
     // pico's listener holds multiple concurrent inbound peers in the ONE
     // session. A single-peer listener would leave the second dialer permanently
     // unserved (its TCP connect lands in the backlog, but the zenoh handshake
@@ -381,6 +394,7 @@ unsafe extern "C" fn on_drop_count(ctx: *mut c_void) {
 
 #[test]
 fn subscription_c_drop_fires_exactly_once_across_faces() {
+    let _program = crate::programs::admit();
     // One C subscription declared on the listener fans out to a wz subscriber
     // PER connected peer, each capturing a clone of the SAME `Arc<CClosure>`.
     // The C `drop(context)` must fire exactly ONCE — never per-face (a
@@ -470,6 +484,7 @@ fn subscription_c_drop_fires_exactly_once_across_faces() {
 
 #[test]
 fn listener_survives_a_peer_disconnect_and_keeps_accepting() {
+    let _program = crate::programs::admit();
     // A peer that connects and then closes drives `CApiForwarder::deregister ->
     // face_down`, removing that face. The listener (and its subscription SSOT)
     // must survive, and a subsequently-connecting peer must still be accepted
@@ -530,6 +545,7 @@ fn listener_survives_a_peer_disconnect_and_keeps_accepting() {
 
 #[test]
 fn declare_subscriber_rejects_a_pico_unsafe_keyexpr() {
+    let _program = crate::programs::admit();
     // A non-canonical / pico-unsafe keyexpr (the `**/c/*` three-family bug) must
     // be rejected with Z_ERR_INVALID up front — NOT silently recorded as a dead
     // subscription that never matches yet reports Z_OK. The moved closure must

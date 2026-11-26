@@ -358,15 +358,21 @@ impl<R: SessionRuntime, T: TimeSource> Publisher<R, T> {
                 // R311y797 — the watch now STORES the locality it was
                 // seeded under, so every later re-evaluation applies the
                 // same gate the seed and the poll do.
+                // A session at its MAX_MATCHING_LISTENERS refuses the watch in the same hold
+                // as it would register it, before the peer is asked anything; the sink it
+                // drops holds a clone of the cell only, so no callback of the caller runs.
                 obs.with_parts(|app, face| {
-                    app.remote_subscribers.declare_matching_listener_seeded(
-                        &*face.remote_subscribers,
-                        criterion,
-                        local,
-                        sink,
-                    )
+                    app.admits_matching_listener().then(|| {
+                        app.remote_subscribers.declare_matching_listener_seeded(
+                            &*face.remote_subscribers,
+                            criterion,
+                            local,
+                            sink,
+                        )
+                    })
                 })
-            });
+            })
+            .ok_or(MatchingListenerError::TableFull)?;
             // R311y771 — ASK THE PEER FOR THE DECLARATIONS THIS WATCH IS FED
             // BY. Without it the watch is registered against a registry the
             // neighbour will never fill: propagation to a face is gated on

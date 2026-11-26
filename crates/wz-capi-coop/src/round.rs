@@ -79,17 +79,17 @@ pub(crate) fn read_room<const SUBS: usize, const LIVE: usize>(limits: &SessionLi
         .lent_under(Quota::at_most(SUBS))
         .unwrap_or(SUBS);
     let most = most_subscribers(subscribers, session_liveliness::<LIVE>(limits))
-        .max(session_watches(limits));
+        .max(session_watches::<{ wz_session_core::caps::MAX_DECL_WATCHES }>(limits));
     ReadRoom {
         // A reply owes its leg's callback, whatever the session's subscribers.
         callbacks: most.max(1),
     }
 }
 
-/// The declaration watches the session's `limits` admit, under the build's: what a record of what a
-/// peer declared owes a callback to at most. None in a build without the watch.
+/// The declaration watches the session's `limits` admit, under `WATCHES`, the build's value: what
+/// a record of what a peer declared owes a callback to at most. None in a build without the watch.
 #[cfg(wz_round)]
-fn session_watches(limits: &SessionLimits) -> usize {
+fn session_watches<const WATCHES: usize>(limits: &SessionLimits) -> usize {
     #[cfg(any(
         feature = "remote-declaration-watch",
         feature = "declarations-synced-event"
@@ -97,8 +97,8 @@ fn session_watches(limits: &SessionLimits) -> usize {
     {
         limits
             .max_decl_watches()
-            .lent_under(Quota::at_most(wz_session_core::caps::MAX_DECL_WATCHES))
-            .unwrap_or(wz_session_core::caps::MAX_DECL_WATCHES)
+            .lent_under(Quota::at_most(WATCHES))
+            .unwrap_or(WATCHES)
     }
     #[cfg(not(any(
         feature = "remote-declaration-watch",

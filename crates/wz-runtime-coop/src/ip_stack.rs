@@ -707,6 +707,18 @@ where
 
     const IPV6: bool = opens_ipv6::<U, D, L>();
 
+    // The platform whose sockets these are resolves a name for each of its links, as its waits
+    // wait on each of them.
+    const RESOLVES: bool = U::RESOLVES;
+
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [SocketAddr],
+    ) -> usize {
+        U::resolve(name, found)
+    }
+
     // The waits of the platform whose sockets these are: its streams, the secure channels over
     // them and its groups name handles of the same platform as its datagram sockets do.
     type Waits = U::Waits;
@@ -769,33 +781,43 @@ where
 
     /// A `tcp/` dial begins its connection and a `tls/` one its channel's (the connection under
     /// it, then its handshake), and each is asked for its stream later (`PendingStream`); a
-    /// datagram link has no connection to wait for. A stream link's buffers are claimed as a
-    /// dial's are, before the connection is begun, and held by the dial until its link is made: a
-    /// refused or abandoned dial gives them back.
+    /// datagram link has no connection to wait for. A protocol the links do not carry is refused
+    /// before any buffer is claimed, and every protocol's buffers are claimed in this one place,
+    /// before its socket is opened, and held by a stream's dial until its link is made: a refused
+    /// or abandoned dial gives them back. Out of line: every address a dial begins at, the one an
+    /// endpoint's text names and each of a host's (`crate::dial`), is begun by this one body.
+    #[inline(never)]
     fn begin_initiator(&self, to: Locator) -> Result<Self::Dial, LinkOpenError> {
         let Some(ip) = to.as_ip() else {
             return Err(LinkOpenError::Unsupported);
         };
+        let rx = match ip.proto {
+            LinkProto::Udp if U::CARRIED => self.shape.datagram_rx,
+            LinkProto::Tcp if D::CARRIED => STREAM_RX_CAPACITY,
+            LinkProto::Tls if L::CARRIED => STREAM_RX_CAPACITY,
+            _ => return Err(LinkOpenError::Unsupported),
+        };
+        let buffers = self.shape.buffers(rx)?;
         match ip.proto {
-            LinkProto::Tcp if D::CARRIED => {
-                let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
-                let socket = self.dial.dial_started(ip.at)?;
-                Ok(IpDial(IpDialing::Tcp(PendingStream {
-                    socket: Some(socket),
-                    buffers: Some(buffers),
-                    place: self.shape.place,
-                })))
+            LinkProto::Udp => {
+                let (rx, tx) = buffers;
+                // Port 0 has the stack choose a free one, one per initiator session.
+                let socket = U::bind(dial_bind(self.local, ip.at)).map_err(bind_refused::<U>)?;
+                self.shape
+                    .place
+                    .datagram(socket, Some(ip.at), rx, tx)
+                    .map(IpDial::from)
             }
-            LinkProto::Tls if L::CARRIED => {
-                let buffers = self.shape.buffers(STREAM_RX_CAPACITY)?;
-                let channel = self.tls.dial_started(ip.at)?;
-                Ok(IpDial(IpDialing::Tls(PendingStream {
-                    socket: Some(channel),
-                    buffers: Some(buffers),
-                    place: self.shape.place,
-                })))
-            }
-            _ => self.open_initiator(to).map(IpDial::from),
+            LinkProto::Tcp => Ok(IpDial(IpDialing::Tcp(PendingStream {
+                socket: Some(self.dial.dial_started(ip.at)?),
+                buffers: Some(buffers),
+                place: self.shape.place,
+            }))),
+            LinkProto::Tls => Ok(IpDial(IpDialing::Tls(PendingStream {
+                socket: Some(self.tls.dial_started(ip.at)?),
+                buffers: Some(buffers),
+                place: self.shape.place,
+            }))),
         }
     }
 

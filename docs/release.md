@@ -13,12 +13,12 @@ The Platform workflow's `package-windows` job runs the same composite action on 
 touches what the package is made from, so the steps a release builds a package with are the steps
 that job reads every push; they are written once.
 
-**The form a release carries.** The library without `std` (`os-windows`, the `capi-nostd` profile),
+**The form a release carries.** The library without `std` (`os-host`, the `capi-nostd` profile),
 as one DLL, is the only form a release carries (owner, 2026-11-23:
-`docs/c-abi-engine-and-memory.md`, E7). `package-windows` also builds the library with `std`, in
-the one-library and the split form, to compare and measure against; no release carries those, and
-the attach job refuses a set that holds one. The split form is not released because its additional
-library (`wz-capi-pico-ext`) has no form without `std`.
+`docs/c-abi-engine-and-memory.md`, E7); the C library has no `std` form
+(`docs/win-budget/std-heap.md`, S1). `package-windows` also builds the split form, the core and
+the additional library (`wz-capi-pico-ext`) apart; no release carries it, and the attach job
+refuses a set that holds one.
 
 A package that fails its build or its test fails the release run and nothing is attached: no step of
 the package jobs is soft, and the attach job needs every row.

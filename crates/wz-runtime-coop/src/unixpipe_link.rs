@@ -18,6 +18,11 @@
 //! ([`SessionLinks::begin_initiator`]), and a listener takes one invitation at a time, as
 //! upstream's does, and gives up on one its dialer does not confirm within
 //! [`HANDSHAKE_TIMEOUT_US`], which upstream's listener has no bound for.
+//!
+//! [`FifoOpen`]: crate::unixpipe_link::FifoOpen
+//! [`HANDSHAKE_TIMEOUT_US`]: crate::unixpipe_link::HANDSHAKE_TIMEOUT_US
+//! [`PipeStream`]: crate::unixpipe_link::PipeStream
+//! [`SessionLinks::begin_initiator`]: crate::session_drive::SessionLinks::begin_initiator
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -714,6 +719,17 @@ where
     type Dial = UnixpipeLinksDial<S::Dial, O, N>;
 
     const IPV6: bool = S::IPV6;
+
+    // A name is resolved by the network the stack's IP links are opened on.
+    const RESOLVES: bool = S::RESOLVES;
+
+    fn resolve(
+        &self,
+        name: &crate::locator_text::NamedHost<'_>,
+        found: &mut [core::net::SocketAddr],
+    ) -> usize {
+        self.links.resolve(name, found)
+    }
 
     type Waits = S::Waits;
 

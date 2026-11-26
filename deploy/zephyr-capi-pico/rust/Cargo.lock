@@ -855,7 +855,6 @@ dependencies = [
  "wz-capi-coop",
  "wz-capi-core",
  "wz-capi-port",
- "wz-cdylib-build",
  "wz-codecs",
  "wz-conformance-build",
  "wz-runtime-zephyr",
@@ -871,10 +870,6 @@ dependencies = [
  "wz-node-time",
  "wz-session-core",
 ]
-
-[[package]]
-name = "wz-cdylib-build"
-version = "0.1.0"
 
 [[package]]
 name = "wz-codecs"

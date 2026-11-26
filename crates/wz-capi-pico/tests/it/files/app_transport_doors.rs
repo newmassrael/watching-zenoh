@@ -512,6 +512,7 @@ unsafe fn converge(session: &z_owned_session_t, key: &CStr, heard: &Heard, probe
 
 #[test]
 fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_query() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     pipe.faults.store(true, Ordering::SeqCst);
     let listening = make_transport(&pipe, Side::Listening);
@@ -715,6 +716,7 @@ fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_qu
 
 #[test]
 fn an_open_over_the_transport_refuses_what_it_does_not_carry_by_name() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     let transport = make_transport(&pipe, Side::Dialling);
     for (key, locator, code) in [
@@ -767,6 +769,7 @@ fn an_open_over_the_transport_refuses_what_it_does_not_carry_by_name() {
 
 #[test]
 fn a_dial_the_program_refuses_fails_the_open_and_leaves_no_link() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     pipe.refusing.store(true, Ordering::SeqCst);
     let transport = make_transport(&pipe, Side::Dialling);
@@ -787,6 +790,7 @@ fn a_dial_the_program_refuses_fails_the_open_and_leaves_no_link() {
 
 #[test]
 fn the_programs_calls_are_refused_by_name() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     let transport = make_transport(&pipe, Side::Listening);
     unsafe {
@@ -1029,6 +1033,7 @@ unsafe fn put_and_get(listener: &z_owned_session_t, dialler: &z_owned_session_t)
 /// engine the build has: the test of a cooperative-engine build as much as of a tokio one.
 #[test]
 fn a_client_session_opens_over_the_programs_transport_on_the_builds_engine() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     let listening = make_transport(&pipe, Side::Listening);
     let dialling = make_transport(&pipe, Side::Dialling);
@@ -1104,6 +1109,7 @@ unsafe fn timed_get(session: &z_owned_session_t, key: &CStr) -> Duration {
 /// takes hundreds of milliseconds.
 #[test]
 fn a_get_between_two_open_sessions_over_the_programs_transport_ends_at_once() {
+    let _program = crate::programs::admit();
     const GETS: usize = 21;
     let pipe = Arc::new(Pipe::default());
     let listening = make_transport(&pipe, Side::Listening);
@@ -1144,6 +1150,7 @@ fn a_get_between_two_open_sessions_over_the_programs_transport_ends_at_once() {
 #[cfg(any(not(feature = "engine-tokio"), feature = "link-udp"))]
 #[test]
 fn a_datagram_pair_carries_a_put_and_a_get() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     let listening = make_transport(&pipe, Side::Listening);
     let dialling = make_transport(&pipe, Side::Dialling);
@@ -1173,6 +1180,7 @@ fn a_datagram_pair_carries_a_put_and_a_get() {
 #[cfg(feature = "multicast-transport")]
 #[test]
 fn a_two_member_group_carries_a_put_and_a_get() {
+    let _program = crate::programs::admit();
     let pipe = Arc::new(Pipe::default());
     let first = make_transport(&pipe, Side::Listening);
     let second = make_transport(&pipe, Side::Dialling);
@@ -1286,6 +1294,7 @@ mod living {
 
     #[test]
     fn a_peers_liveliness_interest_is_answered_with_the_listeners_token() {
+        let _program = crate::programs::admit();
         let pipe = Arc::new(Pipe::default());
         let listening = make_transport(&pipe, Side::Listening);
         let dialling = make_transport(&pipe, Side::Dialling);

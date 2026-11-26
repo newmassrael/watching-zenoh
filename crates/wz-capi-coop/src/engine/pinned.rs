@@ -232,7 +232,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// callback makes on its own subscriber's key reaches it at once, at any depth. The number of
     /// subscribers reached.
     #[cfg(feature = "local-subscriber")]
-    fn publish_to_subscribers(
+    pub(super) fn publish_to_subscribers(
         &self,
         keyexpr: &str,
         payload: &[u8],

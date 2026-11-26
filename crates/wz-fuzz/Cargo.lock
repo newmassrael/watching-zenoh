@@ -1221,7 +1221,6 @@ dependencies = [
  "wz-capi-coop",
  "wz-capi-core",
  "wz-capi-port",
- "wz-cdylib-build",
  "wz-codecs",
  "wz-conformance-build",
  "wz-ext-pubsub",

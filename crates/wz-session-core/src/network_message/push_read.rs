@@ -190,6 +190,27 @@ impl<'f> EntrySink<'f> for PushExts<'f> {
 
 impl<'f> PushExts<'f> {
     /// The next entry of the body's chain, whose attachment is of the identity `attachment`.
+    /// Read only by this sink's walk, so unread in the builds that read no Push lent, as
+    /// [`PushExts`] itself is (the same condition).
+    #[cfg_attr(
+        not(all(
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            ),
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            ),
+            feature = "storage-profile",
+            any(feature = "pubsub-put", feature = "pubsub-delete")
+        )),
+        allow(dead_code)
+    )]
     #[inline(always)]
     fn body_entry(&mut self, entry: &ExtEntryView<'f>, attachment: u8) {
         let eid = crate::ext_header::ext_eid(entry.header);
@@ -210,7 +231,10 @@ impl<'f> PushExts<'f> {
 
 /// The admission rule over a chain read one entry at a time: what
 /// [`judge_ext_entries`](crate::ext_admit::judge_ext_entries) answers for the whole chain, its
-/// first offender, without a second walk of the chain to find it.
+/// first offender, without a second walk of the chain to find it. Each entry goes through the
+/// rule's inline screen and, when the screen cannot pass it, the rule's one body
+/// (`crate::ext_admit::judge_one`), so the reader links no copy of the rule of its own. The
+/// carriers it judges are always named, so a chain read through is admissible.
 struct Judge {
     carrier: ExtCarrier,
     verdict: ExtAdmission,
@@ -227,17 +251,19 @@ impl Judge {
     /// The next entry: its header, and the body of an extension the carrier declares.
     fn entry(&mut self, entry: &ExtEntryView<'_>) {
         if self.verdict == ExtAdmission::Admissible {
-            self.verdict = crate::ext_admit::judge_ext_entries(self.carrier, [entry]);
+            self.verdict = crate::ext_admit::judge_one(self.carrier, entry)
+                .unwrap_or(ExtAdmission::Admissible);
         }
     }
 
     /// The shared-memory marker a Put holds as a place: a unit, judged by its header alone.
     fn marker(&mut self) {
         if self.verdict == ExtAdmission::Admissible {
-            self.verdict = crate::ext_admit::judge_ext_chain(
+            self.verdict = crate::ext_admit::judge_one_header(
                 self.carrier,
-                [MsgPutExtensionsHas0x12Key::named().header],
-            );
+                MsgPutExtensionsHas0x12Key::named().header,
+            )
+            .unwrap_or(ExtAdmission::Admissible);
         }
     }
 }
@@ -1210,5 +1236,27 @@ mod tests {
             Some(&CodecError::LengthOutOfRange)
         );
         assert_eq!(answers[5].as_ref().err(), Some(&CodecError::InvalidUtf8));
+    }
+
+    /// The reader reports the first offence of a chain, as the rule over the codec's view does, a
+    /// body its reader refuses included. Turned red by a judge that lets a later entry's verdict
+    /// replace an earlier refusal, or that hands the rule an entry's header without its body.
+    #[test]
+    fn the_first_offence_of_a_chain_and_a_refused_body_are_reported() {
+        let verdict = |bytes: &[u8]| reading(bytes).map(|(_, _, admission)| admission);
+        // A mandatory unit no Push declares, then the reserved encoding, on the Push's own chain.
+        let first = [0x9du8, 1, 0x9f, 0x61, 0x01, 0];
+        assert_eq!(
+            verdict(&first),
+            Ok(ExtAdmission::UnknownMandatory { eid: 0x1f })
+        );
+        // A timestamp whose zid is zero, which its reader refuses, and one whose zid is not.
+        let zero = [0x9du8, 1, 0x42, 3, 0x05, 0x01, 0x00, 0x01, 0];
+        assert_eq!(verdict(&zero), Ok(ExtAdmission::MalformedExt { eid: 0x42 }));
+        let good = [0x9du8, 1, 0x42, 3, 0x05, 0x01, 0x01, 0x01, 0];
+        assert_eq!(verdict(&good), Ok(ExtAdmission::Admissible));
+        for case in [&first[..], &zero[..], &good[..]] {
+            assert_eq!(reading(case), through_the_codec(case), "{case:?}");
+        }
     }
 }

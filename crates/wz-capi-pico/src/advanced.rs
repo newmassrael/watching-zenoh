@@ -3322,12 +3322,24 @@ mod tests {
     fn a_background_subscribers_lodged_names_go_back_with_the_close() {
         use crate::object_slot::{Kind, Slot};
         use crate::session::{
-            engine_held, listening_on_loopback, session_handle, z_close, z_session_drop,
+            engine_held, listening_on_loopback_with, session_handle, z_close, z_session_drop,
             z_session_loan, z_session_loan_mut, z_session_move,
         };
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let mut session = listening_on_loopback();
+        // The subscriber's two subscriptions and four keys are past what a session opens with
+        // unless its config states them.
+        let mut session = listening_on_loopback_with(|config| {
+            // SAFETY: `config` is the live config the open is about to consume.
+            let stated = unsafe {
+                crate::config::zp_config_insert(
+                    config,
+                    crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY,
+                    c"MAX_SUBSCRIPTIONS=2,MAX_DECLARED_KEYEXPRS=4".as_ptr(),
+                )
+            };
+            assert_eq!(stated, Z_OK);
+        });
         // SAFETY: the session is live and owned by this frame.
         let loaned = unsafe { z_session_loan(&session) };
         // SAFETY: as above.

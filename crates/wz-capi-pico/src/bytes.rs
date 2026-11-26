@@ -1047,7 +1047,9 @@ impl SliceState {
 impl StringState {
     /// A string in a block of its own: the bytes, then the NUL a C caller
     /// treating `z_string_data` as a C string relies on. An empty one points at a terminator of
-    /// the library's and holds no block.
+    /// the library's and holds no block. Never inlined: every door that makes a string (a copy, a
+    /// clone, a payload read as text) makes it through this one body.
+    #[inline(never)]
     fn boxed(bytes: &[u8]) -> Result<Box<StringState>, NoRoom> {
         if bytes.is_empty() {
             return try_box(StringState {

@@ -228,7 +228,7 @@ impl QueryableCall {
     }
 }
 
-// Only the round's tests hand it a call; a read that hands each query out itself begins its own.
+// Asked only by the round's tests (`round_tests`), so under their condition.
 #[cfg(all(test, feature = "std", wz_round))]
 impl QueryableCall {
     /// A call begun on `row`: what a test hands the round as the dispatch would.
@@ -255,27 +255,42 @@ pub(super) fn responder_for<'a>(
 /// Where a query's replies go as its queryable makes them: each one onto the link the query came in
 /// on, written into the link's transmit slot under the session's lock
 /// ([`ResponseSink::send_reply_parts`](wz_session_core::response_sink::ResponseSink)), or to the
-/// session's own get. Nothing is staged, as zenoh-pico stages nothing: `z_query_reply` sends its
-/// reply at the call (`vendor/zenoh-pico/src/net/primitives.c` @
+/// session's own get. Nothing is staged outside the link's own open frame, where zenoh-pico's
+/// `z_query_reply` sends its reply at the call (`vendor/zenoh-pico/src/net/primitives.c` @
 /// `if (_z_send_n_msg(zn, &z_msg, Z_RELIABILITY_RELIABLE, Z_CONGESTION_CONTROL_BLOCK, NULL) != _Z_RES_OK) {`),
 /// so a query is answered with no buffer of its replies and as many replies as its queryable makes;
 /// the payload bound the session states (`MAX_REPLY_PAYLOAD_BYTES`) still refuses a longer one.
-/// The query's Final follows when its hold is let go of ([`CoopEngine::answer`]).
+/// The query's Final follows when its hold is let go of ([`CoopEngine::answer`]). The first reply
+/// holds the link's replies in that frame, so the rest and the Final leave with it in one send at
+/// the end of the turn.
 pub(super) struct Onward<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     engine: &'a CoopEngine<L, C>,
     generation: u64,
+    /// Whether a reply of this turn raised the hold on the link's replies.
+    raised: bool,
 }
 
 impl<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Onward<'a, L, C> {
     /// The replies to a query that came in under `generation`.
     pub(super) fn to(engine: &'a CoopEngine<L, C>, generation: u64) -> Self {
-        Self { engine, generation }
+        Self {
+            engine,
+            generation,
+            raised: false,
+        }
+    }
+
+    /// Whether a reply of this turn raised the hold on the link's replies, which the turn's end
+    /// lets go of.
+    pub(super) fn raised(&self) -> bool {
+        self.raised
     }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> StagesReplies for Onward<'_, L, C> {
     fn stage_reply(&mut self, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
-        self.engine.send_reply(self.generation, parts)
+        self.engine
+            .send_reply(self.generation, parts, &mut self.raised)
     }
 }
 
@@ -558,7 +573,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let mut responder = QueryResponder::borrowing(id.rid, key, accept, qos, &mut onward);
             answer(&mut responder);
         }
-        self.answer(id.generation, id.rid, Release::Kept);
+        self.answer(id.generation, id.rid, Release::Kept, onward.raised());
     }
 }
 

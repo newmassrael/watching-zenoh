@@ -17,7 +17,7 @@ pub const CATALOG_VERSION: u32 = 2;
 
 /// The features of the pico ABI's crate that run its sessions on the cooperative engine, when
 /// the tokio engine is not in the build; every other build runs them on the tokio engine.
-pub const COOP_ENGINE_FEATURES: &[&str] = &["engine-coop", "os-posix", "os-windows", "os-zephyr"];
+pub const COOP_ENGINE_FEATURES: &[&str] = &["os-host", "os-zephyr"];
 /// The features that build a library for a platform other than a host, each with its word.
 pub const PLATFORM_FEATURES: &[(&str, &str)] = &[("os-zephyr", "zephyr")];
 
@@ -292,6 +292,7 @@ pub const LIMITS: &[(&str, &str, u64)] = &[
     ("MAX_ACCEPT_PENDING", "WZ_LIMIT_MAX_ACCEPT_PENDING", 100),
     ("RX_POOL_BUFFERS", "WZ_LIMIT_RX_POOL_BUFFERS", 4),
     ("TX_POOL_SLOTS", "WZ_LIMIT_TX_POOL_SLOTS", 4),
+    ("REASSEMBLY_CHAINS", "WZ_LIMIT_REASSEMBLY_CHAINS", 3),
     (
         "SESSION_MAX_PEER_KEYEXPR_ALIASES",
         "WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES",

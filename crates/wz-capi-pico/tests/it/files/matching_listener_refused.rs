@@ -14,10 +14,10 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread,config-document \
+//!     --features os-host,peer,multi-thread,config-document,object-pool \
 //!     --test it files::matching_listener_refused::
 //! ```
-#![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
+#![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 
 use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -134,6 +134,7 @@ unsafe fn declare(
 #[cfg(feature = "config-document")]
 #[test]
 fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::config_policy::wz_ext_config_document;
     use wz_capi_pico::matching::{
         z_matching_listener_move, z_publisher_declare_background_matching_listener,
@@ -212,6 +213,7 @@ fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
 /// returns.
 #[test]
 fn a_listener_on_a_closed_session_is_refused_and_its_slot_null() {
+    let _program = crate::programs::admit();
     let drops = Arc::new(AtomicUsize::new(0));
     // SAFETY: every handle is made here and let go of once; `drops` outlives every closure.
     unsafe {

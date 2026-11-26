@@ -21,10 +21,11 @@
 
 use super::*;
 
-use wz_session_core::query::QueryResponder;
+use wz_session_core::query::{QueryReply, QueryResponder};
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
-use wz_session_core::reply_stage::ReplyStage;
+use wz_session_core::reply_pass::ReplyPass;
+use wz_session_core::reply_stage::ReplyParts;
 use wz_session_core::sample::QosLevel;
 
 /// A query kept past its handler: it answers on the route the query came in
@@ -83,25 +84,14 @@ where
 }
 
 impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, Tp> {
-    /// Route replies a held query produced: onto the wire for a query that
-    /// came in on it, into this session's own pending GET for a query it asked
-    /// of itself. A local reply lands as the in-dispatch local leg's does, and
-    /// its fires are drained under this session's [`LocalDeliveryDrain`].
-    fn deliver_held_replies(&self, key: FinalKey, replies: ReplyStage) {
-        if key.local {
-            R::with_mutex_mut(&self.observer, |observer| {
-                for reply in replies {
-                    let inbound: crate::reply::InboundReply = reply.into();
-                    observer.face().replies.deliver_local_reply(&inbound);
-                }
-            });
-            self.drain_or_wake_local();
-        } else {
-            let route = Tp::reply_route(&self.transport);
-            for reply in replies {
-                route.send_reply(reply);
-            }
-        }
+    /// Hand a reply a held query this session asked of itself to its own pending GET, as the
+    /// in-dispatch local leg's lands. Its fires are drained under this session's
+    /// [`LocalDeliveryDrain`] once the answer that made it returns ([`HeldQuery::reply`]).
+    fn deliver_held_local_reply(&self, reply: QueryReply) {
+        let inbound: crate::reply::InboundReply = reply.into();
+        R::with_mutex_mut(&self.observer, |observer| {
+            observer.face().replies.deliver_local_reply(&inbound);
+        });
     }
 
     /// Hold the Final of a LOCAL query for as long as one of its deferred
@@ -236,10 +226,22 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> HeldQuery<R, T,
 
     /// Answer the query now: `answer` writes replies into a responder built as
     /// the in-dispatch one is (the query's keyexpr, acceptance policy and QoS),
-    /// and they go out on the query's own route.
+    /// and each goes out on the query's own route as `answer` makes it: onto
+    /// the transport for a query that came in over it, into this session's own
+    /// pending GET for a query it asked of itself. No count of rows bounds how
+    /// many, since nothing is held between two of them; the payload bound the
+    /// session states still refuses a longer one.
     pub fn reply(&self, answer: impl FnOnce(&mut dyn ReplyOut)) {
-        let mut replies = ReplyStage::held_to(self.session.reply_bounds);
+        let session = &self.session;
+        let route = (!self.key.local).then(|| Tp::reply_route(&session.transport));
         {
+            let mut replies = ReplyPass::new(session.reply_bounds, |parts: ReplyParts<'_>| {
+                let reply = QueryReply::from_parts(&parts);
+                match &route {
+                    Some(route) => route.send_reply(reply),
+                    None => session.deliver_held_local_reply(reply),
+                }
+            });
             let mut responder = QueryResponder::new(
                 self.key.rid,
                 self.keyexpr.clone(),
@@ -249,7 +251,9 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> HeldQuery<R, T,
             );
             answer(&mut responder);
         }
-        self.session.deliver_held_replies(self.key, replies);
+        if self.key.local {
+            session.drain_or_wake_local();
+        }
     }
 }
 

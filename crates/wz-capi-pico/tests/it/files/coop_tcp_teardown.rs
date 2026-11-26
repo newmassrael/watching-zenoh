@@ -15,15 +15,16 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread --test it files::coop_tcp_teardown::
+//!     --features os-host,peer,multi-thread,object-pool --test it files::coop_tcp_teardown::
 //! ```
-#![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
+#![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 
 use std::ffi::{c_void, CStr, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_closure_sample_move,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_background_subscriber,
@@ -67,6 +68,15 @@ unsafe fn open(key: u8, endpoint: &str) -> z_owned_session_t {
             z_config_loan_mut(&mut cfg),
             Z_CONFIG_MODE_KEY,
             c"peer".as_ptr()
+        ),
+        Z_OK
+    );
+    // The dialler holds two publishers on three keys, past what a session opens with.
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            WZ_EXT_CONFIG_LIMITS_KEY,
+            c"MAX_PUBLISHERS=2,MAX_DECLARED_KEYEXPRS=4".as_ptr()
         ),
         Z_OK
     );
@@ -268,6 +278,7 @@ const LISTENER_STEPS: [&str; 2] = ["z_close", "z_session_drop"];
 
 #[test]
 fn the_dialling_session_tears_down_in_time_while_its_peer_is_open() {
+    let _program = crate::programs::admit();
     // SAFETY: the handles are made here and each is torn down once, on the thread given it.
     let pair = unsafe { pair() };
     each_step_returns(
@@ -289,6 +300,7 @@ fn the_dialling_session_tears_down_in_time_while_its_peer_is_open() {
 
 #[test]
 fn the_dialling_session_tears_down_in_time_after_its_peer_is_gone() {
+    let _program = crate::programs::admit();
     // SAFETY: as above.
     let pair = unsafe { pair() };
     each_step_returns(

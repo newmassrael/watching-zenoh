@@ -273,6 +273,7 @@ unsafe fn declare_all(session: &z_owned_session_t) -> Declared {
 /// peer that declared it, and the end of the peer's initial declarations once per establishment.
 #[test]
 fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it() {
+    let _program = crate::programs::admit();
     let synced_built = cfg!(feature = "declarations-synced-event");
     let peer_built = cfg!(feature = "remote-declaration-watch");
     let port = free_port();
@@ -432,6 +433,7 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
 /// retraction of the same id: the order a watch declared before the link would have heard.
 #[test]
 fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() {
+    let _program = crate::programs::admit();
     let peer_built = cfg!(feature = "remote-declaration-watch");
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -522,6 +524,7 @@ fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() 
 /// once.
 #[test]
 fn a_refused_watch_and_a_closed_session_run_the_programs_drop_once() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: as the test above.

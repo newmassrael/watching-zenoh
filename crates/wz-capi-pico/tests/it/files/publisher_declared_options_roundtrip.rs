@@ -36,6 +36,7 @@ use std::ffi::{c_int, c_void, CStr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_closure_sample_move,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_publisher, z_declare_subscriber,
@@ -120,6 +121,15 @@ unsafe fn open_with(key: u8, endpoint: &CStr) -> Option<z_owned_session_t> {
     assert_eq!(z_config_default(&mut cfg), Z_OK);
     assert_eq!(
         zp_config_insert(z_config_loan_mut(&mut cfg), key, endpoint.as_ptr()),
+        Z_OK
+    );
+    // The dialer holds four publishers on four keys, past what a session opens with.
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            WZ_EXT_CONFIG_LIMITS_KEY,
+            c"MAX_PUBLISHERS=4,MAX_DECLARED_KEYEXPRS=4".as_ptr()
+        ),
         Z_OK
     );
     let mut session: z_owned_session_t = std::mem::zeroed();
@@ -222,6 +232,7 @@ unsafe fn warm_up(publisher: &z_owned_publisher_t, seen: &Arc<Mutex<Vec<Seen>>>)
 
 #[test]
 fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_with() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -456,6 +467,7 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
 /// and nothing saw it while the declare ignored the field.
 #[test]
 fn the_default_publisher_options_are_the_values_pico_writes() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut options: z_publisher_options_t = std::mem::zeroed();
         options.priority = -1;

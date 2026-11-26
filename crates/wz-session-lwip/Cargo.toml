@@ -46,6 +46,27 @@ description = "Phase W MCU session shell — run_session sync drive loop + Boxed
 name = "wz_session_lwip"
 path = "src/lib.rs"
 
+# The configurations this crate has, which Layers C1bf and C1bz build in place of `--all-features`
+# (`scripts/lib/doc_feature_sets.py`). `session-slot`, `static-link-storage`, `tx-lend-only`,
+# `rx-in-place` and `buffer-pool-session-rx-slim` are selectors an MCU image turns on, and each
+# replaces a form of the heap profile with a fixed one (the heap link constructors, the send built
+# on the heap, the copying receive, the full-size receive pool), so a build of every feature
+# compiles none of those forms or the tests written for them. Each profile is a set of its own,
+# with every other feature.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap profile: every feature but the selectors, every target.
+    { name = "heap", except = [
+        "session-slot",
+        "static-link-storage",
+        "tx-lend-only",
+        "rx-in-place",
+        "buffer-pool-session-rx-slim",
+    ] },
+    # The slot profile, with every other feature beside it: the build `--all-features` makes.
+    { name = "slot", except = [] },
+]
+
 [features]
 default = ["alloc"]
 # S9e — the heap. It forwards every dependency feature that links the `alloc`

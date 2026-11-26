@@ -14,11 +14,11 @@
 //! cargo build --release -p wz-capi-pico --example hold_a_listener
 //! WZ_PICO_LISTENER_BIN=$PWD/target/release/examples/hold_a_listener \
 //!     cargo test --release -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,link-udp,query,queryable,liveliness-get \
-//!     --test client_only_dials_a_listener
+//!     --features os-host,link-udp,query,queryable,liveliness-get,object-pool \
+//!     --test it files::client_only_dials_a_listener::
 //! ```
 //!
-//! and again with `engine-tokio` in place of `engine-coop`, and each without `queryable`. Layer
+//! and again with `engine-tokio` in place of `os-host`, and each without `queryable`. Layer
 //! C1co runs the four (`scripts/run-ci.sh`).
 //!
 //! A missing example is a failure and not a skip: a test that passes by not running would say a
@@ -159,6 +159,7 @@ unsafe fn put(session: &z_owned_session_t, key: &CStr, payload: &CStr) {
 
 #[test]
 fn a_client_only_build_publishes_to_a_listener_and_hears_from_it() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listener = Listener::start(port);
     let seen = Arc::new(Mutex::new(BTreeSet::new()));
@@ -324,6 +325,7 @@ mod answering {
 
     #[test]
     fn a_client_only_build_answers_a_listeners_query_and_ends_it_when_let_go() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let mut listener = Listener::start(port);
         // SAFETY: a fresh config, session and queryable, all released before the function returns.
@@ -556,6 +558,7 @@ mod asking {
     /// matching listener goes with its querier.
     #[test]
     fn a_client_only_build_asks_through_a_querier_its_matching_says_is_answered() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let _listener = Listener::start(port);
         // SAFETY: a fresh config and session, released before the function returns.
@@ -628,6 +631,7 @@ mod asking {
 
     #[test]
     fn a_client_only_build_asks_a_listeners_queryable_and_the_final_ends_the_get() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let _listener = Listener::start(port);
         // SAFETY: a fresh config and session, released before the function returns.
@@ -694,6 +698,7 @@ mod local_query {
 
     #[test]
     fn a_client_only_build_answers_its_own_get_with_its_own_queryable() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let _listener = Listener::start(port);
         // SAFETY: a fresh config, session, querier and queryable, all released before the
@@ -782,6 +787,7 @@ mod admin {
 
     #[test]
     fn a_client_only_build_serves_its_admin_space_to_a_listener() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let mut listener = Listener::start(port);
         // SAFETY: a fresh config and session, released before the function returns.
@@ -908,6 +914,7 @@ mod connected {
 
     #[test]
     fn a_client_only_build_lists_its_listener_as_a_transport_and_hears_it_leave() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let mut listener = Listener::start(port);
         let seen: &'static Mutex<Seen> = Box::leak(Box::default());
@@ -1091,6 +1098,7 @@ mod living {
 
     #[test]
     fn a_client_only_build_holds_a_token_and_hears_the_listeners() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let mut listener = Listener::start(port);
         // SAFETY: a fresh config and session, released before the function returns.
@@ -1256,6 +1264,7 @@ mod snapshot {
 
     #[test]
     fn a_client_only_build_asks_the_listeners_tokens_alive() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let mut listener = Listener::start(port);
         // SAFETY: a fresh config and session, released before the function returns.
@@ -1371,6 +1380,7 @@ mod unstable {
 
     #[test]
     fn a_client_only_build_names_its_entities_and_honours_a_cancellation_token() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let _listener = Listener::start(port);
         // SAFETY: a fresh config and session, released before the function returns.
@@ -1465,6 +1475,7 @@ mod local {
 
     #[test]
     fn a_client_only_build_delivers_a_put_to_its_own_subscriber() {
+        let _program = crate::programs::admit();
         use std::sync::atomic::{AtomicUsize, Ordering};
         let port = free_port();
         let _listener = Listener::start(port);
@@ -1643,6 +1654,7 @@ mod advanced {
 
     #[test]
     fn an_advanced_subscriber_is_handed_a_publishers_cache_and_then_its_live_puts_in_order() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let _listener = Listener::start(port);
         let payloads = Arc::new(Payloads(Mutex::new(Vec::new())));

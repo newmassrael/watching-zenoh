@@ -11,9 +11,9 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features engine-coop,peer,multi-thread --test it files::open_in_turn::
+//!     --features os-host,peer,multi-thread,object-pool --test it files::open_in_turn::
 //! ```
-#![cfg(all(feature = "engine-coop", feature = "peer", feature = "multi-thread"))]
+#![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 
 use std::ffi::CString;
 
@@ -62,6 +62,7 @@ unsafe fn close(session: &mut z_owned_session_t) {
 /// what it listens on and dials. The CONTROL is the same pair without the config.
 #[test]
 fn an_interface_on_a_tcp_endpoint_opens_as_picos_does() {
+    let _program = crate::programs::admit();
     // SAFETY: each session is opened here and closed once.
     unsafe {
         for config in ["", "#iface=lo"] {
@@ -82,6 +83,7 @@ fn an_interface_on_a_tcp_endpoint_opens_as_picos_does() {
 /// records opens as the first did.
 #[test]
 fn sessions_opened_and_closed_in_turn_each_open() {
+    let _program = crate::programs::admit();
     for round in 0..ROUNDS {
         let endpoint = format!("tcp/127.0.0.1:{}", free_port());
         // SAFETY: each session is opened here and closed once.

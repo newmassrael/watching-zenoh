@@ -126,7 +126,7 @@ in the size of types a program allocates. The order a program with its own sched
 run API in is written in `wz_ext.h`, in the section "the periodic run API", and
 `examples\periodic.c` runs it.
 
-A build on the cooperative engine (`engine-coop`) hands a put to the session's own subscribers
+A build on the cooperative engine (`os-host`) hands a put to the session's own subscribers
 inside the put, as zenoh-pico does. A subscriber's callback is called with no lock of the library
 held, so it may run on two threads at once, and a put made inside a subscriber's callback that
 reaches that same subscriber calls the callback again from inside itself, before the put returns,

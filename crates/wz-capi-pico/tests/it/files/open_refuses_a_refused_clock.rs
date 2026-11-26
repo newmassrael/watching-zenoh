@@ -80,6 +80,7 @@ fn open_under(stated: &str) -> String {
 
 #[test]
 fn a_session_whose_clock_bound_is_refused_does_not_open() {
+    let _program = crate::programs::admit();
     if std::env::var_os(CHILD).is_some() {
         let (code, made) = open_alone();
         println!("CLOCK-BOUND-OPEN {code} {made}");

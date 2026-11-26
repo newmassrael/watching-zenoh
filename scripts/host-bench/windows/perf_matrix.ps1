@@ -1030,11 +1030,12 @@ function Invoke-Build {
     Copy-Item -Recurse -LiteralPath (Join-Path $picoTree 'include') -Destination $includeP
     Copy-Item -Recurse -Force -Path (Join-Path $build 'include\*') -Destination $includeP
 
-    # The probe against each arm with the same words. /MD: both libraries link the C runtime as a DLL.
+    # The probe against each arm with the same words. /MD: both libraries link the C runtime as a DLL. Arm W's
+    # probe states the counts its roles hold (PERF_WZ_ARM, perf_probe.c), by the wz_ext.h its package ships.
     $cl = 'cl /nologo /std:c11 /experimental:c11atomics /O2 /MD /DZENOH_WINDOWS'
     $arms = @(
-        @{ Arm = 'P'; Include = $includeP; Libraries = @($implib[0].FullName) },
-        @{ Arm = 'W'; Include = (Join-Path $top 'include');
+        @{ Arm = 'P'; Defines = ''; Include = $includeP; Libraries = @($implib[0].FullName) },
+        @{ Arm = 'W'; Defines = ' /DPERF_WZ_ARM'; Include = (Join-Path $top 'include');
            Libraries = @(@($manifest.libraries) | ForEach-Object { Join-Path $top "release\lib\$_.lib" }) }
     )
     foreach ($arm in $arms) {
@@ -1042,7 +1043,7 @@ function Invoke-Build {
         Reset-Directory $objects
         $libraries = ($arm.Libraries | ForEach-Object { $Q + $_ + $Q }) -join ' '
         $exe = Join-Path $script:BinDir "perf_probe_$($arm.Arm).exe"
-        $line = $cl + ' /I' + $Q + $arm.Include + $Q + ' ' + $Q + $probeSource + $Q + ' ' + $libraries +
+        $line = $cl + $arm.Defines + ' /I' + $Q + $arm.Include + $Q + ' ' + $Q + $probeSource + $Q + ' ' + $libraries +
                 ' ws2_32.lib psapi.lib /Fo:' + $Q + (Join-Path $objects 'perf_probe.obj') + $Q + ' /Fe:' + $Q + $exe + $Q
         $log = Join-Path $script:WorkDir "build-probe-$($arm.Arm).log"
         if ((Invoke-InVs "build-probe-$($arm.Arm)" @($line) $log) -ne 0) { Fail-WithLog "perf_probe against arm $($arm.Arm) did not build" $log }
