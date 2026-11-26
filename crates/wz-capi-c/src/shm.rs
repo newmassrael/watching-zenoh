@@ -7593,11 +7593,10 @@ pub unsafe extern "C" fn z_shm_client_storage_new(
             // list wins over the default set, and a later entry over an earlier one. A
             // program that lists the POSIX client and asks for the default set as well
             // (`z_api_shm_test`) is not in error.
+            let full = by_protocol.len() >= wz_session_core::extshm::SHM_PROTOCOL_SLOTS;
             match by_protocol.iter_mut().find(|(id, _)| *id == protocol) {
                 Some(slot) => slot.1 = client.clone(),
-                None if by_protocol.len() >= wz_session_core::extshm::SHM_PROTOCOL_SLOTS => {
-                    return Z_EINVAL;
-                }
+                None if full => return Z_EINVAL,
                 None => by_protocol.push((protocol, client.clone())),
             }
         }
