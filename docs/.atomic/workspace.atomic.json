@@ -8214,6 +8214,24 @@
       "carry_forward_bullets": [
         "the initial interest Final is built into client-only coop builds (about 400 B) for lack of a peer-role feature."
       ]
+    },
+    "Round 4674": {
+      "decision_summary": "A build that answers no Interest (wz-capi-coop without interest-answer) links\nno initial interest Final, since such a build only ever meets peers as a\nclient. Peer builds keep the Final unchanged. Measured about -370 B on the\nclient-only pico build.",
+      "changes_bullets": [
+        "capi-coop: the initial Final's state, owing and send are built with interest-answer only.",
+        "tests: a build without interest-answer sends no initial Final to a peer."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop replay tests (default, listen, app-transport+group); clippy default, listen, host-sys; wz-capi-pico lib 538.",
+        "size ledger check passes; pico-client-coop-nostd area sum 628 B below main3f90 (size-5's 257 included).",
+        "subprofile receive W 3,078.3 vs P 4,049.4 Ir per message."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
