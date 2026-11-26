@@ -214,20 +214,23 @@ fn s4() -> StatsRegistry {
 fn s5() -> StatsRegistry {
     let mut registry = StatsRegistry::new("a1b2", WhatAmI::Router, "v1");
     let transport = registry.open_unicast_transport("c3d4", WhatAmI::Peer, None);
-    registry
-        .transport_mut(transport)
-        .expect("just opened")
-        .observe_network_message_payload(
-            StatsDirection::Rx,
-            NetworkMessagePayloadLabels {
-                space: StatSpace::User,
-                priority: Priority::Data,
-                message: MessageLabel::Put,
-                shm: false,
-            },
-            64,
-            ["a/**", "a/b"],
-        );
+    let metrics = registry.transport_mut(transport).expect("just opened");
+    // The keys a payload counts under are the configured ones, as upstream's are.
+    metrics.set_key_filters(
+        StatsKeyFilters::new(["a/**", "a/b"].map(String::from).to_vec())
+            .expect("two keys are within the list's capacity"),
+    );
+    metrics.observe_network_message_payload(
+        StatsDirection::Rx,
+        NetworkMessagePayloadLabels {
+            space: StatSpace::User,
+            priority: Priority::Data,
+            message: MessageLabel::Put,
+            shm: false,
+        },
+        64,
+        ["a/**", "a/b"],
+    );
     registry
 }
 
@@ -733,5 +736,242 @@ fn a_new_filter_list_drops_the_per_key_series_of_the_old() {
     assert_eq!(
         metrics, expected,
         "the payload series stays, its per-key series under the old key goes"
+    );
+}
+
+/// A payload label set's index runs in the order the labels compare, and names every label set
+/// once: a table walked by index writes its series in the order a map keyed by the labels did.
+/// Turned red by an axis nested out of field order in `NetworkMessagePayloadLabels::index`.
+#[test]
+fn a_payload_label_index_runs_in_label_order() {
+    assert!(
+        MessageLabel::ALL
+            .iter()
+            .enumerate()
+            .all(|(at, message)| *message as usize == at),
+        "a message kind's discriminant is its place in the list"
+    );
+    let all: Vec<NetworkMessagePayloadLabels> = (0..NetworkMessagePayloadLabels::COUNT)
+        .map(|index| {
+            NetworkMessagePayloadLabels::from_index(index)
+                .expect("an index below the count names a label set")
+        })
+        .collect();
+    assert!(
+        all.windows(2).all(|pair| pair[0] < pair[1]),
+        "the label sets by index ascend in label order"
+    );
+    for (index, labels) in all.iter().enumerate() {
+        assert_eq!(labels.index(), index, "{labels:?}");
+    }
+    assert_eq!(
+        NetworkMessagePayloadLabels::from_index(NetworkMessagePayloadLabels::COUNT),
+        None,
+        "past the count is no label set"
+    );
+}
+
+/// The payload family kept at its label index and the per-key rows write the series a map keyed
+/// by the labels wrote, in the same order and with the same values: payloads met out of label
+/// order, over every axis, under two keys, under none, and under one key twice. A label set no
+/// key counted held an empty per-key series there, which wrote no sample, and has none here.
+/// Turned red by an index out of label order or a per-key row counted under another key.
+#[test]
+fn the_label_indexed_payload_families_export_what_label_keyed_maps_did() {
+    assert!(
+        caps::STATS_KEY_SERIES >= 3,
+        "the events give a key three label sets; fewer rows is the overflow test's case"
+    );
+    let filters = StatsKeyFilters::new(["b/**", "a/**"].map(String::from).to_vec())
+        .expect("two keys are within the list's capacity");
+    let events: [(StatSpace, Priority, MessageLabel, bool, u64, &[&str]); 7] = [
+        (
+            StatSpace::User,
+            Priority::Background,
+            MessageLabel::ReplyErr,
+            true,
+            7,
+            &["b/**"],
+        ),
+        (
+            StatSpace::Admin,
+            Priority::Control,
+            MessageLabel::Put,
+            false,
+            0,
+            &["a/**", "b/**"],
+        ),
+        (
+            StatSpace::User,
+            Priority::Data,
+            MessageLabel::Put,
+            false,
+            2000,
+            &["a/**"],
+        ),
+        (
+            StatSpace::User,
+            Priority::Data,
+            MessageLabel::Put,
+            false,
+            40,
+            &[],
+        ),
+        (
+            StatSpace::Admin,
+            Priority::RealTime,
+            MessageLabel::Oam,
+            true,
+            1 << 20,
+            &["b/**"],
+        ),
+        (
+            StatSpace::User,
+            Priority::Data,
+            MessageLabel::Query,
+            false,
+            64,
+            &[],
+        ),
+        (
+            StatSpace::User,
+            Priority::Data,
+            MessageLabel::Put,
+            false,
+            64,
+            &["a/**", "a/**"],
+        ),
+    ];
+    for direction in StatsDirection::ALL {
+        let mut metrics = TransportMetrics::default();
+        metrics.set_key_filters(filters.clone());
+        let mut payload: BTreeMap<NetworkMessagePayloadLabels, PayloadHistogram> = BTreeMap::new();
+        let mut per_key: BTreeMap<NetworkMessagePayloadLabels, PerKeyHistogram> = BTreeMap::new();
+        for (space, priority, message, shm, size, keys) in events {
+            let labels = NetworkMessagePayloadLabels {
+                space,
+                priority,
+                message,
+                shm,
+            };
+            metrics.observe_network_message_payload(
+                direction,
+                labels.clone(),
+                size,
+                keys.iter().copied(),
+            );
+            payload.entry(labels.clone()).or_default().observe(size);
+            per_key
+                .entry(labels)
+                .or_default()
+                .observe(keys.iter().copied(), size);
+        }
+        let ours: Vec<_> = payload_cells(&metrics, direction)
+            .into_iter()
+            .map(|(_, labels, histogram)| (labels, histogram))
+            .collect();
+        let theirs: Vec<_> = payload.into_iter().collect();
+        assert_eq!(ours, theirs, "the payload family, {direction:?}");
+        let ours: Vec<_> = payload_per_key_cells(&metrics, direction)
+            .into_iter()
+            .map(|(_, labels, per_key)| (labels, per_key))
+            .collect();
+        let theirs: Vec<_> = per_key
+            .into_iter()
+            .filter(|(_, per_key)| *per_key != PerKeyHistogram::default())
+            .collect();
+        assert_eq!(ours, theirs, "the per-key family, {direction:?}");
+        assert_eq!(
+            metrics.per_key_refused(direction),
+            0,
+            "CONTROL: every key is in the list and within its rows"
+        );
+    }
+}
+
+/// A key holds its build's `STATS_KEY_SERIES` label sets: a payload of one more is counted
+/// under no key and counted as refused, while the payload family counts it, a label set the key
+/// holds keeps counting and another key's rows stay its own. A key the list does not hold is
+/// refused the same way, and a new list keeps the count refused. Turned red by a row lent past
+/// its key's block (`PerKeyRows::observe`) or a refusal left uncounted.
+#[test]
+fn a_per_key_series_past_its_rows_is_counted_and_dropped() {
+    let rows = caps::STATS_KEY_SERIES;
+    let tx = StatsDirection::Tx;
+    let mut metrics = TransportMetrics::default();
+    metrics.set_key_filters(
+        StatsKeyFilters::new(["a/**", "b/**"].map(String::from).to_vec())
+            .expect("two keys are within the list's capacity"),
+    );
+    // One label set more than a key holds, where the family has that many.
+    let label_sets: Vec<NetworkMessagePayloadLabels> = (0..=rows)
+        .filter_map(NetworkMessagePayloadLabels::from_index)
+        .collect();
+    for labels in &label_sets {
+        metrics.observe_network_message_payload(tx, labels.clone(), 1, ["a/**"]);
+    }
+    let mut refused = u64::from(label_sets.len() > rows);
+    assert_eq!(
+        metrics.per_key_refused(tx),
+        refused,
+        "the one past the rows"
+    );
+    let first = label_sets
+        .first()
+        .expect("the family has a label set")
+        .clone();
+    metrics.observe_network_message_payload(tx, first.clone(), 1, ["b/**"]);
+    refused += u64::from(rows == 0);
+    assert_eq!(
+        metrics.per_key_refused(tx),
+        refused,
+        "another key's rows are its own"
+    );
+    metrics.observe_network_message_payload(tx, first.clone(), 1, ["a/**"]);
+    refused += u64::from(rows == 0);
+    assert_eq!(
+        metrics.per_key_refused(tx),
+        refused,
+        "a held label set keeps counting"
+    );
+    metrics.observe_network_message_payload(tx, first, 1, ["z/**"]);
+    refused += 1;
+    assert_eq!(
+        metrics.per_key_refused(tx),
+        refused,
+        "a key the list does not hold"
+    );
+
+    let under = |key: &str| {
+        payload_per_key_cells(&metrics, tx)
+            .iter()
+            .filter(|(_, _, per_key)| per_key.keys.contains_key(key))
+            .count()
+    };
+    assert_eq!(under("a/**"), rows.min(label_sets.len()));
+    assert_eq!(under("b/**"), rows.min(1));
+    assert_eq!(under("z/**"), 0);
+    assert_eq!(
+        payload_cells(&metrics, tx).len(),
+        label_sets.len(),
+        "CONTROL: the payload family counts every label set"
+    );
+    assert_eq!(
+        metrics.per_key_refused(StatsDirection::Rx),
+        0,
+        "the other direction refused nothing"
+    );
+
+    metrics.set_key_filters(
+        StatsKeyFilters::new(alloc::vec!["c/**".to_string()]).expect("one key is within capacity"),
+    );
+    assert_eq!(
+        metrics.per_key_refused(tx),
+        refused,
+        "a new list keeps the count"
+    );
+    assert!(
+        payload_per_key_cells(&metrics, tx).is_empty(),
+        "a new list holds no series of the old"
     );
 }

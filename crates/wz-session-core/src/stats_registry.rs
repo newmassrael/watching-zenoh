@@ -66,11 +66,13 @@
 //! - The ORDER of samples inside a block is deterministic here (label order,
 //!   then registration order), where upstream's is hash order.
 
+use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
+use crate::caps;
 use crate::qos::Priority;
 use crate::stats::{StatSpace, StatsKeyMatch};
 use crate::WhatAmI;
@@ -395,6 +397,56 @@ pub struct NetworkMessagePayloadLabels {
     pub shm: bool,
 }
 
+/// Every priority band, in the order [`Priority`] compares them.
+const PRIORITIES: [Priority; 8] = [
+    Priority::Control,
+    Priority::RealTime,
+    Priority::InteractiveHigh,
+    Priority::InteractiveLow,
+    Priority::DataHigh,
+    Priority::Data,
+    Priority::DataLow,
+    Priority::Background,
+];
+
+impl NetworkMessagePayloadLabels {
+    /// How many label sets the payload families have: the product of their four closed axes.
+    pub const COUNT: usize = StatSpace::COUNT * PRIORITIES.len() * MessageLabel::ALL.len() * 2;
+
+    /// This label set's place among the [`Self::COUNT`]. The axes nest in field order, each in its
+    /// own order, so the places run in the order the derived `Ord` gives: a table walked by place
+    /// is written in the order a map keyed by the labels was.
+    pub fn index(&self) -> usize {
+        // Below COUNT at every step, so no operation wraps.
+        let space = self.space.index();
+        let priority = space
+            .wrapping_mul(PRIORITIES.len())
+            .wrapping_add(self.priority as usize);
+        let message = priority
+            .wrapping_mul(MessageLabel::ALL.len())
+            .wrapping_add(self.message as usize);
+        message.wrapping_mul(2).wrapping_add(usize::from(self.shm))
+    }
+
+    /// The label set at `index`, [`Self::index`]'s inverse; `None` past [`Self::COUNT`].
+    pub fn from_index(index: usize) -> Option<Self> {
+        let messages = MessageLabel::ALL.len();
+        let priorities = PRIORITIES.len();
+        let shm = index.checked_rem(2)? == 1;
+        let rest = index.checked_div(2)?;
+        let message = *MessageLabel::ALL.get(rest.checked_rem(messages)?)?;
+        let rest = rest.checked_div(messages)?;
+        let priority = *PRIORITIES.get(rest.checked_rem(priorities)?)?;
+        let space = *StatSpace::ALL.get(rest.checked_div(priorities)?)?;
+        Some(Self {
+            space,
+            priority,
+            message,
+            shm,
+        })
+    }
+}
+
 impl StatsLabelSet for NetworkMessagePayloadLabels {
     fn write(&self, w: &mut LabelWriter<'_>) {
         w.label("space", self.space.label());
@@ -678,6 +730,118 @@ struct LinkMetrics {
     directions: [LinkDirection; 2],
 }
 
+/// The payload family of one direction: a histogram for every label set, at the set's
+/// [`NetworkMessagePayloadLabels::index`].
+///
+/// The label sets are a closed product, so every series has its place from the moment the
+/// transport is made and observing a payload is an index, never an insert: the transport's
+/// first payload of a label set takes no memory, where a map keyed by the labels took a node.
+/// A series upstream has not created yet is one observed nothing, and it is written only once
+/// it has, which is when upstream creates it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PayloadTable(Box<[PayloadHistogram]>);
+
+impl Default for PayloadTable {
+    fn default() -> Self {
+        Self(
+            alloc::vec![PayloadHistogram::default(); NetworkMessagePayloadLabels::COUNT]
+                .into_boxed_slice(),
+        )
+    }
+}
+
+impl PayloadTable {
+    fn observe(&mut self, index: usize, size: u64) {
+        if let Some(histogram) = self.0.get_mut(index) {
+            histogram.observe(size);
+        }
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        for (mine, theirs) in self.0.iter_mut().zip(other.0.iter()) {
+            mine.merge_from(theirs);
+        }
+    }
+
+    /// The series observed at least once, in label order.
+    fn observed(&self) -> impl Iterator<Item = (NetworkMessagePayloadLabels, &PayloadHistogram)> {
+        self.0
+            .iter()
+            .enumerate()
+            .filter(|(_, histogram)| histogram.count() != 0)
+            .filter_map(|(index, histogram)| {
+                Some((NetworkMessagePayloadLabels::from_index(index)?, histogram))
+            })
+    }
+}
+
+/// One per-key payload series: the label set it counts, by its index, once a payload claimed it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PerKeyRow {
+    labels: Option<usize>,
+    histogram: PayloadHistogram,
+}
+
+/// The per-key payload family of one direction: [`caps::STATS_KEY_SERIES`] rows for each
+/// `stats/filters` key, reserved when the filter list is set, the key at place `k` holding
+/// the rows from `k * STATS_KEY_SERIES`.
+///
+/// A label set takes a row of its key the first time a payload of it meets the key, and keeps
+/// it until the filter list changes. One past the key's rows, or one counted under a key the
+/// list does not hold, has no row: it is counted in [`Self::refused`] and under no key, and
+/// the rest of its payload's series are counted as ever.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PerKeyRows {
+    rows: Vec<PerKeyRow>,
+    refused: u64,
+}
+
+impl PerKeyRows {
+    /// The rows of `keys` keys, none claimed, carrying the count refused so far.
+    fn reserved(keys: usize, refused: u64) -> Self {
+        Self {
+            rows: alloc::vec![PerKeyRow::default(); keys.saturating_mul(caps::STATS_KEY_SERIES)],
+            refused,
+        }
+    }
+
+    /// Count a payload of `size` bytes of the label set at `labels` under the key at `key`.
+    fn observe(&mut self, key: usize, labels: usize, size: u64) {
+        let start = key.saturating_mul(caps::STATS_KEY_SERIES);
+        let end = start.saturating_add(caps::STATS_KEY_SERIES);
+        match self
+            .rows
+            .get_mut(start..end)
+            .and_then(|block| row_of(block, labels))
+        {
+            Some(row) => {
+                row.labels = Some(labels);
+                row.histogram.observe(size);
+            }
+            None => self.refuse(),
+        }
+    }
+
+    fn refuse(&mut self) {
+        self.refused = self.refused.wrapping_add(1);
+    }
+
+    /// Each key's rows, by the key's place in the list.
+    fn keys(&self) -> core::slice::Chunks<'_, PerKeyRow> {
+        self.rows.chunks(caps::STATS_KEY_SERIES.max(1))
+    }
+}
+
+/// The row of `block` that counts the label set at `labels`: the one that claimed it, or else
+/// the first none has claimed.
+fn row_of(block: &mut [PerKeyRow], labels: usize) -> Option<&mut PerKeyRow> {
+    let at = block
+        .iter()
+        .position(|row| row.labels == Some(labels))
+        .or_else(|| block.iter().position(|row| row.labels.is_none()))?;
+    block.get_mut(at)
+}
+
 /// One direction of the cells that belong to the transport rather than to
 /// one of its open links — upstream's `None` link bucket
 /// (`commons/zenoh-stats/src/family.rs` @ `links: HashMap<Option<LinkLabels>, HashMap<S, M>>,`).
@@ -688,9 +852,13 @@ struct TransportDirection {
     bytes: BTreeMap<BytesLabels, u64>,
     transport_message: BTreeMap<TransportMessageLabels, u64>,
     network_message: BTreeMap<NetworkMessageLabels, u64>,
-    network_message_payload: BTreeMap<NetworkMessagePayloadLabels, PayloadHistogram>,
+    network_message_payload: PayloadTable,
     network_message_dropped_payload: BTreeMap<NetworkMessageDroppedPayloadLabels, PayloadHistogram>,
-    network_message_payload_per_key: BTreeMap<NetworkMessagePayloadLabels, PerKeyHistogram>,
+    network_message_payload_per_key: PerKeyRows,
+    /// The per-key series of transports retired into this one, by key text: they were counted
+    /// under filter lists of their own, so only the key's text says which series they join.
+    /// Written only by [`TransportMetrics::retire_from`], never as a payload is counted.
+    retired_per_key: BTreeMap<NetworkMessagePayloadLabels, PerKeyHistogram>,
 }
 
 fn merge_into<L: Ord + Clone, M: StatsMetric>(into: &mut BTreeMap<L, M>, from: &BTreeMap<L, M>) {
@@ -704,18 +872,16 @@ impl TransportDirection {
         merge_into(&mut self.bytes, &other.bytes);
         merge_into(&mut self.transport_message, &other.transport_message);
         merge_into(&mut self.network_message, &other.network_message);
-        merge_into(
-            &mut self.network_message_payload,
-            &other.network_message_payload,
-        );
+        self.network_message_payload
+            .merge_from(&other.network_message_payload);
         merge_into(
             &mut self.network_message_dropped_payload,
             &other.network_message_dropped_payload,
         );
-        merge_into(
-            &mut self.network_message_payload_per_key,
-            &other.network_message_payload_per_key,
-        );
+        // The per-key series join by key text, which only the transport knows
+        // (`TransportMetrics::retire_from`); the count refused is the direction's.
+        let refused = &mut self.network_message_payload_per_key.refused;
+        *refused = refused.wrapping_add(other.network_message_payload_per_key.refused);
     }
 }
 
@@ -793,7 +959,11 @@ fn payload_cells(
     m: &TransportMetrics,
     d: StatsDirection,
 ) -> Cells<'_, NetworkMessagePayloadLabels, PayloadHistogram> {
-    own_cells(&d.of(&m.directions).network_message_payload)
+    d.of(&m.directions)
+        .network_message_payload
+        .observed()
+        .map(|(labels, histogram)| (None, labels, histogram.clone()))
+        .collect()
 }
 
 fn dropped_payload_cells(
@@ -803,18 +973,47 @@ fn dropped_payload_cells(
     own_cells(&d.of(&m.directions).network_message_dropped_payload)
 }
 
+/// The per-key series by label set, each holding its keys by their text: the rows counted under
+/// this transport's filter list and the series of the transports retired into it. A label set
+/// no key counted is not here, which writes what its empty series wrote: nothing.
 fn payload_per_key_cells(
     m: &TransportMetrics,
     d: StatsDirection,
 ) -> Cells<'_, NetworkMessagePayloadLabels, PerKeyHistogram> {
-    own_cells(&d.of(&m.directions).network_message_payload_per_key)
+    let own = d.of(&m.directions);
+    let mut series = own.retired_per_key.clone();
+    for (key, rows) in m
+        .key_filters
+        .keys()
+        .iter()
+        .zip(own.network_message_payload_per_key.keys())
+    {
+        for row in rows {
+            let Some(labels) = row.labels.and_then(NetworkMessagePayloadLabels::from_index) else {
+                continue;
+            };
+            series
+                .entry(labels)
+                .or_default()
+                .keys
+                .entry(key.clone())
+                .or_default()
+                .merge_from(&row.histogram);
+        }
+    }
+    series
+        .into_iter()
+        .map(|(labels, per_key)| (None, labels, per_key))
+        .collect()
 }
 
 /// One transport's counters in both directions: what a session records into.
 ///
 /// Recording on a link goes through the [`LinkSlot`] its open returned, and
 /// every recording call is allocation-free once its series exists — the hot
-/// path is an index and a `Copy`-keyed map lookup.
+/// path is an index and a `Copy`-keyed map lookup. The payload families take no
+/// memory to count at all: their tables are made with the transport, and the
+/// per-key rows when its filter list is set.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransportMetrics {
     links: Vec<LinkMetrics>,
@@ -828,17 +1027,29 @@ impl TransportMetrics {
     /// Count payloads under `filters` from here on. A list that differs from the one held drops
     /// the per-key series counted so far, as upstream drops the series of a key list it has
     /// replaced (`commons/zenoh-stats/src/keys.rs` @ `*generation += 1;`).
+    ///
+    /// Each key of the list is given its [`caps::STATS_KEY_SERIES`] rows here, before the
+    /// transport carries data, so counting a payload under a key never takes memory.
     pub fn set_key_filters(&mut self, filters: StatsKeyFilters) {
         if self.key_filters == filters {
             return;
         }
-        // The series stays, as the family's does upstream; what it held under the old keys goes.
         for direction in &mut self.directions {
-            for per_key in direction.network_message_payload_per_key.values_mut() {
-                *per_key = PerKeyHistogram::default();
-            }
+            let refused = direction.network_message_payload_per_key.refused;
+            direction.network_message_payload_per_key =
+                PerKeyRows::reserved(filters.keys().len(), refused);
         }
         self.key_filters = filters;
+    }
+
+    /// The payloads of `direction` that a key of this transport's filter list met and that were
+    /// counted under no key: a label set past the key's [`caps::STATS_KEY_SERIES`] rows, or a
+    /// key the list does not hold. Upstream would have made one more series for each.
+    pub fn per_key_refused(&self, direction: StatsDirection) -> u64 {
+        direction
+            .of(&self.directions)
+            .network_message_payload_per_key
+            .refused
     }
 
     /// The keys this transport counts payloads under.
@@ -956,11 +1167,12 @@ impl TransportMetrics {
     }
 
     /// Count one network payload of `size` bytes, and count it again under
-    /// every configured key in `keys`. Both series are created on the first
-    /// call even when `keys` is empty, as upstream creates the pair together
+    /// every configured key in `keys`, as upstream observes the pair together
     /// (`commons/zenoh-stats/src/transport.rs` @ `pub fn observe_network_message_payload(`).
     /// Upstream's labels (space, priority, message, shm) come as the one
-    /// [`NetworkMessagePayloadLabels`] both series are labelled by.
+    /// [`NetworkMessagePayloadLabels`] both series are labelled by. A key must
+    /// be one of this transport's [`StatsKeyFilters`]: one that is not has no
+    /// rows and is counted in [`Self::per_key_refused`].
     pub fn observe_network_message_payload<'k>(
         &mut self,
         direction: StatsDirection,
@@ -968,15 +1180,15 @@ impl TransportMetrics {
         size: u64,
         keys: impl IntoIterator<Item = &'k str>,
     ) {
+        let index = labels.index();
         let own = direction.of_mut(&mut self.directions);
-        own.network_message_payload
-            .entry(labels.clone())
-            .or_default()
-            .observe(size);
-        own.network_message_payload_per_key
-            .entry(labels)
-            .or_default()
-            .observe(keys, size);
+        own.network_message_payload.observe(index, size);
+        for key in keys {
+            match self.key_filters.keys().iter().position(|held| held == key) {
+                Some(at) => own.network_message_payload_per_key.observe(at, index, size),
+                None => own.network_message_payload_per_key.refuse(),
+            }
+        }
     }
 
     /// [`Self::observe_network_message_payload`] for a classified message: its payload, counted
@@ -995,16 +1207,16 @@ impl TransportMetrics {
             message,
             shm,
         };
+        let index = labels.index();
         let size = payload.pl_bytes as u64;
         let own = direction.of_mut(&mut self.directions);
-        own.network_message_payload
-            .entry(labels.clone())
-            .or_default()
-            .observe(size);
-        own.network_message_payload_per_key
-            .entry(labels)
-            .or_default()
-            .observe(self.key_filters.names(payload.keys), size);
+        own.network_message_payload.observe(index, size);
+        for key in 0..self.key_filters.keys().len() {
+            if payload.keys.contains(key) {
+                own.network_message_payload_per_key
+                    .observe(key, index, size);
+            }
+        }
     }
 
     /// Count one dropped network payload of `size` bytes. `link` names the link
@@ -1045,6 +1257,13 @@ impl TransportMetrics {
     fn retire_from(&mut self, other: &Self) {
         for (mine, theirs) in self.directions.iter_mut().zip(other.directions.iter()) {
             mine.merge_from(theirs);
+        }
+        for direction in StatsDirection::ALL {
+            let carried = payload_per_key_cells(other, direction);
+            let retired = &mut direction.of_mut(&mut self.directions).retired_per_key;
+            for (_, labels, per_key) in carried {
+                retired.entry(labels).or_default().merge_from(&per_key);
+            }
         }
     }
 
