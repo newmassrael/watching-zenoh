@@ -1707,10 +1707,10 @@ fn every_key_proven_on_the_wire_is_in_the_frame_a_zenohd_would_receive() {
     /// R2203 (open-debt item 220) — a FOURTH shape, and the first whose subject
     /// is a node with TWO links rather than a frame a lone node emits.
     ///
-    /// `timestamping/enabled` reaches `--timestamping`, and both forwarders spend
-    /// it at exactly one site: `forward_push`, the path an INBOUND Push takes to
-    /// the other faces (`router_forward.rs`, `linkstate_forward.rs`, each citing
-    /// zenoh's own single stamp point at `dispatcher/pubsub.rs:328`). There is no
+    /// `timestamping/enabled` reaches `--timestamping`, and the forwarder spends
+    /// it at exactly one site: `route_push`, the path an INBOUND Push takes to
+    /// the other faces (`router_forward.rs`, the twin of zenoh's own single stamp
+    /// point at `dispatcher/pubsub.rs:328`). There is no
     /// publish-side auto-stamp to read instead — on the single-session path the
     /// key only chooses which CLOCK `FallbackStamp` borrows, and both clocks
     /// stamp (`timestamp_source.rs`), so no frame differs. Measured, not assumed:
@@ -3061,8 +3061,8 @@ fn beacon_reading_from_a_config(
 ///
 /// R2203 (open-debt item 220). `timestamping/enabled` is the last key in the
 /// item's `not-yet-read` queue that a fixture can reach, and its effect is on
-/// neither a handshake frame nor a beacon: both forwarders apply it at ONE site,
-/// `forward_push` (`router_forward.rs`, `linkstate_forward.rs`), which is the
+/// neither a handshake frame nor a beacon: the forwarder applies it at ONE site,
+/// `route_push` (`router_forward.rs`), which is the
 /// path an INBOUND Push takes on its way out the other faces. So the subject is
 /// a node with TWO links, and the reading is the `t` flag of the Put that came
 /// out — zenoh-protocol `put.rs:43`, whose `timestamp` field at `:50` the

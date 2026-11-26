@@ -19,11 +19,11 @@
 //! With it, a span is opened only where `tracing` has a subscriber that wants the level, as upstream
 //! opens `demux` (`tracing::enabled!(tracing::Level::DEBUG).then(..)`).
 
+use wz_routing_graph::Zid;
 use wz_session_core::extbound::Region;
 use wz_session_core::wire_id::RequestId;
 
 use crate::accept_loop::FaceId;
-use crate::linkstate_forward::Zid;
 
 /// A span that is open until this drops: nothing without the feature, or where `tracing` wants
 /// no span of that level.

@@ -8,7 +8,7 @@
 //! and liveliness tokens. A declaration is a face's id naming a key, and a queryable also carries
 //! the [`QueryableInfo`] it was declared with; the store holds that value beside the id, as `V`
 //! ([`Held`]), so the planes differ only in `V`. The subscriber store is the client leg of a data
-//! route ([`client_route`](crate::linkstate_forward)), the queryable store the client leg of a query
+//! route (`linkstate_routes::client_route`), the queryable store the client leg of a query
 //! route, and both are cached against it. Three things come with it that a plain
 //! `Versioned<HashMap<..>>` did not give:
 //!

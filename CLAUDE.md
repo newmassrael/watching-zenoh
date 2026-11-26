@@ -102,6 +102,18 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   hold work waiting for a hosted run; read its result when it arrives. Never
   skip a failing gate and never bypass the hooks.
 
+## A change keeps its name
+
+Every commit carries a `Change-Id:` trailer (`COMMIT_FORMAT.md` §3a; the
+commit-msg hook writes it). A branch's work is judged merged by that name when
+its patch differs on main (bx RFC 0087), so:
+
+- take another branch's work with `git cherry-pick`, never by retyping it;
+- a commit that writes another commit's work again carries
+  `Supersedes: <that commit's Change-Id>`;
+- work that will not land is abandoned on the record
+  (`bx-wt abandon <name> --reason "..." --apply`), not left as a branch.
+
 ## License + SPDX header policy
 
 Source-available, non-commercial or commercial:

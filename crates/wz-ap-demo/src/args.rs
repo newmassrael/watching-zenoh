@@ -3347,7 +3347,7 @@ impl Expansion<'_> {
     fn router_link_weights(
         &mut self,
         key: &'static str,
-        rows: &[wz::runtime_tokio::linkstate_forward::TransportWeight],
+        rows: &[wz::runtime_tokio::routing_policy::TransportWeight],
         blocked: Option<KeyEffect>,
     ) -> KeyEffect {
         if let Some(blocked) = blocked {
@@ -10294,7 +10294,7 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
 /// measured against the pinned binary (R2633): an uppercase or leading-zero zid
 /// ("Invalid id"), a zero or over-wide weight ("expected a nonzero u16"). The
 /// DUPLICATE destination is deliberately NOT refused here — it is refused by
-/// [`link_weights_from_config`](wz::runtime_tokio::linkstate_forward::link_weights_from_config),
+/// [`link_weights_from_config`](wz::runtime_tokio::routing_policy::link_weights_from_config),
 /// where upstream refuses it, so the flag and the config file are judged by one
 /// rule instead of two.
 ///
@@ -10310,7 +10310,7 @@ pub(crate) fn parse_connect_retry(args: &[String]) -> Result<Option<RetryPolicy>
 #[cfg(feature = "router-hat-router")]
 pub(crate) fn parse_router_link_weights(
     args: &[String],
-) -> Result<Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>, String> {
+) -> Result<Vec<wz::runtime_tokio::routing_policy::TransportWeight>, String> {
     use core::num::NonZeroU16;
     let mut out = Vec::new();
     for raw in parse_pairs(args, "--router-link-weight") {
@@ -10330,8 +10330,8 @@ pub(crate) fn parse_router_link_weights(
             .ok_or_else(|| {
                 format!("--router-link-weight {raw:?}: {weight_text:?} is not 1..=65535")
             })?;
-        out.push(wz::runtime_tokio::linkstate_forward::TransportWeight {
-            dst_zid: wz::runtime_tokio::linkstate_forward::Zid::from_slice(&bytes),
+        out.push(wz::runtime_tokio::routing_policy::TransportWeight {
+            dst_zid: wz::runtime_tokio::routing_policy::Zid::from_slice(&bytes),
             weight,
         });
     }
@@ -10651,7 +10651,7 @@ pub(crate) fn parse_scout_socket(args: &[String]) -> Result<ScoutSocketArgs, Str
 pub(crate) fn parse_scout_autoconnect(
     args: &[String],
 ) -> Result<Option<crate::runner::ScoutAutoconnectArgs>, String> {
-    use wz::runtime_tokio::linkstate_forward::{AutoConnectStrategies, WhatAmI, WhatAmIMatcher};
+    use wz::runtime_tokio::routing_policy::{AutoConnectStrategies, WhatAmI, WhatAmIMatcher};
 
     let Some(roles) = parse_pair(args, "--scout-autoconnect") else {
         if parse_pair(args, "--scout-autoconnect-strategy").is_some() {
@@ -12398,7 +12398,7 @@ mod router_link_weight_flag_tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(
             rows[0].dst_zid,
-            wz::runtime_tokio::linkstate_forward::Zid::from_slice(&[0x01])
+            wz::runtime_tokio::routing_policy::Zid::from_slice(&[0x01])
         );
         assert_eq!(rows[0].weight.get(), 10);
         assert_eq!(rows[1].weight.get(), 65535);
@@ -12431,7 +12431,7 @@ mod router_link_weight_flag_tests {
         let rows = parse_router_link_weights(&argv(&["1=10", "1=20"]))
             .expect("a duplicate parses at the flag");
         assert_eq!(rows.len(), 2);
-        assert!(wz::runtime_tokio::linkstate_forward::link_weights_from_config(&rows).is_err());
+        assert!(wz::runtime_tokio::routing_policy::link_weights_from_config(&rows).is_err());
     }
 }
 

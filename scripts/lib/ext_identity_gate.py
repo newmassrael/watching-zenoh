@@ -236,7 +236,7 @@ def blank_comments(text: str) -> str:
     it as the attribute blanked every line up to the next closing brace, which
     hid a real 4-bit read in the integration harness; and a `}` inside a string
     or a char literal closed a test module early, which exposed a test helper in
-    `linkstate_forward.rs` as product code.
+    a routing module as product code.
 
     One alternation, scanned left to right, so whichever starts first wins: a
     `//` inside a string is part of the string, and a quote inside a comment is

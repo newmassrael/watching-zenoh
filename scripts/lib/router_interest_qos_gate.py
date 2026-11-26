@@ -35,7 +35,8 @@ Current/CurrentFuture split: three occurrences in
 @ `ext_qos: interest::ext::QoSType::INTEREST` and three in
 `zenoh/src/net/routing/hat/peer/interests.rs`
 @ `ext_qos: interest::ext::QoSType::INTEREST`. wz's own propagation --
-`LinkstateForwarder::propagate_current_interest` -- reached for the two
+`propagate_current_interest`, now in `router_forward/brokered_interest.rs` --
+reached for the two
 API-plane builders by mode, so the CurrentFuture arm was right BY ACCIDENT
 (it borrowed a stamp meant for the api plane) and the Current arm went out
 bare.

@@ -45,15 +45,15 @@
 //!   onward re-flood `propagate_link_states` (zenoh `network.rs:804`) is DONE:
 //!   the graph supplies the `build_linkstate_split` payload builder — `new`
 //!   nodes full, `updated` nodes links-only, the D4 `Details` split — and the
-//!   per-face re-flood lives in the driver `linkstate_forward::propagate`,
-//!   R311ra+sl.
+//!   per-face re-flood lives in the driver, `RouterForwarder::propagate_tier`
+//!   in wz-runtime-tokio, R311ra+sl.
 //!
 //! What that list must NEVER hold is a claim about what a CALLER hands this
 //! crate, and one did for months: "the driver records every peer-mesh
 //! neighbour as Peer". The role arrives as a PARAMETER of `add_link`, so this
 //! crate records whatever it is given and is structurally unable to check that
 //! sentence — which is why it outlived the driver by many rounds and was still
-//! being read as a live gap long after `linkstate_forward` began threading the
+//! being read as a live gap long after the runtime driver began threading the
 //! real handshake role at R311td. Both rules are enforced by the test
 //! `every_deferred_entry_names_its_kind`, which reads this comment.
 //!
@@ -102,7 +102,7 @@ pub use wz_codecs::whatami::WhatAmI;
 mod autoconnect;
 /// The autoconnect policy ([`AutoConnect`] / [`AutoConnectStrategy`]) — the
 /// role matcher and zid tie-break a discovering node consults before dialing one
-/// it just learned about. The gossip driver (`linkstate_forward`) holds an
+/// it just learned about. The gossip driver (`RouterForwarder`) holds an
 /// instance and applies the gate at its discovery emit; the accept-loop dials.
 ///
 /// R2141 — and [`AutoConnectStrategies`], the per-TARGET tie-break table
@@ -2714,8 +2714,8 @@ mod tests {
     /// handed and cannot check a sentence about what a caller passes. One such
     /// sentence lived here for months -- "the driver records every peer-mesh
     /// neighbour as Peer" -- and stayed readable as a live gap long after
-    /// `linkstate_forward` began threading the handshake role at R311td. The
-    /// three tests that prove it does are in THAT module, not this one, which
+    /// the runtime driver began threading the handshake role at R311td. The
+    /// tests that prove it does are in that driver, not in this crate, which
     /// is exactly the point: the claim was made where it could not be tested.
     ///
     /// The block is delimited as the comment is written: it opens at the

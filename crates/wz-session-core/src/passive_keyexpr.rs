@@ -8,9 +8,8 @@
 //!
 //! [`crate::wireexpr_resolve::resolve_wireexpr`] already composes an id and a
 //! suffix against a table, and a participant needs exactly ONE table per link:
-//! the ids the PEER declared (`wz-runtime-tokio/src/linkstate_forward.rs:230-237`
-//! — "populated from sourced `Declare(DeclKexpr)` messages the peer sent on
-//! THIS link"). It needs no more, because the other number space is its own and
+//! the ids the PEER declared, from the `Declare(DeclKexpr)` messages the peer
+//! sent on THIS link (`absorb_keyexpr_into`). It needs no more, because the other number space is its own and
 //! it never has to look anything up in it.
 //!
 //! An observer has neither number space. It must rebuild BOTH from the

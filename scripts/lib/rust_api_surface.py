@@ -197,6 +197,13 @@ MEMBERS: tuple[Member, ...] = (
     Member("zenoh-config", "zenoh_config", "zenoh-config",
            (("default", ""), ("unstable", "unstable"), ("transport_tcp", "transport_tcp")),
            {"default": 0, "unstable": 0, "transport_tcp": 0}, split_wz=True),
+    # `tracing-instrument`, upstream's one feature of `zenoh-task`, wraps the future each spawn
+    # is given (`commons/zenoh-task/src/lib.rs` @
+    # `let future = tracing::Instrument::instrument(future, tracing::Span::current());`) and
+    # declares no item, so no feature splits the surface and the crate has the one arm, as
+    # `zenoh-runtime` has with its feature of the same name. `zenoh-sync` has no feature.
+    Member("zenoh-task", "zenoh_task", "zenoh-task", DEFAULT_ARM, {"default": 0}),
+    Member("zenoh-sync", "zenoh_sync", "zenoh-sync", DEFAULT_ARM, {"default": 0}),
 )
 
 
