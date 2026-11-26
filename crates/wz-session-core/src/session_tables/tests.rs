@@ -1613,6 +1613,49 @@ fn rows_of_one_text_share_its_block() {
     );
 }
 
+/// A write filter's row and its Interest's hold one block of the key arena between them, and both
+/// rows are dropped where they lie when the filter is undeclared: the arena has every byte back,
+/// and the next filter on the key takes a block again. Turned red by an undeclaration that leaves
+/// a row's key held, or one that drops neither row.
+#[test]
+fn an_undeclared_write_filter_gives_its_key_back_where_its_rows_lay() {
+    let rows = small_rows();
+    let mut arena = arena(SessionTables::<Calls, Lent>::arena_bytes(&rows).unwrap());
+    let space = keys(256);
+    let mut tables = SessionTables::<Calls, Lent>::lent(&mut arena, space, &rows).unwrap();
+    let before = space.counts().used;
+    let filter = tables
+        .declare_write_filter(Plane::Subscribers, "w/k", false)
+        .unwrap();
+    let held = space.counts().used;
+    assert!(held > before, "CONTROL: the filter's key takes a block");
+    assert!(
+        filter.interest.is_some(),
+        "the filter asks the peers by an Interest"
+    );
+    let gone = tables
+        .undeclare_write_filter(filter.handle, |_, _| unreachable!("no listener on it"))
+        .unwrap();
+    assert_eq!(gone.interest_final, filter.interest.map(|opened| opened.id));
+    assert_eq!(gone.held, None);
+    assert_eq!(
+        space.counts().used,
+        before,
+        "both rows' holds of the block went with them"
+    );
+    assert!(tables.write_filters().get(filter.handle).is_none());
+    assert_eq!(tables.interests().len(), 0);
+    let again = tables
+        .declare_write_filter(Plane::Subscribers, "w/k", false)
+        .unwrap();
+    assert_eq!(
+        space.counts().used,
+        held,
+        "the next filter takes the block again"
+    );
+    assert_ne!(again.handle, filter.handle);
+}
+
 #[test]
 fn lent_tables_past_a_build_bound_are_refused() {
     let rows = TableRows {

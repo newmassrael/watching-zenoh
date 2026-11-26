@@ -419,6 +419,92 @@ fn an_insert_writes_its_row_once_into_a_freed_or_an_added_slot() {
     assert_eq!(drops.get(), 3);
 }
 
+/// A row discarded is dropped once, where it lies, and leaves its slot free for the next row at a
+/// generation its handle does not name; a handle past its row discards nothing. Turned red by a
+/// discard that leaves the row standing, drops it a second time with the table, or frees the slot
+/// without dropping the row.
+#[test]
+fn a_discarded_row_is_dropped_once_where_it_lies() {
+    let drops = Cell::new(0);
+    let mut map = SlotMap::<Test, Counted<'_>, 4, Static>::new();
+    let gone = map
+        .insert(Counted(&drops))
+        .expect("a table of four takes a row");
+    let kept = map
+        .insert(Counted(&drops))
+        .expect("a table of four takes a second row");
+    assert_eq!(map.discard(gone), Some(Discarded::Now));
+    assert_eq!(drops.get(), 1);
+    assert!(map.get(gone).is_none());
+    assert!(!map.holds_slot(gone));
+    assert_eq!(map.len(), 1);
+    assert_eq!(
+        map.discard(gone),
+        None,
+        "a handle past its row discards nothing"
+    );
+    assert_eq!(drops.get(), 1);
+    let next = map.insert(Counted(&drops)).expect("the freed slot is free");
+    assert_eq!(next.place(), gone.place());
+    assert_ne!(next, gone);
+    assert!(map.get(kept).is_some());
+    drop(map);
+    assert_eq!(
+        drops.get(),
+        3,
+        "the two rows left go with the table, once each"
+    );
+}
+
+/// A pinned row discarded is retired, not dropped: it leaves every lookup, keeps its slot, and is
+/// handed back by its last unpin, as a pinned row removed is. Turned red by a discard that drops a
+/// row a call still reads.
+#[test]
+fn a_pinned_row_discarded_waits_for_its_last_unpin() {
+    let drops = Cell::new(0);
+    let mut map = SlotMap::<Test, Counted<'_>, 2, Static>::new();
+    let row = map
+        .insert(Counted(&drops))
+        .expect("a table of two takes a row");
+    let pin = map.pin(row).expect("a live row is pinned");
+    assert_eq!(map.discard(row), Some(Discarded::AfterCalls));
+    assert_eq!(drops.get(), 0, "a call still reads it");
+    assert!(map.get(row).is_none());
+    assert!(map.holds_slot(row));
+    let back = map.unpin(pin);
+    assert!(back.is_some(), "the last unpin hands the row back");
+    drop(back);
+    assert_eq!(drops.get(), 1);
+    assert!(!map.holds_slot(row));
+}
+
+/// A row found by its entry is discarded through it as by its handle: dropped where it lies, or
+/// retired while pinned. Turned red by an entry's discard that frees no slot, or drops a row a
+/// call still reads.
+#[test]
+fn an_entry_discards_its_row_as_its_handle_does() {
+    let drops = Cell::new(0);
+    let mut map = SlotMap::<Test, Counted<'_>, 2, Static>::new();
+    let free = map
+        .insert(Counted(&drops))
+        .expect("a table of two takes a row");
+    let pinned = map
+        .insert(Counted(&drops))
+        .expect("a table of two takes a second row");
+    let pin = map.pin(pinned).expect("a live row is pinned");
+    let entry = map.entry(free).expect("a live row has an entry");
+    assert_eq!(entry.discard(), Some(Discarded::Now));
+    assert_eq!(drops.get(), 1);
+    assert!(!map.holds_slot(free));
+    let entry = map.entry(pinned).expect("a live row has an entry");
+    assert_eq!(entry.discard(), Some(Discarded::AfterCalls));
+    assert_eq!(drops.get(), 1, "a call still reads it");
+    assert!(map.entry(pinned).is_none(), "a retired row has no entry");
+    drop(map.unpin(pin));
+    assert_eq!(drops.get(), 2);
+    assert_eq!(map.len(), 0);
+}
+
 /// A slot is taken only off the free list, and is put there only once it was added after every
 /// slot there was: taken, it is live at the generation it was added at; freed, it is taken again
 /// at its next. Turned red by a take that makes a slot live that was never added, or an added slot

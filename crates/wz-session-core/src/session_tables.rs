@@ -1673,7 +1673,21 @@ pub struct OpenedInterest {
     pub id: EntityId,
 }
 
-/// A write filter or a matching listener undeclared.
+/// A write filter undeclared ([`SessionTables::undeclare_write_filter`]). Its row is dropped where
+/// it lay: it owns no program callback, and its key is one of the key arena's, which is let go of
+/// under the lock the tables are held by, so nothing of it is handed to the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FilterUnwatched {
+    /// The id of the Interest it held last, whose Final goes on the wire.
+    pub interest_final: Option<EntityId>,
+    /// The declaration the row held that the entity's key is named by ([`WriteFilterRow::own`]),
+    /// `None` for none: the row's hold of it is the caller's from here on, given back as any
+    /// holder's is ([`SessionTables::undeclare_keyexpr`]), so a key's last hold is let go of, and
+    /// its retraction sent, by one body whoever held it.
+    pub held: Option<KeyexprHandle>,
+}
+
+/// A matching listener undeclared.
 pub struct Unwatched<R> {
     /// The row, for the caller to drop where it holds no lock; `None` while a call of its
     /// callback runs, whose last unpin hands it back.
@@ -1926,7 +1940,7 @@ fn release_keyexpr<P: Storage>(
         return None;
     }
     let id = row.id();
-    let _ = entry.remove();
+    let _ = entry.discard();
     Some(id)
 }
 
@@ -2333,7 +2347,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         // Its count goes to none first: a holder at the row's address takes no more hold of it and
         // gives its own back to the table, which finds the row gone.
         row.head.count.retract(handle);
-        let _ = entry.remove();
+        let _ = entry.discard();
         Some(id)
     }
 
@@ -2738,7 +2752,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     fn close_interest(&mut self, handle: InterestHandle) -> Option<EntityId> {
         let entry = self.kept_interests_mut()?.entry(handle)?;
         let id = entry.get()?.id;
-        let _ = entry.remove();
+        let _ = entry.discard();
         Some(id)
     }
 
@@ -2866,12 +2880,12 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// `each` is handed each listener's handle and its removal, the row when no call of it runs,
     /// else [`Removal::AfterCalls`], when the call that ends last lets it go
     /// ([`Self::release_matching_listener`]). The row's hold of the declaration its key is named
-    /// by goes to the caller ([`Unwatched::held`]).
+    /// by goes to the caller ([`FilterUnwatched::held`]); the row itself is dropped where it lies.
     pub fn undeclare_write_filter(
         &mut self,
         handle: WriteFilterHandle,
         mut each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>),
-    ) -> Option<Unwatched<WriteFilterRow<<P as Storage>::Key>>> {
+    ) -> Option<FilterUnwatched> {
         let (interest, own) = {
             let row = self.kept_write_filters()?.get(handle)?;
             (row.interest, row.own)
@@ -2888,10 +2902,11 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 }
             }
         }
-        let removal = self.kept_write_filters_mut()?.remove(handle)?;
+        // Its key is the arena's and its drop no program's, so it goes where it lies, with no copy
+        // of the row moved out to be dropped by the caller under the same lock.
+        self.kept_write_filters_mut()?.discard(handle)?;
         let interest_final = interest.and_then(|interest| self.close_interest(interest));
-        Some(Unwatched {
-            row: removal.taken(),
+        Some(FilterUnwatched {
             interest_final,
             held: own,
         })
@@ -2904,7 +2919,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     pub fn undeclare_write_filter_quietly(
         &mut self,
         handle: WriteFilterHandle,
-    ) -> Option<Unwatched<WriteFilterRow<<P as Storage>::Key>>> {
+    ) -> Option<FilterUnwatched> {
         self.undeclare_write_filter(handle, |_, _| {})
     }
 
