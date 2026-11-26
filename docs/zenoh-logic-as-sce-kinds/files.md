@@ -682,6 +682,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/session/admin_space.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/buffered.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/decl_listener.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/session/group_reserve_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/session/held_query.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/liveliness.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/matching_listener.rs` | S4 | |
