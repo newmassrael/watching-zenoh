@@ -1821,9 +1821,12 @@ impl<C: ClockSource + 'static> GroupPump<C> {
     }
 
     /// Let go of the session, which ended: its transport goes now, so the group's next join finds
-    /// what it held of the stack's free, and the place stays for that join.
+    /// what it held of the stack's free, and the place stays for that join. The receive half goes
+    /// with it: it holds the transport's socket and receive buffer (or, for a transport whose
+    /// halves are one, the transport itself), which the next join claims again.
     pub(super) fn let_go(&mut self) {
         self.place.leave();
+        self.rx = None;
     }
 
     /// What the group's records are handed out with, which the read ends a step's records with.
