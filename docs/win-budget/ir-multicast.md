@@ -663,7 +663,7 @@ send are below pico's.
 | row | change | takes | files | state |
 |---|---|---|---|---|
 | G4 | the size a group's publication is pushed with worked out from its parts where no body field rides (`lent_push::publication_len`, the arithmetic of `plain_put_len` for a Put and a Del), the writer run to count it only where a field rides | S1b, 373.0 | `wz-session-core/src/lent_push.rs`, `multicast_tx.rs` | this lane |
-| P3 | the read thread's drop of the group's own datagram made with what pico's read task pays for it: the source compared in the kernel's form against the send socket's, read once at the join, and what is left of the wait worked out without a clock reading for each own datagram, the read's deadline still kept | read thread, up to 148 | `wz-runtime-posix/src/multicast.rs`, `net.rs` | design: the deadline must hold under a stream of own datagrams |
+| P3 | the group's own datagram dropped before it is queued on the joined socket: a socket filter (`SO_ATTACH_FILTER`) made at the join compares the packet's source address and port with the send socket's, so no own datagram wakes the read, and the wait's deadline is kept by the loop as it stands, which reads the clock only after a datagram that reaches it; the receive's own drop stays for a platform or an address the filter does not take | read thread, 235.7 | `wz-runtime-posix/src/net.rs`, `group.rs`, `multicast.rs` | this lane (Linux) |
 
 Expected after G2, G3 and G4: the put at about 2,390 against 2,555.0 (0.94), the read thread's
 148 still above pico's. T4 stays a design: the transport is erased where a stack opens a group
@@ -680,3 +680,48 @@ is its length); G2, `wz-session-mcu`
 `group_drive::stage::tests::the_kept_count_follows_what_the_staged_storage_holds`; G3,
 `wz-session-core`
 `multicast_tx::lend_tests::a_window_flushes_its_open_frame_once_and_an_empty_one_nothing`.
+
+#### The sixth reading: the put within pico's, and what was left red
+
+The arm after G2, G3 and G4 (`mcast-8`): the put 2,448.1 against zenoh-pico's 2,555.0 (0.96),
+and the receive 3,098.7 against 3,531.0 (0.878).
+
+The T3 test (`a_push_onto_empty_lanes_leaves_from_where_it_was_written`) read two datagrams
+queued where it expected one. The stage's tests build `transport-multicast,codec-push`, where the
+session core's lend seam (`transport-tx-lend`) is off: the stage is compiled only without
+`session-slot`, and `session-slot` is what turns the seam on for this crate, so the stage's own
+tests never build the lent path. A push there builds its frame apart and copies it onto its lane
+(`StageQueue::enqueue`), which offered nothing to the socket: the datagram was queued and then
+written by the write after the push, so the wire was right and the count was not. G2's kept count
+is not in it: a push that writes through keeps no message. The copied frame is now offered as the
+lent one is, so T3 holds in every build, a window's frame and a heap fragment chain included
+(`a_frame_built_apart_leaves_from_where_it_was_copied`).
+
+P3 as built: the filter is four instructions and two returns for an IPv4 source, ten and two for
+an IPv6 one, read at the UDP header (the source port) and past `SKF_NET_OFF` (the source
+address); it drops exactly what `sent_by_own` drops for a source with no scope. An IPv6 address
+with a scope, which `sent_by_own` compares by the interface too, and the unspecified address are
+left to the receive, as is every platform but Linux. The deadline question the design left open
+does not arise where the filter is taken: no own datagram reaches the wait. Expected: the read
+thread's 235.7 a put leaves the user-space reading, where pico's read task pays 87.0.
+
+Unit tests: `wz-runtime-posix` `net::tests::the_own_source_filter_drops_only_the_own_address_and_port`
+(the program run on each source, as the kernel runs it) and
+`net::tests::the_kernel_drops_what_the_own_socket_sent_and_keeps_a_members` (a filter the kernel
+takes, on loopback), with `--features host-multicast` on Linux; `wz-session-mcu`
+`group_drive::stage::tests::a_frame_built_apart_leaves_from_where_it_was_copied`.
+
+T4, refined: S4 is 144.0 against pico's 197.0 already, so T4 is not owed by the put; what it takes
+is the two indirect calls, tens of Ir. Its two halves do not cost the same. `&dyn SendNow` is local
+to `group_drive/stage.rs`, but making `Through` generic over the socket makes the push path
+(`push_encoded_through`, `push_on`, `StageQueue`, `Lanes::queue`) generic too, and the stage
+pushes both with a socket (`GroupLink::push_encoded`) and without one (`GroupTxStage::push_encoded`,
+the replies, `push_deferred`): two copies of that path, against a code size the build still loses
+on. It is taken only with a size reading that shows the copy is smaller than the call it saves.
+`Box<dyn GroupTransport>` is the larger half: `SessionLinks::open_group` and
+`TransportState::open_group` answer it for six stacks, and an associated type there has no
+default. The form that leaves the six untouched is a second, concrete joiner beside the erased
+one: the engine that is built with one kind of group socket (the shipped preset's host groups)
+names `HostGroups` as its joiner type, its `Watched` holds `HostGroupTransport<S>` by value,
+and the erased `Box` stays the form of a build that composes stacks. That is a round of its own,
+in `engine/group.rs` and `host_group.rs`, measured by M4 and M5's `dyn` calls and by the size.
