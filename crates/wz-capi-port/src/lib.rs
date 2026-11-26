@@ -284,6 +284,17 @@ impl<M> PlainCallback<M> {
     }
 }
 
+// The parts let themselves go, rather than each sink that holds them, so a sink drops them with
+// no test of which of its forms it is, and a sink whose one form they are needs no drop of its own.
+impl<M> Drop for PlainCallback<M> {
+    fn drop(&mut self) {
+        // SAFETY: the constructor's contract: the parts are held by one sink, which drops them
+        // once, after its last call, since a call borrows the sink and the sink is dropped only
+        // once no borrow is left.
+        unsafe { self.let_go() };
+    }
+}
+
 /// The one letting go of a plain closure's parts, whatever it is called with: its C drop with its
 /// context, then what was held with it. Apart from [`PlainCallback`]'s marshal type, so every sink
 /// lets go through one body.
@@ -432,16 +443,6 @@ impl SubscriberSink {
                 (plain.marshal)(plain.call, plain.context, sample, shows_timestamp)
             },
             Self::Shared(call) => shown(sample, shows_timestamp, |sample| call(sample)),
-        }
-    }
-}
-
-impl Drop for SubscriberSink {
-    fn drop(&mut self) {
-        if let Self::Plain(plain) = self {
-            // SAFETY: the constructor's contract: this is its one drop, after its last call, since
-            // a call borrows the sink and the sink is dropped only once no borrow is left.
-            unsafe { plain.let_go() };
         }
     }
 }
@@ -613,15 +614,6 @@ impl LivelinessSink {
             // SAFETY: the constructor's contract: the call may be made from here, now.
             Self::Plain(plain) => unsafe { (plain.marshal)(plain.call, plain.context, sample) },
             Self::Shared(call) => call(sample),
-        }
-    }
-}
-
-impl Drop for LivelinessSink {
-    fn drop(&mut self) {
-        if let Self::Plain(plain) = self {
-            // SAFETY: the constructor's contract: this is its one drop, after its last call.
-            unsafe { plain.let_go() };
         }
     }
 }
