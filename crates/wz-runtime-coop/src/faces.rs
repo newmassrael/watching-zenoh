@@ -32,7 +32,7 @@ use wz_session_core::link_life::{LinkInput, LinkPhase, LinkRole, UnicastLink};
 use wz_session_core::locator_directory::LocatorText;
 #[cfg(feature = "resource-snapshot")]
 use wz_session_core::resource_snapshot::{BuildMessageReading, BuildReceiveLedger};
-use wz_session_core::session_zid::SessionZid;
+use wz_session_core::session_zid::{SessionZid, ZID_MAX};
 use wz_session_core::zid_hex::same_zid;
 
 use crate::link_cells::{CellRc, CountKind, FaceHeld, FaceParts, OneTask};
@@ -42,7 +42,7 @@ use crate::session_drive::{
 };
 use crate::sync::{FacePlace, HoldKind, Lend, LockKind, PlaceHold};
 use crate::CoopLocalJoinHandle;
-use core::sync::atomic::{fence, AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{fence, AtomicU32, Ordering};
 
 /// The number a session knows one of its faces by.
 pub type FaceId = u64;
@@ -450,15 +450,15 @@ pub const PARTS_DEBTS: u32 = CLOSE_OWED - 1;
 /// handles on the link ([`FaceAt`]) and the session owe it: a close, and the parts' own debts,
 /// owed by whoever could not lend the place because another holder had it. Every lend of the
 /// parts goes through [`Self::lend`] or [`Self::try_lend`], which pay what is owed before they
-/// let go of the place, so a debt is paid once, by whichever holder pays it.
+/// let go of the place, so a debt is paid once, by whichever holder pays it. Beside the place lie
+/// the facts of its link that are read with no lend of it ([`SiteFacts`]), cleared whenever the
+/// place is given a link or emptied of one, by whoever holds the face's read.
 pub struct FaceSite<K: LockKind, P: WireParts> {
     place: FacePlace<K, FaceHeld<P>>,
     /// What is owed to the parts the place holds: [`PARTS_DEBTS`] bits and [`CLOSE_OWED`].
     owed: AtomicU32,
-    /// Whether the place's holder now is a send ([`Self::hold_send`], [`Self::try_lend_send`]),
-    /// which may wait for its link's room while it holds it, and not a lend of a moment (a look
-    /// at the link, a debt paid): what a sender that finds the place held tells apart.
-    sending: AtomicBool,
+    /// What the link the place holds is read to be, apart from the place.
+    facts: SiteFacts,
 }
 
 impl<K: LockKind, P: WireParts> FaceSite<K, P> {
@@ -467,20 +467,32 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         Self {
             place: FacePlace::empty(),
             owed: AtomicU32::new(0),
-            sending: AtomicBool::new(false),
+            facts: SiteFacts::new(),
         }
     }
 
-    /// Put `parts` in the place, as the face's link is made, and answer the parts it held. What
-    /// was owed to the link the place held is not the new link's.
-    pub fn hold(&self, parts: FaceHeld<P>) -> Option<FaceHeld<P>> {
-        self.owed.store(0, Ordering::SeqCst);
-        self.place.hold(parts)
+    /// The facts of the place's link that are read with no lend of the place.
+    pub fn facts(&self) -> &SiteFacts {
+        &self.facts
     }
 
-    /// Take the parts out of the place, as the face goes; `None` when it held none.
+    /// Put `parts` in the place, as the face's link is made, and answer the parts it held. What
+    /// was owed to the link the place held is not the new link's, nor is what it was read to be.
+    pub fn hold(&self, parts: FaceHeld<P>) -> Option<FaceHeld<P>> {
+        self.place.with_place(|place| {
+            self.owed.store(0, Ordering::SeqCst);
+            self.facts.clear();
+            place.replace(parts)
+        })
+    }
+
+    /// Take the parts out of the place, as the face goes; `None` when it held none. The facts of
+    /// the link go with it.
     pub fn take(&self) -> Option<FaceHeld<P>> {
-        self.place.take()
+        self.place.with_place(|place| {
+            self.facts.clear();
+            place.take()
+        })
     }
 
     /// [`Self::hold`] that waits for nothing: the parts the place held, or `parts` handed back
@@ -491,6 +503,7 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         let mut carried = Some(parts);
         let held = self.place.try_with_place(|place| {
             self.owed.store(0, Ordering::SeqCst);
+            self.facts.clear();
             carried.take().and_then(|parts| place.replace(parts))
         });
         match (held, carried) {
@@ -507,7 +520,10 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         match self.place.try_with_place(Option::take) {
             None => Lend::Held,
             Some(None) => Lend::Empty,
-            Some(Some(parts)) => Lend::Lent(parts),
+            Some(Some(parts)) => {
+                self.facts.clear();
+                Lend::Lent(parts)
+            }
         }
     }
 
@@ -524,21 +540,13 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         answer
     }
 
-    /// [`Self::try_lend`] for a send: the place is marked as a send's for as long as `f` holds
-    /// the parts ([`Self::held_by_send`]), as a send held as a value marks it.
-    pub fn try_lend_send<U>(&self, f: impl FnOnce(&mut FaceHeld<P>) -> U) -> Lend<U> {
-        self.try_lend(|held| {
-            let _mark = SendMark::enter(&self.sending);
-            f(held)
-        })
-    }
-
-    /// Whether the place's holder now is a send, which may wait for its link's room while it
-    /// holds the place; `false` for a lend of a moment, and for a free place. A hint, as the
-    /// holder may change as it is read: a sender that reads `false` for a place it found held
-    /// tries the place again.
-    pub fn held_by_send(&self) -> bool {
-        self.sending.load(Ordering::Acquire)
+    /// Tell the place's facts what a write through `held`, the parts lent from this site, begun
+    /// at `mark` ([`SiteFacts::write_mark`]), left: whether the link owes its stack a write now
+    /// ([`SiteFacts::wrote`]). Every holder that may write the link tells it as it lets go.
+    #[inline]
+    pub fn tell_written(&self, mark: WriteMark, held: &mut FaceHeld<P>) {
+        let owes = held.lend(|parts| parts.wire().is_some_and(FaceWire::owes_write));
+        self.facts.wrote(mark, owes);
     }
 
     /// [`Self::lend`] that waits for nothing ([`FacePlace::try_lend`]).
@@ -661,27 +669,13 @@ impl<K: HoldKind, P: SendParts> FaceSite<K, P> {
     #[inline(never)]
     pub unsafe fn hold_send(&self) -> Option<SiteSend<'_, K, P>> {
         let held = ManuallyDrop::new(self.place.hold_lent()?);
-        // Cleared in the send's drop, before the hold is let go of, so a place no longer held is
-        // never read as a send's.
-        self.sending.store(true, Ordering::Release);
-        Some(SiteSend { site: self, held })
-    }
-}
-
-/// The mark of a place as a send's for a lend of it ([`FaceSite::try_lend_send`]): set as the
-/// lend's closure begins and cleared as it ends, unwinding included, inside the lend.
-struct SendMark<'a>(&'a AtomicBool);
-
-impl<'a> SendMark<'a> {
-    fn enter(sending: &'a AtomicBool) -> Self {
-        sending.store(true, Ordering::Release);
-        Self(sending)
-    }
-}
-
-impl Drop for SendMark<'_> {
-    fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        // Taken once the place is held, so the count it marks is of the writes before this one.
+        let mark = self.facts.write_mark();
+        Some(SiteSend {
+            site: self,
+            held,
+            mark,
+        })
     }
 }
 
@@ -691,6 +685,8 @@ pub struct SiteSend<'a, K: HoldKind, P: SendParts> {
     site: &'a FaceSite<K, P>,
     /// Let go of in the send's drop, once the debts owed are paid.
     held: ManuallyDrop<PlaceHold<'a, K, FaceHeld<P>>>,
+    /// The count of the link's writes as the send took the place ([`FaceSite::tell_written`]).
+    mark: WriteMark,
 }
 
 impl<K: HoldKind, P: SendParts> SiteSend<'_, K, P> {
@@ -712,8 +708,8 @@ impl<K: HoldKind, P: SendParts> Drop for SiteSend<'_, K, P> {
         let place: &mut Option<FaceHeld<P>> = &mut self.held;
         if let Some(parts) = place.as_mut() {
             self.site.pay(parts);
+            self.site.tell_written(self.mark, parts);
         }
-        self.site.sending.store(false, Ordering::Release);
         // SAFETY: the hold is let go of here alone, once, and is not reached after: the send is
         // being dropped.
         unsafe { ManuallyDrop::drop(&mut self.held) };
@@ -742,18 +738,334 @@ fn pay_parts<P: WireParts>(parts: &mut P, owed: u32) {
     }
 }
 
+/// What the read of a face's link tells of it ([`SiteFacts::tell`]) as it last stepped the link's
+/// receive: what a handle on the face's place ([`FaceAt`]) reads of the link with no lend of the
+/// place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReadFacts {
+    /// Whether the link's handshake has completed ([`FaceSession::established`]).
+    pub established: bool,
+    /// Whether the link holds input it has already taken from its stack
+    /// ([`FaceWire::holds_input`]).
+    pub holds_input: bool,
+    /// Whether the link's stack holds input it cannot read until another link gives a receive
+    /// buffer back ([`FaceWire::waits_for_buffer`]).
+    pub waits_for_buffer: bool,
+    /// The reason of the Close the link's session staged ([`FaceSession::close_reason`]).
+    pub close_reason: Option<CloseReason>,
+}
+
+/// The bit of a read's word that is its link's establishment ([`ReadFacts::established`]).
+const READ_ESTABLISHED: u32 = 1;
+/// The bit of a read's word that is the input its link holds ([`ReadFacts::holds_input`]).
+const READ_HOLDS_INPUT: u32 = 1 << 1;
+/// The bit of a read's word that is its link's wait for a buffer
+/// ([`ReadFacts::waits_for_buffer`]).
+const READ_WAITS_FOR_BUFFER: u32 = 1 << 2;
+/// Where a read's word holds its link's Close: one past the reason's code, none at zero.
+const READ_CLOSE_SHIFT: u32 = 8;
+
+/// Every Close a read's word names, at its code ([`close_code`]).
+const CLOSE_REASONS: [CloseReason; 8] = [
+    CloseReason::Generic,
+    CloseReason::Unsupported,
+    CloseReason::Invalid,
+    CloseReason::MaxSessions,
+    CloseReason::MaxLinks,
+    CloseReason::Expired,
+    CloseReason::Unresponsive,
+    CloseReason::ConnectionToSelf,
+];
+
+/// The code of `reason` in a read's word: its place in [`CLOSE_REASONS`]. A match, so a reason
+/// added to the session's set is a build error here until the table holds it too.
+fn close_code(reason: CloseReason) -> u32 {
+    match reason {
+        CloseReason::Generic => 0,
+        CloseReason::Unsupported => 1,
+        CloseReason::Invalid => 2,
+        CloseReason::MaxSessions => 3,
+        CloseReason::MaxLinks => 4,
+        CloseReason::Expired => 5,
+        CloseReason::Unresponsive => 6,
+        CloseReason::ConnectionToSelf => 7,
+    }
+}
+
+impl ReadFacts {
+    /// What the read tells of `link`, the link it steps, whose session is `established` and
+    /// staged the Close `close_reason`.
+    pub fn of_link<N: CountKind>(
+        link: &CellRc<dyn SessionDatagramLink, N>,
+        established: bool,
+        close_reason: Option<CloseReason>,
+    ) -> Self {
+        Self {
+            established,
+            holds_input: link.holds_input(),
+            waits_for_buffer: waits_for_buffer(link),
+            close_reason,
+        }
+    }
+
+    /// The facts as one word, written at once.
+    fn word(self) -> u32 {
+        let mut word = 0;
+        if self.established {
+            word |= READ_ESTABLISHED;
+        }
+        if self.holds_input {
+            word |= READ_HOLDS_INPUT;
+        }
+        if self.waits_for_buffer {
+            word |= READ_WAITS_FOR_BUFFER;
+        }
+        if let Some(reason) = self.close_reason {
+            word |= (close_code(reason) + 1) << READ_CLOSE_SHIFT;
+        }
+        word
+    }
+
+    /// The facts `word` holds ([`Self::word`]).
+    fn of_word(word: u32) -> Self {
+        let close = (word >> READ_CLOSE_SHIFT) & 0xff;
+        Self {
+            established: word & READ_ESTABLISHED != 0,
+            holds_input: word & READ_HOLDS_INPUT != 0,
+            waits_for_buffer: word & READ_WAITS_FOR_BUFFER != 0,
+            close_reason: close
+                .checked_sub(1)
+                .and_then(|code| CLOSE_REASONS.get(code as usize))
+                .copied(),
+        }
+    }
+}
+
+/// The words a link's node is kept in ([`SiteFacts::node`]).
+const NODE_WORDS: usize = ZID_MAX / 4;
+
+// A node's bytes fill its words whole.
+const _: () = assert!(NODE_WORDS * 4 == ZID_MAX);
+
+/// The count of a link's writes a writer read as it began ([`SiteFacts::write_mark`]): what it
+/// tells the facts it drained up to when it leaves nothing owed ([`SiteFacts::wrote`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WriteMark(u32);
+
+/// The facts of a face's link that a handle on the face's place ([`FaceAt`]) reads with no lend
+/// of the place, since a send may hold the place while it waits for its link's room. Each has its
+/// own rule of who writes it, so no write is lost to another:
+///
+/// - the read's word ([`ReadFacts`]): written whole, after each step of the link's receive, by
+///   the holder of the face's read alone, who also clears the facts as the place is given a link
+///   or emptied of one ([`FaceSite::hold`], [`FaceSite::take`]);
+/// - whether the link owes its stack a write: two counts, as a producer's and a consumer's. Whoever
+///   leaves bytes owed on the link (a send under the place, or the read's step outside it) moves
+///   `written` on, and whoever leaves nothing owed sets `drained` to the count of `written` it
+///   read before it wrote ([`Self::write_mark`], [`Self::wrote`]). The link owes a write while
+///   the two differ;
+/// - the node the link reached: told once per link by the read ([`Self::tell_node`]), and read
+///   whole or not at all, as a sequence count guards its words across the change of the place's
+///   link.
+pub struct SiteFacts {
+    /// The read's word ([`ReadFacts::word`]).
+    read: AtomicU32,
+    /// How many writes left bytes owed on the link.
+    written: AtomicU32,
+    /// The count of `written` the last writer that left nothing owed read as it began.
+    drained: AtomicU32,
+    /// Even while the node's words are whole, odd while the read writes them.
+    node_seq: AtomicU32,
+    /// The node's length, 0 for none.
+    node_len: AtomicU32,
+    /// The node's bytes, zero past its length.
+    node_bytes: [AtomicU32; NODE_WORDS],
+    /// Whether a teller is in (`Self::one_teller`): a debug build's check of the read's rule.
+    #[cfg(debug_assertions)]
+    telling: core::sync::atomic::AtomicBool,
+}
+
+impl SiteFacts {
+    /// The facts of no link: not established, holding nothing, owing nothing, naming no node.
+    fn new() -> Self {
+        Self {
+            read: AtomicU32::new(0),
+            written: AtomicU32::new(0),
+            drained: AtomicU32::new(0),
+            node_seq: AtomicU32::new(0),
+            node_len: AtomicU32::new(0),
+            node_bytes: core::array::from_fn(|_| AtomicU32::new(0)),
+            #[cfg(debug_assertions)]
+            telling: core::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// What the face's read last told of the link.
+    #[inline]
+    pub fn read(&self) -> ReadFacts {
+        ReadFacts::of_word(self.read.load(Ordering::Acquire))
+    }
+
+    /// Tell `facts` of the link: by the holder of the face's read alone, after a step of the
+    /// link's receive.
+    #[inline]
+    pub fn tell(&self, facts: ReadFacts) {
+        let _one = self.one_teller();
+        self.read.store(facts.word(), Ordering::Release);
+    }
+
+    /// The node the link reached, once the read told it; `None` before, and while the place's
+    /// link is changed.
+    pub fn node(&self) -> Option<SessionZid> {
+        let seq = self.node_seq.load(Ordering::Acquire);
+        if seq & 1 != 0 {
+            return None;
+        }
+        let len = self.node_len.load(Ordering::Relaxed) as usize;
+        let mut bytes = [0u8; ZID_MAX];
+        for (word, chunk) in self.node_bytes.iter().zip(bytes.chunks_exact_mut(4)) {
+            chunk.copy_from_slice(&word.load(Ordering::Relaxed).to_ne_bytes());
+        }
+        // Orders the reads of the words before the second read of the count: a word written by a
+        // change begun after the first read is seen only with that change's count.
+        fence(Ordering::Acquire);
+        if self.node_seq.load(Ordering::Relaxed) != seq {
+            return None;
+        }
+        SessionZid::new(bytes.get(..len)?).ok()
+    }
+
+    /// Whether the read told the link's node yet: read by the read itself, which tells it once.
+    #[inline]
+    pub fn has_node(&self) -> bool {
+        self.node_len.load(Ordering::Relaxed) != 0
+    }
+
+    /// Tell the node the link reached: by the holder of the face's read alone, once for each
+    /// link the place is given.
+    pub fn tell_node(&self, node: &SessionZid) {
+        let _one = self.one_teller();
+        debug_assert!(!self.has_node(), "a link's node is told once");
+        self.write_node(node.as_slice());
+    }
+
+    /// The count of the link's writes as a writer begins ([`Self::wrote`]).
+    #[inline]
+    pub fn write_mark(&self) -> WriteMark {
+        WriteMark(self.written.load(Ordering::Acquire))
+    }
+
+    /// What a write begun at `mark` left: the link owes its stack a write (`owes`), counted as
+    /// one more write left owed, or it owes nothing, and every write counted up to `mark` was
+    /// drained. A write counted after `mark` stays owed, whichever of the two writers is last.
+    #[inline]
+    pub fn wrote(&self, mark: WriteMark, owes: bool) {
+        if owes {
+            self.written.fetch_add(1, Ordering::Release);
+        } else {
+            debug_assert!(
+                self.written.load(Ordering::Relaxed).wrapping_sub(mark.0) <= u32::MAX / 2,
+                "a write's mark is a count its own site's writes reached"
+            );
+            self.drained.store(mark.0, Ordering::Release);
+        }
+    }
+
+    /// Whether the link owes its stack the rest of what it was handed: a write left owed that no
+    /// writer drained since.
+    #[inline]
+    pub fn owes_write(&self) -> bool {
+        self.drained.load(Ordering::Acquire) != self.written.load(Ordering::Acquire)
+    }
+
+    /// The facts of no link, as the place is given a link or emptied of one: by the holder of
+    /// the face's read.
+    fn clear(&self) {
+        let _one = self.one_teller();
+        self.read.store(0, Ordering::Release);
+        if self.has_node() {
+            self.write_node(&[]);
+        }
+        self.drained
+            .store(self.written.load(Ordering::Acquire), Ordering::Release);
+    }
+
+    /// Write `node`'s bytes, none for no node, inside an odd count, so a reader reads them whole
+    /// or reads none (`Self::node`).
+    fn write_node(&self, node: &[u8]) {
+        let mut bytes = [0u8; ZID_MAX];
+        let len = node.len().min(ZID_MAX);
+        if let (Some(into), Some(from)) = (bytes.get_mut(..len), node.get(..len)) {
+            into.copy_from_slice(from);
+        }
+        let seq = self.node_seq.load(Ordering::Relaxed);
+        self.node_seq.store(seq.wrapping_add(1), Ordering::Relaxed);
+        // Orders the odd count before the words: a reader that sees a word of this write sees
+        // the count moved, and reads none.
+        fence(Ordering::Release);
+        for (word, chunk) in self.node_bytes.iter().zip(bytes.chunks_exact(4)) {
+            word.store(
+                u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                Ordering::Relaxed,
+            );
+        }
+        self.node_len.store(len as u32, Ordering::Relaxed);
+        self.node_seq.store(seq.wrapping_add(2), Ordering::Release);
+    }
+
+    /// The one teller of the read's facts: a debug build fails a second teller that comes in
+    /// while one is in, which a teller other than the holder of the face's read would be.
+    #[inline(always)]
+    fn one_teller(&self) -> OneTeller<'_> {
+        #[cfg(debug_assertions)]
+        {
+            let other = self.telling.swap(true, Ordering::Acquire);
+            debug_assert!(
+                !other,
+                "a face's read facts are told by the holder of its read alone"
+            );
+            OneTeller {
+                telling: &self.telling,
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            OneTeller {
+                _of: core::marker::PhantomData,
+            }
+        }
+    }
+}
+
+/// A teller of a site's read facts, in for as long as it lives (`SiteFacts::one_teller`).
+struct OneTeller<'a> {
+    #[cfg(debug_assertions)]
+    telling: &'a core::sync::atomic::AtomicBool,
+    #[cfg(not(debug_assertions))]
+    _of: core::marker::PhantomData<&'a SiteFacts>,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for OneTeller<'_> {
+    fn drop(&mut self) {
+        self.telling.store(false, Ordering::Release);
+    }
+}
+
 /// A face's link whose parts lie in a face's place ([`FaceSite`]), apart from the session's
 /// state: what the face's record holds while the link is up or in its handshake, holding no
 /// handle on the parts.
 ///
-/// The supervisor reads it under the session's lock, which never waits on a face, so each read
-/// tries the place and waits for nothing: a place another thread holds, or one that holds no
-/// wire, reads as a link that holds no input, owes no write, is not established, names no node
-/// and no Close, and is told nothing; its next look reads it again. A close it cannot tell then is
-/// owed to the place's holder, which tells it before letting go. A wait on the link's input and
-/// room is read off the link once, when it is made, and how its session ends is read and asked
-/// through its end (`E`), with no lend of the place. What the link counted is read through the
-/// count the handle keeps (`resource-snapshot`), with no lend of the place either.
+/// The supervisor reads it under the session's lock, which never waits on a face, and a send may
+/// hold the place while it waits for its link's room, so each fact of the link is read off the
+/// place's facts ([`SiteFacts`]), which the face's read tells, with no lend of the place: a place
+/// that holds no wire reads as a link that holds no input, owes no write, is not established and
+/// names no node and no Close. What the handle asks of the link (a close, a write of what it
+/// owes) tries the place and waits for nothing; a close it cannot tell then is owed to the
+/// place's holder, which tells it before letting go. A wait on the link's input and room is read
+/// off the link once, when it is made, and how its session ends is read and asked through its end
+/// (`E`), with no lend of the place. What the link counted is read through the count the handle
+/// keeps (`resource-snapshot`), with no lend of the place either.
 pub struct FaceAt<K: LockKind, P: WireParts, E: LinkEnd> {
     site: core::ptr::NonNull<FaceSite<K, P>>,
     end: E,
@@ -770,10 +1082,10 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
     ///
     /// # Safety
     ///
-    /// `site` lives, at the address it has now, for as long as the handle does. A read made
-    /// inside a lend of `site` finds the place held, on every kind (a kind whose own try cannot
-    /// see it has the lend marked in the place, [`FacePlace::try_lend`]), and reads the link as
-    /// quiet.
+    /// `site` lives, at the address it has now, for as long as the handle does. What the handle
+    /// asks of the link inside a lend of `site` finds the place held, on every kind (a kind whose
+    /// own try cannot see it has the lend marked in the place, [`FacePlace::try_lend`]), and is
+    /// owed or not done.
     pub unsafe fn new(
         site: &FaceSite<K, P>,
         end: E,
@@ -814,27 +1126,38 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceAt<K, P, E> {
         unsafe { self.site.as_ref() }
     }
 
-    /// `f` on the wire of the parts when the place lends them now, else `absent`: the answer
-    /// is written by `f` where it lies, through the one body of the lend (`Self::lend_wire`).
+    /// What the face's read last told of the link ([`SiteFacts::read`]).
     #[inline(always)]
-    fn read<U: Send>(&self, absent: U, f: impl Fn(&P::Wire) -> U + Send) -> U {
-        let mut read = ReadInto { f, answer: absent };
-        let _ = self.lend_wire(&mut read);
-        read.answer
+    fn facts(&self) -> ReadFacts {
+        self.site().facts().read()
+    }
+
+    /// `f` on the wire of the parts when the place lends them now, through the one body of the
+    /// lend (`Self::lend_wire`); nothing while another holder has the place.
+    #[cfg(feature = "session-unicast-accept")]
+    #[inline(always)]
+    fn act(&self, f: impl Fn(&P::Wire) + Send) {
+        let _ = self.lend_wire(&mut ActOn(f));
     }
 
     /// `on` on the wire of the parts when the place lends them now, by a try of the place that
-    /// waits for nothing. What the lend came to; `on` ran only where it is [`Lend::Lent`]. Out
-    /// of line, and handed `on` by reference, so every fact a handle reads and every lend of the
-    /// link's session it makes, whatever its answer, goes through one body of the try and its pay.
+    /// waits for nothing, telling the place's facts what the lend left owed on the link
+    /// ([`FaceSite::tell_written`]). What the lend came to; `on` ran only where it is
+    /// [`Lend::Lent`]. Out of line, and handed `on` by reference, so every act of a handle and
+    /// every lend of the link's session it makes, whatever its answer, goes through one body of
+    /// the try and its pay.
     #[inline(never)]
     fn lend_wire(&self, on: &mut (dyn OnWire<P::Wire> + Send)) -> Lend<()> {
-        let lent = self.site().try_lend(|held| {
-            held.lend(|parts| {
+        let site = self.site();
+        let lent = site.try_lend(|held| {
+            let mark = site.facts().write_mark();
+            let lent = held.lend(|parts| {
                 let wire = parts.wire()?;
                 on.on(wire);
                 Some(())
-            })
+            });
+            site.tell_written(mark, held);
+            lent
         });
         match lent {
             Lend::Lent(Some(())) => Lend::Lent(()),
@@ -852,15 +1175,14 @@ trait OnWire<W> {
     fn on(&mut self, wire: &W);
 }
 
-/// A fact read off the wire by `f`, kept in `answer` (`FaceAt::read`).
-struct ReadInto<F, U> {
-    f: F,
-    answer: U,
-}
+/// An act on the wire (`FaceAt::act`).
+#[cfg(feature = "session-unicast-accept")]
+struct ActOn<F>(F);
 
-impl<W, U, F: Fn(&W) -> U> OnWire<W> for ReadInto<F, U> {
+#[cfg(feature = "session-unicast-accept")]
+impl<W, F: Fn(&W)> OnWire<W> for ActOn<F> {
     fn on(&mut self, wire: &W) {
-        self.answer = (self.f)(wire);
+        (self.0)(wire);
     }
 }
 
@@ -886,11 +1208,11 @@ where
 
 impl<K: LockKind, P: WireParts, E: LinkEnd> FaceSession for FaceAt<K, P, E> {
     fn established(&self) -> bool {
-        self.read(false, |wire| wire.established())
+        self.facts().established
     }
 
     fn node(&self) -> Option<SessionZid> {
-        self.read(None, |wire| wire.node())
+        self.site().facts().node()
     }
 
     /// Told as a close ([`FaceWire::close`]): the end of an established link, owed to the
@@ -900,13 +1222,12 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceSession for FaceAt<K, P, E> {
     }
 
     fn close_reason(&self) -> Option<CloseReason> {
-        self.read(None, |wire| wire.close_reason())
+        self.facts().close_reason
     }
 
-    #[cfg(any(feature = "listen", feature = "group"))]
-    fn input_seen(&self, ready: bool) {
-        self.read((), move |wire| wire.input_seen(ready));
-    }
+    // What a wait found is not told: a link whose parts lie in a place is stepped by the face's
+    // read where it lies, which reads its input at every step, so the provided form, which keeps
+    // nothing, is the handle's, and a wait lends nothing of the place.
 
     /// Read through the count the handle keeps ([`Self::counted_by`]), with no lend of the place.
     #[cfg(feature = "resource-snapshot")]
@@ -927,15 +1248,15 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceWire for FaceAt<K, P, E> {
     }
 
     fn holds_input(&self) -> bool {
-        self.read(false, |wire| wire.holds_input())
+        self.facts().holds_input
     }
 
     fn owes_write(&self) -> bool {
-        self.read(false, |wire| wire.owes_write())
+        self.site().facts().owes_write()
     }
 
     fn waits_for_buffer(&self) -> bool {
-        self.read(false, |wire| wire.waits_for_buffer())
+        self.facts().waits_for_buffer
     }
 
     fn input_wait(&self) -> Option<WaitOn> {
@@ -954,13 +1275,22 @@ impl<K: LockKind, P: WireParts, E: LinkEnd> FaceWire for FaceAt<K, P, E> {
 
     #[cfg(feature = "session-unicast-accept")]
     fn write_owed_now(&self) {
-        self.read((), |wire| wire.write_owed_now());
+        self.act(|wire| wire.write_owed_now());
     }
 
-    /// The three facts under one lend of the place; a place another thread holds, or that holds
-    /// no wire, looks quiet, as each of its reads does.
+    /// The three facts in one read of the word the face's read told, and of the place's counts
+    /// of its writes; a place that holds no wire looks quiet.
     fn look(&self) -> WireLook {
-        self.read(WireLook::Quiet, |wire| wire.look())
+        let facts = self.facts();
+        if facts.holds_input {
+            WireLook::HoldsInput
+        } else if facts.waits_for_buffer {
+            WireLook::WaitsForBuffer
+        } else if self.owes_write() {
+            WireLook::OwesWrite
+        } else {
+            WireLook::Quiet
+        }
     }
 }
 
@@ -3373,40 +3703,6 @@ mod tests {
         );
     }
 
-    /// A place reads as a send's while a send holds it, as a value or by a lend for a send, and
-    /// not while it is lent for a moment, nor once the send let go. Turned red by a send's drop
-    /// that leaves the mark set, a mark cleared only after the hold is let go of being read by
-    /// the lend that follows, or a plain lend that marks the place.
-    #[test]
-    fn a_place_reads_as_a_sends_while_a_send_holds_it_alone() {
-        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
-        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
-        assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
-        assert!(!site.held_by_send(), "CONTROL: a free place");
-        assert_eq!(
-            site.try_lend(|_| site.held_by_send()),
-            Lend::Lent(false),
-            "a lend of a moment is no send"
-        );
-        {
-            // SAFETY: the test keeps no handle of the parts past a send.
-            let _send = unsafe { site.hold_send() }.expect("a free place is held");
-            assert!(site.held_by_send(), "a send held as a value");
-        }
-        assert!(!site.held_by_send(), "the send let go");
-        assert_eq!(
-            site.try_lend(|_| site.held_by_send()),
-            Lend::Lent(false),
-            "the lend after the send is no send"
-        );
-        assert_eq!(
-            site.try_lend_send(|_| site.held_by_send()),
-            Lend::Lent(true),
-            "a lend for a send"
-        );
-        assert!(!site.held_by_send(), "the lend for a send let go");
-    }
-
     /// A debt of the parts in the bit of the site's close fails a debug build: the close is the
     /// site's to tell, through the wire. Turned red by an `owe` that takes the close's bit.
     #[cfg(debug_assertions)]
@@ -3417,15 +3713,16 @@ mod tests {
         site.owe(1 << 31);
     }
 
-    /// A link whose parts lie in a face's place is read through a lend of the place, and its end
-    /// through the end it was made with, with no lend; an empty place reads as a quiet link and
-    /// keeps no close owed to it. Turned red by a handle that reads its end or its waits off the
-    /// parts, reads an empty place as anything but quiet, or a close owed to an empty place told
-    /// to the link held after; or by a read inside the place's own lend that reaches the parts
-    /// (the place's mark of its lend, `FacePlace::try_lend`), or a close made there that is not
-    /// owed to that lend.
+    /// A link whose parts lie in a face's place is read off the facts its read told the place, with
+    /// no lend of the place, and its end through the end it was made with; an empty place, and a
+    /// place given a link or emptied of one, reads as a quiet link that names no node and no
+    /// Close, and keeps no close owed to it. Turned red by a handle that reads a fact off the
+    /// parts' wire (the wire here holds input and is established, and the read told nothing
+    /// yet), by facts that outlive the place's link (`FaceSite::hold` or `FaceSite::take` with
+    /// no clear), by a close owed to an empty place told to the link held after, or by a close
+    /// made inside the place's own lend that is not owed to that lend.
     #[test]
-    fn a_link_in_a_faces_place_is_read_through_the_place() {
+    fn a_link_in_a_faces_place_is_read_off_the_facts_its_read_told() {
         let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
         let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
         let end = Rc::new(HeldEnd::default());
@@ -3439,8 +3736,23 @@ mod tests {
             "the wait the handle was made with"
         );
         assert!(site.hold(held_parts(&aborted, &ended)).is_none());
-        assert!(at.holds_input(), "the parts' wire read through the place");
-        assert!(at.established(), "as is its session");
+        assert!(
+            !at.holds_input(),
+            "a link its read told nothing of holds no input, whatever its wire holds"
+        );
+        assert!(!at.established(), "and is not established");
+        let node = SessionZid::from_array([7, 1]);
+        site.facts().tell(ReadFacts {
+            established: true,
+            holds_input: true,
+            waits_for_buffer: false,
+            close_reason: Some(CloseReason::Expired),
+        });
+        site.facts().tell_node(&node);
+        assert!(at.holds_input(), "the input the read told");
+        assert!(at.established(), "the establishment the read told");
+        assert_eq!(at.close_reason(), Some(CloseReason::Expired));
+        assert!(at.node() == Some(node), "the node the read told");
         assert!(site.lend(|_| ()).is_some());
         assert_eq!(
             ended.load(Ordering::SeqCst),
@@ -3455,12 +3767,16 @@ mod tests {
         );
         let inside = site.lend(|_| {
             at.close();
-            (at.holds_input(), ended.load(Ordering::SeqCst))
+            (
+                at.holds_input(),
+                at.node() == Some(node),
+                ended.load(Ordering::SeqCst),
+            )
         });
         assert_eq!(
             inside,
-            Some((false, 1)),
-            "a read inside the place's own lend reads as quiet, and its close is owed"
+            Some((true, true, 1)),
+            "a read inside the place's own lend reads the facts told, and its close is owed"
         );
         assert_eq!(
             ended.load(Ordering::SeqCst),
@@ -3475,15 +3791,18 @@ mod tests {
         assert_eq!(aborted.get(), 0, "and not the parts' wire");
         assert!(site.take().is_some());
         assert!(!at.holds_input(), "a place emptied reads as no input");
+        assert!(!at.established(), "and as no link established");
+        assert!(at.node().is_none(), "naming no node");
+        assert_eq!(at.close_reason(), None, "and no Close");
     }
 
     /// A link's look reads the first of its facts in the order a wait takes them, and through a
-    /// face's place reads them under one lend: an empty place, or one read inside its own lend,
-    /// looks quiet. Turned red by a look that reads an owed write ahead of held input
-    /// (`FaceWire::look`), or a handle's look that does not read the parts' wire
-    /// (`FaceAt::look`).
+    /// face's place reads them off the facts its read told and the place's counts of the writes
+    /// left owed, inside the place's own lend too. Turned red by a look that reads an owed write
+    /// ahead of held input (`FaceWire::look`), or a handle's look that reads the parts' wire or
+    /// tries the place (`FaceAt::look`).
     #[test]
-    fn a_links_look_reads_its_first_fact_through_its_place() {
+    fn a_links_look_reads_its_first_fact_off_its_places_facts() {
         let wire = |holds, owes| ApartWire {
             holds,
             owes,
@@ -3498,42 +3817,260 @@ mod tests {
         // SAFETY: the site outlives the handle, in this frame.
         let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
         assert_eq!(at.look(), WireLook::Quiet, "an empty place looks quiet");
-        let parts = ApartParts(Some(wire(false, true)), Ended::default());
+        let parts = ApartParts(Some(wire(true, true)), Ended::default());
         // SAFETY: no handle on a cell of the parts lives outside them.
         assert!(site.hold(unsafe { FaceHeld::gathered(parts) }).is_none());
-        assert_eq!(at.look(), WireLook::OwesWrite, "the parts' wire looked at");
-        assert_eq!(
-            site.lend(|_| at.look()),
-            Some(WireLook::Quiet),
-            "a look inside the place's own lend reads as quiet"
-        );
-        let parts = ApartParts(Some(wire(true, true)), Ended::default());
-        // SAFETY: as above.
-        assert!(site.hold(unsafe { FaceHeld::gathered(parts) }).is_some());
         assert_eq!(
             at.look(),
-            WireLook::HoldsInput,
-            "held input ahead of an owed write"
+            WireLook::Quiet,
+            "a link its read told nothing of looks quiet, whatever its wire says"
+        );
+        let facts = site.facts();
+        facts.wrote(facts.write_mark(), true);
+        assert_eq!(at.look(), WireLook::OwesWrite, "a write left owed");
+        assert_eq!(
+            site.lend(|_| at.look()),
+            Some(WireLook::OwesWrite),
+            "looked at inside the place's own lend too"
+        );
+        facts.tell(ReadFacts {
+            waits_for_buffer: true,
+            ..ReadFacts::default()
+        });
+        assert_eq!(
+            at.look(),
+            WireLook::WaitsForBuffer,
+            "a wait for a buffer ahead of an owed write"
+        );
+        facts.tell(ReadFacts {
+            holds_input: true,
+            waits_for_buffer: true,
+            ..ReadFacts::default()
+        });
+        assert_eq!(at.look(), WireLook::HoldsInput, "held input ahead of both");
+        facts.wrote(facts.write_mark(), false);
+        facts.tell(ReadFacts::default());
+        assert_eq!(
+            at.look(),
+            WireLook::Quiet,
+            "the owed write drained, and nothing held"
         );
     }
 
-    /// A link whose place another thread holds reads as a quiet link at once, waiting for
-    /// nothing, and as its parts once that thread lets go of the place. Turned red by a read that
-    /// waits for the place (the test then never ends), or reads it held as holding input.
+    /// Every fact a read tells is read back as it was told, each Close by its own code, and a
+    /// word told over another replaces it whole. Turned red by a word that shares a bit between
+    /// two facts, or a code that names another reason (`close_code` out of step with
+    /// `CLOSE_REASONS`).
+    #[test]
+    fn a_reads_word_holds_every_fact_it_was_told() {
+        let facts = SiteFacts::new();
+        assert_eq!(facts.read(), ReadFacts::default(), "CONTROL: nothing told");
+        for (code, reason) in CLOSE_REASONS.iter().enumerate() {
+            assert_eq!(close_code(*reason) as usize, code, "{reason:?} at its code");
+            for bits in 0..8u32 {
+                let told = ReadFacts {
+                    established: bits & 1 != 0,
+                    holds_input: bits & 2 != 0,
+                    waits_for_buffer: bits & 4 != 0,
+                    close_reason: Some(*reason),
+                };
+                facts.tell(told);
+                assert_eq!(facts.read(), told);
+            }
+        }
+        facts.tell(ReadFacts::default());
+        assert_eq!(
+            facts.read(),
+            ReadFacts::default(),
+            "a word told over another"
+        );
+    }
+
+    /// A link's node is read once its read told it, and as none once the place is given another
+    /// link or emptied, until the read tells that link's. Turned red by a clear that leaves the
+    /// node (`SiteFacts::clear`), or a node read off words a change left half written.
+    #[test]
+    fn a_links_node_is_read_once_told_and_goes_with_its_link() {
+        let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        let (first, second) = (
+            SessionZid::from_array([1; 16]),
+            SessionZid::from_array([9, 8, 7]),
+        );
+        assert!(site.facts().node().is_none(), "CONTROL: none told");
+        assert!(site.hold(held_parts(&aborted, &ended)).is_none());
+        site.facts().tell_node(&first);
+        assert!(site.facts().node() == Some(first), "the node told");
+        assert!(site.hold(held_parts(&aborted, &ended)).is_some());
+        assert!(site.facts().node().is_none(), "a new link names none yet");
+        site.facts().tell_node(&second);
+        assert!(site.facts().node() == Some(second), "the new link's node");
+        assert!(site.take().is_some());
+        assert!(site.facts().node().is_none(), "an emptied place names none");
+    }
+
+    /// A send that leaves its link owing a write tells the place's facts so as it lets go, and one
+    /// that leaves nothing owed tells them that what was owed as it began was drained. Turned red
+    /// by a send's drop that tells nothing (`FaceSite::tell_written` left out of `SiteSend`'s
+    /// drop), or a link given to the place that keeps the last link's debt.
+    #[test]
+    fn a_send_tells_its_place_what_it_left_owed_as_it_lets_go() {
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        let owing = |owes| {
+            let parts = ApartParts(
+                Some(ApartWire {
+                    holds: false,
+                    owes,
+                    finished: false,
+                    aborted: Rc::new(Cell::new(0)),
+                    ended: Ended::default(),
+                }),
+                Ended::default(),
+            );
+            // SAFETY: no handle on a cell of the parts lives outside them.
+            unsafe { FaceHeld::gathered(parts) }
+        };
+        assert!(site.hold(owing(true)).is_none());
+        assert!(
+            !site.facts().owes_write(),
+            "CONTROL: a link given to the place owes nothing yet"
+        );
+        {
+            // SAFETY: the test keeps no handle of the parts past the send.
+            let _send = unsafe { site.hold_send() }.expect("a free place is held");
+        }
+        assert!(site.facts().owes_write(), "the write the send left owed");
+        assert!(site.hold(owing(false)).is_some());
+        assert!(
+            !site.facts().owes_write(),
+            "a new link owes nothing of the last"
+        );
+        site.facts().wrote(site.facts().write_mark(), true);
+        {
+            // SAFETY: as above.
+            let _send = unsafe { site.hold_send() }.expect("a free place is held");
+        }
+        assert!(
+            !site.facts().owes_write(),
+            "a send that left nothing owed drained what was owed as it began"
+        );
+    }
+
+    /// A write left owed while a drain is under way stays owed once the drain ends, and a drain
+    /// begun after it clears it: the counts keep a write that a single flag would lose to the
+    /// drain's clear. Turned red by a drain that sets the count it reads as it ends rather than
+    /// as it began, or a write left owed that does not move its count.
+    #[test]
+    fn a_write_left_owed_during_a_drain_stays_owed() {
+        let facts = SiteFacts::new();
+        let drain = facts.write_mark();
+        facts.wrote(facts.write_mark(), true);
+        facts.wrote(drain, false);
+        assert!(
+            facts.owes_write(),
+            "the write left owed after the drain began"
+        );
+        let later = facts.write_mark();
+        facts.wrote(later, false);
+        assert!(!facts.owes_write(), "a drain begun after it");
+    }
+
+    /// Two threads writing one link, one leaving writes owed and one draining, as a send under the
+    /// place and the read's step outside it do, lose no count, and end owing a write exactly
+    /// when the last drain began before the last write left owed. Turned red by a count of the
+    /// writes moved by a load and a store (a lost write), or a drain that stores what it reads as
+    /// it ends.
     #[cfg(feature = "host-lock")]
     #[test]
-    fn a_link_another_thread_holds_reads_as_quiet_and_waits_for_nothing() {
+    fn two_writers_of_a_link_end_with_its_last_owed_write_kept() {
+        extern crate std;
+        use std::sync::atomic::AtomicBool as Flag;
+        const WRITES: u32 = 20_000;
+        for _ in 0..8 {
+            let facts = SiteFacts::new();
+            let writing = Flag::new(true);
+            let last_drain = std::thread::scope(|scope| {
+                let drains = scope.spawn(|| {
+                    let mut last = None;
+                    while writing.load(Ordering::Acquire) {
+                        let mark = facts.write_mark();
+                        facts.wrote(mark, false);
+                        last = Some(mark);
+                    }
+                    last
+                });
+                for _ in 0..WRITES {
+                    facts.wrote(facts.write_mark(), true);
+                }
+                writing.store(false, Ordering::Release);
+                drains.join().expect("the drains end")
+            });
+            assert_eq!(
+                facts.written.load(Ordering::SeqCst),
+                WRITES,
+                "no write left owed is lost"
+            );
+            assert_eq!(
+                facts.owes_write(),
+                last_drain != Some(WriteMark(WRITES)),
+                "owed exactly while the last drain began before the last write"
+            );
+        }
+    }
+
+    /// A read of a link's facts takes nothing of the face's place, so a send that tries the place
+    /// while another thread reads the link over and over never finds it held: a droppable send is
+    /// dropped behind a send alone. Turned red by a fact read through a lend of the place, whose
+    /// lends the tries then meet.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_read_of_a_links_facts_never_holds_its_place_against_a_send() {
+        extern crate std;
+        use std::sync::atomic::AtomicBool as Flag;
+        let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
+        let site = FaceSite::<crate::sync::Shared, ApartParts>::empty();
+        assert!(site.hold(held_parts(&aborted, &ended)).is_none());
+        site.facts().tell(ReadFacts {
+            established: true,
+            ..ReadFacts::default()
+        });
+        let reading = Flag::new(true);
+        let held = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                // SAFETY: the site outlives the handle, in this scope.
+                let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
+                while reading.load(Ordering::Acquire) {
+                    let _ = (at.look(), at.established(), at.node(), at.close_reason());
+                }
+            });
+            let held = (0..20_000)
+                .filter(|_| site.try_lend(|_| ()) == Lend::Held)
+                .count();
+            reading.store(false, Ordering::Release);
+            held
+        });
+        assert_eq!(held, 0, "no try of the place met a read of its link");
+    }
+
+    /// A link whose place another thread holds reads the facts its read told at once, waiting for
+    /// nothing, as it does once that thread lets go of the place. Turned red by a read that waits
+    /// for the place (the test then never ends), or one that reads a held place as quiet.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_link_another_thread_holds_reads_its_told_facts_and_waits_for_nothing() {
         extern crate std;
         use std::sync::Barrier;
         let (aborted, ended) = (Rc::new(Cell::new(0)), Ended::default());
         let site = FaceSite::<crate::sync::Shared, ApartParts>::empty();
         assert!(site.hold(held_parts(&aborted, &ended)).is_none());
+        site.facts().tell(ReadFacts {
+            established: true,
+            holds_input: true,
+            ..ReadFacts::default()
+        });
         // SAFETY: the site outlives the handle, in this frame.
         let at = unsafe { FaceAt::new(&site, Rc::new(HeldEnd::default()), None, None) };
-        assert!(
-            at.holds_input(),
-            "CONTROL: a place no thread holds lends its parts"
-        );
+        assert!(at.holds_input(), "CONTROL: a place no thread holds");
         let (taken, done) = (Barrier::new(2), Barrier::new(2));
         std::thread::scope(|scope| {
             scope.spawn(|| {
@@ -3543,14 +4080,49 @@ mod tests {
                 });
             });
             taken.wait();
-            assert!(
-                !at.holds_input(),
-                "a place another thread holds reads as no input"
-            );
-            assert!(!at.established(), "and as no link established");
+            let read = (at.holds_input(), at.established());
             done.wait();
+            assert_eq!(
+                read,
+                (true, true),
+                "a place another thread holds reads the facts told"
+            );
         });
-        assert!(at.holds_input(), "its parts once the place is let go of");
+        assert!(at.holds_input(), "and once the place is let go of");
+    }
+
+    /// A second teller of a link's read facts while one is in fails a debug build: the facts have
+    /// one writer, the holder of the face's read. Turned red by a tell that does not go through
+    /// the one teller (`SiteFacts::one_teller`).
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "told by the holder of its read alone")]
+    fn a_second_teller_of_a_links_facts_fails_a_debug_build() {
+        let facts = SiteFacts::new();
+        let _first = facts.one_teller();
+        facts.tell(ReadFacts::default());
+    }
+
+    /// A drain told to a count the link's writes never reached fails a debug build: a mark is
+    /// read off its own site's count. Turned red by a `SiteFacts::wrote` that stores any mark.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a count its own site's writes reached")]
+    fn a_drain_to_a_count_never_written_fails_a_debug_build() {
+        let facts = SiteFacts::new();
+        facts.wrote(WriteMark(5), false);
+    }
+
+    /// A link's node told twice fails a debug build: it is told once for each link the place is
+    /// given. Turned red by a `SiteFacts::tell_node` that writes over a node told.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "a link's node is told once")]
+    fn a_links_node_told_twice_fails_a_debug_build() {
+        let facts = SiteFacts::new();
+        let node = SessionZid::from_array([3]);
+        facts.tell_node(&node);
+        facts.tell_node(&node);
     }
 
     /// A face whose link lies in a face's place, kept by the supervisor.

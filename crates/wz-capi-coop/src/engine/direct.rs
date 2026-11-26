@@ -45,7 +45,9 @@ use core::sync::atomic::AtomicBool;
 use wz_runtime_coop::faces::MessageCount;
 #[cfg(not(any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::SiteSend;
-use wz_runtime_coop::faces::{Dial, FaceAt, FaceSite, LinkEnd, SendParts, WireParts};
+use wz_runtime_coop::faces::{
+    Dial, FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
+};
 use wz_runtime_coop::link_cells::{FaceHeld, FaceParts};
 use wz_runtime_coop::session_drive::LinkOpenError;
 #[cfg(not(feature = "threads"))]
@@ -730,6 +732,39 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
     /// When the face is next due by its life or its pump, on the session's clock in microseconds.
     fn due_us(&self) -> u64 {
         self.life_due_us.min(self.pump_due_us)
+    }
+
+    /// Tell `site`, the face's send place, what the step of the pump begun at `mark` left of
+    /// the link, read off the read's own handles on it (the pump's link and the records' actions),
+    /// so a look at the face lends nothing of the place: whether the link owes its stack a write,
+    /// its input and its session's state, and, with `listen`, the node it reached, once. The
+    /// read is the facts' one teller (`SiteFacts`): it holds this slot. Nothing while no pump
+    /// is written.
+    fn tell_facts(&self, site: &DirectSite<L, C>, mark: WriteMark) {
+        let Some(records) = self.records.as_ref() else {
+            return;
+        };
+        // SAFETY: the records are held exactly while the pump is written in its place.
+        let link = unsafe { self.pump.assume_init_ref() }.link();
+        let facts = site.facts();
+        facts.wrote(mark, link.owes_write());
+        let actions = &records.actions;
+        facts.tell(ReadFacts::of_link(
+            link,
+            actions.is_established(),
+            actions.close_reason(),
+        ));
+        // The node a refused handshake's admission was asked about counts as the node its link
+        // reached, as the record's own read of it does (`LinkSession::node`).
+        #[cfg(feature = "listen")]
+        if !facts.has_node() {
+            if let Some(node) = actions
+                .peer_session_zid()
+                .or_else(|| actions.link_admission_node())
+            {
+                facts.tell_node(&node);
+            }
+        }
     }
 
     /// Drop the pump, when one is written, and what its steps are handed: its deadlines go with
@@ -1712,9 +1747,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// part is not held for the step: a send a callback of a record makes inside it, or another
     /// thread makes meanwhile, holds that part itself.
     fn pump_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) {
+        // Read before the step, which writes what the link owes its stack beside the sends.
+        let mark = face.site.facts().write_mark();
         let Some((ended, due_us)) = self.step_pump(slot, turn) else {
             return;
         };
+        slot.tell_facts(&face.site, mark);
         if ended {
             face.end.ended.store(true, Ordering::Release);
             slot.life_due_us = turn.now_us;
@@ -2262,11 +2300,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// `leg` of a droppable publish on `face`, the face at place `at`: its send place tried, and
-    /// while another send holds it, the face passed over or the place waited for as the queue
-    /// profile says (`Self::behind_held_place`). A place lent for a moment (a look at the face's
-    /// link, a debt paid) is tried again: only a send's hold is a transmit lock found taken, as
-    /// zenoh-pico's read takes no transmit lock to look at its transport. `None`, with `leg`
-    /// not run, while the place holds no parts.
+    /// while another holder has it, the face passed over or the place waited for as the queue
+    /// profile says (`Self::behind_held_place`). A look at the face's link lends nothing of the
+    /// place (`SiteFacts`), as zenoh-pico's read takes no transmit lock to look at its transport,
+    /// so a place found held is a transmit lock found taken. What the leg left owed on the link
+    /// is told to the place as the try lets go. `None`, with `leg` not run, while the place
+    /// holds no parts.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(never)]
     fn try_leg(
@@ -2276,28 +2315,29 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Option<Result<usize, FanoutError>> {
         loop {
-            let lent = face.site.try_lend_send(|parts| {
-                // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as
-                // `LinkTx`, a borrow of the lend that ends before it.
-                let wire = unsafe { parts.parts_mut() }.tx().as_ref();
-                let held = HeldSend {
-                    face: &face.end,
-                    wire,
-                    before: None,
+            let lent = face.site.try_lend(|parts| {
+                let mark = face.site.facts().write_mark();
+                let sent = {
+                    // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as
+                    // `LinkTx`, a borrow of the lend that ends before it.
+                    let wire = unsafe { parts.parts_mut() }.tx().as_ref();
+                    let held = HeldSend {
+                        face: &face.end,
+                        wire,
+                        before: None,
+                    };
+                    leg(FaceTx {
+                        held: Some(&held),
+                        alone: Some(at),
+                    })
                 };
-                leg(FaceTx {
-                    held: Some(&held),
-                    alone: Some(at),
-                })
+                face.site.tell_written(mark, parts);
+                sent
             });
             match lent {
                 Lend::Lent(sent) => return Some(sent),
                 Lend::Empty => return None,
                 Lend::Held => {}
-            }
-            if !face.site.held_by_send() {
-                core::hint::spin_loop();
-                continue;
             }
             match self.behind_held_place(at) {
                 Behind::TryAgain => core::hint::spin_loop(),
@@ -2366,23 +2406,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // A place another thread holds is held only where there are other threads.
         if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
             loop {
-                let lent = face.site.try_lend_send(|parts| {
-                    // SAFETY: as in `Self::hold_dial`: `leg` reaches the send part only as
-                    // `LinkTx`, a borrow of the lend that ends before it.
-                    let wire = unsafe { parts.parts_mut() }.tx().as_ref();
-                    leg(FaceTx { wire })
+                let lent = face.site.try_lend(|parts| {
+                    let mark = face.site.facts().write_mark();
+                    let sent = {
+                        // SAFETY: as in `Self::hold_dial`: `leg` reaches the send part only as
+                        // `LinkTx`, a borrow of the lend that ends before it.
+                        let wire = unsafe { parts.parts_mut() }.tx().as_ref();
+                        leg(FaceTx { wire })
+                    };
+                    face.site.tell_written(mark, parts);
+                    sent
                 });
                 match lent {
                     Lend::Lent(sent) => return sent.map(|_| 0),
                     Lend::Empty => return Ok(0),
                     Lend::Held => {}
                 }
-                // A place lent for a moment is tried again, as `Self::try_leg` tries one.
-                if !face.site.held_by_send() {
-                    core::hint::spin_loop();
-                    continue;
-                }
-                // The dial role's face is at the first place.
+                // A look at the link lends nothing of the place, as `Self::try_leg` reads it: a
+                // place found held is a transmit lock found taken. The dial role's face is at the
+                // first place.
                 match self.behind_held_place(0) {
                     Behind::TryAgain => core::hint::spin_loop(),
                     Behind::WaitForSession => break,

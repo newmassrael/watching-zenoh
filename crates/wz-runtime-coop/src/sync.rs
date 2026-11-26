@@ -621,6 +621,12 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         K::with(&self.place, Option::take)
     }
 
+    /// `f` on the place itself, waiting for whatever holds it now: a change of the transport
+    /// made together with what lies beside the place, with no holder of the transport between.
+    pub fn with_place<U>(&self, f: impl FnOnce(&mut Option<X>) -> U) -> U {
+        K::with(&self.place, f)
+    }
+
     /// Lend the transport to `f` when no other thread holds the face now, and wait for nothing:
     /// a droppable send that finds the face held is dropped on this face alone, as zenoh-pico
     /// drops one that finds its transmit lock held
