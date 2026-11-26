@@ -223,6 +223,11 @@ DECLARED: dict[str, tuple[str, str]] = {
         "reaps the build artefacts no gate touches from a checkout's target directory",
         "run by hand, and by scripts/round-runner.sh between rounds",
     ),
+    "scripts/verify-once.sh": (
+        "runs the lanes a change moved as units of bx --checks ci, which no lane may call; "
+        "its planner and receipt store gate_ledger.py is selftested in Layer C0",
+        "run by scripts/land.sh as its lane-gate, and by hand before a landing",
+    ),
     "scripts/with-sdk-env.sh": (
         "runs one command inside a Yocto or QNX SDK the caller provides; no lane has one",
         "run by hand, or by a build machine's job, where the SDK is",

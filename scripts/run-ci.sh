@@ -3094,6 +3094,11 @@ layer_c0_test_discipline() {
     # The table in this gate is what keeps the cheap ones above it.
     _runci_leg hook_default_region_gate.selftest -- python3 scripts/lib/hook_default_region_gate.py --selftest
     _runci_leg hook_default_region_gate --after hook_default_region_gate.selftest -- python3 scripts/lib/hook_default_region_gate.py
+    # R3353 -- the author receipt store and the plans of scripts/verify-once.sh, the
+    # lane-gate of scripts/land.sh. The selftest builds a throwaway repository with a
+    # lane set of its own and drives the plans, the link(2) publication, the refused
+    # receipts and the --all refusal through their states.
+    _runci_leg gate_ledger.selftest -- python3 scripts/lib/gate_ledger.py --selftest
     # R3190 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
     # home-path line and a later commit that removes it leave the tip clean
     # (gate 0b reads the checkout) while the blob is published. The selftest
