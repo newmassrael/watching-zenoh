@@ -6790,17 +6790,17 @@ mod tests {
         let mut registry = SubscriberRegistry::new();
         registry.dispatch_iteration_event(IterationEvent::InPlace(record.past_sender_bound()));
         assert_eq!(
-            (registry.alias_count(), registry.alias_refusals()),
+            (
+                registry.peer().alias_count(),
+                registry.peer().alias_refusals()
+            ),
             (0, 1),
             "past the member's bound: nothing bound, one refusal counted"
         );
         registry.dispatch_iteration_event(IterationEvent::InPlace(record));
         let spaces = registry.mapping_spaces();
         assert_eq!(
-            spaces
-                .peer()
-                .get(&crate::wire_id::sender_peer_key(3, 7))
-                .map(AsRef::<str>::as_ref),
+            spaces.from_sender(3).peer().get(&7),
             Some("theirs/seven"),
             "the member's alias is bound under its tag"
         );
