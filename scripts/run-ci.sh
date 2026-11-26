@@ -2785,6 +2785,11 @@ layer_c0_test_discipline() {
     _runci_leg lane_decl.selftest -- python3 scripts/lib/lane_decl.py --selftest
     _runci_leg lanes_gate.selftest --after lane_decl.selftest,lane_graph.selftest -- python3 scripts/lib/lanes_gate.py --selftest
     _runci_leg lanes_gate --after lanes_gate.selftest -- python3 scripts/lib/lanes_gate.py --check
+    # D(L, t), the digest a lane's verdict is keyed by: its fixtures (each input kind moves it, a
+    # file outside its inputs does not), then every declared lane of this tree, with the opaque ones
+    # counted.
+    _runci_leg lane_digest.selftest --after lanes_gate.selftest -- python3 scripts/lib/lane_digest.py --selftest
+    _runci_leg lane_digest --after lane_digest.selftest,lanes_gate -- python3 scripts/lib/lane_digest.py --check
     # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
     # rows. The mutants themselves run nightly; this is what a push can afford of them.
     _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
