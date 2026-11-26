@@ -533,6 +533,16 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
         !self.alone || self.holds(link)
     }
 
+    /// Whether a publish's leg sent through this hold goes to the session's groups: an
+    /// operation's hold reaches every face and every group, and a publish reaches the groups by
+    /// the one leg of its own that holds no face's place (`CoopEngine::on_faces`), so each group
+    /// is sent a publish once, whatever the faces it is sent on.
+    #[cfg(feature = "group")]
+    #[inline(always)]
+    pub(super) fn reaches_groups(&self) -> bool {
+        !self.alone || self.held.is_none()
+    }
+
     /// Every leg reaches the dial role's face where it is the only face: a publish hands a leg
     /// only to a face whose place it holds.
     #[cfg(not(any(feature = "listen", feature = "group")))]
@@ -2189,8 +2199,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// and let go of before the next face's is taken, so no thread holds two faces' places and a
     /// face that waits holds up no other. `leg` takes the session's lock its own way inside each
     /// hold (one that may be dropped tries it) and reaches the held face alone
-    /// ([`FaceTx::reaches`]). A face whose place holds no parts is not handed to `leg`. What
-    /// the last leg that failed came to, else `Ok(0)`, as a leg's own faces answer.
+    /// ([`FaceTx::reaches`]). A face whose place holds no parts is not handed to `leg`. The
+    /// session's groups are one leg after the faces', which reaches them alone
+    /// ([`FaceTx::reaches_groups`]). What the last leg that failed came to, else `Ok(0)`, as a
+    /// leg's own faces answer.
     // Inlined whole: a publish's path is the one a message takes each time.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
@@ -2212,6 +2224,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             let sent = leg(FaceTx {
                 held: Some(&held),
+                alone: true,
+            });
+            if sent.is_err() {
+                outcome = sent;
+            }
+        }
+        // The groups' leg, after the faces': a group is written on through its own stage, under the
+        // session's lock, so its leg holds no face's place and reaches no face's link.
+        #[cfg(feature = "group")]
+        {
+            let sent = leg(FaceTx {
+                held: None,
                 alone: true,
             });
             if sent.is_err() {

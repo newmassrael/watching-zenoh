@@ -7837,26 +7837,42 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // And each group the session joined, which its task frames and sends.
         #[cfg(feature = "group")]
         let mut outcome = outcome;
+        // Where each face's leg is sent apart, the groups are sent by the one leg that reaches
+        // them (`FaceTx::reaches_groups`).
+        #[cfg(all(feature = "group", not(wz_round)))]
+        let groups: &[_] = if tx.reaches_groups() {
+            &core.transport.groups
+        } else {
+            &[]
+        };
+        #[cfg(all(feature = "group", wz_round))]
+        let groups = &core.transport.groups;
         #[cfg(feature = "group")]
-        for group in &core.transport.groups {
+        for group in groups {
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
                 continue;
             }
             let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
+            let put = GroupPut {
+                keyexpr,
+                wire,
+                payload,
+                kind: opts.kind,
+                meta,
+                reliable: send.reliable,
+                priority: send.priority,
+            };
             // A group whose queue is full runs the session's tasks while it waits for room
             // (`group::SessionPace`): what they dispatch reaches the registry lent for that wait.
-            let sent = core.registry_lend.lend_for(&mut core.session.registry, || {
-                group.publish(GroupPut {
-                    keyexpr,
-                    wire,
-                    payload,
-                    kind: opts.kind,
-                    meta,
-                    reliable: send.reliable,
-                    priority: send.priority,
-                })
-            });
+            // Where the read steps the group's session itself the wait runs no task, and the
+            // registry is lent to none.
+            #[cfg(wz_round)]
+            let sent = core
+                .registry_lend
+                .lend_for(&mut core.session.registry, || group.publish(put));
+            #[cfg(not(wz_round))]
+            let sent = group.publish(put);
             if sent.is_err() {
                 outcome = sent;
             }
