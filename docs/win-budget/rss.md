@@ -201,7 +201,8 @@ The digest is not the conformance digest, which the preset leaves out (arm W nam
 negotiated state there. zenoh-pico answers an InitSyn with an empty cookie
 (`src/transport/unicast/transport.c`, `_z_t_msg_make_init_ack(mode, *local_zid, cookie)` with
 `_z_slice_null()`). Leaving the MAC out would leave the acceptor's state unauthenticated, a change of the
-handshake's guarantee, so it is a decision of its own and not a build switch this lane may flip.
+handshake's guarantee, so it is a decision of its own and not a build switch this lane may flip
+(section 5.2).
 
 **Anonymous memory, W - P = +164 KiB**, read per process from the mappings of the tcp round trip cell
 (`perf.json`, `smaps_client` and `smaps_server`); the other cells read the same within 4 KiB a part:
@@ -230,6 +231,72 @@ share.
 | A2 the open's stack | 28 | `assemble` and `lend_session` build `SessionLent` and the plan in their frames and return them by value. The plan's list of rows (`ArenaPlan::rows`, `ARENA_ROWS` rows of 24 bytes), which only a report reads, is left out of the open's plan: `OpenPlan` is `ArenaPlan<0>`, which lays out every sum and every layer's rows and lists none, so `lend_session`'s frame holds no table of rows and its walk writes none (text falls with the stores); a region's plan is taken on without its list (`ArenaPlan::take_on`). The values the open builds in its frames and moves (`Core` in `assemble`, `SessionLent` out of `lend_session`) stay: writing them field by field where they live cost text in the sessions lane, so only a value whose bytes are measured to dominate a frame is a candidate | the list **landed in this lane**, the frames read again on the merged build (`objdump -d`, as section 5.1 counted them) |
 | A3 `.bss` | 16 | the words every critical section writes laid beside the first thread record, the one the read thread's spawn takes: `wz_host_sync::process_section`, a reentrant lock in one 128-byte-aligned static with the records (`ProcessWords`), which `wz_runtime_coop::cs::host_sys` enters, so the two writes lie on one page; the scout window's buffer and the callback table stay where the linker puts them, and R0 reads whether either is written | **landed in this lane**, R0 reads it |
 | A4 the read thread's malloc arena | -12 | none | a win |
+
+### 5.2 The acceptor's cookie MAC: a smaller one that keeps its guarantee (design; the owner's decision)
+
+Nothing of this section is implemented: each candidate below but C1 changes what the handshake proves
+or how, which is the owner's decision.
+
+**What the MAC proves now.** Under `handshake-cookie = stateless` (the default, `deploy/wz-config.toml`)
+the acceptor mints in its InitAck the state it negotiated from the InitSyn (`AcceptCookieState` of
+`wz_session_core::accept_cookie`: the nonce, whatami, `sn_res`, batch size, zid and the extension
+outcomes) followed by `HMAC-SHA256(key, payload)[..16]` (`COOKIE_TAG_BYTES`,
+`signing_key::cookie_payload_tag`), the key 32 bytes or more drawn from the session's entropy
+(`SigningKey::from_entropy`). At the OpenSyn it checks the tag in constant time over the whole payload
+before it parses a field (`cookie_payload_tag_verify`, `verify_truncated_left`), then the carried nonce
+against the one it drew at this handshake's InitAck and holds (`SessionActions::cookie_valid`,
+`draw_cookie_nonce`), and spends that nonce on admission (`admit_open_syn`). The guarantee: an OpenSyn is
+admitted only when it echoes a cookie this acceptor minted in this handshake, and the negotiated state the
+session runs on is bytes this acceptor minted. A peer that sends a cookie it altered (a larger batch, an
+extension it was refused) is refused.
+
+**What links SHA-256 in the preset's library.** By the code: `sha2` is called in the pico C library's graph
+from `wz_session_core::signing_key` (the HMAC, and `hmac_key_block`, which hashes a key longer than the
+block) and from `credential_identity::zid_from_spki_der`, which only a TLS or QUIC link's credential
+reaches (`peer_credential_zid`; no link of the preset has one); `wz_capi_pico::conformance` is built only
+with `conformance-digest`, which the preset leaves out; the Open body's `initial_sn` takes no hash on a host
+(`initial-sn-compact`, which `os-host` selects, so Keccak is not linked either); the usrpwd method's
+HMAC-SHA3 is `wz-auth`'s, outside this graph. By the symbols: the preset's run (section 5.1, `nm -S` of
+`lib-W`) names `signing_key::compute_hmac_sha256_full` 1,108 bytes, `sha2::sha256::compress256` 11,596 (the
+unrolled software form) and `digest_blocks` 947 (the SHA-NI form `sha2` picks at run time), 13,651 in all.
+No library of the current tree was at hand to read again (the builds run off this machine); R1's next
+`nm -S -C lib-W/libwz_capi_pico.so | grep -E 'sha2|hmac|signing_key|credential_identity|keccak'` confirms
+that the cookie is their one caller. So the 13.7 KB are the cookie's alone.
+
+**What upstream and pico do.** zenoh 1.10.2 (the tree `upstream_root()` resolves on this machine, the
+oracle store's clone of 1.10.2) encrypts its cookie and authenticates nothing:
+`io/zenoh-transport/src/unicast/establishment/cookie.rs` @ `let encrypted = self.cipher.encrypt(buff, self.prng);`
+is AES-128 applied block by block with random padding (`commons/zenoh-crypto/src/cipher.rs` @
+`self.inner.encrypt_block(block);`), one key for the process (`io/zenoh-transport/src/manager.rs` @
+`let cipher = BlockCipher::new(key);`), and the only check of what comes back is the nonce its accept task
+holds (`io/zenoh-transport/src/unicast/establishment/accept.rs` @ `if input.cookie_nonce != cookie.nonce {`).
+Blocks of one cookie can be replaced by blocks of another the same process minted, and a block altered
+decrypts to bytes nobody checks, so upstream's binding is the 64-bit nonce and its state is confidential
+but not authenticated. zenoh-pico sends an empty cookie and holds its state (section 5.1). wz's HMAC is
+the strongest of the three, and none of the candidates below is weaker than upstream's.
+
+**How strong a tag must be.** The key never leaves the acceptor, so a forger can test a guess only online:
+one InitSyn, one InitAck and one OpenSyn per guess, against a nonce drawn for that handshake and spent when
+it admits, each handshake held to `MAX_ACCEPT_PENDING` at once and to the accept's timeout. The tags it
+sees are of cookies minted for its own handshakes, which a PRF tells it nothing about for any other
+payload. For a keyed PRF with a t-bit tag a forgery then succeeds with probability 2^-t per handshake
+(plus the PRF's distinguishing advantage): at a million handshakes a second, 2^64 guesses take about
+585,000 years, so a 64-bit tag is far from the attack's reach and a 128-bit one leaves no margin to
+argue about.
+
+| | cookie | guarantee against C0 | forgery per online attempt | text (estimate; the size ledger measures) | changes |
+|---|---|---|---|---:|---|
+| C0, now | carried state + HMAC-SHA256 truncated to 128 bits | | 2^-128 | 13,651 | |
+| C1 | the same, SHA-256 compiled small: `sha2`'s `force-soft-compact` (sha2 0.10.9 `src/sha256.rs` @ `if #[cfg(feature = "force-soft-compact")] {`, the rolled 64-round loop of `soft_compact.rs`), turned on by a feature of `wz-session-core` that `os-host` selects as it selects `initial-sn-compact`, and `opt-level = "s"` for the `sha2` package in the C library's profiles, as `wz-app-schema` has | identical, bit for bit (the RFC 4231 vectors of `signing_key`'s tests hold) | 2^-128 | about 2,000 (the HMAC and one rolled compression; the unrolled and SHA-NI forms leave) | none on the wire; the four or five compressions of a mint and of a check run rolled, microseconds a handshake; a graph that builds the analyzer's TLS key schedule beside `os-host` in one cargo invocation would share the slower form, so the feature stays off every other graph |
+| C2 | carried state + SipHash-2-4 (Aumasson and Bernstein, 2012) under 128 bits of the key, spelled in `wz-session-core` as `initial_sn.rs` spells its sponge | the same binding and the same authentication, by a PRF with a 64-bit tag | 2^-64 | about 400 | the cookie 8 bytes shorter; the key read as 128 bits |
+| C3 | carried state + KMAC128 (NIST SP 800-185) over Keccak-f[1600] | the same, 128-bit tag | 2^-128 | about 2,500 (the permutation, 2.2 KB, is not linked on a host now) | a second construction beside the MCU acceptor's `initial_sn` sponge, which would share it there |
+| C4 | held state + a 128-bit random token: the acceptor keeps what it negotiated, as it already does under `fixed`, and the cookie is 16 bytes drawn from the session's entropy at the InitAck, compared in constant time with the held copy and spent on admission | the same binding (only the holder of this handshake's InitAck can echo it); the state is authenticated by never leaving the acceptor | 2^-128 | 0 of the 13,651 left in a build whose domain leaves `stateless` out | the acceptor holds the negotiated slots through the handshake, bounded by `MAX_ACCEPT_PENDING` as under `fixed`: the property `accept_cookie` bought (carried, not held) is given up, while the session object and the nonce are held across the handshake either way (`cookie_valid`); a third value of `handshake-cookie` or a new form of `stateless`, an opaque cookie that upstream's and pico's dialers echo as they echo any |
+
+**Recommendation.** C1 first: it moves no guarantee and no byte of the wire, and the ledger reads what it
+takes. The rest of the gap, C1's remainder, is then the owner's choice between C4 (no MAC; the acceptor
+holds a few tens of bytes for each handshake in flight, as pico and `fixed` do, and keeps `stateless`'s
+binding), C2 (the smallest MAC, a 64-bit tag) and C3 (a 128-bit tag at about C1's size). Each is a
+change to the handshake's proof, so none is a build switch this lane flips.
 
 ## 6. Measurement cells
 
