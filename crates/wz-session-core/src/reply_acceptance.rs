@@ -227,10 +227,51 @@ pub fn reply_keyexpr_intersects(query_keyexpr: &str, reply: &str) -> bool {
     keyexpr_match::keyexpr_intersects_text(reply, query_keyexpr)
 }
 
+/// [`reply_keyexpr_intersects`] for a reply whose key was judged canon: a reply keyed with its
+/// query's own text is covered with nothing split, since a key in canon form intersects itself;
+/// any other is walked as [`reply_keyexpr_intersects`] walks it. A responder answers with the
+/// query's own key more often than with any other.
+pub fn canon_reply_intersects(
+    query_keyexpr: &str,
+    reply: crate::keyexpr_canon::CanonKey<'_>,
+) -> bool {
+    reply.as_str() == query_keyexpr || reply_keyexpr_intersects(query_keyexpr, reply.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::selector_params::ANYKE_PARAM;
+
+    /// A reply keyed with its query's own canon text is covered with no walk of either key, and
+    /// any other reply is judged as [`reply_keyexpr_intersects`] judges it. Turned red by a
+    /// shortcut that walks the equal text, or that answers another text as the walk does not.
+    #[test]
+    fn a_reply_keyed_as_its_query_is_covered_with_nothing_split() {
+        use crate::keyexpr_canon::{CanonKey, KeyexprDialect};
+        use crate::keyexpr_match::INTERSECT_WALKS;
+        fn key(text: &str) -> CanonKey<'_> {
+            CanonKey::judge(text, KeyexprDialect::Pico).expect("canon")
+        }
+        let walks = || INTERSECT_WALKS.with(|count| count.get());
+        let before = walks();
+        assert!(canon_reply_intersects("thr", key("thr")));
+        assert!(canon_reply_intersects("demo/**", key("demo/**")));
+        assert_eq!(walks(), before, "the query's own key is not walked");
+        for (query, reply) in [
+            ("demo/**", "demo/a/b"),
+            ("demo/*", "demo/a"),
+            ("demo/a", "demo/b"),
+            ("demo/**", "other/a"),
+        ] {
+            assert_eq!(
+                canon_reply_intersects(query, key(reply)),
+                reply_keyexpr_intersects(query, reply),
+                "{query} {reply}"
+            );
+        }
+        assert!(walks() > before, "a reply keyed otherwise is walked");
+    }
 
     #[test]
     fn the_default_mode_is_the_guarantee_not_the_opt_out() {

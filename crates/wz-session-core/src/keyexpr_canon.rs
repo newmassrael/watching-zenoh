@@ -324,6 +324,37 @@ pub fn is_canon(input: &str, dialect: KeyexprDialect) -> bool {
     is_plain_canon(input) || is_canon_walked(input, dialect)
 }
 
+/// A key text judged to be in canon form: made by [`CanonKey::judge`], which judges it, so a door
+/// handed one does not judge the text again. Where a holder keeps the text and its judgement apart
+/// (a query's key, judged the first time a reply names it), [`CanonKey::judged_before`] makes it
+/// again from the text without the walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonKey<'a> {
+    text: &'a str,
+}
+
+impl<'a> CanonKey<'a> {
+    /// `text` as a canon key of `dialect`, or `None` where [`is_canon`] refuses it.
+    pub fn judge(text: &'a str, dialect: KeyexprDialect) -> Option<Self> {
+        is_canon(text, dialect).then_some(Self { text })
+    }
+
+    /// `text`, which a [`Self::judge`] took before, made a canon key again without the walk.
+    ///
+    /// # Safety
+    /// `text` is the text of a key [`Self::judge`] returned, or holds the same bytes: a holder of
+    /// a key reads it as canon and judges nothing, so a text not in canon form passed here would
+    /// go where every door refuses one.
+    pub const unsafe fn judged_before(text: &'a str) -> Self {
+        Self { text }
+    }
+
+    /// The key's text.
+    pub const fn as_str(self) -> &'a str {
+        self.text
+    }
+}
+
 /// [`is_canon`] as the walk answers it, for any text.
 fn is_canon_walked(input: &str, dialect: KeyexprDialect) -> bool {
     if exceeds_byte_bound::<Profile, { caps::MAX_KEYEXPR_BYTES }>(input) {
@@ -2160,6 +2191,52 @@ mod tests {
         ] {
             assert!(!is_plain_canon(text), "{text:?}");
         }
+    }
+
+    /// A canon key is made of exactly the texts the canon check takes, its text as it was given.
+    /// Turned red by a judgement that takes a text the check refuses (`a//b`, `a/**/*`).
+    #[test]
+    fn a_canon_key_is_made_of_a_text_the_check_takes() {
+        for text in ["thr", "a/b", "a/*/**"] {
+            let key = CanonKey::judge(text, KeyexprDialect::Pico).expect("canon");
+            assert_eq!(key.as_str(), text);
+        }
+        for text in ["", "a//b", "a/**/*", "a/", "a#b"] {
+            assert_eq!(
+                CanonKey::judge(text, KeyexprDialect::Pico),
+                None,
+                "{text:?}"
+            );
+        }
+        // SAFETY: `a/b` is the text of the key judged above.
+        let again = unsafe { CanonKey::judged_before("a/b") };
+        assert_eq!(Some(again), CanonKey::judge("a/b", KeyexprDialect::Pico));
+    }
+
+    /// Every text judged canon intersects itself, in both dialects, which is what lets a reply
+    /// keyed with its query's own canon key be covered with nothing split
+    /// (`crate::reply_acceptance::canon_reply_intersects`). Turned red by a canon check that takes
+    /// a text the matchers refuse (an empty chunk, or more chunks than the fixed backing holds).
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_canon_key_intersects_itself() {
+        let mut canon = 0usize;
+        let mut agree = |text: &str| {
+            for dialect in [KeyexprDialect::Pico, KeyexprDialect::ZenohC] {
+                if let Some(key) = CanonKey::judge(text, dialect) {
+                    canon = canon.saturating_add(1);
+                    assert!(
+                        crate::keyexpr_match::keyexpr_intersects(key.as_str(), key.as_str()),
+                        "{text:?} {dialect:?}"
+                    );
+                }
+            }
+        };
+        for text in canon_corpus() {
+            agree(&text);
+        }
+        walk_alphabet(&mut agree);
+        assert!(canon > 0);
     }
 
     /// Each judgement of a text answers as the walk answers it, in both dialects: the canon check,
