@@ -18,7 +18,7 @@
 //! (`wz_capi_c_event_release`), and that is what makes room.
 //!
 //! What the log does is [`wz_capi_port::observation::events`]'s, which the pico ABI's
-//! `wz_ext_event_*` doors act on too; this file is this ABI's names and result codes for it.
+//! `zext_event_*` doors act on too; this file is this ABI's names and result codes for it.
 
 use wz_capi_port::observation::events::{self, Read};
 

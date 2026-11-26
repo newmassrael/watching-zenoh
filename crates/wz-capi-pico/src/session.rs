@@ -375,7 +375,7 @@ fn compose_snapshots(
 /// The snapshots `z_open` opens `cfg` under, its limits composed over `stated`, which an open
 /// hands as [`Stated::OPENING`]: the policies its doors state over the build's, returned, and the
 /// limits they state written over `stated`, as `compose_snapshots` composes both, and over them
-/// the counts its [`WZ_EXT_CONFIG_LIMITS_KEY`] states, which every build reads, the held values
+/// the counts its [`ZEXT_CONFIG_LIMITS_KEY`] states, which every build reads, the held values
 /// the process pools reserve at the first open among them; `Z_ERR_CONFIG_INVALID_VALUE` when the
 /// build refuses any of it, and then what was written is no resolution, which the caller drops.
 ///
@@ -385,14 +385,14 @@ fn compose_snapshots(
 /// through each layer.
 ///
 /// [`Stated::OPENING`]: crate::config_limits::Stated::OPENING
-/// [`WZ_EXT_CONFIG_LIMITS_KEY`]: crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY
+/// [`ZEXT_CONFIG_LIMITS_KEY`]: crate::config_limits::ZEXT_CONFIG_LIMITS_KEY
 #[cfg_attr(feature = "device-requires", inline(never))]
 pub(crate) fn resolve_open(
     cfg: &ConfigState,
     stated: &mut crate::config_limits::Stated,
 ) -> Result<SessionPolicy, ZResult> {
     let policy = compose_snapshots(&cfg.policies, &mut stated.limits)?;
-    let text = cfg.get(crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY);
+    let text = cfg.get(crate::config_limits::ZEXT_CONFIG_LIMITS_KEY);
     crate::config_limits::state_over(text, stated)?;
     Ok(policy)
 }
@@ -757,7 +757,7 @@ pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZR
 
 /// The files [`resolve_tls_config`] reads: each of its keys that names the PEM by path, the
 /// client certificate's two only when mTLS is on, as it reads them. Read by
-/// `wz_ext_config_device_requires` only, so it is in a build with `device-requires`.
+/// `zext_config_device_requires` only, so it is in a build with `device-requires`.
 #[cfg(all(
     feature = "device-requires",
     any(
@@ -1529,7 +1529,7 @@ unsafe fn open_request(
 }
 
 /// What a config tells pico's open, read once for [`z_open`] and for the door that describes the
-/// open (`wz_ext_config_device_requires`), so the two cannot read a config differently: the
+/// open (`zext_config_device_requires`), so the two cannot read a config differently: the
 /// locator it dials, the one it listens on, and the role it dials as. The texts are the config's
 /// own, read where it holds them.
 pub(crate) struct OpenConfig<'cfg> {

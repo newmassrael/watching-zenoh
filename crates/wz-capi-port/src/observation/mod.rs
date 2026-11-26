@@ -5,7 +5,7 @@
 //!
 //! The four instruments (the clock a program registers, the event log, the supervisor and the
 //! resource snapshot) are wz's own: no upstream library has a counterpart, so a C program reaches
-//! them through doors that each ABI names for itself (`wz_ext_*` in the pico ABI, `wz_capi_c_*`
+//! them through doors that each ABI names for itself (`zext_*` in the pico ABI, `wz_capi_c_*`
 //! in the zenoh-c one). The doors are thin on purpose. A door checks its pointers, calls the
 //! function here and turns the answer into its ABI's result code; what the instrument does is
 //! written once, so the ABIs cannot come to disagree about it.

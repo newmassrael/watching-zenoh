@@ -190,32 +190,32 @@ pub mod keyexpr {
 /// The versioned extension interface (`crate::ext_interface`).
 pub mod ext_interface {
     /// The major version of the interface these doors were written against.
-    pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
+    pub const ZEXT_INTERFACE_MAJOR: u16 = 1;
     /// The minor version of the interface these doors were written against.
-    pub const WZ_EXT_INTERFACE_MINOR: u16 = 3;
+    pub const ZEXT_INTERFACE_MINOR: u16 = 3;
 
     /// `replay_reply_shape`: one reply per frame, as it was sent.
-    pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
+    pub const ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
     /// `replay_reply_shape`: each frame as the pieces of its segment profile.
-    pub const WZ_EXT_REPLAY_SHAPE_SEGMENTED: u8 = 1;
+    pub const ZEXT_REPLAY_SHAPE_SEGMENTED: u8 = 1;
     /// `replay_live_before_answer`: a live sample is handed on as it arrives.
-    pub const WZ_EXT_REPLAY_LIVE_DELIVER: u8 = 0;
+    pub const ZEXT_REPLAY_LIVE_DELIVER: u8 = 0;
     /// `replay_live_before_answer`: live samples wait for the first round.
-    pub const WZ_EXT_REPLAY_LIVE_HOLD_BACK: u8 = 1;
+    pub const ZEXT_REPLAY_LIVE_HOLD_BACK: u8 = 1;
 
-    /// The version of the interface (`wz_ext_interface_version_t`).
+    /// The version of the interface (`zext_interface_version_t`).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct wz_ext_interface_version_t {
+    pub struct zext_interface_version_t {
         pub struct_size: u32,
         pub major: u16,
         pub minor: u16,
     }
 
-    /// What the core says of a session (`wz_ext_session_facts_t`).
+    /// What the core says of a session (`zext_session_facts_t`).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct wz_ext_session_facts_t {
+    pub struct zext_session_facts_t {
         pub struct_size: u32,
         pub closed: u8,
         pub replay_reply_shape: u8,
@@ -227,10 +227,10 @@ pub mod ext_interface {
         pub replay_depth_max: usize,
     }
 
-    /// What the core says of the process's runtime (`wz_ext_runtime_facts_t`).
+    /// What the core says of the process's runtime (`zext_runtime_facts_t`).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct wz_ext_runtime_facts_t {
+    pub struct zext_runtime_facts_t {
         pub struct_size: u32,
         pub reserved: u32,
         pub message_catalog_entries: usize,
@@ -250,24 +250,23 @@ pub mod ext_interface {
         link(name = "wz_capi_pico", kind = "raw-dylib")
     )]
     extern "C" {
-        pub fn wz_ext_interface_version(
-            out: *mut wz_ext_interface_version_t,
-        ) -> crate::result::ZResult;
-        pub fn wz_ext_interface_major_1() -> u16;
+        pub fn zext_interface_version(out: *mut zext_interface_version_t)
+            -> crate::result::ZResult;
+        pub fn zext_interface_major_1() -> u16;
         #[cfg(feature = "query")]
-        pub fn wz_ext_interface_session_facts(
+        pub fn zext_interface_session_facts(
             session: *const super::session::z_loaned_session_t,
-            out: *mut wz_ext_session_facts_t,
+            out: *mut zext_session_facts_t,
         ) -> crate::result::ZResult;
-        pub fn wz_ext_interface_runtime_facts(
-            out: *mut wz_ext_runtime_facts_t,
+        pub fn zext_interface_runtime_facts(
+            out: *mut zext_runtime_facts_t,
         ) -> crate::result::ZResult;
-        pub fn wz_ext_interface_bytes_view(
+        pub fn zext_interface_bytes_view(
             bytes: *const super::abi::z_loaned_bytes_t,
             data: *mut *const u8,
             len: *mut usize,
         ) -> crate::result::ZResult;
-        pub fn wz_ext_interface_run_in_callback(
+        pub fn zext_interface_run_in_callback(
             body: Option<unsafe extern "C" fn(context: *mut core::ffi::c_void)>,
             context: *mut core::ffi::c_void,
         ) -> crate::result::ZResult;
@@ -278,15 +277,15 @@ pub mod ext_interface {
 #[cfg(feature = "event-ring")]
 pub mod event_log {
     /// `level` of an event the library reports.
-    pub const WZ_EXT_EVENT_LEVEL_LIBRARY: u8 = 255;
+    pub const ZEXT_EVENT_LEVEL_LIBRARY: u8 = 255;
     /// `source` of an event that says an instance key dropped a sample.
-    pub const WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED: u16 = 0xFF02;
+    pub const ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED: u16 = 0xFF02;
     /// The first argument of that event: the key field did not decode.
-    pub const WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE: u64 = 0;
+    pub const ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE: u64 = 0;
     /// The first argument of that event: the key field is absent.
-    pub const WZ_EXT_EVENT_INSTANCE_KEY_ABSENT: u64 = 1;
+    pub const ZEXT_EVENT_INSTANCE_KEY_ABSENT: u64 = 1;
     /// The first argument of that event: the key is not one the program listed.
-    pub const WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED: u64 = 2;
+    pub const ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED: u64 = 2;
 
     #[cfg_attr(
         all(not(test), windows, target_arch = "x86"),
@@ -301,7 +300,7 @@ pub mod event_log {
         link(name = "wz_capi_pico", kind = "raw-dylib")
     )]
     extern "C" {
-        pub fn wz_ext_event_emit(
+        pub fn zext_event_emit(
             level: u8,
             source: u16,
             args: *const u64,
@@ -646,7 +645,7 @@ pub mod get_to_peer {
         link(name = "wz_capi_pico", kind = "raw-dylib")
     )]
     extern "C" {
-        pub fn wz_ext_get_to_peer(
+        pub fn zext_get_to_peer(
             session: *const super::session::z_loaned_session_t,
             keyexpr: *const super::abi::z_loaned_keyexpr_t,
             parameters: *const core::ffi::c_char,
@@ -662,18 +661,18 @@ pub mod get_to_peer {
 #[cfg(feature = "replay-cache")]
 pub mod decl_watch {
     /// `kind` of an event: the peer declared the entity.
-    pub const WZ_EXT_DECL_DECLARED: u8 = 0;
+    pub const ZEXT_DECL_DECLARED: u8 = 0;
     /// `kind` of an event: the peer retracted the entity.
-    pub const WZ_EXT_DECL_UNDECLARED: u8 = 1;
+    pub const ZEXT_DECL_UNDECLARED: u8 = 1;
     /// `kind` of an event: the watch lost events, `id` of them (added in minor version 3).
-    pub const WZ_EXT_DECL_LOST: u8 = 3;
+    pub const ZEXT_DECL_LOST: u8 = 3;
     /// `entity` of a watch and an event: a queryable.
-    pub const WZ_EXT_DECL_QUERYABLE: u8 = 1;
+    pub const ZEXT_DECL_QUERYABLE: u8 = 1;
 
-    /// One declaration or retraction a watch is told (`wz_ext_decl_event_t`).
+    /// One declaration or retraction a watch is told (`zext_decl_event_t`).
     #[repr(C)]
     #[derive(Debug, Clone, Copy)]
-    pub struct wz_ext_decl_event_t {
+    pub struct zext_decl_event_t {
         pub kind: u8,
         pub entity: u8,
         pub zid_len: u8,
@@ -685,9 +684,9 @@ pub mod decl_watch {
         pub zid: [u8; wz_session_core::session_zid::ZID_MAX],
     }
 
-    /// An owned watch (`wz_ext_owned_decl_watch_t`).
+    /// An owned watch (`zext_owned_decl_watch_t`).
     #[repr(C)]
-    pub struct wz_ext_owned_decl_watch_t {
+    pub struct zext_owned_decl_watch_t {
         pub _val: *mut core::ffi::c_void,
     }
 
@@ -704,19 +703,19 @@ pub mod decl_watch {
         link(name = "wz_capi_pico", kind = "raw-dylib")
     )]
     extern "C" {
-        pub fn wz_ext_decl_watch_declare(
+        pub fn zext_decl_watch_declare(
             session: *const super::session::z_loaned_session_t,
-            watch: *mut wz_ext_owned_decl_watch_t,
+            watch: *mut zext_owned_decl_watch_t,
             entity: u8,
             call: Option<
                 unsafe extern "C" fn(
                     context: *mut core::ffi::c_void,
-                    event: *const wz_ext_decl_event_t,
+                    event: *const zext_decl_event_t,
                 ),
             >,
             drop: Option<unsafe extern "C" fn(context: *mut core::ffi::c_void)>,
             context: *mut core::ffi::c_void,
         ) -> crate::result::ZResult;
-        pub fn wz_ext_decl_watch_drop(watch: *mut wz_ext_owned_decl_watch_t);
+        pub fn zext_decl_watch_drop(watch: *mut zext_owned_decl_watch_t);
     }
 }

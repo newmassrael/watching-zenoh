@@ -4,7 +4,7 @@
  *
  * A network stack of the program's own under the sessions: the guide to plugging a TCP/IP
  * stack that is not the operating system's into the library, through the program's transport
- * (wz_ext_transport_*; wz_ext.h, the section "the program's transport", states the contract).
+ * (zext_transport_*; wz_ext.h, the section "the program's transport", states the contract).
  *
  * The file is in three parts. A program that brings its own stack keeps the shape of the second
  * and puts its stack in place of the first:
@@ -18,7 +18,7 @@
  *      nothing until the wire has carried some of it.
  *   2. THE GLUE. The calls the library makes into the stack (open, send, close, drained, drop)
  *      and the three the stack makes into the library when something happens on the wire
- *      (wz_ext_transport_received, _event and _accepted). This is the part to write for a real
+ *      (zext_transport_received, _event and _accepted). This is the part to write for a real
  *      stack: open is its connect, bind or group join; send its non-blocking send; close its
  *      close; and its receive, connected and writable callbacks become the calls into the
  *      library.
@@ -36,7 +36,7 @@
  *   - a datagram is taken whole or not at all;
  *   - a connect that needs a round trip answers WOULD_BLOCK, then reports CONNECTED, or CLOSED
  *     when it is refused;
- *   - bytes a session refuses (WZ_EXT_ERR_LINK_FULL) stay in the stack until it says drained;
+ *   - bytes a session refuses (ZEXT_ERR_LINK_FULL) stay in the stack until it says drained;
  *   - the stack never holds its own lock across a call into the library: such a call may run
  *     the program's close or drained before it returns, and those take that lock.
  *
@@ -64,10 +64,10 @@
 
 /* The calls into the library the stack makes when something happens on the wire; part 2
  * defines them. A real stack makes them from its receive, connected and writable callbacks. */
-static z_result_t upcall_received(int host, wz_ext_link_t link, const uint8_t *data, size_t len,
+static z_result_t upcall_received(int host, zext_link_t link, const uint8_t *data, size_t len,
                                   const char *source);
-static z_result_t upcall_accepted(int host, wz_ext_link_t listener, const char *remote, wz_ext_link_t *out);
-static void upcall_event(int host, wz_ext_link_t link, wz_ext_link_event_t event);
+static z_result_t upcall_accepted(int host, zext_link_t listener, const char *remote, zext_link_t *out);
+static void upcall_event(int host, zext_link_t link, zext_link_event_t event);
 
 /* A bounded byte queue: a stream end's window, or a datagram end's queue of length-prefixed
  * datagrams. */
@@ -148,7 +148,7 @@ typedef struct {
     int host;
     /* The session's name for this end, as a stack keeps a pointer of its user's with each
      * socket; 0 until the library names it. */
-    wz_ext_link_t link;
+    zext_link_t link;
     int peer;          /* the other end of a stream or datagram pair, or -1 */
     int blocked;       /* a send found no room: WRITABLE is owed */
     int full;          /* the session refused bytes for this end: wait for drained */
@@ -161,7 +161,7 @@ typedef struct {
 static struct {
     z_owned_mutex_t lock;
     wire_end_t end[ENDS];
-    wz_ext_owned_transport_t transport[HOSTS];
+    zext_owned_transport_t transport[HOSTS];
     int host_id[HOSTS];
     unsigned next_port;
     int stopping;
@@ -192,7 +192,7 @@ static int read_stat(const int *stat) {
 
 /* A new end of `host` in `state`, or -1 when the stack is out of ends or memory. Called with the
  * lock held. */
-static int end_new(int host, int role, wz_ext_link_t link, int state) {
+static int end_new(int host, int role, zext_link_t link, int state) {
     for (int i = 0; i < ENDS; i++) {
         wire_end_t *e = &net.end[i];
         if (e->state != END_FREE) continue;
@@ -217,7 +217,7 @@ static void end_release(int i) {
 }
 
 /* The end `host`'s session names `link`, or -1. Called with the lock held. */
-static int end_find(int host, wz_ext_link_t link) {
+static int end_find(int host, zext_link_t link) {
     for (int i = 0; i < ENDS; i++) {
         if (net.end[i].state != END_FREE && net.end[i].host == host && net.end[i].link == link && link != 0) {
             return i;
@@ -238,7 +238,7 @@ static int end_listener(int role, const char *locator) {
 
 /* Take `n` bytes out of end `i`'s queue: the link to report WRITABLE on when a send of it waits
  * for room, else 0. Called with the lock held. */
-static wz_ext_link_t end_took(int i, size_t n) {
+static zext_link_t end_took(int i, size_t n) {
     wire_end_t *e = &net.end[i];
     ring_take(&e->out, n);
     if (!e->blocked || e->state != END_OPEN) return 0;
@@ -262,10 +262,10 @@ static void wire_connect(int i) {
     if (a < 0) {
         /* Refused. The stack lets the end go itself, whether or not the session then closes
          * the link whose open failed. */
-        wz_ext_link_t refused = dial->link;
+        zext_link_t refused = dial->link;
         dial->state = END_CLOSED;
         net_unlock();
-        upcall_event(dial_host, refused, WZ_EXT_LINK_EVENT_CLOSED);
+        upcall_event(dial_host, refused, ZEXT_LINK_EVENT_CLOSED);
         return;
     }
     wire_end_t *acc = &net.end[a];
@@ -273,17 +273,17 @@ static void wire_connect(int i) {
     dial->peer = a;
     snprintf(acc->address, sizeof acc->address, "%s", net.end[l].locator);
     int listen_host = net.end[l].host;
-    wz_ext_link_t listener = net.end[l].link;
+    zext_link_t listener = net.end[l].link;
     char remote[NAME_LEN];
     snprintf(remote, sizeof remote, "%s", dial->address);
     net_unlock();
 
-    wz_ext_link_t accepted = 0;
+    zext_link_t accepted = 0;
     z_result_t rc = upcall_accepted(listen_host, listener, remote, &accepted);
 
     net_lock();
-    wz_ext_link_t connected = 0;
-    wz_ext_link_t refused = 0;
+    zext_link_t connected = 0;
+    zext_link_t refused = 0;
     if (rc == Z_OK) {
         acc->link = accepted;
         acc->state = END_OPEN;
@@ -302,8 +302,8 @@ static void wire_connect(int i) {
         }
     }
     net_unlock();
-    if (connected != 0) upcall_event(dial_host, connected, WZ_EXT_LINK_EVENT_CONNECTED);
-    if (refused != 0) upcall_event(dial_host, refused, WZ_EXT_LINK_EVENT_CLOSED);
+    if (connected != 0) upcall_event(dial_host, connected, ZEXT_LINK_EVENT_CONNECTED);
+    if (refused != 0) upcall_event(dial_host, refused, ZEXT_LINK_EVENT_CLOSED);
 }
 
 /* Carry up to WIRE_CHUNK bytes of stream end `i` to its peer. */
@@ -325,25 +325,25 @@ static void carry_stream(int i) {
     size_t n = e->out.len < WIRE_CHUNK ? e->out.len : WIRE_CHUNK;
     ring_peek(&e->out, 0, carried, n);
     int to_host = net.end[p].host;
-    wz_ext_link_t to_link = net.end[p].link;
+    zext_link_t to_link = net.end[p].link;
     unsigned drained_seen = net.end[p].drained;
     net_unlock();
 
     z_result_t rc = upcall_received(to_host, to_link, carried, n, NULL);
 
     net_lock();
-    wz_ext_link_t writable = 0;
-    if (rc == WZ_EXT_ERR_LINK_FULL) {
+    zext_link_t writable = 0;
+    if (rc == ZEXT_ERR_LINK_FULL) {
         /* The session holds all it takes: the bytes stay here until it says drained. A drained
          * that came while this call was out means it takes bytes again already. */
         net.link_full++;
         if (net.end[p].drained == drained_seen) net.end[p].full = 1;
-    } else if (rc != WZ_EXT_ERR_LINK_NOT_OPEN) {
+    } else if (rc != ZEXT_ERR_LINK_NOT_OPEN) {
         /* Carried, or the other end is gone: either way the bytes have left this end. */
         writable = end_took(i, n);
     }
     net_unlock();
-    if (writable != 0) upcall_event(host, writable, WZ_EXT_LINK_EVENT_WRITABLE);
+    if (writable != 0) upcall_event(host, writable, ZEXT_LINK_EVENT_WRITABLE);
 }
 
 /* Carry the oldest datagram of datagram end `i` to its peer. The first datagram to a listening
@@ -359,9 +359,9 @@ static void carry_datagram(int i) {
         int a = l < 0 ? -1 : end_new(net.end[l].host, ROLE_DATAGRAM, 0, END_ACCEPTING);
         if (a < 0) {
             /* Nobody listens there: the datagram is lost, as one sent to no socket is. */
-            wz_ext_link_t writable = end_took(i, 4 + n);
+            zext_link_t writable = end_took(i, 4 + n);
             net_unlock();
-            if (writable != 0) upcall_event(host, writable, WZ_EXT_LINK_EVENT_WRITABLE);
+            if (writable != 0) upcall_event(host, writable, ZEXT_LINK_EVENT_WRITABLE);
             return;
         }
         wire_end_t *acc = &net.end[a];
@@ -369,12 +369,12 @@ static void carry_datagram(int i) {
         e->peer = a;
         snprintf(acc->address, sizeof acc->address, "%s", net.end[l].locator);
         int listen_host = net.end[l].host;
-        wz_ext_link_t listener = net.end[l].link;
+        zext_link_t listener = net.end[l].link;
         char remote[NAME_LEN];
         snprintf(remote, sizeof remote, "%s", e->address);
         net_unlock();
 
-        wz_ext_link_t accepted = 0;
+        zext_link_t accepted = 0;
         z_result_t rc = upcall_accepted(listen_host, listener, remote, &accepted);
 
         net_lock();
@@ -391,9 +391,9 @@ static void carry_datagram(int i) {
     }
     wire_end_t *to = &net.end[p];
     if (to->state != END_OPEN) {
-        wz_ext_link_t writable = end_took(i, 4 + n);
+        zext_link_t writable = end_took(i, 4 + n);
         net_unlock();
-        if (writable != 0) upcall_event(host, writable, WZ_EXT_LINK_EVENT_WRITABLE);
+        if (writable != 0) upcall_event(host, writable, ZEXT_LINK_EVENT_WRITABLE);
         return;
     }
     if (to->full) {
@@ -402,7 +402,7 @@ static void carry_datagram(int i) {
     }
     ring_peek(&e->out, 4, carried, n);
     int to_host = to->host;
-    wz_ext_link_t to_link = to->link;
+    zext_link_t to_link = to->link;
     unsigned drained_seen = to->drained;
     char source[NAME_LEN];
     snprintf(source, sizeof source, "%s", e->address);
@@ -412,21 +412,21 @@ static void carry_datagram(int i) {
     z_result_t rc = upcall_received(to_host, to_link, carried, n, source);
 
     net_lock();
-    wz_ext_link_t writable = 0;
-    if (rc == WZ_EXT_ERR_LINK_FULL) {
+    zext_link_t writable = 0;
+    if (rc == ZEXT_ERR_LINK_FULL) {
         net.link_full++;
         if (net.end[p].drained == drained_seen) net.end[p].full = 1;
-    } else if (rc != WZ_EXT_ERR_LINK_NOT_OPEN) {
+    } else if (rc != ZEXT_ERR_LINK_NOT_OPEN) {
         writable = end_took(i, 4 + n);
     }
     net_unlock();
-    if (writable != 0) upcall_event(host, writable, WZ_EXT_LINK_EVENT_WRITABLE);
+    if (writable != 0) upcall_event(host, writable, ZEXT_LINK_EVENT_WRITABLE);
 }
 
 /* Carry the oldest datagram of group end `i` to every other member of its group, with the
  * address of the member that sent it, which is how the members are told apart. */
 static void carry_group(int i) {
-    wz_ext_link_t links[ENDS];
+    zext_link_t links[ENDS];
     int hosts[ENDS];
     int members = 0;
     char source[NAME_LEN];
@@ -450,7 +450,7 @@ static void carry_group(int i) {
     for (int k = 0; k < members; k++) {
         /* A member whose session holds all it takes loses the datagram, as a socket whose
          * buffer is full loses one; a group has no flow control. */
-        if (upcall_received(hosts[k], links[k], carried, n, source) == WZ_EXT_ERR_LINK_FULL) {
+        if (upcall_received(hosts[k], links[k], carried, n, source) == ZEXT_ERR_LINK_FULL) {
             net_lock();
             net.group_losses++;
             net_unlock();
@@ -458,9 +458,9 @@ static void carry_group(int i) {
     }
 
     net_lock();
-    wz_ext_link_t writable = end_took(i, 4 + n);
+    zext_link_t writable = end_took(i, 4 + n);
     net_unlock();
-    if (writable != 0) upcall_event(host, writable, WZ_EXT_LINK_EVENT_WRITABLE);
+    if (writable != 0) upcall_event(host, writable, ZEXT_LINK_EVENT_WRITABLE);
 }
 
 /* An end the session closed is let go once the stack is done with it: a stream's queued bytes
@@ -479,7 +479,7 @@ static void wire_finish(int i) {
         net_unlock();
         return;
     }
-    wz_ext_link_t tell = 0;
+    zext_link_t tell = 0;
     int tell_host = 0;
     if (p >= 0 && net.end[p].state != END_FREE && net.end[p].peer == i) {
         net.end[p].peer = -1;
@@ -490,7 +490,7 @@ static void wire_finish(int i) {
     }
     end_release(i);
     net_unlock();
-    if (tell != 0) upcall_event(tell_host, tell, WZ_EXT_LINK_EVENT_CLOSED);
+    if (tell != 0) upcall_event(tell_host, tell, ZEXT_LINK_EVENT_CLOSED);
 }
 
 /* One tick of end `i`. */
@@ -533,38 +533,38 @@ static void *wire_task(void *arg) {
 /* The session opens a link: `kind` says which, `locator` names where (as the config wrote it).
  * The handle `link` is the session's name for it from now on; it is valid before this is
  * called, so the stack may report the link from its own thread before this returns. */
-static wz_ext_link_result_t glue_open(void *context, wz_ext_link_t link, wz_ext_link_kind_t kind,
+static zext_link_result_t glue_open(void *context, zext_link_t link, zext_link_kind_t kind,
                                       const char *locator) {
     int host = *(const int *)context;
     int role;
     int state;
-    wz_ext_link_result_t answer = WZ_EXT_LINK_OK;
+    zext_link_result_t answer = ZEXT_LINK_OK;
     switch (kind) {
-        case WZ_EXT_LINK_STREAM_LISTEN: /* bind and listen */
+        case ZEXT_LINK_STREAM_LISTEN: /* bind and listen */
             role = ROLE_STREAM_LISTENER;
             state = END_LISTENING;
             break;
-        case WZ_EXT_LINK_DATAGRAM_LISTEN: /* bind; each new source is accepted on it */
+        case ZEXT_LINK_DATAGRAM_LISTEN: /* bind; each new source is accepted on it */
             role = ROLE_DATAGRAM_LISTENER;
             state = END_LISTENING;
             break;
-        case WZ_EXT_LINK_STREAM_DIAL:
+        case ZEXT_LINK_STREAM_DIAL:
             /* A connect takes a round trip: under way now, CONNECTED or CLOSED from the stack's
              * thread later. */
             role = ROLE_STREAM;
             state = END_CONNECTING;
-            answer = WZ_EXT_LINK_WOULD_BLOCK;
+            answer = ZEXT_LINK_WOULD_BLOCK;
             break;
-        case WZ_EXT_LINK_DATAGRAM: /* nothing to set up: up at once */
+        case ZEXT_LINK_DATAGRAM: /* nothing to set up: up at once */
             role = ROLE_DATAGRAM;
             state = END_OPEN;
             break;
-        case WZ_EXT_LINK_GROUP: /* join the group: up at once */
+        case ZEXT_LINK_GROUP: /* join the group: up at once */
             role = ROLE_GROUP;
             state = END_OPEN;
             break;
         default:
-            return WZ_EXT_LINK_FAILED;
+            return ZEXT_LINK_FAILED;
     }
     net_lock();
     int i = end_new(host, role, link, state);
@@ -582,20 +582,20 @@ static wz_ext_link_result_t glue_open(void *context, wz_ext_link_t link, wz_ext_
         }
     }
     net_unlock();
-    return i < 0 ? WZ_EXT_LINK_FAILED : answer;
+    return i < 0 ? ZEXT_LINK_FAILED : answer;
 }
 
 /* The session sends `len` bytes on `link`. The bytes are valid only during the call, so the
  * stack copies what it takes. */
-static wz_ext_link_result_t glue_send(void *context, wz_ext_link_t link, const uint8_t *data, size_t len,
+static zext_link_result_t glue_send(void *context, zext_link_t link, const uint8_t *data, size_t len,
                                       size_t *written) {
     int host = *(const int *)context;
-    wz_ext_link_result_t answer;
+    zext_link_result_t answer;
     net_lock();
     int i = end_find(host, link);
     wire_end_t *e = i < 0 ? NULL : &net.end[i];
     if (e == NULL || e->state != END_OPEN) {
-        answer = WZ_EXT_LINK_CLOSED;
+        answer = ZEXT_LINK_CLOSED;
     } else if (e->role == ROLE_STREAM) {
         /* What fits in the window: all of it, part of it (the session sends the rest from where
          * the stack stopped), or nothing (WOULD_BLOCK; WRITABLE follows once the wire has
@@ -605,25 +605,25 @@ static wz_ext_link_result_t glue_send(void *context, wz_ext_link_t link, const u
         if (take == 0) {
             e->blocked = 1;
             net.would_blocks++;
-            answer = WZ_EXT_LINK_WOULD_BLOCK;
+            answer = ZEXT_LINK_WOULD_BLOCK;
         } else {
             ring_put(&e->out, data, take);
             if (take < len) net.partial_sends++;
             *written = take;
-            answer = WZ_EXT_LINK_OK;
+            answer = ZEXT_LINK_OK;
         }
     } else if (len > DATAGRAM_MAX) {
         /* A datagram the stack can never carry: taking part of it would cut it. */
-        answer = WZ_EXT_LINK_FAILED;
+        answer = ZEXT_LINK_FAILED;
     } else if (ring_room(&e->out) < 4 + len) {
         /* A datagram is taken whole or not at all. */
         e->blocked = 1;
         net.would_blocks++;
-        answer = WZ_EXT_LINK_WOULD_BLOCK;
+        answer = ZEXT_LINK_WOULD_BLOCK;
     } else {
         ring_put_record(&e->out, data, len);
         *written = len;
-        answer = WZ_EXT_LINK_OK;
+        answer = ZEXT_LINK_OK;
     }
     net_unlock();
     return answer;
@@ -633,7 +633,7 @@ static wz_ext_link_result_t glue_send(void *context, wz_ext_link_t link, const u
  * report checks that the end is still open first, and one already on its way when the close
  * came is refused by the library. The stack's thread carries what the end still holds and lets
  * it go. */
-static void glue_close(void *context, wz_ext_link_t link) {
+static void glue_close(void *context, zext_link_t link) {
     int host = *(const int *)context;
     net_lock();
     int i = end_find(host, link);
@@ -642,9 +642,9 @@ static void glue_close(void *context, wz_ext_link_t link) {
     net_unlock();
 }
 
-/* The session has read `link` down after refusing bytes for it (WZ_EXT_ERR_LINK_FULL): the
+/* The session has read `link` down after refusing bytes for it (ZEXT_ERR_LINK_FULL): the
  * stack hands them in again. Called from a session thread. */
-static void glue_drained(void *context, wz_ext_link_t link) {
+static void glue_drained(void *context, zext_link_t link) {
     int host = *(const int *)context;
     net_lock();
     int i = end_find(host, link);
@@ -664,27 +664,27 @@ static void glue_drop(void *context) {
     net_unlock();
 }
 
-static const wz_ext_loaned_transport_t *host_transport(int host) {
-    return wz_ext_transport_loan(&net.transport[host]);
+static const zext_loaned_transport_t *host_transport(int host) {
+    return zext_transport_loan(&net.transport[host]);
 }
 
-/* Bytes that arrived for `link`: copied before this returns. WZ_EXT_ERR_LINK_FULL when the
+/* Bytes that arrived for `link`: copied before this returns. ZEXT_ERR_LINK_FULL when the
  * session holds all it takes, nothing taken. */
-static z_result_t upcall_received(int host, wz_ext_link_t link, const uint8_t *data, size_t len,
+static z_result_t upcall_received(int host, zext_link_t link, const uint8_t *data, size_t len,
                                   const char *source) {
-    return wz_ext_transport_received(host_transport(host), link, data, len, source);
+    return zext_transport_received(host_transport(host), link, data, len, source);
 }
 
 /* A stream, or a datagram source, the stack accepted on `listener`: the handle the session names
  * it by from now on. */
-static z_result_t upcall_accepted(int host, wz_ext_link_t listener, const char *remote, wz_ext_link_t *out) {
-    return wz_ext_transport_accepted(host_transport(host), listener, remote, out);
+static z_result_t upcall_accepted(int host, zext_link_t listener, const char *remote, zext_link_t *out) {
+    return zext_transport_accepted(host_transport(host), listener, remote, out);
 }
 
 /* CONNECTED, CLOSED or WRITABLE. A report that crosses the session's close of the link is
- * refused (WZ_EXT_ERR_LINK_UNKNOWN or _CLOSED), and there is nothing more to tell then. */
-static void upcall_event(int host, wz_ext_link_t link, wz_ext_link_event_t event) {
-    (void)wz_ext_transport_event(host_transport(host), link, event);
+ * refused (ZEXT_ERR_LINK_UNKNOWN or _CLOSED), and there is nothing more to tell then. */
+static void upcall_event(int host, zext_link_t link, zext_link_event_t event) {
+    (void)zext_transport_event(host_transport(host), link, event);
 }
 
 /* One transport for each host, over the glue, and the stack's thread. */
@@ -694,7 +694,7 @@ static int stack_start(void) {
     net.next_port = 41000;
     for (int h = 0; h < HOSTS; h++) {
         net.host_id[h] = h;
-        wz_ext_transport_t calls;
+        zext_transport_t calls;
         memset(&calls, 0, sizeof calls);
         calls.context = &net.host_id[h];
         calls.open = glue_open;
@@ -702,7 +702,7 @@ static int stack_start(void) {
         calls.close = glue_close;
         calls.drained = glue_drained;
         calls.drop = glue_drop;
-        if (wz_ext_transport_new(&net.transport[h], &calls) != Z_OK) return 0;
+        if (zext_transport_new(&net.transport[h], &calls) != Z_OK) return 0;
     }
     return z_task_init(&net.wire, NULL, wire_task, NULL) == Z_OK;
 }
@@ -714,7 +714,7 @@ static void stack_stop(void) {
     net.stopping = 1;
     net_unlock();
     z_task_join(z_task_move(&net.wire));
-    for (int h = 0; h < HOSTS; h++) wz_ext_transport_drop(wz_ext_transport_move(&net.transport[h]));
+    for (int h = 0; h < HOSTS; h++) zext_transport_drop(zext_transport_move(&net.transport[h]));
     for (int i = 0; i < 1000 && read_stat(&net.drops) < HOSTS; i++) z_sleep_ms(10);
     CHECK(read_stat(&net.drops) == HOSTS, "%d of the %d transports were let go", read_stat(&net.drops), HOSTS);
     if (read_stat(&net.drops) == HOSTS) {
@@ -772,7 +772,7 @@ static z_result_t open_over(z_owned_session_t *session, int host, const char *mo
     z_config_default(&config);
     if (mode != NULL) zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_MODE_KEY, mode);
     zp_config_insert(z_config_loan_mut(&config), key, locator);
-    z_result_t rc = wz_ext_config_transport(z_config_loan_mut(&config), host_transport(host));
+    z_result_t rc = zext_config_transport(z_config_loan_mut(&config), host_transport(host));
     if (rc != Z_OK) {
         z_config_drop(z_config_move(&config));
         return rc;

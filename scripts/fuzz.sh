@@ -5,7 +5,7 @@
 # fuzz.sh -- build, replay and run the fuzz targets of `crates/wz-fuzz`: the
 # C ABI doors of `wz-capi-dissect`, `wz-capi-replay` and `wz-capi-c` (the
 # config verdict and the end-to-end sender) a consumer hands outside bytes to,
-# the pico C ABI's own doors (`wz_ext_*`) in the build of its release package,
+# the pico C ABI's own doors (`zext_*`) in the build of its release package,
 # and the network ingress, the bytes a peer sends into a session (the
 # transport decoders and record walks, the reassembly, and a session of each
 # profile behind them; `crates/wz-fuzz/README.md`).

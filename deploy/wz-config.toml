@@ -128,7 +128,7 @@
 # `process_open_count = true` marks a capacity of the process pools the pico ABI reserves once for
 # the whole process, the values a program holds apart from any session (`HELD_*`): the build's
 # value is the most the process reserves, and the config of its first open states the count it
-# does reserve (`WZ_EXT_CONFIG_LIMITS_KEY`), this value where it states none; the pools are fixed
+# does reserve (`ZEXT_CONFIG_LIMITS_KEY`), this value where it states none; the pools are fixed
 # after that open. It stays a capacity: no snapshot holds it and a document refuses it by name, as
 # a document states a session's or a runtime's limits and these pools are neither's. The generated
 # `PROCESS_OPEN_COUNTS` names them.
@@ -1001,7 +1001,7 @@ help = "The advanced publisher and subscriber (cache, history, miss detection)."
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no
 # counterpart in an upstream library, so it is off in every original and part of the unstable
-# surface, as `wz_ext_config_device_requires` is.
+# surface, as `zext_config_device_requires` is.
 [[capability]]
 id = "clock-source"
 # The bit this capability has in the `features` word of a resource snapshot
@@ -1086,7 +1086,7 @@ help = "Record how full each of the node's fixed pools has been and list every p
 # row type) and what the ABI and each link hold, summed. A program reads it once its session is
 # open, to know what the limits it chose cost before the session runs. wz's own, with no
 # counterpart in an upstream library, so off in every original; a build without it links none of
-# the computation. The pico ABI's doors are wz_ext_* and part of its unstable surface.
+# the computation. The pico ABI's doors are zext_* and part of its unstable surface.
 [[capability]]
 id = "session-memory"
 kconfig = "WZ_CAP_SESSION_MEMORY"
@@ -1095,13 +1095,13 @@ upstream_off = ["zenoh-pico"]
 default = "off"
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Report the most memory a session holds, part by part, computed from the limits it opened under: its tables, its handle and the queues and buffers of its links (wz_ext_session_memory, wz_ext_session_memory_row, wz-own doors)."
+help = "Report the most memory a session holds, part by part, computed from the limits it opened under: its tables, its handle and the queues and buffers of its links (zext_session_memory, zext_session_memory_row, wz-own doors)."
 
 # The peer's initial declarations are final (the declarations-synced event): a declaration
 # listener is told, once, that the declarations it has been given are everything the peer held
 # when the session was established and the ones after are live. wz's own, with no counterpart in
 # an upstream library, so off in every original. The pico ABI tells it to the declaration watch
-# of `wz_ext.h` (`wz_ext_decl_watch_declare`).
+# of `wz_ext.h` (`zext_decl_watch_declare`).
 [[capability]]
 id = "declarations-synced-event"
 kconfig = "WZ_CAP_DECLARATIONS_SYNCED_EVENT"
@@ -1116,7 +1116,7 @@ help = "Tell a declaration listener when the peer has sent everything it held, s
 # is one link, and a session that reconnects can meet another peer, so a listener that outlives
 # the link needs the identity beside each event rather than a separate read it could not order
 # against them. wz's own, so off in every original. The pico ABI's declaration watch
-# (`wz_ext_decl_watch_declare`, `wz_ext.h`) is in a build that has either of the two
+# (`zext_decl_watch_declare`, `wz_ext.h`) is in a build that has either of the two
 # capabilities, and names the peer of each event only with this one.
 [[capability]]
 id = "remote-declaration-watch"
@@ -1327,7 +1327,7 @@ id = "e2e-sender"
 kconfig = "WZ_CAP_E2E_SENDER"
 # On in the zenoh-c ABI's default build, which has exported these doors since they were added and
 # which a participant that sends protected messages links as it is. Off in the pico ABI's: its
-# default is zenoh-pico's own surface, and its doors are wz_ext_* of the unstable surface, as its
+# default is zenoh-pico's own surface, and its doors are zext_* of the unstable surface, as its
 # other wz-own doors are; the zenoh-c ABI has no unstable capability, so that edge reaches pico
 # alone.
 default_off_abis = ["pico"]
@@ -1335,7 +1335,7 @@ os_needs = []
 upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, wz_ext_e2e_sender_*, wz-own doors) and the frame writer behind it."
+help = "The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, zext_e2e_sender_*, wz-own doors) and the frame writer behind it."
 
 [[capability]]
 id = "e2e-receiver"
@@ -1348,7 +1348,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (wz_ext_e2e_receiver_*, wz-own doors)."
+help = "The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (zext_e2e_receiver_*, wz-own doors)."
 
 [[capability]]
 id = "e2e-sender-demux"
@@ -1378,7 +1378,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "The instance of a message a sample is, read from fields of its payload: a stream of the end-to-end doors and a last value per instance, samples of no instance dropped and counted (wz_ext_instance_keyer_*, wz-own doors; INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE)."
+help = "The instance of a message a sample is, read from fields of its payload: a stream of the end-to-end doors and a last value per instance, samples of no instance dropped and counted (zext_instance_keyer_*, wz-own doors; INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE)."
 
 [[capability]]
 id = "config-verdict"
@@ -1425,20 +1425,20 @@ id = "segment-sender"
 kconfig = "WZ_CAP_SEGMENT_SENDER"
 # Off by default: neither zenoh-c nor zenoh-pico has such doors, and they link the piece writer of
 # wz-app-frame into a library that only a participant sending to a deployment which splits its
-# large messages needs. The pico ABI's doors are wz_ext_* and part of its unstable surface, as its
+# large messages needs. The pico ABI's doors are zext_* and part of its unstable surface, as its
 # other wz-own doors are; the zenoh-c ABI has no unstable capability, so the edge reaches pico alone.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors)."
+help = "The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, zext_segment_sender_*, wz-own doors)."
 
 # Reception supervision per stream: a receiver gives each periodic stream a deadline of its period
 # times a factor, and is told once when a stream stops arriving, with saturating error counts per
 # stream and per node. Judged only after a start delay and while a condition the application
 # supplies holds; a sender the application marks absent is not judged. Off by default: neither
-# zenoh-c nor zenoh-pico has such doors. The pico ABI's doors are wz_ext_* and part of its unstable
+# zenoh-c nor zenoh-pico has such doors. The pico ABI's doors are zext_* and part of its unstable
 # surface; the model is wz-session-core's `stream_supervisor`. How many streams one supervisor holds
 # is the `E2E_SUPERVISED_STREAMS` limit, and whether a loss carries the stream's last payload is the
 # `e2e-supervision-notify` policy.
@@ -1450,13 +1450,13 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors)."
+help = "Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (zext_stream_supervisor_*, wz-own doors)."
 
 # The replay cache: a publisher keeps the frames it last sent of each instance of a message, as it
 # sent them, and answers them on the message's key plus a suffix the application states; a
 # subscriber asks each publisher as its suffixed queryable appears and judges the answers in the
 # receive path of its live samples. Off by default: neither zenoh-c nor zenoh-pico has such doors.
-# The pico ABI's doors are wz_ext_* and part of its unstable surface; the ring, the serving gate and
+# The pico ABI's doors are zext_* and part of its unstable surface; the ring, the serving gate and
 # the subscriber's round are wz-session-core's. How deep a ring is is the REPLAY_DEPTH_MAX limit;
 # the answer's shape, whether serving holds the message's sends and whether live samples wait for
 # the replay are the three replay-* policies. The subscriber hears a publisher's queryable through
@@ -1470,7 +1470,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api", "query", "queryable", "remote-declaration-watch", "e2e-receiver"]
-help = "Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (wz_ext_replay_*, wz-own doors)."
+help = "Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (zext_replay_*, wz-own doors)."
 
 # The message catalog: one JSON5 declaration of a deployment's messages (key expression, id, the
 # nodes that publish and subscribe, period, protection profile and values, senders, instance keys,
@@ -1478,7 +1478,7 @@ help = "Replay what each publisher last sent to a subscriber that arrives later:
 # hands the other doors what they are made from: a sender, a receiver, supervision rows. A
 # fixed-memory image runs the generator over the same file (scripts/lib/message_catalog.py) and
 # links static tables instead. How many messages one catalog holds is `MESSAGE_CATALOG_ENTRIES`.
-# Off by default: neither zenoh-pico nor zenoh-c has such doors. The pico ABI's doors are wz_ext_*
+# Off by default: neither zenoh-pico nor zenoh-c has such doors. The pico ABI's doors are zext_*
 # and part of its unstable surface; the reader is wz-app-frame's.
 [[capability]]
 id = "message-catalog"
@@ -1488,13 +1488,13 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (wz_ext_message_catalog_*, wz-own doors)."
+help = "A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (zext_message_catalog_*, wz-own doors)."
 
 # The payload of a catalog message, set and read field by field at paths under `.proto` files the
 # program hands over when it runs, and its protobuf bytes encoded and decoded: what a host program
 # that knows its messages by name and its fields by path needs when no code is generated for them.
 # Made for a message of the catalog, so it implies the catalog. Off by default: neither zenoh-pico
-# nor zenoh-c has such doors. The pico ABI's doors are wz_ext_* and part of its unstable surface;
+# nor zenoh-c has such doors. The pico ABI's doors are zext_* and part of its unstable surface;
 # the payload is wz-app-frame's and the schema is read by its one `.proto` reader.
 [[capability]]
 id = "message-payload"
@@ -1504,7 +1504,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api", "message-catalog"]
-help = "The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors)."
+help = "The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (zext_payload_schema_*, zext_message_payload_*, wz-own doors)."
 
 # The doors that read a payload's schema from the `.proto` text a program hands over when it runs,
 # beside the message payloads and the instance keys, over wz-app-frame's text reader (its tokenizer,
@@ -1512,7 +1512,7 @@ help = "The payload of a catalog message set and read field by field, by path, u
 # compiled the files into when the program was built, and no text reader is linked. Off by default
 # and off in the release package: neither zenoh-pico nor zenoh-c has such doors, and a device
 # program compiles its schema. A build that reads the text a person hands over turns it on. The
-# pico ABI's doors are wz_ext_* and part of its unstable surface; it turns neither capability whose
+# pico ABI's doors are zext_* and part of its unstable surface; it turns neither capability whose
 # doors it adds on.
 [[capability]]
 id = "proto-text"
@@ -1522,7 +1522,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "The message payload and instance key doors that read a schema from .proto text at run time (wz_ext_payload_schema_new, wz_ext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled."
+help = "The message payload and instance key doors that read a schema from .proto text at run time (zext_payload_schema_new, zext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled."
 
 [[capability]]
 id = "app-transport"
@@ -1530,14 +1530,14 @@ kconfig = "WZ_CAP_APP_TRANSPORT"
 # Off by default: zenoh-pico opens its links on the system's sockets, and so does a build made as it
 # is. A program whose network stack is its own turns it on and hands each config the transport its
 # session opens every link on. It asks nothing of the operating system: the program's stack carries
-# the links. The pico ABI's doors are wz_ext_* and part of its unstable surface; the model threads
+# the links. The pico ABI's doors are zext_* and part of its unstable surface; the model threads
 # the transport to each dial and listen of a session.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors)."
+help = "A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (zext_transport_*, zext_config_transport, wz-own doors)."
 
 [[capability]]
 id = "time-base"
@@ -1546,7 +1546,7 @@ kconfig = "WZ_CAP_TIME_BASE"
 # and so does a build made as any of them is. A program that runs its sessions on a time of its own
 # (a simulation, paused, or faster or slower than the wall clock) turns it on and hands each config
 # the time base its session's timers run on. It asks nothing of the operating system. The pico ABI's
-# doors are wz_ext_* and part of its unstable surface, the zenoh-c ABI's are wz_capi_c_*; the model
+# doors are zext_* and part of its unstable surface, the zenoh-c ABI's are wz_capi_c_*; the model
 # makes the session's clock over the time base, for either engine. A node that forwards between its
 # faces is not timed by one, and its open refuses a config that names one.
 default = "off"
@@ -1554,7 +1554,7 @@ os_needs = []
 upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors)."
+help = "A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (zext_time_base_* and zext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors)."
 
 [[capability]]
 id = "object-pool"
@@ -1566,13 +1566,13 @@ kconfig = "WZ_CAP_OBJECT_POOL"
 # allocation for them either. A program that states its own counts turns it on and reserves the
 # pools before its first object, each count held to the bound of the session limit that bounds the
 # object; on the tokio engine, which otherwise keeps those objects on the heap, it also puts them
-# in the pools. The pico ABI's doors are wz_ext_* and part of its unstable surface.
+# in the pools. The pico ABI's doors are zext_* and part of its unstable surface.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "The doors through which a program reserves the fixed pools the objects it holds outside a session are taken from (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads, configs and kept hellos) with counts of its own, and reads what they hold; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY. A library without the tokio engine has the pools without the doors, reserved by its first object from the build's limits (wz_ext_object_pool_*, wz-own doors)."
+help = "The doors through which a program reserves the fixed pools the objects it holds outside a session are taken from (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads, configs and kept hellos) with counts of its own, and reads what they hold; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY. A library without the tokio engine has the pools without the doors, reserved by its first object from the build's limits (zext_object_pool_*, wz-own doors)."
 
 [[capability]]
 id = "object-pool-region"
@@ -1584,7 +1584,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["object-pool"]
-help = "The object pools laid over memory the program hands over in place of one heap allocation (wz_ext_object_pool_place, a wz-own door)."
+help = "The object pools laid over memory the program hands over in place of one heap allocation (zext_object_pool_place, a wz-own door)."
 
 [[capability]]
 id = "shared-key-ids"
@@ -1592,16 +1592,16 @@ kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # Off by default: a node that names a key by an id it never declared cannot be read by a stock
 # peer, which has no such dictionary, so a build has the dictionary and the forms of the
 # key-wire-form policy that use it only when a deployment asks for them. The pico ABI's doors are
-# wz_ext_* and part of its unstable surface, as its other wz-own doors are; both engines hold the
+# zext_* and part of its unstable surface, as its other wz-own doors are; both engines hold the
 # dictionary and name each link's keys in that link's form. A configuration document states the
 # same in its wz/key-ids member, which the zenoh-c ABI reads from its config and the pico ABI from
-# wz_ext_config_document; the doors go over the document. The zenoh-c ABI adds no door and no type.
+# zext_config_document; the doors go over the document. The zenoh-c ABI adds no door and no type.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and wz_ext_config_key_ids and wz_ext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
+help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and zext_config_key_ids and zext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
 
 [[capability]]
 id = "rx-callback-offload"
@@ -1644,7 +1644,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = []
-help = "wz_ext_config_policy and wz_ext_config_profile: a pico config states the policies and the profile of the sessions it opens, which the open resolves over the build's defaults (wz-own). Off, a session runs under the build's policies and limits and the open resolves none."
+help = "zext_config_policy and zext_config_profile: a pico config states the policies and the profile of the sessions it opens, which the open resolves over the build's defaults (wz-own). Off, a session runs under the build's policies and limits and the open resolves none."
 
 [[capability]]
 id = "conformance-digest"
@@ -1657,14 +1657,14 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = []
-help = "wz_ext_conformance_digest: the digest of the configuration this library was built with, which equals the digest of the build statement that describes it (wz-own)."
+help = "zext_conformance_digest: the digest of the configuration this library was built with, which equals the digest of the build statement that describes it (wz-own)."
 
 [[capability]]
 id = "config-document"
 kconfig = "WZ_CAP_CONFIG_DOCUMENT"
 # Off by default: zenoh-pico's config is a set of numbered keys and reads no document, and the door
 # links a JSON5 reader. A pico build with config-policy states its policies through
-# wz_ext_config_policy and wz_ext_config_profile; this one hands it the zenoh JSON5 document the
+# zext_config_policy and zext_config_profile; this one hands it the zenoh JSON5 document the
 # zenoh-c ABI reads, whose wz member states the policies of both ABIs alike, resolved by the same
 # open, so it implies config-policy.
 default = "off"
@@ -1672,7 +1672,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["config-policy"]
-help = "wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own)."
+help = "zext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own)."
 
 [[capability]]
 id = "device-requires"
@@ -1686,7 +1686,7 @@ os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["unstable-api"]
-help = "wz_ext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own)."
+help = "zext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own)."
 
 [[capability]]
 id = "transport_compression"
@@ -2868,7 +2868,7 @@ ABI library built without std and with threads: the entries of the table
 that marks each such thread, since the library has no thread-local storage.
 A thread delivers as a session's read task, or as a program thread whose
 call delivers in place. A callback a thread past it would run is not run
-and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+and is counted (zext_callbacks_refused). The single-threaded arm holds
 one entry whatever this says, as one thread calls the library at a time.
 '''
 
@@ -2920,7 +2920,7 @@ help = '''
 The owned samples a program of the pico C ABI holds at once (taken out of
 a callback, cloned, or held in a channel): the most slots of the pool of
 samples the library reserves at its first open, the count that open's
-config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states
+config states (ZEXT_CONFIG_LIMITS_KEY) and this value where it states
 none, unless the program reserved the pools itself (object-pool). One more
 is refused, its source untouched.
 '''
@@ -2948,7 +2948,7 @@ wire = "none"
 help = '''
 The owned replies and reply errors a program of the pico C ABI holds at
 once: the most slots of the pool of replies the library reserves at its
-first open, the count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY)
+first open, the count that open's config states (ZEXT_CONFIG_LIMITS_KEY)
 and this value where it states none, unless the program reserved the pools
 itself (object-pool). One more is refused, its source untouched.
 '''
@@ -2977,7 +2977,7 @@ help = '''
 The owned queries a program of the pico C ABI holds at once, each keeping
 its query's answer open: the most slots of the pool of queries the library
 reserves at its first open, the count that open's config states
-(WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none, unless the
+(ZEXT_CONFIG_LIMITS_KEY) and this value where it states none, unless the
 program reserved the pools itself (object-pool). One more is refused, its
 source untouched.
 '''
@@ -3034,7 +3034,7 @@ The hellos a program of the pico C ABI keeps at once (z_hello_clone), each
 with as many locators as a scouting window keeps of one Hello: the most slots
 of the pool of kept hellos the library reserves at its first kept hello, or
 else at its first open, from the count that open's config states
-(WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none. One more is
+(ZEXT_CONFIG_LIMITS_KEY) and this value where it states none. One more is
 refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 '''
 
@@ -3112,7 +3112,7 @@ help = '''
 The blocks of PAYLOAD_SMALL_BLOCK_BYTES bytes a program of the pico C ABI
 holds payload bytes in at once: the most blocks of the smallest of the three
 pools of payload blocks the library reserves at its first open, the count
-that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it
+that open's config states (ZEXT_CONFIG_LIMITS_KEY) and this value where it
 states none. A payload whose bytes no free
 block of a pool that holds them takes is refused with
 _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
@@ -3142,7 +3142,7 @@ help = '''
 The blocks of PAYLOAD_MEDIUM_BLOCK_BYTES bytes a program of the pico C ABI
 holds payload bytes in at once: the most blocks of the middle one of the
 three pools of payload blocks the library reserves at its first open, the
-count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value
+count that open's config states (ZEXT_CONFIG_LIMITS_KEY) and this value
 where it states none. A payload whose bytes no free
 block of a pool that holds them takes is refused with
 _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
@@ -3172,7 +3172,7 @@ help = '''
 The blocks a program of the pico C ABI holds its largest payloads in at once:
 the most blocks of the largest of the three pools of payload blocks the
 library reserves at its first open, the count that open's config states
-(WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none, each block
+(ZEXT_CONFIG_LIMITS_KEY) and this value where it states none, each block
 holding the largest message a session of the build
 delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
 PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
@@ -3204,7 +3204,7 @@ help = '''
 The encodings with a schema (z_owned_encoding_t) a program of the pico C ABI
 holds at once, each schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the most
 slots of the pool of encodings the library reserves at its first open, the
-count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value
+count that open's config states (ZEXT_CONFIG_LIMITS_KEY) and this value
 where it states none. An encoding
 takes one from the constructor, clone or schema setter that gives it a schema
 until it is dropped or moved into the call it describes, and a declared
@@ -3339,7 +3339,7 @@ binding_fixed = "build"
 wire = "none"
 help = '''
 How deep the zenoh JSON5 document a config of the pico C ABI is handed
-(wz_ext_config_document) may nest, the outermost object being 1: the reader
+(zext_config_document) may nest, the outermost object being 1: the reader
 walks the document keeping no tree, and this bounds the values it steps over.
 A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
 keeps what it held. From 3, which the wz member's policies and limits take.
@@ -4841,7 +4841,7 @@ storage = "quota"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "open"
-# `wz_ext_stream_supervisor_new` makes a reception supervisor with the rows the process's runtime
+# `zext_stream_supervisor_new` makes a reception supervisor with the rows the process's runtime
 # limits lend it (wz-capi-port runtime_limits, ProcessRows of wz-session-core), under the build's
 # value.
 read = "snapshot"
@@ -4977,7 +4977,7 @@ storage = "both"
 scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
-# Read from the build: the judge is no entity of a session. `wz_ext_e2e_receiver_new` and the
+# Read from the build: the judge is no entity of a session. `zext_e2e_receiver_new` and the
 # catalog's receiver door make it from a profile with no session, a program makes it before it
 # opens one, and the replay subscriber takes one made apart; no SessionLimits is in reach.
 read = "build"
@@ -5034,7 +5034,7 @@ storage = "both"
 scope = "runtime"
 binding_heap = "open"
 binding_fixed = "build"
-# `wz_ext_message_catalog_new` reads a catalog against the messages the process's runtime limits
+# `zext_message_catalog_new` reads a catalog against the messages the process's runtime limits
 # lend it (wz-capi-port runtime_limits, ProcessRows of wz-session-core), under the build's value.
 read = "snapshot"
 wire = "none"
@@ -5063,7 +5063,7 @@ scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
 # Read from the build: the keyer is no entity of a session. The doors that make a keyer
-# (`wz_ext_instance_keyer_from_descriptor_set`, `wz_ext_instance_keyer_new`) and the catalog read a
+# (`zext_instance_keyer_from_descriptor_set`, `zext_instance_keyer_new`) and the catalog read a
 # description with no session, and a program makes a keyer before it opens one; no SessionLimits is
 # in reach.
 read = "build"
@@ -5094,7 +5094,7 @@ scope = "entity"
 binding_heap = "open"
 binding_fixed = "build"
 # Read from the build: the keyer is no entity of a session. The doors that make a keyer
-# (`wz_ext_instance_keyer_from_descriptor_set`, `wz_ext_instance_keyer_new`) and the catalog read a
+# (`zext_instance_keyer_from_descriptor_set`, `zext_instance_keyer_new`) and the catalog read a
 # description with no session, and a program makes a keyer before it opens one; no SessionLimits is
 # in reach.
 read = "build"
@@ -6369,7 +6369,7 @@ that does not hold the same dictionary cannot read what `shared` sends, so both
 ends of the link must hold it. Every node that holds the dictionary reads an id
 only the dictionary names, whatever its own value. The value is the session's,
 and an endpoint the configuration dials or listens on may be stated a value of
-its own (wz/key-ids/links, wz_ext_config_key_wire_form_for), which every link
+its own (wz/key-ids/links, zext_config_key_wire_form_for), which every link
 to or from that endpoint takes. A session opened with `shared`, for itself or an
 endpoint, and no dictionary is refused, and so is one whose value is not
 `declared` in a build without the capability, and a router node, whose faces

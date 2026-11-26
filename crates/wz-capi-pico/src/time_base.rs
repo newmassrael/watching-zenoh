@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_time_base_*` and `wz_ext_config_time_base`: a time base the program supplies, which
+//! `zext_time_base_*` and `zext_config_time_base`: a time base the program supplies, which
 //! the timers of a session opened from a config naming it run on in place of the system's
 //! monotonic clock.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `time-base` capability implies `unstable-api`.
 //!
 //! A program that runs its sessions on a time of its own (a network simulator's, paused, or
@@ -20,12 +20,12 @@
 //! The cooperative engine reads the time at each step the program has it take (`zp_read`,
 //! `zp_spin_once`, a pass of the read task), so a deadline the program's time has passed is acted
 //! on at the next step. The tokio engine waits for its deadlines on threads of its own, and such a
-//! wait ends only when the program says its time has moved (`wz_ext_time_base_advanced`). A
+//! wait ends only when the program says its time has moved (`zext_time_base_advanced`). A
 //! program calls it each time its time moves on, whichever engine the build has.
 //!
 //! # Who owns the time base
 //!
-//! As with a transport the program supplies: the program makes it (`wz_ext_time_base_new`) and
+//! As with a transport the program supplies: the program makes it (`zext_time_base_new`) and
 //! holds it, a config given it holds a reference, and so does a session opened from that config,
 //! for as long as it runs. The program's `drop(context)` runs once, when the last of them goes.
 
@@ -40,38 +40,38 @@ use crate::prelude::Box;
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
 
 /// The program's read of its time: nanoseconds since an epoch of its choosing.
-pub type wz_ext_time_base_now_fn = wz_capi_port::time_base::NowFn;
+pub type zext_time_base_now_fn = wz_capi_port::time_base::NowFn;
 
 /// The program's `drop(context)`, run once when the time base is gone.
-pub type wz_ext_time_base_drop_fn = wz_capi_port::time_base::DropFn;
+pub type zext_time_base_drop_fn = wz_capi_port::time_base::DropFn;
 
 /// The calls the program supplies. `now_ns` is required; `drop` may be NULL.
 #[repr(C)]
-pub struct wz_ext_time_base_t {
+pub struct zext_time_base_t {
     pub context: *mut c_void,
-    pub now_ns: Option<wz_ext_time_base_now_fn>,
-    pub drop: Option<wz_ext_time_base_drop_fn>,
+    pub now_ns: Option<zext_time_base_now_fn>,
+    pub drop: Option<zext_time_base_drop_fn>,
 }
 
 /// An owned time base: the handle in its one word, null for the gravestone.
 #[repr(C)]
-pub struct wz_ext_owned_time_base_t {
+pub struct zext_owned_time_base_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned time base: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_time_base_t {
+pub struct zext_loaned_time_base_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved time base (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_time_base_t {
-    pub(crate) _this: wz_ext_owned_time_base_t,
+pub struct zext_moved_time_base_t {
+    pub(crate) _this: zext_owned_time_base_t,
 }
 
-impl wz_ext_owned_time_base_t {
+impl zext_owned_time_base_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
@@ -83,7 +83,7 @@ impl wz_ext_owned_time_base_t {
 ///
 /// # Safety
 /// `this_` is null or a loan of a live owned time base.
-unsafe fn hold_of<'a>(this_: *const wz_ext_loaned_time_base_t) -> Option<&'a TimeBaseHold> {
+unsafe fn hold_of<'a>(this_: *const zext_loaned_time_base_t) -> Option<&'a TimeBaseHold> {
     if this_.is_null() || (*this_).handle.is_null() {
         return None;
     }
@@ -98,15 +98,15 @@ unsafe fn hold_of<'a>(this_: *const wz_ext_loaned_time_base_t) -> Option<&'a Tim
 /// # Safety
 /// `this_` is writable; `time_base` is null or readable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_time_base_new(
-    this_: *mut wz_ext_owned_time_base_t,
-    time_base: *const wz_ext_time_base_t,
+pub unsafe extern "C" fn zext_time_base_new(
+    this_: *mut zext_owned_time_base_t,
+    time_base: *const zext_time_base_t,
 ) -> ZResult {
     guarded(|| {
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        *this_ = wz_ext_owned_time_base_t::null_value();
+        *this_ = zext_owned_time_base_t::null_value();
         if time_base.is_null() {
             return Z_ERR_NULL;
         }
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn wz_ext_time_base_new(
             now_ns,
             calls.drop,
         ));
-        *this_ = wz_ext_owned_time_base_t {
+        *this_ = zext_owned_time_base_t {
             handle: Box::into_raw(hold) as *mut c_void,
         };
         Z_OK
@@ -136,9 +136,9 @@ pub unsafe extern "C" fn wz_ext_time_base_new(
 /// # Safety
 /// `config` is null or a loaned config; `time_base` is null or a loan of a live time base.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_time_base(
+pub unsafe extern "C" fn zext_config_time_base(
     config: *mut z_loaned_config_t,
-    time_base: *const wz_ext_loaned_time_base_t,
+    time_base: *const zext_loaned_time_base_t,
 ) -> ZResult {
     guarded(|| {
         if config.is_null() || (*config).handle.is_null() {
@@ -161,8 +161,8 @@ pub unsafe extern "C" fn wz_ext_config_time_base(
 /// # Safety
 /// `time_base` is null or a loan of a live time base.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_time_base_advanced(
-    time_base: *const wz_ext_loaned_time_base_t,
+pub unsafe extern "C" fn zext_time_base_advanced(
+    time_base: *const zext_loaned_time_base_t,
 ) -> ZResult {
     guarded(|| {
         let Some(hold) = hold_of(time_base) else {
@@ -178,21 +178,21 @@ pub unsafe extern "C" fn wz_ext_time_base_advanced(
 /// # Safety
 /// `this_` is null or an owned time base.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_time_base_loan(
-    this_: *const wz_ext_owned_time_base_t,
-) -> *const wz_ext_loaned_time_base_t {
-    this_.cast::<wz_ext_loaned_time_base_t>()
+pub unsafe extern "C" fn zext_time_base_loan(
+    this_: *const zext_owned_time_base_t,
+) -> *const zext_loaned_time_base_t {
+    this_.cast::<zext_loaned_time_base_t>()
 }
 
-/// The moved form of a time base, for `wz_ext_time_base_drop`: a cast, which nulls nothing.
+/// The moved form of a time base, for `zext_time_base_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned time base.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_time_base_move(
-    this_: *mut wz_ext_owned_time_base_t,
-) -> *mut wz_ext_moved_time_base_t {
-    this_.cast::<wz_ext_moved_time_base_t>()
+pub unsafe extern "C" fn zext_time_base_move(
+    this_: *mut zext_owned_time_base_t,
+) -> *mut zext_moved_time_base_t {
+    this_.cast::<zext_moved_time_base_t>()
 }
 
 /// Release the program's reference and leave the gravestone. The configs and sessions that hold
@@ -202,13 +202,13 @@ pub unsafe extern "C" fn wz_ext_time_base_move(
 /// # Safety
 /// `this_` is null or a moved time base.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_time_base_drop(this_: *mut wz_ext_moved_time_base_t) {
+pub unsafe extern "C" fn zext_time_base_drop(this_: *mut zext_moved_time_base_t) {
     let _ = guarded(|| {
         if this_.is_null() {
             return Z_OK;
         }
         let handle = (*this_)._this.handle;
-        (*this_)._this = wz_ext_owned_time_base_t::null_value();
+        (*this_)._this = zext_owned_time_base_t::null_value();
         if !handle.is_null() {
             drop(Box::from_raw(handle as *mut TimeBaseHold));
         }
@@ -221,9 +221,9 @@ pub unsafe extern "C" fn wz_ext_time_base_drop(this_: *mut wz_ext_moved_time_bas
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_time_base_null(this_: *mut wz_ext_owned_time_base_t) {
+pub unsafe extern "C" fn zext_internal_time_base_null(this_: *mut zext_owned_time_base_t) {
     if !this_.is_null() {
-        *this_ = wz_ext_owned_time_base_t::null_value();
+        *this_ = zext_owned_time_base_t::null_value();
     }
 }
 
@@ -232,8 +232,8 @@ pub unsafe extern "C" fn wz_ext_internal_time_base_null(this_: *mut wz_ext_owned
 /// # Safety
 /// `this_` is null or an owned time base.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_time_base_check(
-    this_: *const wz_ext_owned_time_base_t,
+pub unsafe extern "C" fn zext_internal_time_base_check(
+    this_: *const zext_owned_time_base_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -406,16 +406,16 @@ mod tests {
             .fetch_add(1, Ordering::SeqCst);
     }
 
-    fn calls(program: &Program) -> wz_ext_time_base_t {
-        wz_ext_time_base_t {
+    fn calls(program: &Program) -> zext_time_base_t {
+        zext_time_base_t {
             context: program as *const Program as *mut c_void,
             now_ns: Some(read),
             drop: Some(dropped),
         }
     }
 
-    fn null_time_base() -> wz_ext_owned_time_base_t {
-        wz_ext_owned_time_base_t::null_value()
+    fn null_time_base() -> zext_owned_time_base_t {
+        zext_owned_time_base_t::null_value()
     }
 
     #[test]
@@ -423,24 +423,24 @@ mod tests {
         let program = Program::default();
         unsafe {
             assert_eq!(
-                wz_ext_time_base_new(core::ptr::null_mut(), &calls(&program)),
+                zext_time_base_new(core::ptr::null_mut(), &calls(&program)),
                 Z_ERR_NULL
             );
             // A slot that holds something, so that the gravestone is seen to be written.
-            let mut time_base = wz_ext_owned_time_base_t {
+            let mut time_base = zext_owned_time_base_t {
                 handle: core::ptr::NonNull::dangling().as_ptr(),
             };
             assert_eq!(
-                wz_ext_time_base_new(&mut time_base, core::ptr::null()),
+                zext_time_base_new(&mut time_base, core::ptr::null()),
                 Z_ERR_NULL
             );
-            assert!(!wz_ext_internal_time_base_check(&time_base));
-            let no_read = wz_ext_time_base_t {
+            assert!(!zext_internal_time_base_check(&time_base));
+            let no_read = zext_time_base_t {
                 now_ns: None,
                 ..calls(&program)
             };
-            assert_eq!(wz_ext_time_base_new(&mut time_base, &no_read), Z_ERR_NULL);
-            assert!(!wz_ext_internal_time_base_check(&time_base));
+            assert_eq!(zext_time_base_new(&mut time_base, &no_read), Z_ERR_NULL);
+            assert!(!zext_internal_time_base_check(&time_base));
         }
         assert_eq!(program.drops.load(Ordering::SeqCst), 0);
     }
@@ -452,21 +452,21 @@ mod tests {
             let mut config: z_owned_config_t = core::mem::zeroed();
             assert_eq!(z_config_default(&mut config), Z_OK);
             assert_eq!(
-                wz_ext_config_time_base(z_config_loan_mut(&mut config), core::ptr::null()),
+                zext_config_time_base(z_config_loan_mut(&mut config), core::ptr::null()),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_config_time_base(
+                zext_config_time_base(
                     z_config_loan_mut(&mut config),
-                    wz_ext_time_base_loan(&gravestone)
+                    zext_time_base_loan(&gravestone)
                 ),
                 Z_ERR_NULL
             );
             assert!((*(config.handle as *const ConfigState)).time_base.is_none());
             z_config_drop(z_config_move(&mut config));
-            assert_eq!(wz_ext_time_base_advanced(core::ptr::null()), Z_ERR_NULL);
+            assert_eq!(zext_time_base_advanced(core::ptr::null()), Z_ERR_NULL);
             assert_eq!(
-                wz_ext_time_base_advanced(wz_ext_time_base_loan(&gravestone)),
+                zext_time_base_advanced(zext_time_base_loan(&gravestone)),
                 Z_ERR_NULL
             );
         }
@@ -477,14 +477,14 @@ mod tests {
         let program = Program::default();
         unsafe {
             let mut time_base = null_time_base();
-            assert_eq!(wz_ext_time_base_new(&mut time_base, &calls(&program)), Z_OK);
-            assert!(wz_ext_internal_time_base_check(&time_base));
+            assert_eq!(zext_time_base_new(&mut time_base, &calls(&program)), Z_OK);
+            assert!(zext_internal_time_base_check(&time_base));
             let mut config: z_owned_config_t = core::mem::zeroed();
             assert_eq!(z_config_default(&mut config), Z_OK);
             assert_eq!(
-                wz_ext_config_time_base(
+                zext_config_time_base(
                     z_config_loan_mut(&mut config),
-                    wz_ext_time_base_loan(&time_base)
+                    zext_time_base_loan(&time_base)
                 ),
                 Z_OK
             );
@@ -499,14 +499,14 @@ mod tests {
                 "the config's reference reads the program"
             );
 
-            wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
-            assert!(!wz_ext_internal_time_base_check(&time_base));
+            zext_time_base_drop(zext_time_base_move(&mut time_base));
+            assert!(!zext_internal_time_base_check(&time_base));
             assert_eq!(
                 program.drops.load(Ordering::SeqCst),
                 0,
                 "the config still holds it"
             );
-            wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
+            zext_time_base_drop(zext_time_base_move(&mut time_base));
 
             z_config_drop(z_config_move(&mut config));
             assert_eq!(program.drops.load(Ordering::SeqCst), 1);
@@ -517,7 +517,7 @@ mod tests {
     /// when there is one: it opens without a peer, so the test needs no other node.
     #[cfg(feature = "peer")]
     unsafe fn listening(
-        time_base: Option<&wz_ext_owned_time_base_t>,
+        time_base: Option<&zext_owned_time_base_t>,
     ) -> crate::session::z_owned_session_t {
         use crate::config::{zp_config_insert, Z_CONFIG_LISTEN_KEY};
         let port = wz_runtime_tokio_test_support::free_port();
@@ -534,9 +534,9 @@ mod tests {
         );
         if let Some(time_base) = time_base {
             assert_eq!(
-                wz_ext_config_time_base(
+                zext_config_time_base(
                     z_config_loan_mut(&mut config),
-                    wz_ext_time_base_loan(time_base)
+                    zext_time_base_loan(time_base)
                 ),
                 Z_OK
             );
@@ -574,7 +574,7 @@ mod tests {
         program.now_ns.store(5_000_000_000, Ordering::SeqCst);
         unsafe {
             let mut time_base = null_time_base();
-            assert_eq!(wz_ext_time_base_new(&mut time_base, &calls(&program)), Z_OK);
+            assert_eq!(zext_time_base_new(&mut time_base, &calls(&program)), Z_OK);
             let session = listening(Some(&time_base));
             let engine = engine_of(&session);
             let opened =
@@ -587,7 +587,7 @@ mod tests {
             );
             program.now_ns.fetch_add(1_500_000_000, Ordering::SeqCst);
             assert_eq!(
-                wz_ext_time_base_advanced(wz_ext_time_base_loan(&time_base)),
+                zext_time_base_advanced(zext_time_base_loan(&time_base)),
                 Z_OK
             );
             assert_eq!(
@@ -596,7 +596,7 @@ mod tests {
             );
             drop(engine);
             close(session);
-            wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
+            zext_time_base_drop(zext_time_base_move(&mut time_base));
         }
     }
 

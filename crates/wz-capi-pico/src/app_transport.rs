@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_transport_*`: a transport the program supplies. A program with a network stack of its
+//! `zext_transport_*`: a transport the program supplies. A program with a network stack of its
 //! own gives the session that stack in place of the system's sockets: a `send` the session calls
 //! with bytes, and calls the program makes when bytes arrive or a link changes state.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `app-transport` capability implies `unstable-api`.
 //!
 //! The transport object is engine-neutral (`wz_session_core::app_transport`), its table held
@@ -16,11 +16,11 @@
 //!
 //! # Who owns the transport
 //!
-//! The program makes the transport (`wz_ext_transport_new`) and holds it, and the calls it makes
+//! The program makes the transport (`zext_transport_new`) and holds it, and the calls it makes
 //! name it. Not the config: a config that dials makes `z_open` wait for the handshake, whose bytes
-//! the program hands in through `wz_ext_transport_received` from its own thread WHILE `z_open`
+//! the program hands in through `zext_transport_received` from its own thread WHILE `z_open`
 //! runs, so the program needs the object before the session exists and apart from the config,
-//! which `z_open` consumes. `wz_ext_config_transport` gives a config a reference to it; the
+//! which `z_open` consumes. `zext_config_transport` gives a config a reference to it; the
 //! session opened from that config holds one for as long as it has a link; the program's own
 //! drops when it drops it. The program's `drop(context)` runs once, when the last of them goes.
 //!
@@ -29,7 +29,7 @@
 //! The session names every link: `open` is handed the handle of the link it opens, which is in
 //! the transport's table before `open` is called, so a program that reports the link up from its
 //! own thread before `open` returns finds it. A stream the program accepts on a listener is named
-//! by `wz_ext_transport_accepted`, which returns its handle. A handle is never reused.
+//! by `zext_transport_accepted`, which returns its handle. A handle is never reused.
 
 use alloc::sync::Arc;
 use core::ffi::{c_char, c_void, CStr};
@@ -47,103 +47,101 @@ use crate::prelude::Box;
 use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
 
 /// A link of a transport the program supplies. 0 never names one.
-pub type wz_ext_link_t = u64;
+pub type zext_link_t = u64;
 
 /// What kind of link `open` is asked for.
-pub type wz_ext_link_kind_t = u8;
+pub type zext_link_kind_t = u8;
 /// A byte stream the session dials (a `tcp/` connect locator).
-pub const WZ_EXT_LINK_STREAM_DIAL: wz_ext_link_kind_t = AppLinkKind::StreamDial as u8;
+pub const ZEXT_LINK_STREAM_DIAL: zext_link_kind_t = AppLinkKind::StreamDial as u8;
 /// A stream listener (a `tcp/` listen locator).
-pub const WZ_EXT_LINK_STREAM_LISTEN: wz_ext_link_kind_t = AppLinkKind::StreamListen as u8;
+pub const ZEXT_LINK_STREAM_LISTEN: zext_link_kind_t = AppLinkKind::StreamListen as u8;
 /// A unicast datagram link (a `udp/` connect locator).
-pub const WZ_EXT_LINK_DATAGRAM: wz_ext_link_kind_t = AppLinkKind::Datagram as u8;
+pub const ZEXT_LINK_DATAGRAM: zext_link_kind_t = AppLinkKind::Datagram as u8;
 /// A multicast group (a `udp/` listen locator with `#iface=`).
-pub const WZ_EXT_LINK_GROUP: wz_ext_link_kind_t = AppLinkKind::Group as u8;
+pub const ZEXT_LINK_GROUP: zext_link_kind_t = AppLinkKind::Group as u8;
 /// A datagram listener (a `udp/` listen locator naming no interface): the program accepts each
-/// source that sends to it with `wz_ext_transport_accepted`.
-pub const WZ_EXT_LINK_DATAGRAM_LISTEN: wz_ext_link_kind_t = AppLinkKind::DatagramListen as u8;
+/// source that sends to it with `zext_transport_accepted`.
+pub const ZEXT_LINK_DATAGRAM_LISTEN: zext_link_kind_t = AppLinkKind::DatagramListen as u8;
 
 /// What the program's `open` and `send` answer.
-pub type wz_ext_link_result_t = i8;
+pub type zext_link_result_t = i8;
 /// Done: the link is up, or the send took `*written` bytes.
-pub const WZ_EXT_LINK_OK: wz_ext_link_result_t = 0;
+pub const ZEXT_LINK_OK: zext_link_result_t = 0;
 /// Not now: the open is under way, or the send took nothing and `writable` follows.
-pub const WZ_EXT_LINK_WOULD_BLOCK: wz_ext_link_result_t = 1;
+pub const ZEXT_LINK_WOULD_BLOCK: zext_link_result_t = 1;
 /// The link is closed.
-pub const WZ_EXT_LINK_CLOSED: wz_ext_link_result_t = 2;
+pub const ZEXT_LINK_CLOSED: zext_link_result_t = 2;
 /// The open or the send failed.
-pub const WZ_EXT_LINK_FAILED: wz_ext_link_result_t = 3;
+pub const ZEXT_LINK_FAILED: zext_link_result_t = 3;
 
 /// What the program tells the session of a link.
-pub type wz_ext_link_event_t = u8;
+pub type zext_link_event_t = u8;
 /// The link the session asked to open is up.
-pub const WZ_EXT_LINK_EVENT_CONNECTED: wz_ext_link_event_t = 0;
+pub const ZEXT_LINK_EVENT_CONNECTED: zext_link_event_t = 0;
 /// The link is gone, or its open failed.
-pub const WZ_EXT_LINK_EVENT_CLOSED: wz_ext_link_event_t = 1;
+pub const ZEXT_LINK_EVENT_CLOSED: zext_link_event_t = 1;
 /// A link whose send would block takes bytes again.
-pub const WZ_EXT_LINK_EVENT_WRITABLE: wz_ext_link_event_t = 2;
+pub const ZEXT_LINK_EVENT_WRITABLE: zext_link_event_t = 2;
 
 /// The program's `open(context, link, kind, locator)`; `locator` is NUL-terminated and valid for
 /// the call.
-pub type wz_ext_transport_open_fn = unsafe extern "C" fn(
+pub type zext_transport_open_fn = unsafe extern "C" fn(
     context: *mut c_void,
-    link: wz_ext_link_t,
-    kind: wz_ext_link_kind_t,
+    link: zext_link_t,
+    kind: zext_link_kind_t,
     locator: *const c_char,
-) -> wz_ext_link_result_t;
+) -> zext_link_result_t;
 
 /// The program's `send(context, link, data, len, written)`; `data` is valid for the call only.
-pub type wz_ext_transport_send_fn = unsafe extern "C" fn(
+pub type zext_transport_send_fn = unsafe extern "C" fn(
     context: *mut c_void,
-    link: wz_ext_link_t,
+    link: zext_link_t,
     data: *const u8,
     len: usize,
     written: *mut usize,
-) -> wz_ext_link_result_t;
+) -> zext_link_result_t;
 
 /// The program's `close(context, link)`.
-pub type wz_ext_transport_close_fn =
-    unsafe extern "C" fn(context: *mut c_void, link: wz_ext_link_t);
+pub type zext_transport_close_fn = unsafe extern "C" fn(context: *mut c_void, link: zext_link_t);
 
 /// The program's `drained(context, link)`: `link`, which refused bytes with
-/// `WZ_EXT_ERR_LINK_FULL`, has been read down and takes bytes again.
-pub type wz_ext_transport_drained_fn =
-    unsafe extern "C" fn(context: *mut c_void, link: wz_ext_link_t);
+/// `ZEXT_ERR_LINK_FULL`, has been read down and takes bytes again.
+pub type zext_transport_drained_fn = unsafe extern "C" fn(context: *mut c_void, link: zext_link_t);
 
 /// The program's `drop(context)`, run once when the transport is gone.
-pub type wz_ext_transport_drop_fn = unsafe extern "C" fn(context: *mut c_void);
+pub type zext_transport_drop_fn = unsafe extern "C" fn(context: *mut c_void);
 
 /// The calls the program supplies. `open`, `send` and `close` are required; `drained` and `drop`
 /// may be NULL.
 #[repr(C)]
-pub struct wz_ext_transport_t {
+pub struct zext_transport_t {
     pub context: *mut c_void,
-    pub open: Option<wz_ext_transport_open_fn>,
-    pub send: Option<wz_ext_transport_send_fn>,
-    pub close: Option<wz_ext_transport_close_fn>,
-    pub drained: Option<wz_ext_transport_drained_fn>,
-    pub drop: Option<wz_ext_transport_drop_fn>,
+    pub open: Option<zext_transport_open_fn>,
+    pub send: Option<zext_transport_send_fn>,
+    pub close: Option<zext_transport_close_fn>,
+    pub drained: Option<zext_transport_drained_fn>,
+    pub drop: Option<zext_transport_drop_fn>,
 }
 
 /// An owned transport: the handle in its one word, null for the gravestone.
 #[repr(C)]
-pub struct wz_ext_owned_transport_t {
+pub struct zext_owned_transport_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned transport: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_transport_t {
+pub struct zext_loaned_transport_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved transport (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_transport_t {
-    pub(crate) _this: wz_ext_owned_transport_t,
+pub struct zext_moved_transport_t {
+    pub(crate) _this: zext_owned_transport_t,
 }
 
-impl wz_ext_owned_transport_t {
+impl zext_owned_transport_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
@@ -155,11 +153,11 @@ impl wz_ext_owned_transport_t {
 /// does, which is when the last reference to the transport goes.
 struct ProgramPort {
     context: *mut c_void,
-    open: wz_ext_transport_open_fn,
-    send: wz_ext_transport_send_fn,
-    close: wz_ext_transport_close_fn,
-    drained: Option<wz_ext_transport_drained_fn>,
-    drop: Option<wz_ext_transport_drop_fn>,
+    open: zext_transport_open_fn,
+    send: zext_transport_send_fn,
+    close: zext_transport_close_fn,
+    drained: Option<zext_transport_drained_fn>,
+    drop: Option<zext_transport_drop_fn>,
 }
 
 // SAFETY: the context and the function pointers are the program's, and the header's threading
@@ -227,21 +225,21 @@ impl Drop for ProgramPort {
 }
 
 /// What an `open` answer means. Any value but the four is a failure.
-fn open_answer(answer: wz_ext_link_result_t) -> ProgramOpen {
+fn open_answer(answer: zext_link_result_t) -> ProgramOpen {
     match answer {
-        WZ_EXT_LINK_OK => ProgramOpen::Up,
-        WZ_EXT_LINK_WOULD_BLOCK => ProgramOpen::Pending,
+        ZEXT_LINK_OK => ProgramOpen::Up,
+        ZEXT_LINK_WOULD_BLOCK => ProgramOpen::Pending,
         _ => ProgramOpen::Refused,
     }
 }
 
 /// What a `send` answer means. Any value but the four is a failure; the table refuses a count
 /// past what was offered.
-fn send_answer(answer: wz_ext_link_result_t, written: usize) -> ProgramSend {
+fn send_answer(answer: zext_link_result_t, written: usize) -> ProgramSend {
     match answer {
-        WZ_EXT_LINK_OK => ProgramSend::Wrote(written),
-        WZ_EXT_LINK_WOULD_BLOCK => ProgramSend::WouldBlock,
-        WZ_EXT_LINK_CLOSED => ProgramSend::Closed,
+        ZEXT_LINK_OK => ProgramSend::Wrote(written),
+        ZEXT_LINK_WOULD_BLOCK => ProgramSend::WouldBlock,
+        ZEXT_LINK_CLOSED => ProgramSend::Closed,
         _ => ProgramSend::Failed,
     }
 }
@@ -249,11 +247,11 @@ fn send_answer(answer: wz_ext_link_result_t, written: usize) -> ProgramSend {
 /// What a refused call of the program's returns.
 fn refusal_code(refusal: InboundRefusal) -> ZResult {
     match refusal {
-        InboundRefusal::NoSuchLink => crate::result::WZ_EXT_ERR_LINK_UNKNOWN,
-        InboundRefusal::NotOpen => crate::result::WZ_EXT_ERR_LINK_NOT_OPEN,
-        InboundRefusal::Closed => crate::result::WZ_EXT_ERR_LINK_CLOSED,
-        InboundRefusal::WrongKind => crate::result::WZ_EXT_ERR_LINK_KIND,
-        InboundRefusal::Full => crate::result::WZ_EXT_ERR_LINK_FULL,
+        InboundRefusal::NoSuchLink => crate::result::ZEXT_ERR_LINK_UNKNOWN,
+        InboundRefusal::NotOpen => crate::result::ZEXT_ERR_LINK_NOT_OPEN,
+        InboundRefusal::Closed => crate::result::ZEXT_ERR_LINK_CLOSED,
+        InboundRefusal::WrongKind => crate::result::ZEXT_ERR_LINK_KIND,
+        InboundRefusal::Full => crate::result::ZEXT_ERR_LINK_FULL,
         // A group's datagram must name the member it came from.
         InboundRefusal::NoSource => Z_ERR_NULL,
         // No storage of the link could hold it: handed in again it is refused again.
@@ -265,7 +263,7 @@ fn refusal_code(refusal: InboundRefusal) -> ZResult {
 ///
 /// # Safety
 /// `this_` is null or a loan of a live owned transport.
-unsafe fn transport_of<'a>(this_: *const wz_ext_loaned_transport_t) -> Option<&'a AppTransport> {
+unsafe fn transport_of<'a>(this_: *const zext_loaned_transport_t) -> Option<&'a AppTransport> {
     if this_.is_null() || (*this_).handle.is_null() {
         return None;
     }
@@ -280,15 +278,15 @@ unsafe fn transport_of<'a>(this_: *const wz_ext_loaned_transport_t) -> Option<&'
 /// # Safety
 /// `this_` is writable; `transport` is null or readable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_new(
-    this_: *mut wz_ext_owned_transport_t,
-    transport: *const wz_ext_transport_t,
+pub unsafe extern "C" fn zext_transport_new(
+    this_: *mut zext_owned_transport_t,
+    transport: *const zext_transport_t,
 ) -> ZResult {
     guarded(|| {
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        *this_ = wz_ext_owned_transport_t::null_value();
+        *this_ = zext_owned_transport_t::null_value();
         if transport.is_null() {
             return Z_ERR_NULL;
         }
@@ -308,7 +306,7 @@ pub unsafe extern "C" fn wz_ext_transport_new(
             Box::new(PortLock(wz_capi_port::sync::Lock::new(AppLinkTable::new()))),
             Box::new(port),
         ));
-        *this_ = wz_ext_owned_transport_t {
+        *this_ = zext_owned_transport_t {
             handle: Arc::into_raw(transport) as *mut c_void,
         };
         Z_OK
@@ -324,9 +322,9 @@ pub unsafe extern "C" fn wz_ext_transport_new(
 /// # Safety
 /// `config` is null or a loaned config; `transport` is null or a loan of a live transport.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_transport(
+pub unsafe extern "C" fn zext_config_transport(
     config: *mut z_loaned_config_t,
-    transport: *const wz_ext_loaned_transport_t,
+    transport: *const zext_loaned_transport_t,
 ) -> ZResult {
     guarded(|| {
         if config.is_null() || (*config).handle.is_null() {
@@ -351,18 +349,18 @@ pub unsafe extern "C" fn wz_ext_config_transport(
 /// Z_OK; Z_ERR_NULL for a NULL transport, or NULL data with a length; Z_EINVAL for a source that
 /// is not UTF-8, or for more than the link could ever hold at once (more bytes than its bound, a
 /// datagram past 65,535 bytes, a locator past 254);
-/// WZ_EXT_ERR_LINK_UNKNOWN for a link the transport does not hold (a handle it never gave, or a
+/// ZEXT_ERR_LINK_UNKNOWN for a link the transport does not hold (a handle it never gave, or a
 /// link the session let go whose close on the program has returned);
-/// WZ_EXT_ERR_LINK_NOT_OPEN before the link is up; WZ_EXT_ERR_LINK_CLOSED once it is closing or
-/// closed and still held; WZ_EXT_ERR_LINK_KIND for a listener.
+/// ZEXT_ERR_LINK_NOT_OPEN before the link is up; ZEXT_ERR_LINK_CLOSED once it is closing or
+/// closed and still held; ZEXT_ERR_LINK_KIND for a listener.
 ///
 /// # Safety
 /// `transport` is null or a loan of a live transport; `data` is null or `len` readable bytes;
 /// `source` is null or a C string.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_received(
-    transport: *const wz_ext_loaned_transport_t,
-    link: wz_ext_link_t,
+pub unsafe extern "C" fn zext_transport_received(
+    transport: *const zext_loaned_transport_t,
+    link: zext_link_t,
     data: *const u8,
     len: usize,
     source: *const c_char,
@@ -395,26 +393,26 @@ pub unsafe extern "C" fn wz_ext_transport_received(
 
 /// The program says `event` happened to `link`.
 ///
-/// Z_OK; Z_ERR_NULL for a NULL transport; Z_EINVAL for another event; WZ_EXT_ERR_LINK_UNKNOWN for
-/// a link the transport does not hold (as `wz_ext_transport_received` says);
-/// WZ_EXT_ERR_LINK_CLOSED for a link already closed and still held.
+/// Z_OK; Z_ERR_NULL for a NULL transport; Z_EINVAL for another event; ZEXT_ERR_LINK_UNKNOWN for
+/// a link the transport does not hold (as `zext_transport_received` says);
+/// ZEXT_ERR_LINK_CLOSED for a link already closed and still held.
 ///
 /// # Safety
 /// `transport` is null or a loan of a live transport.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_event(
-    transport: *const wz_ext_loaned_transport_t,
-    link: wz_ext_link_t,
-    event: wz_ext_link_event_t,
+pub unsafe extern "C" fn zext_transport_event(
+    transport: *const zext_loaned_transport_t,
+    link: zext_link_t,
+    event: zext_link_event_t,
 ) -> ZResult {
     guarded(|| {
         let Some(transport) = transport_of(transport) else {
             return Z_ERR_NULL;
         };
         let event = match event {
-            WZ_EXT_LINK_EVENT_CONNECTED => ProgramEvent::Connected,
-            WZ_EXT_LINK_EVENT_CLOSED => ProgramEvent::Closed,
-            WZ_EXT_LINK_EVENT_WRITABLE => ProgramEvent::Writable,
+            ZEXT_LINK_EVENT_CONNECTED => ProgramEvent::Connected,
+            ZEXT_LINK_EVENT_CLOSED => ProgramEvent::Closed,
+            ZEXT_LINK_EVENT_WRITABLE => ProgramEvent::Writable,
             _ => return Z_EINVAL,
         };
         match transport.event(link, event) {
@@ -429,21 +427,21 @@ pub unsafe extern "C" fn wz_ext_transport_event(
 /// stream from here on.
 ///
 /// Z_OK; Z_ERR_NULL for a NULL transport, remote or out_link; Z_EINVAL for a remote that is not
-/// UTF-8; WZ_EXT_ERR_LINK_UNKNOWN for a listener the transport does not hold (as
-/// `wz_ext_transport_received` says);
-/// WZ_EXT_ERR_LINK_NOT_OPEN before it is listening; WZ_EXT_ERR_LINK_CLOSED once it is closing or
-/// closed; WZ_EXT_ERR_LINK_KIND for a link that is not a listener. `*out_link` is 0 on every
+/// UTF-8; ZEXT_ERR_LINK_UNKNOWN for a listener the transport does not hold (as
+/// `zext_transport_received` says);
+/// ZEXT_ERR_LINK_NOT_OPEN before it is listening; ZEXT_ERR_LINK_CLOSED once it is closing or
+/// closed; ZEXT_ERR_LINK_KIND for a link that is not a listener. `*out_link` is 0 on every
 /// error.
 ///
 /// # Safety
 /// `transport` is null or a loan of a live transport; `remote` is null or a C string; `out_link`
 /// is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_accepted(
-    transport: *const wz_ext_loaned_transport_t,
-    listener: wz_ext_link_t,
+pub unsafe extern "C" fn zext_transport_accepted(
+    transport: *const zext_loaned_transport_t,
+    listener: zext_link_t,
     remote: *const c_char,
-    out_link: *mut wz_ext_link_t,
+    out_link: *mut zext_link_t,
 ) -> ZResult {
     guarded(|| {
         if out_link.is_null() {
@@ -474,21 +472,21 @@ pub unsafe extern "C" fn wz_ext_transport_accepted(
 /// # Safety
 /// `this_` is null or an owned transport.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_loan(
-    this_: *const wz_ext_owned_transport_t,
-) -> *const wz_ext_loaned_transport_t {
-    this_.cast::<wz_ext_loaned_transport_t>()
+pub unsafe extern "C" fn zext_transport_loan(
+    this_: *const zext_owned_transport_t,
+) -> *const zext_loaned_transport_t {
+    this_.cast::<zext_loaned_transport_t>()
 }
 
-/// The moved form of a transport, for `wz_ext_transport_drop`: a cast, which nulls nothing.
+/// The moved form of a transport, for `zext_transport_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned transport.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_move(
-    this_: *mut wz_ext_owned_transport_t,
-) -> *mut wz_ext_moved_transport_t {
-    this_.cast::<wz_ext_moved_transport_t>()
+pub unsafe extern "C" fn zext_transport_move(
+    this_: *mut zext_owned_transport_t,
+) -> *mut zext_moved_transport_t {
+    this_.cast::<zext_moved_transport_t>()
 }
 
 /// Release the program's reference and leave the gravestone. The configs and sessions that hold
@@ -498,13 +496,13 @@ pub unsafe extern "C" fn wz_ext_transport_move(
 /// # Safety
 /// `this_` is null or a moved transport.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_transport_drop(this_: *mut wz_ext_moved_transport_t) {
+pub unsafe extern "C" fn zext_transport_drop(this_: *mut zext_moved_transport_t) {
     let _ = guarded(|| {
         if this_.is_null() {
             return Z_OK;
         }
         let handle = (*this_)._this.handle;
-        (*this_)._this = wz_ext_owned_transport_t::null_value();
+        (*this_)._this = zext_owned_transport_t::null_value();
         if !handle.is_null() {
             drop(Arc::from_raw(handle as *const AppTransport));
         }
@@ -517,9 +515,9 @@ pub unsafe extern "C" fn wz_ext_transport_drop(this_: *mut wz_ext_moved_transpor
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_transport_null(this_: *mut wz_ext_owned_transport_t) {
+pub unsafe extern "C" fn zext_internal_transport_null(this_: *mut zext_owned_transport_t) {
     if !this_.is_null() {
-        *this_ = wz_ext_owned_transport_t::null_value();
+        *this_ = zext_owned_transport_t::null_value();
     }
 }
 
@@ -528,8 +526,8 @@ pub unsafe extern "C" fn wz_ext_internal_transport_null(this_: *mut wz_ext_owned
 /// # Safety
 /// `this_` is null or an owned transport.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_transport_check(
-    this_: *const wz_ext_owned_transport_t,
+pub unsafe extern "C" fn zext_internal_transport_check(
+    this_: *const zext_owned_transport_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -545,7 +543,7 @@ pub unsafe extern "C" fn wz_ext_internal_transport_check(
 pub(crate) fn refused_open(connect: Option<&str>, listen: Option<&str>) -> Option<ZResult> {
     use wz_session_core::app_link_table::kind_for_locator;
     if connect.is_none() && listen.is_none() {
-        return Some(crate::result::WZ_EXT_ERR_UNSUPPORTED);
+        return Some(crate::result::ZEXT_ERR_UNSUPPORTED);
     }
     for (locator, is_listen) in [(connect, false), (listen, true)] {
         let Some(locator) = locator else {
@@ -580,49 +578,49 @@ const GROUPS_CARRIED: bool = cfg!(feature = "multicast-transport");
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::result::{WZ_EXT_ERR_UNSUPPORTED, Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN};
+    use crate::result::{ZEXT_ERR_UNSUPPORTED, Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN};
 
     #[test]
     fn the_kind_numbers_are_the_tables() {
-        assert_eq!(WZ_EXT_LINK_STREAM_DIAL, 0);
-        assert_eq!(WZ_EXT_LINK_STREAM_LISTEN, 1);
-        assert_eq!(WZ_EXT_LINK_DATAGRAM, 2);
-        assert_eq!(WZ_EXT_LINK_GROUP, 3);
-        assert_eq!(WZ_EXT_LINK_DATAGRAM_LISTEN, 4);
+        assert_eq!(ZEXT_LINK_STREAM_DIAL, 0);
+        assert_eq!(ZEXT_LINK_STREAM_LISTEN, 1);
+        assert_eq!(ZEXT_LINK_DATAGRAM, 2);
+        assert_eq!(ZEXT_LINK_GROUP, 3);
+        assert_eq!(ZEXT_LINK_DATAGRAM_LISTEN, 4);
     }
 
     #[test]
     fn a_full_link_and_a_sourceless_group_datagram_answer_their_codes() {
         assert_eq!(
             refusal_code(InboundRefusal::Full),
-            crate::result::WZ_EXT_ERR_LINK_FULL
+            crate::result::ZEXT_ERR_LINK_FULL
         );
         assert_eq!(refusal_code(InboundRefusal::NoSource), Z_ERR_NULL);
         assert_eq!(refusal_code(InboundRefusal::TooLarge), Z_EINVAL);
         assert_eq!(
             refusal_code(InboundRefusal::NoSuchLink),
-            crate::result::WZ_EXT_ERR_LINK_UNKNOWN
+            crate::result::ZEXT_ERR_LINK_UNKNOWN
         );
     }
 
     #[test]
     fn an_open_answer_outside_the_four_is_a_refusal() {
-        assert_eq!(open_answer(WZ_EXT_LINK_OK), ProgramOpen::Up);
-        assert_eq!(open_answer(WZ_EXT_LINK_WOULD_BLOCK), ProgramOpen::Pending);
-        for answer in [WZ_EXT_LINK_CLOSED, WZ_EXT_LINK_FAILED, 4, -1, i8::MIN] {
+        assert_eq!(open_answer(ZEXT_LINK_OK), ProgramOpen::Up);
+        assert_eq!(open_answer(ZEXT_LINK_WOULD_BLOCK), ProgramOpen::Pending);
+        for answer in [ZEXT_LINK_CLOSED, ZEXT_LINK_FAILED, 4, -1, i8::MIN] {
             assert_eq!(open_answer(answer), ProgramOpen::Refused, "{answer}");
         }
     }
 
     #[test]
     fn a_send_answer_maps_onto_what_the_session_does() {
-        assert_eq!(send_answer(WZ_EXT_LINK_OK, 7), ProgramSend::Wrote(7));
+        assert_eq!(send_answer(ZEXT_LINK_OK, 7), ProgramSend::Wrote(7));
         assert_eq!(
-            send_answer(WZ_EXT_LINK_WOULD_BLOCK, 7),
+            send_answer(ZEXT_LINK_WOULD_BLOCK, 7),
             ProgramSend::WouldBlock
         );
-        assert_eq!(send_answer(WZ_EXT_LINK_CLOSED, 0), ProgramSend::Closed);
-        assert_eq!(send_answer(WZ_EXT_LINK_FAILED, 0), ProgramSend::Failed);
+        assert_eq!(send_answer(ZEXT_LINK_CLOSED, 0), ProgramSend::Closed);
+        assert_eq!(send_answer(ZEXT_LINK_FAILED, 0), ProgramSend::Failed);
         assert_eq!(send_answer(9, 0), ProgramSend::Failed);
     }
 
@@ -634,7 +632,7 @@ mod tests {
             refused_open(Some("tcp/192.0.2.8:7447"), Some("tcp/192.0.2.9:7447")),
             None
         );
-        assert_eq!(refused_open(None, None), Some(WZ_EXT_ERR_UNSUPPORTED));
+        assert_eq!(refused_open(None, None), Some(ZEXT_ERR_UNSUPPORTED));
         assert_eq!(
             refused_open(Some("tls/192.0.2.8:7447"), None),
             Some(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN)

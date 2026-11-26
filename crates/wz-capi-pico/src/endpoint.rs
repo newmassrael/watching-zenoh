@@ -192,7 +192,7 @@ fn link_built(scheme: &str) -> bool {
 /// The text is made in `kept`, a locator text of the caller's stack, the form of the row the
 /// engine writes it into, so no text of an endpoint is a value of the heap. The reading the open
 /// hands the engine, which reads each endpoint by it as it writes the endpoint's row
-/// (`wz_capi_coop::open_source::EndpointReading`), and the one `wz_ext_config_device_requires`
+/// (`wz_capi_coop::open_source::EndpointReading`), and the one `zext_config_device_requires`
 /// reads an endpoint by.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn engine_text<'t>(

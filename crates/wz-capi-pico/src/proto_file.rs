@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_proto_file_t`: one `.proto` file as a program hands it to a door that reads a schema,
+//! `zext_proto_file_t`: one `.proto` file as a program hands it to a door that reads a schema,
 //! the instance keys' (`crate::instance_key`) and the message payloads'
 //! (`crate::message_payload`), and the one reading of a list of them into the schema reader's
 //! files. Declared in `wz_ext.h` with the instance keys, which had it first. A build reads a
@@ -20,7 +20,7 @@ use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL};
 /// text, both NUL-terminated UTF-8, BORROWED for the call.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct wz_ext_proto_file_t {
+pub struct zext_proto_file_t {
     pub name: *const c_char,
     pub text: *const c_char,
 }
@@ -34,13 +34,13 @@ pub struct wz_ext_proto_file_t {
 /// `files` is null or readable for `count` entries, each holding NUL-terminated C strings that
 /// stay valid for `'a`.
 pub(crate) unsafe fn proto_files<'a>(
-    files: *const wz_ext_proto_file_t,
+    files: *const zext_proto_file_t,
     count: usize,
 ) -> Result<Vec<ProtoFile<'a>>, ZResult> {
     if files.is_null() && count != 0 {
         return Err(Z_ERR_NULL);
     }
-    let given: &[wz_ext_proto_file_t] = if count == 0 {
+    let given: &[zext_proto_file_t] = if count == 0 {
         &[]
     } else {
         core::slice::from_raw_parts(files, count)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_instance_keyer_*`: which instance of a message a sample is, read from fields of its
+//! `zext_instance_keyer_*`: which instance of a message a sample is, read from fields of its
 //! payload through the message's schema, from C.
 //!
 //! A keyer is made over the program's schema, the `FileDescriptorSet` `protoc` compiled its
@@ -12,10 +12,10 @@
 //! protecting door protects a payload on the sender's counter stream of its instance. A sample of
 //! no instance is dropped, counted by reason, and reported at the rate the description states;
 //! with `event-ring` each report is also an event of the node's log
-//! (`WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED`). The last value of each instance is kept in storage
+//! (`ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED`). The last value of each instance is kept in storage
 //! the program gives when it makes the keyer.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `instance-key` capability implies `unstable-api`. The keyer is
 //! [`wz_app_frame::instance_key`]; ownership and threads are as `crate::e2e` describes. The
 //! judging and protecting doors hold the keyer's lock and then the receiver's or the sender's, and
@@ -35,7 +35,7 @@ use crate::e2e::{
 };
 use crate::ffi::{guard_val, guarded};
 #[cfg(feature = "proto-text")]
-use crate::proto_file::{proto_files, wz_ext_proto_file_t};
+use crate::proto_file::{proto_files, zext_proto_file_t};
 use crate::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
     Z_RES_CHANNEL_NODATA,
@@ -43,47 +43,47 @@ use crate::result::{
 use crate::sized::{Out, SizedOut};
 
 /// The sample is an instance: `instance` is its index.
-pub const WZ_EXT_INSTANCE_KEY_INDEXED: u8 = 0;
+pub const ZEXT_INSTANCE_KEY_INDEXED: u8 = 0;
 /// The payload is not a message of the schema, or the frame is shorter than its header.
-pub const WZ_EXT_INSTANCE_KEY_UNDECODABLE: u8 = 1;
+pub const ZEXT_INSTANCE_KEY_UNDECODABLE: u8 = 1;
 /// A key field that has presence is not in the payload: `field` says which.
-pub const WZ_EXT_INSTANCE_KEY_ABSENT: u8 = 2;
+pub const ZEXT_INSTANCE_KEY_ABSENT: u8 = 2;
 /// A key value is in no list: `field` says which.
-pub const WZ_EXT_INSTANCE_KEY_NOT_LISTED: u8 = 3;
+pub const ZEXT_INSTANCE_KEY_NOT_LISTED: u8 = 3;
 
 /// No last values are kept, or the sample was dropped.
-pub const WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT: u8 = 0;
+pub const ZEXT_INSTANCE_KEY_LAST_NOT_KEPT: u8 = 0;
 /// The payload is now the instance's last value.
-pub const WZ_EXT_INSTANCE_KEY_LAST_RECORDED: u8 = 1;
+pub const ZEXT_INSTANCE_KEY_LAST_RECORDED: u8 = 1;
 /// The frame is not intact, so the instance's last value is the one before.
-pub const WZ_EXT_INSTANCE_KEY_LAST_NOT_INTACT: u8 = 2;
+pub const ZEXT_INSTANCE_KEY_LAST_NOT_INTACT: u8 = 2;
 /// The payload is longer than an instance's room, so its last value is the one before.
-pub const WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG: u8 = 3;
+pub const ZEXT_INSTANCE_KEY_LAST_TOO_LONG: u8 = 3;
 
 /// An owned keyer: the handle in its one word, null for the gravestone. `Debug` shows the word,
 /// so a test can unwrap the refusal of a door that answers one or the other.
 #[repr(C)]
 #[derive(Debug)]
-pub struct wz_ext_owned_instance_keyer_t {
+pub struct zext_owned_instance_keyer_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned keyer: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_instance_keyer_t {
+pub struct zext_loaned_instance_keyer_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved keyer (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_instance_keyer_t {
-    pub(crate) _this: wz_ext_owned_instance_keyer_t,
+pub struct zext_moved_instance_keyer_t {
+    pub(crate) _this: zext_owned_instance_keyer_t,
 }
 
 /// How a keyer is made.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_instance_keyer_options_t {
+pub struct zext_instance_keyer_options_t {
     /// The storage of the last values: `value_capacity` bytes for each instance, the first
     /// instance's first. The PROGRAM's, and it must stay valid and untouched until the keyer is
     /// dropped. Read only when `value_capacity` is not 0.
@@ -94,7 +94,7 @@ pub struct wz_ext_instance_keyer_options_t {
     pub value_capacity: usize,
 }
 
-impl Default for wz_ext_instance_keyer_options_t {
+impl Default for zext_instance_keyer_options_t {
     fn default() -> Self {
         Self {
             storage: core::ptr::null_mut(),
@@ -108,15 +108,15 @@ impl Default for wz_ext_instance_keyer_options_t {
 /// (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_instance_key_t {
+pub struct zext_instance_key_t {
     /// The bytes of the struct the program was compiled with; a door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
-    /// A `WZ_EXT_INSTANCE_KEY_*` status.
+    /// A `ZEXT_INSTANCE_KEY_*` status.
     pub status: u8,
     /// 1 when this drop carries the report of the drops since the last one (`dropped`).
     pub reported: u8,
-    /// A `WZ_EXT_INSTANCE_KEY_LAST_*` value: what became of the instance's last value.
+    /// A `ZEXT_INSTANCE_KEY_LAST_*` value: what became of the instance's last value.
     pub last: u8,
     pub reserved: u8,
     /// For `_ABSENT` and `_NOT_LISTED`, the key field, in the order the description lists them.
@@ -128,7 +128,7 @@ pub struct wz_ext_instance_key_t {
     pub instance: usize,
 }
 
-impl Default for wz_ext_instance_key_t {
+impl Default for zext_instance_key_t {
     /// Nothing said, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -145,7 +145,7 @@ impl Default for wz_ext_instance_key_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_instance_key_t {
+unsafe impl SizedOut for zext_instance_key_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -178,45 +178,45 @@ struct Held {
 }
 
 /// The handle word of a loaned keyer.
-fn word(this_: *const wz_ext_loaned_instance_keyer_t) -> *const *mut c_void {
+fn word(this_: *const zext_loaned_instance_keyer_t) -> *const *mut c_void {
     this_.cast::<*mut c_void>()
 }
 
 /// Write `refusal`'s status and field into `out`.
-fn refused(out: &mut wz_ext_instance_key_t, refusal: Refusal) {
+fn refused(out: &mut zext_instance_key_t, refusal: Refusal) {
     let (status, field) = match refusal {
-        Refusal::Undecodable => (WZ_EXT_INSTANCE_KEY_UNDECODABLE, 0),
-        Refusal::Absent { field } => (WZ_EXT_INSTANCE_KEY_ABSENT, field),
-        Refusal::NotListed { field } => (WZ_EXT_INSTANCE_KEY_NOT_LISTED, field),
+        Refusal::Undecodable => (ZEXT_INSTANCE_KEY_UNDECODABLE, 0),
+        Refusal::Absent { field } => (ZEXT_INSTANCE_KEY_ABSENT, field),
+        Refusal::NotListed { field } => (ZEXT_INSTANCE_KEY_NOT_LISTED, field),
     };
     out.status = status;
     out.field = u32::try_from(field).unwrap_or(u32::MAX);
 }
 
 /// Write a report into `out`, and into the node's event log in a build that has one.
-fn write_report(out: &mut wz_ext_instance_key_t, due: Report) {
+fn write_report(out: &mut zext_instance_key_t, due: Report) {
     out.reported = 1;
     out.dropped = due.dropped;
     #[cfg(feature = "event-ring")]
     {
         use crate::event_log::{
-            wz_ext_event_emit, WZ_EXT_EVENT_INSTANCE_KEY_ABSENT,
-            WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED, WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE,
-            WZ_EXT_EVENT_LEVEL_LIBRARY, WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
+            zext_event_emit, ZEXT_EVENT_INSTANCE_KEY_ABSENT, ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED,
+            ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE, ZEXT_EVENT_LEVEL_LIBRARY,
+            ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
         };
         let (why, field) = match due.latest {
-            Refusal::Undecodable => (WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE, 0),
-            Refusal::Absent { field } => (WZ_EXT_EVENT_INSTANCE_KEY_ABSENT, field),
-            Refusal::NotListed { field } => (WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED, field),
+            Refusal::Undecodable => (ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE, 0),
+            Refusal::Absent { field } => (ZEXT_EVENT_INSTANCE_KEY_ABSENT, field),
+            Refusal::NotListed { field } => (ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED, field),
         };
         let args = [why, u64::try_from(field).unwrap_or(u64::MAX), due.dropped];
         // A full log under `drop-newest` refuses the report and counts it, as it does any event;
         // the keyer's own count in `out` stands either way.
         // SAFETY: `args` is readable for its length for the call.
         let _ = unsafe {
-            wz_ext_event_emit(
-                WZ_EXT_EVENT_LEVEL_LIBRARY,
-                WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
+            zext_event_emit(
+                ZEXT_EVENT_LEVEL_LIBRARY,
+                ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
                 args.as_ptr(),
                 args.len(),
             )
@@ -225,8 +225,8 @@ fn write_report(out: &mut wz_ext_instance_key_t, due: Report) {
 }
 
 /// The C form of a drop.
-fn dropped(sample: Dropped) -> wz_ext_instance_key_t {
-    let mut out = wz_ext_instance_key_t::default();
+fn dropped(sample: Dropped) -> zext_instance_key_t {
+    let mut out = zext_instance_key_t::default();
     refused(&mut out, sample.refusal);
     if let Some(due) = sample.report {
         write_report(&mut out, due);
@@ -235,12 +235,12 @@ fn dropped(sample: Dropped) -> wz_ext_instance_key_t {
 }
 
 /// The C form of a sample indexed as `instance`.
-fn indexed(instance: usize, last: u8) -> wz_ext_instance_key_t {
-    wz_ext_instance_key_t {
-        status: WZ_EXT_INSTANCE_KEY_INDEXED,
+fn indexed(instance: usize, last: u8) -> zext_instance_key_t {
+    zext_instance_key_t {
+        status: ZEXT_INSTANCE_KEY_INDEXED,
         last,
         instance,
-        ..wz_ext_instance_key_t::default()
+        ..zext_instance_key_t::default()
     }
 }
 
@@ -249,11 +249,11 @@ fn indexed(instance: usize, last: u8) -> wz_ext_instance_key_t {
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_options_default(
-    this_: *mut wz_ext_instance_keyer_options_t,
+pub unsafe extern "C" fn zext_instance_keyer_options_default(
+    this_: *mut zext_instance_keyer_options_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_instance_keyer_options_t::default();
+        *this_ = zext_instance_keyer_options_t::default();
     }
 }
 
@@ -272,13 +272,13 @@ fn limits() -> Limits {
 /// `this_` is writable and holds the gravestone; `options` is null or valid, its `storage`
 /// writable for `storage_len` bytes until the keyer is dropped; `refusal` is null or writable.
 unsafe fn adopt_keyer(
-    this_: *mut wz_ext_owned_instance_keyer_t,
+    this_: *mut zext_owned_instance_keyer_t,
     made: Result<Keyer, NewError>,
-    options: *const wz_ext_instance_keyer_options_t,
+    options: *const zext_instance_keyer_options_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     let options = if options.is_null() {
-        wz_ext_instance_keyer_options_t::default()
+        zext_instance_keyer_options_t::default()
     } else {
         *options
     };
@@ -336,12 +336,12 @@ unsafe fn adopt_keyer(
 /// bytes until the keyer is dropped and touched by nothing else meanwhile; `refusal` is null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_from_descriptor_set(
-    this_: *mut wz_ext_owned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_from_descriptor_set(
+    this_: *mut zext_owned_instance_keyer_t,
     bytes: *const u8,
     len: usize,
     description: *const c_char,
-    options: *const wz_ext_instance_keyer_options_t,
+    options: *const zext_instance_keyer_options_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -367,7 +367,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_from_descriptor_set(
 /// one is read, with what it imports), made as `options` says (null: no last values). In a build
 /// with `proto-text`, which links the text reader.
 ///
-/// `description`, `this_` and `refusal` are as for [`wz_ext_instance_keyer_from_descriptor_set`],
+/// `description`, `this_` and `refusal` are as for [`zext_instance_keyer_from_descriptor_set`],
 /// a schema refusal being the text reader's diagnostic: the file, the line and why.
 ///
 /// Returns `Z_ERR_NULL` for a null `this_` or `description`, a null `files` with a count, a file
@@ -382,12 +382,12 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_from_descriptor_set(
 /// by nothing else meanwhile; `refusal` is null or writable.
 #[cfg(feature = "proto-text")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_new(
-    this_: *mut wz_ext_owned_instance_keyer_t,
-    files: *const wz_ext_proto_file_t,
+pub unsafe extern "C" fn zext_instance_keyer_new(
+    this_: *mut zext_owned_instance_keyer_t,
+    files: *const zext_proto_file_t,
     file_count: usize,
     description: *const c_char,
-    options: *const wz_ext_instance_keyer_options_t,
+    options: *const zext_instance_keyer_options_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -421,8 +421,8 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_new(
 /// # Safety
 /// `this_` is null or a loaned keyer; `out` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_instances(
-    this_: *const wz_ext_loaned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_instances(
+    this_: *const zext_loaned_instance_keyer_t,
     out: *mut usize,
 ) -> ZResult {
     guarded(|| {
@@ -449,19 +449,19 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_instances(
 /// `this_` is null or a loaned keyer; `payload` is readable for `len` bytes; `out` is null or a
 /// struct of `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_index(
-    this_: *const wz_ext_loaned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_index(
+    this_: *const zext_loaned_instance_keyer_t,
     payload: *const u8,
     len: usize,
     now_ms: u64,
-    out: *mut wz_ext_instance_key_t,
+    out: *mut zext_instance_key_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
             Ok(out) => out,
             Err(code) => return code,
         };
-        out.put(&wz_ext_instance_key_t::default());
+        out.put(&zext_instance_key_t::default());
         let Some(held) = behind::<Held>(word(this_)) else {
             return Z_ERR_NULL;
         };
@@ -474,10 +474,10 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_index(
         out.put(&match held.keyer.index(payload, now_ms) {
             Ok(instance) => {
                 let last = match held.last.as_mut() {
-                    None => WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT,
+                    None => ZEXT_INSTANCE_KEY_LAST_NOT_KEPT,
                     Some(store) => match store.record(instance, payload) {
-                        Ok(()) => WZ_EXT_INSTANCE_KEY_LAST_RECORDED,
-                        Err(_) => WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG,
+                        Ok(()) => ZEXT_INSTANCE_KEY_LAST_RECORDED,
+                        Err(_) => ZEXT_INSTANCE_KEY_LAST_TOO_LONG,
                     },
                 };
                 indexed(instance, last)
@@ -496,23 +496,23 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_index(
 /// # Safety
 /// `this_` is null or a loaned keyer; `out` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_flush(
-    this_: *const wz_ext_loaned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_flush(
+    this_: *const zext_loaned_instance_keyer_t,
     now_ms: u64,
-    out: *mut wz_ext_instance_key_t,
+    out: *mut zext_instance_key_t,
 ) -> bool {
     guard_val(|| {
         let Ok(out) = Out::of(out) else {
             return false;
         };
-        out.put(&wz_ext_instance_key_t::default());
+        out.put(&zext_instance_key_t::default());
         let Some(held) = behind::<Held>(word(this_)) else {
             return false;
         };
         let Some(due) = locked(held).keyer.flush(now_ms) else {
             return false;
         };
-        let mut key = wz_ext_instance_key_t::default();
+        let mut key = zext_instance_key_t::default();
         refused(&mut key, due.latest);
         write_report(&mut key, due);
         out.put(&key);
@@ -527,8 +527,8 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_flush(
 /// `this_` is null or a loaned keyer; `undecodable`, `absent` and `not_listed` are null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_counts(
-    this_: *const wz_ext_loaned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_counts(
+    this_: *const zext_loaned_instance_keyer_t,
     undecodable: *mut u64,
     absent: *mut u64,
     not_listed: *mut u64,
@@ -563,8 +563,8 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_counts(
 /// `this_` is null or a loaned keyer; `out` is writable for `capacity` bytes; `len` is null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_last(
-    this_: *const wz_ext_loaned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_last(
+    this_: *const zext_loaned_instance_keyer_t,
     instance: usize,
     out: *mut u8,
     capacity: usize,
@@ -609,8 +609,8 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_last(
 /// # Safety
 /// `this_` is null or a loaned keyer; `value` is readable for `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_set_last(
-    this_: *const wz_ext_loaned_instance_keyer_t,
+pub unsafe extern "C" fn zext_instance_keyer_set_last(
+    this_: *const zext_loaned_instance_keyer_t,
     instance: usize,
     value: *const u8,
     len: usize,
@@ -653,14 +653,14 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_set_last(
 /// bytes.
 #[cfg(feature = "e2e-receiver")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_judge(
-    this_: *const wz_ext_loaned_instance_keyer_t,
-    receiver: *const crate::e2e_receiver::wz_ext_loaned_e2e_receiver_t,
+pub unsafe extern "C" fn zext_instance_keyer_judge(
+    this_: *const zext_loaned_instance_keyer_t,
+    receiver: *const crate::e2e_receiver::zext_loaned_e2e_receiver_t,
     frame: *const u8,
     len: usize,
     now_ms: u64,
-    key: *mut wz_ext_instance_key_t,
-    verdict: *mut crate::e2e_receiver::wz_ext_e2e_verdict_t,
+    key: *mut zext_instance_key_t,
+    verdict: *mut crate::e2e_receiver::zext_e2e_verdict_t,
 ) -> ZResult {
     use wz_app_frame::e2e_receiver::Receiver;
     use wz_app_frame::instance_key::{judge, JudgeError, Judged, LastOutcome};
@@ -670,8 +670,8 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_judge(
             (Ok(key), Ok(verdict)) => (key, verdict),
             (Err(code), _) | (_, Err(code)) => return code,
         };
-        key.put(&wz_ext_instance_key_t::default());
-        verdict.put(&crate::e2e_receiver::wz_ext_e2e_verdict_t::default());
+        key.put(&zext_instance_key_t::default());
+        verdict.put(&crate::e2e_receiver::zext_e2e_verdict_t::default());
         let Some(held) = behind::<Held>(word(this_)) else {
             return Z_ERR_NULL;
         };
@@ -697,10 +697,10 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_judge(
                 last,
             }) => {
                 let last = match last {
-                    LastOutcome::Recorded => WZ_EXT_INSTANCE_KEY_LAST_RECORDED,
-                    LastOutcome::NotIntact => WZ_EXT_INSTANCE_KEY_LAST_NOT_INTACT,
-                    LastOutcome::TooLong { .. } => WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG,
-                    LastOutcome::NotKept => WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT,
+                    LastOutcome::Recorded => ZEXT_INSTANCE_KEY_LAST_RECORDED,
+                    LastOutcome::NotIntact => ZEXT_INSTANCE_KEY_LAST_NOT_INTACT,
+                    LastOutcome::TooLong { .. } => ZEXT_INSTANCE_KEY_LAST_TOO_LONG,
+                    LastOutcome::NotKept => ZEXT_INSTANCE_KEY_LAST_NOT_KEPT,
                 };
                 key.put(&indexed(instance, last));
                 verdict.put(&crate::e2e_receiver::to_c(&judged));
@@ -728,7 +728,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_judge(
 ///
 /// Returns `Z_OK`; `Z_EINVAL` when the payload is no instance of the keyer (`key` says why; it was
 /// counted, no frame was built and no counter value consumed) or the sender refuses the frame, and
-/// for a `struct_size` of `key` short of its struct, nothing written then; `Z_ERR_OVERFLOW` when `capacity` is less than the frame (`wz_ext_e2e_sender_frame_size`);
+/// for a `struct_size` of `key` short of its struct, nothing written then; `Z_ERR_OVERFLOW` when `capacity` is less than the frame (`zext_e2e_sender_frame_size`);
 /// `_Z_ERR_CONFIG_INVALID_VALUE` for a sender that keeps fewer streams than the keyer has
 /// instances; `Z_ERR_NULL` for a null keyer, sender, `out`, `written` or `key`, the gravestone, or
 /// a null payload with a length. A call that does not return `Z_OK` writes nothing to `out`.
@@ -740,9 +740,9 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_judge(
 #[cfg(feature = "e2e-sender")]
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
-    this_: *const wz_ext_loaned_instance_keyer_t,
-    sender: *const crate::e2e_sender::wz_ext_loaned_e2e_sender_t,
+pub unsafe extern "C" fn zext_instance_keyer_protect(
+    this_: *const zext_loaned_instance_keyer_t,
+    sender: *const crate::e2e_sender::zext_loaned_e2e_sender_t,
     payload: *const u8,
     len: usize,
     now_ms: u64,
@@ -750,7 +750,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
     capacity: usize,
     written: *mut usize,
     counter: *mut u64,
-    key: *mut wz_ext_instance_key_t,
+    key: *mut zext_instance_key_t,
 ) -> ZResult {
     use wz_app_frame::e2e_stream_sender::StreamSender;
     use wz_app_frame::instance_key::{protect_into, KeyedWritten, ProtectError};
@@ -763,7 +763,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
             Ok(key) => key,
             Err(code) => return code,
         };
-        key.put(&wz_ext_instance_key_t::default());
+        key.put(&zext_instance_key_t::default());
         *written = 0;
         let Some(held) = behind::<Held>(word(this_)) else {
             return Z_ERR_NULL;
@@ -794,10 +794,10 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
                     *counter = frame.counter;
                 }
                 let last = match held.last.as_mut() {
-                    None => WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT,
+                    None => ZEXT_INSTANCE_KEY_LAST_NOT_KEPT,
                     Some(store) => match store.record(instance, payload) {
-                        Ok(()) => WZ_EXT_INSTANCE_KEY_LAST_RECORDED,
-                        Err(_) => WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG,
+                        Ok(()) => ZEXT_INSTANCE_KEY_LAST_RECORDED,
+                        Err(_) => ZEXT_INSTANCE_KEY_LAST_TOO_LONG,
                     },
                 };
                 key.put(&indexed(instance, last));
@@ -818,21 +818,21 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_protect(
 /// # Safety
 /// `this_` is null or an owned keyer.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_loan(
-    this_: *const wz_ext_owned_instance_keyer_t,
-) -> *const wz_ext_loaned_instance_keyer_t {
-    this_.cast::<wz_ext_loaned_instance_keyer_t>()
+pub unsafe extern "C" fn zext_instance_keyer_loan(
+    this_: *const zext_owned_instance_keyer_t,
+) -> *const zext_loaned_instance_keyer_t {
+    this_.cast::<zext_loaned_instance_keyer_t>()
 }
 
-/// The moved form of a keyer, for `wz_ext_instance_keyer_drop`: a cast, which nulls nothing.
+/// The moved form of a keyer, for `zext_instance_keyer_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned keyer.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_move(
-    this_: *mut wz_ext_owned_instance_keyer_t,
-) -> *mut wz_ext_moved_instance_keyer_t {
-    this_.cast::<wz_ext_moved_instance_keyer_t>()
+pub unsafe extern "C" fn zext_instance_keyer_move(
+    this_: *mut zext_owned_instance_keyer_t,
+) -> *mut zext_moved_instance_keyer_t {
+    this_.cast::<zext_moved_instance_keyer_t>()
 }
 
 /// Release a keyer and leave the gravestone; the storage of its last values is the program's
@@ -841,7 +841,7 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_move(
 /// # Safety
 /// `this_` is null or a moved keyer.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_instance_keyer_drop(this_: *mut wz_ext_moved_instance_keyer_t) {
+pub unsafe extern "C" fn zext_instance_keyer_drop(this_: *mut zext_moved_instance_keyer_t) {
     let _ = guarded(|| {
         if !this_.is_null() {
             release::<Held>(core::ptr::addr_of_mut!((*this_)._this.handle));
@@ -855,8 +855,8 @@ pub unsafe extern "C" fn wz_ext_instance_keyer_drop(this_: *mut wz_ext_moved_ins
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_instance_keyer_null(
-    this_: *mut wz_ext_owned_instance_keyer_t,
+pub unsafe extern "C" fn zext_internal_instance_keyer_null(
+    this_: *mut zext_owned_instance_keyer_t,
 ) {
     if !this_.is_null() {
         (*this_).handle = core::ptr::null_mut();
@@ -868,8 +868,8 @@ pub unsafe extern "C" fn wz_ext_internal_instance_keyer_null(
 /// # Safety
 /// `this_` is null or an owned keyer.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_instance_keyer_check(
-    this_: *const wz_ext_owned_instance_keyer_t,
+pub unsafe extern "C" fn zext_internal_instance_keyer_check(
+    this_: *const zext_owned_instance_keyer_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -883,19 +883,19 @@ mod tests {
     /// its own, before the keyer is read. Turned red by a write before the size is read.
     #[test]
     fn a_key_short_of_its_struct_is_refused_untouched() {
-        a_short_struct_is_refused_untouched::<wz_ext_instance_key_t, _>(
+        a_short_struct_is_refused_untouched::<zext_instance_key_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size; no keyer is named.
                 unsafe {
-                    wz_ext_instance_keyer_index(core::ptr::null(), core::ptr::null(), 0, 0, out)
+                    zext_instance_keyer_index(core::ptr::null(), core::ptr::null(), 0, 0, out)
                 }
             },
             Z_EINVAL,
         );
-        a_short_struct_is_refused_untouched::<wz_ext_instance_key_t, _>(
+        a_short_struct_is_refused_untouched::<zext_instance_key_t, _>(
             |out| {
                 // SAFETY: as above.
-                unsafe { wz_ext_instance_keyer_flush(core::ptr::null(), 0, out) }
+                unsafe { zext_instance_keyer_flush(core::ptr::null(), 0, out) }
             },
             false,
         );
@@ -905,16 +905,16 @@ mod tests {
     #[cfg(feature = "e2e-receiver")]
     #[test]
     fn a_judgement_with_a_short_struct_writes_neither() {
-        use crate::e2e_receiver::wz_ext_e2e_verdict_t;
-        let mut verdict = wz_ext_e2e_verdict_t {
+        use crate::e2e_receiver::zext_e2e_verdict_t;
+        let mut verdict = zext_e2e_verdict_t {
             counter: 7,
-            ..wz_ext_e2e_verdict_t::default()
+            ..zext_e2e_verdict_t::default()
         };
-        a_short_struct_is_refused_untouched::<wz_ext_instance_key_t, _>(
+        a_short_struct_is_refused_untouched::<zext_instance_key_t, _>(
             |key| {
                 // SAFETY: both structs are live; no keyer, receiver or frame is named.
                 unsafe {
-                    wz_ext_instance_keyer_judge(
+                    zext_instance_keyer_judge(
                         core::ptr::null(),
                         core::ptr::null(),
                         core::ptr::null(),
@@ -931,15 +931,15 @@ mod tests {
             verdict.counter, 7,
             "the full verdict was not written either"
         );
-        let mut key = wz_ext_instance_key_t {
+        let mut key = zext_instance_key_t {
             field: 7,
-            ..wz_ext_instance_key_t::default()
+            ..zext_instance_key_t::default()
         };
-        a_short_struct_is_refused_untouched::<wz_ext_e2e_verdict_t, _>(
+        a_short_struct_is_refused_untouched::<zext_e2e_verdict_t, _>(
             |verdict| {
                 // SAFETY: as above.
                 unsafe {
-                    wz_ext_instance_keyer_judge(
+                    zext_instance_keyer_judge(
                         core::ptr::null(),
                         core::ptr::null(),
                         core::ptr::null(),
@@ -961,11 +961,11 @@ mod tests {
     fn a_protection_with_a_short_key_writes_nothing() {
         let mut written = 7usize;
         let mut frame = [0u8; 4];
-        a_short_struct_is_refused_untouched::<wz_ext_instance_key_t, _>(
+        a_short_struct_is_refused_untouched::<zext_instance_key_t, _>(
             |key| {
                 // SAFETY: every pointer is a live local or null; no keyer or sender is named.
                 unsafe {
-                    wz_ext_instance_keyer_protect(
+                    zext_instance_keyer_protect(
                         core::ptr::null(),
                         core::ptr::null(),
                         core::ptr::null(),

@@ -13,7 +13,7 @@
 //! the program says its time has moved on (`wz_capi_c_time_base_advanced`).
 //!
 //! The time base is made by the port both C ABIs share (`wz_capi_port::time_base`), as the pico
-//! ABI's `wz_ext_time_base_*` doors make theirs; this file is this ABI's names, result codes and
+//! ABI's `zext_time_base_*` doors make theirs; this file is this ABI's names, result codes and
 //! ownership around it. The program makes the time base and holds it; a config given it holds a
 //! reference, and so does a session opened from that config, for as long as it runs; the
 //! program's `drop(context)` runs once, when the last of them goes. A node that forwards between

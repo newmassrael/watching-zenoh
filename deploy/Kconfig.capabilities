@@ -158,7 +158,7 @@ config WZ_CAP_SESSION_MEMORY
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  Report the most memory a session holds, part by part, computed from the limits it opened under: its tables, its handle and the queues and buffers of its links (wz_ext_session_memory, wz_ext_session_memory_row, wz-own doors).
+	  Report the most memory a session holds, part by part, computed from the limits it opened under: its tables, its handle and the queues and buffers of its links (zext_session_memory, zext_session_memory_row, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_DECLARATIONS_SYNCED_EVENT
@@ -309,7 +309,7 @@ config WZ_CAP_E2E_SENDER
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, wz_ext_e2e_sender_*, wz-own doors) and the frame writer behind it.
+	  The sending side of an end-to-end protected message: a frame built under a profile with the counter kept per stream (wz_capi_c_e2e_sender_*, zext_e2e_sender_*, wz-own doors) and the frame writer behind it.
 	  Exported by: pico, c.
 
 config WZ_CAP_E2E_RECEIVER
@@ -317,7 +317,7 @@ config WZ_CAP_E2E_RECEIVER
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (wz_ext_e2e_receiver_*, wz-own doors).
+	  The receiving judge of end-to-end protected frames: per-stream state, the judging rules a profile states, and a status per sample (zext_e2e_receiver_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_E2E_SENDER_DEMUX
@@ -333,7 +333,7 @@ config WZ_CAP_INSTANCE_KEY
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  The instance of a message a sample is, read from fields of its payload: a stream of the end-to-end doors and a last value per instance, samples of no instance dropped and counted (wz_ext_instance_keyer_*, wz-own doors; INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE).
+	  The instance of a message a sample is, read from fields of its payload: a stream of the end-to-end doors and a last value per instance, samples of no instance dropped and counted (zext_instance_keyer_*, wz-own doors; INSTANCE_KEY_FIELDS, INSTANCES_PER_MESSAGE).
 	  Exported by: pico.
 
 config WZ_CAP_CONFIG_VERDICT
@@ -363,7 +363,7 @@ config WZ_CAP_SEGMENT_SENDER
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, wz_ext_segment_sender_*, wz-own doors).
+	  The sending side of a declared segment profile: one message cut into the pieces the profile's header describes, put on a publisher or handed to a callback (wz_capi_c_segment_sender_*, zext_segment_sender_*, wz-own doors).
 	  Exported by: pico, c.
 
 config WZ_CAP_E2E_SUPERVISION
@@ -371,7 +371,7 @@ config WZ_CAP_E2E_SUPERVISION
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (wz_ext_stream_supervisor_*, wz-own doors).
+	  Supervise the reception of periodic streams: a deadline per stream, a loss told once, saturating error counts, a start delay, an application condition and absent senders (zext_stream_supervisor_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_REPLAY_CACHE
@@ -383,7 +383,7 @@ config WZ_CAP_REPLAY_CACHE
 	select WZ_CAP_REMOTE_DECLARATION_WATCH
 	select WZ_CAP_E2E_RECEIVER
 	help
-	  Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (wz_ext_replay_*, wz-own doors).
+	  Replay what each publisher last sent to a subscriber that arrives later: a ring of sent frames per instance, answered on a suffixed key, asked of each publisher as it appears and merged with live data in one stated order (zext_replay_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_MESSAGE_CATALOG
@@ -391,7 +391,7 @@ config WZ_CAP_MESSAGE_CATALOG
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (wz_ext_message_catalog_*, wz-own doors).
+	  A deployment's messages declared once, as data, and read at run time: the entry of each message, and the e2e sender, receiver and supervision rows made from it (zext_message_catalog_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_MESSAGE_PAYLOAD
@@ -400,7 +400,7 @@ config WZ_CAP_MESSAGE_PAYLOAD
 	select WZ_CAP_UNSTABLE_API
 	select WZ_CAP_MESSAGE_CATALOG
 	help
-	  The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (wz_ext_payload_schema_*, wz_ext_message_payload_*, wz-own doors).
+	  The payload of a catalog message set and read field by field, by path, under .proto files read at run time, and its protobuf bytes encoded and decoded (zext_payload_schema_*, zext_message_payload_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_PROTO_TEXT
@@ -408,7 +408,7 @@ config WZ_CAP_PROTO_TEXT
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  The message payload and instance key doors that read a schema from .proto text at run time (wz_ext_payload_schema_new, wz_ext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled.
+	  The message payload and instance key doors that read a schema from .proto text at run time (zext_payload_schema_new, zext_instance_keyer_new, wz-own doors); without it a schema is read only from the FileDescriptorSet protoc compiled.
 	  Exported by: pico.
 
 config WZ_CAP_APP_TRANSPORT
@@ -416,7 +416,7 @@ config WZ_CAP_APP_TRANSPORT
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (wz_ext_transport_*, wz_ext_config_transport, wz-own doors).
+	  A transport the program supplies in place of the system's sockets: the session calls the program's open, send and close, and the program hands in what its stack received and what happened to each link (zext_transport_*, zext_config_transport, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_TIME_BASE
@@ -424,7 +424,7 @@ config WZ_CAP_TIME_BASE
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (wz_ext_time_base_* and wz_ext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors).
+	  A time base the program supplies in place of the system's clock: the timers of a session opened from a config that names it (lease, keep-alive, handshake and the other deadlines) run on the program's time, which the program reads to the library and says when it has moved on (zext_time_base_* and zext_config_time_base, wz_capi_c_time_base_* and wz_capi_c_config_time_base, wz-own doors).
 	  Exported by: pico, c.
 
 config WZ_CAP_OBJECT_POOL
@@ -432,7 +432,7 @@ config WZ_CAP_OBJECT_POOL
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  The doors through which a program reserves the fixed pools the objects it holds outside a session are taken from (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads, configs and kept hellos) with counts of its own, and reads what they hold; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY. A library without the tokio engine has the pools without the doors, reserved by its first object from the build's limits (wz_ext_object_pool_*, wz-own doors).
+	  The doors through which a program reserves the fixed pools the objects it holds outside a session are taken from (sessions, publishers, subscribers, queryables, liveliness tokens and subscribers, owned samples, replies, queries and payloads, configs and kept hellos) with counts of its own, and reads what they hold; a full pool refuses the object with _Z_ERR_SYSTEM_OUT_OF_MEMORY. A library without the tokio engine has the pools without the doors, reserved by its first object from the build's limits (zext_object_pool_*, wz-own doors).
 	  Exported by: pico.
 
 config WZ_CAP_OBJECT_POOL_REGION
@@ -440,7 +440,7 @@ config WZ_CAP_OBJECT_POOL_REGION
 	default n
 	select WZ_CAP_OBJECT_POOL
 	help
-	  The object pools laid over memory the program hands over in place of one heap allocation (wz_ext_object_pool_place, a wz-own door).
+	  The object pools laid over memory the program hands over in place of one heap allocation (zext_object_pool_place, a wz-own door).
 	  Exported by: pico.
 
 config WZ_CAP_SHARED_KEY_IDS
@@ -448,7 +448,7 @@ config WZ_CAP_SHARED_KEY_IDS
 	default n
 	select WZ_CAP_UNSTABLE_API
 	help
-	  Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and wz_ext_config_key_ids and wz_ext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says.
+	  Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and zext_config_key_ids and zext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says.
 	  Exported by: pico, c.
 
 config WZ_CAP_RX_CALLBACK_OFFLOAD
@@ -472,14 +472,14 @@ config WZ_CAP_CONFIG_POLICY
 	bool "config-policy"
 	default y
 	help
-	  wz_ext_config_policy and wz_ext_config_profile: a pico config states the policies and the profile of the sessions it opens, which the open resolves over the build's defaults (wz-own). Off, a session runs under the build's policies and limits and the open resolves none.
+	  zext_config_policy and zext_config_profile: a pico config states the policies and the profile of the sessions it opens, which the open resolves over the build's defaults (wz-own). Off, a session runs under the build's policies and limits and the open resolves none.
 	  Exported by: pico.
 
 config WZ_CAP_CONFORMANCE_DIGEST
 	bool "conformance-digest"
 	default y
 	help
-	  wz_ext_conformance_digest: the digest of the configuration this library was built with, which equals the digest of the build statement that describes it (wz-own).
+	  zext_conformance_digest: the digest of the configuration this library was built with, which equals the digest of the build statement that describes it (wz-own).
 	  Exported by: pico.
 
 config WZ_CAP_CONFIG_DOCUMENT
@@ -487,7 +487,7 @@ config WZ_CAP_CONFIG_DOCUMENT
 	default n
 	select WZ_CAP_CONFIG_POLICY
 	help
-	  wz_ext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own).
+	  zext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own).
 	  Exported by: pico.
 
 config WZ_CAP_DEVICE_REQUIRES
@@ -495,7 +495,7 @@ config WZ_CAP_DEVICE_REQUIRES
 	default y
 	select WZ_CAP_UNSTABLE_API
 	help
-	  wz_ext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own).
+	  zext_config_device_requires: what an open of a pico config would ask of the operating system, in the facility words of the target manifest (wz-own).
 	  Exported by: pico.
 
 config WZ_CAP_TRANSPORT_COMPRESSION

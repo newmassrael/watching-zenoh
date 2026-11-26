@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_session_memory` and `wz_ext_session_memory_row`: the most memory a session holds,
+//! `zext_session_memory` and `zext_session_memory_row`: the most memory a session holds,
 //! part by part, computed from the limits it opened under.
 //!
 //! # The rows
@@ -53,7 +53,7 @@
 //! box's own layers, as capturing nothing: what it captures is the engine's type. An engine's own
 //! state, its runtime, its threads and its tasks, is sized by no limit and is outside the rows, and
 //! so are the objects behind the handles a program holds. Whether the build refuses past every
-//! row is `wz_ext_session_memory_t::enforced`.
+//! row is `zext_session_memory_t::enforced`.
 
 use core::ffi::c_char;
 
@@ -67,17 +67,17 @@ use crate::result::{ZResult, Z_EINVAL, Z_ERR_NULL, Z_OK};
 use crate::session::{session_handle, z_loaned_session_t, SessionPlace};
 use crate::sized::{Out, SizedOut};
 
-/// The most memory a session holds, as `wz_ext_session_memory` reports it, into a struct the
+/// The most memory a session holds, as `zext_session_memory` reports it, into a struct the
 /// program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_session_memory_t {
+pub struct zext_session_memory_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
     /// The sum of the rows that have a count: the most the session holds when `bounded` is 1.
     pub total_bytes: usize,
-    /// How many rows `wz_ext_session_memory_row` reports.
+    /// How many rows `zext_session_memory_row` reports.
     pub rows: usize,
     /// 1 when every row has a count, so that `total_bytes` is the session's worst case.
     pub bounded: u8,
@@ -86,11 +86,11 @@ pub struct wz_ext_session_memory_t {
     pub reserved: [u8; 6],
 }
 
-/// One part of what a session holds, as `wz_ext_session_memory_row` reports it, into a struct the
+/// One part of what a session holds, as `zext_session_memory_row` reports it, into a struct the
 /// program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_session_memory_row_t {
+pub struct zext_session_memory_row_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
@@ -377,7 +377,7 @@ fn put(memory: &mut SessionMemory, row: MemoryRow) {
     let _ = memory.push(row);
 }
 
-impl Default for wz_ext_session_memory_t {
+impl Default for zext_session_memory_t {
     /// Nothing reported, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -392,20 +392,20 @@ impl Default for wz_ext_session_memory_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_session_memory_t {
+unsafe impl SizedOut for zext_session_memory_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_session_memory_row_t {
+unsafe impl SizedOut for zext_session_memory_row_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
 /// `row` as the C door hands it over.
-fn row_of(row: &MemoryRow) -> wz_ext_session_memory_row_t {
+fn row_of(row: &MemoryRow) -> zext_session_memory_row_t {
     let total = row.total();
-    wz_ext_session_memory_row_t {
-        struct_size: core::mem::size_of::<wz_ext_session_memory_row_t>(),
+    zext_session_memory_row_t {
+        struct_size: core::mem::size_of::<zext_session_memory_row_t>(),
         part: row.part.as_ptr(),
         basis: row.basis.as_ptr(),
         count: total.and(row.count).unwrap_or(0),
@@ -428,9 +428,9 @@ fn row_of(row: &MemoryRow) -> wz_ext_session_memory_row_t {
 /// `session` is null or a loaned session of this library; `out` is null or a struct of
 /// `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_session_memory(
+pub unsafe extern "C" fn zext_session_memory(
     session: *const z_loaned_session_t,
-    out: *mut wz_ext_session_memory_t,
+    out: *mut zext_session_memory_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn wz_ext_session_memory(
         };
         let memory = handle.memory.report();
         let total = memory.total();
-        out.put(&wz_ext_session_memory_t {
+        out.put(&zext_session_memory_t {
             struct_size: 0,
             total_bytes: memory.bounded_bytes(),
             rows: memory.rows().len(),
@@ -455,7 +455,7 @@ pub unsafe extern "C" fn wz_ext_session_memory(
 }
 
 /// Write row `index` of what `session` holds into `*out`, rows counted from 0 in the order
-/// `wz_ext_session_memory` sums them.
+/// `zext_session_memory` sums them.
 ///
 /// Returns `Z_OK`; `Z_ERR_NULL` for a null `out`, a null session or one with no handle;
 /// `Z_EINVAL` for an index past the last row, leaving `*out` as it was, and for a `struct_size`
@@ -465,10 +465,10 @@ pub unsafe extern "C" fn wz_ext_session_memory(
 /// `session` is null or a loaned session of this library; `out` is null or a struct of
 /// `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_session_memory_row(
+pub unsafe extern "C" fn zext_session_memory_row(
     session: *const z_loaned_session_t,
     index: usize,
-    out: *mut wz_ext_session_memory_row_t,
+    out: *mut zext_session_memory_row_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
@@ -497,17 +497,17 @@ mod tests {
     /// Turned red by a write before the size is read.
     #[test]
     fn a_report_short_of_its_struct_is_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_session_memory_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_session_memory_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size; no session is named.
-                unsafe { wz_ext_session_memory(core::ptr::null(), out) }
+                unsafe { zext_session_memory(core::ptr::null(), out) }
             },
             Z_EINVAL,
         );
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_session_memory_row_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_session_memory_row_t, _>(
             |out| {
                 // SAFETY: as above.
-                unsafe { wz_ext_session_memory_row(core::ptr::null(), 0, out) }
+                unsafe { zext_session_memory_row(core::ptr::null(), 0, out) }
             },
             Z_EINVAL,
         );

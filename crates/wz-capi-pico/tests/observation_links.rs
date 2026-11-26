@@ -23,16 +23,16 @@ use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use wz_capi_pico::clock_source::{wz_ext_clock_source_register, wz_ext_clock_source_unregister};
+use wz_capi_pico::clock_source::{zext_clock_source_register, zext_clock_source_unregister};
 use wz_capi_pico::event_log::{
-    wz_ext_event_emit, wz_ext_event_read, wz_ext_event_t, WZ_EXT_EVENT_LEVEL_LIBRARY,
-    WZ_EXT_EVENT_RECORD, WZ_EXT_EVENT_SOURCE_LIBRARY, WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED,
+    zext_event_emit, zext_event_read, zext_event_t, ZEXT_EVENT_LEVEL_LIBRARY, ZEXT_EVENT_RECORD,
+    ZEXT_EVENT_SOURCE_LIBRARY, ZEXT_EVENT_SOURCE_SUPERVISION_EXPIRED,
 };
 use wz_capi_pico::result::Z_OK;
-use wz_capi_pico::snapshot::{wz_ext_snapshot_poll, wz_ext_snapshot_read, wz_ext_snapshot_size};
+use wz_capi_pico::snapshot::{zext_snapshot_poll, zext_snapshot_read, zext_snapshot_size};
 use wz_capi_pico::supervision::{
-    wz_ext_supervision_check, wz_ext_supervision_set_hook, wz_ext_supervision_start,
-    wz_ext_supervision_stop,
+    zext_supervision_check, zext_supervision_set_hook, zext_supervision_start,
+    zext_supervision_stop,
 };
 use wz_capi_pico::{
     z_close, z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
@@ -88,13 +88,13 @@ unsafe fn close_session(session: &mut z_owned_session_t) {
 unsafe fn read_all(cursor: &mut u64) -> Vec<(u16, u8, u64, Vec<u64>)> {
     let mut all = Vec::new();
     loop {
-        let mut out = wz_ext_event_t::default();
+        let mut out = zext_event_t::default();
         let mut args = [0u64; 8];
         assert_eq!(
-            wz_ext_event_read(cursor, &mut out, args.as_mut_ptr(), args.len()),
+            zext_event_read(cursor, &mut out, args.as_mut_ptr(), args.len()),
             Z_OK
         );
-        if out.kind != WZ_EXT_EVENT_RECORD {
+        if out.kind != ZEXT_EVENT_RECORD {
             return all;
         }
         let kept = usize::from(out.arg_count).min(args.len());
@@ -104,10 +104,10 @@ unsafe fn read_all(cursor: &mut u64) -> Vec<(u16, u8, u64, Vec<u64>)> {
 
 #[test]
 fn the_instruments_are_linked_through_the_doors() {
-    assert_eq!(WZ_EXT_EVENT_LEVEL_LIBRARY, 255);
+    assert_eq!(ZEXT_EVENT_LEVEL_LIBRARY, 255);
     assert_eq!(
-        WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED,
-        WZ_EXT_EVENT_SOURCE_LIBRARY
+        ZEXT_EVENT_SOURCE_SUPERVISION_EXPIRED,
+        ZEXT_EVENT_SOURCE_LIBRARY
     );
     // SAFETY: fresh configs and sessions, each closed before the function returns.
     unsafe {
@@ -116,10 +116,10 @@ fn the_instruments_are_linked_through_the_doors() {
         // LINK 1: an event written while a clock is registered carries that clock's seconds.
         let mut handle = 0u32;
         assert_eq!(
-            wz_ext_clock_source_register(Some(registered_clock), std::ptr::null_mut(), &mut handle),
+            zext_clock_source_register(Some(registered_clock), std::ptr::null_mut(), &mut handle),
             Z_OK
         );
-        assert_eq!(wz_ext_event_emit(3, 0x4200, std::ptr::null(), 0), Z_OK);
+        assert_eq!(zext_event_emit(3, 0x4200, std::ptr::null(), 0), Z_OK);
         let events = read_all(&mut cursor);
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -127,30 +127,30 @@ fn the_instruments_are_linked_through_the_doors() {
             AHEAD,
             "the event is stamped by the registered clock"
         );
-        assert_eq!(wz_ext_clock_source_unregister(handle), Z_OK);
+        assert_eq!(zext_clock_source_unregister(handle), Z_OK);
 
         // LINK 2: a checkpoint that misses its deadline writes one event, carrying the library's
         // level and source and the checkpoint's number, and the program's hook still runs.
         assert_eq!(
-            wz_ext_supervision_set_hook(Some(hook), std::ptr::null_mut()),
+            zext_supervision_set_hook(Some(hook), std::ptr::null_mut()),
             Z_OK
         );
-        assert_eq!(wz_ext_supervision_start(1, 100), Z_OK);
+        assert_eq!(zext_supervision_start(1, 100), Z_OK);
         std::thread::sleep(Duration::from_millis(250));
-        assert_eq!(wz_ext_supervision_check(), Z_OK);
-        assert_eq!(wz_ext_supervision_check(), Z_OK);
+        assert_eq!(zext_supervision_check(), Z_OK);
+        assert_eq!(zext_supervision_check(), Z_OK);
         let events = read_all(&mut cursor);
         assert_eq!(events.len(), 1, "one expiry, one event: {events:?}");
         let (source, level, timestamp, args) = &events[0];
-        assert_eq!(*source, WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED);
-        assert_eq!(*level, WZ_EXT_EVENT_LEVEL_LIBRARY);
+        assert_eq!(*source, ZEXT_EVENT_SOURCE_SUPERVISION_EXPIRED);
+        assert_eq!(*level, ZEXT_EVENT_LEVEL_LIBRARY);
         assert_eq!(args, &[1]);
         assert!(
             *timestamp >> 32 > 1_700_000_000,
             "stamped with the time now"
         );
         assert_eq!(HOOK_CALLS.load(Ordering::SeqCst), 1);
-        assert_eq!(wz_ext_supervision_stop(1), Z_OK);
+        assert_eq!(zext_supervision_stop(1), Z_OK);
 
         // LINK 3: the snapshot says the ring was measured, and that it refused nothing: the build
         // keeps overwrite-oldest, which refuses none (the drop-newest count is `wz-node-time`'s
@@ -158,11 +158,11 @@ fn the_instruments_are_linked_through_the_doors() {
         let port = free_port();
         let mut listener = open_on(Z_CONFIG_LISTEN_KEY, port);
         let mut dialler = open_on(Z_CONFIG_CONNECT_KEY, port);
-        assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
-        let mut bytes = vec![0u8; wz_ext_snapshot_size()];
+        assert_eq!(zext_snapshot_poll(z_session_loan(&listener)), 1);
+        let mut bytes = vec![0u8; zext_snapshot_size()];
         let mut length = 0usize;
         assert_eq!(
-            wz_ext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
+            zext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
             Z_OK
         );
         let snapshot =

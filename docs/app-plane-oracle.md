@@ -96,12 +96,12 @@ A JSON object. The values below are SYNTHETIC; a deployment states its own.
 | `wz.features` | wz-capi-pico features wz's party needs beyond the four above, a comma list |
 | `wz.build_env` | `WZ_POLICY_*` and `WZ_LIMIT_*` values wz's build states, as a deployment's node would be built; `WZ_POLICY_REPLAY_REPLY_SHAPE` is refused, the lane states it per check |
 | `session.connect_mode` | the mode of the side that dials: `client` (default) or `peer` |
-| `key_ids.dictionary` | optional: the key ids every node of the deployment shares, `[{id, key}]`; each id 1 to 65535 and named once, each key a canonical key expression named once. wz's party hands it to `wz_ext_config_key_ids` before it opens, in every role, so its session reads a key named by one of these ids though nobody declared it. It needs `shared-key-ids` in `wz.features`, and is refused without it |
-| `key_ids.forms` | optional: the key-wire form (`declared`, `shared` or `literal`) of the `listen` side's endpoint and of the `connect` side's, which wz's party states with `wz_ext_config_key_wire_form_for`; a side not named takes the session's form, the `key-wire-form` policy, which `wz.build_env` may state, or else the build declaration's default. The deployment's party is built with one form and plays both sides, so a lane file whose two sides come out in two forms is refused, and so is one whose form is `shared` with no dictionary |
+| `key_ids.dictionary` | optional: the key ids every node of the deployment shares, `[{id, key}]`; each id 1 to 65535 and named once, each key a canonical key expression named once. wz's party hands it to `zext_config_key_ids` before it opens, in every role, so its session reads a key named by one of these ids though nobody declared it. It needs `shared-key-ids` in `wz.features`, and is refused without it |
+| `key_ids.forms` | optional: the key-wire form (`declared`, `shared` or `literal`) of the `listen` side's endpoint and of the `connect` side's, which wz's party states with `zext_config_key_wire_form_for`; a side not named takes the session's form, the `key-wire-form` policy, which `wz.build_env` may state, or else the build declaration's default. The deployment's party is built with one form and plays both sides, so a lane file whose two sides come out in two forms is refused, and so is one whose form is `shared` with no dictionary |
 | `name` | lower-case letters, digits and dashes; the check directory's name |
 | `kind` | `e2e` (protected frames on a key) or `replay` (a replay cache and the subscriber that asks it) |
 | `key` | the key expression the frames travel on |
-| `profile`, `values` | wz's end-to-end profile document and its header values, as `wz_ext_e2e_sender_new` and `wz_ext_e2e_receiver_new` take them: an inline object, or a path relative to the lane file |
+| `profile`, `values` | wz's end-to-end profile document and its header values, as `zext_e2e_sender_new` and `zext_e2e_receiver_new` take them: an inline object, or a path relative to the lane file |
 | `payload_len` | the length of every synthetic payload, at least 1 |
 | `skip_beyond_gap` | `e2e`: how many frames the sender holds back in one run so that the next frame's counter step is beyond the deployment's allowance (for an allowance of N steps, N) |
 | `first_counter` | the counter of a stream's first frame, 0 by default |
@@ -177,9 +177,9 @@ A class is what every implementation's receiver can say of a frame:
 
 | Class | wz's verdict | Meaning |
 |---|---|---|
-| `intact` | `WZ_EXT_E2E_OK`, `WZ_EXT_E2E_FIRST` | the checks hold and the counter is acceptable |
-| `counter` | `WZ_EXT_E2E_REPEATED`, `WZ_EXT_E2E_OUT_OF_RANGE`, `WZ_EXT_E2E_COUNTER_ERROR` | intact, but the counter breaks the rules |
-| `integrity` | `WZ_EXT_E2E_INTEGRITY` | the CRC, the identifier or the length failed |
+| `intact` | `ZEXT_E2E_OK`, `ZEXT_E2E_FIRST` | the checks hold and the counter is acceptable |
+| `counter` | `ZEXT_E2E_REPEATED`, `ZEXT_E2E_OUT_OF_RANGE`, `ZEXT_E2E_COUNTER_ERROR` | intact, but the counter breaks the rules |
+| `integrity` | `ZEXT_E2E_INTEGRITY` | the CRC, the identifier or the length failed |
 | `other` | anything else | no verdict of these |
 
 ## What the judge holds

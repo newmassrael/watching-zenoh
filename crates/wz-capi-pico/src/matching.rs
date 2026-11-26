@@ -1031,7 +1031,7 @@ mod tests {
     ))]
     #[test]
     fn an_undeclared_listener_leaves_the_others_on_its_filter() {
-        use crate::config_policy::wz_ext_config_document;
+        use crate::config_policy::zext_config_document;
         use crate::session::{
             engine_held, listening_on_loopback_with, session_handle, z_session_drop,
             z_session_loan, z_session_move,
@@ -1050,7 +1050,7 @@ mod tests {
         let mut session = listening_on_loopback_with(|config| {
             // SAFETY: the config is live and the document a NUL-terminated string.
             let stated = unsafe {
-                wz_ext_config_document(
+                zext_config_document(
                     config,
                     c"{ wz: { limits: { MAX_MATCHING_LISTENERS: 2 } } }".as_ptr(),
                 )

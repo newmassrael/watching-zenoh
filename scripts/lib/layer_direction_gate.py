@@ -72,7 +72,7 @@ literals blanked, and refuses:
    which each library compiles for itself; or an item a `pub mod` of the crate
    root declares strictly `pub` as an `extern "C"` function, a constant, a static
    or a `#[repr(C)]` type. An item the module declares nowhere (one a macro
-   declares) passes only under a pico or `wz_ext` C name. A glob, the module
+   declares) passes only under a pico or `zext` C name. A glob, the module
    itself and an associated item of a core type are refused: the C ABI has none.
 5. ANOTHER CRATE OF THE STACK. The door may name `wz-app-frame` (the features'
    own rules), the stateless modules of `wz-session-core` in
@@ -278,7 +278,7 @@ EXTENSION_DOORS: frozenset[str] = frozenset(
     }
 )
 
-# The versioned C interface the core exports for the doors (`wz_ext_interface_*`).
+# The versioned C interface the core exports for the doors (`zext_interface_*`).
 EXTENSION_INTERFACE = "ext_interface"
 
 # Helpers of a core module that hold no state of the core: a panic guard and a pointer marked
@@ -330,8 +330,8 @@ EXTENSION_LIMITS = frozenset(
 # What a path a door names reaches in the core: (module, item, whether the item is a type).
 Item = tuple[str, str, bool]
 
-# A name of the C ABI: pico's (`z_`, `zp_`, `ze_`, `Z_`, `ZP_`, `_Z_`) or wz's own (`wz_ext_`).
-C_NAME = re.compile(r"^(?:z|zp|ze|wz_ext|Z|ZP|_Z|WZ_EXT)_[A-Za-z0-9_]*$")
+# A name of the C ABI: pico's (`z_`, `zp_`, `ze_`, `Z_`, `ZP_`, `_Z_`) or wz's own (`zext_`).
+C_NAME = re.compile(r"^(?:z|zp|ze|zext|Z|ZP|_Z|ZEXT)_[A-Za-z0-9_]*$")
 
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 LIB_MOD = re.compile(rf"^[ \t]*(pub(?:\s*\([^)]*\))?\s+)?mod\s+({_IDENT})\s*[;{{]", re.M)
@@ -494,7 +494,7 @@ def judge_item(text: str, name: str) -> tuple[str | None, bool]:
             return None, name.endswith("_t")
         return (
             "which its module declares nowhere the gate can read and which is no C name "
-            "(an item a macro declares passes under a pico or `wz_ext` name)",
+            "(an item a macro declares passes under a pico or `zext` name)",
             False,
         )
     reasons = []
@@ -1076,14 +1076,14 @@ _EXT_CORE: dict[str, str] = {
         'pub unsafe extern "C" fn z_string_copy_from_substr() {}\n'
     ),
     "ext_interface.rs": (
-        "pub struct wz_ext_session_facts_t {\n"
+        "pub struct zext_session_facts_t {\n"
         "    pub closed: u8,\n"
         "}\n"
         "fn holds() -> bool {\n"
         "    true\n"
         "}\n"
         "#[no_mangle]\n"
-        'pub unsafe extern "C" fn wz_ext_interface_version() {}\n'
+        'pub unsafe extern "C" fn zext_interface_version() {}\n'
     ),
     "lib.rs": (
         "mod prelude {}\npub mod abi;\npub mod bytes;\npub mod ext_interface;\nmod ffi;\n"
@@ -1105,7 +1105,7 @@ use wz_session_core::replay_publisher::{Dispatch, ReplayPublisher};
 use crate::abi::{z_id_t, z_owned_bytes_t, z_owned_string_t};
 use crate::bytes::z_string_copy_from_substr;
 use crate::e2e::locked;
-use crate::ext_interface::{wz_ext_interface_version, wz_ext_session_facts_t};
+use crate::ext_interface::{zext_interface_version, zext_session_facts_t};
 use crate::ffi::guarded;
 use crate::result::{ZResult, Z_OK};
 use crate::session::{z_loaned_session_t, z_session_loan};
@@ -1120,7 +1120,7 @@ fn own(o: &Own) -> u8 {
 
 fn id() -> z_id_t {
     let text = "crate::session::session_handle(s)";
-    let facts = wz_ext_session_facts_t { closed: 0 };
+    let facts = zext_session_facts_t { closed: 0 };
     let id = z_id_t { id: [0; 16] };
     if Z_OK == 0 {
     }

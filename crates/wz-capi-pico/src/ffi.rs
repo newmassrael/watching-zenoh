@@ -406,7 +406,7 @@ impl InCallback {
 /// threads inside one was full (`InCallback::enter` answered `None`); 0 in the tokio engine's
 /// build, which marks every thread and so runs every callback.
 #[no_mangle]
-pub extern "C" fn wz_ext_callbacks_refused() -> usize {
+pub extern "C" fn zext_callbacks_refused() -> usize {
     callback_depth::refused()
 }
 
@@ -692,9 +692,9 @@ mod tests {
             entered.iter().all(Option::is_some),
             "every callback entered"
         );
-        assert_eq!(super::wz_ext_callbacks_refused(), 0);
+        assert_eq!(super::zext_callbacks_refused(), 0);
         drop(entered);
-        assert_eq!(super::wz_ext_callbacks_refused(), 0);
+        assert_eq!(super::zext_callbacks_refused(), 0);
     }
 
     #[test]

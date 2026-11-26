@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_get_to_peer`: a get addressed to one node by its zenoh id (policy `targeted-query`).
+//! `zext_get_to_peer`: a get addressed to one node by its zenoh id (policy `targeted-query`).
 //!
-//! A door wz has and zenoh-pico does not, so it is `wz_ext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers). It takes what `z_get` takes and the id of
 //! the node the get is for, and asks it on the one link that reaches that node: not on any other
 //! link, not of the session's own queryables, not of a multicast group. A node the session has no
@@ -11,10 +11,10 @@
 //! The id names a node, not a link or a queryable (`wz_session_core::peer_target`).
 //!
 //! The policy is the session's, as its open resolved it, and off unless the build states it
-//! (`WZ_POLICY_TARGETED_QUERY`). Off, the door refuses with `WZ_EXT_ERR_POLICY_OFF` and sends
+//! (`WZ_POLICY_TARGETED_QUERY`). Off, the door refuses with `ZEXT_ERR_POLICY_OFF` and sends
 //! nothing, as the zenoh-c ABI's `wz_capi_c_get_ext` refuses a target; an id of no bytes is
 //! `Z_ERR_INVALID`. On, a session whose engine cannot address a get to one node (the cooperative
-//! engine) answers `WZ_EXT_ERR_UNSUPPORTED` and asks no link. The callback and the moved parts of
+//! engine) answers `ZEXT_ERR_UNSUPPORTED` and asks no link. The callback and the moved parts of
 //! the options are consumed on every path, a refusal included, as `z_get` consumes them; on a
 //! refusal the callback's `drop(context)` runs before the door returns, which is the get reported
 //! over with no reply.
@@ -28,7 +28,7 @@ use wz_session_core::policy_binding::PolicyValue;
 use crate::abi::z_loaned_keyexpr_t;
 use crate::get::{get_inner, z_get_options_t, z_moved_closure_reply_t};
 use crate::prelude::Vec;
-use crate::result::{ZResult, WZ_EXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL};
+use crate::result::{ZResult, ZEXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL};
 use crate::session::z_loaned_session_t;
 use crate::zid::{z_id_t, Z_ID_SIZE};
 
@@ -55,7 +55,7 @@ pub(crate) fn targeted_by(policy: &SessionPolicy) -> bool {
 }
 
 /// The node `peer` names, admitted by a session whose `targeted-query` policy is `enabled`, or
-/// the code the door answers: `Z_ERR_NULL` for no id, `WZ_EXT_ERR_POLICY_OFF` with the policy
+/// the code the door answers: `Z_ERR_NULL` for no id, `ZEXT_ERR_POLICY_OFF` with the policy
 /// off, `Z_ERR_INVALID` for an id that names no node.
 fn addressed(peer: Option<&z_id_t>, enabled: bool) -> Result<Option<Vec<u8>>, ZResult> {
     let Some(peer) = peer else {
@@ -64,20 +64,20 @@ fn addressed(peer: Option<&z_id_t>, enabled: bool) -> Result<Option<Vec<u8>>, ZR
     let zid = wire_bytes(&peer.id);
     match peer_target::admit(Some(&zid), enabled) {
         Ok(()) => Ok(Some(zid)),
-        Err(PeerTargetError::PolicyOff) => Err(WZ_EXT_ERR_POLICY_OFF),
+        Err(PeerTargetError::PolicyOff) => Err(ZEXT_ERR_POLICY_OFF),
         Err(PeerTargetError::Empty | PeerTargetError::TooLong(_)) => Err(Z_ERR_INVALID),
     }
 }
 
-/// `z_get`, addressed to the node `peer` names (see the module doc). `WZ_EXT_ERR_POLICY_OFF` on a
+/// `z_get`, addressed to the node `peer` names (see the module doc). `ZEXT_ERR_POLICY_OFF` on a
 /// session whose `targeted-query` policy is off, `Z_ERR_INVALID` for an all-zero id, `Z_ERR_NULL`
-/// for a null `peer` or session, and `WZ_EXT_ERR_UNSUPPORTED` from an engine that cannot address
+/// for a null `peer` or session, and `ZEXT_ERR_UNSUPPORTED` from an engine that cannot address
 /// a get; each sends nothing. Otherwise what `z_get` answers.
 ///
 /// # Safety
 /// As `z_get`; `peer` must be null or point to a readable `z_id_t`.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_get_to_peer(
+pub unsafe extern "C" fn zext_get_to_peer(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
     parameters: *const c_char,
@@ -123,7 +123,7 @@ mod tests {
         assert_eq!(addressed(Some(&node), true), Ok(Some(vec![0xc7, 0xd1])));
         assert_eq!(
             addressed(Some(&node), false),
-            Err(WZ_EXT_ERR_POLICY_OFF),
+            Err(ZEXT_ERR_POLICY_OFF),
             "with the policy off a node is refused by name, not asked"
         );
         assert_eq!(

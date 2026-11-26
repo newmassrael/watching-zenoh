@@ -722,7 +722,7 @@ def release_notes(template: str, facts: dict) -> str:
         f"- Source: commit `{facts['commit']}`" + ("" if facts["tree_clean"] else " with changes not committed"),
         f"- Toolchain: `{facts['rustc']}`, target `{facts['target']}`",
         f"- Profile: `{facts['profile']}` (`configs/profiles/{facts['profile']}.conf`)",
-        f"- Conformance digest: `{statement['digest']}` (what `wz_ext_conformance_digest()` answers)",
+        f"- Conformance digest: `{statement['digest']}` (what `zext_conformance_digest()` answers)",
         f"- Engine: {statement['engine']}",
         f"- Rust standard library: `{LIBRARY}.dll` links none: `core` and `alloc` over the system's own "
         f"calls (`{ENGINE_FEATURE}`), the process heap as its allocator, a panic ends the process",

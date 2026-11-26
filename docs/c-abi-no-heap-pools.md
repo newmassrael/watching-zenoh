@@ -119,7 +119,7 @@ past its callback), payload bytes (`bytes.rs`: `ByteBuf` over a shared `Block`),
 string arrays, encodings and their schema, owned key expressions not declared on a session, and
 what a program makes before any session: its configs and the hellos it keeps.
 
-- Bound: the counts of `wz_ext_object_pool_counts_t` are limits: `HELD_SESSIONS`,
+- Bound: the counts of `zext_object_pool_counts_t` are limits: `HELD_SESSIONS`,
   `HELD_SAMPLES`, `HELD_REPLIES` and `HELD_QUERIES` (the entities take their session limits
   times `HELD_SESSIONS`), `HELD_CONFIGS`, `HELD_HELLOS` and the three counts of payload blocks
   for the bytes the payloads, strings and slices carry (an owned payload lies in its own value
@@ -373,7 +373,7 @@ device-requirements door's facilities, TLS material.
   old place when it fits there (zenoh-pico frees the value it replaces), the last place grows into
   the free text, and otherwise the value goes after the last place; a value's place never moves, so
   the pointer `zp_config_get` lends stays valid while the config lives and the key is not inserted
-  again. The policy statements of `wz_ext_config_policy` and `wz_ext_config_profile` are the
+  again. The policy statements of `zext_config_policy` and `zext_config_profile` are the
   build's own ids (`PolicyStatements`, a row per policy), found by the door, so they hold no text
   of their own. The document is walked once by the no-heap lexer (`json5_lex::Lexer`), at most
   `CONFIG_DOCUMENT_DEPTH` deep (default 16; zenoh's reference document nests 7), and its `wz`
@@ -418,7 +418,7 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   ring is full, as a cache of that depth does.
 - **End-to-end protection**: `E2E_SENDER_SLOTS`, `E2E_SUPERVISED_STREAMS`,
   `SUPERVISION_CHECKPOINTS`; fixed tables. The last two are limits of the process's runtime
-  (`wz_ext_runtime_limits_document`, stated before the first such machine is made), lent under the
+  (`zext_runtime_limits_document`, stated before the first such machine is made), lent under the
   build's values (`ProcessRows`, `wz-session-core` `process_limits.rs`); a stream past them is
   refused at its door with `_Z_ERR_SYSTEM_OUT_OF_MEMORY`.
 - **Catalogs**: `MESSAGE_CATALOG_ENTRIES` (the process's runtime, as above), `INSTANCE_KEY_FIELDS`,
@@ -443,7 +443,7 @@ The planes of the unstable API and scouting, each its own unit (section 6, U15):
   waiting is a window nobody answered (`Z_OK` with no Hello, or the open's
   `_Z_ERR_SCOUT_NO_RESULTS`), so no scout fails because another thread scouts. A scout asked on
   the holding thread, from inside a scout's callback, is refused at once with
-  `WZ_EXT_ERR_SCOUT_REENTERED`. The holder's mutex and condition variable are the kernel's, made
+  `ZEXT_ERR_SCOUT_REENTERED`. The holder's mutex and condition variable are the kernel's, made
   by the first scout of the process (U11's kernel objects). The Rust
   preset's window (`ScoutingActions::new`, the tokio engine) keeps zenoh's collection on the
   heap, with no bound. A cooperative window allocates nothing: its state (`ScoutingActions`)
@@ -506,9 +506,9 @@ reserved once, at the library's first call (decision Q1; a reservation door is a
 never required).
 
 **The report is the reservation.** The branch `poc-q4-worst-memory` computes the same rows to
-report them (`wz_ext_session_memory`, `MemoryBasis`, `session_tables`), with a flag
+report them (`zext_session_memory`, `MemoryBasis`, `session_tables`), with a flag
 `enforced` that is 0 on a growable build. One function serves both: `z_open` reserves its
-total, and `wz_ext_session_memory` reports the rows it reserved, `enforced` 1 by construction. A
+total, and `zext_session_memory` reports the rows it reserved, `enforced` 1 by construction. A
 test opens a session, fills every table to its limit and holds the arena's high-water mark to the
 reservation, and another holds the report's total to the reserved bytes. The branch is not merged
 by this note; unit U1 takes its rows.
@@ -605,7 +605,7 @@ suites (C1co, Layer Z) unchanged.
     is in every library without the tokio engine (`wz_process_pools`, set by `build.rs`), so a
     build without `unstable-api`, the speed matrix's and the release set's, has them and makes no
     allocation for its objects after its first; `object-pool` is only the doors
-    (`wz_ext_object_pool_*`), which still imply `unstable-api`, and on the tokio engine bring
+    (`zext_object_pool_*`), which still imply `unstable-api`, and on the tokio engine bring
     the pools with them. `Slot::take` has no heap fallback where the pools are. The config
     (`Kind::Config`, `HELD_CONFIGS`, a slot of its own size since the build's config is past
     the largest class) and a hello the program keeps (`Kind::Hello`, `HELD_HELLOS`: the hello, its
@@ -717,7 +717,7 @@ suites (C1co, Layer Z) unchanged.
       follows those units; a liveliness get copies its key twice (`ke.to_owned()` and the gate's
       `clone`), once of which goes with U8's gate.
     - History and replay: done for the answer. The program's storage, sized by
-      `wz_ext_replay_publisher_storage_size`, holds past the rings an answer area (`AnswerArea`:
+      `zext_replay_publisher_storage_size`, holds past the rings an answer area (`AnswerArea`:
       the order of the cells, each frame's length, a copy of every frame and one frame's room for
       the release), aligned wherever the storage starts; one answer at a time copies into it under
       the cache's lock and replies after it, so an answer allocates nothing. zenoh-pico answers

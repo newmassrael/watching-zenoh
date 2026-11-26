@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The sender of a declared segment profile through the `wz_ext_segment_*` doors, driven as a C
+//! The sender of a declared segment profile through the `zext_segment_*` doors, driven as a C
 //! program drives them.
 //!
 //! The oracle is the synthetic profile's own piece builder (`segment_profile::synthetic::piece`),
@@ -70,11 +70,11 @@ unsafe fn make_raw(
     profile: &CString,
     values: &CString,
     first: u64,
-    rollover: wz_ext_segment_rollover_t,
-) -> Result<wz_ext_owned_segment_sender_t, (ZResult, String)> {
-    let mut sender: wz_ext_owned_segment_sender_t = std::mem::zeroed();
+    rollover: zext_segment_rollover_t,
+) -> Result<zext_owned_segment_sender_t, (ZResult, String)> {
+    let mut sender: zext_owned_segment_sender_t = std::mem::zeroed();
     let mut refusal: z_owned_string_t = std::mem::zeroed();
-    let rc = wz_ext_segment_sender_new(
+    let rc = zext_segment_sender_new(
         &mut sender,
         profile.as_ptr(),
         values.as_ptr(),
@@ -85,11 +85,11 @@ unsafe fn make_raw(
     let text = take(&mut refusal);
     if rc == Z_OK {
         assert!(text.is_empty(), "a made sender leaves no refusal: {text}");
-        assert!(wz_ext_internal_segment_sender_check(&sender));
+        assert!(zext_internal_segment_sender_check(&sender));
         Ok(sender)
     } else {
         assert!(
-            !wz_ext_internal_segment_sender_check(&sender),
+            !zext_internal_segment_sender_check(&sender),
             "a refused sender leaves the null state"
         );
         Err((rc, text))
@@ -100,24 +100,24 @@ unsafe fn make(
     profile: &str,
     values: &str,
     first: u64,
-    rollover: wz_ext_segment_rollover_t,
-) -> Result<wz_ext_owned_segment_sender_t, (ZResult, String)> {
+    rollover: zext_segment_rollover_t,
+) -> Result<zext_owned_segment_sender_t, (ZResult, String)> {
     let profile = CString::new(profile).unwrap();
     let values = CString::new(values).unwrap();
     make_raw(&profile, &values, first, rollover)
 }
 
-unsafe fn demo(first: u64, rollover: wz_ext_segment_rollover_t) -> wz_ext_owned_segment_sender_t {
+unsafe fn demo(first: u64, rollover: zext_segment_rollover_t) -> zext_owned_segment_sender_t {
     make(synthetic::PROFILE, VALUES, first, rollover).expect("the synthetic profile makes a sender")
 }
 
-unsafe fn release(sender: &mut wz_ext_owned_segment_sender_t) {
-    wz_ext_segment_sender_drop(wz_ext_segment_sender_move(sender));
+unsafe fn release(sender: &mut zext_owned_segment_sender_t) {
+    zext_segment_sender_drop(zext_segment_sender_move(sender));
 }
 
-unsafe fn next_of(sender: &wz_ext_owned_segment_sender_t) -> Option<u64> {
+unsafe fn next_of(sender: &zext_owned_segment_sender_t) -> Option<u64> {
     let mut out = u64::MAX;
-    wz_ext_segment_sender_next(wz_ext_segment_sender_loan(sender), &mut out).then_some(out)
+    zext_segment_sender_next(zext_segment_sender_loan(sender), &mut out).then_some(out)
 }
 
 unsafe extern "C" fn collect(context: *mut c_void, piece: *const u8, len: usize) -> ZResult {
@@ -140,27 +140,27 @@ unsafe extern "C" fn stop_after(context: *mut c_void, _piece: *const u8, _len: u
 /// handed and the refusal text.
 struct Outcome {
     rc: ZResult,
-    result: wz_ext_segment_result_t,
+    result: zext_segment_result_t,
     pieces: Vec<Vec<u8>>,
     refusal: String,
 }
 
 unsafe fn split_raw(
-    sender: *const wz_ext_loaned_segment_sender_t,
+    sender: *const zext_loaned_segment_sender_t,
     message: *const u8,
     len: usize,
     chunk: usize,
 ) -> Outcome {
     let mut pieces: Vec<Vec<u8>> = Vec::new();
     // A result the door must overwrite, so a door that left it alone is seen.
-    let mut result = wz_ext_segment_result_t {
+    let mut result = zext_segment_result_t {
         transfer: 99,
         pieces: 99,
         sent: 99,
-        ..wz_ext_segment_result_t::default()
+        ..zext_segment_result_t::default()
     };
     let mut refusal: z_owned_string_t = std::mem::zeroed();
-    let rc = wz_ext_segment_sender_split(
+    let rc = zext_segment_sender_split(
         sender,
         message,
         len,
@@ -179,9 +179,9 @@ unsafe fn split_raw(
     }
 }
 
-unsafe fn split(sender: &wz_ext_owned_segment_sender_t, msg: &[u8], chunk: usize) -> Outcome {
+unsafe fn split(sender: &zext_owned_segment_sender_t, msg: &[u8], chunk: usize) -> Outcome {
     split_raw(
-        wz_ext_segment_sender_loan(sender),
+        zext_segment_sender_loan(sender),
         msg.as_ptr(),
         msg.len(),
         chunk,
@@ -191,7 +191,7 @@ unsafe fn split(sender: &wz_ext_owned_segment_sender_t, msg: &[u8], chunk: usize
 /// A refusal before any piece: `Z_EINVAL`, a zeroed result, no piece and a reason.
 fn assert_refused(outcome: &Outcome, reason: &str) {
     assert_eq!(outcome.rc, Z_EINVAL, "refused: {}", outcome.refusal);
-    assert_eq!(outcome.result, wz_ext_segment_result_t::default());
+    assert_eq!(outcome.result, zext_segment_result_t::default());
     assert!(outcome.pieces.is_empty(), "a refused message emits nothing");
     assert!(
         outcome.refusal.contains(reason),
@@ -206,18 +206,18 @@ fn a_split_hands_the_callback_each_piece_the_profile_describes() {
     // SAFETY: every handle is made by its door and dropped before the test returns; the buffers
     // outlive each call.
     unsafe {
-        let mut sender = demo(7, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut sender = demo(7, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         let msg = message(30);
         let outcome = split(&sender, &msg, 8);
         assert_eq!(outcome.rc, Z_OK, "{}", outcome.refusal);
         assert!(outcome.refusal.is_empty());
         assert_eq!(
             outcome.result,
-            wz_ext_segment_result_t {
+            zext_segment_result_t {
                 transfer: 7,
                 pieces: 4,
                 sent: 4,
-                ..wz_ext_segment_result_t::default()
+                ..zext_segment_result_t::default()
             }
         );
         assert_eq!(outcome.pieces.len(), 4);
@@ -267,7 +267,7 @@ fn a_refused_message_emits_nothing_and_consumes_no_number() {
     let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
-        let mut sender = demo(7, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut sender = demo(7, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         let msg = message(30);
 
         assert_refused(&split(&sender, &msg, 0), "chunk size is zero");
@@ -275,7 +275,7 @@ fn a_refused_message_emits_nothing_and_consumes_no_number() {
 
         // An empty message, with a pointer and without one.
         assert_refused(&split(&sender, &[], 8), "empty");
-        let outcome = split_raw(wz_ext_segment_sender_loan(&sender), std::ptr::null(), 0, 8);
+        let outcome = split_raw(zext_segment_sender_loan(&sender), std::ptr::null(), 0, 8);
         assert_refused(&outcome, "empty");
         assert_eq!(next_of(&sender), Some(7));
 
@@ -284,21 +284,21 @@ fn a_refused_message_emits_nothing_and_consumes_no_number() {
         assert_eq!(next_of(&sender), Some(7));
 
         // The null arguments: nothing is split and the result is zeroed.
-        let outcome = split_raw(wz_ext_segment_sender_loan(&sender), std::ptr::null(), 4, 8);
+        let outcome = split_raw(zext_segment_sender_loan(&sender), std::ptr::null(), 4, 8);
         assert_eq!(outcome.rc, Z_ERR_NULL, "a null message with a length");
-        assert_eq!(outcome.result, wz_ext_segment_result_t::default());
+        assert_eq!(outcome.result, zext_segment_result_t::default());
         let outcome = split_raw(std::ptr::null(), msg.as_ptr(), msg.len(), 8);
         assert_eq!(outcome.rc, Z_ERR_NULL, "a null sender");
         assert!(outcome.pieces.is_empty());
-        let mut result = wz_ext_segment_result_t {
+        let mut result = zext_segment_result_t {
             transfer: 99,
             pieces: 99,
             sent: 99,
-            ..wz_ext_segment_result_t::default()
+            ..zext_segment_result_t::default()
         };
         assert_eq!(
-            wz_ext_segment_sender_split(
-                wz_ext_segment_sender_loan(&sender),
+            zext_segment_sender_split(
+                zext_segment_sender_loan(&sender),
                 msg.as_ptr(),
                 msg.len(),
                 8,
@@ -310,7 +310,7 @@ fn a_refused_message_emits_nothing_and_consumes_no_number() {
             Z_ERR_NULL,
             "a null callback"
         );
-        assert_eq!(result, wz_ext_segment_result_t::default());
+        assert_eq!(result, zext_segment_result_t::default());
         assert_eq!(next_of(&sender), Some(7));
 
         // After every refusal the next message carries the number the sender was made with.
@@ -326,13 +326,13 @@ fn a_callback_that_stops_the_split_has_used_the_number() {
     let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
-        let mut sender = demo(7, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut sender = demo(7, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         let msg = message(30);
         let mut left = 1usize;
-        let mut result = wz_ext_segment_result_t::default();
+        let mut result = zext_segment_result_t::default();
         let mut refusal: z_owned_string_t = std::mem::zeroed();
-        let rc = wz_ext_segment_sender_split(
-            wz_ext_segment_sender_loan(&sender),
+        let rc = zext_segment_sender_split(
+            zext_segment_sender_loan(&sender),
             msg.as_ptr(),
             msg.len(),
             8,
@@ -345,11 +345,11 @@ fn a_callback_that_stops_the_split_has_used_the_number() {
         assert_eq!(rc, STOPPED, "the split returns what the callback returned");
         assert_eq!(
             result,
-            wz_ext_segment_result_t {
+            zext_segment_result_t {
                 transfer: 7,
                 pieces: 4,
                 sent: 1,
-                ..wz_ext_segment_result_t::default()
+                ..zext_segment_result_t::default()
             }
         );
         assert!(
@@ -373,23 +373,23 @@ fn the_number_is_refused_past_its_largest_value_unless_the_sender_restarts() {
         let msg = message(10);
 
         // The profile's transfer field is one byte: 255 is its largest value.
-        let mut refusing = demo(255, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut refusing = demo(255, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         assert_eq!(split(&refusing, &msg, 8).result.transfer, 255);
         assert_eq!(next_of(&refusing), None, "nothing comes after the largest");
         assert_refused(&split(&refusing, &msg, 8), "largest value");
         assert_eq!(next_of(&refusing), None);
         // `set` gives the stream a number again.
         assert_eq!(
-            wz_ext_segment_sender_set(wz_ext_segment_sender_loan(&refusing), 3),
+            zext_segment_sender_set(zext_segment_sender_loan(&refusing), 3),
             Z_OK
         );
         assert_eq!(split(&refusing, &msg, 8).result.transfer, 3);
         release(&mut refusing);
 
         // Restarting goes back to the number the sender was made with, not to 0.
-        let mut restarting = demo(1, WZ_EXT_SEGMENT_ROLLOVER_RESTART);
+        let mut restarting = demo(1, ZEXT_SEGMENT_ROLLOVER_RESTART);
         assert_eq!(
-            wz_ext_segment_sender_set(wz_ext_segment_sender_loan(&restarting), 255),
+            zext_segment_sender_set(zext_segment_sender_loan(&restarting), 255),
             Z_OK
         );
         let outcome = split(&restarting, &msg, 8);
@@ -399,7 +399,7 @@ fn the_number_is_refused_past_its_largest_value_unless_the_sender_restarts() {
         release(&mut restarting);
 
         // A first number past the field is taken, and refused by the message that would carry it.
-        let mut wide = demo(256, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut wide = demo(256, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         assert_refused(&split(&wide, &msg, 8), "past the largest value it holds");
         assert_eq!(next_of(&wide), Some(256), "and nothing was consumed");
         release(&mut wide);
@@ -415,7 +415,7 @@ fn a_sender_is_refused_for_a_text_it_cannot_take() {
             profile,
             values,
             1,
-            WZ_EXT_SEGMENT_ROLLOVER_REFUSE,
+            ZEXT_SEGMENT_ROLLOVER_REFUSE,
         ) {
             Err(refusal) => refusal,
             Ok(mut sender) => {
@@ -459,33 +459,33 @@ fn a_sender_is_refused_for_a_text_it_cannot_take() {
         // Text that is not UTF-8.
         let profile = CString::new(synthetic::PROFILE).unwrap();
         let not_utf8 = CString::new(vec![0xFFu8, 0xFE]).unwrap();
-        let (rc, _) = make_raw(&profile, &not_utf8, 1, WZ_EXT_SEGMENT_ROLLOVER_REFUSE)
+        let (rc, _) = make_raw(&profile, &not_utf8, 1, ZEXT_SEGMENT_ROLLOVER_REFUSE)
             .err()
             .expect("refused");
         assert_eq!(rc, Z_EINVAL);
 
         // The null arguments.
         let values = CString::new(VALUES).unwrap();
-        let mut sender: wz_ext_owned_segment_sender_t = std::mem::zeroed();
+        let mut sender: zext_owned_segment_sender_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_segment_sender_new(
+            zext_segment_sender_new(
                 &mut sender,
                 std::ptr::null(),
                 values.as_ptr(),
                 1,
-                WZ_EXT_SEGMENT_ROLLOVER_REFUSE,
+                ZEXT_SEGMENT_ROLLOVER_REFUSE,
                 std::ptr::null_mut(),
             ),
             Z_ERR_NULL
         );
-        assert!(!wz_ext_internal_segment_sender_check(&sender));
+        assert!(!zext_internal_segment_sender_check(&sender));
         assert_eq!(
-            wz_ext_segment_sender_new(
+            zext_segment_sender_new(
                 std::ptr::null_mut(),
                 profile.as_ptr(),
                 values.as_ptr(),
                 1,
-                WZ_EXT_SEGMENT_ROLLOVER_REFUSE,
+                ZEXT_SEGMENT_ROLLOVER_REFUSE,
                 std::ptr::null_mut(),
             ),
             Z_ERR_NULL
@@ -498,15 +498,15 @@ fn a_dropped_sender_is_the_null_state_and_a_second_drop_does_nothing() {
     let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
-        let mut sender = demo(1, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut sender = demo(1, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         release(&mut sender);
-        assert!(!wz_ext_internal_segment_sender_check(&sender));
+        assert!(!zext_internal_segment_sender_check(&sender));
         release(&mut sender);
-        wz_ext_segment_sender_drop(std::ptr::null_mut());
+        zext_segment_sender_drop(std::ptr::null_mut());
 
         assert_eq!(next_of(&sender), None);
         assert_eq!(
-            wz_ext_segment_sender_set(wz_ext_segment_sender_loan(&sender), 4),
+            zext_segment_sender_set(zext_segment_sender_loan(&sender), 4),
             Z_ERR_NULL
         );
         let msg = message(4);
@@ -516,19 +516,19 @@ fn a_dropped_sender_is_the_null_state_and_a_second_drop_does_nothing() {
 
         // The null state written by its own door reads the same. The handle is copied out first,
         // as a C program copies the struct, so the sender is still released.
-        let mut slot = demo(1, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+        let mut slot = demo(1, ZEXT_SEGMENT_ROLLOVER_REFUSE);
         let mut kept = std::ptr::read(&slot);
-        wz_ext_internal_segment_sender_null(&mut slot);
-        assert!(!wz_ext_internal_segment_sender_check(&slot));
-        assert!(wz_ext_internal_segment_sender_check(&kept));
+        zext_internal_segment_sender_null(&mut slot);
+        assert!(!zext_internal_segment_sender_check(&slot));
+        assert!(zext_internal_segment_sender_check(&kept));
         release(&mut kept);
 
-        let mut options = wz_ext_segment_put_options_t {
+        let mut options = zext_segment_put_options_t {
             timestamp: std::ptr::NonNull::<wz_capi_pico::z_timestamp_t>::dangling()
                 .as_ptr()
                 .cast_const(),
         };
-        wz_ext_segment_put_options_default(&mut options);
+        zext_segment_put_options_default(&mut options);
         assert!(
             options.timestamp.is_null(),
             "the default carries no timestamp"
@@ -696,15 +696,15 @@ mod over_loopback {
             std::thread::sleep(Duration::from_millis(300));
             seen.lock().unwrap().clear();
 
-            let mut sender = demo(1, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
+            let mut sender = demo(1, ZEXT_SEGMENT_ROLLOVER_REFUSE);
             let msg = message(30);
-            let mut options: wz_ext_segment_put_options_t = std::mem::zeroed();
-            wz_ext_segment_put_options_default(&mut options);
-            let mut result = wz_ext_segment_result_t::default();
+            let mut options: zext_segment_put_options_t = std::mem::zeroed();
+            zext_segment_put_options_default(&mut options);
+            let mut result = zext_segment_result_t::default();
             let mut refusal: wz_capi_pico::z_owned_string_t = std::mem::zeroed();
             assert_eq!(
-                wz_ext_segment_sender_put(
-                    wz_ext_segment_sender_loan(&sender),
+                zext_segment_sender_put(
+                    zext_segment_sender_loan(&sender),
                     z_publisher_loan(&publisher),
                     msg.as_ptr(),
                     msg.len(),
@@ -718,11 +718,11 @@ mod over_loopback {
             assert!(!wz_capi_pico::z_internal_string_check(&refusal));
             assert_eq!(
                 result,
-                wz_ext_segment_result_t {
+                zext_segment_result_t {
                     transfer: 1,
                     pieces: 4,
                     sent: 4,
-                    ..wz_ext_segment_result_t::default()
+                    ..zext_segment_result_t::default()
                 }
             );
             let got = wait_for(&seen, 4);
@@ -737,8 +737,8 @@ mod over_loopback {
             // A put with no publisher is refused before the message is looked at, and consumes
             // nothing.
             assert_eq!(
-                wz_ext_segment_sender_put(
-                    wz_ext_segment_sender_loan(&sender),
+                zext_segment_sender_put(
+                    zext_segment_sender_loan(&sender),
                     std::ptr::null(),
                     msg.as_ptr(),
                     msg.len(),
@@ -749,7 +749,7 @@ mod over_loopback {
                 ),
                 Z_ERR_NULL
             );
-            assert_eq!(result, wz_ext_segment_result_t::default());
+            assert_eq!(result, zext_segment_result_t::default());
             assert_eq!(next_of(&sender), Some(2));
 
             release(&mut sender);

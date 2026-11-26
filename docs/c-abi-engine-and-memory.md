@@ -296,7 +296,7 @@ The questions this record left open, decided. Each keeps its number, so a refere
   program before `z_open` and outlive `z_close`. The library reserves its process pools once,
   at the first call a program makes into it, sized from the build's limits, so that call is the
   initialisation after which nothing is allocated. No reservation door is required; one
-  (`wz_ext_object_pool_reserve`, `_place`) may be offered beside it, for a program that places
+  (`zext_object_pool_reserve`, `_place`) may be offered beside it, for a program that places
   the memory itself. Reason: the drop-in contract. An existing pico program runs unchanged, and
   no pico program calls a door pico does not have.
 - **Q2. The document's `wz/limits` may only lower a build value, never raise it.** Reason: the

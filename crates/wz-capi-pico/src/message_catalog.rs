@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_message_catalog_*`: a deployment's MESSAGE CATALOG, from C. The program hands over the
+//! `zext_message_catalog_*`: a deployment's MESSAGE CATALOG, from C. The program hands over the
 //! catalog's JSON5 text once; the library reads and judges it and answers, per message, its entry
 //! (key expression, id, period, replay depth, supervision) and the pieces the other doors are made
 //! from: an e2e sender for a node that publishes it, an e2e receiver for one that subscribes, and
 //! the rows of a reception supervisor. One library serves every deployment whose catalog it is
 //! given; the catalog, not the build, says which messages exist.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `message-catalog` capability implies `unstable-api`. The doors that
 //! make a sender, a receiver or supervision rows are in a build that also has `e2e-sender`,
 //! `e2e-receiver` or `e2e-supervision`, and hand back the same handles those capabilities' own
@@ -46,44 +46,44 @@ use crate::sized::{Out, SizedOut};
 use wz_app_frame::message_catalog::HandleError;
 
 /// The node publishes the message.
-pub const WZ_EXT_MESSAGE_PUBLISHES: u8 = 1;
+pub const ZEXT_MESSAGE_PUBLISHES: u8 = 1;
 /// The node subscribes to the message.
-pub const WZ_EXT_MESSAGE_SUBSCRIBES: u8 = 2;
+pub const ZEXT_MESSAGE_SUBSCRIBES: u8 = 2;
 
 /// The bits of `has`: what a message's entry states.
-pub const WZ_EXT_MESSAGE_HAS_PERIOD: u8 = 1;
-pub const WZ_EXT_MESSAGE_HAS_PROTECTION: u8 = 2;
-pub const WZ_EXT_MESSAGE_HAS_SENDERS: u8 = 4;
-pub const WZ_EXT_MESSAGE_HAS_INSTANCE_KEY: u8 = 8;
-pub const WZ_EXT_MESSAGE_HAS_REPLAY: u8 = 16;
-pub const WZ_EXT_MESSAGE_HAS_SUPERVISION: u8 = 32;
-pub const WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE: u8 = 64;
+pub const ZEXT_MESSAGE_HAS_PERIOD: u8 = 1;
+pub const ZEXT_MESSAGE_HAS_PROTECTION: u8 = 2;
+pub const ZEXT_MESSAGE_HAS_SENDERS: u8 = 4;
+pub const ZEXT_MESSAGE_HAS_INSTANCE_KEY: u8 = 8;
+pub const ZEXT_MESSAGE_HAS_REPLAY: u8 = 16;
+pub const ZEXT_MESSAGE_HAS_SUPERVISION: u8 = 32;
+pub const ZEXT_MESSAGE_HAS_SEGMENT_PROFILE: u8 = 64;
 
 /// An owned catalog: the handle in its one word, null for the gravestone. `Debug` shows the word,
 /// so a test can unwrap the refusal of a door that answers one or the other.
 #[repr(C)]
 #[derive(Debug)]
-pub struct wz_ext_owned_message_catalog_t {
+pub struct zext_owned_message_catalog_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned catalog: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_message_catalog_t {
+pub struct zext_loaned_message_catalog_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved catalog (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_message_catalog_t {
-    pub(crate) _this: wz_ext_owned_message_catalog_t,
+pub struct zext_moved_message_catalog_t {
+    pub(crate) _this: zext_owned_message_catalog_t,
 }
 
 /// One message's entry, as C reads it, written into a struct the program sized (`crate::sized`).
 /// A number whose `has` bit is clear is 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct wz_ext_message_entry_t {
+pub struct zext_message_entry_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
@@ -97,7 +97,7 @@ pub struct wz_ext_message_entry_t {
     pub replay_depth: u32,
     /// How many periods a stream may miss; 0 when its reception is not supervised.
     pub supervision_factor: u16,
-    /// The `WZ_EXT_MESSAGE_HAS_*` bits.
+    /// The `ZEXT_MESSAGE_HAS_*` bits.
     pub has: u8,
     /// 1 when a supervised stream can be lost before its first reception.
     pub supervision_awaited: u8,
@@ -106,7 +106,7 @@ pub struct wz_ext_message_entry_t {
     pub reserved: u32,
 }
 
-impl Default for wz_ext_message_entry_t {
+impl Default for zext_message_entry_t {
     /// No entry, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -125,7 +125,7 @@ impl Default for wz_ext_message_entry_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_message_entry_t {
+unsafe impl SizedOut for zext_message_entry_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -139,7 +139,7 @@ struct Held {
 ///
 /// # Safety
 /// `this_` is null or a loaned catalog of this library.
-unsafe fn held<'a>(this_: *const wz_ext_loaned_message_catalog_t) -> Option<&'a Held> {
+unsafe fn held<'a>(this_: *const zext_loaned_message_catalog_t) -> Option<&'a Held> {
     if this_.is_null() {
         return None;
     }
@@ -193,8 +193,8 @@ unsafe fn utf8_arg<'a>(text: *const c_char) -> Option<&'a str> {
 /// # Safety
 /// `this_` is writable; `text` is null or a NUL-terminated C string; `refusal` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_new(
-    this_: *mut wz_ext_owned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_new(
+    this_: *mut zext_owned_message_catalog_t,
     text: *const c_char,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
@@ -248,8 +248,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_new(
 /// # Safety
 /// `this_` is null or a loaned catalog.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_len(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_len(
+    this_: *const zext_loaned_message_catalog_t,
 ) -> usize {
     guard_val(|| held(this_).map_or(0, |h| h.catalog.messages().len()))
 }
@@ -280,8 +280,8 @@ unsafe fn answer_index(found: Option<usize>, out: *mut usize) -> ZResult {
 /// `this_` is null or a loaned catalog; `key_expr` is null or a C string; `out_index` is null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_find(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_find(
+    this_: *const zext_loaned_message_catalog_t,
     key_expr: *const c_char,
     out_index: *mut usize,
 ) -> ZResult {
@@ -307,8 +307,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_find(
 /// # Safety
 /// `this_` is null or a loaned catalog; `out_index` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_find_id(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_find_id(
+    this_: *const zext_loaned_message_catalog_t,
     id: u32,
     out_index: *mut usize,
 ) -> ZResult {
@@ -329,8 +329,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_find_id(
 /// `this_` is null or a loaned catalog; `name` is null or a C string; `out_node` is null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_node(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_node(
+    this_: *const zext_loaned_message_catalog_t,
     name: *const c_char,
     out_node: *mut usize,
 ) -> ZResult {
@@ -357,17 +357,17 @@ pub unsafe extern "C" fn wz_ext_message_catalog_node(
 /// # Safety
 /// `this_` is null or a loaned catalog; `out` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_entry(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_entry(
+    this_: *const zext_loaned_message_catalog_t,
     index: usize,
-    out: *mut wz_ext_message_entry_t,
+    out: *mut zext_message_entry_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
             Ok(out) => out,
             Err(code) => return code,
         };
-        out.put(&wz_ext_message_entry_t::default());
+        out.put(&zext_message_entry_t::default());
         let Some(held) = held(this_) else {
             return Z_ERR_NULL;
         };
@@ -376,37 +376,37 @@ pub unsafe extern "C" fn wz_ext_message_catalog_entry(
             return Z_ERR_INVALID;
         };
         let mut has = 0u8;
-        let mut entry = wz_ext_message_entry_t {
+        let mut entry = zext_message_entry_t {
             key_expr: key.as_ptr(),
             id: message.id,
             // Each list is bounded by a build limit far below 2^32.
             senders: message.senders.len() as u32,
-            ..wz_ext_message_entry_t::default()
+            ..zext_message_entry_t::default()
         };
         if let Some(period) = message.period_ms {
-            has |= WZ_EXT_MESSAGE_HAS_PERIOD;
+            has |= ZEXT_MESSAGE_HAS_PERIOD;
             entry.period_ms = period;
         }
         if message.protection.is_some() {
-            has |= WZ_EXT_MESSAGE_HAS_PROTECTION;
+            has |= ZEXT_MESSAGE_HAS_PROTECTION;
         }
         if !message.senders.is_empty() {
-            has |= WZ_EXT_MESSAGE_HAS_SENDERS;
+            has |= ZEXT_MESSAGE_HAS_SENDERS;
         }
         if !message.instance_key.is_empty() {
-            has |= WZ_EXT_MESSAGE_HAS_INSTANCE_KEY;
+            has |= ZEXT_MESSAGE_HAS_INSTANCE_KEY;
         }
         if let Some(depth) = message.replay_depth {
-            has |= WZ_EXT_MESSAGE_HAS_REPLAY;
+            has |= ZEXT_MESSAGE_HAS_REPLAY;
             entry.replay_depth = depth;
         }
         if let Some(supervision) = message.supervision {
-            has |= WZ_EXT_MESSAGE_HAS_SUPERVISION;
+            has |= ZEXT_MESSAGE_HAS_SUPERVISION;
             entry.supervision_factor = supervision.factor;
             entry.supervision_awaited = u8::from(supervision.awaited);
         }
         if message.segment_profile.is_some() {
-            has |= WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE;
+            has |= ZEXT_MESSAGE_HAS_SEGMENT_PROFILE;
         }
         entry.has = has;
         out.put(&entry);
@@ -414,15 +414,15 @@ pub unsafe extern "C" fn wz_ext_message_catalog_entry(
     })
 }
 
-/// Whether `node` publishes or subscribes to message `index`: the `WZ_EXT_MESSAGE_PUBLISHES` and
-/// `WZ_EXT_MESSAGE_SUBSCRIBES` bits, 0 for neither, a message or a node the catalog does not have,
+/// Whether `node` publishes or subscribes to message `index`: the `ZEXT_MESSAGE_PUBLISHES` and
+/// `ZEXT_MESSAGE_SUBSCRIBES` bits, 0 for neither, a message or a node the catalog does not have,
 /// a null catalog or the gravestone.
 ///
 /// # Safety
 /// `this_` is null or a loaned catalog.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_direction(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_direction(
+    this_: *const zext_loaned_message_catalog_t,
     index: usize,
     node: usize,
 ) -> u8 {
@@ -432,10 +432,10 @@ pub unsafe extern "C" fn wz_ext_message_catalog_direction(
         };
         let mut bits = 0;
         if message.publishers.contains(&node) {
-            bits |= WZ_EXT_MESSAGE_PUBLISHES;
+            bits |= ZEXT_MESSAGE_PUBLISHES;
         }
         if message.subscribers.contains(&node) {
-            bits |= WZ_EXT_MESSAGE_SUBSCRIBES;
+            bits |= ZEXT_MESSAGE_SUBSCRIBES;
         }
         bits
     })
@@ -447,8 +447,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_direction(
 /// # Safety
 /// `this_` is null or a loaned catalog.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_supervision_start_delay(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_supervision_start_delay(
+    this_: *const zext_loaned_message_catalog_t,
 ) -> u32 {
     guard_val(|| held(this_).map_or(0, |h| h.catalog.supervision_start_delay_ms()))
 }
@@ -471,8 +471,8 @@ unsafe fn handle_refused(why: &HandleError, refusal: *mut z_owned_string_t) -> Z
 
 /// The e2e sender `node` protects message `index` with: the message's profile and header values,
 /// the node's address for the fields the profile derives from it, made as `options` says (null:
-/// the defaults of `wz_ext_e2e_sender_options_default`). The handle is the one
-/// `wz_ext_e2e_sender_new` makes, and the `wz_ext_e2e_sender_*` doors take it.
+/// the defaults of `zext_e2e_sender_options_default`). The handle is the one
+/// `zext_e2e_sender_new` makes, and the `zext_e2e_sender_*` doors take it.
 ///
 /// `out` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
 /// gravestone on success and the reason on `_Z_ERR_CONFIG_INVALID_VALUE`.
@@ -487,12 +487,12 @@ unsafe fn handle_refused(why: &HandleError, refusal: *mut z_owned_string_t) -> Z
 /// `refusal` is null or writable.
 #[cfg(feature = "e2e-sender")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_e2e_sender_new(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_e2e_sender_new(
+    this_: *const zext_loaned_message_catalog_t,
     index: usize,
     node: usize,
-    options: *const crate::e2e_sender::wz_ext_e2e_sender_options_t,
-    out: *mut crate::e2e_sender::wz_ext_owned_e2e_sender_t,
+    options: *const crate::e2e_sender::zext_e2e_sender_options_t,
+    out: *mut crate::e2e_sender::zext_owned_e2e_sender_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -535,14 +535,14 @@ fn wants_sender_slots(_catalog: &Catalog, _index: usize) -> bool {
 
 /// The e2e receiver `node` judges message `index` with: the message's profile, the header values
 /// for the identifier it expects, and one slot per sender the entry lists, bound to its identity,
-/// or one stream when it lists none. The handle is the one `wz_ext_e2e_receiver_new` makes, and
-/// the `wz_ext_e2e_receiver_*` doors take it.
+/// or one stream when it lists none. The handle is the one `zext_e2e_receiver_new` makes, and
+/// the `zext_e2e_receiver_*` doors take it.
 ///
 /// `out` holds the gravestone on every error. `refusal` may be null; when it is not, it holds the
 /// gravestone on success and the reason on `_Z_ERR_CONFIG_INVALID_VALUE`.
 ///
 /// Returns `Z_OK`; `Z_ERR_INVALID` for a message or a node the catalog does not have;
-/// `WZ_EXT_ERR_UNSUPPORTED` for a message that lists senders in a build without
+/// `ZEXT_ERR_UNSUPPORTED` for a message that lists senders in a build without
 /// `e2e-sender-demux`; `_Z_ERR_CONFIG_INVALID_VALUE` when the node does not subscribe to the
 /// message or the message is not protected; `Z_ERR_NULL` for a null catalog or `out`, or the
 /// gravestone.
@@ -551,11 +551,11 @@ fn wants_sender_slots(_catalog: &Catalog, _index: usize) -> bool {
 /// `this_` is null or a loaned catalog; `out` is null or writable; `refusal` is null or writable.
 #[cfg(feature = "e2e-receiver")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_e2e_receiver_new(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_e2e_receiver_new(
+    this_: *const zext_loaned_message_catalog_t,
     index: usize,
     node: usize,
-    out: *mut crate::e2e_receiver::wz_ext_owned_e2e_receiver_t,
+    out: *mut crate::e2e_receiver::zext_owned_e2e_receiver_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -568,7 +568,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_e2e_receiver_new(
             return Z_ERR_NULL;
         };
         if wants_sender_slots(&held.catalog, index) {
-            return crate::result::WZ_EXT_ERR_UNSUPPORTED;
+            return crate::result::ZEXT_ERR_UNSUPPORTED;
         }
         match held
             .catalog
@@ -596,8 +596,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_e2e_receiver_new(
 /// writable.
 #[cfg(feature = "e2e-supervision")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_supervision_rows(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_supervision_rows(
+    this_: *const zext_loaned_message_catalog_t,
     index: usize,
     node: usize,
     out_rows: *mut usize,
@@ -624,15 +624,15 @@ pub unsafe extern "C" fn wz_ext_message_catalog_supervision_rows(
 
 /// Add to `supervisor` the rows of message `index` as `node` receives it: the message's period and
 /// factor, and as each row's sender the index of the node that sends the stream (the number
-/// `wz_ext_stream_supervisor_set_sender_present` takes). The stream numbers the supervisor gives
+/// `zext_stream_supervisor_set_sender_present` takes). The stream numbers the supervisor gives
 /// are written to `out_streams` in the order of the receiver's slots (the order of the senders the
 /// entry lists, else one), and how many to `written`.
 ///
 /// Returns `Z_OK`; `Z_ERR_OVERFLOW` when `capacity` is less than the rows
-/// (`wz_ext_message_catalog_supervision_rows`), before any is added; `Z_ERR_INVALID` for a message
+/// (`zext_message_catalog_supervision_rows`), before any is added; `Z_ERR_INVALID` for a message
 /// or a node the catalog does not have; `_Z_ERR_CONFIG_INVALID_VALUE` when the node does not
 /// subscribe to the message or its reception is not supervised; a code of
-/// `wz_ext_stream_supervisor_add` when the supervisor refuses a row, the rows before it added and
+/// `zext_stream_supervisor_add` when the supervisor refuses a row, the rows before it added and
 /// counted in `written`; `Z_ERR_NULL` for a null argument or the gravestone.
 ///
 /// # Safety
@@ -641,11 +641,11 @@ pub unsafe extern "C" fn wz_ext_message_catalog_supervision_rows(
 #[cfg(feature = "e2e-supervision")]
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wz_ext_message_catalog_supervise(
-    this_: *const wz_ext_loaned_message_catalog_t,
+pub unsafe extern "C" fn zext_message_catalog_supervise(
+    this_: *const zext_loaned_message_catalog_t,
     index: usize,
     node: usize,
-    supervisor: *const crate::stream_supervision::wz_ext_loaned_stream_supervisor_t,
+    supervisor: *const crate::stream_supervision::zext_loaned_stream_supervisor_t,
     out_streams: *mut u32,
     capacity: usize,
     written: *mut usize,
@@ -672,7 +672,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_supervise(
         }
         for (n, row) in rows.iter().enumerate() {
             let mut stream = 0u32;
-            let code = crate::stream_supervision::wz_ext_stream_supervisor_add(
+            let code = crate::stream_supervision::zext_stream_supervisor_add(
                 supervisor,
                 row.period_ms,
                 row.factor,
@@ -696,21 +696,21 @@ pub unsafe extern "C" fn wz_ext_message_catalog_supervise(
 /// # Safety
 /// `this_` is null or an owned catalog.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_loan(
-    this_: *const wz_ext_owned_message_catalog_t,
-) -> *const wz_ext_loaned_message_catalog_t {
-    this_.cast::<wz_ext_loaned_message_catalog_t>()
+pub unsafe extern "C" fn zext_message_catalog_loan(
+    this_: *const zext_owned_message_catalog_t,
+) -> *const zext_loaned_message_catalog_t {
+    this_.cast::<zext_loaned_message_catalog_t>()
 }
 
-/// The moved form of a catalog, for `wz_ext_message_catalog_drop`: a cast, which nulls nothing.
+/// The moved form of a catalog, for `zext_message_catalog_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned catalog.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_move(
-    this_: *mut wz_ext_owned_message_catalog_t,
-) -> *mut wz_ext_moved_message_catalog_t {
-    this_.cast::<wz_ext_moved_message_catalog_t>()
+pub unsafe extern "C" fn zext_message_catalog_move(
+    this_: *mut zext_owned_message_catalog_t,
+) -> *mut zext_moved_message_catalog_t {
+    this_.cast::<zext_moved_message_catalog_t>()
 }
 
 /// Release a catalog and leave the gravestone: every key expression an entry pointed at goes with
@@ -719,7 +719,7 @@ pub unsafe extern "C" fn wz_ext_message_catalog_move(
 /// # Safety
 /// `this_` is null or a moved catalog, which no other thread reads.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_message_catalog_drop(this_: *mut wz_ext_moved_message_catalog_t) {
+pub unsafe extern "C" fn zext_message_catalog_drop(this_: *mut zext_moved_message_catalog_t) {
     let _ = guarded(|| {
         if !this_.is_null() {
             let slot = core::ptr::addr_of_mut!((*this_)._this.handle);
@@ -738,8 +738,8 @@ pub unsafe extern "C" fn wz_ext_message_catalog_drop(this_: *mut wz_ext_moved_me
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_message_catalog_null(
-    this_: *mut wz_ext_owned_message_catalog_t,
+pub unsafe extern "C" fn zext_internal_message_catalog_null(
+    this_: *mut zext_owned_message_catalog_t,
 ) {
     if !this_.is_null() {
         (*this_).handle = core::ptr::null_mut();
@@ -751,8 +751,8 @@ pub unsafe extern "C" fn wz_ext_internal_message_catalog_null(
 /// # Safety
 /// `this_` is null or an owned catalog.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_message_catalog_check(
-    this_: *const wz_ext_owned_message_catalog_t,
+pub unsafe extern "C" fn zext_internal_message_catalog_check(
+    this_: *const zext_owned_message_catalog_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -765,10 +765,10 @@ mod tests {
     /// read. Turned red by a write before the size is read.
     #[test]
     fn an_entry_short_of_its_struct_is_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_message_entry_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_message_entry_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size; no catalog is named.
-                unsafe { wz_ext_message_catalog_entry(core::ptr::null(), 0, out) }
+                unsafe { zext_message_catalog_entry(core::ptr::null(), 0, out) }
             },
             Z_EINVAL,
         );
