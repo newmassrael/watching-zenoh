@@ -8037,6 +8037,27 @@
         "22 opaque lanes are always selected; give each a declared input closure.",
         "the three hand_back tests of wz-capi-coop build on no host lane (wz_round needs a target without 64-bit atomics)."
       ]
+    },
+    "Round 4665": {
+      "decision_summary": "Land mcast-perf: the multicast receive and put paths of the pico preset win\nagainst zenoh-pico (receive 3,102 vs 3,532 Ir per message, put 2,211 vs\n2,555), with the lanes it carried for the unicast read and the listener. Layer\nC1cc now builds the pico CLIs its interop legs run, so a run of the layer\nalone judges the same tree as hosted CI.",
+      "changes_bullets": [
+        "capi-coop/session-core: multicast receive and put paths cut to beat zenoh-pico per message.",
+        "capi-coop: a face with no wire is skipped by the ? operator in the declaration watch walks.",
+        "ci: Layer C1cc builds the pico CLIs its interop legs run."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-capi-coop, wz-capi-pico, wz-runtime-coop, wz-runtime-posix, wz-runtime-tokio, wz-session-core, wz-session-mcu clippy-clean after merging main.",
+        "tests: wz-capi-coop arena 68 and 73 (runtime-plan), tx_pool; wz-session-core session_tables 103 passed.",
+        "Layer C1cc: 74 of 78 legs reached; the one red leg (a coop pico listener sends no initial-interest final) is main's, not this lane's.",
+        "measured multicast Ir per message: receive 0.88x, put 0.87x zenoh-pico."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "coop engine sends no initial-interest DeclareFinal to a dialling zenoh peer (Layer C1cc leg); lane coop-final.",
+        "wz-capi-coop hand_back tests build on no host lane (wz_round needs a target without 64-bit atomics)."
+      ]
     }
   },
   "inventory_entries": {
