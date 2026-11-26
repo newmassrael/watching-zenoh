@@ -167,7 +167,7 @@ the conformance digest (section 5.1).
 
 | row | W - P (count) | structure that removes it | files | lane | state |
 |---|---:|---|---|---|---|
-| R1 library text pages | +800,696 B mapped | (a0) both arms built as zenoh-pico's preset (section 2.2), so neither carries a plane pico's default build has not; (a) the text lane's areas (`text.md`), read here on the bench's features, where the gap is 3.84 and not 1.38: the engine (`wz_capi_coop::engine` 166 KB) and the session core (352 KB) carry the doors of every default capability; (b) code a run never calls kept off the pages it does: the doors of the capabilities a program may not use (advanced, liveliness, scouting, connectivity, the conformance digest, about 190 KB by name in section 2.1) laid out together, apart from the open, put and read, so their 64 KiB windows are never faulted (GNU ld already puts `.text.unlikely.*` first; a `#[cold]` door is placed there); (c) float formatting and the digest out of the no_std form | `text.md`; the door modules of `wz-capi-pico`; `wz-capi-pico-lib` link script; (a0) `wz_config.py`, `perf_matrix.py` | text, rss | (a0) **landed in this lane**, R1 read again on it; (b) and (c): cell R3 first, since which windows a run faults is read, not counted |
+| R1 library text pages | +800,696 B mapped | (a0) both arms built as zenoh-pico's preset (section 2.2), so neither carries a plane pico's default build has not; (a) the text lane's areas (`text.md`), read here on the bench's features, where the gap is 3.84 and not 1.38: the engine (`wz_capi_coop::engine` 166 KB) and the session core (352 KB) carry the doors of every default capability; (b) code a run never calls kept off the pages it does: the doors of the capabilities a program may not use (advanced, liveliness, scouting, connectivity, the conformance digest, about 190 KB by name in section 2.1) laid out together, apart from the open, put and read, so their 64 KiB windows are never faulted (GNU ld already puts `.text.unlikely.*` first; a `#[cold]` door is placed there); (c) float formatting and the digest out of the no_std form | `text.md`; the door modules of `wz-capi-pico`; `wz-capi-pico-lib` link script; (a0) `wz_config.py`, `perf_matrix.py` | text, rss | (a0) **landed in this lane**, R1 read again on it; (b) the layout **landed in this lane** (section 5.4), its list made from a traced run (cell R6); (c): cell R3 first, since which windows a run faults is read, not counted |
 | R2 `.rodata` | +58,692 B on the crate default's build; +10,234 B and +8 KiB resident a process on the preset's (section 5.3) | the jump tables of short matches lowered to compares, the encoding constants' states folded into their views, the errno match of the accept as a set; the bytes count only where they cross a page (section 5.3) | `.cargo/capi-nostd.toml`; `wz-capi-pico` `encoding.rs`; `wz-runtime-posix` `stream.rs` | rss, text | designed, section 5.3; measured first |
 | R3 RW, relocated | +53,176 B on the crate default's build; +21,480 B and +20 KiB resident a process on the preset's (section 5.3) | fewer pointers the library holds to itself: the link drivers dispatched over the build's closed set, not through vtables; the limits' and the encodings' names as offsets into one string, so their tables carry no pointer | `wz-runtime-coop`, `wz-capi-coop` (the links); `wz-session-core` `limit_binding.rs` and the generator of `limits_generated.rs`; `wz-codecs` `encoding_ids.rs` | rss, text | designed, section 5.3; measured first |
 | R4 `libgcc_s.so.1` | its mapped pages, W only | define `_Unwind_Resume` in the library as a local symbol that aborts, as `rust_eh_personality` is: the library is `panic = "abort"`, its personality aborts and its unwind tables are discarded, so no landing pad is ever entered and the name is never called; with it defined, the C compiler's as-needed link of `libgcc_s` drops the library, and the size gate refuses the name undefined | `wz-capi-pico/src/lib.rs` (`c_library_runtime!`), `scripts/lib/capability_cost_gate.py` | rss | **landed in this lane** |
@@ -189,7 +189,9 @@ like alone took that much. Summed over the two processes of a cell, in KiB, W ag
 against 856 (1.95), anonymous 272 against 108 (2.5), the main thread's stack 76 against 48, the brk heap 44
 against 40, libc 2,952 against 3,208 (W ahead: pico calls more of libc), the rollup's private dirty 560
 against 340. Arm W's library text is resident whole: 191 of 191 pages in every role (`resident-text`), so
-its resident text is its text size, and R1 is the text lane's work and nothing a layout of it can take.
+its resident text is its text size. That is what fault-around makes of a run whose code lies in every 64 KiB
+window of the text, and it says nothing of how much of the text the run executes: section 5.4 reads that,
+and lays the run's code out together.
 
 **What the preset still carries that no run calls.** Of section 2.1's groups the run holds 30,552 bytes
 named liveliness or token, 22,880 named scout and 13,773 named digest. Liveliness and scouting are
@@ -515,6 +517,81 @@ run of R0 reads the `rw-p` mapping. R2.1's flag returns only with a reading of t
 boundary that the text it costs is weighed against; R3.2 and R3.3 return in a form whose readers are no larger
 than the indexing of a slice of `&str` they replace, measured on the ledger before they land.
 
+### 5.4 The run's code in one place: what a layout can take of R1 (design; the layout landed)
+
+**What 191 of 191 says, and what it does not.** A read fault on the library's text maps every page of the
+64 KiB window around it that the page cache holds (section 1), and the matrix's library is in the page cache
+whole, so a page is resident as soon as any function of its window ran. 191 pages are 12 windows: a run whose
+executed functions fall in each of them holds the text whole however few of its bytes it executes, and the
+page map cannot tell the two apart (cell R3). So section 5.1's reading leaves open how much of R1 a layout
+takes: what a layout can take is every window in which nothing runs, and that follows from the bytes a run
+executes, which no reading has given yet. Laid out together, E bytes executed span at most E / 64 KiB + 1
+windows (rounded up), and the rest of the text none.
+
+**The resident set by part, and the reading of each.** What is new is the second row; the others are R0's
+mappings read part by part, which the table of section 5.1 already fills for anonymous memory and stacks.
+
+| part | mappings of `/proc/self/smaps` | what counts | reading | W against P (section 5.1) |
+|---|---|---|---|---|
+| text, resident | the library's `r-xp` | `Rss`, and its present pages | R0, R3 (`PERF_SMAPS=1`, the page map) | W whole, 191 pages; the library's mappings 1,668 against 856 KiB a cell |
+| text, executed | the same | the bytes of the functions the run executed, and the windows they span laid out together | R6 (`run --trace-text`, `run-text` of each arm's library) | not read |
+| text, touched | the same | the present pages with fault-around off: the pages the run executed or read, and no neighbour | R0 and R3 with `fault_around_bytes` 4096 (debugfs, root), a cross-check of R6 | not read |
+| read-only data | the library's `r--p` (headers and symbol tables; `.rodata`) | `Rss` | R0 | section 5.3 |
+| data and `.bss` | the library's `rw-p`, and the anonymous mapping that starts where it ends (the `.bss` past its last file page) | `Rss`, `Private_Dirty` | R0; the tail is counted as anonymous by `smaps_class` and told apart by its `start` | +16 KiB of `.bss` (A3) |
+| heap | `[heap]`; the session arena (one anonymous mapping of its reserved size); a malloc arena (64 MiB) | `Rss` | R0, the anonymous mappings by size | brk 44 against 40; the arena +160 (A1) |
+| stack | `[stack]`; a thread's stack (8 MiB and a guard page) | `Rss` | R0 | main +28 (A2); the read thread's 12 against 12 |
+
+Not `perf mem`: it samples loads and stores by their latency (the processor's memory sampling), which says which
+data is hot and not which pages are present, and nothing of code. `perf record -e page-faults -d` (a software
+event a user may record of its own process) gives the address of each fault, the page whose fault brought a
+window in; a page fault-around mapped faults no more, so it counts windows and not pages, and R0 and R6 say
+more.
+
+**The means, and the one this lane takes.**
+
+- (i) `#[cold]`. LLVM gives a function with the cold attribute the section prefix `unlikely`
+  (`.text.unlikely.<name>` with a section a function), and GNU ld's own script lays `.text.unlikely.*` first in
+  `.text`, together. It moves the function marked and nothing it calls, so a door marked cold leaves the code
+  behind it where it lies, and each mark is a function chosen by hand: the tool for a path a program takes only
+  when something failed, not for what one program's run does not call, which differs from program to program.
+- (ii) Function sections and an order. rustc puts every function in a section of its own on ELF, so a link can
+  place functions one by one, and the order is the set of functions a traced run executed, laid together ahead
+  of the rest. GNU ld 2.42, the linker of these libraries (the discard of the unwind tables needs it, docs/c-abi-size-diet.md T7,
+  `capability_cost_gate.GNU_LD`), has no section ordering file (2.43 adds one), and lld's symbol ordering file
+  is lld's alone; an INSERT script places them for both: one output section, `.text.run`, listing each function
+  by its sections' names, inserted before `.text` in the same executable segment. **Landed in this lane.**
+- (iii) The code that runs only at the open, apart. It runs once before the run reaches its peak, so its pages
+  are counted in VmHWM wherever they lie: apart, it gains only if its pages are given back after the open
+  (`madvise(MADV_DONTNEED)` drops a file page from `Rss`) and the peak comes after, which bounds the gain by the
+  open's own text. With (ii) the open's code lies among the run's already, as it ran; a design, read after (ii).
+
+**What landed.**
+
+- `perf_matrix.py run --trace-text DIR`: every probe of the run started under callgrind (`TEXT_TRACE_TOOL`,
+  names left mangled), its profile written to DIR by cell, role and pid. Callgrind counts every function that
+  ran, the open and the handshake as surely as the loop, where a sampling profile misses what runs once. The
+  run's record says `text_trace`, and the gate refuses its figures, which are the tracer's.
+- `perf_matrix.py run-text LIBRARY SCRIPT TRACE...`: the functions of LIBRARY the profiles name, kept where
+  LIBRARY defines a text symbol of the name (`nm -S`), printed as bytes executed and windows spanned, and each
+  written into SCRIPT's statement as `*(.text.<name> .text.unlikely.<name>)`, a Rust name's hash matched by any
+  sixteen characters so a line holds across builds while the function's path does; sorted by name, so a list
+  made again differs by what changed. SCRIPT `-` writes nothing, which reads arm P's executed bytes too.
+- `crates/wz-capi-pico/link/run-text.ld`, its statement empty until a trace fills it (an output section with
+  nothing in it is not written, so the library links as before), and `crates/.cargo/capi-run-text.toml`, in the
+  size gate's `pico-client-coop-nostd` case and so in arm W of the matrix (`bench_case`). The zenoh-pico
+  reference is not linked with it: the order is wz's own.
+- The library's build script reruns when a link script changes, so a new list relinks the library.
+
+**What can keep a function the run executes outside.** (a) A path the traced run did not take: callgrind runs a
+probe tens of times slower, so a path only a run at full speed takes (a write that would block under the
+throughput workload) is missed; it then faults a window of the rest, R0's page map read after the layout shows
+present pages past `.text.run`, and a trace of more cells adds it. (b) A name with a character a pattern does not
+take unquoted (`run-text` counts them). (c) A function that is another symbol in another build: a generic
+instantiated afresh, a path that moved. The list is made again from a trace of the build the matrix runs, as a
+size reading is read again. None of the three changes what the library does, only where its code lies. The
+section is not aligned to a window: aligning it would pad the file by up to 64 KiB, which the size gate counts,
+for at most one window a process.
+
 ## 6. Measurement cells
 
 - **R0, the absolute figure and its parts.** `PERF_SMAPS=1` in the matrix's environment makes
@@ -557,6 +634,25 @@ than the indexing of a slice of `&str` they replace, measured on the ledger befo
     --features "$(python3 -I scripts/lib/wz_config.py --print-preset-features coop)" \
     the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture
   ```
+- **R6, the run's executed text and its layout.** On the directory `scripts/pico-compare.sh perf` built (`<perf>`:
+  `bin/`, `lib-W`, `lib-P`, `reference.json`), one traced repetition of every transport, then the list, then the
+  matrix again on the library linked by it:
+
+  ```
+  python3 -I scripts/host-bench/perf_matrix.py run --bin-dir <perf>/bin --run <perf>/traced \
+    --reference-record <perf>/reference.json --reps 1 --sizes 64 --pings 500 --warmup-ms 500 \
+    --window-s 2 --trace-text <perf>/trace
+  python3 -I scripts/host-bench/perf_matrix.py run-text <perf>/lib-P/libzenohpico.so - <perf>/trace/*
+  python3 -I scripts/host-bench/perf_matrix.py run-text <perf>/lib-W/libwz_capi_pico.so \
+    crates/wz-capi-pico/link/run-text.ld <perf>/trace/*
+  PERF_SMAPS=1 bash scripts/pico-compare.sh perf
+  python3 -I scripts/host-bench/perf_matrix.py resident-text <run>/perf.json <perf>/lib-W/libwz_capi_pico.so
+  ```
+
+  The first `run-text` reads arm P's executed bytes and writes nothing; the second writes the list. The cell's
+  figures: the bytes each arm executes against its text, the windows W's span, and after the layout R0's
+  `smaps_library_kib` and the present pages of `resident-text` against that span. `readelf -SW` of the new
+  library names `.text.run` and its size, the bytes the list placed.
 
 ## 7. What this lane landed
 
@@ -588,3 +684,6 @@ than the indexing of a slice of `&str` they replace, measured on the ledger befo
   table (made in place per window). R2.1 (the jump table floor), R3.2 (a limit row's id as offsets), R3.3
   (the encoding names as one string) and R3.4's pool stage (a tag of zero) were committed and taken back:
   each grew the text with no page read. R3.1 (a) stays a design.
+- Section 5.4: the resident set by part with the reading of each, and R1 (b)'s layout: the run's code traced
+  (`run --trace-text`), listed (`run-text`) and laid out together ahead of the rest of the text by the
+  library's link (`run-text.ld`, `capi-run-text.toml`); its list comes from cell R6.
