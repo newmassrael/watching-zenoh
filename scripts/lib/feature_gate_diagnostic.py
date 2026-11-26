@@ -709,7 +709,9 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # crate's now, under the same names). `connect-endpoints` left it too: with
                 # `adminspace-write` gone, `pub mod connect_endpoints` is behind the bare
                 # feature, a simple site the root probe reads.
-                "attachment-bytes",
+                # `attachment-bytes` LEFT this list: `pub mod attachment` is at the crate root
+                # under the bare feature now that a build without a heap holds an attachment's
+                # reader too, a simple site the root probe reads, so the feature is probed there.
                 # `bounded-heapless` joins from the methods list below: its two accessors of
                 # `ApplicationLayerObserver` (`reply_refusals`, `request_refusals`) carry no
                 # cfg since the reply and final stages hold the session's quota on every backing,
@@ -815,16 +817,15 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # arms that call it), and `driver_loop::RX_LENT_ONLY` exists in every build.
                 "rx-lent-only",
                 "session-matching",
-                # `session-unicast-accept` and `session-unicast-open` MOVED HERE from
-                # `NO_PUBLIC_PATH` (see the note there). The handshake-stray-message policy
-                # holds the establishment answer a link sent, to send it again on a repeated
-                # step, and `SessionLinkActions::held_answer_len` reads how much is held: a
-                # `pub` method, because the runtime's integration test of the policy
-                # (`handshake_stray_message`) asserts the hold is filled and let go, behind
-                # `all(any(codec-init-body, codec-open-body), any(session-unicast-open,
+                # `session-unicast-open` MOVED HERE from `NO_PUBLIC_PATH` (see the note there).
+                # The handshake-stray-message policy holds the establishment answer a link sent,
+                # to send it again on a repeated step, and `SessionLinkActions::held_answer_len`
+                # reads how much is held: a `pub` method, because the runtime's integration test
+                # of the policy (`handshake_stray_message`) asserts the hold is filled and let go,
+                # behind `all(any(codec-init-body, codec-open-body), any(session-unicast-open,
                 # session-unicast-accept))` (`session_actions.rs`). Its one public site is
-                # compound, which rustc's note does not name.
-                "session-unicast-accept",
+                # compound, which rustc's note does not name. `session-unicast-accept` left for
+                # the methods list below.
                 "session-unicast-open",
                 # `transport-batching` LEFT this list: see its own row below.
                 # `transport-tx-lend` LEFT this list: the session's count of the frames it built
@@ -874,6 +875,11 @@ DEFERRED: dict[str, dict[str, str]] = {
                 "query-selector-parameters",
                 "query-source-info",
                 "query-value",
+                # `session-unicast-accept` joins from the compound list above: the accepting
+                # role's cookie key is held only where a session accepts, and its reader
+                # `CookieKey::signing_key` is a METHOD under the bare feature; its other
+                # public site, `SessionLinkActions::held_answer_len`, is compound.
+                "session-unicast-accept",
                 "switchboard",
             )
         },

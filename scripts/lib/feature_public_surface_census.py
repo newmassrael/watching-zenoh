@@ -166,6 +166,10 @@ BARE_NAME = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:.]*\s*,?\s*$")
 # A match arm with a guard, `None if cond =>` or `Some(x) if cond =>`: a pattern followed by
 # `if`, which no item starts with.
 GUARDED_ARM = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_:]*(?:\s*\([^)]*\))?\s+if\b")
+# A match arm that binds what it matches, `name @ Pattern =>`: a pattern, which no item starts with.
+BOUND_ARM = re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*@")
+# A gated lifetime parameter of a generic list, `'c,` or `'a: 'b,`: no item starts with a lifetime.
+LIFETIME_PARAM = re.compile(r"^\s*'[A-Za-z_][A-Za-z0-9_]*\s*(?::[^,>]*)?[,>]?\s*$")
 # A foreign block that declares nothing: an item with no visibility whose only effect is the
 # `#[link]` attributes in front of it, naming a library for the linker. A foreign block that
 # declares functions makes each public or not by its own visibility, which the attribute in front
@@ -452,13 +456,23 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "pico ABI's `peer` and `config-policy` builds open through; `raweth` gates the "
         "`raweth_group` re-export of the runtime's joiner of `reth/` groups, which the pico "
         "ABI's `raweth-transport` wraps the host's groups in and the runtime's own "
-        "`raweth_group` unit tests run",
+        "`raweth_group` unit tests run; `advanced-cache` gates `SessionRows::cache_bytes`, the "
+        "row of a session's arena the advanced publishers' caches keep their samples in, which "
+        "the open claims and the crate's own "
+        "`an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches` runs; `query` gates "
+        "`SessionRows::held_replies`, the replies the consolidating gets hold, which the open "
+        "lends and `tests::arena` holds to the lent rows; "
+        "`resource-snapshot` gates `CoopEngine::message_reading`, what the receive paths of the "
+        "session's links and groups counted, which `tests::congestion` and `tests::group` read",
         frozenset(
             {
+                "advanced-cache",
                 "app-transport",
                 "group-host",
                 "listen",
+                "query",
                 "raweth",
+                "resource-snapshot",
                 "runtime-plan",
                 "scout",
                 "scout-datagram",
@@ -492,11 +506,16 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "key as one link's key-wire form names them, which both engines call for each link, this "
         "crate's `link_form_tests` run and the cooperative engine's `shared_key_ids` tests run; "
         "`time-base` gates `time_base`, the time base a program supplies made from the C calls "
-        "both ABIs' doors are handed, which this crate's own test and each ABI's door tests run",
+        "both ABIs' doors are handed, which this crate's own test and each ABI's door tests run. "
+        "`os-sys` makes, for a host library built without `std`, the lock, condition variable "
+        "and threads `std` makes, of the host's own calls (`os`: the `wz-host-sync` "
+        "re-export, `StaticMutex`, `StaticCondvar`); every site is `any(std, os-sys)`, so it "
+        "gates no name a default build lacks, and the pico ABI's default `os-host` turns it on",
         frozenset(
             {
                 "clock-source",
                 "event-ring",
+                "os-sys",
                 "resource-snapshot",
                 "shared-key-ids",
                 "supervision",
@@ -888,13 +907,30 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         # `raweth` joins: the groups over raw Ethernet (`pub mod raweth_group`: `RawEthDevice`,
         # `RawEthOpen`, `RawEthGroup`, `RawethJoiner`), selected by the crate that joins
         # `reth/` groups on this engine; the shape `app-link`'s site has.
+        # Six join with the session's faces and transport state held in the runtime (`faces`,
+        # `transport::state`), each selected by `wz-capi-coop`'s feature of the same name, which
+        # is where a consumer reaches it. `listen` gates `faces::Accepted`, the reassembly's
+        # `SessionPeers` and the listening methods of `LinkSupervisor` and `TransportState`
+        # (`listen`, `accept_at`, `next_accepted`); `resource-snapshot` gates
+        # `faces::MessageCount` and the faces' `message_reading`: both have module-level sites
+        # the derivation reads. `group` gates the group methods of `TransportState`
+        # (`open_group`, `add_group`, `groups_due_ms` and the rest), `query` and `queryable`
+        # the faces a get or a reply is routed over (`next_up_face`, `next_group_to_ask`,
+        # `write_answers`, `group_answer_sink`), and `shared-key-ids` the key-wire form of a
+        # face (`TransportState::key_form_of`): methods of an `impl`, some behind an `any(..)`,
+        # which the second clause reads off the sites.
         frozenset(
             {
                 "alloc",
                 "app-link",
+                "group",
                 "host-lock",
+                "listen",
+                "query",
+                "queryable",
                 "raweth",
                 "reassembly",
+                "resource-snapshot",
                 "runtime",
                 "rx-in-place",
                 "scouting-static",
@@ -902,12 +938,25 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "session-slot",
                 "session-unicast",
                 "session-unicast-accept",
+                "shared-key-ids",
                 "switchboard",
                 "udp-listen",
                 "unixpipe",
                 "ws",
             }
         ),
+    ),
+    # The schema's readers, moved out of the application frame into a crate built for size. Its
+    # one non-default feature that gates a public item, `proto-text`, gates the `.proto` text
+    # reader's three crate-root modules (`proto_lex`, `proto_parse`, `proto_schema`), which a
+    # consumer types at `wz-app-frame`'s paths, re-exported there behind that crate's own
+    # `proto-text`, the probe the axis runs for it. Held to `AXIS_REACHABLE` below.
+    "wz-app-schema": (
+        "the schema readers of the application frame, built for size in a crate of their own: "
+        "its consumers are `wz-app-frame`, whose `proto-text` re-exports the text reader at the "
+        "paths it had there, and `wz-capture` (`docs`). Held to `AXIS_REACHABLE` below rather "
+        "than to this sentence",
+        frozenset({"proto-text"}),
     ),
     "wz-runtime-core": (
         "the trait skeleton; its one non-default feature gates the alloc-only "
@@ -1072,6 +1121,11 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 # names a commander (`host-slot-node --features verbs`), never added to by a
                 # library caller.
                 "client-verbs",
+                # The meter a group session spaces each message it receives on
+                # (`MulticastPump::attach_meter`, `MulticastSessionSeed::with_meter`): methods
+                # of the group drive's types, selected by the cooperative C engine's
+                # `resource-snapshot`, which no MCU image selects.
+                "resource-snapshot",
                 "session-slot",
                 "test-support",
                 "transport-multicast",
@@ -1515,13 +1569,22 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
     # which the second clause reads off the sites. `ws` and `unixpipe` join the same way.
     # `raweth` joins with its OFF_AXIS row: its one site, `pub mod raweth_group`, is at the crate
     # root behind `all(raweth, not(session-slot))`, the compound `app-link`'s site has.
+    # `listen` and `resource-snapshot` join with their OFF_AXIS row: each has module-level sites
+    # in `pub mod faces` (`Accepted`, `MessageCount`) that the derivation probes. `group`,
+    # `query`, `queryable` and `shared-key-ids` join the same way: every site is a method of
+    # `TransportState` or `LinkSupervisor`, some behind an `any(..)`, which the second clause reads.
     "wz-runtime-coop": frozenset(
         {
             "alloc",
             "app-link",
+            "group",
             "host-lock",
+            "listen",
+            "query",
+            "queryable",
             "raweth",
             "reassembly",
+            "resource-snapshot",
             "runtime",
             "rx-in-place",
             "scouting-static",
@@ -1529,6 +1592,7 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "session-slot",
             "session-unicast",
             "session-unicast-accept",
+            "shared-key-ids",
             "switchboard",
             "udp-listen",
             "unixpipe",
@@ -1578,12 +1642,19 @@ AXIS_REACHABLE: dict[str, frozenset[str]] = {
             "lifecycle-verbs",
             "liveliness-token",
             "query-get",
+            # `resource-snapshot` joins with its OFF_AXIS row: its two sites are methods of the
+            # group drive (`MulticastPump::attach_meter`, `MulticastSessionSeed::with_meter`),
+            # which the second clause reads off the sites.
+            "resource-snapshot",
             "session-slot",
             "test-support",
             "transport-multicast",
             "transport-stats",
         }
     ),
+    # `proto-text` gates three crate-root `pub mod`s under a simple cfg, the shape the derivation
+    # probes, so the row is excused only while the axis could take it for free.
+    "wz-app-schema": frozenset({"proto-text"}),
     "wz-runtime-core": frozenset({"alloc"}),
     "wz-runtime-zephyr": frozenset({"session-slot"}),
     # The host profile: `session-slot` gates one crate-root `pub mod slot`, and `host-multicast`
@@ -1964,6 +2035,8 @@ def classify(following: str) -> str:
     if CALL_OR_PATH.match(following) or BARE_NAME.match(following):
         return "not-an-item"
     if GUARDED_ARM.match(following):
+        return "not-an-item"
+    if BOUND_ARM.match(following) or LIFETIME_PARAM.match(following):
         return "not-an-item"
     return "UNCLASSIFIED"
 
@@ -4279,7 +4352,14 @@ def attribute_selftest() -> int:
         ("a macro's value with `?`", "try_thing!(x)?;", "not-an-item"),
         ("a ) in a string inside the group", 'm!(")").f();', "not-an-item"),
     ]
-    for label, line, want in foreign + macros:
+    patterns = [
+        ("a match arm that binds its value", "unixpipe @ Self::Unixpipe { .. } => unixpipe,",
+         "not-an-item"),
+        ("a gated lifetime parameter", "'c,", "not-an-item"),
+        ("a gated bounded lifetime parameter", "'a: 'b,", "not-an-item"),
+        ("an item whose generics hold a lifetime", "pub fn f<'a>(x: &'a u8) {}", "public-item"),
+    ]
+    for label, line, want in foreign + macros + patterns:
         if classify(line) != want:
             print(
                 f"feature-public-surface: SELFTEST FAIL -- classify, {label}: expected "

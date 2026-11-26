@@ -84,7 +84,7 @@ use crate::result::{
 #[cfg(feature = "multi-thread")]
 use crate::sync::Z_ERR_SYSTEM_GENERIC;
 #[cfg(feature = "engine-tokio")]
-use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance, SessionState};
+use wz_capi_core::drive::{open_blocking, DialPhase, OpenError, OpenStance};
 #[cfg(any(feature = "engine-tokio", feature = "tls-mbedtls"))]
 use wz_capi_port::tls_material::CapiTlsConfig;
 use wz_capi_port::BatchStep;
@@ -982,15 +982,6 @@ impl PicoSessionHandle {
     }
 }
 
-#[cfg(feature = "engine-tokio")]
-impl PicoSessionHandle {
-    /// The tokio engine's session, for a capability the port does not carry yet; `None` when
-    /// another engine runs it.
-    pub(crate) fn tokio(&self) -> Option<&SessionState> {
-        self.drive.as_any().downcast_ref::<SessionState>()
-    }
-}
-
 /// Read the [`PicoSessionHandle`] behind a loaned session, or `None` if the pointer or its
 /// handle slot is null.
 ///
@@ -1247,25 +1238,6 @@ crate::abi::impl_type_facts!(
     z_owned_session_t,
     Some(release_handle as unsafe fn(*mut c_void))
 );
-
-/// Read the tokio engine's [`SessionState`] behind a loaned session, or `None` if the pointer or
-/// its handle slot is null, or another engine runs the session.
-///
-/// For the modules of the capabilities the port does not carry yet (scouting, the advanced
-/// plane); the client surface goes through the session's handle and the port.
-///
-/// Lives here, beside BOTH types it touches ([`SessionState`] and
-/// [`z_loaned_session_t`]), because every module that reaches a session needs
-/// it: `pubsub` and `query` each carried a byte-identical private copy until
-/// R311y294 folded them into this one.
-///
-/// # Safety
-/// `zs` must be null, or a valid `z_loaned_session_t` whose `_val` slot is null or the live
-/// handle [`z_open`] installed.
-#[cfg(feature = "engine-tokio")]
-pub unsafe fn session_state<'a>(zs: *const z_loaned_session_t) -> Option<&'a SessionState> {
-    session_handle(zs)?.tokio()
-}
 
 /// The engine a session's client surface goes through: the port's [`SessionEngine`], so the
 /// modules that publish, subscribe, hold key expressions, watch for matches and filter writes
