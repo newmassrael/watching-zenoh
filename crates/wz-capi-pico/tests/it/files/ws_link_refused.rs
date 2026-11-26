@@ -44,6 +44,7 @@ fn open_code(key: u8, endpoint: &CStr) -> i8 {
 /// Turned red by a scheme judged built without its link, or by a refusal left to the engine.
 #[test]
 fn a_ws_endpoint_opens_no_session_without_the_feature() {
+    let _program = crate::programs::admit();
     for (key, role) in [
         (Z_CONFIG_LISTEN_KEY, "listen"),
         (Z_CONFIG_CONNECT_KEY, "connect"),

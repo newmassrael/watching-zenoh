@@ -194,6 +194,7 @@ fn heard_by_a_listener(listener_holds: bool) -> BTreeSet<String> {
 
 #[test]
 fn puts_by_a_shared_id_and_by_an_id_and_the_rest_reach_a_session_that_holds_the_dictionary() {
+    let _program = crate::programs::admit();
     let heard = heard_by_a_listener(true);
     assert!(
         heard.contains("lab/rig/alpha"),
@@ -207,6 +208,7 @@ fn puts_by_a_shared_id_and_by_an_id_and_the_rest_reach_a_session_that_holds_the_
 
 #[test]
 fn a_session_without_the_dictionary_drops_what_an_id_names_and_hears_the_literal() {
+    let _program = crate::programs::admit();
     let heard = heard_by_a_listener(false);
     assert_eq!(
         heard,
@@ -261,6 +263,7 @@ unsafe extern "C" fn on_reply_drop(ctx: *mut c_void) {
 
 #[test]
 fn a_get_by_an_id_and_the_rest_is_answered_by_a_session_that_holds_the_dictionary() {
+    let _program = crate::programs::admit();
     let endpoint = format!("tcp/127.0.0.1:{}", free_port());
     // SAFETY: fresh configs, sessions and a queryable, all released before the function returns.
     unsafe {

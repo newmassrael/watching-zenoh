@@ -278,6 +278,7 @@ const LISTENER_STEPS: [&str; 2] = ["z_close", "z_session_drop"];
 
 #[test]
 fn the_dialling_session_tears_down_in_time_while_its_peer_is_open() {
+    let _program = crate::programs::admit();
     // SAFETY: the handles are made here and each is torn down once, on the thread given it.
     let pair = unsafe { pair() };
     each_step_returns(
@@ -299,6 +300,7 @@ fn the_dialling_session_tears_down_in_time_while_its_peer_is_open() {
 
 #[test]
 fn the_dialling_session_tears_down_in_time_after_its_peer_is_gone() {
+    let _program = crate::programs::admit();
     // SAFETY: as above.
     let pair = unsafe { pair() };
     each_step_returns(

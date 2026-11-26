@@ -172,6 +172,7 @@ fn wait_for(seen: &Arc<Mutex<Vec<Seen>>>, n: usize) -> Vec<Seen> {
 
 #[test]
 fn a_querier_declared_with_an_encoding_sends_it_as_the_default_of_every_get() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

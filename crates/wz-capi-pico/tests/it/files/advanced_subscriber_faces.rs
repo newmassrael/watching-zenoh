@@ -458,11 +458,13 @@ fn scenario(declare_before_dial: bool) {
 /// replay, under the identity its handle reports.
 #[test]
 fn an_advanced_subscriber_declared_before_its_peer_connects_is_announced_by_its_identity() {
+    let _program = crate::programs::admit();
     scenario(true);
 }
 
 /// The same for one declared after the peer is connected.
 #[test]
 fn an_advanced_subscriber_declared_after_its_peer_connects_is_announced_by_its_identity() {
+    let _program = crate::programs::admit();
     scenario(false);
 }

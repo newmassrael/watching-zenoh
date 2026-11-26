@@ -241,6 +241,7 @@ fn wait_for<F: Fn() -> bool>(cond: F, budget: Duration) -> bool {
 
 #[test]
 fn a_dying_face_undeclares_its_remote_liveliness_tokens_to_the_c_app() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let ctx = Box::into_raw(Box::new(Ctx {

@@ -34,12 +34,14 @@ unsafe fn open_code(entries: &[(u8, &str)]) -> i8 {
 
 #[test]
 fn a_listen_endpoint_is_refused() {
+    let _program = crate::programs::admit();
     let code = unsafe { open_code(&[(Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:0")]) };
     assert_eq!(code, Z_ERR_INVALID);
 }
 
 #[test]
 fn a_listen_beside_a_connect_is_refused() {
+    let _program = crate::programs::admit();
     let code = unsafe {
         open_code(&[
             (Z_CONFIG_LISTEN_KEY, "tcp/127.0.0.1:0"),
@@ -51,6 +53,7 @@ fn a_listen_beside_a_connect_is_refused() {
 
 #[test]
 fn the_peer_mode_is_refused() {
+    let _program = crate::programs::admit();
     let code = unsafe {
         open_code(&[
             (Z_CONFIG_MODE_KEY, "peer"),
@@ -65,6 +68,7 @@ fn the_peer_mode_is_refused() {
 /// config's.
 #[test]
 fn a_client_dial_is_not_refused_by_the_build() {
+    let _program = crate::programs::admit();
     let code = unsafe { open_code(&[(Z_CONFIG_CONNECT_KEY, "tcp/127.0.0.1:1")]) };
     assert_ne!(code, Z_OK);
     assert_ne!(code, Z_ERR_INVALID);

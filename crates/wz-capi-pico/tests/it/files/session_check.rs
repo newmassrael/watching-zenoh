@@ -73,6 +73,7 @@ unsafe extern "C" fn count_drop(ctx: *mut c_void) {
 
 #[test]
 fn a_closed_session_refuses_its_publisher_and_querier() {
+    let _program = crate::programs::admit();
     unsafe {
         let port = free_port();
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
@@ -174,6 +175,7 @@ fn a_closed_session_refuses_its_publisher_and_querier() {
 
 #[test]
 fn the_batch_calls_answer_a_null_session_as_a_closed_one() {
+    let _program = crate::programs::admit();
     unsafe {
         assert_eq!(zp_batch_start(std::ptr::null()), SESSION_CLOSED);
         assert_eq!(zp_batch_flush(std::ptr::null()), SESSION_CLOSED);
@@ -184,6 +186,7 @@ fn the_batch_calls_answer_a_null_session_as_a_closed_one() {
 #[cfg(not(feature = "multi-thread"))]
 #[test]
 fn the_single_threaded_entry_points_answer_an_open_session() {
+    let _program = crate::programs::admit();
     unsafe {
         let port = free_port();
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
@@ -229,6 +232,7 @@ fn the_single_threaded_entry_points_answer_an_open_session() {
 #[cfg(not(feature = "multi-thread"))]
 #[test]
 fn the_single_threaded_entry_points_answer_a_closed_session() {
+    let _program = crate::programs::admit();
     unsafe {
         let port = free_port();
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);

@@ -49,6 +49,7 @@ fn open_code(key: u8, endpoint: &CStr) -> i8 {
 /// named FIFO included), or by a refusal left to the engine.
 #[test]
 fn a_unixpipe_endpoint_opens_no_session_without_the_feature() {
+    let _program = crate::programs::admit();
     for (key, role) in [
         (Z_CONFIG_LISTEN_KEY, "listen"),
         (Z_CONFIG_CONNECT_KEY, "connect"),

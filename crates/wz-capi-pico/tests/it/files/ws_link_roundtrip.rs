@@ -23,6 +23,7 @@ use wz_runtime_tokio_test_support::free_port;
 
 #[test]
 fn a_sample_crosses_a_ws_link_between_two_pico_sessions() {
+    let _program = crate::programs::admit();
     let endpoint = format!("ws/127.0.0.1:{}", free_port());
     let received = payloads_across(&endpoint, &endpoint);
     assert_eq!(

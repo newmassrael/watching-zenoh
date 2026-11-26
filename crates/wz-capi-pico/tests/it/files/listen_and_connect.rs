@@ -121,6 +121,7 @@ unsafe fn put_until_seen(
 /// would leave one of the samples unheard.
 #[test]
 fn a_session_that_states_listen_and_connect_listens_and_dials() {
+    let _program = crate::programs::admit();
     let (port_listened, port_dialled) = (free_port(), free_port());
     let seen = Arc::new(Mutex::new(BTreeSet::new()));
     // SAFETY: fresh configs and sessions, each closed before the function returns.

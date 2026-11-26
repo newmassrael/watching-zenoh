@@ -71,6 +71,7 @@ fn advertised_numbers(stream: &mut std::net::TcpStream) -> (u16, u8) {
 /// is the subject of the test below, not a failure of this one.
 #[test]
 fn a_build_that_states_no_number_states_picos_default() {
+    let _program = crate::programs::admit();
     if option_env!("WZ_LIMIT_PICO_UNICAST_BATCH_BYTES").is_some() {
         return;
     }
@@ -79,6 +80,7 @@ fn a_build_that_states_no_number_states_picos_default() {
 
 #[test]
 fn the_init_syn_advertises_the_numbers_the_build_states() {
+    let _program = crate::programs::admit();
     let listener = TcpListener::bind("127.0.0.1:0").expect("a listener");
     let port = listener.local_addr().expect("its port").port();
 

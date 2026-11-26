@@ -188,6 +188,7 @@ fn write_all(fd: RawFd, mut bytes: &[u8], stop: &AtomicBool) {
 
 #[test]
 fn a_sample_crosses_a_serial_link_between_two_pico_sessions() {
+    let _program = crate::programs::admit();
     let (_wire, listened, dialled) = Wire::join(Pty::open(), Pty::open());
     let received = payloads_across(
         &format!("serial/{listened}#baudrate=115200"),
@@ -208,6 +209,7 @@ fn a_sample_crosses_a_serial_link_between_two_pico_sessions() {
 #[cfg(not(feature = "engine-tokio"))]
 #[test]
 fn a_pin_pair_names_no_tty_of_the_host() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::{
         z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
         z_owned_session_t, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_OK,

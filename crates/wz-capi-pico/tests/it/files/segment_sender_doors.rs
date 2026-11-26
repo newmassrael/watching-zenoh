@@ -202,6 +202,7 @@ fn assert_refused(outcome: &Outcome, reason: &str) {
 
 #[test]
 fn a_split_hands_the_callback_each_piece_the_profile_describes() {
+    let _program = crate::programs::admit();
     // SAFETY: every handle is made by its door and dropped before the test returns; the buffers
     // outlive each call.
     unsafe {
@@ -263,6 +264,7 @@ fn a_split_hands_the_callback_each_piece_the_profile_describes() {
 
 #[test]
 fn a_refused_message_emits_nothing_and_consumes_no_number() {
+    let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
         let mut sender = demo(7, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
@@ -321,6 +323,7 @@ fn a_refused_message_emits_nothing_and_consumes_no_number() {
 
 #[test]
 fn a_callback_that_stops_the_split_has_used_the_number() {
+    let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
         let mut sender = demo(7, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
@@ -364,6 +367,7 @@ fn a_callback_that_stops_the_split_has_used_the_number() {
 
 #[test]
 fn the_number_is_refused_past_its_largest_value_unless_the_sender_restarts() {
+    let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
         let msg = message(10);
@@ -404,6 +408,7 @@ fn the_number_is_refused_past_its_largest_value_unless_the_sender_restarts() {
 
 #[test]
 fn a_sender_is_refused_for_a_text_it_cannot_take() {
+    let _program = crate::programs::admit();
     // SAFETY: as above; the C strings outlive each call.
     unsafe {
         let refused = |profile: &str, values: &str| match make(
@@ -490,6 +495,7 @@ fn a_sender_is_refused_for_a_text_it_cannot_take() {
 
 #[test]
 fn a_dropped_sender_is_the_null_state_and_a_second_drop_does_nothing() {
+    let _program = crate::programs::admit();
     // SAFETY: as above.
     unsafe {
         let mut sender = demo(1, WZ_EXT_SEGMENT_ROLLOVER_REFUSE);
@@ -625,6 +631,7 @@ mod over_loopback {
 
     #[test]
     fn a_put_reaches_a_subscriber_as_one_sample_per_piece_in_order() {
+        let _program = crate::programs::admit();
         let port = free_port();
         let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
         // SAFETY: every session, entity and handle is made by its door and released before the

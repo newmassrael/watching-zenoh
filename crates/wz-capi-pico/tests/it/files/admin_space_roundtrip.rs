@@ -205,6 +205,7 @@ unsafe fn ask_once_and_wait(
 
 #[test]
 fn a_peer_reads_the_admin_space_while_it_runs_and_not_before_or_after() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let probe = Probe::default();
@@ -288,6 +289,7 @@ fn a_peer_reads_the_admin_space_while_it_runs_and_not_before_or_after() {
 
 #[test]
 fn the_open_option_starts_the_admin_space_and_defaults_off() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let probe = Probe::default();

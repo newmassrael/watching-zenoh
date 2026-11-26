@@ -217,6 +217,7 @@ use wz_runtime_tokio_test_support::free_port;
 /// error anywhere, because `z_put` had already returned `Z_OK`.
 #[test]
 fn a_put_immediately_before_z_close_is_drained_not_discarded() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -521,6 +522,7 @@ fn a_put_immediately_before_z_close_is_drained_not_discarded() {
 /// being quiet.
 #[test]
 fn an_idle_z_close_does_not_burn_the_whole_drain_window() {
+    let _program = crate::programs::admit();
     const ROUNDS: usize = 5;
 
     let port = free_port();
@@ -632,6 +634,7 @@ fn an_idle_z_close_does_not_burn_the_whole_drain_window() {
 /// enough to share a frame with its neighbours, and of a length no other test here tells apart.
 #[test]
 fn a_burst_of_small_puts_before_z_close_is_not_left_in_the_open_frame() {
+    let _program = crate::programs::admit();
     const ROUNDS: usize = 10;
     const BURST: usize = 2000;
     const BURST_BYTES: usize = 8;
