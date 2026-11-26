@@ -7953,6 +7953,32 @@
       "carry_forward_bullets": [
         "The C1 empty-handle floor: PassiveSession is 7,480 B in C1's workspace resolution against 3,704 B in wz-capi-dissect's own; find the field that grows with the unified sce-rust-runtime std and make it not, or move the gate to the shipped resolution with its reason. The capic-router-node, capic-default and capic-default-lean budgets: symbol diff against the commit that set them. C1bnl: the shape check of nondefault-tests-gate.sh does not admit the --test-target form its parser accepts (owner's decision on the check). C1d: watch the next hosted run of the arm. Then the handoff's measurement of reduced docs for session-core and S6 steps 3 to 5."
       ]
+    },
+    "Round 4661": {
+      "decision_summary": "Land int206: the integration of the lanes that held the pico preset's\nreceive, reply and size work (lend-only frames written in one body, a\nface's replies and Final sent in one send, key constructors as shells of\none body, stride-only table walks), the declared fixed/heap/slot feature\nsets with their gates, and the reds the integration preflight found.",
+      "changes_bullets": [
+        "session-core: one-body lend-only frame writer; a send's writer handed over as a WireWrite; replies held per face and sent with their Final; table rows found by place and stride.",
+        "capi-pico/capi-coop: key constructors share one body; a get's policy and next face read from its leg's hold; reassembly buffers laid out at the session's count.",
+        "crates: declared fixed (wz-admin, wz-session-core), heap and slot sets; gate 7 and nondefault-features build each set at its declared targets.",
+        "reds paid: OAM body writer and its import gated on alloc; fixed set builds without a heap; closed-session put answers no transport; listener example limits stated; tx_pool test holds its receive buffer to a size.",
+        "bx.toml: [view] shared names the home caches runs share (perf build ids, the mnemosyne pin, the kit lane home).",
+        "merge of origin/main: SHM client storage keeps the protocol-slot refusal on the new storage builder; the fragmenting multicast writer calls write_body."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-session-core, wz-capi-c, wz-capi-core, wz-runtime-coop, wz-capi-pico clippy-clean in every declared set.",
+        "C1co (client-only pico dials a listener) green after the reds.",
+        "unit tests after the merge: wz-capi-c client registry 10/10, wz-capi-core port_tests 20/20 (router-node, transport-qos, queryable), wz-session-core multicast_tx and bundle_tests 40/40 (all features).",
+        "C1bf and the non-default test census run per step; the queue's pre-push hook judges the landing and hosted CI the rest."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session",
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "round-5a lane: C1co client-only listener token test times out; C1bf no_heap_after_open Open enum large variant.",
+        "lanes to land one at a time after this: mcast-perf, stats-parts, rss-design, link-enum, deliv, gate-ledger, SCE pin.",
+        "bx view isolation for this repository waits on the per-machine trial (bx RFC 0035 6)."
+      ]
     }
   },
   "inventory_entries": {
