@@ -1514,7 +1514,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// # Safety
     /// As for [`LockForm::init_at`], of a `Self`.
     unsafe fn init_at(at: NonNull<Self>, core: Core<L, C>) {
-        core.session.keys.guard_by_owner_lock();
+        // Named by the address each hold marks its thread with (`Self::lock`): the lock lies here
+        // from now on.
+        core.session
+            .keys
+            .guard_by_owner_lock(at.as_ptr().cast_const().cast(), session_held_here);
         // SAFETY: the caller's contract, for the one field.
         unsafe {
             <CoopForm as LockForm>::init_at(
@@ -1537,13 +1541,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
         Some(CoreGuard::taken(guard, held))
     }
 
-    /// The state with no lock, the engine being let go of: the key arena is marked held for the
-    /// rest of the engine's drop, which drops every row that keeps a key.
+    /// The state with no lock, the engine being let go of: the key arena is its owner's alone for
+    /// the rest of the engine's drop, which drops every row that keeps a key on whichever thread
+    /// let go of the engine last.
     fn dropping(&mut self) -> &mut Core<L, C> {
         let core = &mut <CoopForm as LockForm>::get_mut(&mut self.0).0;
-        core.session.keys.owner_lock_taken();
+        core.session.keys.owner_alone();
         core
     }
+}
+
+/// Whether the calling thread holds the session lock that lies at `lock`, as the key arena's check
+/// asks it ([`KeySpace::guard_by_owner_lock`]): by the marks each hold leaves on its thread, and
+/// `true` where they cannot tell, which leaves the arena's own mark to answer.
+fn session_held_here(lock: *const ()) -> bool {
+    wz_capi_port::sync::SessionHeld::held_on_this_thread(lock).unwrap_or(true)
 }
 
 /// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
