@@ -54,15 +54,22 @@ impl Kept {
         }
     }
 
-    /// Take a count for another holder. Out of line, as [`Self::release`] is: a holder is taken
-    /// and let go of at many places of many held types, each of which would carry the count's
-    /// exchange and its bound inline.
-    #[inline(never)]
+    /// Take a count for another holder: the count's one exchange, in line at every clone of
+    /// every held type; a count taken past its bound is given back out of line.
+    #[inline]
     pub fn retain(&self) {
         let before = self.count.fetch_add(1, Ordering::Relaxed);
         if before > MOST_HOLDERS {
-            self.count.fetch_sub(1, Ordering::Relaxed);
+            self.past_bound();
         }
+    }
+
+    /// Give back the count just taken past `MOST_HOLDERS`, which no program reaches but one
+    /// that forgot holders.
+    #[cold]
+    #[inline(never)]
+    fn past_bound(&self) {
+        self.count.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Take a count for another holder while one is left, and say whether it was taken: a count
@@ -77,21 +84,35 @@ impl Kept {
             .is_ok()
     }
 
-    /// Give back a count; the last one runs what the count was made with. Out of line: every
-    /// holder's drop, of every held type, gives its count back through this one body.
+    /// Give back a count; the last one runs what the count was made with. The count's one
+    /// exchange is in line at every holder's drop; what the last holder runs is out of line.
     ///
     /// # Safety
     /// `this` is a live count the caller holds one of, given back here once; the caller reads
     /// nothing through it after.
-    #[inline(never)]
+    #[inline]
     pub unsafe fn release(this: NonNull<Self>) {
         // SAFETY: the caller holds a count, so the place is live.
         let kept = unsafe { this.as_ref() };
         // Acquire on the last release orders every holder's use before what `last` drops.
         if kept.count.fetch_sub(1, Ordering::AcqRel) == 1 {
-            let last = kept.last;
-            // SAFETY: no holder is left, so `last` is the one user of the place.
-            unsafe { last(this) }
+            // SAFETY: the count just given back was the last.
+            unsafe { Self::last_released(this) }
+        }
+    }
+
+    /// Run what the count was made with, its last holder gone.
+    ///
+    /// # Safety
+    /// `this` is a count no holder is left of, read nowhere else after.
+    #[cold]
+    #[inline(never)]
+    unsafe fn last_released(this: NonNull<Self>) {
+        // SAFETY: the caller's: the place is live until `last` runs, and no holder is left, so
+        // `last` is the one user of it.
+        unsafe {
+            let last = this.as_ref().last;
+            last(this)
         }
     }
 }
@@ -559,6 +580,31 @@ mod tests {
         unsafe { Kept::release(memory) };
         // SAFETY: the count gave its place up; the box is taken back once, here.
         drop(unsafe { Box::from_raw(memory.as_ptr()) });
+    }
+
+    /// A count taken past its bound is given straight back; one below it is kept, and a count
+    /// given back while a holder is left leaves that holder's. Turned red by a `retain` that keeps
+    /// a count past the bound (the count reads one more) or one that gives back a count below it
+    /// (the control reads 1).
+    #[test]
+    fn a_count_past_its_bound_is_given_straight_back() {
+        let kept = Kept::new(given_back_unseen);
+        kept.retain();
+        assert_eq!(
+            kept.count.load(Ordering::Relaxed),
+            2,
+            "CONTROL: a count below the bound is taken"
+        );
+        // SAFETY: `kept` is live and holds two counts; one is given back, not the last.
+        unsafe { Kept::release(NonNull::from(&kept)) };
+        assert_eq!(kept.count.load(Ordering::Relaxed), 1, "a holder is left");
+        kept.count.store(MOST_HOLDERS + 1, Ordering::Relaxed);
+        kept.retain();
+        assert_eq!(
+            kept.count.load(Ordering::Relaxed),
+            MOST_HOLDERS + 1,
+            "the count past the bound was given back"
+        );
     }
 
     /// What the memory's last count does where another test reads `GIVEN_BACK`: nothing.
