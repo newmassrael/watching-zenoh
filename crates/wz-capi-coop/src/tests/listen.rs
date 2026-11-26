@@ -668,6 +668,51 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
     }
 }
 
+/// A listener's read turns the face that holds its client's link and passes over the dial role's
+/// face, which dials nothing and holds no link: a look at it would move nothing, and the client's
+/// face's look serves the session's own bookkeeping. With no client, the dial role's face is the
+/// one a read turns all the same. Turned red by a read that turns a face at rest beside another
+/// (`DirectSlot::rests` in `CoopEngine::read_faces`, or a dial role that dials nothing not
+/// noted at rest by the open), or one that turns no face when every face rests.
+#[cfg(not(wz_round))]
+#[test]
+fn a_listeners_read_passes_over_its_resting_dial_face() {
+    let engine = open_with(CoopConfig {
+        whatami: WhatAmI::Peer,
+        zid: config_zid(0xa2),
+        listen: vec!["tcp/127.0.0.1:0".to_owned()],
+        ..client_config()
+    });
+    let endpoint = engine.listening().pop().expect("one port is bound");
+    let turns = |engine: &Engine| engine.takes.face_turns.load(Ordering::SeqCst);
+    let before = turns(&engine);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        turns(&engine) - before,
+        1,
+        "with no client the dial role's face is turned all the same"
+    );
+    let dialing = std::thread::spawn(move || client(&endpoint, 0xc2));
+    reads_until(&engine, "the client's face", || engine.faces_up() == 1);
+    let _peer = dialing.join().expect("the client opens");
+    std::thread::sleep(Duration::from_millis(100));
+    for _ in 0..4 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        engine.direct_faces().1,
+        2,
+        "CONTROL: the dial role's face and the client's are both in the read's walk"
+    );
+    let before = turns(&engine);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        turns(&engine) - before,
+        1,
+        "the client's face alone is turned"
+    );
+}
+
 /// A session whose one link is a stream waits on that link's input with nothing of the session
 /// held, and the step after the wait reads what came: each put a listener makes reaches it after
 /// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.

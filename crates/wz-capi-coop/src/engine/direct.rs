@@ -814,6 +814,12 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// change of it is written there.
     #[cfg(any(feature = "listen", feature = "group"))]
     noted_us: u64,
+    /// Whether the face has nothing a look would move: no pump, no dial and no opened link, a
+    /// life idle or closed with no wake, and no chain in its Router. Noted by the face's own look
+    /// under the session's lock and ended where the slot is given a link, so a read passes the
+    /// face over while it turns another (`CoopEngine::read_faces`).
+    #[cfg(any(feature = "listen", feature = "group"))]
+    rests: bool,
     /// The change of the face's send place a look at the life made under the session's lock and
     /// found held by another thread: the place emptied (`Some(None)`) or given these parts, the
     /// ones it holds let go of. Carried out once the lock is let go of (`Self::pay_site`).
@@ -979,6 +985,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
         self.last = None;
         self.brought_up = false;
         self.life_due_us = u64::MAX;
+        self.rests = false;
     }
 }
 
@@ -1212,6 +1219,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         brought_up: false,
                         #[cfg(any(feature = "listen", feature = "group"))]
                         noted_us: u64::MAX,
+                        #[cfg(any(feature = "listen", feature = "group"))]
+                        rests: false,
                         #[cfg(feature = "threads")]
                         site_owed: None,
                     }))
@@ -1445,6 +1454,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 core.transport.endpoints.listens(),
                 core.config.groups.len(),
             ) {
+                // A dial role that dials nothing has no link to look at and no time of its own:
+                // its face rests from the open on.
+                #[cfg(any(feature = "listen", feature = "group"))]
+                {
+                    slot.rests = true;
+                }
                 return Ok(());
             }
             let now_us = core.now_us();
@@ -1588,23 +1603,47 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut jobs_due_ms = None;
         #[cfg(feature = "listen")]
         let mut accepts = false;
-        for face in faces() {
-            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
-                continue;
-            };
-            let Some(turn) = self.face_turn(face, &mut held.0, wait.take()) else {
+        // Whether the read goes on to the next face.
+        let mut turn_face = |face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>| -> bool {
+            let Some(turn) = self.face_turn(face, slot, wait.take()) else {
                 read = Err(SessionClosed);
-                break;
+                return false;
             };
             self.deliver();
             if turn.ended.is_some() {
                 read = Err(SessionClosed);
-                break;
+                return false;
             }
             jobs_due_ms = turn.jobs_due_ms;
             #[cfg(feature = "listen")]
             {
                 accepts |= turn.accepts;
+            }
+            true
+        };
+        // A face at rest (`DirectSlot::rests`) is passed over while another face is turned, whose
+        // look serves the session's own bookkeeping (the ledger, the gets, the jobs, the ports);
+        // with no face turned the first at rest is turned all the same, for that bookkeeping.
+        let mut rested = None;
+        let mut turned = false;
+        for face in faces() {
+            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+                continue;
+            };
+            if held.0.rests {
+                if rested.is_none() {
+                    rested = Some(face);
+                }
+                continue;
+            }
+            turned = true;
+            if !turn_face(face, &mut held.0) {
+                break;
+            }
+        }
+        if let (false, Some(face)) = (turned, rested) {
+            if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
+                turn_face(face, &mut held.0);
             }
         }
         // Each group's session is stepped after the faces, with no face's slot but the dial
@@ -2007,12 +2046,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if core.session.matching.moved(written) {
                 self.read_matching(core);
             }
-            slot.life_due_us = core
-                .transport
-                .links
-                .face(slot.at())
-                .and_then(|face| face.life.wake_at(now_us))
+            let life = core.transport.links.face(slot.at()).map(|face| &face.life);
+            slot.life_due_us = life
+                .and_then(|life| life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
+            // A life standing by is not at rest: it dials again once no other face holds its
+            // node, which only a look at it reads.
+            #[cfg(any(feature = "listen", feature = "group"))]
+            {
+                slot.rests = slot.life_due_us == u64::MAX
+                    && slot.records.is_none()
+                    && slot.dial.is_none()
+                    && slot.opened.is_none()
+                    && slot.router.due_ms() == u64::MAX
+                    && life.is_none_or(|life| {
+                        matches!(life.phase(), LinkPhase::Idle | LinkPhase::Closed)
+                    });
+            }
             // Noted outside the slot for the other faces' reads; the one face's due is the read's
             // own, noted as its turn ends.
             #[cfg(any(feature = "listen", feature = "group"))]
@@ -2364,6 +2414,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             pump: _,
         } = placed;
         slot.records = Some(dispatch);
+        #[cfg(any(feature = "listen", feature = "group"))]
+        {
+            slot.rests = false;
+        }
         // The face's record holds the wire's waits, read once here, and no handle.
         let (input, room) = (wire.input_wait(), wire.room_wait());
         #[cfg(feature = "resource-snapshot")]
