@@ -504,6 +504,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-slot",
         )
     },
+    # Every non-default feature of the application frame gates a public module a consumer types
+    # the path of, probed off the module tree: the empty entry the table-agreement check asks of
+    # a package on the axis, saying that no feature of it is declared to gate nothing.
+    "wz-app-frame": {},
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
