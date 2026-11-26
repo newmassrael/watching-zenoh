@@ -66,6 +66,7 @@ The `Where` column holds the slices that read the crate (`S1, S2`), or
 | `wz-mcu-session-acceptor` | S9 | |
 | `wz-mcu-stack` | excluded: measurement | Paints and reads back the stack of the bare-metal deploy binaries; a measurement, not protocol. |
 | `wz-mesh-client` | S10 | |
+| `wz-msvc-runtime` | excluded: binding | The C runtime symbols an MSVC-target library without `std` links in place of Visual Studio's (the memory functions, the stack probe, the DLL entry, x86's division helpers): the platform's floor under the pico C library, no protocol runs through it. |
 | `wz-node-time` | S9 | |
 | `wz-oa-tc6` | S9 | |
 | `wz-packet-fixtures` | excluded: test | Checksum arithmetic for hand-laid test packets. |
