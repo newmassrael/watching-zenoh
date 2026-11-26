@@ -1,0 +1,24 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Land the lane verdict ledger (RFC 0001 M1-M3). A lane's verdict is keyed by
+the digest of what it reads, so a lane that a change did not move is not run
+again. The input of a lane is the run-ci.sh definitions it runs, its helpers
+and the top-level code, not the whole file. Landing runs no lane before it
+submits: lanes the landing moved run once after it lands (verify-once), and a
+red re-runs alone (--only-red), as TAP and the Chromium CQ split pre- and
+post-submit.
+'''
+changes = '''
+- scripts: lanes.toml declares 194 lanes; lane_digest keys each by its inputs, run-ci.sh read per definition.
+- scripts: verify-once.sh plans, runs and keeps receipts (--plan, --changed, --only-red, --all with a reason).
+- land.sh unchanged in what it runs; CLAUDE.md and RFC 0001 state the post-merge place of the lanes.
+'''
+verification = '''
+- selftests pass: lane_digest 76, lane_input_closure 10, lane_graph 36, lane_decl 19, lanes_gate 14, git_tree 14, gate_ledger, script_exercise_census 67/67.
+- lane_digest --check: 194 lanes digested, 22 opaque.
+- verify-once --plan on this branch selects 56 lanes (was 199 with whole-file inputs).
+'''
+carry = '''
+- 22 opaque lanes are always selected; give each a declared input closure.
+- the three hand_back tests of wz-capi-coop build on no host lane (wz_round needs a target without 64-bit atomics).
+'''
