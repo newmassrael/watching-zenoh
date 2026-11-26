@@ -610,8 +610,8 @@ The design, row by row:
 | row | change | takes | files | state |
 |---|---|---|---|---|
 | G1 | the write after a push runs only where a lane holds a datagram (`GroupTxStage::has_nothing_to_write`): a datagram the writer holds stays on its lane until it is let go, so an empty lane count is a write that would offer nothing | S3 | `group_drive/stage.rs` | this lane |
-| G2 | the kept messages counted in a `Cell` beside `Staged`, read before the conduits are borrowed again: `push_deferred` returns on a count of zero | S2e's second borrow | `group_drive/stage.rs` | design |
-| G3 | the window's flush asked only of a window that holds a frame: `MulticastBatch`'s open frame read inline in `push_on` before the flush is called | S2b | `group_drive/stage.rs`, `multicast_tx.rs` | design |
+| G2 | the kept messages counted in a `Cell` beside `Staged`, read before the conduits are borrowed again: `push_deferred` returns on a count of zero | S2e's second borrow | `group_drive/stage.rs` | this lane |
+| G3 | the window's flush asked only of a window that holds a frame: `MulticastBatch::flush` inline, its open frame read where the push stands, the frame's own flush out of line | S2b | `multicast_tx.rs` | this lane |
 | T4 | the send half named by the joiner: `GroupJoiner::join` answers its own transport type (`type Transport: GroupTransport`), `Watched` is generic over it, and the group's link cell holds it by value, so `LinkCell::send_now` is called on the concrete transport with no `Box<dyn GroupTransport>`; a build that composes joiners (`RawethJoiner` beside `HostGroups`) names an enum of their transports, as `either_links` composes links. `&dyn SendNow` in `push_encoded_through` goes with it: `Through` is generic over the socket, which is the group's one link cell | S4's two indirect calls | `wz-runtime-coop/src/group_transport.rs` (the trait, `NoGroups`), `raweth_group.rs`, `ip_stack.rs`'s test joiners, `wz-capi-coop/src/host_group.rs`, `engine/group.rs` (`Watched`, `ThroughCell`), `group_drive/stage.rs` (`Through`) | design; after D7a, which is in |
 
 G1 keeps every property the write gives: a push whose datagram went on its lane (a link not open,
@@ -624,3 +624,57 @@ and zenoh-pico's `_z_write` by the reading of the code, to be judged on the arm 
 
 Unit test of G1: `wz-session-mcu` `group_drive::stage::tests::the_write_after_a_push_runs_only_where_a_lane_holds_a_datagram`:
 `cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib the_write_after_a_push_runs_only`.
+
+The G1 test's first run failed on its last comparison (`["first", "second", "third", "other"]`
+against `[..., "fourth"]`). The stage wrote the four datagrams in the order they were pushed; the
+test's reader of the wire (`taken`) names a datagram only by the payloads it knows (`PAYLOADS`,
+`first` to `third`), and the fourth push carried `fourth`, which it reads as `other`. The test
+counted wrong and G1's contract held: the fourth push now carries a payload the reader names.
+
+#### The fifth reading: what the put still pays, by the function that pays it
+
+The arm after G1 and W8 (`mcast-7`): the put 2,838.0 against zenoh-pico's 2,555.0 (1.11), the
+calling thread's `op_put` 2,441.2 against 2,306.0, and the read thread 234.9 against 87.0. Each
+row is inclusive Ir a put (the larger run less the smaller, over 10,000), with the function of
+zenoh-pico at the same place.
+
+| layer (wz) | function | Ir a put | zenoh-pico | Ir a put |
+|---|---|---:|---|---:|
+| the ABI's put | `z_publisher_put` | 2,361.2 | `z_publisher_put` | 2,098.0 |
+| the write filter and the plain way (W1 to W4) | `PublisherState::publish` to `put_through_filter_in` | 507.2 above the groups' publish | `_z_publisher_put_impl` above `_z_write` | 423.0 |
+| the groups' publish (S1 to S4) | `GroupFace::publish` | 1,854.0 | `_z_write` | 1,670.0 |
+| S1b: the Push's size, counted by a run of its writer into a sink that only counts | `try_encoded_len` | 373.0 | none: pico encodes once | 0 |
+| S2: the frame onto the lane, the Push written once | `push_encoded_through`, `push_frame`, `Lanes::queue` | 1,374.0 | `_z_transport_tx_send_n_msg` less its send | 1,304.0 |
+| the Push written into the frame | `write_wire` less the count | 452.0 | `_z_network_message_encode` | 819.0 |
+| S2e: the kept messages looked at | `push_deferred` | 84.0 | none | 0 |
+| S2b: the empty window's flush | `MulticastBatch::flush` | 20.0 | none | 0 |
+| S4: the send, through `&dyn SendNow` and `Box<dyn GroupTransport>` | `LinkCell::send_now` | 144.0 | `_z_link_send_wbuf` | 197.0 |
+| the read thread: the put's own datagram looped back, read and dropped | `HostGroupReceive::await_input` | 235.7 | `_zp_multicast_read_task_fn` | 87.0 |
+
+S3 is gone from the reading (G1). What stands past zenoh-pico is, by size: S1b's count (373.0), a
+second run of the Push's writer that pico does not make; the read thread's drop of the put's own
+datagram (235.7 against 87.0: `recvfrom` 64.0, `PosixUdpSocket::receive` 120.9, the sender's
+address read into the kernel's form 28.0); the write filter above the groups' publish (84 past
+pico's); and the two empty looks G2 and G3 take. The frame itself, the Push written once and the
+send are below pico's.
+
+| row | change | takes | files | state |
+|---|---|---|---|---|
+| G4 | the size a group's publication is pushed with worked out from its parts where no body field rides (`lent_push::publication_len`, the arithmetic of `plain_put_len` for a Put and a Del), the writer run to count it only where a field rides | S1b, 373.0 | `wz-session-core/src/lent_push.rs`, `multicast_tx.rs` | this lane |
+| P3 | the own-sender drop of the read thread made before the sender's address is put in the kernel's form: the datagram's source compared as the kernel hands it | read thread, up to 148 | `wz-runtime-posix/src/multicast.rs`, `net.rs` | design |
+
+Expected after G2, G3 and G4: the put at about 2,390 against 2,555.0 (0.94), the read thread's
+148 still above pico's. T4 stays a design: the transport is erased where a stack opens a group
+(`SessionLinks::open_group` answers `Box<dyn GroupTransport>`, as do the six stacks that
+implement it and `TransportState::open_group`), and a concrete type there is an associated type
+of that trait, which every implementor must then name (an associated type has no default on
+stable Rust); it is a round of its own, for S4's two indirect calls, and the put is within
+pico's without it by this reading.
+
+Unit tests of the rows: G4, `wz-session-core`
+`lent_push::tests::a_publications_worked_out_length_is_the_written_one` and
+`multicast_tx::group_publications_written_from_parts` (the size each publication is pushed with
+is its length); G2, `wz-session-mcu`
+`group_drive::stage::tests::the_kept_count_follows_what_the_staged_storage_holds`; G3,
+`wz-session-core`
+`multicast_tx::lend_tests::a_window_flushes_its_open_frame_once_and_an_empty_one_nothing`.
