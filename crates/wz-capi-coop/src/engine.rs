@@ -7118,13 +7118,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Stage `count` replies that `reply` makes on each group the session joined, as a group's
     /// dispatch stages what a member asked for, with no step of the session between them. Compiled
-    /// where its readers are: the tests of a group's drops (`tests::group`, `transport-stats`).
+    /// where its readers are: the tests of a full group's drops, in both forms of the engine's calls
+    /// (`tests::group_congested`, `transport-stats`).
     #[cfg(all(
         test,
         feature = "std",
         feature = "group",
         feature = "app-transport",
-        feature = "threads",
         feature = "transport-stats"
     ))]
     pub(crate) fn stage_group_replies(

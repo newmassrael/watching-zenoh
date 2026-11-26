@@ -1139,7 +1139,6 @@ impl<W: LinkWaits> GroupFace<W> {
         test,
         feature = "std",
         feature = "app-transport",
-        feature = "threads",
         feature = "transport-stats"
     ))]
     pub(super) fn reply_stage(&self) -> &GroupTxStage {
