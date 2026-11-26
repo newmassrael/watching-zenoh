@@ -31,10 +31,11 @@
 //! which is the exact failure the plane exists to prevent.
 
 use core::ffi::c_void;
-use wz_capi_port::lodge::Strong;
 
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::cancellation::CancellationToken;
+#[cfg(feature = "liveliness-get")]
+use wz_capi_port::lodge::Strong;
 use wz_capi_port::TokenId;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::WireKey;
