@@ -475,19 +475,21 @@ fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
     );
 }
 
-/// A put of the session's own hands each subscriber it reaches the sample with the session free,
-/// one row at a time: a row the first callback undeclared before the put reached it is handed
-/// nothing, and the put counts the first alone. The CONTROL is the first subscriber, handed the
-/// sample. Turned red by a put that begins a call on every row it reaches under one lock before
-/// the first callback runs.
+/// A put of the session's own hands every subscriber the one hold that read it found the sample,
+/// each callback with the session free: a row the first callback undeclared before its turn came
+/// is still handed it, as zenoh-pico calls each subscription of the list it took under its lock,
+/// and the put counts both. The CONTROL is the first subscriber, handed the sample. Turned red by
+/// a delivery that passes over a row it pinned once its subscriber was undeclared, or that holds
+/// the session while it calls.
 #[cfg(all(feature = "local-subscriber", not(wz_round)))]
 #[test]
-fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
+fn a_put_of_the_sessions_own_hands_every_row_its_hold_found() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
     let later: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
+    let second = EngineHold::downgrade(&engine);
     engine
         .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
             let (seen, later) = (seen.clone(), later.clone());
@@ -506,7 +508,10 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
         .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
             let seen = seen.clone();
             SubscriberSink::shared(move |_: &dyn SampleView| {
-                seen.lock().unwrap().push((2, true));
+                let free = second
+                    .upgrade()
+                    .is_some_and(|engine| engine.session_is_free());
+                seen.lock().unwrap().push((2, free));
             })
         })
         .expect("the session declares the second subscriber")
@@ -515,13 +520,13 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
     let own = PublishOptions::put().with_locality(Locality::SessionLocal);
     assert_eq!(
         engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
-        Ok(1),
-        "the put reached the row undeclared before it got there"
+        Ok(2),
+        "the put passed over the row undeclared before its turn came"
     );
     assert_eq!(
         *seen.lock().unwrap(),
-        [(1, true)],
-        "the first callback ran with the session held, or the undeclared row was handed the put"
+        [(1, true), (2, true)],
+        "a callback ran with the session held, or the undeclared row was not handed the put"
     );
 }
 

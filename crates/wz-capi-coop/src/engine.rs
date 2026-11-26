@@ -3196,13 +3196,11 @@ impl SubscriberRow {
         }
     }
 
-    /// Hand `sample` to the callback, unless the subscriber was undeclared since the call was
-    /// begun: the one place a sample is handed to a subscriber's callback. The sample is lent as it
-    /// lies to every subscriber; the sink leaves out a timestamp its callback is not to see.
+    /// Hand `sample` to the callback: the one place a sample is handed to a subscriber's
+    /// callback. The sample is lent as it lies to every subscriber; the sink leaves out a timestamp
+    /// its callback is not to see. Whether a call begun before an undeclaration still hands it is
+    /// the call's to say (`SubscriberCall`).
     fn hand(&self, sample: &SampleRef<'_>) {
-        if self.latch.retired() {
-            return;
-        }
         self.sink.call_ref(sample, self.expose);
     }
 
@@ -3295,9 +3293,30 @@ impl SubscriberCall {
         Self { call }
     }
 
-    /// Hand `sample` to the row's callback.
+    /// Hand `sample` to the row's callback, unless the subscriber was undeclared since the call
+    /// was begun: a call the round or a plane owes is made at a time of its own after the lock that
+    /// began it, so an undeclaration made meanwhile says the program wants nothing more of it.
+    #[cfg(any(wz_round, feature = "query", feature = "queryable"))]
     #[inline]
     pub(crate) fn hand(&self, sample: &SampleRef<'_>) {
+        // SAFETY: the row lies where the call began until its last call ended, and this one has
+        // not; nothing writes a row's sink or its timestamp choice after it is declared.
+        let row = unsafe { self.call.0.as_ref() };
+        if !row.latch.retired() {
+            row.hand(sample);
+        }
+    }
+
+    /// Hand `sample` to the row's callback, whether or not the subscriber was undeclared since the
+    /// call was begun: a call pinned in the one hold of the session that read the sample, beside
+    /// every row that hold found, each of which is handed it as zenoh-pico calls each subscription
+    /// of the list it took under its lock
+    /// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`). So a
+    /// row an earlier callback of the same sample undeclared is still handed it, and the count of
+    /// rows a delivery reached is the count of callbacks it called.
+    #[cfg(not(wz_round))]
+    #[inline]
+    pub(crate) fn hand_pinned(&self, sample: &SampleRef<'_>) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has
         // not; nothing writes a row's sink or its timestamp choice after it is declared.
         unsafe { self.call.0.as_ref() }.hand(sample);
