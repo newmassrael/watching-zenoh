@@ -6,14 +6,15 @@
 ## Interface (fixed: the receipt store and the lane-gate step of `scripts/land.sh`, stages M2 and M3,
 ## call these names with these signatures; a change of meaning is a new SCHEMA word)
 
-    lanes(root, rev, *, tables=None) -> list[dict]
+    lanes(root, rev, *, tables=None, decls_from=None) -> list[dict]
         G(t) for the tree of `rev`: one dict per unit `bx --checks ci` runs, in the dispatch table's
         order: {"id": the unit's name ("C1nh", "Qzk:<part>"), "lane": the dispatch id, "part": the
         part or None, "class": "D" | "E" | "S", "opaque": bool, "unit": the planner's unit dict,
         whose "name" equals "id"}. `tables` overrides the planner's lane tables (a selftest's).
-    digest(root, rev, lane_id, *, env_reader=None) -> str
+        With `decls_from` (see "Comparing two trees"), a unit neither tree declares is left out.
+    digest(root, rev, lane_id, *, env_reader=None, decls_from=None) -> str
         D(L, t) as 64 lowercase hex digits. `lane_id` is a dispatch id or `<id>:<part>`.
-    record(root, rev, lane_id, *, env_reader=None) -> dict
+    record(root, rev, lane_id, *, env_reader=None, decls_from=None) -> dict
         what the digest hashes, so an auditor recomputes it from the record alone with
         `digest_of(record)`: {"schema", "lane", "opaque", "spec", "env", "inputs"}.
     digest_of(record) -> str
@@ -25,6 +26,7 @@
         from their digest at base, or that base does not have.
     DigestError       raised for a tree whose digest cannot be computed (no dispatch table, an
                       undeclared lane, a workflow that does not parse); never a silent default.
+    GitError          (`git_tree`'s) raised for a revision git cannot read.
 
     python3 scripts/lib/lane_digest.py --lanes   [--rev R]                JSON lines of lanes()
     python3 scripts/lib/lane_digest.py --digest ID  [--rev R]
@@ -63,6 +65,17 @@ to HEAD and are anything `git rev-parse` reads.
   package graph without building (`cargo metadata`, `cargo tree`), `lane_graph.manifest_inputs`.
 
 The time, the machine (for D and S lanes), the commit id and the branch are not in the key.
+
+## Comparing two trees
+
+The declaration is metadata about the lanes, as a build file is about its targets, and a
+comparison evaluates both trees under declarations it can name. `explain` and `select` read
+the base with `decls_from=head`: a lane the base's `lanes.toml` declares is read with the
+base's entry, and a lane it has no entry for (every lane, when the base has no `lanes.toml`) is
+read with the head's. So a lane whose entry differs between the trees moves, since the entry is
+in its spec, and a lane the base did not declare moves only when its inputs differ. A single
+tree read without `decls_from` still refuses an undeclared lane: a tree's own digest is never
+taken from another tree's declaration unless a comparison asks for it.
 
 ## Opaque lanes (RFC 0001 5.4)
 
@@ -109,7 +122,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lane_decl  # noqa: E402
 import lane_graph  # noqa: E402
 import runci_plan  # noqa: E402
-from git_tree import Fixture, GitTree, git  # noqa: E402
+from git_tree import Fixture, GitError, GitTree, git  # noqa: E402
 
 SCHEMA = "wz-lane-digest/1"
 RUNCI = "scripts/run-ci.sh"
@@ -490,6 +503,8 @@ class Ctx(NamedTuple):
     hosted: dict[str, runci_plan.Hosted]
     dirs: set[str]
     spaces: dict[str, lane_graph.Workspace]
+    #: the lanes whose entry is another tree's (`context(..., decls_from=...)`)
+    borrowed: frozenset[str] = frozenset()
 
 
 _CTX: dict[tuple[str, str], Ctx] = {}
@@ -514,12 +529,23 @@ def _hosted(tree: GitTree) -> dict[str, runci_plan.Hosted]:
     return runci_plan.hosted_runs(docs)
 
 
-def context(root: Path, rev: str) -> Ctx:
-    """The tree of `rev` read once: its dispatch table, declaration, hosted jobs and workspaces."""
+def context(root: Path, rev: str, *, decls_from: str | None = None) -> Ctx:
+    """The tree of `rev` read once: its dispatch table, declaration, hosted jobs and workspaces.
+
+    With `decls_from`, a lane the tree's own declaration has no entry for is declared by the
+    entry of the tree of `decls_from` (see "Comparing two trees"); the tree's own entries stand."""
     commit = git(root, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").decode().strip()
     key = (str(Path(root).resolve()), commit)
-    if key in _CTX:
-        return _CTX[key]
+    if key not in _CTX:
+        _CTX[key] = _read_context(root, rev, commit)
+    ctx = _CTX[key]
+    if decls_from is None:
+        return ctx
+    lent = {lane: e for lane, e in context(root, decls_from).decls.items() if lane not in ctx.decls}
+    return ctx._replace(decls={**ctx.decls, **lent}, borrowed=frozenset(lent)) if lent else ctx
+
+
+def _read_context(root: Path, rev: str, commit: str) -> Ctx:
     tree = GitTree(root, commit)
     text = tree.text(RUNCI)
     if text is None:
@@ -532,10 +558,8 @@ def context(root: Path, rev: str) -> Ctx:
         parts = path.split("/")[:-1]
         for i in range(1, len(parts) + 1):
             dirs.add("/".join(parts[:i]))
-    ctx = Ctx(tree, text, funcs, preamble, dispatch, {e.id: e for e in entries}, _hosted(tree), dirs,
-              lane_graph.workspaces(tree))
-    _CTX[key] = ctx
-    return ctx
+    return Ctx(tree, text, funcs, preamble, dispatch, {e.id: e for e in entries}, _hosted(tree), dirs,
+               lane_graph.workspaces(tree))
 
 
 # -- one lane's analysis -------------------------------------------------------------------------
@@ -642,12 +666,14 @@ def _resolve_call(ctx: Ctx, call: Call) -> tuple[list[tuple[str, str]], list[str
     return (pairs, [], "") if pairs else ([], [], f"cargo {call.sub} in {cwd}, which is no package of {root}")
 
 
-_ANALYSIS: dict[tuple[str, str], Analysis] = {}
+_ANALYSIS: dict[tuple[str, str, bytes], Analysis] = {}
 
 
 def analyse(ctx: Ctx, lane: str) -> Analysis:
-    """What lane `lane` runs and reads at this tree (see the module docstring), once per tree."""
-    key = (ctx.tree.commit, lane)
+    """What lane `lane` runs and reads at this tree (see the module docstring), once per tree
+    and entry: a tree read with another tree's entry for the lane is another analysis."""
+    entry = ctx.decls.get(lane)
+    key = (ctx.tree.commit, lane, b"" if entry is None else _canon(lane_decl.canonical(entry)))
     if key not in _ANALYSIS:
         _ANALYSIS[key] = _analyse(ctx, lane)
     return _ANALYSIS[key]
@@ -866,8 +892,9 @@ def _unit(ctx: Ctx, lane: str, part: str | None) -> dict:
     return runci_plan.unit(lane, _ASKS[ctx.tree.commit].get(lane, runci_plan.Asks()), part)
 
 
-def record(root: Path, rev: str, lane_id: str, *, env_reader: EnvReader | None = None) -> dict:
-    ctx = context(root, rev)
+def record(root: Path, rev: str, lane_id: str, *, env_reader: EnvReader | None = None,
+           decls_from: str | None = None) -> dict:
+    ctx = context(root, rev, decls_from=decls_from)
     lane, part = _split_id(lane_id)
     a = analyse(ctx, lane)
     entry = ctx.decls[lane]
@@ -902,8 +929,9 @@ def record(root: Path, rev: str, lane_id: str, *, env_reader: EnvReader | None =
     }
 
 
-def digest(root: Path, rev: str, lane_id: str, *, env_reader: EnvReader | None = None) -> str:
-    return digest_of(record(root, rev, lane_id, env_reader=env_reader))
+def digest(root: Path, rev: str, lane_id: str, *, env_reader: EnvReader | None = None,
+           decls_from: str | None = None) -> str:
+    return digest_of(record(root, rev, lane_id, env_reader=env_reader, decls_from=decls_from))
 
 
 @contextlib.contextmanager
@@ -923,8 +951,8 @@ def _checkout(root: Path, tree: GitTree) -> Iterator[Path]:
         yield Path(tmp)
 
 
-def lanes(root: Path, rev: str, *, tables: dict | None = None) -> list[dict]:
-    ctx = context(root, rev)
+def lanes(root: Path, rev: str, *, tables: dict | None = None, decls_from: str | None = None) -> list[dict]:
+    ctx = context(root, rev, decls_from=decls_from)
     tables = tables if tables is not None else {}
     parted = tables.get("parted")
     listing = parted if parted is not None else runci_plan.PARTED_LANES
@@ -938,8 +966,11 @@ def lanes(root: Path, rev: str, *, tables: dict | None = None) -> list[dict]:
         except ValueError as err:
             raise DigestError(f"the planner refuses the tree of {rev}: {err}") from err
     undeclared = sorted({u["name"].split(":")[0] for u in units} - set(ctx.decls))
-    if undeclared:
+    if undeclared and decls_from is None:
         raise DigestError(f"lane(s) with no readable entry in {lane_decl.DECL_PATH}: {', '.join(undeclared)}")
+    # Neither tree declares these, so the lane set of `decls_from` (whose own read refuses an
+    # undeclared lane) holds none of them, and no comparison with it asks about them.
+    units = [u for u in units if _split_id(u["name"])[0] in ctx.decls]
     out: list[dict] = []
     for u in units:
         lane, part = _split_id(u["name"])
@@ -968,13 +999,15 @@ def explain(root: Path, base: str, head: str, lane_id: str, *, env_reader: EnvRe
     after = record(root, head, lane_id, env_reader=env_reader)
     d_after = digest_of(after)
     try:
-        before = record(root, base, lane_id, env_reader=env_reader)
+        before = record(root, base, lane_id, env_reader=env_reader, decls_from=head)
     except DigestError as err:
         return f"{lane_id}: selected -- it has no digest at {base} ({err}); D at {head} is {d_after}"
     d_before = digest_of(before)
+    lent = _split_id(lane_id)[0] in context(root, base, decls_from=head).borrowed
+    note = [f"  {base} has no entry for the lane in {lane_decl.DECL_PATH}: read with {head}'s"] if lent else []
     if d_before == d_after:
-        return f"{lane_id}: not selected -- D is {d_after} at both {base} and {head}"
-    lines = [f"{lane_id}: selected -- D moves from {d_before} at {base} to {d_after} at {head}"]
+        return "\n".join([f"{lane_id}: not selected -- D is {d_after} at both {base} and {head}", *note])
+    lines = [f"{lane_id}: selected -- D moves from {d_before} at {base} to {d_after} at {head}", *note]
     if after["opaque"]:
         lines.append(f"  opaque (its inputs are the whole tree): {'; '.join(after['opaque'])}")
     for part in ("spec", "env"):
@@ -1004,7 +1037,7 @@ def select(root: Path, base: str, head: str, *, env_reader: EnvReader | None = N
     out: list[str] = []
     for u in lanes(root, head, tables=tables):
         try:
-            before = digest(root, base, u["id"], env_reader=env_reader)
+            before = digest(root, base, u["id"], env_reader=env_reader, decls_from=head)
         except DigestError:
             out.append(u["id"])
             continue
@@ -1251,6 +1284,39 @@ def selftest() -> int:
         expect("explain says when a lane is not selected", text.startswith("C: not selected"), text)
         sel = select(root, data[0], data[1], env_reader=reader, tables=tables)
         expect("select is digest inequality", sel == ["G", "O", "P"], sel)
+
+        # A base with no declaration at all, and a head that adds it and moves one source.
+        bare = step({lane_decl.DECL_PATH: None})
+        redeclared = step({lane_decl.DECL_PATH: _DECL_FIXTURE, "crates/core/src/inner.rs": "pub fn i() { 2; }\n"})
+        try:
+            lanes(root, redeclared[0], tables=tables)
+        except DigestError:
+            cases += 1
+        else:
+            raise AssertionError("lane_digest selftest: a tree with no declaration was planned on its own")
+        # Red if the base stops being read with the head's entries: every lane would be selected.
+        sel = select(root, redeclared[0], redeclared[1], env_reader=reader, tables=tables)
+        expect("a base with no declaration selects only the lanes whose inputs differ",
+               bare[1] == redeclared[0] and sel == ["C", "O", "W", "B", "P"], sel)
+        expect("a lane the base does not declare is read with the head's entry",
+               digest(root, redeclared[0], "G", env_reader=reader, decls_from=redeclared[1]) == d(redeclared[1], "G"))
+        got_base = lanes(root, redeclared[0], tables=tables, decls_from=redeclared[1])
+        expect("the base's lane set is read with the head's declaration",
+               [u["id"] for u in got_base] == [u["id"] for u in lanes(root, redeclared[1], tables=tables)], got_base)
+        text = explain(root, redeclared[0], redeclared[1], "G", env_reader=reader)
+        expect("explain says the base was read with the head's entry",
+               text.startswith("G: not selected") and "read with" in text, text)
+        # Red if a base that declares the lane is read with the head's entry instead of its own.
+        respec = step({lane_decl.DECL_PATH: _DECL_FIXTURE.replace(
+            'class = "D"\ndecl = ["docs/notes/**"]', 'class = "E"\nreason = "r"\ndecl = ["docs/notes/**"]')})
+        sel = select(root, respec[0], respec[1], env_reader=reader, tables=tables)
+        expect("a lane whose entry differs between the base and the head is selected", sel == ["G", "O", "P"], sel)
+        no_r = _DECL_FIXTURE.replace('\n[[lane]]\nid = "R"\nfn = "layer_r_graph"\nclass = "D"\n', "")
+        partial = step({lane_decl.DECL_PATH: no_r})
+        whole = step({lane_decl.DECL_PATH: _DECL_FIXTURE})
+        sel = select(root, whole[0], whole[1], env_reader=reader, tables=tables)
+        expect("a lane the base's declaration has no entry for is read with the head's",
+               no_r != _DECL_FIXTURE and partial[1] == whole[0] and sel == ["O", "P"], sel)
         undeclared = step({RUNCI: _RUNCI_FIXTURE + "run_layer X layer_c_app || overall=1\n",
                            WORKFLOWS[0]: _CI_FIXTURE + "      - run: bash scripts/run-ci.sh --layer X\n"})
         try:
@@ -1349,7 +1415,7 @@ def main() -> int:
         else:
             for lane_id in select(args.root, args.base, args.head):
                 print(lane_id)
-    except (DigestError, lane_graph.GraphError) as err:
+    except (DigestError, lane_graph.GraphError, GitError) as err:
         print(f"lane_digest: {err}", file=sys.stderr)
         return 2
     return 0

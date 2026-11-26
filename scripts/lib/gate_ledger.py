@@ -45,7 +45,10 @@ already judged here, and nothing that admits a candidate to main reads them.
              merge base with the target (a lane the change did not move was judged
              when the base was admitted), minus those with a pass at their
              digest here, which are INHERITED and printed with the commit they
-             were judged on. The default.
+             were judged on. The default. The base is read with the tip's
+             declaration for every lane the base does not declare itself
+             (`lane_digest.py`, "Comparing two trees"), so a base older than a
+             lane's entry is compared by that lane's inputs.
   only-red   the lanes whose latest measured receipt at their current digest is a
              failure.
   all        every lane of G(tip); refused when this store already holds a verdict
@@ -176,21 +179,34 @@ class LaneDigest:
         self.root = root
         self.module = lane_digest
 
-    def lanes(self, rev: str) -> list[dict]:
-        return list(self.module.lanes(self.root, rev))
+    def _read(self, call):
+        """A tree the module cannot read is a plan that cannot be made (exit 2), with
+        the module's sentence; never a traceback."""
+        try:
+            return call()
+        except (self.module.DigestError, self.module.lane_graph.GraphError,
+                self.module.GitError) as exc:
+            raise LedgerError(str(exc)) from exc
 
-    def digest(self, rev: str, lane_id: str) -> str:
-        return str(self.module.digest(self.root, rev, lane_id))
+    def lanes(self, rev: str, *, decls_from: str | None = None) -> list[dict]:
+        return list(self._read(lambda: self.module.lanes(self.root, rev, decls_from=decls_from)))
+
+    def digest(self, rev: str, lane_id: str, *, decls_from: str | None = None) -> str:
+        return str(self._read(
+            lambda: self.module.digest(self.root, rev, lane_id, decls_from=decls_from)))
 
     def explain(self, base: str, head: str, lane_id: str) -> str | None:
         explain = getattr(self.module, "explain", None)
-        return None if explain is None else str(explain(self.root, base, head, lane_id))
+        if explain is None:
+            return None
+        return str(self._read(lambda: explain(self.root, base, head, lane_id)))
 
 
-def lane_table(provider, rev: str) -> dict[str, dict]:
-    """G(rev) by lane id, each entry checked for the fields this module reads."""
+def lane_table(provider, rev: str, decls_from: str | None = None) -> dict[str, dict]:
+    """G(rev) by lane id, each entry checked for the fields this module reads; with
+    `decls_from`, read with that tree's entry for a lane `rev` does not declare."""
     out: dict[str, dict] = {}
-    for lane in provider.lanes(rev):
+    for lane in provider.lanes(rev, decls_from=decls_from):
         lane_id = lane.get("id") if isinstance(lane, dict) else None
         if not isinstance(lane_id, str) or not lane_id:
             raise LedgerError(f"the lane set at {rev[:12]} holds an entry with no id: {lane!r}")
@@ -345,7 +361,7 @@ def make_plan(root: Path, provider, mode: str, base: str, head: str,
     head_sha = resolve(root, head)
     lanes = lane_table(provider, head_sha)
     base_sha = merge_base(root, base, head_sha) if mode == "changed" else ""
-    base_lanes = lane_table(provider, base_sha) if base_sha else {}
+    base_lanes = lane_table(provider, base_sha, decls_from=head_sha) if base_sha else {}
     rows: list[Row] = []
     for lane_id in sorted(lanes):
         lane = lanes[lane_id]
@@ -360,7 +376,7 @@ def make_plan(root: Path, provider, mode: str, base: str, head: str,
         elif mode == "only-red":
             if last is not None and last.get("verdict") == "fail":
                 rows.append(Row(lane, "run", digest, last))
-        elif lane_id in base_lanes and provider.digest(base_sha, lane_id) == digest:
+        elif lane_id in base_lanes and provider.digest(base_sha, lane_id, decls_from=head_sha) == digest:
             rows.append(Row(lane, "unchanged", digest, last))
         elif last is not None and last.get("verdict") == "pass":
             rows.append(Row(lane, "inherited", digest, last))
@@ -511,12 +527,17 @@ class FakeDigest:
     def __init__(self, root: Path, lanes: dict[str, tuple[str, str]]) -> None:
         self.root = root
         self.spec = lanes  # id -> (class, path it reads)
+        # (rev, decls_from) of every read: the fake's lanes have no declaration to
+        # borrow, so the selftest asks which tree each read was told to borrow from.
+        self.reads: list[tuple[str, str | None]] = []
 
-    def lanes(self, rev: str) -> list[dict]:
+    def lanes(self, rev: str, *, decls_from: str | None = None) -> list[dict]:
+        self.reads.append((rev, decls_from))
         return [{"id": i, "class": c, "unit": {"name": i, "argv": ["run", i]}}
                 for i, (c, _) in self.spec.items()]
 
-    def digest(self, rev: str, lane_id: str) -> str:
+    def digest(self, rev: str, lane_id: str, *, decls_from: str | None = None) -> str:
+        self.reads.append((rev, decls_from))
         path = self.spec[lane_id][1]
         blob = git(self.root, "rev-parse", f"{rev}:{path}", check=False).strip()
         return hashlib.sha256(f"{lane_id}\0{blob}".encode()).hexdigest()
@@ -581,9 +602,16 @@ def selftest() -> int:
         # Red when the base comparison is dropped: every lane would run on every change.
         put("a.txt", "1\n")
         c1 = commit("a moves")
+        lanes.reads.clear()
         got = states(make_plan(root, lanes, "changed", base, c1))
         expect("a change owes the lanes whose digest it moved, and no other",
                got == {"A": "run", "B": "unchanged", "C1:p": "unchanged", "M": "deferred"}, str(got))
+        # Red when the base is read with its own declaration alone: a base older than a
+        # lane's entry would refuse the plan instead of comparing the lane's inputs.
+        expect("the base is read with the tip's declaration, the tip with its own",
+               (base, c1) in lanes.reads and (c1, None) in lanes.reads
+               and all(d in (None, c1) for _, d in lanes.reads)
+               and all(r != c1 or d is None for r, d in lanes.reads), str(lanes.reads))
 
         # Red when an S lane is planned to run, or a D lane's pass is not reused.
         expect("a pass is recorded", judge("changed", c1, [("A", 0)]) == 0)
@@ -690,6 +718,16 @@ def selftest() -> int:
         lines = summary_lines(root, lanes, base, fresh)
         expect("the round's verification names lane, digest, verdict and executor class",
                lines == [f"B {lanes.digest(fresh, 'B')} pass author"], str(lines))
+
+        # Red when the adapter lets the module's error through: the plan command would
+        # die with a traceback instead of exit 2 and the module's sentence.
+        try:
+            LaneDigest(root).lanes(base)
+            unreadable = "read"
+        except LedgerError as exc:
+            unreadable = str(exc)
+        expect("a tree the lane module cannot read is a LedgerError",
+               "run-ci.sh" in unreadable, unreadable)
 
     print(f"gate-ledger selftest: {'OK' if not failures else 'FAILED: ' + ', '.join(failures)}")
     return 1 if failures else 0
