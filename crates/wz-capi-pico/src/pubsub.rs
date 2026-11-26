@@ -28,9 +28,10 @@
 
 #[cfg(test)]
 use alloc::sync::Arc;
-use core::cell::{Cell, UnsafeCell};
+use core::cell::UnsafeCell;
 use core::ffi::{c_int, c_void};
 use core::mem::MaybeUninit;
+use core::sync::atomic::{AtomicU8, Ordering};
 
 #[cfg(feature = "liveliness")]
 use wz_session_core::declare::liveliness_sample::LivelinessSample;
@@ -197,8 +198,10 @@ pub(crate) struct SampleMarshal {
     /// Whether the timestamp is shown: a subscriber that does not see timestamps is handed none,
     /// from the sample every subscriber is lent.
     shows_timestamp: bool,
-    /// Which of [`Self::views`] are written, one bit each ([`View`]).
-    bound: Cell<u8>,
+    /// Which of [`Self::views`] are being written and which are written, two bits each
+    /// ([`View`]): read and claimed atomically, as two threads may ask a lent sample for a view at
+    /// once.
+    bound: AtomicU8,
     /// The views the accessors hand out pointers to, each written the first time it is asked for,
     /// here so that every call answers the same pointer.
     views: UnsafeCell<MaybeUninit<Views>>,
@@ -215,7 +218,7 @@ struct Views {
     source_info: z_source_info_t,
 }
 
-/// The bit of [`SampleMarshal::bound`] each of [`Views`] is written under.
+/// The bit of [`SampleMarshal::bound`] each of [`Views`] is written under once it is written.
 #[derive(Clone, Copy)]
 #[repr(u8)]
 enum View {
@@ -223,6 +226,18 @@ enum View {
     Encoding = 2,
     Timestamp = 4,
     SourceInfo = 8,
+}
+
+impl View {
+    /// The bit of [`SampleMarshal::bound`] the view is claimed under while one thread writes it.
+    const fn writing(self) -> u8 {
+        match self {
+            Self::Attachment => 0x10,
+            Self::Encoding => 0x20,
+            Self::Timestamp => 0x40,
+            Self::SourceInfo => 0x80,
+        }
+    }
 }
 
 impl SampleMarshal {
@@ -257,7 +272,7 @@ impl SampleMarshal {
                 parts.keyexpr.len(),
             ),
             shows_timestamp,
-            bound: Cell::new(0),
+            bound: AtomicU8::new(0),
             views: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
@@ -271,7 +286,7 @@ impl SampleMarshal {
             sample: core::ptr::null(),
             loaned_keyexpr: z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             shows_timestamp: true,
-            bound: Cell::new(0),
+            bound: AtomicU8::new(0),
             views: UnsafeCell::new(MaybeUninit::uninit()),
         }
     }
@@ -310,18 +325,49 @@ impl SampleMarshal {
         self.parts().timestamp.filter(|_| self.shows_timestamp)
     }
 
-    /// The views, with the one `view` names written by `write` unless it already is.
+    /// The views, with the one `view` names written by `write` unless it already is. A program may
+    /// call the accessors of one loaned sample from several threads, as pico's are reads: the
+    /// thread that claims the view's writing bit writes it, and any other waits for its written
+    /// bit, so a view is written once and never read while it is written. The views are reached
+    /// through the cell's raw pointer alone, so no reference to them is made while another
+    /// thread reads one.
     ///
     /// # Safety
     /// `write` writes the view `view` names, and nothing else.
     unsafe fn view(&self, view: View, write: impl FnOnce(*mut Views)) -> *mut Views {
-        let views = (*self.views.get()).as_mut_ptr();
-        let bound = self.bound.get();
-        if (bound & view as u8) == 0 {
+        let views = UnsafeCell::raw_get(&self.views).cast::<Views>();
+        let (written, writing) = (view as u8, view.writing());
+        let claimed = loop {
+            let state = self.bound.load(Ordering::Acquire);
+            if (state & written) != 0 {
+                break false;
+            }
+            if (state & writing) == 0
+                && self
+                    .bound
+                    .compare_exchange_weak(
+                        state,
+                        state | writing,
+                        Ordering::Acquire,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                break true;
+            }
+            core::hint::spin_loop();
+        };
+        if claimed {
             write(views);
-            self.bound.set(bound | view as u8);
+            self.bound.fetch_or(written, Ordering::Release);
         }
         views
+    }
+
+    /// The views written, one bit each ([`View`]).
+    #[cfg(test)]
+    fn written(&self) -> u8 {
+        self.bound.load(Ordering::Relaxed) & 0x0F
     }
 
     /// The loaned view of the sample's attachment, null when it carried none.
@@ -4686,15 +4732,11 @@ mod tests {
         // SAFETY: the marshal is let go before `sample` and what it borrows.
         let marshal = unsafe { SampleMarshal::lent(&sample, true) };
         let loaned = marshal.as_loaned();
-        assert_eq!(marshal.bound.get(), 0, "a delivery converts nothing");
+        assert_eq!(marshal.written(), 0, "a delivery converts nothing");
         // SAFETY: the views of the live marshal.
         unsafe {
             let encoding = z_sample_encoding(loaned);
-            assert_eq!(
-                marshal.bound.get(),
-                View::Encoding as u8,
-                "the one asked for"
-            );
+            assert_eq!(marshal.written(), View::Encoding as u8, "the one asked for");
             assert_eq!(z_sample_encoding(loaned), encoding, "the same view");
             assert!(inside(&marshal, encoding as usize), "in the marshal");
             assert!(inside(&marshal, (*encoding).handle as usize));
@@ -4710,7 +4752,53 @@ mod tests {
             let source = marshal.source_info_view();
             assert_eq!(marshal.source_info_view(), source);
             assert!(inside(&marshal, source as usize));
-            assert_eq!(marshal.bound.get(), 0b1111, "each written once asked for");
+            assert_eq!(marshal.written(), 0b1111, "each written once asked for");
+        }
+    }
+
+    /// Two threads that ask one lent sample for its views at once, as a program may since pico's
+    /// accessors are reads, are answered the same pointers, each view written once and read
+    /// whole. Turned red by a view written by both threads or read before it is written.
+    #[test]
+    fn two_threads_asking_one_sample_for_its_views_are_answered_the_same() {
+        let mut sample =
+            SampleRef::new("demo/threads", b"p", SampleKind::Put, Reliability::Reliable);
+        sample.attachment = Some(&b"att"[..]);
+        sample.encoding = Some((7, Some(&b"utf8"[..])));
+        for _ in 0..64 {
+            // SAFETY: the marshal is let go before `sample`, and the threads end before it.
+            let marshal = unsafe { SampleMarshal::lent(&sample, true) };
+            let at = marshal.as_loaned() as usize;
+            let ask = move || {
+                let loaned = at as *const z_loaned_sample_t;
+                // SAFETY: the marshal at `at` outlives the scope its threads run in.
+                unsafe {
+                    (
+                        z_sample_encoding(loaned) as usize,
+                        z_sample_attachment(loaned) as usize,
+                    )
+                }
+            };
+            let (first, second) = std::thread::scope(|scope| {
+                let one = scope.spawn(ask);
+                let two = scope.spawn(ask);
+                (
+                    one.join().expect("the first asks"),
+                    two.join().expect("the second asks"),
+                )
+            });
+            assert_eq!(first, second, "one view of each, for both");
+            assert!(
+                inside(&marshal, first.0),
+                "the encoding's view is the marshal's"
+            );
+            assert_eq!(
+                marshal.written(),
+                View::Encoding as u8 | View::Attachment as u8
+            );
+            // SAFETY: the view the marshal wrote, live with it.
+            let read = unsafe { bytes_at(first.1 as *const z_loaned_bytes_t) };
+            assert_eq!(read, Some(&b"att"[..]));
         }
     }
 
@@ -4782,7 +4870,7 @@ mod tests {
                 copy.pico_payload.handle as usize,
                 (*second).parts.sample.payload.as_ptr() as usize
             );
-            assert_eq!(copy.bound.get(), View::Encoding as u8, "bound, once each");
+            assert_eq!(copy.written(), View::Encoding as u8, "bound, once each");
             assert!(
                 z_sample_attachment(copy.as_loaned()).is_null(),
                 "no attachment carried, no view of one"
