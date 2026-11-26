@@ -8736,6 +8736,11 @@
       "source": "open-debt register",
       "reason": "OPEN (I): mutation touches the PAYLOAD only. A fuzzer that never corrupts the header cannot reach the core parser bugs; the sample is keyexpr+payload so framing is rebuilt correctly by the publisher every time. Structural limit."
     },
+    "debt-runtime-binding-under-the-wrong-feature": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: wz-session-core states SessionRuntime's unicast-session items (EntropyDraw, ActionsHandle under all(storage-profile, session-unicast); wrap_actions also not(session-slot), crates/wz-session-core/src/link.rs) under its own features, and wz-runtime-tokio binds them under its own transport-unicast (crates/wz-runtime-tokio/src/runtime_impl.rs). Five of its features (transport-qos, transport-lowlatency, session-extqos, session-extcompression, session-extshm) and adminspace-core (through wz-admin/session-unicast) turn the core's session-unicast on without transport-unicast, so a build of them alone leaves the impl short: E0046, carried by the C1bzr ledger (scripts/lib/reduced_docs_ledger.txt, configuration all-without-transport-unicast), whose text c1d38e601 widened by EntropyDraw. Making those features imply transport-unicast was measured on 2026-11-26 and only moves the gap: the reduced builds then miss Unicast, QueryOptions and push_build. Closed by binding the items on the fact itself (wz-session-core publishing it as links metadata from its build script, wz-runtime-tokio's build script turning DEP_ metadata into a cfg the impl and its helpers read), with the ledger line removed and a reduced build that holds it."
+    },
     "debt-sce-codegen-provenance": {
       "status": "active",
       "reason": "Round 1994's open item 468, the half `scripts/lib/sce-codegen-oracle.sh` answers for: an untracked build oracle must record WHAT it was built from, not merely that it exists (Layers B/B2 SKIP-green) or when it was built (R114's mtime, which a backwards pin defeats). The sce-codegen instance is closed and gated; the item stays open for the oracles that still carry no provenance record at all -- `target/zenohd`, `target/zenoh-pico-cli`, the capture fixtures, and `binary_freshness_lint.py`, which grades the sibling class by mtime."
