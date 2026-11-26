@@ -2497,7 +2497,7 @@ pub struct HandshakeFacts {
     /// the inbound InitAck (Initiating side), alongside
     /// [`remote_peer_zid`](Self::remote_peer_zid). Stored RAW — the 2-bit wire
     /// datum, NOT the API-form role byte: session-core is `#![no_std]` and
-    /// routing-agnostic, so the routing boundary (the `linkstate_forward` driver)
+    /// routing-agnostic, so the routing boundary (the wz-runtime-tokio forwarder)
     /// maps it to the graph's API-form WHATAMI_* role, exactly as it maps the raw
     /// `peer_zid` bytes to a routing `Zid`. Reset on re-handshake alongside the
     /// other captured slots. The gossip-policy prerequisite ("F1"): the graph can
@@ -17909,7 +17909,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     //
     // R311y346 DELETES it. That future arrived and took the other road:
     // `build_declare_final_reply` (declare_build.rs) is the interest-response
-    // terminator, live in the router (router_forward.rs, linkstate_forward.rs),
+    // terminator, live in the router (router_forward.rs),
     // and it stamps the id the wire requires. The stub had ZERO callers and
     // could not have acquired a correct one -- it dispatched `build_declare_final`
     // NEAT, i.e. `interest_id: None`, and pico HARD-ERRORS on a DeclFinal with no

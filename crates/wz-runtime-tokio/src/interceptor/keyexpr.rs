@@ -6,7 +6,7 @@
 //! implementation delegates to, and the readers that find a `Declare`'s keyexpr
 //! in whichever field its body carries it.
 //!
-//! R2702 — these lived in `linkstate_forward.rs` until this round, and the move
+//! R2702 — these lived in the routing module until this round, and the move
 //! is the point rather than tidying. The §5.16 module was gated
 //! `#[cfg(feature = "routing-peer")]`, and this was the ONLY thing making that
 //! gate true: nothing else under `interceptor/` names a routing type, but the

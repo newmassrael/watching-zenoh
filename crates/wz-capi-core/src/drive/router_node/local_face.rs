@@ -77,6 +77,10 @@ pub(super) struct QueryHold {
     pub(super) keyexpr: String,
     pub(super) accept: ReplyKeyExpr,
     pub(super) timeout_ms: u32,
+    /// How the replies are consolidated before they are handed over, resolved as a session's get
+    /// resolves it (`QueryOptions::resolved_consolidation`): `Latest` holds each key's newest
+    /// reply until the query ends, as zenoh's session does.
+    pub(super) consolidation: wz_session_core::query_mode::ConsolidationMode,
     pub(super) ingress: Option<ReplyIngress>,
     pub(super) on_reply: ReplyHandler,
     pub(super) on_final: FinalHandler,
@@ -129,6 +133,8 @@ enum Command {
         accept: ReplyKeyExpr,
         /// How long the query waits for its answer, in milliseconds; `0` is no deadline.
         timeout_ms: u32,
+        /// How the replies are consolidated ([`QueryHold::consolidation`]).
+        consolidation: wz_session_core::query_mode::ConsolidationMode,
         on_reply: ReplyHandler,
         on_final: FinalHandler,
     },
@@ -357,6 +363,7 @@ impl State {
                 keyexpr,
                 accept,
                 timeout_ms,
+                consolidation,
                 mut on_reply,
                 on_final,
             } => {
@@ -368,13 +375,19 @@ impl State {
                 // is told its end here, and the handlers it was held with are let go.
                 let on_final = std::sync::Arc::new(std::sync::Mutex::new(on_final));
                 let ended = std::sync::Arc::clone(&on_final);
-                let held = self.queries.register(
+                // The replies go through the query's consolidation, as a session's get's do.
+                let held = self.queries.register_sink(
                     rid,
                     1,
                     deadline,
                     ReplyAcceptance::for_query(&keyexpr, accept),
-                    move |reply| on_reply(reply),
-                    move |_| (ended.lock().unwrap_or_else(|p| p.into_inner()))(),
+                    ConsolidatingSink::new(
+                        consolidation,
+                        BoxedReplySink::new(
+                            move |reply: &dyn ReplyView| on_reply(reply),
+                            move |_| (ended.lock().unwrap_or_else(|p| p.into_inner()))(),
+                        ),
+                    ),
                 );
                 if let Err(refusal) = held {
                     if std::env::var_os("WZ_CAPI_LOG").is_some() {
@@ -818,6 +831,7 @@ impl LocalLiveliness {
             keyexpr,
             accept,
             timeout_ms,
+            consolidation,
             ingress,
             on_reply,
             mut on_final,
@@ -846,6 +860,7 @@ impl LocalLiveliness {
             keyexpr,
             accept,
             timeout_ms,
+            consolidation,
             on_reply,
             on_final,
         });
@@ -936,6 +951,8 @@ mod tests {
             keyexpr: "demo/q".to_owned(),
             accept: ReplyKeyExpr::MatchingQuery,
             timeout_ms: 0,
+            // Each reply handed over as it comes, so the hook's order is read reply by reply.
+            consolidation: wz_session_core::query_mode::ConsolidationMode::None,
             ingress: Some(ingress),
             on_reply: Box::new(move |_view| replied.lock().unwrap().push("reply".to_owned())),
             on_final: Box::new(move || finished.lock().unwrap().push("final".to_owned())),

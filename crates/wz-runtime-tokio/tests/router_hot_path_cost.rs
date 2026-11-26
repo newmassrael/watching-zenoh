@@ -43,8 +43,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use wz_runtime_tokio::accept_loop::{FaceForwarder, FaceId};
-use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::router_forward::RouterForwarder;
+use wz_runtime_tokio::routing_policy::Zid;
 use wz_runtime_tokio::session_glue::{
     BoxedLinkDriver, IterationEvent, LinkSendOutcome, SessionLinkActions,
 };
