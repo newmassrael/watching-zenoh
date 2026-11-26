@@ -185,13 +185,13 @@ says why finer is better and how a lane is cut.
 
 ### 4.2 The digest
 
-    D(L, t) = H( "wz-lane-digest/1" || spec(L, t) || env(L, t) || M(L, t) )
+    D(L, t) = H( "wz-lane-digest/2" || spec(L, t) || env(L, t) || M(L, t) )
 
 H is SHA-256 over a canonical serialization (sorted keys, length-prefixed fields).
 
 | component | what it holds | why |
 |---|---|---|
-| spec(L, t) | lane id, part or leg, the unit's argv and the env keys the planner carries (`runci_plan.py` reads them from the hosted job), the lane function's body (`lane_bodies`, `scripts/lib/runci_plan.py:345`) and the blob of every script it sources or calls, the lane's class and declaration entry | a changed lane definition is a different question; an old pass must not answer it |
+| spec(L, t) | lane id, part or leg, the unit's argv and the env keys the planner carries (`runci_plan.py` reads them from the hosted job), the definitions the lane runs from `scripts/run-ci.sh` (its function, every function it calls, transitively, and the code outside the functions, each without comments; `lane_digest.py`, "The dispatch script") and the blob of every script it sources or calls, the lane's class and declaration entry | a changed lane definition is a different question; an old pass must not answer it, and a change to another lane's function asks this lane nothing new |
 | env(L, t) | the image digest once the tree declares one (bx RFC 0034); until then: `rust-toolchain.toml`, the output of `rustc -vV` and `cargo -V`, the tool-store entries the unit asks for (`[tools.*]`, `needed_by`), the oracle pins (`scripts/zenoh-c-oracle.pin`, `UPSTREAM_VERSION`); for an E lane also the machine's identity | the verdict depends on the tools; a key without them is the defect `bx.toml:389-394` names |
 | M(L, t) | the sorted list of (path, mode, git blob id) of every tracked path in inputs(L, t), and (path, commit) of each submodule gitlink in the closure | git already addresses content; the digest is computed from the commit's tree object, never from a working directory |
 
@@ -221,6 +221,12 @@ candidate reuse what an earlier tree proved.
   (its `[patch]`, `[profile]` and `[workspace.dependencies]`), `rust-toolchain.toml`, and the cargo
   configuration files the call loads (the default ones under `.cargo/` and `crates/.cargo/`, and those
   it names with `--config`, such as `crates/.cargo/capi-nostd.toml`).
+- **The dispatch script** is an input of a lane as the definitions it runs (the spec row of 4.2), as a
+  build key holds a target's own rule and not the whole build file. It is a file input, whole, only where
+  the lane reads it as data (a script that opens it, another lane run whole) or where the reader cannot
+  split it into functions; `--explain` says which. A script's reads are taken from the code a run with
+  the options its call sites spell can reach: `run_layer` runs `lane_decline_read.py --read` for every
+  lane, and only Layer C0 runs its `--audit`, which reads the whole script.
 - **decl(L)** are globs the lane reads outside cargo: its fixtures, TSV and JSON tables, the store for
   the A family (`docs/.atomic/**`), the workflows for a lane that reads them, generated trees a crate
   includes (`out/**` of `[actions.regen-codegen]`, `bx.toml:351-354`) and the files a build script reads

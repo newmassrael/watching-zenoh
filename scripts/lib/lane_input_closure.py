@@ -29,10 +29,19 @@ or the dispatch script, the planner, a workflow the planner reads or a script th
 lane's inputs hold that submodule's gitlink. An opaque lane's inputs are the whole tree, so its
 audit has nothing to find, and says so.
 
+The dispatch script is the one exception to "keyed by the spec": a lane's key holds only the
+definitions of it the lane runs (`lane_digest.py`, "The dispatch script"), so a lane that reads it
+as data, any open but the one by the shell that runs it, needs the file in its inputs. A trace
+tells the two apart (`runci_read_as_data`: the shell that runs it is the process whose execve
+names it, and it opens it once); a read list cannot, and the audit says so.
+
 ## Interface
 
     reads_from_strace(lines) -> list[str]            absolute paths opened for reading
-    undeclared(rec, reads, root, tree) -> list[str]  the tracked paths `rec` does not hold
+    runci_read_as_data(lines, paths) -> bool          one process opened the dispatch script
+                                                     other than to run it
+    undeclared(rec, reads, root, tree, runci_data=False) -> list[str]
+                                                     the tracked paths `rec` does not hold
 
     python3 scripts/lib/lane_input_closure.py --lane ID (--reads FILE | --strace DIR | --run)
     python3 scripts/lib/lane_input_closure.py --selftest
@@ -42,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import posixpath
 import re
 import shutil
 import subprocess
@@ -56,7 +66,11 @@ from git_tree import Fixture, GitTree, git  # noqa: E402
 
 #: One traced open with its result decorated by `-y`: `openat(AT_FDCWD, "x", O_RDONLY) = 3</abs/x>`.
 _OPEN = re.compile(r"^(?:\[pid\s+\d+\]\s+)?(?:\d+\s+)?(?:open|openat|openat2)\((?P<args>.*)\)\s+=\s+\d+<(?P<path>[^>]*)>\s*$")
-STRACE = ["strace", "-ff", "-y", "-qq", "-e", "trace=open,openat,openat2", "-e", "signal=none"]
+#: A program a traced process started: `execve("/usr/bin/bash", ["bash", "scripts/run-ci.sh"], ...) = 0`.
+_EXEC = re.compile(r'^(?:\[pid\s+\d+\]\s+)?(?:\d+\s+)?execve\("(?P<prog>[^"]*)", \[(?P<argv>.*?)\].*\)\s+=\s+0\s*$')
+#: The programs whose open of a script is how they run it.
+SHELLS = frozenset({"bash", "sh", "dash"})
+STRACE = ["strace", "-ff", "-y", "-qq", "-e", "trace=execve,open,openat,openat2", "-e", "signal=none"]
 
 
 def reads_from_strace(lines) -> list[str]:
@@ -77,6 +91,27 @@ def reads_from_strace(lines) -> list[str]:
     return out
 
 
+def runci_read_as_data(lines, paths: set[str]) -> bool:
+    """Whether one process's trace (one file of `strace -ff`) opened the dispatch script, any of
+    `paths`, for any reason but running it. The shell that runs it is the process whose execve
+    names it, and that open comes once; any other open, in that process or another, is a read of
+    the file as data. A process with no execve in its file is a fork, which runs no script anew."""
+    runs = False
+    for line in lines:
+        line = line.rstrip("\n")
+        m = _EXEC.match(line)
+        if m:
+            runs = posixpath.basename(m.group("prog")) in SHELLS and lane_digest.RUNCI in m.group("argv")
+            continue
+        for path in reads_from_strace([line]):
+            if path not in paths:
+                continue
+            if not runs:
+                return True
+            runs = False
+    return False
+
+
 def _relative(path: str, roots: list[str]) -> str | None:
     if not os.path.isabs(path):
         return os.path.normpath(path)
@@ -86,17 +121,21 @@ def _relative(path: str, roots: list[str]) -> str | None:
     return None
 
 
-def undeclared(rec: dict, reads: list[str], root: Path, tree) -> list[str]:
-    """The tracked paths of `reads` the record does not hold (see the module docstring)."""
+def undeclared(rec: dict, reads: list[str], root: Path, tree, runci_data: bool = False) -> list[str]:
+    """The tracked paths of `reads` the record does not hold (see the module docstring); with
+    `runci_data`, a read of the dispatch script as data counts when the key holds only the
+    definitions of it the lane runs."""
     if rec["opaque"]:
         return []
     roots = sorted({str(Path(root)), str(Path(root).resolve())}, key=len, reverse=True)
     held = {f[0] for f in rec["inputs"]["files"]}
+    out: list[str] = []
+    if runci_data and lane_digest.RUNCI not in held:
+        out.append(f"{lane_digest.RUNCI} (read as data; the key holds only the definitions of it the lane runs)")
     held |= {s[0] for s in rec["spec"]["scripts"]}
     held |= {lane_digest.RUNCI, lane_digest.PLANNER, *lane_digest.WORKFLOWS}
     links = {g[0] for g in rec["inputs"]["gitlinks"]}
     all_links = tree.gitlinks()
-    out: list[str] = []
     for raw in reads:
         rel = _relative(raw, roots)
         if rel is None or rel.startswith(".."):
@@ -161,8 +200,14 @@ def main() -> int:
         print(f"lane_input_closure: {err}", file=sys.stderr)
         return 2
     tree = GitTree(args.root, args.rev)
+    runci_paths = {str(args.root / lane_digest.RUNCI), str(args.root.resolve() / lane_digest.RUNCI)}
+    runci_data = False
     if args.reads:
         reads = [line.strip() for line in args.reads.read_text(encoding="utf-8").splitlines() if line.strip()]
+        if rec["spec"]["runci"]["unit"] == "definitions" and any(
+                r in runci_paths or r == lane_digest.RUNCI for r in reads):
+            print(f"lane_input_closure: a read list does not say which process opened {lane_digest.RUNCI}; "
+                  f"whether lane {args.lane} reads it as data is audited from a trace (--strace, --run)")
     else:
         with tempfile.TemporaryDirectory(prefix="wz-lane-trace-") as tmp:
             trace_dir = args.strace
@@ -173,8 +218,10 @@ def main() -> int:
             reads = []
             for f in sorted(trace_dir.iterdir()):
                 with f.open(encoding="utf-8", errors="replace") as fh:
-                    reads.extend(reads_from_strace(fh))
-    return _report(args.lane, undeclared(rec, reads, args.root, tree), rec)
+                    lines = fh.readlines()
+                reads.extend(reads_from_strace(lines))
+                runci_data = runci_data or runci_read_as_data(lines, runci_paths)
+    return _report(args.lane, undeclared(rec, reads, args.root, tree, runci_data), rec)
 
 
 def selftest() -> int:
@@ -225,6 +272,24 @@ def selftest() -> int:
         expect("a submodule read without its pin in the key is undeclared", len(found) == 1 and "vendor/sub" in found[0], found)
         opaque = lane_digest.record(fx.root, rev, "O", env_reader=lambda c: dict(machine))
         expect("an opaque lane has nothing undeclared", undeclared(opaque, reads, fx.root, tree) == [])
+        # Red if a read of the dispatch script as data is excused for a lane whose key holds only
+        # the definitions it runs, or charged to one that holds the file.
+        found = undeclared(rec, [], fx.root, tree, runci_data=True)
+        expect("the dispatch script read as data is undeclared where the key holds its definitions",
+               len(found) == 1 and found[0].startswith(lane_digest.RUNCI), found)
+        audit = lane_digest.record(fx.root, rev, "A", env_reader=lambda c: dict(machine))
+        expect("and declared where the key holds the file", undeclared(audit, [], fx.root, tree, runci_data=True) == [])
+
+    paths = {"/r/scripts/run-ci.sh"}
+    shell = 'execve("/usr/bin/bash", ["bash", "scripts/run-ci.sh", "--layer", "C"], 0x7ffd /* 30 vars */) = 0\n'
+    opened = 'openat(AT_FDCWD, "scripts/run-ci.sh", O_RDONLY) = 3</r/scripts/run-ci.sh>\n'
+    python = 'execve("/usr/bin/python3", ["python3", "scripts/lib/x.py", "--audit"], 0x7ffd /* 30 vars */) = 0\n'
+    # Red if the shell's own open of its script counts as data, or any other open does not.
+    expect("the shell that runs the dispatch script does not read it as data",
+           not runci_read_as_data([shell, opened], paths))
+    expect("a second open by that shell does", runci_read_as_data([shell, opened, opened], paths))
+    expect("another program's open does", runci_read_as_data([python, opened], paths))
+    expect("a fork's open does", runci_read_as_data([opened], paths))
     print(f"lane_input_closure selftest: {cases} cases pass")
     return 0
 

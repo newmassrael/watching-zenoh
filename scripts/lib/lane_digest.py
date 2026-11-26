@@ -24,6 +24,9 @@
     select(root, base, head, *, env_reader=None, tables=None) -> list[str]
         Sel (RFC 0001 5.1, the base form): the unit ids of G(head) whose digest at head differs
         from their digest at base, or that base does not have.
+    parse_shell(text) -> ShellDefs
+        a shell text's top-level function definitions and the code outside them, each without
+        comments; ShellParseError where the text cannot be split (see "The dispatch script").
     DigestError       raised for a tree whose digest cannot be computed (no dispatch table, an
                       undeclared lane, a workflow that does not parse); never a silent default.
     GitError          (`git_tree`'s) raised for a revision git cannot read.
@@ -41,15 +44,13 @@ to HEAD and are anything `git rev-parse` reads.
 
 ## What the digest holds (RFC 0001 4.2 and 4.3)
 
-    D(L, t) = SHA-256( len-prefixed "wz-lane-digest/1", spec, env, inputs ), each a canonical JSON
+    D(L, t) = SHA-256( len-prefixed "wz-lane-digest/2", spec, env, inputs ), each a canonical JSON
     document (sorted keys, no whitespace), each prefixed by its length in bytes.
 
 * **spec** -- the question: the lane id, part and function; its `lanes.toml` entry; the planner's
-  unit and the env and provisioning the hosted job gives it; the text the lane runs from
-  `scripts/run-ci.sh` (the script outside its functions, without the other lanes' dispatch
-  lines, and every function the lane's function and that text name, transitively); and the blob
-  of every script those name, transitively (`scripts/...` paths, a sibling a script names, a
-  python module it imports).
+  unit and the env and provisioning the hosted job gives it; the definitions the lane runs from
+  `scripts/run-ci.sh` (`runci`, see "The dispatch script"); and the blob of every script those
+  name, transitively (`scripts/...` paths, a sibling a script names, a python module it imports).
 * **env** -- what the verdict depends on outside the tree: the toolchain pin's blob, the
   `[tools.*]` tables of `bx.toml`, the oracle pins (`scripts/zenoh-c-oracle.pin`, the
   `UPSTREAM_VERSION` line of `scripts/lib/upstream_feature_census.py`), and what `env_reader`
@@ -65,6 +66,30 @@ to HEAD and are anything `git rev-parse` reads.
   package graph without building (`cargo metadata`, `cargo tree`), `lane_graph.manifest_inputs`.
 
 The time, the machine (for D and S lanes), the commit id and the branch are not in the key.
+
+## The dispatch script
+
+`scripts/run-ci.sh` holds every lane, so a lane's key holds the part of it the lane runs, as a build
+key holds a target's own rule and not the whole build file: the code outside the functions (the
+script's global setup, so a change there moves every lane), the lane's function, and every function
+those name, transitively; each without its comments, the code without the other lanes' dispatch
+lines (`spec.runci`: `unit` "definitions", the digest of `top` and of each of `defs`).
+`parse_shell` reads the script as bash tokenizes it (quotes, `$(...)`, `${...}`, heredoc bodies and
+comments are units), so no brace in a string or a heredoc ends a function. A script it sources is a
+file input like any other.
+
+The script is an input whole (`unit` "file", `why` saying why, and `--explain` printing it) when
+the reader cannot split it, when the lane's function is not one it found, or when the lane reads it
+as data: a script the lane runs opens it, a text the lane runs names it (another lane run whole, the
+script read by a command), or a directory or a glob the lane reads holds it.
+
+What a python script reads is read from its code. When a shell line runs it with options it spells,
+and the script parses its command line once with argparse, the body of an `if args.<flag>:` whose
+`store_true` option no such line passes is left out (`call_modes`, `py_options`, `_py_reached`):
+every lane's `run_layer` runs `lane_decline_read.py --read`, and only Layer C0 runs its `--audit`,
+which reads the whole dispatch script. A call site that may pass more than its words show (a variable
+where an option could stand, the script named outside a command), a script imported or spawned by
+another, or one that could set an option some other way is read in every mode.
 
 ## Comparing two trees
 
@@ -104,7 +129,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import bisect
 import contextlib
+import functools
 import hashlib
 import io
 import json
@@ -124,7 +151,7 @@ import lane_graph  # noqa: E402
 import runci_plan  # noqa: E402
 from git_tree import Fixture, GitError, GitTree, git  # noqa: E402
 
-SCHEMA = "wz-lane-digest/1"
+SCHEMA = "wz-lane-digest/2"
 RUNCI = "scripts/run-ci.sh"
 PLANNER = "scripts/lib/runci_plan.py"
 WORKFLOWS = tuple(str(p) for p in runci_plan.HOSTED_WORKFLOWS)
@@ -163,15 +190,345 @@ def _sha(text: str | bytes) -> str:
 
 # -- the dispatch script ---------------------------------------------------------------------------
 
-_FUNC = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(\) \{\n(.*?)^\}\n?", re.M | re.S)
 _WORD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+#: A function definition at the start of a command: `name() {`, `function name {`, `function name() {`.
+_HEADER = re.compile(r"function[ \t]+([A-Za-z_][\w:.-]*)(?:[ \t]*\([ \t]*\))?|([A-Za-z_][\w:.-]*)[ \t]*\([ \t]*\)")
+#: A word that assigns (`x=`, `x+=`, `x[i]=`); one that ends at the `=` and meets a `(` starts an array.
+_ASSIGNMENT = re.compile(r"[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=")
+#: The reserved word each closing word closes.
+_CLOSES = {"fi": "if", "done": "do", "esac": "case"}
+#: Reserved words after which a command starts.
+_LEADS = frozenset({"then", "else", "elif", "while", "until", "!", "time"})
 
 
-def split_runci(text: str) -> tuple[dict[str, str], str]:
-    """({function: body}, the script outside its functions and without its dispatch lines)."""
-    funcs = {m.group(1): m.group(2) for m in _FUNC.finditer(text)}
-    rest = runci_plan.DISPATCH.sub("", _FUNC.sub("", text))
-    return funcs, rest
+class ShellParseError(ValueError):
+    """A shell text the reader cannot split into its definitions; the message says where."""
+
+
+class ShellDefs(NamedTuple):
+    """A shell text as `parse_shell` splits it (see "The dispatch script")."""
+
+    #: each top-level function's definition, from its name to its closing brace, without comments
+    funcs: dict[str, str]
+    #: the code outside those functions, without comments and without the dispatch lines
+    top: str
+
+
+class _ShellReader:
+    """Bash's tokenizing, as far as finding where each top-level function starts and ends needs:
+    quotes, expansions, heredoc bodies and comments are skipped whole, and `{ }`, `if fi`,
+    `case esac` and `do done` count only where they are reserved words, at the start of a command.
+    What it cannot place raises ShellParseError; it never guesses a boundary."""
+
+    def __init__(self, text: str) -> None:
+        self.t = text
+        self.n = len(text)
+        #: (start, end) of every comment, the newline that ends it excluded
+        self.comments: list[tuple[int, int]] = []
+        #: (name, start, the index after its closing brace) of each top-level function
+        self.defs: list[tuple[str, int, int]] = []
+
+    def fail(self, at: int, what: str) -> ShellParseError:
+        return ShellParseError(f"line {self.t.count(chr(10), 0, at) + 1}: {what}")
+
+    def comment(self, i: int) -> int:
+        j = self.t.find("\n", i)
+        end = self.n if j < 0 else j
+        self.comments.append((i, end))
+        return end
+
+    def squote(self, i: int) -> int:
+        j = self.t.find("'", i + 1)
+        if j < 0:
+            raise self.fail(i, "a ' is not closed")
+        return j + 1
+
+    def escaped(self, i: int, close: str, what: str) -> int:
+        """The index after the `close` that ends the span opened at i, a backslash escaping."""
+        start = i
+        i += 1
+        while i < self.n:
+            c = self.t[i]
+            if c == "\\":
+                i += 2
+            elif c == close:
+                return i + 1
+            else:
+                i += 1
+        raise self.fail(start, f"{what} is not closed")
+
+    def dquote(self, i: int) -> int:
+        t, start = self.t, i
+        i += 1
+        while i < self.n:
+            c = t[i]
+            if c == "\\":
+                i += 2
+            elif c == '"':
+                return i + 1
+            elif c == "$":
+                i = self.dollar(i)
+            elif c == "`":
+                i = self.escaped(i, "`", "a backtick")
+            else:
+                i += 1
+        raise self.fail(start, 'a " is not closed')
+
+    def dollar(self, i: int) -> int:
+        """The index after the expansion the `$` at i starts (i + 1 for a plain `$`)."""
+        t = self.t
+        if t.startswith("$((", i):
+            return self.matched(i + 3, 2, "a $((")
+        if t.startswith("$(", i):
+            return self.run(i + 2, nested=True)
+        if t.startswith("${", i):
+            return self.matched(i + 2, 1, "a ${", "{", "}")
+        if t.startswith("$'", i):
+            return self.escaped(i + 1, "'", "a $' string")
+        if t.startswith('$"', i):
+            return self.dquote(i + 1)
+        return i + 1
+
+    def matched(self, i: int, depth: int, what: str, opening: str = "(", closing: str = ")",
+                comments: bool = False) -> int:
+        """The index after the `closing` that brings `depth` to zero; quotes and expansions are
+        skipped whole, and with `comments` a `#` after a blank starts one (an array's)."""
+        t, start = self.t, i
+        while i < self.n:
+            c = t[i]
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                i = self.squote(i)
+            elif c == '"':
+                i = self.dquote(i)
+            elif c == "`":
+                i = self.escaped(i, "`", "a backtick")
+            elif c == "$":
+                i = self.dollar(i)
+            elif comments and c == "#" and t[i - 1] in " \t\n(":
+                i = self.comment(i)
+            elif c == opening:
+                depth += 1
+                i += 1
+            elif c == closing:
+                depth -= 1
+                i += 1
+                if depth == 0:
+                    return i
+            else:
+                i += 1
+        raise self.fail(start, f"{what} is not closed")
+
+    def word_end(self, i: int) -> int:
+        """The index after the word at i: up to a blank or an operator outside quotes."""
+        t, start = self.t, i
+        while i < self.n:
+            c = t[i]
+            if c in " \t\r\n;&|<>)":
+                break
+            if c == "(":
+                if i > start and t[i - 1] in "@!+*?":
+                    i = self.matched(i + 1, 1, "a pattern group")
+                    continue
+                break
+            if c == "\\":
+                i += 2
+            elif c == "'":
+                i = self.squote(i)
+            elif c == '"':
+                i = self.dquote(i)
+            elif c == "`":
+                i = self.escaped(i, "`", "a backtick")
+            elif c == "$":
+                i = self.dollar(i)
+            else:
+                i += 1
+        return i
+
+    def bodies(self, i: int, pending: list[tuple[str, bool]]) -> int:
+        """The index after the heredoc bodies that start at i, one per pending delimiter."""
+        t = self.t
+        for delim, strip in pending:
+            while True:
+                if i >= self.n:
+                    raise self.fail(self.n, f"the heredoc ending in {delim} has no end")
+                j = t.find("\n", i)
+                line = t[i:] if j < 0 else t[i:j]
+                i = self.n if j < 0 else j + 1
+                if (line.lstrip("\t") if strip else line) == delim:
+                    break
+        return i
+
+    def word(self, i: int, command: bool, stack: list[tuple[str, str | None, int]],
+             nested: bool) -> tuple[int, bool]:
+        """Read the word at i: (the index after it, whether a command starts after it)."""
+        t = self.t
+        if command:
+            m = _HEADER.match(t, i)
+            if m:
+                name = m.group(1) or m.group(2)
+                j = m.end()
+                while j < self.n and t[j] in " \t\r\n":
+                    j += 1
+                if t.startswith("{", j) and (j + 1 >= self.n or t[j + 1] in " \t\r\n"):
+                    stack.append(("{", name, i))
+                    return j + 1, True
+                raise self.fail(i, f"the body of function {name} is not a {{ }} group")
+        start = i
+        i = self.word_end(i)
+        if i == start:
+            raise self.fail(i, f"no word at {t[i:i + 10]!r}")
+        w = t[start:i]
+        if command:
+            if w == "{":
+                stack.append(("{", None, start))
+                return i, True
+            if w == "}":
+                if not stack or stack[-1][0] != "{":
+                    raise self.fail(start, "a } closes no {")
+                _, name, first = stack.pop()
+                if name is not None and not stack and not nested:
+                    self.defs.append((name, first, i))
+                return i, False
+            if w in ("if", "do", "case"):
+                stack.append((w, None, start))
+                return i, w != "case"
+            if w in _CLOSES:
+                if not stack or stack[-1][0] != _CLOSES[w]:
+                    raise self.fail(start, f"{w} closes no {_CLOSES[w]}")
+                stack.pop()
+                return i, False
+            if w in _LEADS:
+                return i, True
+            if _ASSIGNMENT.match(w):
+                if w.endswith("=") and t.startswith("(", i):
+                    i = self.matched(i + 1, 1, "an array", comments=True)
+                return i, True
+        elif _ASSIGNMENT.fullmatch(w) and t.startswith("(", i):
+            return self.matched(i + 1, 1, "an array", comments=True), False
+        return i, False
+
+    def run(self, i: int, nested: bool) -> int:
+        """Read commands from i. Nested (the body of a `$(` or `<(`), return the index after the
+        `)` that closes it; else read to the end, recording the top-level functions."""
+        t, n = self.t, self.n
+        stack: list[tuple[str, str | None, int]] = []
+        command = True
+        pending: list[tuple[str, bool]] = []
+        while i < n:
+            c = t[i]
+            if c == "\n":
+                i += 1
+                if pending:
+                    i = self.bodies(i, pending)
+                    pending = []
+                command = True
+            elif c in " \t\r":
+                i += 1
+            elif c == "\\" and t.startswith("\n", i + 1):
+                i += 2
+            elif c == "#":
+                i = self.comment(i)
+            elif c == "&" and t.startswith(">", i + 1):
+                i += 2
+                while i < n and t[i] == ">":
+                    i += 1
+            elif c in ";&|":
+                i += 1
+                command = True
+            elif c in "<>":
+                if t.startswith("<<<", i):
+                    i += 3
+                elif t.startswith("<<", i):
+                    i += 2
+                    strip = t.startswith("-", i)
+                    if strip:
+                        i += 1
+                    while i < n and t[i] in " \t":
+                        i += 1
+                    j = self.word_end(i)
+                    if j == i:
+                        raise self.fail(i, "a heredoc names no delimiter")
+                    pending.append((re.sub(r"[\"'\\]", "", t[i:j]), strip))
+                    i = j
+                elif t.startswith("(", i + 1):
+                    i = self.run(i + 2, nested=True)
+                    command = False
+                else:
+                    i += 1
+                    while i < n and t[i] in "<>&|-":
+                        i += 1
+            elif c == "(":
+                if command and t.startswith("(", i + 1):
+                    i = self.matched(i + 2, 2, "a ((")
+                    command = False
+                else:
+                    stack.append(("(", None, i))
+                    i += 1
+                    command = True
+            elif c == ")":
+                top = stack[-1][0] if stack else None
+                if top == "(":
+                    stack.pop()
+                elif top != "case":
+                    if nested and top is None:
+                        return i + 1
+                    raise self.fail(i, "a ) closes nothing")
+                i += 1
+                command = True
+            else:
+                i, command = self.word(i, command, stack, nested)
+        if nested:
+            raise self.fail(n, "a $( or <( is not closed")
+        if pending:
+            raise self.fail(n, "a heredoc at the end has no body")
+        if stack:
+            raise self.fail(stack[-1][2], f"a {stack[-1][0]} is not closed")
+        return i
+
+
+def parse_shell(text: str) -> ShellDefs:
+    """Split a shell text into its top-level functions and the code outside them (see "The dispatch
+    script"). A redefinition keeps both texts under the name. Raises ShellParseError."""
+    reader = _ShellReader(text)
+    reader.run(0, nested=False)
+    # A comment that is its whole line goes with its line; one after code, with the blanks before it.
+    comments: list[tuple[int, int]] = []
+    for a, b in sorted(reader.comments):
+        line = text.rfind("\n", 0, a) + 1
+        if not text[line:a].strip(" \t"):
+            comments.append((line, min(b + 1, len(text))))
+        else:
+            while text[a - 1] in " \t":
+                a -= 1
+            comments.append((a, b))
+    starts = [a for a, _ in comments]
+
+    def code(lo: int, hi: int) -> str:
+        out: list[str] = []
+        at = lo
+        k = bisect.bisect_left(starts, lo)
+        while k < len(comments) and comments[k][0] < hi:
+            a, b = comments[k]
+            out.append(text[at:a])
+            at = min(b, hi)
+            k += 1
+        out.append(text[at:hi])
+        return "".join(out)
+
+    funcs: dict[str, str] = {}
+    top: list[str] = []
+    at = 0
+    for name, start, close in reader.defs:
+        nl = text.find("\n", close)
+        eol = len(text) if nl < 0 else nl
+        top.append(code(at, start))
+        funcs[name] = funcs.get(name, "") + code(start, close)
+        # The rest of the closing line goes with the function when it holds nothing to run.
+        at = (len(text) if nl < 0 else nl + 1) if not code(close, eol).strip() else close
+    top.append(code(at, len(text)))
+    return ShellDefs(funcs, runci_plan.DISPATCH.sub("", "".join(top)))
 
 
 def executed(text: str) -> str:
@@ -272,13 +629,20 @@ def _cargo_argv(elts: list[ast.expr]) -> tuple[str, tuple[str, ...] | None] | No
     return sub, (words if constant else None)
 
 
-def python_refs(text: str) -> PyRefs | None:
+@functools.lru_cache(maxsize=None)
+def python_refs(text: str, given: frozenset[str] | None = None) -> PyRefs | None:
     """What a python text names, read by its syntax: a docstring, a bare string statement and a
-    comment are no reference. None when the text does not parse."""
+    comment are no reference. None when the text does not parse. With `given`, the dests of the
+    `store_true` options its call sites pass (`call_modes`), only the code a run with those
+    options reaches (`_py_reached`), or the whole text when that cannot be read off it."""
     try:
         module = ast.parse(text)
     except (SyntaxError, ValueError):
         return None
+    reached = None
+    if given is not None:
+        opts = py_options(text)
+        reached = _py_reached(module, opts, given) if opts is not None else None
     lines = text.splitlines()
     bare: set[int] = set()
     consumed: set[int] = set()
@@ -294,7 +658,7 @@ def python_refs(text: str) -> PyRefs | None:
         n = getattr(node, "lineno", 0)
         return 0 < n <= len(lines) and bool(_PY_SPAWN.search(lines[n - 1]))
 
-    for node in ast.walk(module):
+    for node in ast.walk(module) if reached is None else reached:
         if isinstance(node, (ast.List, ast.Tuple)):
             words = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
             argv = _cargo_argv(node.elts)
@@ -323,14 +687,234 @@ def python_refs(text: str) -> PyRefs | None:
     return PyRefs(imports, found, cargo, runs_lane)
 
 
-def names_in(text: str, base: str, tree, dirs: set[str], kind: str) -> Named:
+# -- a python script's modes -----------------------------------------------------------------------
+
+#: argparse actions whose option takes no value on the command line.
+_NO_VALUE = frozenset({"store_true", "store_false", "store_const", "append_const", "count", "help", "version"})
+#: What sets an option, or calls a function, by a way no call site and no name shows.
+_UNREAD_MODES = ("sys.argv", "set_defaults", "fromfile_prefix_chars", "Namespace(", "__dict__", "setattr(",
+                 "vars(", "globals()", "sys.modules", "eval(", "exec(")
+
+
+class PyOptions(NamedTuple):
+    """A script's argparse options, as a call site spells them (`py_options`)."""
+
+    #: each option string of a `store_true` option -> its dest
+    flags: dict[str, str]
+    #: the option strings that take exactly one value
+    valued: frozenset[str]
+
+
+def _dest(names: list[str], kw: dict[str, ast.expr]) -> str:
+    dest = kw.get("dest")
+    if isinstance(dest, ast.Constant) and isinstance(dest.value, str):
+        return dest.value
+    longs = [n for n in names if n.startswith("--")]
+    return (longs or names)[0].lstrip("-").replace("-", "_")
+
+
+@functools.lru_cache(maxsize=None)
+def py_options(text: str) -> PyOptions | None:
+    """The options of a script that parses its own command line once, with argparse; None when it
+    has no `store_true` option a call site alone decides, or when something else could set one or
+    call a function by a name no code spells (`_UNREAD_MODES`, an argument list given to
+    `parse_args`, an action of its own)."""
+    if any(word in text for word in _UNREAD_MODES):
+        return None
+    try:
+        module = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return None
+    flags: dict[str, str] = {}
+    valued: set[str] = set()
+    others: set[str] = set()
+    for node in ast.walk(module):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr in ("parse_args", "parse_known_args") and (node.args or node.keywords):
+            return None
+        if node.func.attr != "add_argument":
+            continue
+        names = [a.value for a in node.args if isinstance(a, ast.Constant) and isinstance(a.value, str)]
+        if not names:
+            continue
+        kw = {k.arg: k.value for k in node.keywords if k.arg}
+        action = kw.get("action")
+        if action is not None and not (isinstance(action, ast.Constant) and isinstance(action.value, str)):
+            return None
+        word = "store" if action is None else action.value
+        default = kw.get("default")
+        if (word == "store_true" and all(n.startswith("-") for n in names)
+                and (default is None or (isinstance(default, ast.Constant) and default.value is False))):
+            flags.update((n, _dest(names, kw)) for n in names)
+            continue
+        # Any other option sharing a dest with a flag can set it without the flag.
+        others.add(_dest(names, kw))
+        nargs = kw.get("nargs")
+        if word not in _NO_VALUE and (nargs is None or (isinstance(nargs, ast.Constant) and nargs.value == 1)):
+            valued.update(n for n in names if n.startswith("-"))
+    flags = {o: d for o, d in flags.items() if d not in others}
+    return PyOptions(flags, frozenset(valued)) if flags else None
+
+
+def _py_reached(module: ast.Module, opts: PyOptions, given: frozenset[str]) -> list[ast.AST] | None:
+    """The nodes a run of the script reaches when its command line holds the `store_true` options
+    whose dests are `given` and no other, parents before their children: its module-level
+    statements, what loading it evaluates of its definitions (decorators, defaults, base classes),
+    and the body of every top-level function or class a reached node names; never the body of an
+    `if <args>.<dest>:` whose dest is not given (`<args>` a name `parse_args` binds, the dest no
+    code assigns). A string equal to an option, outside `add_argument` (the script running itself
+    with that flag), gives its dest too. None when no such body is left out."""
+    dests = set(opts.flags.values())
+    parsed: set[str] = set()
+    declared: set[int] = set()
+    for node in ast.walk(module):
+        if (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Attribute)
+                and node.value.func.attr in ("parse_args", "parse_known_args")):
+            for target in node.targets:
+                first = target.elts[0] if isinstance(target, ast.Tuple) and target.elts else target
+                if isinstance(first, ast.Name):
+                    parsed.add(first.id)
+        elif isinstance(node, ast.Attribute) and not isinstance(node.ctx, ast.Load):
+            dests.discard(node.attr)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "add_argument":
+            declared.update(id(a) for a in node.args)
+    defs = {s.name: s for s in module.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    on = set(given)
+    while True:
+        roots: list[ast.AST] = []
+        for stmt in module.body:
+            if isinstance(stmt, ast.ClassDef):
+                roots.extend([*stmt.decorator_list, *stmt.bases, *(k.value for k in stmt.keywords)])
+            elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                roots.extend([*stmt.decorator_list, *stmt.args.defaults, *(d for d in stmt.args.kw_defaults if d)])
+            else:
+                roots.append(stmt)
+        out: list[ast.AST] = []
+        named: set[str] = set()
+        more: set[str] = set()
+        left_out = False
+        while roots:
+            node = roots.pop()
+            out.append(node)
+            test = node.test if isinstance(node, ast.If) else None
+            if (isinstance(test, ast.Attribute) and isinstance(test.value, ast.Name) and test.value.id in parsed
+                    and test.attr in dests and test.attr not in on):
+                roots.append(test)
+                roots.extend(node.orelse)
+                left_out = True
+                continue
+            if isinstance(node, ast.Name) and node.id in defs and node.id not in named:
+                named.add(node.id)
+                roots.extend(defs[node.id].body)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in declared:
+                more.update(d for o, d in opts.flags.items() if o == node.value)
+            roots.extend(ast.iter_child_nodes(node))
+        if more <= on:
+            return out if left_out else None
+        on |= more
+
+
+#: The program a python script is run by, as a word of a command line.
+_INTERPRETER = re.compile(r"(?:.*/)?python(?:3(?:\.\d+)?)?")
+#: What may stand before a script run as a command of its own: a line's start or an operator.
+_COMMAND_START = re.compile(r"(?:^|[;&|(]|\bexec|\bthen|\bdo|\belse)\s*$")
+
+
+def _site_words(rest: str) -> list[str]:
+    """The words of a command line after a script's name, up to the first operator outside quotes."""
+    words: list[str] = []
+    word = ""
+    quote = ""
+    i = 0
+    while i < len(rest):
+        c = rest[i]
+        if quote:
+            word += c
+            if c == quote:
+                quote = ""
+        elif c in "\"'":
+            quote = c
+            word += c
+        elif c in " \t":
+            if word:
+                words.append(word)
+            word = ""
+        elif c in ";|&)<>`":
+            break
+        elif c == "\\":
+            word += rest[i : i + 2]
+            i += 1
+        else:
+            word += c
+        i += 1
+    if word and not quote:
+        words.append(word)
+    return words
+
+
+def call_modes(text: str, path: str, opts: PyOptions | None) -> frozenset[str] | None:
+    """The dests of the `store_true` options of the python script `path` that the lines of a shell
+    text running it pass. None, every mode, when the script's options cannot be read (`opts` None),
+    when no line runs it, or when a line may pass more than its words show: a word the shell computes
+    where an option could stand, a cluster of short options, the script named anywhere but after its
+    interpreter or at the start of a command (an assignment, a loop's list)."""
+    if opts is None:
+        return None
+    site = re.compile(rf"(?<![\w.-]){re.escape(posixpath.basename(path))}(?![\w.-])")
+    given: set[str] = set()
+    found = False
+    for line in executed(text).splitlines():
+        for m in site.finditer(line):
+            # Back over the rest of the word the name ends (`"$ROOT/scripts/lib/x.py"`).
+            k = m.start()
+            while k > 0 and (line[k - 1].isalnum() or line[k - 1] in "_./${}-\"'"):
+                k -= 1
+            before = [w for w in re.split(r"[\s\"'=(`]+", line[:k]) if w]
+            while before and before[-1].startswith("-"):
+                before.pop()
+            if not (before and _INTERPRETER.fullmatch(before[-1])) and not _COMMAND_START.search(line[:k]):
+                return None
+            found = True
+            # The words after the one the name ends (its closing quote, if any, is part of it).
+            words = _site_words(re.sub(r"^[^\s;|&)<>]*", "", line[m.end():]))
+            i = 0
+            while i < len(words):
+                raw = words[i]
+                i += 1
+                if "$" in raw or "`" in raw:
+                    return None
+                w = raw.replace('"', "").replace("'", "")
+                if w == "--":
+                    break
+                if not w.startswith("-") or w == "-":
+                    continue
+                opt, eq, _ = w.partition("=")
+                if opt.startswith("--"):
+                    # argparse takes a unique prefix of a long option; every option it could be counts.
+                    hit = {d for o, d in opts.flags.items() if o.startswith(opt)}
+                    takes = any(v.startswith(opt) for v in opts.valued)
+                else:
+                    hit = {d for o, d in opts.flags.items() if o == opt}
+                    takes = opt in opts.valued
+                    if not hit and not takes and len(opt) > 2:
+                        return None
+                given |= hit
+                if takes and not hit and not eq:
+                    i += 1
+    return frozenset(given) if found else None
+
+
+def names_in(text: str, base: str, tree, dirs: set[str], kind: str,
+             given: frozenset[str] | None = None) -> Named:
     """What a text names, relative to the root or to `base`, the directory of its file.
 
     `kind` "shell": every script it names runs (`bash x.sh`, `source x.sh`, `python3 x.py`) and every
     other file it names is read. "python": what it imports runs, and a script named on a line that
     starts a program; every other path in a string of its code is read (one in a docstring or a
     comment is not). "code": what it imports, and nothing it reads -- the planner, whose part in a
-    unit is already the unit and the hosted env the spec holds."""
+    unit is already the unit and the hosted env the spec holds. `given` narrows a "python" text to
+    the code its call sites' options reach (`python_refs`)."""
     scripts: set[str] = set()
     files: set[str] = set()
     found_dirs: set[str] = set()
@@ -360,7 +944,7 @@ def names_in(text: str, base: str, tree, dirs: set[str], kind: str) -> Named:
         for name in _SIBLING.findall(body):
             take(name, True)
         return Named(scripts, files, found_dirs, links)
-    refs = python_refs(text)
+    refs = python_refs(text, given if kind == "python" else None)
     if refs is None:
         # Not python this reader can parse: read it as a shell text reads, which runs more.
         return names_in(text, base, tree, dirs, "shell")
@@ -496,7 +1080,9 @@ def cargo_calls(text: str) -> list[Call]:
 class Ctx(NamedTuple):
     tree: GitTree
     text: str
+    #: each top-level function of the dispatch script, its definition without comments
     funcs: dict[str, str]
+    #: the dispatch script's code outside its functions, without comments and dispatch lines
     preamble: str
     dispatch: dict[str, str]
     decls: dict[str, lane_decl.LaneDecl]
@@ -505,6 +1091,8 @@ class Ctx(NamedTuple):
     spaces: dict[str, lane_graph.Workspace]
     #: the lanes whose entry is another tree's (`context(..., decls_from=...)`)
     borrowed: frozenset[str] = frozenset()
+    #: why the dispatch script could not be split into its definitions ("" when it was)
+    runci_error: str = ""
 
 
 _CTX: dict[tuple[str, str], Ctx] = {}
@@ -550,7 +1138,11 @@ def _read_context(root: Path, rev: str, commit: str) -> Ctx:
     text = tree.text(RUNCI)
     if text is None:
         raise DigestError(f"{RUNCI} is not in the tree of {rev}")
-    funcs, preamble = split_runci(text)
+    try:
+        shell = parse_shell(text)
+        funcs, preamble, error = shell.funcs, shell.top, ""
+    except ShellParseError as err:
+        funcs, preamble, error = {}, "", str(err)
     dispatch = {m.group(1): m.group(2) for m in runci_plan.DISPATCH.finditer(text)}
     entries, _findings = lane_decl.parse(tree.text(lane_decl.DECL_PATH) or "")
     dirs: set[str] = set()
@@ -559,15 +1151,15 @@ def _read_context(root: Path, rev: str, commit: str) -> Ctx:
         for i in range(1, len(parts) + 1):
             dirs.add("/".join(parts[:i]))
     return Ctx(tree, text, funcs, preamble, dispatch, {e.id: e for e in entries}, _hosted(tree), dirs,
-               lane_graph.workspaces(tree))
+               lane_graph.workspaces(tree), runci_error=error)
 
 
 # -- one lane's analysis -------------------------------------------------------------------------
 
 
 class Analysis(NamedTuple):
-    functions: list[str]
-    runci_sha: str
+    #: the spec's `runci`: the definitions the lane runs, or why the dispatch script is an input whole
+    runci: dict
     scripts: dict[str, str]
     files: set[str]
     links: dict[str, str]
@@ -686,10 +1278,23 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
     if entry is None:
         raise DigestError(f"lane {lane} has no readable entry in {lane_decl.DECL_PATH} at {ctx.tree.commit[:12]}")
     fn = ctx.dispatch[lane]
-    seeds = {fn, "run_layer"} | set(_WORD.findall(executed(ctx.preamble)))
-    functions = function_closure(ctx.funcs, seeds)
-    run_text = ctx.preamble + f"run_layer {lane} {fn} || overall=1\n" + "".join(
-        f"{n}() {{\n{ctx.funcs[n]}}}\n" for n in functions)
+    # Why the dispatch script is an input whole (see "The dispatch script"); empty when the lane's
+    # key holds only the definitions it runs.
+    whole: list[str] = []
+    if ctx.runci_error:
+        whole.append(f"it does not split into its definitions ({ctx.runci_error})")
+    elif fn not in ctx.funcs:
+        whole.append(f"it defines no function {fn} this reader found")
+    runci: dict
+    if whole:
+        runci = {"unit": "file"}
+        texts = [ctx.text]
+    else:
+        seeds = {fn, "run_layer"} | set(_WORD.findall(executed(ctx.preamble)))
+        functions = function_closure(ctx.funcs, seeds)
+        runci = {"unit": "definitions", "top": _sha(ctx.preamble),
+                 "defs": [[n, _sha(ctx.funcs[n])] for n in functions]}
+        texts = [ctx.preamble] + [ctx.funcs[n] for n in functions]
     tree = ctx.tree
     gitlinks = tree.gitlinks()
     opaque: list[str] = []
@@ -699,10 +1304,13 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
     links: dict[str, str] = {}
     named_dirs: set[str] = set()
     builds: dict[str, set[str]] = {}
-    # (text, the directory of its file, its kind for `names_in`, its path); the dispatch script is
-    # in scripts/ and runs from the root, so a name in it is tried against both.
-    queue: list[tuple[str, str, str, str]] = [(ctx.preamble, "scripts", "shell", RUNCI)] + [
-        (ctx.funcs[n], "scripts", "shell", RUNCI) for n in functions]
+    # (text, the directory of its file, its kind for `names_in`, its path, the options its call
+    # sites pass or None for every mode); the dispatch script is in scripts/ and runs from the root,
+    # so a name in it is tried against both.
+    queue: list[tuple[str, str, str, str, frozenset[str] | None]] = [
+        (text, "scripts", "shell", RUNCI, None) for text in texts]
+    # The modes each script has been read in; a call site that adds one reads it again.
+    modes_read: dict[str, frozenset[str] | None] = {}
     reads_graph = False
     # Every unit runs through the planner; a tree without one (a selftest's) has nothing to add.
     for path in ([PLANNER] if PLANNER in tree.entries else []) + ([entry.legs] if entry.legs else []):
@@ -710,13 +1318,14 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
             opaque.append(f"{path} is named by the lane's entry and is not in the tree")
             continue
         scripts[path] = tree.entries[path].oid
+        modes_read[path] = None
         kind = "code" if path == PLANNER else ("python" if path.endswith(".py") else "shell")
-        queue.append(((tree.text(path) or ""), posixpath.dirname(path), kind, path))
+        queue.append(((tree.text(path) or ""), posixpath.dirname(path), kind, path, None))
     while queue:
-        text, base, kind, where = queue.pop()
+        text, base, kind, where, modes = queue.pop()
         body = executed(text)
         if kind == "python":
-            refs = python_refs(text)
+            refs = python_refs(text, modes)
             if refs is None:
                 unresolved.append(f"{where} does not parse as python, so what it spawns is unknown")
             else:
@@ -760,23 +1369,33 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
                     links[link] = gitlinks[link]
                 if why:
                     unresolved.append(why)
-        named = names_in(text, base, tree, ctx.dirs, kind)
+        named = names_in(text, base, tree, ctx.dirs, kind, modes)
         for link in named.links:
             links[link] = gitlinks[link]
         named_dirs |= named.dirs
         files |= named.files
+        if RUNCI in named.files:
+            whole.append(f"{where} reads it")
         for path in sorted(named.scripts):
             if path == RUNCI:
-                # Run whole (another lane of it): the lane reads all of it.
-                files.add(path)
-                continue
-            if path in scripts:
+                # Another lane of it run whole, or the script read by a command of a shell text.
+                whole.append(f"a text of {where} names it (another lane run whole, or the script read)")
                 continue
             data = tree.read(path) or b""
-            scripts[path] = tree.entries[path].oid
+            script = data.decode("utf-8", "replace")
             is_python = path.endswith(".py") or data.startswith(b"#!/usr/bin/env python")
-            queue.append((data.decode("utf-8", "replace"), posixpath.dirname(path),
-                          "code" if kind == "code" else ("python" if is_python else "shell"), path))
+            sub = "code" if kind == "code" else ("python" if is_python else "shell")
+            # A shell line that runs a python script says which of its modes runs; anything else
+            # (an import, a spawn, a declaration) may run any.
+            mode = call_modes(text, path, py_options(script)) if kind == "shell" and sub == "python" else None
+            if path in modes_read:
+                before = modes_read[path]
+                if before is None or (mode is not None and mode <= before):
+                    continue
+                mode = None if mode is None else before | mode
+            modes_read[path] = mode
+            scripts[path] = tree.entries[path].oid
+            queue.append((script, posixpath.dirname(path), sub, path, mode))
     for d in named_dirs:
         for path in tree.under(d):
             if path in gitlinks:
@@ -818,7 +1437,12 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
         files |= paths
         links.update(ws_links)
         lock.update(f"{root}: {e}" for e in entries)
-    return Analysis(functions, _sha(run_text), scripts, files, links, sorted(lock), sorted(set(opaque)))
+    if RUNCI in files and not whole:
+        whole.append("a directory or a declared glob the lane reads holds it")
+    if whole:
+        files.add(RUNCI)
+        runci = {**runci, "unit": "file", "why": sorted(set(whole))}
+    return Analysis(runci, scripts, files, links, sorted(lock), sorted(set(opaque)))
 
 
 # -- the machine -----------------------------------------------------------------------------------
@@ -906,8 +1530,7 @@ def record(root: Path, rev: str, lane_id: str, *, env_reader: EnvReader | None =
         "decl": lane_decl.canonical(entry),
         "unit": _unit(ctx, lane, part),
         "hosted": None if hosted is None else {"env": hosted.env, "prep": [[e, argv] for e, argv in hosted.prep]},
-        "runci": a.runci_sha,
-        "functions": a.functions,
+        "runci": a.runci,
         "scripts": sorted([p, oid] for p, oid in a.scripts.items()),
     }
     tree = ctx.tree
@@ -995,6 +1618,24 @@ def _chdir(path: Path) -> Iterator[None]:
         os.chdir(before)
 
 
+def _runci_lines(before: dict, after: dict) -> list[str]:
+    """What `explain` says of the dispatch script: why it is an input whole, and which of the
+    definitions the lane runs differ."""
+    out: list[str] = []
+    if after["unit"] == "file":
+        out.append(f"  {RUNCI} is an input whole: {'; '.join(after.get('why', []))}")
+    old = {name: sha for name, sha in before.get("defs", [])}
+    new = {name: sha for name, sha in after.get("defs", [])}
+    for word, names in (("changed", sorted(n for n in new if n in old and old[n] != new[n])),
+                        ("added", sorted(n for n in new if n not in old)),
+                        ("removed", sorted(n for n in old if n not in new))):
+        if names:
+            out.append(f"  {RUNCI} definitions {word}: {', '.join(names)}")
+    if "top" in before and "top" in after and before["top"] != after["top"]:
+        out.append(f"  {RUNCI} code outside its functions changed (every lane runs it)")
+    return out
+
+
 def explain(root: Path, base: str, head: str, lane_id: str, *, env_reader: EnvReader | None = None) -> str:
     after = record(root, head, lane_id, env_reader=env_reader)
     d_after = digest_of(after)
@@ -1014,6 +1655,7 @@ def explain(root: Path, base: str, head: str, lane_id: str, *, env_reader: EnvRe
         changed = sorted(k for k in set(before[part]) | set(after[part]) if before[part].get(k) != after[part].get(k))
         if changed:
             lines.append(f"  {part} differs in: {', '.join(changed)}")
+    lines.extend(_runci_lines(before["spec"]["runci"], after["spec"]["runci"]))
     for kind in ("files", "gitlinks", "lock"):
         old = {json.dumps(x) for x in before["inputs"][kind]}
         new = {json.dumps(x) for x in after["inputs"][kind]}
@@ -1053,6 +1695,7 @@ _RUNCI_FIXTURE = """#!/usr/bin/env bash
 overall=0
 run_layer() {
     "$2" || return 1
+    python3 scripts/lib/reader.py --read --lane "$1"
 }
 _fixture_helper() {
     echo helper
@@ -1063,6 +1706,11 @@ layer_c_app() {
 }
 layer_g_gate() {
     python3 scripts/lib/gate.py || return 1
+    cat <<'EOF'
+}
+{ a brace a heredoc holds
+EOF
+    echo "}" '{' "${FIXTURE_UNSET:-}}"
 }
 layer_o_opaque() {
     local pkg="$1"
@@ -1080,6 +1728,9 @@ layer_p_computed() {
 layer_r_graph() {
     python3 scripts/lib/graph.py || return 1
 }
+layer_a_audit() {
+    python3 scripts/lib/reader.py --audit || return 1
+}
 run_layer C layer_c_app || overall=1
 run_layer G layer_g_gate || overall=1
 run_layer O layer_o_opaque || overall=1
@@ -1087,6 +1738,7 @@ run_layer W layer_w_workspace || overall=1
 run_layer B layer_b_build || overall=1
 run_layer P layer_p_computed || overall=1
 run_layer R layer_r_graph || overall=1
+run_layer A layer_a_audit || overall=1
 exit "$overall"
 """
 
@@ -1128,6 +1780,11 @@ class = "D"
 id = "R"
 fn = "layer_r_graph"
 class = "D"
+
+[[lane]]
+id = "A"
+fn = "layer_a_audit"
+class = "D"
 """
 
 _CI_FIXTURE = """on: push
@@ -1142,7 +1799,35 @@ jobs:
       - run: bash scripts/run-ci.sh --layer B
       - run: bash scripts/run-ci.sh --layer P
       - run: bash scripts/run-ci.sh --layer R
+      - run: bash scripts/run-ci.sh --layer A
 """
+
+#: A script the dispatch runs for every lane in one mode (`--read`) and for lane A in another
+#: (`--audit`), which alone reads the dispatch script.
+_READER_FIXTURE = '''import argparse
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def audit() -> int:
+    return len((ROOT / "scripts" / "run-ci.sh").read_text().splitlines())
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--read", action="store_true")
+    ap.add_argument("--audit", action="store_true")
+    ap.add_argument("--lane")
+    args = ap.parse_args()
+    if args.audit:
+        return audit()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
 
 FIXTURE: dict[str, str] = {
     **lane_graph.FIXTURE,
@@ -1154,6 +1839,7 @@ FIXTURE: dict[str, str] = {
     "scripts/lib/build.py": 'import subprocess\n\nsubprocess.run(["cargo", "build", "-p", "core"], check=True)\n',
     "scripts/lib/computed.py": 'import subprocess\nimport sys\n\nsubprocess.run(["cargo", "build", "-p", sys.argv[1]], check=True)\n',
     "scripts/lib/graph.py": 'import subprocess\n\nsubprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"], check=True)\n',
+    "scripts/lib/reader.py": _READER_FIXTURE,
     "crates/core/src/inner.rs": "pub fn i() {}\n",
     "deploy/table.json": "{}\n",
     "docs/notes/a.md": "a\n",
@@ -1196,7 +1882,7 @@ def selftest() -> int:
         expect("G(t) is the dispatch table's lanes, each unit named by its id",
                [(u["id"], u["class"], u["unit"]["name"]) for u in got]
                == [("C", "D", "C"), ("G", "D", "G"), ("O", "D", "O"), ("W", "E", "W"), ("B", "D", "B"),
-                   ("P", "D", "P"), ("R", "D", "R")], got)
+                   ("P", "D", "P"), ("R", "D", "R"), ("A", "D", "A")], got)
         # Red if a python argv list of constants, or one that reads the graph, is called opaque, or
         # one whose package is computed is not.
         expect("only the lanes whose packages are computed are opaque", [u["id"] for u in got if u["opaque"]] == ["O", "P"], got)
@@ -1211,7 +1897,8 @@ def selftest() -> int:
         # Red if the D lane's key carries the machine (`_env` stops dropping it for D).
         expect("a D lane's key holds no machine identity", "machine" not in rec["env"]["machine"], rec["env"])
         expect("an E lane's key holds it", record(root, first, "W", env_reader=reader)["env"]["machine"].get("machine") == "m1")
-        expect("the helper function the lane calls is in its spec", "_fixture_helper" in rec["spec"]["functions"], rec["spec"]["functions"])
+        expect("the helper function the lane calls is in its spec",
+               "_fixture_helper" in [n for n, _ in rec["spec"]["runci"]["defs"]], rec["spec"]["runci"])
 
         # Each change below is one commit; each assertion names what, if broken, turns it red.
         outside = step({"README.md": "changed\n", "docs/other.md": "changed\n"})
@@ -1263,8 +1950,47 @@ def selftest() -> int:
         body = step({RUNCI: _RUNCI_FIXTURE.replace("cargo test -p app)", "cargo test -p app --quiet)")})
         # Red if the spec holds run-ci.sh whole instead of the lane's own text.
         expect("a lane's own function moves it and no other lane", moved(body, "C") and not moved(body, "G"))
-        helper = step({RUNCI: _RUNCI_FIXTURE.replace("cargo test -p app)", "cargo test -p app --quiet)").replace("echo helper", "echo helper2")})
+        runci_text = _RUNCI_FIXTURE.replace("cargo test -p app)", "cargo test -p app --quiet)").replace("echo helper", "echo helper2")
+        helper = step({RUNCI: runci_text})
         expect("a function the lane calls moves it", moved(helper, "C") and not moved(helper, "G"))
+        # Every lane's run_layer runs reader.py --read; lane A alone runs its --audit, which reads
+        # run-ci.sh. Red if `call_modes` or `_py_reached` stop narrowing: every lane would hold the file.
+        held = record(root, helper[1], "C", env_reader=reader)
+        expect("a lane whose scripts do not read run-ci.sh holds its definitions, not the file",
+               held["spec"]["runci"]["unit"] == "definitions"
+               and RUNCI not in {f[0] for f in held["inputs"]["files"]}, held["spec"]["runci"])
+        audit = record(root, helper[1], "A", env_reader=reader)
+        expect("a lane whose script reads run-ci.sh in the mode it runs holds the file, and says why",
+               audit["spec"]["runci"]["unit"] == "file" and RUNCI in {f[0] for f in audit["inputs"]["files"]}
+               and audit["spec"]["runci"]["why"] == ["scripts/lib/reader.py reads it"], audit["spec"]["runci"])
+        # Red if the code outside the functions leaves a lane's key.
+        topped_text = runci_text.replace("overall=0\n", "overall=0\nexport FIXTURE_TOP=1\n")
+        topped = step({RUNCI: topped_text})
+        expect("code outside the functions moves every lane",
+               topped_text != runci_text and all(moved(topped, lane) for lane in ("C", "G", "W", "B", "R", "A")))
+        text = explain(root, topped[0], topped[1], "C", env_reader=reader)
+        expect("explain names a change outside the functions", "outside its functions changed" in text, text)
+        # Red if comments are hashed: a lane would move on a word the shell never runs.
+        noted_text = topped_text.replace("    _fixture_helper\n", "    # the helper\n    _fixture_helper\n")
+        noted = step({RUNCI: noted_text})
+        expect("a comment moves only the lane that reads the file",
+               noted_text != topped_text and not moved(noted, "C") and not moved(noted, "G") and moved(noted, "A"))
+        # Red if a brace in a heredoc or a string ends a function: G's tail would be code outside.
+        doc_text = noted_text.replace("{ a brace a heredoc holds", "{ another brace a heredoc holds")
+        doc = step({RUNCI: doc_text})
+        expect("a heredoc of a lane's function moves that lane alone",
+               doc_text != noted_text and moved(doc, "G") and not moved(doc, "C") and not moved(doc, "W"))
+        text = explain(root, doc[0], doc[1], "G", env_reader=reader)
+        expect("explain names the definition that changed", "definitions changed: layer_g_gate" in text, text)
+        # Red if a script that does not split is read as definitions anyway, or silently.
+        broken = step({RUNCI: doc_text + "cat <<NEVER\nno end\n"})
+        unsplit = record(root, broken[1], "C", env_reader=reader)
+        expect("a dispatch script that does not split is an input whole, and says why",
+               unsplit["spec"]["runci"]["unit"] == "file" and RUNCI in {f[0] for f in unsplit["inputs"]["files"]}
+               and any("heredoc" in why for why in unsplit["spec"]["runci"]["why"]), unsplit["spec"]["runci"])
+        text = explain(root, broken[0], broken[1], "G", env_reader=reader)
+        expect("explain says the dispatch script is an input whole", f"{RUNCI} is an input whole" in text, text)
+        step({RUNCI: runci_text})
         cls = step({lane_decl.DECL_PATH: _DECL_FIXTURE.replace('fn = "layer_c_app"\nclass = "D"', 'fn = "layer_c_app"\nclass = "E"\nreason = "r"')})
         # Red if the declaration entry leaves the spec.
         expect("a lane's declaration moves it", moved(cls, "C") and not moved(cls, "G"))
@@ -1348,6 +2074,55 @@ def selftest() -> int:
     expect("an argv list says its cargo subcommand, and its words when all are constants",
            refs is not None and set(refs.cargo) == {("metadata", ("metadata", "--no-deps")), ("rustdoc", None), ("?", ())},
            refs and refs.cargo)
+
+    shell = parse_shell('#!/usr/bin/env bash\nf() {\n    cat <<EOF\n}\nEOF\n    echo "}" \'{\' ${x:-}}  # }\n}\n'
+                        'g() { echo one; }\n# h() {\nh ()\n{\n    case "$1" in\n    a) echo "$(echo ")")" ;;\n    esac\n}\n'
+                        'function k {\n    arr=(a # )\n    b)\n}\nrun_layer X layer_x || overall=1\nf\n')
+    # Red if a heredoc's `}`, a quoted brace, a case pattern's `)` or a comment moves a boundary.
+    expect("the reader finds each top-level function whole",
+           sorted(shell.funcs) == ["f", "g", "h", "k"] and shell.funcs["g"] == "g() { echo one; }"
+           and shell.funcs["f"] == 'f() {\n    cat <<EOF\n}\nEOF\n    echo "}" \'{\' ${x:-}}\n}', shell)
+    expect("the code outside the functions keeps no comment and no dispatch line", shell.top.strip() == "f", shell.top)
+    for bad, says in (('f() {\n    cat <<EOF\n    no end\n}\n', "heredoc"), ('f() {\n    echo "open\n}\n', 'a " is not closed'),
+                      ('f() {\n    :\n', "a { is not closed"), ('f() (\n    :\n)\n', "is not a { } group"),
+                      ('f() {\n    if true; then :; done\n}\n', "done closes no do")):
+        try:
+            parse_shell(bad)
+        except ShellParseError as err:
+            # Red if the reader stops refusing a text it cannot split, or stops saying why.
+            expect(f"a text the reader cannot split is refused ({says})", says in str(err), err)
+        else:
+            raise AssertionError(f"lane_digest selftest: {bad!r} was split")
+
+    opts = py_options(_READER_FIXTURE)
+    expect("a script's store_true and one-value options are read",
+           opts is not None and opts.flags == {"--read": "read", "--audit": "audit"} and opts.valued == {"--lane"}, opts)
+    where = "scripts/lib/reader.py"
+    # Red if a call site's words stop deciding the modes, or a site that may pass more is narrowed.
+    for site, want in (('python3 scripts/lib/reader.py --read --lane "$1"\n', frozenset({"read"})),
+                       ('out="$(python3 -I "$ROOT/scripts/lib/reader.py" --aud 2>&1)"\n', frozenset({"audit"})),
+                       ('scripts/lib/reader.py --lane x\n', frozenset()),
+                       ('python3 scripts/lib/reader.py "$@"\n', None),
+                       ('s=scripts/lib/reader.py\npython3 "$s" --audit\n', None),
+                       ('python3 scripts/lib/reader.py -ra\n', None),
+                       ('echo nothing runs it\n', None)):
+        got_modes = call_modes(site, where, opts)
+        expect(f"the modes of {site.strip()!r}", got_modes == want, got_modes)
+    expect("a script whose options cannot be read runs in every mode", call_modes("python3 x.py --audit\n", "x.py", None) is None)
+    runci_reads = [f for f, _ in python_refs(_READER_FIXTURE).found if f == RUNCI]
+    narrowed = python_refs(_READER_FIXTURE, frozenset({"read"}))
+    # Red if `_py_reached` enters the body of a flag no call site passes, or leaves out one it does.
+    expect("a mode leaves out the branch only another flag enters",
+           runci_reads == [RUNCI] and narrowed is not None and not any(f == RUNCI for f, _ in narrowed.found), narrowed)
+    expect("the mode that passes the flag reaches it",
+           any(f == RUNCI for f, _ in python_refs(_READER_FIXTURE, frozenset({"read", "audit"})).found))
+    respawn = _READER_FIXTURE.replace("    return 0\n", '    subprocess.run([sys.executable, __file__, "--audit"])\n    return 0\n')
+    expect("a script that runs itself with a flag reaches that flag's branch",
+           respawn != _READER_FIXTURE and any(f == RUNCI for f, _ in python_refs(respawn, frozenset({"read"})).found))
+    own_list = _READER_FIXTURE.replace("args = ap.parse_args()", "args = ap.parse_args(sys.argv[1:])")
+    expect("a script that is given its arguments is read in every mode",
+           own_list != _READER_FIXTURE and py_options(own_list) is None
+           and any(f == RUNCI for f, _ in python_refs(own_list, frozenset({"read"})).found))
     print(f"lane_digest selftest: {cases} cases pass")
     return 0
 
