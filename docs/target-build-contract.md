@@ -466,14 +466,18 @@ out-of-range value being an error:
 the capabilities that are on once the base original's defaults and the profile are merged,
 and the limits it sets off their defaults. A library is then built with no default
 features and exactly the features the capability graph gives its ABI for those
-capabilities, and the limits are handed to the build as the environment variables the
-generated module reads. The manifest records `profile` (`id`, `base`, `capabilities`,
+capabilities, on the engine the profile chooses (the tokio engine's features in the place
+of the base's cooperative `os-host`), and the limits are handed to the build as the
+environment variables the generated module reads. The manifest records `profile` (`id`,
+`base`, `capabilities`, `features`, the list each ABI's library is built with, and
 `limits`; `null` for a default build), and `--verify` resolves the profile again and holds
-each library to it: a capability the profile turns on that the library lacks, or one it
-leaves off that the library has, is a finding, so a manifest cannot name a profile its
-files do not hold. A profile does not apply to an executable (the session node's features
-are its own and no mapping from capabilities reaches them): asking for it is a refusal.
-Measured on the host with the registered client profile: `capi-pico` is 2.8 MB against
+each library to it: a feature the profile builds the library's ABI with that the ABI crate
+does not have on, or a capability it leaves off that the library has, is a finding, so a
+manifest cannot name a profile its files do not hold. An artifact's `features` are the
+features cargo enabled in its ABI crate, whichever crate's build makes the file (the pico C
+library is `wz-capi-pico-lib` over the `wz-capi-pico` rlib, which lists none of them).
+A profile does not apply to an executable (the session node's features are its own and no
+mapping from capabilities reaches them): asking for it is a refusal. Measured on the host with the registered client profile: `capi-pico` is 2.8 MB against
 5.9 MB for the default build, and its `device_requires` loses `sockets-udp`, `multicast`
 and `wall-clock`, which is the reason a profile is an input and not a label.
 

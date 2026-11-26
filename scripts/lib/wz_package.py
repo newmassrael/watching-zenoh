@@ -126,7 +126,9 @@ BUNDLED_KEYS = ["soname", "path", "sha256", "size", "elf"]
 # An input the package carries beside what was built from it: a node declaration, under `node/`, so
 # the package says what it was made from in bytes a reader can hold the built file to with no tree.
 INPUT_KEYS = ["kind", "id", "path", "sha256", "size"]
-PROFILE_KEYS = ["id", "base", "capabilities", "limits"]
+# `features` is the feature list each ABI's library is built with under the profile, on the engine
+# it chooses; an ABI whose build the profile refuses has no entry.
+PROFILE_KEYS = ["id", "base", "capabilities", "features", "limits"]
 PROFILES_DIR = ROOT / "configs" / "profiles"
 BUILT_FROM_KEYS = ["commit", "tree_clean"]
 PLATFORM_KEYS = ["id", "triple", "os", "libc", "network_stack", "support", "strongest_green_lane"]
@@ -532,21 +534,36 @@ def resolve_profile(decl: dict, profile_id: str) -> dict:
     for line in wz_config.resolved_limit_env(decl, kconf):
         key, _, value = line.partition("=")
         limits[key] = int(value)
+    # The resolution the build itself takes (`artifact_build`), so the engine the profile chooses
+    # is in the record as its capabilities are: the tokio engine's features stand in the place of
+    # the base's cooperative one. The cooperative engine chosen for an ABI with one engine is a
+    # build the profile refuses, so that ABI has no entry and a library of it is refused by name.
+    features = {}
+    for abi in wz_config.ABIS:
+        try:
+            features[abi] = wz_config.resolved_features(decl, abi, kconf)
+        except wz_config.PresetError:
+            continue
     return {
         "id": profile_id,
         "base": wz_config.preset_header(path.read_text(encoding="utf-8")).get("base"),
         "capabilities": sorted(wz_config.resolved_caps(decl, kconf)),
+        "features": features,
         "limits": dict(sorted(limits.items())),
     }
 
 
-def profile_cargo_args(decl: dict, row: dict, view: dict) -> list[str]:
+def profile_cargo_args(row: dict, view: dict) -> list[str]:
     """The cargo arguments a library artifact is built with under a profile: no default features
-    and exactly the features the capability graph gives its ABI for the profile's capabilities."""
+    and exactly the features the profile resolves its ABI's build to (`resolve_profile`)."""
     if row["kind"] != "shared-library":
         raise Refusal(f"profile {view['id']} cannot apply to {row['id']}: a profile resolves to the "
                       "features of an ABI library, and an executable has no such mapping")
-    return wz_config.cargo_args(decl, row["abi"], set(view["capabilities"])).split()
+    named = view["features"].get(row.get("abi"))
+    if named is None:
+        raise Refusal(f"profile {view['id']} cannot apply to {row['id']}: it resolves no build of the "
+                      f"{row.get('abi')} ABI")
+    return wz_config.cargo_args_of(named).split()
 
 
 def check_capabilities(decl: dict, rows: list[dict], capabilities: list[str]) -> None:
@@ -583,21 +600,26 @@ def artifact_build(decl: dict, row: dict, profile_id: str | None,
 
 
 def profile_findings(decl: dict, view: dict, entries: list[dict]) -> list[str]:
-    """What is wrong with the artifacts a profile built: a capability the profile turns on that a
-    library lacks, or one it leaves off that the library has."""
+    """What is wrong with the artifacts a profile built: a feature the profile builds a library's
+    ABI with (a capability, or the engine it chooses) that the library's ABI crate does not have
+    on, a capability the profile leaves off that the library has, or a library of an ABI the
+    profile resolves no build of. Both sides are features of the ABI crate: the profile's are the
+    ones its build names, the artifact's the ones cargo enabled there (`read_build`)."""
     out = []
-    on = set(view["capabilities"])
+    closed = wz_config.closure(decl["caps"], set(view["capabilities"]))
     for art in entries:
         row = next((a for a in decl["artifacts"] if a["id"] == art["id"]), None)
         if row is None or row["kind"] != "shared-library":
             out.append(f"artifact {art['id']!r}: a profile does not apply to it")
             continue
         abi = row["abi"]
+        named = view["features"].get(abi)
+        if named is None:
+            out.append(f"artifact {art['id']!r}: profile {view['id']} resolves no build of the {abi} ABI")
+            continue
         built = set(art["features"])
-        want = set(wz_config.features_for(decl, abi, on))
-        for feature in sorted(want - built):
+        for feature in sorted(set(named) - built):
             out.append(f"artifact {art['id']!r} lacks the feature `{feature}` profile {view['id']} asks for")
-        closed = wz_config.closure(decl["caps"], on)
         for cid in sorted(c for c in built
                           if c in decl["caps"] and abi in decl["caps"][c]["abis"] and c not in closed):
             out.append(f"artifact {art['id']!r} has the capability `{cid}`, which profile {view['id']} leaves off")
@@ -1169,8 +1191,8 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
                 extra_args: list[str] | None = None, extra_env: dict[str, str] | None = None,
                 node: dict | None = None
                 ) -> tuple[pathlib.Path, list[str], dict[str, list[str]]]:
-    """Build one artifact; the file, the features cargo built it with, and the features it
-    enabled in every package of the build (the union over that package's units).
+    """Build one artifact; the file, the features cargo enabled in the artifact's package, and the
+    features it enabled in every package of the build (`read_build`).
 
     `extra_args` and `extra_env` are what a profile adds: the feature selection and the limits.
     `node` is what a declaration adds to a node-built artifact: the generated constants the build
@@ -1189,10 +1211,22 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
     run = subprocess.run(argv, cwd=cwd, stdout=subprocess.PIPE, text=True, check=False, env=env)
     if run.returncode != 0:
         raise RuntimeError(f"cargo build -p {build_package(row)} failed ({run.returncode})")
+    return read_build(row, run.stdout)
+
+
+def read_build(row: dict, stdout: str) -> tuple[pathlib.Path, list[str], dict[str, list[str]]]:
+    """What cargo's messages (`--message-format=json`) say the build of one artifact made: the
+    file, the features of the artifact's `package`, and the features cargo enabled in every package
+    of the build (the union over that package's units).
+
+    The manifest's `features` are the features on in the artifact's `package` (an ABI crate, for a
+    library) whichever crate makes the file: a build package of its own (the pico C library)
+    enables them through its dependency and lists none of them among its own, so they are read
+    from the package's units and never from the file's."""
     found = None
     resolved: dict[str, set[str]] = {}
     kind = "cdylib" if row["kind"] == "shared-library" else "bin"
-    for line in run.stdout.splitlines():
+    for line in stdout.splitlines():
         try:
             msg = json.loads(line)
         except ValueError:
@@ -1209,13 +1243,13 @@ def cargo_build(platform: dict, cross: bool, row: dict, cargo_profile: str,
             continue
         files =[f for f in msg["filenames"] if f.endswith(".so")] if kind == "cdylib" else [msg.get("executable")]
         if files and files[0]:
-            found = (pathlib.Path(files[0]), list(msg["features"]))
+            found = pathlib.Path(files[0])
     if found is None:
         raise RuntimeError(f"cargo built nothing that is the {row['kind']} of {build_package(row)}")
-    # The capabilities are the artifact's package's features, which a build package of its own
-    # enables through its dependency and does not list among its own.
-    features = found[1] if build_package(row) == row["package"] else sorted(resolved.get(row["package"], ()))
-    return found[0], features, {p: sorted(f) for p, f in resolved.items()}
+    if row["package"] not in resolved:
+        raise RuntimeError(f"cargo reported no unit of {row['package']}, whose features {row['id']} "
+                           f"records, in the build of {build_package(row)}")
+    return found, sorted(resolved[row["package"]]), {p: sorted(f) for p, f in resolved.items()}
 
 
 def ship_debug_env(cargo_profile: str) -> dict[str, str]:
@@ -1333,7 +1367,7 @@ def _package(decl: dict, platform_id: str, artifact_ids: list[str], out: pathlib
         # Resolved and applied-or-refused before anything is built or created.
         view = resolve_profile(decl, profile_id)
         for row in rows:
-            profile_cargo_args(decl, row, view)
+            profile_cargo_args(row, view)
     # Every library's build, resolved before anything is built or created.
     builds = {row["id"]: artifact_build(decl, row, profile_id, capabilities) for row in rows}
     rustc, host = rustc_identity()
@@ -2092,13 +2126,19 @@ def _selftest() -> int:
            ["device_requires"] is not None)
 
     # A registered profile as an input (T13).
-    view = {"id": "p-query", "base": "zenoh-c", "capabilities": ["query"], "limits": {"WZ_LIMIT_X": 7}}
-    pico_args = profile_cargo_args(decl, pico, view)
+    view = {"id": "p-query", "base": "zenoh-c", "capabilities": ["query"],
+            "features": {"pico": wz_config.features_for(decl, "pico", {"query"}),
+                         "c": wz_config.features_for(decl, "c", {"query"})},
+            "limits": {"WZ_LIMIT_X": 7}}
+    pico_args = profile_cargo_args(pico, view)
     expect("a profile gives a library no default features and the graph's features for it",
            pico_args[:2] == ["--no-default-features", "--features"] and "query" in pico_args[2].split(","))
     refuses("a profile on an executable", "an executable has no such mapping",
-            lambda: profile_cargo_args(decl, demo, view))
+            lambda: profile_cargo_args(demo, view))
     c_row = next(a for a in decl["artifacts"] if a["id"] == "capi-c")
+    pico_only = {**view, "features": {"pico": view["features"]["pico"]}}
+    refuses("a profile on a library of an ABI it resolves no build of", "resolves no build of the c ABI",
+            lambda: profile_cargo_args(c_row, pico_only))
     refuses("a capability the declaration does not have", "no capability of the declaration",
             lambda: check_capabilities(decl, [pico, c_row], ["no-such-capability"]))
     refuses("a capability no library named is built through", "no library named",
@@ -2108,6 +2148,22 @@ def _selftest() -> int:
     on_view = artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob, wanted)
     expect("a library built with what the profile asks has no profile finding",
            profile_findings(decl, view, [on_view]) == [])
+    # A profile that chooses the tokio engine builds the pico library with that engine's features in
+    # the place of the base's cooperative one: the library is held to those, never to the base.
+    tokio = wz_config.tokio_features(view["features"]["pico"], wz_config.engine_option_features(decl, "tokio"))
+    tokio_view = {**view, "features": {**view["features"], "pico": tokio}}
+    on_tokio = {**on_view, "features": sorted(tokio)}
+    expect("a library on the engine its profile chooses has no profile finding",
+           wz_config.BASE_ENGINE_FEATURE not in tokio and "engine-tokio" in tokio
+           and profile_findings(decl, tokio_view, [on_tokio]) == [])
+    expect("a library on the base's engine under a profile that chooses the tokio one is a finding",
+           any("lacks the feature `engine-tokio`" in f for f in profile_findings(decl, tokio_view, [on_view])))
+    expect("a library on the tokio engine under a profile that keeps the base's is a finding",
+           any(f"lacks the feature `{wz_config.BASE_ENGINE_FEATURE}`" in f
+               for f in profile_findings(decl, view, [on_tokio])))
+    expect("a library of an ABI the profile resolves no build of is a finding",
+           any("resolves no build of the c ABI" in f
+               for f in profile_findings(decl, pico_only, [{**on_view, "id": "capi-c"}])))
     short = artifact_entry(decl, platform, pico, "lib/libwz_capi_pico.so", pico_blob,
                            [f for f in wanted if f != "query"])
     expect("a library lacking a feature the profile asks for is a finding",
@@ -2149,6 +2205,16 @@ def _selftest() -> int:
         expect("a registered profile resolves strictly to its capabilities",
                "query" in real["capabilities"] and "peer" not in real["capabilities"]
                and real["base"] == "zenoh-c" and real["id"] == "host-client-tcp-query")
+        raweth = resolve_profile(decl, "host-peer-raweth")
+        expect("a registered profile that chooses the tokio engine records that engine's features",
+               "engine-tokio" in raweth["features"]["pico"]
+               and wz_config.BASE_ENGINE_FEATURE not in raweth["features"]["pico"]
+               and wz_config.BASE_ENGINE_FEATURE in real["features"]["pico"])
+        for registered in (real, raweth):
+            for lib_row in (pico, c_row):
+                build = artifact_build(decl, lib_row, registered["id"])
+                expect(f"the record of {registered['id']} is the build of {lib_row['id']} it names",
+                       build is not None and build[0] == profile_cargo_args(lib_row, registered))
         refuses("a profile named by a path", "not the name of a registered profile",
                 lambda: resolve_profile(decl, "../configs/profiles/host-client-tcp-query"))
         refuses("a profile nobody registered", "no registered profile", lambda: resolve_profile(decl, "nope"))
@@ -2257,6 +2323,34 @@ def _selftest() -> int:
            (ROOT / pico_row["cargo_config"]).is_file())
     expect("an artifact its own package builds names its features as they are",
            through_dependency(demo_row, ["--features", "a,b"]) == ["--features", "a,b"])
+    # What a build records is read from cargo's messages: the features on in the artifact's package,
+    # which the pico C library's own crate enables through its dependency and lists none of.
+
+    def unit(package: str, kinds: list[str], features: list[str], files: list[str]) -> str:
+        return json.dumps({"reason": "compiler-artifact", "package_id": f"path+file:///w/crates/{package}#0.1.0",
+                           "target": {"kind": kinds, "name": package.replace("-", "_")},
+                           "features": features, "filenames": files, "executable": None})
+
+    abi_unit = unit("wz-capi-pico", ["lib"], ["peer", "os-host", "scout"], ["/t/libwz_capi_pico.rlib"])
+    lib_unit = unit("wz-capi-pico-lib", ["cdylib", "staticlib"], [],
+                    ["/t/libwz_capi_pico.so", "/t/libwz_capi_pico.a"])
+    split_file, split_features, split_resolved = read_build(
+        pico_row, "\n".join([abi_unit, "not a message", json.dumps({"reason": "build-finished"}), lib_unit]))
+    expect("a library its own crate makes over the ABI crate records the ABI crate's features",
+           split_file == pathlib.Path("/t/libwz_capi_pico.so")
+           and split_features == ["os-host", "peer", "scout"] and split_resolved["wz-capi-pico-lib"] == [])
+    expect("a library its ABI crate makes itself records that crate's features",
+           read_build(c_row, unit("wz-capi-c", ["cdylib"], ["query", "default"], ["/t/libwz_capi_c.so"]))[:2]
+           == (pathlib.Path("/t/libwz_capi_c.so"), ["default", "query"]))
+    for label, words, stdout in (
+            ("a build whose messages name no unit of the ABI crate", "no unit of wz-capi-pico", lib_unit),
+            ("a build whose messages name no file of the artifact's crate", "built nothing", abi_unit)):
+        try:
+            read_build(pico_row, stdout)
+        except RuntimeError as err:
+            expect(f"{label} is a failure (it does not say {words!r}: {err})", words in str(err))
+        else:
+            raise AssertionError(f"selftest: {label}: nothing failed")
     node_release = cargo_argv(platform, False, node_row, "release", None, {"features": ["declared"]})
     expect("a node's release build is its own workspace's release",
            "--release" in node_release and "--profile" not in node_release)
