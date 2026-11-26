@@ -1402,13 +1402,55 @@ pub(crate) struct PublisherQos {
     /// The encoding the publisher was declared with, its constant or kept in its own slot of the pool
     /// of encodings for as long as the publisher stands, and lent to each put that names none.
     encoding: Option<OwnedEncoding>,
+    /// Its congestion control, priority, express flag, reliability and destination, read as a
+    /// session's put and delete read theirs ([`QosLevels::stated`]).
+    levels: QosLevels,
+}
+
+/// The QoS and the destination a publisher's declaration, a session's put and a session's delete
+/// state: the fields their three options structs share, read by one body ([`Self::stated`]) and
+/// laid over a publish's options by one body ([`Self::apply`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QosLevels {
     congestion_control: wz_session_core::qos::CongestionControl,
     priority: wz_session_core::qos::Priority,
     is_express: bool,
     reliability: Reliability,
-    /// Where its samples may go: `allowed_destination` with `local-subscriber`
+    /// Where the samples may go: `allowed_destination` with `local-subscriber`
     /// (`publisher->_allowed_destination` upstream), remote only without it.
     destination: Locality,
+}
+
+impl QosLevels {
+    /// What an options struct states in the fields every one of them has. Inlined: a put reads
+    /// it on its way, and each caller hands it fields of its own layout.
+    #[inline]
+    fn stated(
+        priority: crate::qos::z_priority_t,
+        congestion_control: crate::qos::z_congestion_control_t,
+        is_express: bool,
+        reliability: z_reliability_t,
+        destination: Locality,
+    ) -> Self {
+        Self {
+            congestion_control: push_congestion_from_pico(congestion_control),
+            priority: crate::qos::priority_from_pico(priority),
+            is_express,
+            reliability: reliability_from_pico(reliability),
+            destination,
+        }
+    }
+
+    /// Lay these over `opts`, where they lie. One body for the publisher's sends and both session
+    /// doors, out of line so that none holds a copy of the five setters.
+    #[inline(never)]
+    fn apply(self, opts: &mut PublishOptions<'_>) {
+        opts.set_priority(self.priority);
+        opts.set_congestion_control(self.congestion_control);
+        opts.set_express(self.is_express);
+        opts.reliability = self.reliability;
+        opts.allowed_destination = self.destination;
+    }
 }
 
 impl PublisherQos {
@@ -1433,7 +1475,7 @@ impl PublisherQos {
     /// own subscribers: pico's `ctx->allow_local`, which only a publisher whose
     /// destination admits session-local traffic has.
     pub(crate) fn counts_local(&self) -> bool {
-        self.destination.allows_local()
+        self.levels.destination.allows_local()
     }
 
     /// These QoS for another publisher of the same declaration, the encoding kept again in a slot
@@ -1447,11 +1489,7 @@ impl PublisherQos {
         };
         Some(Self {
             encoding,
-            congestion_control: self.congestion_control,
-            priority: self.priority,
-            is_express: self.is_express,
-            reliability: self.reliability,
-            destination: self.destination,
+            levels: self.levels,
         })
     }
 
@@ -1470,11 +1508,13 @@ impl PublisherQos {
         let options = &*options;
         Self {
             encoding: crate::encoding::take_moved_encoding(options.encoding),
-            congestion_control: push_congestion_from_pico(options.congestion_control),
-            priority: crate::qos::priority_from_pico(options.priority),
-            is_express: options.is_express,
-            reliability: reliability_from_pico(options.reliability()),
-            destination: options.allowed_destination(),
+            levels: QosLevels::stated(
+                options.priority,
+                options.congestion_control,
+                options.is_express,
+                options.reliability(),
+                options.allowed_destination(),
+            ),
         }
     }
 
@@ -1483,15 +1523,12 @@ impl PublisherQos {
     /// stay where they are and are not copied; the publisher's encoding is lent for the publish, so
     /// a put copies none of it.
     ///
-    /// One body out of line: the declare and both ways a publish is sent call it. In place, so no
-    /// caller moves the whole options value in and out of it.
-    #[inline(never)]
+    /// The QoS are laid by the one body a session's put and delete lay theirs with
+    /// ([`QosLevels::apply`]); the encoding's gap is filled here, at the caller, where it was read
+    /// inside the call before, so a publish makes the same one call.
+    #[inline]
     fn apply<'a>(&'a self, opts: &mut PublishOptions<'a>) {
-        opts.set_priority(self.priority);
-        opts.set_congestion_control(self.congestion_control);
-        opts.set_express(self.is_express);
-        opts.reliability = self.reliability;
-        opts.allowed_destination = self.destination;
+        self.levels.apply(opts);
         if opts.encoding.is_none() {
             if let Some(encoding) = &self.encoding {
                 opts.set_encoding_ref(encoding.view());
@@ -2093,6 +2130,17 @@ struct PutCarried {
 }
 
 impl PutCarried {
+    /// What a delete's options carry: a timestamp and a source info, and neither an encoding nor
+    /// an attachment, which a Del body has no field for.
+    fn stamps(timestamp: *mut z_timestamp_t, source_info: *mut z_source_info_t) -> Self {
+        Self {
+            encoding: core::ptr::null_mut(),
+            timestamp,
+            attachment: core::ptr::null_mut(),
+            source_info,
+        }
+    }
+
     /// Put what the options carry into `opts`, where they lie, and answer whether they carried
     /// anything. The moved encoding and attachment are consumed on every path; each is read where
     /// it lies, held in `held` for as long as the options borrow it, so a put with an encoding
@@ -2189,8 +2237,9 @@ mod put_options_tests {
             let mut held = PutHeld::default();
             let mut stated_put = put_options();
             session_put_options(&put, &mut held, &mut stated_put);
+            let mut held_del = PutHeld::default();
             let mut stated_del = put_options();
-            session_delete_options(&del, &mut stated_del);
+            session_delete_options(&del, &mut held_del, &mut stated_del);
             assert!(stated_put.qos.is_some(), "the stated QoS is set");
             assert_eq!(stated_put.qos, stated_del.qos);
             assert_eq!(stated_put.reliability, stated_del.reliability);
@@ -2201,8 +2250,9 @@ mod put_options_tests {
             assert!(matches!(stated_put.kind, SampleKind::Put));
             assert!(matches!(stated_del.kind, SampleKind::Del));
             del.priority = 6;
+            let mut held_again = PutHeld::default();
             let mut restated = put_options();
-            session_delete_options(&del, &mut restated);
+            session_delete_options(&del, &mut held_again, &mut restated);
             assert_ne!(
                 restated.qos, stated_put.qos,
                 "the delete's own priority is read"
@@ -2214,7 +2264,7 @@ mod put_options_tests {
     /// kept as they came, and the publisher's encoding fills in only where the call names none.
     #[test]
     fn a_publishers_qos_is_laid_over_the_options_the_call_moves_in() {
-        use super::{put_options, PublisherQos};
+        use super::{put_options, PublisherQos, QosLevels};
         use wz_session_core::reliability::Reliability;
         use wz_session_core::sample::EncodingHint;
         let declared = PublisherQos {
@@ -2225,8 +2275,10 @@ mod put_options_tests {
                 })
                 .expect("a slot for the declared encoding"),
             ),
-            reliability: Reliability::BestEffort,
-            ..PublisherQos::pico_default()
+            levels: QosLevels {
+                reliability: Reliability::BestEffort,
+                ..PublisherQos::pico_default().levels
+            },
         };
         let mut sent = put_options()
             .with_attachment(&[7, 8])
@@ -2274,21 +2326,22 @@ mod put_options_tests {
             PublisherQos::declared_by(core::ptr::null())
         }] {
             assert!(declared.encoding.is_none());
+            let levels = declared.levels;
             assert_eq!(
-                declared.congestion_control,
+                levels.congestion_control,
                 push_congestion_from_pico(crate::qos::Z_CONGESTION_CONTROL_DROP)
             );
             assert_eq!(
-                declared.priority,
+                levels.priority,
                 crate::qos::priority_from_pico(crate::qos::Z_PRIORITY_DEFAULT)
             );
-            assert!(!declared.is_express);
+            assert!(!levels.is_express);
             assert_eq!(
-                declared.reliability,
+                levels.reliability,
                 reliability_from_pico(Z_RELIABILITY_RELIABLE)
             );
             assert_eq!(
-                declared.destination,
+                levels.destination,
                 crate::locality::default_locality!("local-subscriber")
             );
         }
@@ -2659,10 +2712,124 @@ mod put_options_tests {
             let mut delete = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
             z_delete_options_default(delete.as_mut_ptr());
             let delete = delete.assume_init();
+            let mut held = PutHeld::default();
             let mut stated = put_options();
-            session_delete_options(&delete, &mut stated);
+            session_delete_options(&delete, &mut held, &mut stated);
             assert!(stated.source_info.is_none());
         }
+    }
+
+    /// A session's delete is sent as a put of the Del kind, its options read by the put's
+    /// readers: the timestamp it states and its QoS reach the options sent, and it carries no
+    /// attachment and no encoding. Turned red by the kind dropped, the timestamp left unread, or
+    /// a QoS field dropped.
+    #[test]
+    fn a_session_delete_is_a_put_of_the_delete_kind_with_what_it_states() {
+        use super::{
+            put_options, session_delete_options, z_delete_options_default, z_delete_options_t,
+        };
+        use wz_session_core::sample::SampleKind;
+        let mut stamp = z_timestamp_t {
+            valid: true,
+            id: crate::zid::z_id_t {
+                id: [7; crate::zid::Z_ID_SIZE],
+            },
+            time: 42,
+        };
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            let mut del = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
+            z_delete_options_default(del.as_mut_ptr());
+            let mut del = del.assume_init();
+            del.timestamp = &mut stamp;
+            del.is_express = true;
+            let mut held = PutHeld::default();
+            let mut sent = put_options();
+            session_delete_options(&del, &mut held, &mut sent);
+            assert!(matches!(sent.kind, SampleKind::Del));
+            assert_eq!(sent.timestamp.as_ref().map(|ts| ts.time), Some(42));
+            assert_eq!(sent.qos.map(|qos| qos.is_express()), Some(true));
+            assert!(sent.attachment.is_none());
+            assert!(sent.encoding.is_none());
+            let mut held = PutHeld::default();
+            let mut bare = put_options();
+            session_delete_options(core::ptr::null(), &mut held, &mut bare);
+            assert!(
+                matches!(bare.kind, SampleKind::Del),
+                "a null options struct is still a delete"
+            );
+            assert!(bare.timestamp.is_none());
+        }
+    }
+
+    /// A publisher's delete is a put of the Del kind whose timestamp is read by the put's reader;
+    /// the publisher's own QoS is laid over it when it sends. Turned red by the kind dropped or the
+    /// timestamp left unread.
+    #[test]
+    fn a_publisher_delete_is_a_put_of_the_delete_kind_with_its_timestamp() {
+        use super::{
+            publisher_delete_options, put_options, z_publisher_delete_options_default,
+            z_publisher_delete_options_t,
+        };
+        use wz_session_core::sample::SampleKind;
+        let mut stamp = z_timestamp_t {
+            valid: true,
+            id: crate::zid::z_id_t {
+                id: [9; crate::zid::Z_ID_SIZE],
+            },
+            time: 77,
+        };
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            let mut options = core::mem::MaybeUninit::<z_publisher_delete_options_t>::uninit();
+            z_publisher_delete_options_default(options.as_mut_ptr());
+            let mut options = options.assume_init();
+            options.timestamp = &mut stamp;
+            let mut held = PutHeld::default();
+            let mut sent = put_options();
+            publisher_delete_options(&options, &mut held, &mut sent);
+            assert!(matches!(sent.kind, SampleKind::Del));
+            assert_eq!(sent.timestamp.as_ref().map(|ts| ts.time), Some(77));
+            assert!(sent.attachment.is_none());
+            let mut held = PutHeld::default();
+            let mut bare = put_options();
+            publisher_delete_options(core::ptr::null(), &mut held, &mut bare);
+            assert!(matches!(bare.kind, SampleKind::Del));
+        }
+    }
+
+    /// The one QoS reader and the one body that lays it carry every field it reads into the
+    /// options sent. Turned red by a field dropped between the reader and the options.
+    #[test]
+    fn the_stated_qos_reach_the_options_sent() {
+        use super::{put_options, QosLevels, Z_RELIABILITY_BEST_EFFORT, Z_RELIABILITY_RELIABLE};
+        use wz_session_core::reliability::Reliability;
+        let destination = crate::locality::default_locality!("local-subscriber");
+        let mut sent = put_options();
+        QosLevels::stated(
+            2,
+            crate::qos::Z_CONGESTION_CONTROL_BLOCK,
+            true,
+            Z_RELIABILITY_BEST_EFFORT,
+            destination,
+        )
+        .apply(&mut sent);
+        assert_eq!(sent.reliability, Reliability::BestEffort);
+        assert_eq!(sent.qos.map(|qos| qos.is_express()), Some(true));
+        assert_eq!(sent.allowed_destination, destination);
+        let mut other = put_options();
+        QosLevels::stated(
+            6,
+            crate::qos::Z_CONGESTION_CONTROL_BLOCK,
+            true,
+            Z_RELIABILITY_RELIABLE,
+            destination,
+        )
+        .apply(&mut other);
+        assert_ne!(other.qos, sent.qos, "the priority is read");
+        assert_eq!(other.reliability, Reliability::Reliable);
     }
 }
 
@@ -2946,64 +3113,66 @@ unsafe fn session_put_options<'a>(
         source_info,
     }
     .fold(opts, held);
-    StatedQos {
-        priority: (*options).priority,
-        congestion_control: (*options).congestion_control,
-        is_express: (*options).is_express,
-        reliability: (*options).reliability(),
-        destination: (*options).allowed_destination(),
-    }
+    QosLevels::stated(
+        (*options).priority,
+        (*options).congestion_control,
+        (*options).is_express,
+        (*options).reliability(),
+        (*options).allowed_destination(),
+    )
     .apply(opts);
 }
 
-/// Fold a caller's `z_delete_options_t` into `opts`, where they lie, as the Del kind: `opts`
-/// start as [`put_options`].
+/// Fold a caller's `z_delete_options_t` into `opts`, where they lie: a put of the Del kind,
+/// whose options carry no encoding and no attachment, read by the put's readers
+/// ([`PutCarried::fold`], [`QosLevels::stated`]). `opts` start as [`put_options`].
 ///
 /// # Safety
 /// `options` must be null or a valid delete-options struct.
-unsafe fn session_delete_options(options: *const z_delete_options_t, opts: &mut PublishOptions) {
+unsafe fn session_delete_options<'a>(
+    options: *const z_delete_options_t,
+    held: &'a mut PutHeld,
+    opts: &mut PublishOptions<'a>,
+) {
     opts.kind = SampleKind::Del;
     if options.is_null() {
         return;
     }
-    StatedQos {
-        priority: (*options).priority,
-        congestion_control: (*options).congestion_control,
-        is_express: (*options).is_express,
-        reliability: (*options).reliability(),
-        destination: (*options).allowed_destination(),
-    }
+    #[cfg(feature = "unstable-api")]
+    let source_info = (*options).source_info;
+    #[cfg(not(feature = "unstable-api"))]
+    let source_info = core::ptr::null_mut();
+    PutCarried::stamps((*options).timestamp, source_info).fold(opts, held);
+    QosLevels::stated(
+        (*options).priority,
+        (*options).congestion_control,
+        (*options).is_express,
+        (*options).reliability(),
+        (*options).allowed_destination(),
+    )
     .apply(opts);
-    if let Some(ts) = timestamp_hint_of((*options).timestamp) {
-        opts.set_timestamp(ts);
+}
+
+/// Fold a caller's `z_publisher_delete_options_t` into `opts`, where they lie: a put of the Del
+/// kind whose options carry only a timestamp and a source info, read by the put's reader
+/// ([`PutCarried::fold`]); the publisher lays its own QoS over them when it sends.
+///
+/// # Safety
+/// `options` must be null or a valid publisher-delete-options struct.
+unsafe fn publisher_delete_options<'a>(
+    options: *const z_publisher_delete_options_t,
+    held: &'a mut PutHeld,
+    opts: &mut PublishOptions<'a>,
+) {
+    opts.kind = SampleKind::Del;
+    if options.is_null() {
+        return;
     }
     #[cfg(feature = "unstable-api")]
-    if let Some(si) = source_info_hint_of((*options).source_info) {
-        opts.set_source_info(si);
-    }
-}
-
-/// The QoS and the destination a session's put and delete state, read the same way from
-/// `z_put_options_t` and `z_delete_options_t`, whose layouts differ.
-struct StatedQos {
-    priority: crate::qos::z_priority_t,
-    congestion_control: crate::qos::z_congestion_control_t,
-    is_express: bool,
-    reliability: z_reliability_t,
-    destination: Locality,
-}
-
-impl StatedQos {
-    /// Lay the stated QoS and destination over `opts`, where they lie. One body for both session
-    /// doors, out of line so that neither holds a copy of the five setters.
-    #[inline(never)]
-    fn apply(self, opts: &mut PublishOptions<'_>) {
-        opts.set_priority(crate::qos::priority_from_pico(self.priority));
-        opts.set_congestion_control(push_congestion_from_pico(self.congestion_control));
-        opts.set_express(self.is_express);
-        opts.reliability = reliability_from_pico(self.reliability);
-        opts.allowed_destination = self.destination;
-    }
+    let source_info = (*options).source_info;
+    #[cfg(not(feature = "unstable-api"))]
+    let source_info = core::ptr::null_mut();
+    PutCarried::stamps((*options).timestamp, source_info).fold(opts, held);
 }
 
 /// Publish `payload` on a session's key with `opts`: the body `z_put` and `z_delete` share, out
@@ -3077,8 +3246,9 @@ pub unsafe extern "C" fn z_delete(
     options: *const z_delete_options_t,
 ) -> ZResult {
     guarded(|| {
+        let mut held = PutHeld::default();
         let mut opts = put_options();
-        session_delete_options(options, &mut opts);
+        session_delete_options(options, &mut held, &mut opts);
         session_publish(zs, keyexpr, &[], &opts)
     })
 }
@@ -3101,17 +3271,9 @@ pub unsafe extern "C" fn z_publisher_delete(
             Some(s) => s,
             None => return Z_ERR_NULL,
         };
+        let mut held = PutHeld::default();
         let mut opts = put_options();
-        opts.kind = SampleKind::Del;
-        if !options.is_null() {
-            if let Some(ts) = timestamp_hint_of((*options).timestamp) {
-                opts.set_timestamp(ts);
-            }
-            #[cfg(feature = "unstable-api")]
-            if let Some(si) = source_info_hint_of((*options).source_info) {
-                opts.set_source_info(si);
-            }
-        }
+        publisher_delete_options(options, &mut held, &mut opts);
         state.publish(&[], Some(&mut opts))
     })
 }
