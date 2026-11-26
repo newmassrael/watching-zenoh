@@ -215,6 +215,11 @@ pub const WZ_EXT_ERR_PAYLOAD_WIRE: ZResult = -24;
 /// [`WZ_EXT_ERR_POLICY_OFF`] is.
 pub const WZ_EXT_ERR_SCOUT_REENTERED: ZResult = -25;
 
+/// A step of a session the program runs on its own cycle (`wz_ext_session_step`) was asked while
+/// the session's read task runs, which steps the session itself: nothing was read. wz's own code,
+/// for the reason [`WZ_EXT_ERR_POLICY_OFF`] is.
+pub const WZ_EXT_ERR_READ_TASK_RUNS: ZResult = -26;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +263,7 @@ mod tests {
             WZ_EXT_ERR_PAYLOAD_ABSENT,
             WZ_EXT_ERR_PAYLOAD_WIRE,
             WZ_EXT_ERR_SCOUT_REENTERED,
+            WZ_EXT_ERR_READ_TASK_RUNS,
         ];
         for (at, code) in wz.iter().enumerate() {
             assert!(*code < 0, "{code} must read as a failure");

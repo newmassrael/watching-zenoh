@@ -43,6 +43,25 @@ impl From<CalledFromReadTask> for ReadTaskStartRefused {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionClosed;
 
+/// Why a step the program made ([`SessionDrive::step_once`]) did not step the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepRefused {
+    /// The session is closed ([`SessionClosed`]).
+    Closed,
+    /// The session's read task runs: the task steps the session, so a program that chose its read
+    /// task at the open, or started it since, does not step it as well.
+    ReadTaskRuns,
+    /// The session's engine runs the session on a thread of its own, so there is no step for the
+    /// program to make.
+    Unsupported,
+}
+
+impl From<SessionClosed> for StepRefused {
+    fn from(_: SessionClosed) -> Self {
+        Self::Closed
+    }
+}
+
 /// One session as a C handle holds it, whatever engine runs it.
 ///
 /// `Send + Sync` because a C program may hand its session to any thread in pico's multi-threaded
@@ -87,7 +106,94 @@ pub trait SessionDrive: Send + Sync + 'static {
     /// (zenoh-pico `zp_spin_once`): whether it made progress, `false` for a closed session.
     fn spin_once(&self) -> bool;
 
+    /// Step the session once on the caller's thread, as its read task steps it: read what its
+    /// links hold, waiting for input at most `most_ms` milliseconds (0: only what is ready now),
+    /// keep each lease, dial a lost link again, run what is due and hand what was read to the
+    /// callbacks. For a program that opened the session without its read task and runs its own
+    /// cycle; refused while the read task runs. An engine that runs the session on a thread of its
+    /// own has no such step, which is what this answers unless the engine says otherwise.
+    fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        let _ = most_ms;
+        if self.is_closed() {
+            Err(StepRefused::Closed)
+        } else {
+            Err(StepRefused::Unsupported)
+        }
+    }
+
     /// The session as the engine's own type, for a capability an ABI reaches only on that
     /// engine (one the port does not carry yet).
     fn as_any(&self) -> &dyn Any;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    /// An engine that runs its session on a thread of its own: it says nothing of a step.
+    struct SelfDriven {
+        closed: AtomicBool,
+    }
+
+    impl SessionDrive for SelfDriven {
+        fn zid(&self) -> [u8; 16] {
+            [0; 16]
+        }
+
+        fn close(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+
+        fn start_read_task(&self) -> Result<(), ReadTaskStartRefused> {
+            Ok(())
+        }
+
+        fn stop_read_task(&self) -> Result<(), CalledFromReadTask> {
+            Ok(())
+        }
+
+        fn read_task_is_running(&self) -> bool {
+            true
+        }
+
+        fn read(&self, _single: bool) -> Result<(), SessionClosed> {
+            Ok(())
+        }
+
+        fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+            Ok(())
+        }
+
+        fn spin_once(&self) -> bool {
+            true
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// A step on an engine that steps itself is refused as unsupported, whatever the bound, and as
+    /// closed once its session is.
+    #[test]
+    fn an_engine_that_steps_itself_refuses_the_programs_step() {
+        let drive = SelfDriven {
+            closed: AtomicBool::new(false),
+        };
+        assert_eq!(drive.step_once(0), Err(StepRefused::Unsupported));
+        assert_eq!(drive.step_once(u32::MAX), Err(StepRefused::Unsupported));
+        drive.close();
+        assert_eq!(drive.step_once(0), Err(StepRefused::Closed));
+    }
+
+    /// A closed session read by a step is the step's closed refusal.
+    #[test]
+    fn a_closed_session_is_the_steps_closed_refusal() {
+        assert_eq!(StepRefused::from(SessionClosed), StepRefused::Closed);
+    }
 }

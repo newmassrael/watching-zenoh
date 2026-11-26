@@ -104,7 +104,7 @@ use wz_capi_port::{
     BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
     FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
     MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
-    SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    SessionEngine, SessionKeys, StatementNotHonoured, StepRefused, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -1358,6 +1358,10 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// ([`EngineHandle`]), taken out at the session's close.
     reach: ReachEngine<Self>,
 }
+
+/// The bound of a read's wait for input that leaves the config's (`CoopConfig::idle_wait_ms`) the
+/// only one: the read task's and `zp_read`'s, which the program bounds by no step of its own.
+const NO_STEP_BOUND_MS: u32 = u32::MAX;
 
 /// What a step of the session came to ([`CoopEngine::step`]).
 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
@@ -5039,10 +5043,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// What a read waits for before it steps the session: the link's next input, for at most
-    /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
+    /// [`CoopConfig::idle_wait_ms`] and at most `most_ms`, unless the link already holds some or
+    /// waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
-    fn idle_wait(&mut self) -> IdleWait {
+    fn idle_wait(&mut self, most_ms: u32) -> IdleWait {
         // What is due other than input, the earliest of it in milliseconds of the session's clock:
         // a get whose deadline comes first is swept when it is due, not up to a whole wait late
         // (read at the root of the index of the gets' deadlines, so no table is walked and a get
@@ -5079,13 +5084,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The clock is read when something is due, and that reading serves every bound after it:
         // a wait with nothing due reads it not at all.
         let mut clock_now: Option<u64> = None;
+        let bound = self.config.idle_wait_ms.min(most_ms);
         let most = match due_ms {
             Some(due_ms) => Self::wait_until(
-                self.config.idle_wait_ms,
+                bound,
                 due_ms,
                 *clock_now.get_or_insert_with(|| self.now_us()),
             ),
-            None => self.config.idle_wait_ms,
+            None => bound,
         };
         // A group whose stack gives no wait for its input is looked at on its tick.
         #[cfg(feature = "group")]
@@ -5884,7 +5890,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.transport.dial_settled() {
-                let mut wait = core.idle_wait();
+                let mut wait = core.idle_wait(NO_STEP_BOUND_MS);
                 wait.wait(core.rooms.waits(), sleep_ms);
                 core.transport.links.waited(wait);
                 core.run_tasks();
@@ -10493,14 +10499,84 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         false
     }
 
-    // The read steps the one link itself (`direct`).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
-        self.read_direct()
+        self.read_within(NO_STEP_BOUND_MS)
     }
 
+    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        let core = self.live().ok_or(SessionClosed)?;
+        // A link that is down has no lease to keep; the session is not closed.
+        for actions in core.0.transport.ups() {
+            actions.send_keep_alive();
+        }
+        Ok(())
+    }
+
+    fn spin_once(&self) -> bool {
+        self.read(false).is_ok()
+    }
+
+    fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        // The task steps the session itself; a step of the program's beside it would be a second
+        // reader the program did not choose at the open. A start made while this step runs reads
+        // beside it, as two reads may (`HandBack`).
+        #[cfg(feature = "threads")]
+        if SessionDrive::read_task_is_running(self) {
+            return Err(StepRefused::ReadTaskRuns);
+        }
+        self.read_within(most_ms).map_err(StepRefused::from)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
+#[cfg(feature = "query")]
+struct FanCancelled;
+
+/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
+/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
+/// that waits for the callbacks returns whether or not the session is stepped.
+#[cfg(feature = "query")]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
+    fn cancel_fan(&self, key: FanKey) {
+        loop {
+            let leg = self.live().and_then(|mut core| {
+                let core = &mut core.0;
+                let at = core
+                    .session
+                    .pending_gets
+                    .iter()
+                    .position(|pending| pending.fan == Some(key))?;
+                let pending = core.session.pending_gets.remove(at);
+                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
+                Some(pending.leg)
+            });
+            let Some(leg) = leg else {
+                break;
+            };
+            self.end_leg_now(leg);
+        }
+    }
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// [`SessionDrive::read`] with its wait for input bounded by `most_ms` as well as by the
+    /// config's ([`CoopConfig::idle_wait_ms`]): the read task and `zp_read` read with no bound of
+    /// their own ([`NO_STEP_BOUND_MS`]), and a step the program makes with the one it gives
+    /// ([`SessionDrive::step_once`]).
+    // The read steps the one link itself (`direct`).
+    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    fn read_within(&self, most_ms: u32) -> Result<(), SessionClosed> {
+        self.read_direct(most_ms)
+    }
+
+    /// [`SessionDrive::read`] with its wait for input bounded by `most_ms` as well as by the
+    /// config's ([`CoopConfig::idle_wait_ms`]), as in a build whose read steps its one link itself.
     #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
-    fn read(&self, _single: bool) -> Result<(), SessionClosed> {
+    fn read_within(&self, most_ms: u32) -> Result<(), SessionClosed> {
         // The wait comes first and holds nothing of the session, so what arrives during it is
         // read by this call and a publisher on another thread is not held up by it. Input the last
         // step left held makes it none, which it is then without the session taken to say so:
@@ -10518,7 +10594,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
             // before the session is.
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-                let wait = core.0.idle_wait();
+                let wait = core.0.idle_wait(most_ms);
                 #[cfg(feature = "threads")]
                 if matches!(wait, IdleWait::Behind(_)) {
                     seen = Some(self.hand_back.enter());
@@ -10565,55 +10641,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         }
     }
 
-    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        let core = self.live().ok_or(SessionClosed)?;
-        // A link that is down has no lease to keep; the session is not closed.
-        for actions in core.0.transport.ups() {
-            actions.send_keep_alive();
-        }
-        Ok(())
-    }
-
-    fn spin_once(&self) -> bool {
-        self.read(false).is_ok()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
-#[cfg(feature = "query")]
-struct FanCancelled;
-
-/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
-/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
-/// that waits for the callbacks returns whether or not the session is stepped.
-#[cfg(feature = "query")]
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
-    fn cancel_fan(&self, key: FanKey) {
-        loop {
-            let leg = self.live().and_then(|mut core| {
-                let core = &mut core.0;
-                let at = core
-                    .session
-                    .pending_gets
-                    .iter()
-                    .position(|pending| pending.fan == Some(key))?;
-                let pending = core.session.pending_gets.remove(at);
-                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
-                Some(pending.leg)
-            });
-            let Some(leg) = leg else {
-                break;
-            };
-            self.end_leg_now(leg);
-        }
-    }
-}
-
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
     /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
     /// one take of the session, as zenoh-pico's put reads its filter's state and takes only its
@@ -10780,6 +10807,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
     /// [`SessionDrive::spin_once`].
     pub fn spin_once(&self) -> bool {
         SessionDrive::spin_once(self.engine_ref())
+    }
+
+    /// [`SessionDrive::step_once`].
+    pub fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        SessionDrive::step_once(self.engine_ref(), most_ms)
     }
 }
 

@@ -522,7 +522,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.drive_link(core, slot, LinkInput::Open, now_us)?;
         }
         while !self.link_is_up() {
-            let turn = self.link_turn(slot).ok_or(OpenError::NoEndpoint)?;
+            let turn = self
+                .link_turn(slot, NO_STEP_BOUND_MS)
+                .ok_or(OpenError::NoEndpoint)?;
             if let Some(last) = turn.ended {
                 return Err(last);
             }
@@ -531,11 +533,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The read of a session whose read steps its one link itself: the wait for the link's input
-    /// or the next deadline, a look at the link's life and the session's bookkeeping when they are
+    /// or the next deadline, for at most `most_ms` milliseconds, a look at the link's life and the session's bookkeeping when they are
     /// owed, then the pump stepped with nothing of the session held, each record handed out as it
     /// is read. A read from a callback reads nothing: the read under way holds the link, and any
     /// other delivery marks the thread as delivering.
-    pub(super) fn read_direct(&self) -> Result<(), SessionClosed> {
+    pub(super) fn read_direct(&self, most_ms: u32) -> Result<(), SessionClosed> {
         // A callback reads nothing either while a delivery other than a read's runs it (a put to
         // the session's own subscribers): a record read here would be handed to a callback inside
         // another.
@@ -552,7 +554,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
         };
         let slot = &mut held.0;
-        let read = self.read_held(slot);
+        let read = self.read_held(slot, most_ms);
         // A close made while the read stepped the pump (a callback's) ended the link's life but
         // left the pump, which the read held: it goes now, once no step of it is under way.
         if self.closed.load(Ordering::Acquire) {
@@ -562,8 +564,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// [`Self::read_direct`] with the face held.
-    fn read_held(&self, slot: &mut DirectSlot<L, C>) -> Result<(), SessionClosed> {
-        let turn = self.link_turn(slot).ok_or(SessionClosed)?;
+    fn read_held(&self, slot: &mut DirectSlot<L, C>, most_ms: u32) -> Result<(), SessionClosed> {
+        let turn = self.link_turn(slot, most_ms).ok_or(SessionClosed)?;
         self.deliver();
         if turn.ended.is_some() {
             return Err(SessionClosed);
@@ -583,8 +585,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// session. `None` once the session closed. Out of line: the open and the read step the link
     /// through one body.
     #[inline(never)]
-    fn link_turn(&self, slot: &mut DirectSlot<L, C>) -> Option<LinkTurn> {
-        let mut wait = self.link_wait(slot)?;
+    fn link_turn(&self, slot: &mut DirectSlot<L, C>, most_ms: u32) -> Option<LinkTurn> {
+        let mut wait = self.link_wait(slot, most_ms)?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
@@ -602,14 +604,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// What a read waits for, worked out under the session's lock: the link's input, or the
-    /// earliest of the link's deadlines and the session's. `None` once the session closed.
-    fn link_wait(&self, slot: &DirectSlot<L, C>) -> Option<IdleWait> {
+    /// earliest of the link's deadlines and the session's, for at most `most_ms` milliseconds.
+    /// `None` once the session closed.
+    fn link_wait(&self, slot: &DirectSlot<L, C>, most_ms: u32) -> Option<IdleWait> {
         let mut held = self.live()?;
         held.0.link_due_us = slot.life_due_us.min(slot.pump_due_us);
         // Marked as a holder that holds no send, so a droppable publish that finds the session
         // held for the wait tries it again at once (`LinkRooms::for_held`).
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-        Some(held.0.idle_wait())
+        Some(held.0.idle_wait(most_ms))
     }
 
     /// A look at the link's life after `wait`, under the session's lock: what the link brings is

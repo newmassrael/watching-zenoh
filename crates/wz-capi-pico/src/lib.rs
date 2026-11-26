@@ -628,6 +628,10 @@ mod session_place;
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]
 pub mod session_memory;
+// One step of a session the program runs on its own cycle, opened without its read task: a wz
+// door (`wz_ext.h`) of the multi-threaded arm, whose read task otherwise steps the session.
+#[cfg(feature = "multi-thread")]
+pub mod session_step;
 // The structs the doors write into memory the program sized: each starts with its size.
 #[cfg(any(
     feature = "object-pool",

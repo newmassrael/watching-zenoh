@@ -1161,9 +1161,11 @@ CASES: tuple[Case, ...] = (
                  STD_RUNTIME),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
-         # 813 exports: `wz_ext_callbacks_refused` (d80d315d1), and `rust_eh_personality`, which the
-         # library without `std` defines (pico-client-coop-nostd's note).
-         exports=813,
+         # 814 exports: `wz_ext_session_step`, the step of a session opened without its read task,
+         # which the multi-threaded arm has. 813 with `wz_ext_callbacks_refused` (d80d315d1) and
+         # `rust_eh_personality`, which the library without `std` defines (pico-client-coop-nostd's
+         # note).
+         exports=814,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
               "(`header_internals`: `_z_cancellation_token_clear`, "
