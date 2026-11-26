@@ -744,7 +744,8 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
 #[cfg(all(
     feature = "codec-linkstate",
     feature = "codec-push",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    feature = "alloc"
 ))]
 pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
