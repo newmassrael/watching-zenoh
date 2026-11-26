@@ -59,6 +59,46 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
+/// A turn of an answer holds its link's replies from its first reply and lets them go after its
+/// Final, so the replies and the Final leave in one send, in the order they were made. A read
+/// that steps its one link itself holds them across its callbacks instead (`queries`), so the
+/// count is read where the query is handed out of the round. The CONTROL is the order: two
+/// replies, then the Final. Turned red by a first reply that raises no hold (the count stays
+/// where it was), or by an answer that never lets it go (the Final then never reaches the router).
+#[cfg(all(
+    feature = "std",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
+#[test]
+fn an_answers_replies_are_held_to_leave_with_its_final() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    declare(&engine, "demo/h/**", move |_, query, out| {
+        out.reply_keyed(query.keyexpr(), b"one")
+            .expect("a reply on the query's own key");
+        out.reply_keyed(query.keyexpr(), b"two")
+            .expect("a reply on the query's own key");
+    });
+    until(&engine, "the router to see the queryable", || {
+        router.seen(|s| s.declares) >= 1
+    });
+    let held = engine.answers_held();
+    router.send(Command::Query(5, "demo/h/a"));
+    until(&engine, "the replies and the final", || {
+        router.seen(|s| s.answers.len()) >= 3
+    });
+    assert_eq!(
+        router.seen(|s| s.answers.clone()),
+        vec!["reply", "reply", "final"],
+        "CONTROL: the replies, then the Final"
+    );
+    assert_eq!(
+        engine.answers_held() - held,
+        1,
+        "one hold for the turn, raised by its first reply and let go after its Final"
+    );
+}
+
 /// A query asked in one frame between two Pushes is answered as one asked alone is: its reply,
 /// then its Final, each once. Its Final is owed by its own record's dispatch and taken there, so the
 /// drain after the Push that follows it in the frame finds none owed, which a debug build asserts

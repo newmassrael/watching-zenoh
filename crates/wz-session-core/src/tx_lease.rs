@@ -398,6 +398,18 @@ impl<D: BoxedLinkDriver + ?Sized> TxBuf for TxLease<'_, D> {
         self.len = self.len.wrapping_add(n);
         Ok(Some(window))
     }
+
+    /// The slot's room left, up to its budget ([`Self::hold_to`]), as one window.
+    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        let n = self.room();
+        // SAFETY: the window `[headroom + len, headroom + capacity)` lies in the slot (`len`
+        // never passes the capacity), the slot is this lease's alone (see `as_slice`), and the
+        // borrow of the window is the borrow of `self`, so nothing else touches the slot while
+        // it lives.
+        let window = unsafe { slice::from_raw_parts_mut(self.base.add(self.write_at()), n) };
+        self.len = self.capacity();
+        Some(window)
+    }
 }
 
 impl<D: BoxedLinkDriver + ?Sized> Drop for TxLease<'_, D> {
@@ -624,6 +636,31 @@ mod tests {
         );
         lease.append(&[7; SLOT_LEN - HEADROOM]).unwrap();
         assert_eq!(lease.append_byte(8), Err(CodecError::BufferOverflow));
+    }
+
+    /// The rest of a lease is the room up to its budget, one window from where the frame stands,
+    /// and what the writer does not fill is given back. Turned red by a `reserve_rest` that
+    /// reads the slot's whole length past a hold, or starts the window at the headroom.
+    #[test]
+    fn the_rest_of_a_lease_is_its_room_up_to_the_budget() {
+        let link = LendingLink::new();
+        let mut lease = TxLease::acquire(&link, 8, Priority::DEFAULT).unwrap();
+        lease.hold_to(6);
+        lease.append(&[1, 2]).unwrap();
+        let window = lease.reserve_rest().expect("a slot hands its room out");
+        assert_eq!(window.len(), 4, "to the budget, not the slot's end");
+        window[0] = 3;
+        window[1] = 4;
+        assert_eq!(lease.len(), 6, "the window counts as written");
+        lease.truncate(4);
+        assert_eq!(lease.as_slice(), &[1, 2, 3, 4]);
+        assert_eq!(lease.append(&[5, 6, 7]), Err(CodecError::BufferOverflow));
+        let _ = lease.send(Reliability::Reliable, Priority::DEFAULT);
+        assert_eq!(
+            link.sent.borrow()[0].1,
+            [1, 2, 3, 4],
+            "the bytes the link is handed"
+        );
     }
 
     #[test]

@@ -1012,23 +1012,142 @@ impl<R: SessionRuntime> core::future::Future for OutOfBandSignalled<'_, R> {
     }
 }
 
+/// The caller's window, `zp_batch_start` .. `zp_batch_stop` (`_Z_BATCHING_ACTIVE` /
+/// `_Z_BATCHING_IDLE`): a bit of [`TxConduits`]'s word of windows.
+#[cfg(feature = "transport-batching")]
+const WINDOW_CALLER: u64 = 1;
+/// The link's writer pulls what the conduits stage ([`BoxedLinkDriver::set_idle_flush`]), so its
+/// window is open for as long as the session lives and no caller opens or closes it. A bit of its
+/// own: `zp_batch_stop` closes the window the caller opened and must not close this one.
+#[cfg(feature = "transport-batching")]
+const WINDOW_LINK: u64 = 1 << 1;
+/// The face's read holds the replies it sends in their conduits' open frames
+/// ([`SessionLinkActions::hold_replies`]). Joined by replies alone: every other message is sent
+/// at once, after what the replies left open, so a hold opens no window for them.
+#[cfg(feature = "transport-batching")]
+const WINDOW_REPLIES: u64 = 1 << 2;
+/// One drain under way of a window just closed, counted above the window bits: while one is, a
+/// frame the window left open may still stand in a conduit the drain has not reached.
+#[cfg(feature = "transport-batching")]
+const WINDOW_DRAINING: u64 = 1 << 3;
+
+/// Whether a message joins its conduit's open frame under `windows` (one read of the word):
+/// inside the caller's or the link's window, or, for a `reply`, inside the hold of the replies.
+/// Gated as the emit chokepoint that reads it.
+#[cfg(all(
+    feature = "transport-batching",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+fn window_joins(windows: u64, reply: bool) -> bool {
+    windows & (WINDOW_CALLER | WINDOW_LINK) != 0 || (reply && windows & WINDOW_REPLIES != 0)
+}
+
+/// Whether a conduit may hold a frame open under `windows` that a message joining none sends
+/// before itself: a window is open, or the drain of one just closed is under way. With none, no
+/// conduit holds a frame open, so such a message reads no conduit's frame for it.
+#[cfg(all(
+    feature = "transport-batching",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+fn window_may_hold_open(windows: u64) -> bool {
+    windows != 0
+}
+
+/// Open (`open`) or close the window `bit` of `word`, leaving the others as they are: whether
+/// this call changed it, so of two that open it at once one is told it did. Out of line, as
+/// [`begin_drain`] is.
+#[cfg(feature = "transport-batching")]
+#[inline(never)]
+fn set_window<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, open: bool) -> bool {
+    let mut seen = word.load(core::sync::atomic::Ordering::SeqCst);
+    loop {
+        if (seen & bit != 0) == open {
+            return false;
+        }
+        let next = if open { seen | bit } else { seen & !bit };
+        match word.compare_exchange(
+            seen,
+            next,
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(now) => seen = now,
+        }
+    }
+}
+
+/// Close the window `bit` of `word` and count a drain under way, in one write, so a message
+/// that reads the window closed reads the drain too, and sends a frame the drain has not reached
+/// before itself. The drain's end is [`end_drain`]. Out of line: every closer of a window calls
+/// it, and a copy of its loop in each cost more than the call.
+#[cfg(feature = "transport-batching")]
+#[inline(never)]
+fn begin_drain<W: crate::runtime_cell::WordCell>(word: &W, bit: u64) {
+    let mut seen = word.load(core::sync::atomic::Ordering::SeqCst);
+    loop {
+        let next = (seen & !bit).wrapping_add(WINDOW_DRAINING);
+        match word.compare_exchange(
+            seen,
+            next,
+            core::sync::atomic::Ordering::SeqCst,
+            core::sync::atomic::Ordering::SeqCst,
+        ) {
+            Ok(_) => return,
+            Err(now) => seen = now,
+        }
+    }
+}
+
+/// End a drain [`begin_drain`] counted.
+#[cfg(feature = "transport-batching")]
+fn end_drain<W: crate::runtime_cell::WordCell>(word: &W) {
+    word.fetch_sub(WINDOW_DRAINING, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Close the window `bit` of `word` and run `drain`, which sends what it left open, counted as
+/// a drain under way from the close to the drain's end.
+#[cfg(feature = "transport-batching")]
+fn close_and_drain<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, drain: impl FnOnce()) {
+    begin_drain(word, bit);
+    drain();
+    end_drain(word);
+}
+
 /// R2920 — the session's TX conduits: one [`BatchTx`] behind its own lock
 /// per priority (one in all, without `transport-qos`), and the batching
-/// window flag they share.
+/// windows they share.
 pub struct TxConduits<R: SessionRuntime> {
-    /// `zp_batch_start` .. `zp_batch_stop` window flag
-    /// (`_Z_BATCHING_ACTIVE` / `_Z_BATCHING_IDLE`). The runtime's flag rather
-    /// than a field of a conduit, because the window spans every conduit and no
-    /// conduit's lock may stand for the others.
+    /// The face's send windows, a bit each in one word, so a message's send reads every one of
+    /// them with one load: the caller's ([`WINDOW_CALLER`]), the link's writer's
+    /// ([`WINDOW_LINK`]) and the hold of the replies ([`WINDOW_REPLIES`]), with the drains under
+    /// way of a window just closed counted above them ([`WINDOW_DRAINING`]). The runtime's word
+    /// rather than a field of a conduit, because a window spans every conduit and no conduit's
+    /// lock may stand for the others.
     #[cfg(feature = "transport-batching")]
-    active: R::Flag,
-    /// The link's writer pulls what the conduits stage (see
-    /// [`BoxedLinkDriver::set_idle_flush`]), so the window is open for as long as
-    /// the session lives and no caller opens or closes it. Its own flag rather than
-    /// `active`: `zp_batch_stop` closes the window the caller opened and must not
-    /// close this one, which is the link's and not the caller's.
-    #[cfg(feature = "transport-batching")]
-    auto: R::Flag,
+    window: R::Word,
     /// A control message was left in the Control conduit's open frame, for the control messages
     /// after it to join, and a message staged on another conduit is to follow that frame out.
     /// Raised by the sender of the control message once it has staged it, lowered under the
@@ -1329,9 +1448,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     fn new() -> Self {
         Self {
             #[cfg(feature = "transport-batching")]
-            active: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
-            #[cfg(feature = "transport-batching")]
-            auto: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
+            window: <R::Word as crate::runtime_cell::WordCell>::new(0),
             #[cfg(feature = "transport-batching")]
             control_open: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             // A blocking sender keeps its conduit while it waits for room (a chain's fragments
@@ -1461,34 +1578,61 @@ impl<R: SessionRuntime> TxConduits<R> {
         )
     ))]
     fn is_active(&self) -> bool {
-        crate::runtime_cell::FlagCell::load(&self.active, core::sync::atomic::Ordering::SeqCst)
-            || self.is_auto()
+        self.windows() & (WINDOW_CALLER | WINDOW_LINK) != 0
+    }
+
+    /// The face's windows as they stand (the `window` field), in one load.
+    #[cfg(feature = "transport-batching")]
+    fn windows(&self) -> u64 {
+        crate::runtime_cell::WordCell::load(&self.window, core::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Open (`open`) or close the window `bit`, the others left as they are: whether this call
+    /// changed it.
+    #[cfg(feature = "transport-batching")]
+    fn set_window(&self, bit: u64, open: bool) -> bool {
+        set_window(&self.window, bit, open)
+    }
+
+    /// Close the window `bit` and run `drain`, which sends what it left open, counted as a drain
+    /// under way from the close to the drain's end.
+    #[cfg(feature = "transport-batching")]
+    fn close_and_drain(&self, bit: u64, drain: impl FnOnce()) {
+        close_and_drain(&self.window, bit, drain);
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_active(&self, active: bool) {
-        crate::runtime_cell::FlagCell::store(
-            &self.active,
-            active,
-            core::sync::atomic::Ordering::SeqCst,
-        );
+        self.set_window(WINDOW_CALLER, active);
     }
 
-    /// The link pulls the staged frames itself (the `auto` field). Read where
+    /// The link pulls the staged frames itself ([`WINDOW_LINK`]). Read where
     /// [`Self::is_active`] is, by the emit chokepoint, and by the caller's stop
     /// ([`SessionLinkActions::batch_stop`]), which asks such a link for the flush.
     #[cfg(feature = "transport-batching")]
     fn is_auto(&self) -> bool {
-        crate::runtime_cell::FlagCell::load(&self.auto, core::sync::atomic::Ordering::Relaxed)
+        self.windows() & WINDOW_LINK != 0
     }
 
     #[cfg(feature = "transport-batching")]
     fn set_auto(&self, auto: bool) {
-        crate::runtime_cell::FlagCell::store(
-            &self.auto,
-            auto,
-            core::sync::atomic::Ordering::SeqCst,
-        );
+        self.set_window(WINDOW_LINK, auto);
+    }
+
+    /// Whether the face's read holds its replies ([`WINDOW_REPLIES`]). Gated as the conduit of a
+    /// reply that reads it (`SessionLinkActions::reply_conduit`).
+    #[cfg(all(
+        feature = "transport-batching",
+        any(
+            feature = "codec-response-final",
+            all(
+                feature = "codec-response",
+                any(feature = "storage-profile", feature = "alloc")
+            )
+        )
+    ))]
+    fn replies_held(&self) -> bool {
+        self.windows() & WINDOW_REPLIES != 0
     }
 
     /// The caller's window alone (`zp_batch_start` .. `zp_batch_stop`), without the link's.
@@ -1499,7 +1643,7 @@ impl<R: SessionRuntime> TxConduits<R> {
     /// not one of them, so the writer reads this to know when to stay its hand.
     #[cfg(feature = "transport-batching")]
     fn caller_window_open(&self) -> bool {
-        crate::runtime_cell::FlagCell::load(&self.active, core::sync::atomic::Ordering::SeqCst)
+        self.windows() & WINDOW_CALLER != 0
     }
 
     /// Raise the `control_open` mark: read and raised where [`Self::is_auto`] is read, by the
@@ -1613,6 +1757,22 @@ struct BatchStage {
     /// here is still lent ([`crate::tx_lease::TxLease::pick_up`]).
     #[cfg(feature = "transport-tx-lend")]
     lent: Option<crate::tx_lease::OpenSlot>,
+}
+
+#[cfg(feature = "transport-batching")]
+impl BatchStage {
+    /// Whether a frame is open on this conduit, in a lent slot or on the heap.
+    fn is_open(&self) -> bool {
+        #[cfg(feature = "transport-tx-lend")]
+        if self.lent.is_some() {
+            return true;
+        }
+        #[cfg(not(feature = "tx-lend-only"))]
+        if !self.buf.is_empty() {
+            return true;
+        }
+        false
+    }
 }
 
 /// Why a batch frame was opened on the heap and not in a lent slot (the
@@ -3822,6 +3982,34 @@ pub struct BlockFirstJob {
 struct Conduit {
     priority: Priority,
     reliable: bool,
+    /// A reply that may wait in its conduit's open frame while the face's read holds its replies
+    /// ([`SessionLinkActions::hold_replies`]), so that it leaves with the `Final` after it.
+    #[cfg(feature = "transport-batching")]
+    held: bool,
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl Conduit {
+    /// The conduit of a message that is not held.
+    fn new(priority: Priority, reliable: bool) -> Self {
+        Self {
+            priority,
+            reliable,
+            #[cfg(feature = "transport-batching")]
+            held: false,
+        }
+    }
 }
 
 /// R2952 — which pass through [`SessionLinkActions::dispatch_network_message_at`]
@@ -4833,10 +5021,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit {
-                    priority: qos.priority(),
-                    reliable: true,
-                },
+                self.reply_conduit(qos.priority(), true),
                 qos,
                 size,
                 crate::stats::NetworkStatsClass::unread(),
@@ -4855,6 +5040,15 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         qos: crate::sample::QosLevel,
     ) {
         self.send_response_final(request_id, qos);
+    }
+
+    // The holder of the answer route, a trait object, reaches the face's own hold through it.
+    fn hold_replies(&self) -> bool {
+        SessionLinkActions::hold_replies(self)
+    }
+
+    fn release_replies(&self, raised: bool) {
+        SessionLinkActions::release_replies(self, raised);
     }
 
     // The replies of a drain and the `Final` that ends them leave as one frame. The window is
@@ -4904,8 +5098,8 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     ))]
     fn end_burst(&self, opened: bool) {
         if opened {
-            self.tx_conduits.set_active(false);
-            self.flush_open_batch();
+            self.tx_conduits
+                .close_and_drain(WINDOW_CALLER, || self.flush_open_batch());
         }
     }
 }
@@ -4946,10 +5140,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit {
-                    priority: Priority::Control,
-                    reliable: true,
-                },
+                Conduit::new(Priority::Control, true),
                 crate::sample::QosLevel::DEFAULT,
                 size_hint(|| {
                     crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id)
@@ -4989,10 +5180,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 };
                 let _ = self.dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    Conduit {
-                        priority: Priority::Control,
-                        reliable: true,
-                    },
+                    Conduit::new(Priority::Control, true),
                     crate::sample::QosLevel::DEFAULT,
                     size_hint(|| crate::tx_buf::encoded_len(as_encoder(&reply))),
                     crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -7210,6 +7398,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Conduit {
             priority: route,
             reliable,
+            ..
         } = route;
         // Asked BEFORE the slot is taken, so a session with no hand-off never
         // holds a slot nothing would give back.
@@ -7296,7 +7485,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session's own machinery.
         let _ = self.dispatch_network_message_at(
             DispatchStage::Scheduled,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             qos,
             body.len(),
             stats_class,
@@ -12947,7 +13136,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Nothing of a lend-only build reads it: every frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
         let SizeHint = worst_case_payload;
-        let Conduit { priority, reliable } = conduit;
+        let Conduit {
+            priority, reliable, ..
+        } = conduit;
         // A send of its caller's own: every other stage's question is answered here.
         let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
@@ -13161,7 +13352,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
                 message_priority,
-                Conduit { priority, reliable },
+                Conduit::new(priority, reliable),
                 qos,
                 worst_case_payload,
                 _stats_class,
@@ -13345,8 +13536,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Whatever this sender does with the conduit, a wait for room included, is a send
             // in progress to a droppable message that finds the conduit held.
             let _sender = SenderInside::mark(self.tx_conduits.sender_flag(priority));
+            // A held reply joins its conduit's open frame as a message of a window does, and
+            // leaves with what follows it in that frame. One load of the face's windows decides
+            // both whether the message joins the open frame and whether a frame it does not join
+            // may be open.
             #[cfg(feature = "transport-batching")]
-            if self.tx_conduits.is_active() {
+            let windows = self.tx_conduits.windows();
+            #[cfg(feature = "transport-batching")]
+            let window = window_joins(windows, conduit.held);
+            // A frame held replies, or a window being drained, left open leaves before a message
+            // that does not join it takes the conduit's next SN: sent after that message, its
+            // earlier SN would read as stale to the peer's reliable channel. With no window and no
+            // drain no frame is open, and the conduit's frame is not read.
+            #[cfg(feature = "transport-batching")]
+            if !window && window_may_hold_open(windows) && batch.stage.is_open() {
+                self.flush_conduit(TxConduits::<R>::conduit_index(priority), priority, batch);
+            }
+            #[cfg(feature = "transport-batching")]
+            if window {
                 // The heap stage's helpers: under `tx-lend-only` the window's
                 // frame opens in a lent slot or the message is refused, so there
                 // is no vector to encode into and no frame prefix to write by hand.
@@ -14494,8 +14701,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send the frame open in one conduit, under that conduit's lock (`batch`): the body of
-    /// the walks of [`Self::flush_open_batch`] and [`Self::try_flush_open_batch`].
+    /// the walks of [`Self::flush_open_batch`] and [`Self::try_flush_open_batch`], and of a send
+    /// that finds a frame open it does not join. Out of line: that send is every message's, and
+    /// the frame is open there only while replies are held or a window is drained.
     #[cfg(feature = "transport-batching")]
+    #[inline(never)]
     fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
         // Lowered before the frame is taken, under the lock that keeps a control message from
         // being staged in between: whatever control message the mark stood for leaves here.
@@ -14589,15 +14799,72 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     pub fn batch_stop(&self) -> Result<(), SendWireError> {
         #[cfg(feature = "transport-batching")]
         {
-            self.tx_conduits.set_active(false);
-            if self.tx_conduits.is_auto() {
-                self.own_link().link_driver().tx_staged();
-            }
-            self.flush_open_batch();
+            self.tx_conduits.close_and_drain(WINDOW_CALLER, || {
+                if self.tx_conduits.is_auto() {
+                    self.own_link().link_driver().tx_staged();
+                }
+                self.flush_open_batch();
+            });
             Ok(())
         }
         #[cfg(not(feature = "transport-batching"))]
         Err(SendWireError::FeatureDisabled)
+    }
+
+    /// Hold the replies this face sends from now on in their conduits' open frames, until
+    /// [`Self::release_replies`]: the replies a queryable makes in its callback and the `Final`
+    /// owed after it then leave in one frame and one send, as a window of them would, where each
+    /// was a frame and a send of its own. No window opens: every message that is not a reply,
+    /// from this thread or another, is sent at once, and the frame the replies left open goes
+    /// out before it. Answers whether this call raised the hold, to be handed to the release; a
+    /// hold already raised is left to the call that raised it. Without `transport-batching`
+    /// nothing is held and this answers `false`.
+    pub fn hold_replies(&self) -> bool {
+        #[cfg(feature = "transport-batching")]
+        {
+            self.tx_conduits.set_window(WINDOW_REPLIES, true)
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        false
+    }
+
+    /// End the hold [`Self::hold_replies`] raised, when `raised`, and send what it held. Lowered
+    /// before the drain, so a reply racing the release joins no frame the drain has passed. A
+    /// window the caller or the link keeps open is theirs to drain, and the held frames, which
+    /// joined it, leave with it.
+    pub fn release_replies(&self, raised: bool) {
+        #[cfg(feature = "transport-batching")]
+        if raised {
+            self.tx_conduits.close_and_drain(WINDOW_REPLIES, || {
+                if !self.tx_conduits.caller_window_open() && !self.tx_conduits.is_auto() {
+                    self.flush_open_batch();
+                }
+            });
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = raised;
+    }
+
+    /// The conduit a reply (a `Response` or a `ResponseFinal`) is sent on: held in its open frame
+    /// while the face holds its replies ([`Self::hold_replies`]).
+    #[cfg(any(
+        feature = "codec-response-final",
+        all(
+            feature = "codec-response",
+            any(feature = "storage-profile", feature = "alloc")
+        )
+    ))]
+    fn reply_conduit(&self, priority: Priority, reliable: bool) -> Conduit {
+        #[cfg(feature = "transport-batching")]
+        {
+            Conduit {
+                priority,
+                reliable,
+                held: self.tx_conduits.replies_held(),
+            }
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        Conduit::new(priority, reliable)
     }
 
     /// Open the batching window for good, because the link's writer pulls what the conduits
@@ -14656,7 +14923,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = self.outbound_push_class(&push);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             // R2923 — every arm's congestion control comes off the message's
             // OWN ext_qos, as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
@@ -14684,7 +14951,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = crate::frame_encode::push_body(push);
         self.dispatch_network_message_at(
             stage,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             crate::declare_ext_qos::read_push_qos(push),
             // What THIS message can encode to, and not the codec's reserve hint for any message
             // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
@@ -15101,7 +15368,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = crate::stats::NetworkStatsClass::unread();
         let ended = self.dispatch_network_message_at(
             DispatchStage::Probe,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             encoded.qos(),
             size_hint(|| push.encoded_len()),
             class,
@@ -15701,10 +15968,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
-            Conduit {
-                priority: Priority::Control,
-                reliable,
-            },
+            Conduit::new(Priority::Control, reliable),
             crate::declare_ext_qos::read_declare_qos(declare),
             len,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
@@ -15741,10 +16005,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_declare_lent(&self, what: &LentDeclaration<'_>) -> Result<(), SendWireError> {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit {
-                priority: Priority::Control,
-                reliable: true,
-            },
+            Conduit::new(Priority::Control, true),
             crate::declare_ext_qos::QOS_DECLARE,
             size_hint(|| what.encoded_len()),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -15795,10 +16056,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
-            Conduit {
-                priority: Priority::Control,
-                reliable,
-            },
+            Conduit::new(Priority::Control, reliable),
             crate::declare_ext_qos::read_oam_qos(oam),
             len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
@@ -15845,10 +16103,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = size_hint(|| wz_codecs::request::RequestWire::measure(request).len());
         let ended = self.dispatch_network_message_at(
             stage,
-            Conduit {
-                priority: qos.priority(),
-                reliable,
-            },
+            Conduit::new(qos.priority(), reliable),
             qos,
             len,
             class,
@@ -15906,10 +16161,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = size_hint(|| wz_codecs::response::ResponseWire::measure(response).len());
         let ended = self.dispatch_network_message_at(
             stage,
-            Conduit {
-                priority: qos.priority(),
-                reliable,
-            },
+            self.reply_conduit(qos.priority(), reliable),
             qos,
             len,
             class,
@@ -15962,10 +16214,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         self.dispatch_network_message_at(
             stage,
-            Conduit {
-                priority: qos.priority(),
-                reliable,
-            },
+            self.reply_conduit(qos.priority(), reliable),
             qos,
             len,
             // A pure correlation marker — no key expression and no payload, so
@@ -16017,10 +16266,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
-            Conduit {
-                priority: Priority::Control,
-                reliable,
-            },
+            Conduit::new(Priority::Control, reliable),
             crate::declare_ext_qos::read_interest_qos(interest),
             len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
@@ -16046,10 +16292,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit {
-                priority: Priority::Control,
-                reliable: true,
-            },
+            Conduit::new(Priority::Control, true),
             qos,
             size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body))),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
@@ -16319,7 +16562,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         let sent = self.dispatch_network_message_at(
             stage,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             qos,
             size,
             class,
@@ -16457,7 +16700,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let size = size_hint(|| crate::tx_buf::encoded_len(encode));
             let sent = self.dispatch_network_message_at(
                 stage,
-                Conduit { priority, reliable },
+                Conduit::new(priority, reliable),
                 qos,
                 size,
                 crate::stats::NetworkStatsClass::unread(),
@@ -16558,7 +16801,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let class = crate::stats::NetworkStatsClass::unread();
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit { priority, reliable },
+                Conduit::new(priority, reliable),
                 // A Put built here carries no extension, so no `ext_qos`: the
                 // default QoS, which `read_push_qos` answers for the same message.
                 crate::sample::QosLevel::DEFAULT,
@@ -16782,10 +17025,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit {
-                    priority: Priority::DEFAULT,
-                    reliable,
-                },
+                Conduit::new(Priority::DEFAULT, reliable),
                 crate::sample::QosLevel::DEFAULT,
                 size_hint(|| crate::lent_push::literal_del_len(keyexpr_suffix)),
                 crate::stats::NetworkStatsClass::unread(),
@@ -18885,10 +19125,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit {
-                priority: qos.priority(),
-                reliable: true,
-            },
+            Conduit::new(qos.priority(), true),
             qos,
             size,
             crate::stats::NetworkStatsClass::unread(),
@@ -18992,10 +19229,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    Conduit {
-                        priority: qos.priority(),
-                        reliable: true,
-                    },
+                    self.reply_conduit(qos.priority(), true),
                     qos,
                     len,
                     crate::stats::NetworkStatsClass::control(
@@ -21358,6 +21592,131 @@ mod sender_inside_tests {
             assert!(flag.get(), "raised inside");
         }
         assert!(!flag.get(), "lowered once it leaves");
+    }
+}
+
+#[cfg(all(test, feature = "transport-batching"))]
+mod window_word_tests {
+    use super::{close_and_drain, set_window, WINDOW_CALLER, WINDOW_DRAINING, WINDOW_REPLIES};
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    /// A window opens once and closes once, and the others stand as they were: of two that open it
+    /// at once one is told it did, so a hold is let go of by the one that raised it. Turned red by
+    /// a change that answers it changed the bit when it was already so, or one that writes over
+    /// another bit.
+    #[test]
+    fn a_window_opens_and_closes_once_beside_the_others() {
+        let word = AtomicU64::new(WINDOW_CALLER);
+        assert!(set_window(&word, WINDOW_REPLIES, true), "opened");
+        assert!(!set_window(&word, WINDOW_REPLIES, true), "open already");
+        assert_eq!(word.load(Ordering::SeqCst), WINDOW_CALLER | WINDOW_REPLIES);
+        assert!(set_window(&word, WINDOW_REPLIES, false), "closed");
+        assert!(!set_window(&word, WINDOW_REPLIES, false), "closed already");
+        assert_eq!(
+            word.load(Ordering::SeqCst),
+            WINDOW_CALLER,
+            "the caller's window stands"
+        );
+    }
+
+    /// While a closed window is drained, the word reads the window closed and a drain under way,
+    /// so a message joining no window still finds a frame may be open; once the drain ends the word
+    /// reads nothing open. Turned red by a close that does not count its drain, or a drain that is
+    /// never taken off the count.
+    #[test]
+    fn a_drain_is_counted_from_the_close_to_its_end() {
+        let word = AtomicU64::new(WINDOW_REPLIES);
+        let during = core::cell::Cell::new(0);
+        close_and_drain(&word, WINDOW_REPLIES, || {
+            during.set(word.load(Ordering::SeqCst));
+        });
+        assert_eq!(
+            during.get(),
+            WINDOW_DRAINING,
+            "closed, with its drain counted"
+        );
+        assert_eq!(word.load(Ordering::SeqCst), 0, "nothing open once drained");
+    }
+
+    /// Two drains under way at once are two counts, and the first to end leaves the second's: a
+    /// frame the second has not reached is still sent first. Turned red by a count of one bit.
+    #[test]
+    fn two_drains_under_way_are_counted_apart() {
+        let word = AtomicU64::new(WINDOW_CALLER | WINDOW_REPLIES);
+        let inner = core::cell::Cell::new(0);
+        close_and_drain(&word, WINDOW_CALLER, || {
+            close_and_drain(&word, WINDOW_REPLIES, || {
+                inner.set(word.load(Ordering::SeqCst));
+            });
+        });
+        assert_eq!(inner.get(), 2 * WINDOW_DRAINING, "both drains counted");
+        assert_eq!(word.load(Ordering::SeqCst), 0);
+    }
+
+    /// The word of a runtime of one task, a cell, opens, closes and counts as the atomic one does.
+    #[test]
+    fn a_cell_word_keeps_its_windows_as_the_atomic_one() {
+        let word = core::cell::Cell::new(0u64);
+        assert!(set_window(&word, WINDOW_CALLER, true));
+        let during = core::cell::Cell::new(0);
+        close_and_drain(&word, WINDOW_CALLER, || during.set(word.get()));
+        assert_eq!(during.get(), WINDOW_DRAINING);
+        assert_eq!(word.get(), 0);
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "transport-batching",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+mod window_join_tests {
+    use super::{
+        window_joins, window_may_hold_open, WINDOW_CALLER, WINDOW_DRAINING, WINDOW_LINK,
+        WINDOW_REPLIES,
+    };
+
+    /// Every message joins the caller's and the link's window; the hold of the replies is joined
+    /// by a reply alone; with nothing open nothing joins. Turned red by a hold that a message which
+    /// is not a reply joins, or a window a message does not join.
+    #[test]
+    fn a_message_joins_the_windows_it_belongs_to() {
+        for open in [WINDOW_CALLER, WINDOW_LINK] {
+            assert!(window_joins(open, false), "any message joins {open}");
+            assert!(window_joins(open, true), "a reply joins {open}");
+        }
+        assert!(window_joins(WINDOW_REPLIES, true), "a reply joins the hold");
+        assert!(
+            !window_joins(WINDOW_REPLIES, false),
+            "what is not a reply does not"
+        );
+        assert!(!window_joins(0, true), "nothing open, nothing joined");
+        assert!(
+            !window_joins(WINDOW_DRAINING, true),
+            "a drain is no window to join"
+        );
+    }
+
+    /// A frame may be open while any window is or a drain is under way, and only then: with the
+    /// word clear a message reads no conduit's frame. Turned red by a word that reads clear with a
+    /// drain under way.
+    #[test]
+    fn a_frame_may_be_open_only_while_a_window_or_a_drain_is() {
+        assert!(!window_may_hold_open(0), "nothing open");
+        for word in [WINDOW_CALLER, WINDOW_LINK, WINDOW_REPLIES, WINDOW_DRAINING] {
+            assert!(window_may_hold_open(word), "{word} may leave a frame open");
+        }
     }
 }
 

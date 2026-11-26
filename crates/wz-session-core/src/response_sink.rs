@@ -98,6 +98,20 @@ pub trait ResponseSink {
     fn end_burst(&self, opened: bool) {
         let _ = opened;
     }
+
+    /// Hold the replies and the `Final` sent through this sink from now on in their open frames,
+    /// until [`Self::release_replies`], and say whether this call raised the hold. Unlike a burst
+    /// it opens no window: a message that is not a reply leaves at once. An answer that holds them
+    /// from its first reply to its `Final` leaves in one send where each reply was one of its own.
+    /// The provided form holds nothing, which is right for a sink that cannot coalesce.
+    fn hold_replies(&self) -> bool {
+        false
+    }
+
+    /// End the hold [`Self::hold_replies`] raised, when `raised`, and send what it held.
+    fn release_replies(&self, raised: bool) {
+        let _ = raised;
+    }
 }
 
 /// A sink handed a `Response` already built as the owned record: a reply a
@@ -280,6 +294,12 @@ impl<S: ResponseSink + ?Sized> ResponseSink for &S {
     fn end_burst(&self, opened: bool) {
         (**self).end_burst(opened)
     }
+    fn hold_replies(&self) -> bool {
+        (**self).hold_replies()
+    }
+    fn release_replies(&self, raised: bool) {
+        (**self).release_replies(raised)
+    }
 }
 
 impl<S: DeclareReplySink + ?Sized> DeclareReplySink for &S {
@@ -348,6 +368,12 @@ impl<S: ResponseSink + ?Sized> ResponseSink for alloc::sync::Arc<S> {
     fn end_burst(&self, opened: bool) {
         (**self).end_burst(opened)
     }
+    fn hold_replies(&self) -> bool {
+        (**self).hold_replies()
+    }
+    fn release_replies(&self, raised: bool) {
+        (**self).release_replies(raised)
+    }
 }
 
 #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
@@ -385,5 +411,42 @@ impl<S: LivelinessGetPrune + ?Sized> LivelinessGetPrune for alloc::sync::Arc<S> 
     #[cfg(feature = "liveliness-get")]
     fn prune_liveliness_get_interest(&self, interest_id: u64) {
         (**self).prune_liveliness_get_interest(interest_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ResponseSink;
+
+    /// A sink that writes what it is handed and coalesces nothing, as the group's reply sink.
+    struct Plain;
+
+    impl ResponseSink for Plain {
+        #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
+        fn send_reply_parts(&self, _parts: crate::reply_stage::ReplyParts<'_>) {}
+
+        #[cfg(feature = "codec-response-final")]
+        fn send_response_final(
+            &self,
+            _request_id: crate::wire_id::RequestId,
+            _qos: crate::sample::QosLevel,
+        ) {
+        }
+    }
+
+    /// The provided hold raises nothing, through the sink and through a reference to it, so the
+    /// answer of a sink that cannot coalesce releases nothing either. Turned red by a provided
+    /// form, or a forward of the reference, that answers it raised a hold.
+    #[test]
+    fn a_sink_that_cannot_coalesce_raises_no_hold() {
+        let sink = Plain;
+        assert!(!sink.hold_replies(), "the provided form holds nothing");
+        let route: &dyn ResponseSink = &sink;
+        let by_reference = &route;
+        assert!(
+            !by_reference.hold_replies(),
+            "the reference forwards to the sink"
+        );
+        by_reference.release_replies(false);
     }
 }
