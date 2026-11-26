@@ -41,7 +41,10 @@
 //! it has propagated what it holds to it
 //! (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`), and a zenoh peer's
 //! open waits for it. It goes out once, in the turn that tells the last owed declaration, so a
-//! paced replay sends it only after its last turn and a replay given up on sends none.
+//! paced replay sends it only after its last turn and a replay given up on sends none. The Final
+//! answers the Interest the peer hat acts as if the new face had sent, so it is part of the
+//! answering end of an Interest (`interest-answer`): a build without it, a client that only
+//! dials, answers none and owes no face the Final, whatever its config says.
 
 use super::CoopLinks;
 use super::LinkActions;
@@ -49,10 +52,13 @@ use super::LinkActions;
 use wz_runtime_coop::faces::LendsSession;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::ClockSource;
+#[cfg(feature = "interest-answer")]
 use wz_session_core::extbound::INITIAL_INTEREST_ID;
 use wz_session_core::link_life::LinkPhase;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
+// The trait of the one send that reads it, the initial interest's Final.
+#[cfg(feature = "interest-answer")]
 use wz_session_core::response_sink::DeclareReplySink;
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
@@ -127,6 +133,7 @@ pub(super) struct Replay {
     /// Whether the peer is owed the `DeclareFinal` of the initial interest once it has been told
     /// everything: set when the link comes up, taken by the turn that finishes the replay, and
     /// gone with the link. A replay begun again over the same link (a redeclaration) keeps it.
+    #[cfg(feature = "interest-answer")]
     initial_final: bool,
 }
 
@@ -138,12 +145,14 @@ impl Replay {
             next_turn_ms: 0,
             last_progress_ms: 0,
             lap_owed: false,
+            #[cfg(feature = "interest-answer")]
             initial_final: false,
         }
     }
 
     /// The link has just come up: whether its peer is owed the `DeclareFinal` of the initial
     /// interest after its replay.
+    #[cfg(feature = "interest-answer")]
     fn owe_initial_final(&mut self, owed: bool) {
         self.initial_final = owed;
     }
@@ -151,6 +160,7 @@ impl Replay {
     /// Whether a turn that ended as `end` is the one to send the owed `DeclareFinal` of the
     /// initial interest: one that kept the link and left nothing more owed. Taken once; a turn
     /// that ends the link drops it, the next link being owed its own.
+    #[cfg(feature = "interest-answer")]
     fn take_initial_final(&mut self, end: TurnEnd) -> bool {
         let due = match end {
             TurnEnd::Kept => self.initial_final && self.finished(),
@@ -217,7 +227,10 @@ impl Replay {
     pub(super) fn discard(&mut self) {
         self.cursor = ReplayCursor::idle();
         self.lap_owed = false;
-        self.initial_final = false;
+        #[cfg(feature = "interest-answer")]
+        {
+            self.initial_final = false;
+        }
     }
 
     /// Whether the peer has been told everything the session owes it: always, in a build that
@@ -354,6 +367,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// everything when the session's config ends a push so and the two meet as the peer hat's
     /// two north-bound peers. A client, a router and a remote whose role never arrived are owed
     /// none.
+    #[cfg(feature = "interest-answer")]
     pub(super) fn owe_link_initial_final(&mut self, at: usize, peer_hat: Option<bool>) {
         let owed = self.config.initial_interest && peer_hat == Some(true);
         if let Some(face) = self.transport.links.face_mut(at) {
@@ -368,6 +382,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// link, as it left it. The Final is written as an answer to an interest is, from its parts
     /// into the slot the link lends where the build lends one, so a session with no heap frame
     /// sends it too. A Final with no wire to go through stays owed.
+    #[cfg(feature = "interest-answer")]
     fn end_initial_interest(
         &mut self,
         at: usize,
@@ -398,6 +413,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 face.replay.owe_initial_final(true);
             }
         }
+        end
+    }
+
+    /// The end of a turn in a build that answers no Interest, whose links are owed no Final: what
+    /// the turn leaves of the link, as it left it.
+    #[cfg(not(feature = "interest-answer"))]
+    fn end_initial_interest(&self, _at: usize, end: TurnEnd, _tx: super::LinkTx<'_, C>) -> TurnEnd {
         end
     }
 
@@ -945,6 +967,7 @@ mod tests {
     /// The Final of the initial interest is taken by the turn that finishes the replay and by no
     /// other: not while a declaration is still owed, once when none is, and not again by a replay
     /// begun anew over the same link. Turned red by a Final taken before the last turn, or twice.
+    #[cfg(feature = "interest-answer")]
     #[test]
     fn the_initial_final_is_taken_once_by_the_turn_that_finishes_the_replay() {
         let mut replay = Replay::idle();
@@ -980,6 +1003,7 @@ mod tests {
     /// owed its own, from its own coming up. The CONTROL is a link that comes up owing none, which
     /// is sent none, beside one that owes it. Turned red by a Final sent over a link whose replay
     /// was given up on, or carried to the next link.
+    #[cfg(feature = "interest-answer")]
     #[test]
     fn a_link_that_ends_drops_the_owed_initial_final() {
         let mut replay = Replay::idle();

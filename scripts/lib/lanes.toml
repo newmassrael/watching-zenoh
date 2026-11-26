@@ -76,12 +76,16 @@ reason = "its hosted job (gate-provenance) provisions what it runs against on th
 id = "C0mut"
 fn = "layer_c0mut_verdict_legs"
 class = "D"
+# verdict_leg_mutation.py tests the members of crates/ each recipe names, in crates/.
+packages = ["crates:*"]
 
 [[lane]]
 id = "Cmut"
 fn = "layer_cmut_code_mutation"
 class = "E"
 reason = "it runs the machine's cargo-mutants (the pin of bx.toml), which the key does not hold"
+# cargo-mutants mutates and tests the members of crates/ that deploy/mutation_ratchet.json scopes.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C0i"
@@ -348,6 +352,9 @@ id = "C1bn"
 fn = "layer_c1bn_passive_dissection_features"
 class = "E"
 reason = "it arms an oracle the machine provides (a WZ_*_REQUIRE), which the key does not hold"
+# feature_gate_diagnostic.py builds probe crates that depend on members of crates/ by path, offline
+# from the workspace lock.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1bnl"
@@ -371,6 +378,8 @@ reason = "it runs nm, which the machine provides and the key does not hold"
 id = "C1so"
 fn = "layer_c1so_cdylib_soname"
 class = "D"
+# cdylib_soname_gate.py builds every cdylib member of crates/ that cargo metadata lists.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1st"
@@ -386,6 +395,9 @@ id = "C1sp"
 fn = "layer_c1sp_cross_platforms"
 class = "E"
 reason = "its hosted job (capi-c-arms) provisions what it runs against on the machine, which the key does not hold"
+# wz_package.py builds the artifacts each platform plan names, capi-pico, capi-c, ap-demo and
+# declared-node, whose packages (deploy/wz-config.toml) are these.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-c", "crates:wz-capi-pico-lib", "deploy/host-slot-node:host-slot-node"]
 
 [[lane]]
 id = "C1bt"
@@ -431,6 +443,8 @@ packages = ["crates:*"]
 id = "C1bzr"
 fn = "layer_c1bzr_reduced_docs_resolve"
 class = "D"
+# reduced_docs_gate.py documents members of crates/ under the feature sets doc_feature_sets.py reads.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1w"
@@ -536,11 +550,16 @@ reason = "it runs nm, which the machine provides and the key does not hold"
 id = "C1cf"
 fn = "layer_c1cf_reduced_features"
 class = "D"
+# reduced_points_gate.py clippies members of crates/ under their reduced feature sets.
+packages = ["crates:*"]
 
 [[lane]]
 id = "C1cs"
 fn = "layer_c1cs_capability_cost"
 class = "D"
+# capability_cost_gate.py builds the C library of each case, the artifact crate of wz-capi-pico
+# and wz-capi-c itself (`artifact_package`).
+packages = ["crates:wz-capi-c", "crates:wz-capi-pico-lib"]
 
 [[lane]]
 id = "Z8"
@@ -786,6 +805,8 @@ id = "C1ob"
 fn = "layer_c1ob_offline_build_entry"
 class = "E"
 reason = "it builds in a bwrap sandbox with the machine's C toolchain and libclang, which the key does not hold"
+# offline_build.py builds the bundles of deploy/offline-build.json, whose packages are these.
+packages = ["crates:wz-ap-demo", "crates:wz-capi-c", "crates:wz-capi-dissect", "crates:wz-capi-replay"]
 
 [[lane]]
 id = "Ewirez"
@@ -1030,6 +1051,8 @@ class = "D"
 id = "Fz"
 fn = "layer_fz_fuzz_regress"
 class = "D"
+# fuzz.sh builds the packages of the fuzz workspace that fuzz_seeds.py maps its targets to.
+packages = ["crates/wz-fuzz:*"]
 
 [[lane]]
 id = "Vcov"
@@ -1080,6 +1103,9 @@ id = "Qa"
 fn = "layer_qa_mcu_admin_node_vs_zenohd"
 class = "E"
 reason = "it builds with the machine's ARM toolchain, boots under its qemu and talks to its zenohd, none of which the key holds"
+# Each firmware build of deploy/offline-build.json is a binary of deploy/mcu-admin-node, run as
+# the argv offline_build.py prints.
+packages = ["deploy/mcu-admin-node:mcu-admin-node"]
 
 [[lane]]
 id = "Qz"
@@ -1117,12 +1143,17 @@ fn = "layer_m_scouting_multicast"
 class = "S"
 reason = "it reads the host's multicast interfaces, socket buffers and scheduling"
 nondet = ["interfaces", "host-buffers", "scheduler"]
+# wz_package.py builds the declared-node artifact, the binary of deploy/host-slot-node.
+packages = ["deploy/host-slot-node:host-slot-node"]
 
 [[lane]]
 id = "Z"
 fn = "layer_z_zenohd_interop"
 class = "E"
 reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+# platform_surface_matrix.py and rust_api_surface.py build members of crates/, wz_package.py the
+# declared-node artifact of deploy/host-slot-node.
+packages = ["crates:*", "deploy/host-slot-node:host-slot-node"]
 
 [[lane]]
 id = "E5z"

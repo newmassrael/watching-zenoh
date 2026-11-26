@@ -88,8 +88,16 @@ and the script parses its command line once with argparse, the body of an `if ar
 `store_true` option no such line passes is left out (`call_modes`, `py_options`, `_py_reached`):
 every lane's `run_layer` runs `lane_decline_read.py --read`, and only Layer C0 runs its `--audit`,
 which reads the whole dispatch script. A call site that may pass more than its words show (a variable
-where an option could stand, the script named outside a command), a script imported or spawned by
-another, or one that could set an option some other way is read in every mode.
+where an option could stand, the script named outside a command), a script spawned by another, or
+one that could set an option some other way is read in every mode.
+
+A module a python script imports is not run: what it reads is what importing it runs and what its
+importers call (`_lib_reached`): its top-level statements but its `__main__` guard's body, and the
+definitions its importers use (`mod.name`, `from mod import name`) and those name, transitively.
+So a config reader whose selftest imports a builder lends a lane that calls the reader none of the
+builder's cargo calls. A module whose use is not read (the module passed as a value, `import *`,
+`import_module`) or that can reach a definition by a name no code spells (`globals()`,
+`sys.modules`, `eval`, a module `__getattr__`, running itself) is read whole.
 
 ## Comparing two trees
 
@@ -108,8 +116,11 @@ A lane is opaque when its inputs cannot be read off its commands: a cargo call w
 computed (`-p "$pkg"`) or depends on a directory the reader cannot see, a script that spawns a
 cargo build itself, or a lane that runs another lane (`run-ci.sh --layer`); unless its entry
 declares the `packages` or `legs` it builds. A `-p "$x"` whose `x` is the variable of a `for`
-over literal words names those words. A cargo call that reads the package graph and builds nothing
-(`cargo metadata`, `cargo tree`, from the shell or from a script's argv list) is not opaque: it
+over literal words names those words, and so does one whose `x` the text binds only to literal
+words (`x=wz-a`); a word of a script's argv list that is a name its module binds once to a
+string (`PACKAGE = "wz-a"`) is that string. A cargo call that reads the package graph and
+builds nothing (`cargo metadata`, `cargo tree`, `cargo vendor`, from the shell or from a
+script's argv list) is not opaque: it
 reads what `lane_graph.manifest_inputs` lists, the manifests and locks of the tree and what
 decides the targets cargo discovers. An opaque lane's inputs are the WHOLE tree, so its digest is still
 sound (an equal digest is an equal tree) and moves on every change: it is always selected. The record
@@ -560,12 +571,14 @@ _ROOT_VARS = re.compile(r"^(?:\$\{?(?:ROOT|REPO|repo|root|PWD|REPO_ROOT|repo_roo
 
 
 class Named(NamedTuple):
-    """What a text names: scripts it runs or imports, data files it reads, directories, gitlinks."""
+    """What a text names: scripts it runs or imports, data files it reads, directories, gitlinks,
+    and the modules a python text imports with the names of each it uses (None: every one)."""
 
     scripts: set[str]
     files: set[str]
     dirs: set[str]
     links: set[str]
+    imported: dict[str, frozenset[str] | None]
 
 
 # A python line that starts a program: what it names with a script's suffix is run, not read.
@@ -596,32 +609,50 @@ class PyRefs(NamedTuple):
     cargo: list[tuple[str, tuple[str, ...] | None]]
     #: an argv list naming run-ci.sh and --layer
     runs_lane: bool
+    #: for each module in `imports`, the top-level names of it the code uses (`mod.name`,
+    #: `from mod import name`), or None when a use cannot be read: the module bound and used as a
+    #: value, `from mod import *`, a dotted import, `import_module`
+    uses: dict[str, frozenset[str] | None]
 
 
 #: Cargo subcommands that read the package graph and build nothing: their inputs are
-#: `lane_graph.manifest_inputs`, not the closure of a package.
-CARGO_READS = frozenset({"metadata", "tree", "locate-project", "pkgid", "verify-project", "read-manifest"})
+#: `lane_graph.manifest_inputs`, not the closure of a package. `vendor` copies the sources the
+#: lock names out of the registry and compiles none of the tree's.
+CARGO_READS = frozenset({"metadata", "tree", "locate-project", "pkgid", "verify-project", "read-manifest",
+                         "vendor"})
 #: Cargo words that ask cargo about itself and read nothing of the tree (env holds `cargo -V`).
 CARGO_ASKS = frozenset({"-V", "--version", "version", "-vV", "--list"})
 
 
-def _cargo_argv(elts: list[ast.expr]) -> tuple[str, tuple[str, ...] | None] | None:
+def _word(e: ast.expr, consts: dict[str, str]) -> str | None:
+    """The word an argv element spells: a string literal, or a name the module binds once to one
+    (`_module_constants`); None for anything computed."""
+    if isinstance(e, ast.Constant) and isinstance(e.value, str):
+        return e.value
+    if isinstance(e, ast.Name) and e.id in consts:
+        return consts[e.id]
+    return None
+
+
+def _cargo_argv(elts: list[ast.expr],
+                consts: dict[str, str] | None = None) -> tuple[str, tuple[str, ...] | None] | None:
     """(the subcommand, the words after "cargo" when all are constants) of an argv list whose
-    first constant word is "cargo", or None for any other list. The subcommand is "?" when the
-    word that holds it is not a constant; a toolchain word (`"+stable"`, `f"+{channel}"`) before
-    it is skipped, as cargo skips it."""
+    first string literal is "cargo", or None for any other list. A word after it is a constant
+    when it is a string literal or a name of `consts`. The subcommand is "?" when the word that
+    holds it is not a constant; a toolchain word (`"+stable"`, `f"+{channel}"`) before it is
+    skipped, as cargo skips it."""
     first = next((i for i, e in enumerate(elts) if isinstance(e, ast.Constant) and isinstance(e.value, str)), None)
     if first is None or elts[first].value != "cargo":
         return None
-    rest = elts[first + 1:]
-    words = tuple(e.value for e in rest if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    rest = [_word(e, consts or {}) for e in elts[first + 1:]]
+    words = tuple(w for w in rest if w is not None)
     constant = first == 0 and len(words) == len(rest)
     sub = "?"
-    for e in rest:
-        if isinstance(e, ast.Constant) and isinstance(e.value, str):
-            if e.value.startswith("+"):
+    for e, w in zip(elts[first + 1:], rest):
+        if w is not None:
+            if w.startswith("+"):
                 continue
-            sub = e.value
+            sub = w
         elif (isinstance(e, ast.JoinedStr) and e.values and isinstance(e.values[0], ast.Constant)
                 and str(e.values[0].value).startswith("+")):
             continue
@@ -629,27 +660,158 @@ def _cargo_argv(elts: list[ast.expr]) -> tuple[str, tuple[str, ...] | None] | No
     return sub, (words if constant else None)
 
 
+#: Calls that reach a top-level definition by a name no code spells.
+_DYNAMIC_CALLS = frozenset({"globals", "vars", "eval", "exec", "__import__"})
+
+
+def _dynamic(node: ast.AST) -> bool:
+    """Whether a node can reach a module's definitions by a computed name: a call of
+    `_DYNAMIC_CALLS`, `sys.modules` or a `__dict__`."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+        return node.func.id in _DYNAMIC_CALLS
+    if isinstance(node, ast.Attribute):
+        return node.attr == "__dict__" or (node.attr == "modules" and isinstance(node.value, ast.Name)
+                                           and node.value.id == "sys")
+    return False
+
+
+def _bound_names(node: ast.AST) -> list[str]:
+    """The names a node binds: an assignment's, a parameter's, an import's, a definition's, a
+    `global`'s, an `except ... as`'s, a pattern's."""
+    if isinstance(node, ast.Name):
+        return [] if isinstance(node.ctx, ast.Load) else [node.id]
+    if isinstance(node, ast.arg):
+        return [node.arg]
+    if isinstance(node, ast.alias):
+        return [(node.asname or node.name).split(".")[0]]
+    if isinstance(node, (ast.Global, ast.Nonlocal)):
+        return list(node.names)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, ast.ExceptHandler):
+        return [node.name] if node.name else []
+    name = getattr(node, "name", None) if type(node).__name__ in ("MatchAs", "MatchStar") else None
+    rest = getattr(node, "rest", None) if type(node).__name__ == "MatchMapping" else None
+    return [n for n in (name, rest) if isinstance(n, str)]
+
+
+def _module_constants(module: ast.Module) -> dict[str, str]:
+    """The names a module binds exactly once, by a top-level assignment of a string literal
+    (`PACKAGE = "wz-x"`), with their strings; an argv list that names one spells that word. A
+    module that reaches a definition by a computed name (`_dynamic`) has none."""
+    once: dict[str, str] = {}
+    for stmt in module.body:
+        target = (stmt.targets[0] if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1
+                  else stmt.target if isinstance(stmt, ast.AnnAssign) else None)
+        value = stmt.value if isinstance(stmt, (ast.Assign, ast.AnnAssign)) else None
+        if isinstance(target, ast.Name) and isinstance(value, ast.Constant) and isinstance(value.value, str):
+            once[target.id] = value.value
+    bindings: dict[str, int] = {}
+    for node in ast.walk(module):
+        if _dynamic(node):
+            return {}
+        for name in _bound_names(node):
+            bindings[name] = bindings.get(name, 0) + 1
+    return {name: value for name, value in once.items() if bindings.get(name) == 1}
+
+
+def _is_main_guard(stmt: ast.stmt) -> bool:
+    """`if __name__ == "__main__":`, whose body an import does not run."""
+    test = stmt.test if isinstance(stmt, ast.If) else None
+    return (isinstance(test, ast.Compare) and isinstance(test.left, ast.Name) and test.left.id == "__name__"
+            and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq) and len(test.comparators) == 1
+            and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value == "__main__")
+
+
+def _lib_reached(module: ast.Module, used: frozenset[str], lines: list[str]) -> list[ast.AST] | None:
+    """The nodes importing the module runs when its importers use its top-level names `used`,
+    parents before their children: its top-level statements but the body of its `__main__`
+    guard, what loading it evaluates of its definitions (decorators, defaults, base classes, a
+    class's own statements), the body of every decorated function (the decorator may keep it),
+    and the body of every top-level definition `used` or a reached node names, transitively.
+    None, the whole text, when the module defines `__getattr__`, or a reached node reaches a
+    definition by a computed name (`_dynamic`) or starts the module as a program (`__file__`
+    on a line that starts one)."""
+    defs: dict[str, list[ast.stmt]] = {}
+    for stmt in module.body:
+        if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            defs.setdefault(stmt.name, []).append(stmt)
+    if "__getattr__" in defs:
+        return None
+    roots: list[ast.AST] = []
+    named: set[str] = set()
+
+    def enter(name: str) -> None:
+        if name not in defs or name in named:
+            return
+        named.add(name)
+        for d in defs[name]:
+            if isinstance(d, ast.ClassDef):
+                roots.extend(s for s in d.body if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)))
+            else:
+                roots.extend(d.body)
+
+    for stmt in module.body:
+        if isinstance(stmt, ast.ClassDef):
+            roots.extend([*stmt.decorator_list, *stmt.bases, *(k.value for k in stmt.keywords)])
+            roots.extend(s for s in stmt.body if not isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        elif isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            roots.extend([*stmt.decorator_list, *stmt.args.defaults, *(d for d in stmt.args.kw_defaults if d)])
+            if stmt.decorator_list:
+                enter(stmt.name)
+        elif _is_main_guard(stmt):
+            roots.append(stmt.test)
+            roots.extend(stmt.orelse)
+        else:
+            roots.append(stmt)
+    for name in sorted(used):
+        enter(name)
+    out: list[ast.AST] = []
+    while roots:
+        node = roots.pop()
+        out.append(node)
+        if _dynamic(node):
+            return None
+        if isinstance(node, ast.Name):
+            n = getattr(node, "lineno", 0)
+            if node.id == "__file__" and 0 < n <= len(lines) and _PY_SPAWN.search(lines[n - 1]):
+                return None
+            enter(node.id)
+        roots.extend(ast.iter_child_nodes(node))
+    return out
+
+
 @functools.lru_cache(maxsize=None)
-def python_refs(text: str, given: frozenset[str] | None = None) -> PyRefs | None:
+def python_refs(text: str, given: frozenset[str] | None = None,
+                used: frozenset[str] | None = None) -> PyRefs | None:
     """What a python text names, read by its syntax: a docstring, a bare string statement and a
     comment are no reference. None when the text does not parse. With `given`, the dests of the
     `store_true` options its call sites pass (`call_modes`), only the code a run with those
-    options reaches (`_py_reached`), or the whole text when that cannot be read off it."""
+    options reaches (`_py_reached`), or the whole text when that cannot be read off it. With
+    `used`, the text is a module imported and not run, and its importers use these of its
+    top-level names: only the code importing it reaches (`_lib_reached`), or the whole text when
+    that cannot be read off it (`given` is then not read)."""
     try:
         module = ast.parse(text)
     except (SyntaxError, ValueError):
         return None
+    lines = text.splitlines()
     reached = None
-    if given is not None:
+    if used is not None:
+        reached = _lib_reached(module, used, lines)
+    elif given is not None:
         opts = py_options(text)
         reached = _py_reached(module, opts, given) if opts is not None else None
-    lines = text.splitlines()
+    consts = _module_constants(module)
     bare: set[int] = set()
     consumed: set[int] = set()
     imports: list[str] = []
     found: list[tuple[str, bool]] = []
     cargo: list[tuple[str, tuple[str, ...] | None]] = []
     runs_lane = False
+    # The names an import binds to a module, and what of each module the code uses.
+    bound: dict[str, set[str]] = {}
+    uses: dict[str, set[str] | None] = {}
     for node in ast.walk(module):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
             bare.add(id(node.value))
@@ -658,23 +820,42 @@ def python_refs(text: str, given: frozenset[str] | None = None) -> PyRefs | None
         n = getattr(node, "lineno", 0)
         return 0 < n <= len(lines) and bool(_PY_SPAWN.search(lines[n - 1]))
 
-    for node in ast.walk(module) if reached is None else reached:
+    def use(mod: str, names: set[str] | None) -> None:
+        before = uses.setdefault(mod, set())
+        if names is None or before is None:
+            uses[mod] = None
+        else:
+            before.update(names)
+
+    nodes = list(ast.walk(module)) if reached is None else reached
+    for node in nodes:
         if isinstance(node, (ast.List, ast.Tuple)):
             words = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-            argv = _cargo_argv(node.elts)
+            argv = _cargo_argv(node.elts, consts)
             if argv is not None:
                 cargo.append(argv)
             runs_lane = runs_lane or (any(w.endswith("run-ci.sh") for w in words) and "--layer" in words)
         if isinstance(node, ast.Import):
-            imports.extend(alias.name.split(".")[0] for alias in node.names)
+            for alias in node.names:
+                mod = alias.name.split(".")[0]
+                imports.append(mod)
+                if "." in alias.name:
+                    use(mod, None)
+                else:
+                    bound.setdefault(alias.asname or mod, set()).add(mod)
+                    use(mod, set())
         elif isinstance(node, ast.ImportFrom):
             if node.module and not node.level:
-                imports.append(node.module.split(".")[0])
+                mod = node.module.split(".")[0]
+                imports.append(mod)
+                star = "." in node.module or any(alias.name == "*" for alias in node.names)
+                use(mod, None if star else {alias.name for alias in node.names})
         elif isinstance(node, ast.Call):
             name = getattr(node.func, "attr", None) or getattr(node.func, "id", None)
             first = node.args[0] if node.args else None
             if name == "import_module" and isinstance(first, ast.Constant) and isinstance(first.value, str):
                 imports.append(first.value.split(".")[0])
+                use(first.value.split(".")[0], None)
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) and id(node) not in consumed:
             segs = _div_segments(node, consumed)
             if segs:
@@ -684,7 +865,18 @@ def python_refs(text: str, given: frozenset[str] | None = None) -> PyRefs | None
                 found.append((tok, runs(node)))
             for name in _SIBLING.findall(node.value):
                 found.append((name, runs(node)))
-    return PyRefs(imports, found, cargo, runs_lane)
+    # A module's name read as `mod.name` uses that name; read any other way (passed, compared,
+    # rebound) it is a value whose use is not read.
+    attr_bases = {id(n.value) for n in nodes if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)}
+    for node in nodes:
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in bound:
+            for mod in bound[node.value.id]:
+                use(mod, {node.attr})
+        elif isinstance(node, ast.Name) and node.id in bound and id(node) not in attr_bases:
+            for mod in bound[node.id]:
+                use(mod, None)
+    return PyRefs(imports, found, cargo, runs_lane,
+                  {mod: (None if names is None else frozenset(names)) for mod, names in uses.items()})
 
 
 # -- a python script's modes -----------------------------------------------------------------------
@@ -906,30 +1098,33 @@ def call_modes(text: str, path: str, opts: PyOptions | None) -> frozenset[str] |
 
 
 def names_in(text: str, base: str, tree, dirs: set[str], kind: str,
-             given: frozenset[str] | None = None) -> Named:
+             given: frozenset[str] | None = None, used: frozenset[str] | None = None) -> Named:
     """What a text names, relative to the root or to `base`, the directory of its file.
 
     `kind` "shell": every script it names runs (`bash x.sh`, `source x.sh`, `python3 x.py`) and every
-    other file it names is read. "python": what it imports runs, and a script named on a line that
-    starts a program; every other path in a string of its code is read (one in a docstring or a
-    comment is not). "code": what it imports, and nothing it reads -- the planner, whose part in a
-    unit is already the unit and the hosted env the spec holds. `given` narrows a "python" text to
-    the code its call sites' options reach (`python_refs`)."""
+    other file it names is read. "python": what it imports is `imported`, with the names of it the
+    code uses, and a script named on a line that starts a program runs; every other path in a
+    string of its code is read (one in a docstring or a comment is not). "code": what it imports
+    runs, and nothing it reads -- the planner, whose part in a unit is already the unit and the
+    hosted env the spec holds. `given` narrows a "python" text to the code its call sites' options
+    reach, `used` to the code importing it reaches (`python_refs`)."""
     scripts: set[str] = set()
     files: set[str] = set()
     found_dirs: set[str] = set()
     links: set[str] = set()
+    imported: dict[str, frozenset[str] | None] = {}
     gitlinks = tree.gitlinks()
 
-    def take(candidate: str, runs: bool) -> None:
+    def places(candidate: str) -> set[str]:
         # A path written under a variable (`$ROOT/scripts/x.sh`) is read as the token
         # `ROOT/scripts/x.sh`: every tail of two or more segments is tried too.
         parts = candidate.split("/")
         tails = {"/".join(parts[i:]) for i in range(max(1, len(parts) - 1))} | {candidate}
         options = {posixpath.normpath(t) for t in tails} | {posixpath.normpath(posixpath.join(base, candidate))}
-        for path in options:
-            if path.startswith("../") or path in (".", ".."):
-                continue
+        return {p for p in options if not (p.startswith("../") or p in (".", ".."))}
+
+    def take(candidate: str, runs: bool) -> None:
+        for path in places(candidate):
             if path in gitlinks:
                 links.add(path)
             elif path in tree.entries:
@@ -943,13 +1138,21 @@ def names_in(text: str, base: str, tree, dirs: set[str], kind: str,
             take(_ROOT_VARS.sub("", tok), True)
         for name in _SIBLING.findall(body):
             take(name, True)
-        return Named(scripts, files, found_dirs, links)
-    refs = python_refs(text, given if kind == "python" else None)
+        return Named(scripts, files, found_dirs, links, imported)
+    refs = python_refs(text, given if kind == "python" else None, used if kind == "python" else None)
     if refs is None:
         # Not python this reader can parse: read it as a shell text reads, which runs more.
         return names_in(text, base, tree, dirs, "shell")
     for mod in refs.imports:
-        take(posixpath.join(base, mod + ".py"), True)
+        candidate = posixpath.join(base, mod + ".py")
+        if kind != "python":
+            take(candidate, True)
+            continue
+        names = refs.uses.get(mod)
+        for path in places(candidate):
+            if path in tree.entries and path not in gitlinks:
+                before = imported.get(path, frozenset())
+                imported[path] = None if names is None or before is None else before | names
     if kind == "python":
         for candidate, runs in refs.found:
             take(candidate, runs)
@@ -957,7 +1160,7 @@ def names_in(text: str, base: str, tree, dirs: set[str], kind: str,
         files.clear()
         found_dirs.clear()
         links.clear()
-    return Named(scripts, files, found_dirs, links)
+    return Named(scripts, files, found_dirs, links, imported)
 
 
 # -- cargo calls ---------------------------------------------------------------------------------
@@ -999,12 +1202,46 @@ _LITERAL_WORD = re.compile(r"([\"']?)([A-Za-z0-9_.+-]+)\1")
 _REBINDS = re.compile(r"\b(?:read|local|declare|typeset|mapfile|readarray)\b")
 
 
+def _constant_words(body: str) -> dict[str, list[str]]:
+    """Each variable an executed shell text binds only by whole-line assignments of one literal
+    word (`BIN=wz-x`, `local crate="wz-y"`), with every word it is given there. A variable the
+    text binds any other way anywhere (`read`, `for`, `local` with no value, `+=`, `${X:=a}`, an
+    assignment of a computed value) or names other than as `$X` or `${X...}` is none: what it
+    holds would not be read off the text. Every word is kept, wherever it stands, since the order
+    the lines run in is not the order they are written in."""
+    lines = body.splitlines()
+    words: dict[str, set[str]] = {}
+    computed: set[str] = set()
+    for line in lines:
+        a = _ASSIGN.match(line)
+        if a:
+            if re.fullmatch(r"[A-Za-z0-9_.+-]+", a.group(3)):
+                words.setdefault(a.group(1), set()).add(a.group(3))
+            else:
+                computed.add(a.group(1))
+    out: dict[str, list[str]] = {}
+    for name in sorted(set(words) - computed):
+        mention = re.compile(rf"(?<!\w){re.escape(name)}(?!\w)")
+        for line in lines:
+            a = _ASSIGN.match(line)
+            if a and a.group(1) == name:
+                continue
+            if any(not (line[: m.start()].endswith("$") or (line[: m.start()].endswith("${")
+                                                             and not re.match(r":?=", line[m.end():])))
+                   for m in mention.finditer(line)):
+                break
+        else:
+            out[name] = sorted(words[name])
+    return out
+
+
 def cargo_calls(text: str) -> list[Call]:
     """Every cargo call of an executed shell text (see `Call`). A selector that is the variable
     of a `for` over literal words (`for crate in a b; do ... -p "$crate"`) names every word of
     every such `for` since the variable was last bound another way (a `read`, a `local`, an
-    assignment, a `for` over anything else), a superset of what it holds. A call whose selector
-    holds any other variable is unresolved and says why; a call inside a quoted string is read only when it names
+    assignment, a `for` over anything else), a superset of what it holds; one the text binds only
+    by plain assignments of a literal word names every such word (`_constant_words`). A call whose
+    selector holds any other variable is unresolved and says why; a call inside a quoted string is read only when it names
     its packages, since an `echo` mentions cargo far more often than a `bash -c` runs it. The directory
     is a `cd` earlier on the call's line, or else the last line that is a `cd` alone (one inside a
     subshell starts with its parenthesis and is not read), with the text's plain assignments
@@ -1013,6 +1250,7 @@ def cargo_calls(text: str) -> list[Call]:
     assigned: dict[str, str] = {}
     looped: dict[str, list[str]] = {}
     last_cd: str | None = None
+    constant = _constant_words(executed(text))
     for line in executed(text).splitlines():
         a = _ASSIGN.match(line)
         if a:
@@ -1061,6 +1299,8 @@ def cargo_calls(text: str) -> list[Call]:
                     var = re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", value)
                     if var and var.group(1) in looped:
                         packages.extend(looped[var.group(1)])
+                    elif var and var.group(1) in constant:
+                        packages.extend(constant[var.group(1)])
                     else:
                         packages.append(value)
                         if "$" in value or "`" in value or not value:
@@ -1305,12 +1545,16 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
     named_dirs: set[str] = set()
     builds: dict[str, set[str]] = {}
     # (text, the directory of its file, its kind for `names_in`, its path, the options its call
-    # sites pass or None for every mode); the dispatch script is in scripts/ and runs from the root,
-    # so a name in it is tried against both.
-    queue: list[tuple[str, str, str, str, frozenset[str] | None]] = [
-        (text, "scripts", "shell", RUNCI, None) for text in texts]
+    # sites pass or None for every mode, the names its importers use when it is imported and not
+    # run); the dispatch script is in scripts/ and runs from the root, so a name in it is tried
+    # against both.
+    queue: list[tuple[str, str, str, str, frozenset[str] | None, frozenset[str] | None]] = [
+        (text, "scripts", "shell", RUNCI, None, None) for text in texts]
     # The modes each script has been read in; a call site that adds one reads it again.
     modes_read: dict[str, frozenset[str] | None] = {}
+    # The names each module imported and not run has been read for; an importer that uses
+    # another reads it again.
+    names_read: dict[str, frozenset[str]] = {}
     reads_graph = False
     # Every unit runs through the planner; a tree without one (a selftest's) has nothing to add.
     for path in ([PLANNER] if PLANNER in tree.entries else []) + ([entry.legs] if entry.legs else []):
@@ -1320,12 +1564,12 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
         scripts[path] = tree.entries[path].oid
         modes_read[path] = None
         kind = "code" if path == PLANNER else ("python" if path.endswith(".py") else "shell")
-        queue.append(((tree.text(path) or ""), posixpath.dirname(path), kind, path, None))
+        queue.append(((tree.text(path) or ""), posixpath.dirname(path), kind, path, None, None))
     while queue:
-        text, base, kind, where, modes = queue.pop()
+        text, base, kind, where, modes, used = queue.pop()
         body = executed(text)
         if kind == "python":
-            refs = python_refs(text, modes)
+            refs = python_refs(text, modes, used)
             if refs is None:
                 unresolved.append(f"{where} does not parse as python, so what it spawns is unknown")
             else:
@@ -1369,14 +1613,15 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
                     links[link] = gitlinks[link]
                 if why:
                     unresolved.append(why)
-        named = names_in(text, base, tree, ctx.dirs, kind, modes)
+        named = names_in(text, base, tree, ctx.dirs, kind, modes, used)
         for link in named.links:
             links[link] = gitlinks[link]
         named_dirs |= named.dirs
         files |= named.files
         if RUNCI in named.files:
             whole.append(f"{where} reads it")
-        for path in sorted(named.scripts):
+        # A module imported whose use is not read may run any of its code, as a script spawned does.
+        for path in sorted(named.scripts | {p for p, n in named.imported.items() if n is None}):
             if path == RUNCI:
                 # Another lane of it run whole, or the script read by a command of a shell text.
                 whole.append(f"a text of {where} names it (another lane run whole, or the script read)")
@@ -1395,7 +1640,18 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
                 mode = None if mode is None else before | mode
             modes_read[path] = mode
             scripts[path] = tree.entries[path].oid
-            queue.append((script, posixpath.dirname(path), sub, path, mode))
+            queue.append((script, posixpath.dirname(path), sub, path, mode, None))
+        for path, names in sorted(named.imported.items(), key=lambda item: item[0]):
+            if names is None or modes_read.get(path, frozenset()) is None:
+                continue
+            before = names_read.get(path)
+            if before is not None and names <= before:
+                continue
+            names = names if before is None else before | names
+            names_read[path] = names
+            scripts[path] = tree.entries[path].oid
+            queue.append(((tree.read(path) or b"").decode("utf-8", "replace"), posixpath.dirname(path),
+                          "python", path, None, names))
     for d in named_dirs:
         for path in tree.under(d):
             if path in gitlinks:
@@ -1835,7 +2091,10 @@ FIXTURE: dict[str, str] = {
     lane_decl.DECL_PATH: _DECL_FIXTURE,
     WORKFLOWS[0]: _CI_FIXTURE,
     "scripts/lib/gate.py": 'import helper\n\nTABLE = "deploy/table.json"\n',
-    "scripts/lib/helper.py": "X = 1\n",
+    # A module imported for a name, with a build no importer reaches: its own computed cargo call
+    # runs only when `build` is called.
+    "scripts/lib/helper.py": 'import subprocess\nimport sys\n\nX = 1\n\n\ndef build() -> None:\n'
+                             '    subprocess.run(["cargo", "build", "-p", sys.argv[1]], check=True)\n',
     "scripts/lib/build.py": 'import subprocess\n\nsubprocess.run(["cargo", "build", "-p", "core"], check=True)\n',
     "scripts/lib/computed.py": 'import subprocess\nimport sys\n\nsubprocess.run(["cargo", "build", "-p", sys.argv[1]], check=True)\n',
     "scripts/lib/graph.py": 'import subprocess\n\nsubprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"], check=True)\n',
@@ -1884,7 +2143,8 @@ def selftest() -> int:
                == [("C", "D", "C"), ("G", "D", "G"), ("O", "D", "O"), ("W", "E", "W"), ("B", "D", "B"),
                    ("P", "D", "P"), ("R", "D", "R"), ("A", "D", "A")], got)
         # Red if a python argv list of constants, or one that reads the graph, is called opaque, or
-        # one whose package is computed is not.
+        # one whose package is computed is not, or if the computed build of a module G's script
+        # imports and never calls makes G opaque (`_lib_reached`).
         expect("only the lanes whose packages are computed are opaque", [u["id"] for u in got if u["opaque"]] == ["O", "P"], got)
         # Red if `_resolve_call` stops normalising the crates/-relative manifest it tries.
         ctx = context(root, first)
@@ -2067,6 +2327,14 @@ def selftest() -> int:
            [(c.packages, bool(c.unresolved)) for c in looped] == [(("a", "b"), False), (("${crate}",), True)], looped)
     over = cargo_calls('for m in $list; do cargo test -p "$m"; done\n')
     expect("a for over anything else leaves its variable unread", len(over) == 1 and bool(over[0].unresolved), over)
+    plain = cargo_calls('BIN=wz-a\nbuild() {\n    cargo build -p "$BIN"\n}\nR=a\nR="b"\ncargo test -p "${R}"\n'
+                        'P=a\nread -r P\ncargo build -p "$P"\nQ=a\nQ="$1"\ncargo build -p "$Q"\n'
+                        'S=a\necho "${S:=b}"\ncargo build -p "$S"\n')
+    # Red if a variable bound only to literal words is not read as those words, or one bound any
+    # other way (a read, a computed value, a default assigned in an expansion) is.
+    expect("a variable a text binds only to literal words names each, and no other is read",
+           [(c.packages, bool(c.unresolved)) for c in plain]
+           == [(("wz-a",), False), (("a", "b"), False), (("$P",), True), (("$Q",), True), (("$S",), True)], plain)
     refs = python_refs('import subprocess\nsubprocess.run(["cargo", "metadata", "--no-deps"])\n'
                        'subprocess.run(["cargo", f"+{tc}", "rustdoc", "-p", name])\nsubprocess.run(["cargo"] + rest)\n')
     # Red if `_cargo_argv` misreads the subcommand past a toolchain word, or calls a list with a
@@ -2074,6 +2342,44 @@ def selftest() -> int:
     expect("an argv list says its cargo subcommand, and its words when all are constants",
            refs is not None and set(refs.cargo) == {("metadata", ("metadata", "--no-deps")), ("rustdoc", None), ("?", ())},
            refs and refs.cargo)
+    named = python_refs('import subprocess\nPKG = "core"\nsubprocess.run(["cargo", "build", "-p", PKG])\n')
+    # Red if a name the module binds once to a string stops being the word it spells.
+    expect("a module's string constant is a constant word of an argv list",
+           named is not None and named.cargo == [("build", ("build", "-p", "core"))], named and named.cargo)
+    for rebound in ('def f(PKG):\n    subprocess.run(["cargo", "build", "-p", PKG])\n',
+                    'for PKG in names:\n    subprocess.run(["cargo", "build", "-p", PKG])\n',
+                    'subprocess.run(["cargo", "build", "-p", PKG])\nglobals()["PKG"] = other\n'):
+        got_refs = python_refs('import subprocess\nPKG = "core"\n' + rebound)
+        # Red if a name bound a second time, or one a computed name can reach, is read as constant.
+        expect(f"a name bound again is no constant ({rebound.split(chr(10))[0]!r})",
+               got_refs is not None and got_refs.cargo == [("build", None)], got_refs and got_refs.cargo)
+    helper = FIXTURE["scripts/lib/helper.py"]
+    lib = python_refs(helper, None, frozenset())
+    full = python_refs(helper)
+    # Red if an import reads a module whole, or reads a definition its importers do not name.
+    expect("a module imported for none of its definitions runs only its top level",
+           lib is not None and lib.cargo == [] and full is not None and full.cargo == [("build", None)], lib)
+    expect("a definition an importer names is read", python_refs(helper, None, frozenset({"build"})).cargo == [("build", None)])
+    gated = ('import os\n\nX = 1\n\n\ndef selftest():\n    import costly\n    return costly.CASES\n\n\n'
+             'def main():\n    return selftest()\n\n\nif __name__ == "__main__":\n    main()\n')
+    expect("the __main__ guard and what only it calls are not run by an import",
+           python_refs(gated, None, frozenset()).imports == ["os"]
+           and python_refs(gated, None, frozenset({"main"})).uses.get("costly") == frozenset({"CASES"}))
+    for shape in ('\n@register\ndef hidden():\n    return build()\n',
+                  '\ndef table():\n    return globals()["build"]()\n',
+                  '\ndef table():\n    subprocess.run([sys.executable, __file__, "--x"])\n',
+                  '\ndef __getattr__(name):\n    return build\n'):
+        reach = python_refs(helper + shape, None, frozenset({"table"}))
+        # Red if a definition a decorator keeps, a name computed at run time, a module that runs
+        # itself or one that answers any name is narrowed: the build would leave the key.
+        expect(f"a module that can reach a definition by no name its code spells is read whole ({shape.split(chr(10))[1]!r})",
+               reach is not None and ("build", None) in reach.cargo, reach and reach.cargo)
+    importer = python_refs('import helper\nimport other as o\nimport pkg.sub\nfrom gate import a, b\nfrom star import *\n'
+                           'helper.X\nhelper.build()\nkeep(o)\n')
+    # Red if a module's uses stop being its attributes, or a use that cannot be read is narrowed.
+    expect("an importer uses what it reads off a module, and every name of one it passes",
+           importer is not None and importer.uses == {"helper": frozenset({"X", "build"}), "other": None, "pkg": None,
+                                                      "gate": frozenset({"a", "b"}), "star": None}, importer and importer.uses)
 
     shell = parse_shell('#!/usr/bin/env bash\nf() {\n    cat <<EOF\n}\nEOF\n    echo "}" \'{\' ${x:-}}  # }\n}\n'
                         'g() { echo one; }\n# h() {\nh ()\n{\n    case "$1" in\n    a) echo "$(echo ")")" ;;\n    esac\n}\n'
