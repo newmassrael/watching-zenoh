@@ -8140,9 +8140,9 @@
       "reason": "OPEN (M): the four y653 assertions PIN A POLICY. Rewriting them to \"a live viewer wants the first frame of a flow\" reds by design, which is the signal to spend a round on it. A marker more than a debt."
     },
     "debt-c1ay-router-forward-count-drift": {
-      "status": "active",
+      "status": "deprecated",
       "source": "open-debt register",
-      "reason": "OPEN: Layer C1ay's guard `C1AY router_forward 356` (scripts/run-ci.sh, cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward) reads 359 passed, 0 failed on main 20ee0c0a1 (2026-11-26, a build host), so the lane reds when hosted reaches it; hosted run 45654176488 stopped earlier in the job (unused imports SessionFsmUnicastEvent and SessionFsmUnicastState). The three new tests are not Round 4616's. The guards below it in the same layer likely moved by the same three; each is to be run and set to the number its command prints (count guards with filters are bound by nothing static)."
+      "reason": "CLOSED (fixed): the nine C1ay router_forward guards and their labels moved to what their commands print on a build host (356 -> 360 and the rest by four), read by guarded_count_gate.py --range 913bfef90..HEAD with the 33 other guards that drifted since 913bfef90; the hosted lane had stopped at earlier reds and never reached them."
     },
     "debt-c1cc-init-open-before-link": {
       "status": "active",
@@ -8534,6 +8534,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN 2026-11-21 (docs/upstream-parity.md D11, deploy/completeness_ratchet.json a.pico-api.shortfall = 2). Two of zenoh-pico's own API tests pass against the original and not against wz: z_api_source_info_test and z_api_admin_space_test, which call internal `_z_*` functions wz does not export. Closed when both pass on wz (the export or the equivalent public path) and the row is locked at 0."
+    },
+    "debt-coop-serial-sample-not-handed": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: on the cooperative engine (wz-capi-pico default build, transport-link-serial), two pico sessions joined by a serial line through two pty pairs open, handshake and exchange frames, and the listener's session delivers the dialler's put to its subscriber row (SubscriberPeer::deliver_lent returns Ok for each), yet the subscriber's callback is never called within the test's 10 s (files::serial_link_roundtrip, C1bnl). The same helper over unixpipe hands the sample out at once, so the stall is after the session layer: the round the threaded engine hands its deliveries out of is not drained for a face whose link is a serial line. The link's ready flag is false between frames, so the read is not held busy by stale input. Found after the serial listener's INIT race was repaid (the listen now opens its line); closed by finding why the round is not handed out for that face and a test that a serial face's sample reaches its callback."
     },
     "debt-d-m5": {
       "status": "active",
