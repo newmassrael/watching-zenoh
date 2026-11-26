@@ -73,8 +73,11 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   Code" / emoji.
 - **Push to `main` only with `bash scripts/land.sh`** (owner, 2026-10-27). It
   submits HEAD to the landing queue (`bx --land`, `[land]` in `bx.toml`) and
-  waits; the queue's one integrator rebases it, files its ledger round with the
+  waits; the queue's one integrator merges it, files its ledger round with the
   number the store gives it there, judges it with the pre-push hook and pushes.
+  It runs no lane first: the lanes a landing moved run once, by digest, with
+  `bash scripts/verify-once.sh` (receipts; `--plan` shows them), and a red
+  re-runs only that lane (`--only-red`). Never chain the whole gate by hand.
   Append-round arguments after `--` (no `--entry-id`) become a round
   descriptor committed under `docs/rounds/pending/` (`scripts/file-round.sh`).
   Pre-push gate 0p refuses a push to main from any clone but the integrator's

@@ -3743,14 +3743,36 @@ fn stats_space_of_key<F>(
 where
     F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
 {
+    stats_space_of_key_by(id, suffix, &|id| {
+        resolve_alias(id).map(|prefix| crate::stats::StatSpace::of_keyexpr(&prefix))
+    })
+}
+
+/// [`stats_space_of_key`] for a sender that reads the space of a declaration where the
+/// declaration lies, with no string made of it: `space_of_alias` answers the space of the key the
+/// mapping `id` names, `None` for an id the sender's space does not hold, which counts in the user
+/// space as an alias that resolves to nothing does.
+#[cfg(all(
+    feature = "transport-stats",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response"
+    )
+))]
+fn stats_space_of_key_by<F>(
+    id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    space_of_alias: &F,
+) -> crate::stats::StatSpace
+where
+    F: Fn(crate::wire_id::ExprId) -> Option<crate::stats::StatSpace>,
+{
     if id == 0 {
         // Fully literal: the suffix IS the whole expression.
         return crate::stats::StatSpace::of_keyexpr(suffix.unwrap_or_default());
     }
-    match resolve_alias(id) {
-        Some(prefix) => crate::stats::StatSpace::of_keyexpr(&prefix),
-        None => crate::stats::StatSpace::User,
-    }
+    space_of_alias(id).unwrap_or(crate::stats::StatSpace::User)
 }
 
 /// The key expression a data message addresses, an alias resolved through the caller's id space
@@ -3896,21 +3918,23 @@ where
 /// [`request_stats_class`] for a get a sender writes from its parts, with no owned `Request` to
 /// read: the class the owned `Request` of the same parts is given
 /// ([`crate::query_parts::GetParts::owned_request`]), its payload what the writer writes of the
-/// query's value and its attachment.
+/// query's value and its attachment. A key named by a declaration is in the space
+/// `space_of_alias` reads off that declaration, as `stats_space_of_key_by` reads it, so a get is
+/// classified with no string made of its key.
 #[cfg(all(feature = "transport-stats", feature = "codec-request"))]
 pub fn get_stats_class<F>(
     writer: &crate::lent_request::RequestWriter<'_>,
-    resolve_alias: F,
+    space_of_alias: F,
 ) -> crate::stats::NetworkStatsClass
 where
-    F: Fn(crate::wire_id::ExprId) -> Option<alloc::string::String>,
+    F: Fn(crate::wire_id::ExprId) -> Option<crate::stats::StatSpace>,
 {
     use crate::stats::{MessageLabel, NetworkStatsClass, StatMessage};
     let key = writer.parts().key;
     NetworkStatsClass::net(
         MessageLabel::Query,
         StatMessage::Query,
-        stats_space_of_key(key.id(), key.suffix(), &resolve_alias),
+        stats_space_of_key_by(key.id(), key.suffix(), &space_of_alias),
         writer.payload_len(),
     )
 }
@@ -4305,6 +4329,7 @@ impl<'k> RecordClass<'k> {
     /// The key expression the record addresses, an alias resolved through no space, as
     /// [`stats_keyexpr`] resolves the owned message's: what the session's `stats/filters` are
     /// matched against.
+    #[cfg(any(feature = "session-unicast", all(test, feature = "codec-push")))]
     pub(crate) fn keyexpr(&self) -> Option<alloc::string::String> {
         let (id, suffix) = self.key?;
         stats_keyexpr_of_key(id, suffix, &|_id| None)

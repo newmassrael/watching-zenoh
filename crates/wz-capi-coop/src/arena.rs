@@ -756,15 +756,32 @@ impl ArenaRegion {
         &self.limits
     }
 
+    /// Lay out on `plan`, an open's blank plan or [`ArenaPlan::vacant`] as made, this region's
+    /// rows for an open of `config`, the plan [`ArenaPlan::count`] would lay out for a config of
+    /// the region's shape and limits, refused as [`Self::admit`] refuses the config.
+    #[cfg(feature = "runtime-plan")]
+    pub(crate) fn lay_out_on<E: EndpointList, const ROWS: usize>(
+        &self,
+        plan: &mut ArenaPlan<ROWS>,
+        config: &CoopConfig<E>,
+    ) -> Result<(), ArenaRefused> {
+        self.admit(config)?;
+        plan.take_on(&self.plan);
+        Ok(())
+    }
+
     /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
     /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
     /// and limits, refused as [`Self::admit`] refuses the config.
+    #[cfg(not(feature = "runtime-plan"))]
     pub(crate) fn lay_out_on<E: EndpointList>(
         &self,
         plan: &mut ArenaPlan,
         config: &CoopConfig<E>,
     ) -> Result<(), ArenaRefused> {
         self.admit(config)?;
+        // Stored whole over the plan the open made, so the optimiser drops that plan's making:
+        // a build without `runtime-plan` lists no rows, and its open's plan is this one alone.
         plan.clone_from(&self.plan);
         Ok(())
     }
@@ -1621,14 +1638,14 @@ impl Iterator for HeldPlacesWalk {
 /// ([`Self::transport`], [`Self::session`], [`Self::places`]). The arena is the sum of the rows'
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArenaPlan {
+pub struct ArenaPlan<const ROWS: usize = ARENA_ROWS> {
     /// The rows laid out, in order, the first `len` of them: a row is written when it is laid
     /// out, and the rows past `len` are [`UNLAID_ROW`] in every plan, so two plans of the same rows
     /// are equal. Kept where a plan is read row by row, a build that lays its plans out at the
     /// open and the tests: an open by a region reads `reserved` and the rows of each layer alone,
     /// so a region carries no table of rows.
     #[cfg(any(feature = "runtime-plan", test))]
-    rows: [ArenaRow; ARENA_ROWS],
+    rows: [ArenaRow; ROWS],
     /// How many rows were laid out.
     len: usize,
     /// The bytes the rows laid out take together, each row's span added as it is laid out;
@@ -1651,8 +1668,10 @@ pub struct ArenaPlan {
 }
 
 impl ArenaPlan {
-    /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]): out of line,
-    /// so the plan is made where its caller keeps it.
+    /// A plan of no rows that lists every row it lays out (`rows`, where a build keeps a list): the
+    /// plan a report and a test read row by row, and the place an open of a build without
+    /// `runtime-plan` lays its plan out in ([`Self::count`]). Out of line, so the plan is made
+    /// where its caller keeps it.
     #[inline(never)]
     pub const fn vacant() -> Self {
         Self {
@@ -1679,21 +1698,6 @@ impl ArenaPlan {
         Ok(plan)
     }
 
-    /// Lay out on this plan, [`Self::vacant`] as made, the rows of a session `config` opens under
-    /// `limits` (see the module), where the plan lies: an open that keeps its plan in its own frame
-    /// moves no 2 KB plan out of a returned value. Refused when a limit is over the build's value
-    /// or the arena is past the address space; a refused plan is no plan to open by. The numbers
-    /// of the config are read once ([`PlanShape::of`]) and laid out as [`Self::lay_out`] lays out
-    /// a build's constants.
-    #[inline(never)]
-    pub fn count<E: EndpointList>(
-        &mut self,
-        config: &CoopConfig<E>,
-        limits: &SessionLimits,
-    ) -> Result<(), ArenaRefused> {
-        self.lay_out(PlanShape::of(config), limits)
-    }
-
     /// The plan of a session of `shape` under `limits`, laid out as [`Self::lay_out`] lays it out:
     /// a constant where both are, so a build that states them has its plan when it is compiled
     /// and runs none of the walk.
@@ -1703,6 +1707,84 @@ impl ArenaPlan {
             Ok(()) => Ok(plan),
             Err(refused) => Err(refused),
         }
+    }
+}
+
+/// The plan an open lays out and reserves by where the build lays its plans out at the open
+/// (`lend_session`): every sum and every layer's rows of a listed plan, and no list of the rows,
+/// which only a report reads, so the open's frame holds no table of them and its walk writes none.
+/// A build without `runtime-plan` lists no rows in any plan and opens by [`ArenaPlan::vacant`], so
+/// it has no second kind of plan to make.
+#[cfg(feature = "runtime-plan")]
+pub(crate) type OpenPlan = ArenaPlan<0>;
+
+impl<const ROWS: usize> ArenaPlan<ROWS> {
+    /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]), listing the
+    /// first `ROWS` rows it lays out: out of line, so the plan is made where its caller keeps it.
+    #[cfg(feature = "runtime-plan")]
+    #[inline(never)]
+    pub(crate) const fn blank() -> Self {
+        Self {
+            rows: [UNLAID_ROW; ROWS],
+            len: 0,
+            reserved: Some(0),
+            refused: None,
+            transport: TransportRows::NONE,
+            session: SessionRows::NONE,
+            places: PlaceRows::NONE,
+            runtime_bytes: 0,
+        }
+    }
+
+    /// Lay out on this plan, [`ArenaPlan::vacant`] or an open's blank plan as made, the rows of a
+    /// session `config` opens under `limits` (see the module), where the plan lies: an open that
+    /// keeps its plan in its own frame moves no plan out of a returned value. Refused when a limit
+    /// is over the build's value or the arena is past the address space; a refused plan is no plan
+    /// to open by. The numbers of the config are read once ([`PlanShape::of`]) and laid out as
+    /// [`Self::lay_out`] lays out a build's constants.
+    #[inline(never)]
+    pub fn count<E: EndpointList>(
+        &mut self,
+        config: &CoopConfig<E>,
+        limits: &SessionLimits,
+    ) -> Result<(), ArenaRefused> {
+        self.lay_out(PlanShape::of(config), limits)
+    }
+
+    /// Take on the rows `laid` laid out and every sum of them, as this plan would have laid them
+    /// out itself, listing as many of its listed rows as this plan lists: what an open by a region
+    /// lays out, the region's plan made when the build was compiled.
+    #[cfg(feature = "runtime-plan")]
+    pub(crate) fn take_on<const LAID: usize>(&mut self, laid: &ArenaPlan<LAID>) {
+        let ArenaPlan {
+            rows,
+            len,
+            reserved,
+            refused,
+            transport,
+            session,
+            places,
+            runtime_bytes,
+        } = laid;
+        let rows = {
+            let mut listed = [UNLAID_ROW; ROWS];
+            let shared = ROWS.min(LAID);
+            listed[..shared].copy_from_slice(&rows[..shared]);
+            listed
+        };
+        let taken = Self {
+            rows,
+            len: *len,
+            reserved: *reserved,
+            refused: *refused,
+            transport: *transport,
+            session: *session,
+            places: *places,
+            runtime_bytes: *runtime_bytes,
+        };
+        // Made apart and stored whole, as `clone_from` stores a plan, so that no byte of the plan
+        // it replaces outlives this store.
+        *self = taken;
     }
 
     /// Lay out on this plan, [`Self::vacant`] as made, the rows of a session of `shape` under
@@ -3641,8 +3723,8 @@ impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
     #[cfg(any(feature = "runtime-plan", test))]
-    pub(crate) fn reserve(
-        plan: &ArenaPlan,
+    pub(crate) fn reserve<const ROWS: usize>(
+        plan: &ArenaPlan<ROWS>,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Self, ArenaRefused> {
         Self::of_bytes(plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?, memory)

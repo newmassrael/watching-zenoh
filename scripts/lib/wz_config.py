@@ -67,9 +67,15 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   (configs/profiles/host-peer-ext.conf) chooses (kconfiglib)
     --bench-cargo-args ENGINE [FEATURES]
                                   the cargo words of a bench's wz-capi-pico build on ENGINE with
-                                  FEATURES (a comma list) over its default capabilities
+                                  FEATURES (a comma list) over zenoh-pico's preset
+                                  (configs/zenoh-pico_defconfig, kconfiglib)
     --bench-config-h ENGINE [FEATURES]
                                   the zenoh-pico `config.h` of that build
+    --print-preset-features ENGINE [FEATURES]
+                                  the features of that build as one comma list, the names
+                                  wz-capi-pico itself takes (`cargo test -p wz-capi-pico
+                                  --no-default-features --features <list>`); with --original-env
+                                  zenoh-pico, the preset's whole build
     --resolve-features ABI PRESET...
                                   merge presets onto the defaults (kconfiglib) and print the cargo
                                   arguments of ABI, on the engine the presets choose
@@ -197,6 +203,7 @@ Usage:
     wz_config.py --resolve-conformance-statement pico|c|core PRESET...
     wz_config.py --original-conformance-statement zenoh-pico|zenoh-c|zenoh
     wz_config.py --pico-config-h [--engine coop] FEATURES
+    wz_config.py --print-preset-features tokio|coop [FEATURES]
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
         `#define Z_FEATURE_X 0|1` and `#define WZ_FEATURE_X 0|1` lines; a capability the
@@ -2657,40 +2664,72 @@ def engine_stdlib(engine: str, stated: str | None = None) -> str:
     return have
 
 
-def bench_named_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None) -> list[str]:
-    """The features a bench's cargo build of wz-capi-pico names, without the default features, on
-    `engine`, `table` the crate's feature table: on the tokio engine the default build's list with the
-    base's engine feature replaced by the tokio option's features (`tokio_features`), and `asked`; on
-    the cooperative one the default build's list with what selects the tokio engine left out
-    (`coop_features`), as the package's profile resolves its own, and `asked`. `stdlib`, when given,
-    is checked against the engine's (`engine_stdlib`). A capability asked that the cooperative engine
-    does not run is refused by name rather than built into a library on the tokio engine."""
+# -- the build a bench compares with zenoh-pico ---------------------------------------------------------
+#
+# A bench that reads wz's pico library against zenoh-pico (the perf matrix, its instruction counts, the
+# parity matrix) builds arm W as zenoh-pico's preset in wz: configs/zenoh-pico_defconfig, generated from the
+# declaration's upstream_on and upstream_off, so the two arms carry the same capabilities and a ratio does
+# not charge wz for the planes pico's own build leaves out. The crate's default features are the Kconfig
+# defaults, which turn on planes pico's default build does not have (advanced, connectivity, the config
+# policy, the conformance digest, ...): a ratio read from them is no comparison of like with like.
+
+#: The original whose preset a bench against zenoh-pico builds arm W as.
+PICO_BENCH_ORIGINAL = "zenoh-pico"
+
+
+def pico_bench_configuration():
+    """The preset of `PICO_BENCH_ORIGINAL` resolved: its ABI's configuration with no preset, its
+    defconfig alone (`configuration_of`). Needs kconfiglib; without it PresetError says so."""
+    return configuration_of(BASE_ABI[PICO_BENCH_ORIGINAL], [])
+
+
+def preset_named_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None,
+                          decl: dict | None = None, kconf=None) -> list[str]:
+    """The features a bench's cargo build of wz-capi-pico names, without the default features, for
+    zenoh-pico's preset on `engine` and `asked` over it, `table` the crate's feature table: the
+    capabilities the preset turns on (`kconf`, `pico_bench_configuration` when not given) on the engine
+    the bench measures, not the one the preset chooses (`engine_features`), then `asked`. `stdlib`, when
+    given, is checked against the engine's (`engine_stdlib`). A capability the preset turns on, or one
+    asked, that the cooperative engine does not run is refused by name rather than left out."""
     asked = [f for f in asked if f]
     engine_stdlib(engine, stdlib)
+    decl = load_decl() if decl is None else decl
+    kconf = pico_bench_configuration() if kconf is None else kconf
+    abi = BASE_ABI[PICO_BENCH_ORIGINAL]
+    named = engine_features(abi, decl["base"][abi], features_for(decl, abi, resolved_caps(decl, kconf)),
+                            engine == "coop", table, engine_option_features(decl, "tokio"))
+    named += [f for f in asked if f not in named]
     if engine == "tokio":
-        named = tokio_features(list(table["default"]), tokio_switches())
-        return named + [f for f in asked if f not in named]
-    named = coop_features(list(table["default"]) + asked, table)
-    lost = [f for f in asked if f not in named]
+        return named
+    out = coop_features(named, table)
+    lost = [f for f in asked if f not in out]
     if lost:
         raise PresetError(f"the cooperative engine does not run {', '.join(lost)}: measure "
                           f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
-    return named
+    return out
 
 
-def bench_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None) -> set[str]:
-    """The wz-capi-pico features a bench's build on `engine` turns on, as cargo resolves them, `stdlib`
-    checked as `bench_named_features` checks it: what the reference zenoh-pico and the header a probe
-    compiles against are derived from."""
-    return enabled_features(table, bench_named_features(engine, asked, table, stdlib))
+def preset_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None,
+                    decl: dict | None = None, kconf=None) -> set[str]:
+    """The wz-capi-pico features that build turns on, as cargo resolves them: what the reference
+    zenoh-pico (`pico_reference`) and the header a probe compiles against are derived from."""
+    return enabled_features(table, preset_named_features(engine, asked, table, stdlib, decl, kconf))
 
 
+def preset_feature_list(engine: str, asked: list[str], table: dict, decl: dict | None = None, kconf=None) -> str:
+    """The features of zenoh-pico's preset on `engine` and `asked` over it (`preset_named_features`), as
+    the comma list a cargo command of wz-capi-pico itself names after `--no-default-features --features`:
+    the build a test of the crate reads the preset's arena, places and stack in, the one the bench's
+    library (`bench_cargo_args`) is built as."""
+    return ",".join(preset_named_features(engine, asked, table, None, decl, kconf))
 
-def bench_cargo_args(engine: str, asked: list[str], table: dict) -> str:
-    """The cargo words of that build of the C library, `-p wz-capi-pico-lib`, each feature named
-    through its dependency on the ABI crate (`abi`), so the same words build it beside another
-    package (`-p zenoh-pico-sys -p wz-capi-pico-lib`)."""
-    named = [f"{PICO_ARTIFACT_DEP}/{f}" for f in bench_named_features(engine, asked, table)]
+
+def bench_cargo_args(engine: str, asked: list[str], table: dict, decl: dict | None = None, kconf=None) -> str:
+    """The cargo words of a bench's build of the C library, `-p wz-capi-pico-lib`, for zenoh-pico's preset on
+    `engine` and `asked` over it (`preset_named_features`), each feature named through its dependency on the
+    ABI crate (`abi`), so the same words build it beside another package (`-p zenoh-pico-sys -p
+    wz-capi-pico-lib`)."""
+    named = [f"{PICO_ARTIFACT_DEP}/{f}" for f in preset_named_features(engine, asked, table, None, decl, kconf)]
     words = ["--no-default-features"]
     if named:
         words.append("--features " + ",".join(named))
@@ -5961,52 +6000,86 @@ def cmd_selftest() -> int:
     expect("a bench takes the engine it is told and refuses a name that is no engine",
            bench_engine("coop") == "coop" and bench_engine("tokio") == "tokio"
            and "fast" in refusal_text(lambda: bench_engine("fast")))
-    expect("a bench on the tokio engine builds the default build on that engine",
-           bench_features("tokio", [], good) == pico_build_features("tokio", [], good)
-           and "engine-tokio" in bench_features("tokio", [], good)
-           and "os-host" not in bench_features("tokio", [], good)
-           and bench_cargo_args("tokio", [], good).startswith(
-               "--no-default-features --features abi/engine-tokio,")
-           and bench_cargo_args("tokio", ["app-transport"], good).endswith(",abi/app-transport"))
     expect("the default build is the cooperative engine's",
            pico_build_features("default", [], good) == enabled_features(good, ["default"])
            and "os-host" in pico_build_features("default", [], good)
            and "engine-tokio" not in pico_build_features("default", [], good))
-    on_coop = bench_features("coop", [], good)
-    expect("a bench on the cooperative engine builds the default capabilities that engine runs",
-           "os-host" in on_coop and "engine-tokio" not in on_coop
-           and not {"serial-drive-own-thread", "rx-busy-poll"} & on_coop
-           and set(coop_features(list(good["default"]), good)) <= on_coop
-           and bench_cargo_args("coop", [], good).startswith(
-               "--no-default-features --features abi/os-host,"))
     expect("the pico C library takes the ABI crate by the dependency its features are named through",
            f'{PICO_ARTIFACT_DEP} = {{ package = "wz-capi-pico"'
            in (ROOT / "crates" / PICO_ARTIFACT / "Cargo.toml").read_text(encoding="utf-8"))
-    expect("a capability asked of a bench that only the tokio engine runs is refused by name",
-           "gossip" in refusal_text(lambda: bench_named_features("coop", ["gossip"], good))
-           and "raweth-transport" in bench_named_features("coop", ["raweth-transport"], good))
     # The standard library is the engine's: the cooperative engine's library has no std form and the
     # tokio engine's has no other, so a bench that names the other form is refused by name.
     expect("each engine's library has the one standard library its engine decides",
            engine_stdlib("coop") == "nostd" and engine_stdlib("tokio") == "std"
-           and engine_stdlib("coop", "nostd") == "nostd"
-           and bench_named_features("coop", [], good, "nostd") == bench_named_features("coop", [], good)
-           and bench_features("tokio", [], good, "std") == bench_features("tokio", [], good)
-           and "app-transport" in bench_features("coop", ["app-transport"], good, "nostd"))
+           and engine_stdlib("coop", "nostd") == "nostd")
     expect("a form the crate does not build, or a standard library that is none, is refused by name",
-           "cooperative" in refusal_text(lambda: bench_named_features("tokio", [], good, "nostd"))
-           and "tokio" in refusal_text(lambda: bench_named_features("coop", [], good, "std"))
-           and "alloc" in refusal_text(lambda: bench_named_features("coop", [], good, "alloc"))
+           "cooperative" in refusal_text(lambda: engine_stdlib("tokio", "nostd"))
+           and "tokio" in refusal_text(lambda: engine_stdlib("coop", "std"))
+           and "alloc" in refusal_text(lambda: engine_stdlib("coop", "alloc"))
            and "fast" in refusal_text(lambda: engine_stdlib("fast")))
     # The C library has no std form (S1): the crate has no `std` feature and none of its features
     # names one; the tokio engine reaches `std` through its dependencies.
     expect("the manifest has no std feature, and no feature names one",
            "std" not in good and not {name for name, feats in good.items() if "std" in feats})
+    expect("the preset's feature list refuses an engine that is none before it resolves the preset",
+           "fast" in refusal_text(lambda: preset_feature_list("fast", [], good)))
 
     if kconfiglib_module() is not None:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",
                bench_engine("") == ("coop" if chooses_coop else "tokio"))
+        # A bench against zenoh-pico builds pico's preset: the list parity's arm W is built from, on the
+        # engine the bench names, without the planes pico's own default build does not have.
+        preset = pico_bench_configuration()
+        on_preset = preset_named_features("coop", [], good, "nostd", decl, preset)
+        expect("a bench against zenoh-pico builds the preset parity builds, on the cooperative engine",
+               on_preset == resolved_features(decl, "pico", configuration_of("pico", []))
+               and on_preset[0] == BASE_ENGINE_FEATURE
+               and {"peer", "multicast-transport", "scout", "query", "queryable", "liveliness",
+                    "multi-thread"} <= set(on_preset))
+        expect("zenoh-pico's preset leaves out the planes pico's default build does not have",
+               not {"advanced", "connectivity", "unstable-api", "config-policy", "conformance-digest",
+                    "device-requires"} & preset_features("coop", [], good, None, decl, preset))
+        expect("the preset on the tokio engine names that engine's features in the place of os-host",
+               "engine-tokio" in preset_named_features("tokio", [], good, "std", decl, preset)
+               and BASE_ENGINE_FEATURE not in preset_named_features("tokio", [], good, None, decl, preset))
+        expect("a capability asked over the preset is built, and one the cooperative engine lacks refused",
+               preset_named_features("coop", ["app-transport"], good, None, decl, preset)[-1] == "app-transport"
+               and "unstable-api" in preset_features("coop", ["app-transport"], good, None, decl, preset)
+               and "gossip" in refusal_text(
+                   lambda: preset_named_features("coop", ["gossip"], good, None, decl, preset))
+               and "cooperative" in refusal_text(
+                   lambda: preset_named_features("tokio", [], good, "nostd", decl, preset)))
+        expect("the reference of the preset is pico's default build on the switches wz answers",
+               {k: v for k, v in pico_reference(decl, preset_features("coop", [], good, None, decl, preset)).items()
+                if k in ("Z_FEATURE_ADVANCED_PUBLICATION", "Z_FEATURE_CONNECTIVITY", "Z_FEATURE_UNSTABLE_API",
+                         "Z_FEATURE_UNICAST_PEER", "Z_FEATURE_LIVELINESS")}
+               == {"Z_FEATURE_ADVANCED_PUBLICATION": 0, "Z_FEATURE_CONNECTIVITY": 0,
+                   "Z_FEATURE_UNSTABLE_API": 0, "Z_FEATURE_UNICAST_PEER": 1, "Z_FEATURE_LIVELINESS": 1})
+        # Every bench of the pico library builds that preset: the cargo words the rtt, thr, nodrop,
+        # profile and tids modes and the batch arm build from name its list and nothing else.
+        expect("a bench's cargo words name the preset's features on its engine, and what is asked over them",
+               bench_cargo_args("coop", [], good, decl, preset)
+               == "--no-default-features --features " + ",".join(f"{PICO_ARTIFACT_DEP}/{f}" for f in on_preset)
+               and bench_cargo_args("tokio", [], good, decl, preset).startswith(
+                   "--no-default-features --features abi/engine-tokio,")
+               and bench_cargo_args("coop", ["app-transport"], good, decl, preset).endswith(",abi/app-transport")
+               and "abi/advanced" not in bench_cargo_args("coop", [], good, decl, preset).split(","))
+        # A test of the crate itself reads the preset's arena and stack in the build the bench's library is
+        # made as: the same list, named on wz-capi-pico rather than through its dependency.
+        expect("the preset's feature list is the bench's build, named on the ABI crate itself",
+               preset_feature_list("coop", [], good, decl, preset) == ",".join(on_preset)
+               and bench_cargo_args("coop", [], good, decl, preset)
+               == "--no-default-features --features " + ",".join(
+                   f"{PICO_ARTIFACT_DEP}/{f}" for f in preset_feature_list("coop", [], good, decl, preset).split(","))
+               and preset_feature_list("coop", ["app-transport"], good, decl, preset).endswith(",app-transport")
+               and "advanced" not in preset_feature_list("coop", [], good, decl, preset).split(","))
+        expect("a bench's form is the one its engine builds, and a standard library of the other is refused",
+               preset_named_features("coop", [], good, "nostd", decl, preset)
+               == preset_named_features("coop", [], good, None, decl, preset)
+               and "tokio" in refusal_text(lambda: preset_named_features("coop", [], good, "std", decl, preset))
+               and "alloc" in refusal_text(
+                   lambda: preset_named_features("coop", [], good, "alloc", decl, preset)))
     # The conformance statement (decision C15) states the build the feature list makes, every
     # capability of the ABI on or off, every limit and policy, and a digest of only those values.
     defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}
@@ -8090,6 +8163,17 @@ def main(argv: list[str]) -> int:
             print(f"  wz-config FAIL: {exc}", file=sys.stderr)
             return 1
         return 0
+    if argv[1:2] == ["--print-preset-features"] and len(argv) in (3, 4):
+        try:
+            print(preset_feature_list(argv[2], argv[3].split(",") if len(argv) == 4 else [],
+                                      manifest_features(MANIFESTS["pico"])))
+        except KeyError as exc:
+            print(f"  wz-config FAIL: {exc.args[0]}", file=sys.stderr)
+            return 1
+        except (ValueError, OSError) as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if argv[1:2] in (["--bench-cargo-args"], ["--bench-config-h"]) and len(argv) in (3, 4):
         asked = argv[3].split(",") if len(argv) == 4 else []
         table = manifest_features(MANIFESTS["pico"])
@@ -8098,7 +8182,7 @@ def main(argv: list[str]) -> int:
                 print(bench_cargo_args(argv[2], asked, table))
                 return 0
             decl = load_decl()
-            header = pico_config_header(decl, bench_features(argv[2], asked, table), dict(os.environ))
+            header = pico_config_header(decl, preset_features(argv[2], asked, table, None, decl), dict(os.environ))
         except KeyError as exc:
             print(f"  wz-config FAIL: {exc.args[0]}", file=sys.stderr)
             return 1

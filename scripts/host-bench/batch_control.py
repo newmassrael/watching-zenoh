@@ -11,8 +11,9 @@ opens. This runs one program (`batch_probe.c`) both ways and reads the batches o
 of its own, the same way for both:
 
     batch_control.py reference --out DIR --engine ENGINE [--sizes 512,2048,8192]
-        zenoh-pico built as the same build as wz-capi-pico with `config-document` on ENGINE (tokio or coop,
-        what `wz_config.py --bench-engine` resolved, `wz_config.bench_features`), once per size with
+        zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset with `config-document` on
+        ENGINE (tokio or coop, what `wz_config.py --bench-engine` resolved, `wz_config.preset_features`), once
+        per size with
         BATCH_UNICAST_SIZE set to it (`capability_cost_gate.pico_reference_tree`, its switches from
         `wz_config.pico_reference`): each library copied to DIR/lib-P<size>, its headers to
         DIR/include-P<size>, and DIR/reference.json, which names each build
@@ -289,19 +290,20 @@ def parse_sizes(text: str) -> list[int]:
 
 
 def cmd_reference(out: pathlib.Path, sizes: list[int], engine: str) -> int:
-    """zenoh-pico built as the same build as wz-capi-pico with the document door on `engine`, once per
-    size."""
+    """zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset with the document door on
+    `engine`, once per size."""
     # The gate's builder and resolver, imported here and not at the top: the selftest needs neither.
     import capability_cost_gate as cost
     import wz_config
 
     table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+    decl = wz_config.load_decl()
     try:
-        features = wz_config.bench_features(engine, list(WZ_FEATURES), table)
+        features = wz_config.preset_features(engine, list(WZ_FEATURES), table, None, decl)
     except wz_config.PresetError as error:
         print(f"batch-control: NOT-MEASURED, {error}", flush=True)
         return 2
-    asked = wz_config.pico_reference(wz_config.load_decl(), features)
+    asked = wz_config.pico_reference(decl, features)
     builds = []
     pin = toolchain = ""
     for size in sizes:

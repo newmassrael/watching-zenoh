@@ -2773,6 +2773,26 @@ layer_c0_test_discipline() {
     # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
     _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
     _runci_leg runci_plan --after runci_plan.selftest -- python3 scripts/lib/runci_plan.py --check
+    # RFC 0001 stage M1 (docs/rfc/0001-a-lane-lands-alone-and-a-verdict-is-keyed-by-what-it-read.md):
+    # a commit's tree read from git's objects, and the cargo package graph a lane's key is computed
+    # from, held both ways on this tree as Layer C0d holds the doc-link expansion: a change to
+    # wz-session-core reaches wz-runtime-tokio, and nothing depends on wz-ap-demo.
+    _runci_leg git_tree.selftest -- python3 scripts/lib/git_tree.py --selftest
+    _runci_leg lane_graph.selftest --after git_tree.selftest -- python3 scripts/lib/lane_graph.py --selftest
+    _runci_leg lane_graph --after lane_graph.selftest -- python3 scripts/lib/lane_graph.py --check
+    # The lane declaration (scripts/lib/lanes.toml): its reader, then the declaration held to the
+    # dispatch table, the hosted jobs and the workspaces (UNDECLARED, ORPHAN, DUPLICATE, FIELD).
+    _runci_leg lane_decl.selftest -- python3 scripts/lib/lane_decl.py --selftest
+    _runci_leg lanes_gate.selftest --after lane_decl.selftest,lane_graph.selftest -- python3 scripts/lib/lanes_gate.py --selftest
+    _runci_leg lanes_gate --after lanes_gate.selftest -- python3 scripts/lib/lanes_gate.py --check
+    # D(L, t), the digest a lane's verdict is keyed by: its fixtures (each input kind moves it, a
+    # file outside its inputs does not), then every declared lane of this tree, with the opaque ones
+    # counted.
+    _runci_leg lane_digest.selftest --after lanes_gate.selftest -- python3 scripts/lib/lane_digest.py --selftest
+    _runci_leg lane_digest --after lane_digest.selftest,lanes_gate -- python3 scripts/lib/lane_digest.py --check
+    # The traced audit (RFC 0001 4.4): its reading of a trace and its judgment on fixtures. A traced
+    # run is the audited lane's own (`lane_input_closure.py --lane <id> --run`), not this lane's.
+    _runci_leg lane_input_closure.selftest --after lane_digest.selftest -- python3 scripts/lib/lane_input_closure.py --selftest
     # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
     # rows. The mutants themselves run nightly; this is what a push can afford of them.
     _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
@@ -3094,6 +3114,11 @@ layer_c0_test_discipline() {
     # The table in this gate is what keeps the cheap ones above it.
     _runci_leg hook_default_region_gate.selftest -- python3 scripts/lib/hook_default_region_gate.py --selftest
     _runci_leg hook_default_region_gate --after hook_default_region_gate.selftest -- python3 scripts/lib/hook_default_region_gate.py
+    # R3353 -- the receipt store and the plans of scripts/verify-once.sh, which runs
+    # the lanes a change moved, after a landing. The selftest builds a throwaway repository with a
+    # lane set of its own and drives the plans, the link(2) publication, the refused
+    # receipts and the --all refusal through their states.
+    _runci_leg gate_ledger.selftest -- python3 scripts/lib/gate_ledger.py --selftest
     # R3190 (open-debt item 791) — pre-push gate 0b2: a commit that adds a
     # home-path line and a later commit that removes it leave the tip clean
     # (gate 0b reads the checkout) while the blob is published. The selftest

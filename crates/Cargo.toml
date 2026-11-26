@@ -504,6 +504,15 @@ opt-level = "s"
 [profile.capi-nostd.package.wz-tls-pem]
 opt-level = "s"
 
+# SHA-256 in the C libraries: its one caller there is the acceptor's cookie MAC, run a few times a
+# handshake (`wz-session-core`'s `sha256-compact`), so the compression is built for size in the
+# profiles the C libraries are built with and at the profile's level everywhere else.
+[profile.capi-small.package.sha2]
+opt-level = "s"
+
+[profile.capi-nostd.package.sha2]
+opt-level = "s"
+
 # socket2 0.6.3 and tokio 1.52.3 do not compile for QNX on the io-sock network stack: `libc` has
 # no `TCP_KEEPALIVE`, `unpcbid` or `LOCAL_PEEREID` there. ring 0.17.14 compiles for QNX but has no
 # entropy source for it (`SystemRandom` implements nothing), and quinn-udp 0.5.14 asks for an IP

@@ -60,11 +60,6 @@ const VALUE_RIDES: bool = cfg!(feature = "query-value");
 const SOURCE_INFO_RIDES: bool = cfg!(feature = "query-source-info");
 const ATTACHMENT_RIDES: bool = cfg!(feature = "query-attachment");
 
-/// Whether the build's network counters classify a Request by its owned message
-/// (`transport-stats`): a session of such a build sends every query as that message, which the
-/// counters read.
-pub const COUNTED_FROM_OWNED: bool = cfg!(feature = "transport-stats");
-
 /// A `get`, ready to encode.
 #[derive(Debug, Clone, Copy)]
 pub struct RequestWriter<'a> {
