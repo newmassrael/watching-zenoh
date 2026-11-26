@@ -1342,7 +1342,8 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// in microseconds: its JOIN beacon, and its sweep tick while the group holds a member or the
     /// socket holds back a datagram of the data emit. A sweep evicts members, and each step offers
     /// the socket what it refused; a group with neither has nothing to do on the tick. A host that
-    /// waits for the group's input waits no longer than this.
+    /// waits for the group's input waits no longer than this. A time already passed is a reading
+    /// at or before the clock's present one: the pump is due at once.
     pub fn next_due_us(&self) -> u64 {
         // The datagram the transport keeps is read on at the next step, and no wait on the
         // group's socket would see it.
@@ -1356,11 +1357,9 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         } else {
             self.next_join_ms
         };
-        let left_ms = due_ms.saturating_sub(self.clock.now_monotonic_ms());
-        self.runtime
-            .clock()
-            .now_us()
-            .saturating_add(left_ms.saturating_mul(1_000))
+        // The deadlines are kept on the clock's epoch, so the reading they fall at is known with
+        // no reading taken: a holder asks this after every step, a datagram's among them.
+        self.clock.us_at_ms(due_ms)
     }
 
     /// Whether the socket had no room for a datagram of the data emit that the pump holds for its
@@ -3187,5 +3186,53 @@ mod tests {
         assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
         assert_eq!(taken(&wire), ["join", "join", "join", "first", "join"]);
         assert!(matches_the_wire(), "the held put once, as it left");
+    }
+
+    /// A clock that stands at one reading past its zero and counts how often it is read.
+    #[derive(Clone, Default)]
+    struct Counted;
+
+    static COUNTED_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    impl ClockSource for Counted {
+        fn now_us(&self) -> u64 {
+            COUNTED_READS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            7_250
+        }
+    }
+
+    /// The pump says when it is next due with no reading of its clock, its deadlines being kept on
+    /// the clock's epoch: the beacon a second past the reading the pump was made at, on a clock
+    /// that does not stand at zero. Turned red by a `next_due_us` that reads the clock, or one
+    /// that leaves the epoch out.
+    #[test]
+    fn the_pump_says_when_it_is_next_due_with_no_reading_of_its_clock() {
+        use core::sync::atomic::Ordering::Relaxed;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let mut params = params();
+        params.join_interval_ms = 1_000;
+        let runtime = CoopRuntime::try_new(Counted).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join"], "the first beacon");
+        let reads = COUNTED_READS.load(Relaxed);
+        assert_eq!(pump.next_due_us(), 7_250 + 1_000_000, "the next beacon");
+        assert_eq!(COUNTED_READS.load(Relaxed), reads, "no reading taken");
     }
 }

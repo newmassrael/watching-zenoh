@@ -122,6 +122,13 @@ impl<C: ClockSource> CoopTime<C> {
         // millisecond value.
         now_us.saturating_sub(self.epoch_us) / 1000
     }
+
+    /// The clock's reading at which [`TimeSource::now_monotonic_ms`] first reads `ms`: a
+    /// deadline kept on this instance's epoch, said as a reading of the clock with none taken, for
+    /// a caller that tells a waiter when it is next due as often as it steps.
+    pub fn us_at_ms(&self, ms: u64) -> u64 {
+        self.epoch_us.saturating_add(ms.saturating_mul(1000))
+    }
 }
 
 impl<C: ClockSource> Clone for CoopTime<C> {
