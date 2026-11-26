@@ -155,6 +155,32 @@ impl SessionHeld {
         }
     }
 
+    /// Whether this thread holds the lock of the session whose state lies at `session`, as far as
+    /// the marks say: `None` where they cannot tell, which is a release build, one with no `std`,
+    /// and a thread that holds more sessions than its marks have room for.
+    pub fn held_on_this_thread(session: *const ()) -> Option<bool> {
+        #[cfg(all(feature = "std", debug_assertions))]
+        {
+            let session = session as usize;
+            held_here::HELD.with(|held| {
+                let (sessions, len) = held.get();
+                let taken = sessions.get(..len).unwrap_or(&[]);
+                if taken.contains(&session) {
+                    Some(true)
+                } else if len >= held_here::ROOM {
+                    None
+                } else {
+                    Some(false)
+                }
+            })
+        }
+        #[cfg(not(all(feature = "std", debug_assertions)))]
+        {
+            let _ = session;
+            None
+        }
+    }
+
     /// Whether this thread holds any session's lock, as far as the marks say: never in a release
     /// build.
     pub fn any_here() -> bool {
@@ -215,6 +241,53 @@ mod tests {
             !SessionHeld::any_here(),
             "none is held once every mark is dropped"
         );
+    }
+
+    /// A session is held on the thread that marked it and on no other, from its mark to its drop;
+    /// a build that keeps no marks cannot tell.
+    #[test]
+    fn a_session_is_held_on_the_thread_that_marked_it_alone() {
+        let one = 1_u8;
+        let at = core::ptr::from_ref(&one).cast::<()>();
+        let marks = cfg!(all(feature = "std", debug_assertions));
+        assert_eq!(SessionHeld::held_on_this_thread(at), marks.then_some(false));
+        let held = SessionHeld::enter(at);
+        assert_eq!(SessionHeld::held_on_this_thread(at), marks.then_some(true));
+        #[cfg(feature = "std")]
+        {
+            let address = at as usize;
+            let elsewhere =
+                std::thread::spawn(move || SessionHeld::held_on_this_thread(address as *const ()))
+                    .join()
+                    .expect("the other thread reads its marks");
+            assert_eq!(
+                elsewhere,
+                marks.then_some(false),
+                "another thread does not hold what this one marked"
+            );
+        }
+        drop(held);
+        assert_eq!(SessionHeld::held_on_this_thread(at), marks.then_some(false));
+    }
+
+    /// A thread whose marks are full cannot tell of a session it holds no mark of, so the answer
+    /// is none rather than that it is not held.
+    #[cfg(all(feature = "std", debug_assertions))]
+    #[test]
+    fn a_thread_with_its_marks_full_cannot_tell() {
+        let places = [0_u8; held_here::ROOM + 1];
+        let marks: std::vec::Vec<SessionHeld> = places[..held_here::ROOM]
+            .iter()
+            .map(|place| SessionHeld::enter(core::ptr::from_ref(place).cast()))
+            .collect();
+        let unmarked = core::ptr::from_ref(&places[held_here::ROOM]).cast::<()>();
+        assert_eq!(SessionHeld::held_on_this_thread(unmarked), None);
+        assert_eq!(
+            SessionHeld::held_on_this_thread(core::ptr::from_ref(&places[0]).cast()),
+            Some(true)
+        );
+        drop(marks);
+        assert_eq!(SessionHeld::held_on_this_thread(unmarked), Some(false));
     }
 
     /// A session's lock taken again on the thread that holds it fails at once in a debug build.
