@@ -8232,6 +8232,24 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4675": {
+      "decision_summary": "Read an imported Python module for the names its importers call, not whole,\nand declare the builds of the lanes whose builds are computed. The opaque\nlanes, always selected because their inputs could not be read, fall from 22\nto 4 (C0, Z8, Ero, Q); the rest are keyed by what they read.",
+      "changes_bullets": [
+        "lane_digest: an imported module is read for what its importers use; one-word shell constants and module string constants resolve.",
+        "lanes.toml: thirteen lanes declare the packages their computed builds build."
+      ],
+      "verification_bullets": [
+        "lane_digest selftest 89, lane_input_closure 10, lane_decl 19, lanes_gate selftest 14 and --check pass; python floor lint clean.",
+        "lane_digest --check: 194 lanes, 4 opaque."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "audit each newly declared lane with lane_input_closure --run (strace) for an input the declaration misses.",
+        "the reader still misses three build shapes: a cargo path argv, a printed argv run by the shell, cargo-mutants."
+      ]
     }
   },
   "inventory_entries": {
