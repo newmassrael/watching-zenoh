@@ -227,10 +227,43 @@ share.
 
 | row | KiB (two processes) | structure | state |
 |---|---:|---|---|
-| A1 arena pages the listener's open writes | 112 + 48 | the rows the open constructs (link cells, rooms, runtime and engine places, the planes) laid together at the head of the arena and the face sets after them, so the sets of faces not yet accepted stay unwritten. Read from the code: `RegistryOf::new` builds the set of every face the plan counts at the open (`for _ in 0..peers.tables` over `lend_set`), so the sets of faces not yet accepted are written whatever their place; the structure that leaves them unwritten lends a set when its face is taken (`engine/registry/adding.rs`), its span reserved by the plan and untouched until then. Which rows the written pages are is read first, by the arena's own page map (R5, now one command) against its row report: a layout or a deferral that misses the written rows moves nothing | R5 first; not implemented |
+| A1 arena pages the listener's open writes | 112 + 48 | the sets of the faces not yet accepted built when a face first takes their place, not at the open: `RegistryOf::new` builds the dial face's set and reserves one span for the rows of every other place (`SpareSets::reserved`, `Arena::split_off`), which nothing writes; `add_face` builds the set of the place it takes from that span (`engine/registry/adding.rs`), passing a place a tomb kept on the way, and rebuilds the index of the gets' deadlines over the sets built (`DueIndex::rebuild`). The arena is still reserved to its ceiling, so a face that comes is never refused for memory; what moves is which pages are written. The rows judged one by one, largest first, are in section 5.1.1 | **landed in this lane**; R5's page map reads it |
 | A2 the open's stack | 28 | `assemble` and `lend_session` build `SessionLent` and the plan in their frames and return them by value. The plan's list of rows (`ArenaPlan::rows`, `ARENA_ROWS` rows of 24 bytes), which only a report reads, is left out of the open's plan: `OpenPlan` is `ArenaPlan<0>`, which lays out every sum and every layer's rows and lists none, so `lend_session`'s frame holds no table of rows and its walk writes none (text falls with the stores); a region's plan is taken on without its list (`ArenaPlan::take_on`). The values the open builds in its frames and moves (`Core` in `assemble`, `SessionLent` out of `lend_session`) stay: writing them field by field where they live cost text in the sessions lane, so only a value whose bytes are measured to dominate a frame is a candidate | the list **landed in this lane**, the frames read again on the merged build (`objdump -d`, as section 5.1 counted them) |
 | A3 `.bss` | 16 | the words every critical section writes laid beside the first thread record, the one the read thread's spawn takes: `wz_host_sync::process_section`, a reentrant lock in one 128-byte-aligned static with the records (`ProcessWords`), which `wz_runtime_coop::cs::host_sys` enters, so the two writes lie on one page; the scout window's buffer and the callback table stay where the linker puts them, and R0 reads whether either is written | **landed in this lane**, R0 reads it |
 | A4 the read thread's malloc arena | -12 | none | a win |
+
+#### 5.1.1 A1: the rows of R5's report, largest first
+
+R5's report of the preset (the plan of a listener at the preset's limits, `WZ_LIMITS_ZENOH_PICO`, 237,792
+bytes of rows; the loopback listener of the same run reserved 163,312) against what the open writes in each
+row, read from the code. The arena of a host's session is the system's fresh pages (`HostPages`,
+`Arena::over_zeroed`), so a row is resident only where something writes it; a row lent and not written
+costs nothing until it is used.
+
+| row (listener, at the limits) | bytes | written by the open | what A1 changes |
+|---|---:|---|---|
+| session tables | 56,272 | no: `SessionTables::lent` lends each table's columns over the span as it lies (`SlotMap::lent_from`, `BoundedVec::lent_over`) | nothing; a declaration writes its own row |
+| peer tables | 10 x 5,152 | each set lent at the open writes its key-composing row as its rows are lent (`ComposeRow::lent`, which pushes one `KeyexprRow`, with `storage-profile`), so a page or two of each face's span is written for faces that may never come | the dial face's alone at the open; each other one when a face first takes its place |
+| publisher, queryable, subscriber places | 24,000, 24,000, 11,200 | no: tables of byte cells over zeroed memory are lent as they lie (`Arena::lend_byte_cells`) | nothing; a declaration writes its place |
+| reassembly buffers | 12,288 | no: byte cells, as above | nothing |
+| face tables | 11 x 760 | every set written whole where it lies (`FaceTables::rowless_in`: the gets, the due row, the peer's tables by `init_in`), then its handles (`keep_rows_in`, `limit_to`) | the dial face's set alone at the open, 760 bytes; 7,600 bytes of the eleven not written until faces come |
+| peer pools (declarations, aliases, interests) | 4,944, 1,040, 784 | each pool's state at its head (`RawSpace::lent_pool` writes `PoolState`) | nothing: the pools are the session's, lent at the open |
+
+By the count, A1 leaves unwritten at the open the ten spare sets' 7,600 bytes of the face tables and,
+with `storage-profile`, a page or two of each spare face's 5,152-byte span: of the order of ten pages,
+40 KiB, of the listener's 112. That is an estimate from the code; R5's page map of the merged build reads
+it. The rows the count leaves written (the engine, runtime and plane places, the link cells and rooms, the
+pools' heads, the dial face's set) are the open's own and stay.
+
+**Whether A2's `ROWS` default made a second copy of the plan's walk.** By the code it does not: an open
+lays out `OpenPlan`, which is `ArenaPlan<0>` in a build with `runtime-plan` and the listed plan without it,
+and no other path of the library reaches the generic walk (`count`, `lay_out`, `put`, `lay_out_open`,
+`SessionArena::reserve`) with the other `ROWS`: `ArenaPlan::planned` of the listed plan is reached by
+`ArenaRegion::of`, a constant evaluated when a build without `runtime-plan` is compiled, and the region
+path of an open with `runtime-plan` takes a region's plan on (`take_on::<0, ARENA_ROWS>`) and walks none.
+The +422 of `sessions` against int206 is then not a second walk; read it on the merged build with
+`nm -S -C` of the library, counting each of `ArenaPlan<_>::lay_out` and `::count` (two entries of one name
+are two copies).
 
 ### 5.2 The acceptor's cookie MAC: a smaller one that keeps its guarantee (design; the owner's decision)
 
@@ -283,6 +316,19 @@ payload. For a keyed PRF with a t-bit tag a forgery then succeeds with probabili
 (plus the PRF's distinguishing advantage): at a million handshakes a second, 2^64 guesses take about
 585,000 years, so a 64-bit tag is far from the attack's reach and a 128-bit one leaves no margin to
 argue about.
+
+**C1, landed in this lane.** `wz-session-core`'s `sha256-compact` turns on `sha2`'s `force-soft-compact`
+and `wz-capi-pico`'s `os-host` selects it, as it selects `initial-sn-compact`; `[profile.capi-small.package.sha2]`
+and `[profile.capi-nostd.package.sha2]` build the crate at `opt-level = "s"` (`crates/Cargo.toml`), the
+profiles the C libraries are built with, and every other profile keeps its level. The proof is unchanged: the
+same HMAC-SHA256 truncated to 128 bits, the same key, the same checks, so the same cookie bytes; the RFC 4231
+vectors of `signing_key`'s tests are what says so on a build with the feature (`cargo test -p
+wz-session-core --features sha256-compact signing_key::`). Expected in the size ledger, on the preset's
+library: `sha2::sha256::compress256` (11,596, unrolled) and the SHA-NI `digest_blocks` (947) leave with the
+run-time detection that picks between them, and one rolled compression of the order of 0.5 to 1 KB takes their
+place beside the 256 bytes of round constants in `.rodata`: about 11 to 12 KB of text less, the HMAC's 1,108
+unchanged. A mint and a check each run four or five compressions, rolled; the handshake's time is not the
+matrix's. What stays for the owner is C2 to C4.
 
 | | cookie | guarantee against C0 | forgery per online attempt | text (estimate; the size ledger measures) | changes |
 |---|---|---|---|---:|---|
@@ -360,3 +406,8 @@ change to the handshake's proof, so none is a build switch this lane flips.
 - A2's first part: the open's plan lists no rows (`OpenPlan`). A3: the process's critical section beside
   the first thread record (`wz_host_sync::process_section`).
 - Section 5.2: the cookie MAC's candidates, for the owner's decision.
+- A1: the set of each face but the dial role's built when a face first takes its place, from a span the
+  open reserves and writes nothing of (`SpareSets`, `Arena::split_off`, `DueIndex::rebuild`); section 5.1.1
+  judges R5's rows, largest first, and answers whether A2 made a second copy of the walk.
+- C1: SHA-256 compiled small in the C libraries (`sha256-compact` under `os-host`, `sha2` at `opt-level = "s"`
+  in `capi-small` and `capi-nostd`), section 5.2.
