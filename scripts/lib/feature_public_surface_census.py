@@ -506,7 +506,10 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "key as one link's key-wire form names them, which both engines call for each link, this "
         "crate's `link_form_tests` run and the cooperative engine's `shared_key_ids` tests run; "
         "`time-base` gates `time_base`, the time base a program supplies made from the C calls "
-        "both ABIs' doors are handed, which this crate's own test and each ABI's door tests run. "
+        "both ABIs' doors are handed, which this crate's own test and each ABI's door tests run; "
+        "`shared-sinks` gates `SubscriberSink::shared`, `MatchingSink::shared` and "
+        "`SharedSampleFn`, a Rust program's own closure as a callback, which the engines with a "
+        "Rust API name and this crate's `shared_sink_tests` and the cooperative engine's tests run. "
         "`os-sys` makes, for a host library built without `std`, the lock, condition variable "
         "and threads `std` makes, of the host's own calls (`os`: the `wz-host-sync` "
         "re-export, `StaticMutex`, `StaticCondvar`); every site is `any(std, os-sys)`, so it "
@@ -518,6 +521,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
                 "os-sys",
                 "resource-snapshot",
                 "shared-key-ids",
+                "shared-sinks",
                 "supervision",
                 "time-base",
             }

@@ -183,12 +183,15 @@ pub enum SubscriberSink {
     /// A closure given as plain functions over one context, with no heap: a C program's as its
     /// ABI hands it over ([`Self::c`]), or a Rust function's ([`Self::raw`]).
     Plain(PlainCallback<SampleMarshal>),
-    /// A Rust program's closure, shared ([`Self::shared`]).
+    /// A Rust program's closure, shared ([`Self::shared`]). A C library hands none, so a build
+    /// without `shared-sinks` has no such form to call or drop.
+    #[cfg(feature = "shared-sinks")]
     Shared(Arc<SharedSampleFn>),
 }
 
 /// A Rust program's subscriber callback, as [`SubscriberSink::Shared`] shares it: upstream zenoh's
 /// `Callback<Sample>` shape.
+#[cfg(feature = "shared-sinks")]
 pub type SharedSampleFn = dyn Fn(&dyn SampleView) + Send + Sync;
 
 /// A C program's callback function as a port holds it, its first argument erased to a pointer:
@@ -414,6 +417,7 @@ impl SubscriberSink {
     }
 
     /// A Rust program's closure, shared.
+    #[cfg(feature = "shared-sinks")]
     pub fn shared(call: impl Fn(&dyn SampleView) + Send + Sync + 'static) -> Self {
         Self::Shared(Arc::new(call))
     }
@@ -427,6 +431,7 @@ impl SubscriberSink {
             Self::Plain(plain) => unsafe {
                 (plain.marshal)(plain.call, plain.context, &SampleRef::of(sample), true)
             },
+            #[cfg(feature = "shared-sinks")]
             Self::Shared(call) => call(sample),
         }
     }
@@ -442,6 +447,7 @@ impl SubscriberSink {
             Self::Plain(plain) => unsafe {
                 (plain.marshal)(plain.call, plain.context, sample, shows_timestamp)
             },
+            #[cfg(feature = "shared-sinks")]
             Self::Shared(call) => shown(sample, shows_timestamp, |sample| call(sample)),
         }
     }
@@ -632,7 +638,9 @@ pub enum MatchingSink {
     /// A C program's closure: its function, its context and its drop, held as they are, with no
     /// heap ([`Self::raw`]).
     Raw(RawMatchingCallback),
-    /// A Rust program's closure, shared ([`Self::shared`]).
+    /// A Rust program's closure, shared ([`Self::shared`]), only with `shared-sinks`, as a
+    /// subscriber's ([`SubscriberSink`]).
+    #[cfg(feature = "shared-sinks")]
     Shared(Arc<dyn Fn(bool) + Send + Sync>),
 }
 
@@ -670,6 +678,7 @@ impl MatchingSink {
     }
 
     /// A Rust program's closure, shared.
+    #[cfg(feature = "shared-sinks")]
     pub fn shared(call: impl Fn(bool) + Send + Sync + 'static) -> Self {
         Self::Shared(Arc::new(call))
     }
@@ -679,6 +688,7 @@ impl MatchingSink {
         match self {
             // SAFETY: `Self::raw`'s contract: the call may be made from here, now.
             Self::Raw(raw) => unsafe { (raw.call)(raw.context, matching) },
+            #[cfg(feature = "shared-sinks")]
             Self::Shared(call) => call(matching),
         }
     }
@@ -1661,6 +1671,88 @@ mod link_form_tests {
     }
 }
 
+/// The shared form of a subscriber's and a matching listener's sinks (`shared-sinks`).
+#[cfg(all(test, feature = "shared-sinks"))]
+mod shared_sink_tests {
+    use super::*;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    use wz_session_core::reliability::Reliability;
+    use wz_session_core::sample::SampleKind;
+
+    /// A Rust closure, which reads the sample itself, is handed the session's sample when it is to
+    /// see the timestamp and one with none when it is not, and the session's sample keeps its
+    /// own. Turned red by the shared arm of `call_ref` handing the sample on without `shown`.
+    #[test]
+    fn a_shared_sink_sees_the_timestamp_only_when_it_is_shown() {
+        let seen = Arc::new(AtomicUsize::new(2));
+        let into = Arc::clone(&seen);
+        let sink = SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.store(
+                usize::from(sample.timestamp_parts().is_some()),
+                Ordering::SeqCst,
+            );
+        });
+        let mut sample = SampleRef::new("demo/stamp", b"p", SampleKind::Put, Reliability::Reliable);
+        sample.timestamp = Some((7, &[1u8, 2][..]));
+        for shows in [false, true] {
+            seen.store(2, Ordering::SeqCst);
+            sink.call_ref(&sample, shows);
+            assert_eq!(
+                seen.load(Ordering::SeqCst),
+                usize::from(shows),
+                "shown {shows}"
+            );
+        }
+        assert!(
+            sample.timestamp.is_some(),
+            "the session's sample keeps its own"
+        );
+    }
+
+    /// A shared closure is called with the view a sink is handed (`SubscriberSink::call`), and
+    /// the sink holds it by its count alone: the sink's drop lets go of that one hold. Turned red
+    /// by the shared arm of `call` not calling the closure, or a drop that keeps the hold or lets
+    /// go of it twice.
+    #[test]
+    fn a_shared_sink_calls_its_closure_and_lets_go_of_its_hold() {
+        let heard = Arc::new(AtomicUsize::new(0));
+        let into = Arc::clone(&heard);
+        let sink = SubscriberSink::shared(move |sample: &dyn SampleView| {
+            into.fetch_add(sample.payload().len(), Ordering::SeqCst);
+        });
+        let sample = SampleRef::new(
+            "demo/shared",
+            b"abc",
+            SampleKind::Put,
+            Reliability::Reliable,
+        );
+        sink.call(&sample);
+        assert_eq!(heard.load(Ordering::SeqCst), 3, "the payload's length");
+        assert_eq!(Arc::strong_count(&heard), 2, "the closure's hold");
+        drop(sink);
+        assert_eq!(Arc::strong_count(&heard), 1, "let go with the sink");
+    }
+
+    /// A shared matching closure is told each verdict it is called with, and let go of with its
+    /// sink. Turned red by the shared arm of `MatchingSink::call` not calling the closure or
+    /// handing it another verdict, or a drop that keeps the hold.
+    #[test]
+    fn a_shared_matching_sink_is_told_each_verdict_and_let_go_with_its_sink() {
+        let told = Arc::new(AtomicUsize::new(0));
+        let into = Arc::clone(&told);
+        let sink = MatchingSink::shared(move |matching| {
+            into.store(usize::from(matching) + 1, Ordering::SeqCst);
+        });
+        sink.call(true);
+        assert_eq!(told.load(Ordering::SeqCst), 2, "matching");
+        sink.call(false);
+        assert_eq!(told.load(Ordering::SeqCst), 1, "not matching");
+        assert_eq!(Arc::strong_count(&told), 2, "the closure's hold");
+        drop(sink);
+        assert_eq!(Arc::strong_count(&told), 1, "let go with the sink");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1780,9 +1872,10 @@ mod tests {
 
     /// A sink told to hide the timestamp hides it from every kind of callback, and shows the one it
     /// is told to show: a C program's marshal is handed the session's sample as it lies with the
-    /// choice to apply, and a Rust function or closure, which reads the sample itself, a sample
-    /// with none. Turned red by a marshal handed a copy of the sample or another choice, or a Rust
-    /// callback handed a timestamp it is not to see or not handed one it is.
+    /// choice to apply, and a Rust function, which reads the sample itself, a sample with none (a
+    /// Rust closure the same, `shared_sink_tests`). Turned red by a marshal handed a copy of the
+    /// sample or another choice, or a Rust function handed a timestamp it is not to see or not
+    /// handed one it is.
     #[test]
     fn a_sink_hides_the_timestamp_it_is_told_to() {
         use core::sync::atomic::{AtomicUsize, Ordering};
@@ -1816,12 +1909,6 @@ mod tests {
             unsafe { SubscriberSink::c(marshal, Some(program), core::ptr::null_mut(), None, None) };
         // SAFETY: `note` reads only the sample it is handed, from any thread; nothing is dropped.
         let raw = unsafe { SubscriberSink::raw(note, core::ptr::null_mut(), None) };
-        let shared = SubscriberSink::shared(|sample: &dyn SampleView| {
-            SHOWN.store(
-                usize::from(sample.timestamp_parts().is_some()),
-                Ordering::SeqCst,
-            );
-        });
         for shows in [false, true] {
             c.call_ref(&sample, shows);
             assert_eq!(HANDED.load(Ordering::SeqCst), at, "the sample as it lies");
@@ -1830,15 +1917,13 @@ mod tests {
                 usize::from(shows),
                 "the C choice"
             );
-            for rust in [&raw, &shared] {
-                SHOWN.store(2, Ordering::SeqCst);
-                rust.call_ref(&sample, shows);
-                assert_eq!(
-                    SHOWN.load(Ordering::SeqCst),
-                    usize::from(shows),
-                    "a Rust one"
-                );
-            }
+            SHOWN.store(2, Ordering::SeqCst);
+            raw.call_ref(&sample, shows);
+            assert_eq!(
+                SHOWN.load(Ordering::SeqCst),
+                usize::from(shows),
+                "a Rust function"
+            );
         }
         assert!(
             sample.timestamp.is_some(),
@@ -1859,6 +1944,25 @@ mod tests {
             core::mem::size_of::<LivelinessSink>(),
             core::mem::size_of::<PlainCallback<LivelinessMarshal>>()
         );
+    }
+
+    /// Without `shared-sinks` a subscriber's and a matching listener's sinks have their plain form
+    /// alone: each binding below names every form its sink has, so the build that turns it red is
+    /// one that keeps a shared form without the feature (it no longer compiles).
+    #[cfg(not(feature = "shared-sinks"))]
+    #[test]
+    fn without_shared_sinks_a_sink_has_its_plain_form_alone() {
+        unsafe fn note(_context: *mut core::ffi::c_void, _sample: &SampleRef<'_>) {}
+        unsafe fn told(_context: *mut core::ffi::c_void, _matching: bool) {}
+        let context = 0x2a_usize as *mut core::ffi::c_void;
+        // SAFETY: neither function is called, and neither sink is given a drop.
+        let subscriber = unsafe { SubscriberSink::raw(note, context, None) };
+        // SAFETY: as above.
+        let matching = unsafe { MatchingSink::raw(told, context, None) };
+        let SubscriberSink::Plain(plain) = &subscriber;
+        assert_eq!(plain.context as usize, 0x2a, "the plain form's context");
+        let MatchingSink::Raw(raw) = &matching;
+        assert_eq!(raw.context as usize, 0x2a, "the raw form's context");
     }
 
     /// A callback given as a Rust function is called with its own context, and its drop runs
