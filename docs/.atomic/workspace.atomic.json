@@ -7998,6 +7998,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4663": {
+      "decision_summary": "Land rss-design: cut the resident memory of the pico preset build. A\nlistener lends its face tables on accept instead of reserving them up front,\nand SHA-256 is built compact; rows that grew text more than they saved were\nreverted. The preset's RSS ratio against zenoh-pico moved from 1.31 to 1.15.",
+      "changes_bullets": [
+        "capi-coop/runtime-coop: face tables lent on accept rather than reserved for every slot.",
+        "crates: SHA-256 built compact for the preset.",
+        "reverted the rows that grew text more than they saved."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-capi-coop, wz-capi-pico, wz-host-sync, wz-runtime-coop, wz-runtime-posix, wz-session-core clippy-clean in every declared set after merging main.",
+        "lib tests: wz-capi-coop, wz-runtime-coop, wz-runtime-posix, wz-host-sync pass.",
+        "measured RSS ratio against zenoh-pico on the preset build: 1.15 (was 1.31)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "RSS still loses at 1.15: the resident library text is the remaining source."
+      ]
     }
   },
   "inventory_entries": {
