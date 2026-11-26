@@ -95,7 +95,7 @@ while [[ $# -gt 0 ]]; do
         exit 0
         ;;
     *)
-        echo "verify-once: unknown argument `$1`" >&2
+        echo "verify-once: unknown argument \`$1\`" >&2
         usage >&2
         exit 2
         ;;
@@ -149,7 +149,7 @@ case "$plan_rc" in
     ;;
 esac
 if [[ $plan_only -eq 1 || $check_only -eq 1 ]]; then
-    echo "verify-once: lanes are still to run (above); run `bash scripts/verify-once.sh`" >&2
+    echo "verify-once: lanes are still to run (above); run \`bash scripts/verify-once.sh\`" >&2
     exit 1
 fi
 
@@ -162,9 +162,13 @@ if [[ -z "$bx_bin" ]]; then
     exit 2
 fi
 
+if [[ ! -s "$work/ids" ]]; then
+    echo "verify-once: the plan named lanes to run but wrote no ids to $work/ids" >&2
+    exit 2
+fi
 ids="$(cat "$work/ids")"
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-echo "verify-once: running ${ids//,/ } in one `bx --checks ci` call"
+echo "verify-once: running ${ids//,/ } in one \`bx --checks ci\` call"
 bx_rc=0
 "$bx_bin" --checks ci --results "$work/results.jsonl" -- \
     python3 -I "$ledger" units --head "$head" --ids "$ids" || bx_rc=$?
@@ -179,7 +183,7 @@ record_rc=0
 python3 -I "$ledger" "${record_args[@]}" || record_rc=$?
 if [[ $record_rc -ne 0 ]]; then
     echo "verify-once: a lane failed or was not measured (above); repair it and run" >&2
-    echo "             `bash scripts/verify-once.sh --only-red`" >&2
+    echo "             \`bash scripts/verify-once.sh --only-red\`" >&2
     exit 1
 fi
 echo "verify-once: every lane the branch moved has a pass at its digest"
