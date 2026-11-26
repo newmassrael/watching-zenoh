@@ -1623,10 +1623,12 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
 
 /* ================================================ the periodic run API
  *
- * No door of wz's own: this section states the order in which a program that
- * runs its own scheduler calls zenoh-pico's run API on the pico C ABI, and
- * what each call does on each engine (docs/periodic-run-api.md has the table;
- * crates/wz-capi-pico/examples/c/periodic.c runs it).
+ * This section states the order in which a program that runs its own
+ * scheduler calls zenoh-pico's run API on the pico C ABI, and what each call
+ * does on each engine (docs/periodic-run-api.md has the table;
+ * crates/wz-capi-pico/examples/c/periodic.c runs it). Its one door of wz's
+ * own, declared at its end, steps a session the program opened without its
+ * read task.
  *
  *   1 open       z_open. Multi-threaded arm: the read task starts with the
  *                session unless the open options say not to.
@@ -1639,7 +1641,9 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  *                the channel's try_recv until Z_CHANNEL_NODATA.
  *   4 each cycle zp_batch_start, the cycle's puts, zp_batch_flush: the puts
  *                leave together at the flush, and the window stays open.
- *                Single-threaded: then zp_spin_once. Then pull the channels.
+ *                Single-threaded: then zp_spin_once; multi-threaded and
+ *                opened without the read task: then wz_ext_session_step.
+ *                Then pull the channels.
  *                Then wait for the cycle's absolute deadline (z_clock_now,
  *                z_clock_advance_ms) with z_condvar_wait_until or a sleep.
  *   5 end        zp_batch_stop, the undeclarations, zp_stop_read_task if
@@ -1654,9 +1658,35 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * program built for the single-threaded arm's promise that callbacks run only
  * inside its own calls therefore locks what its callbacks share, or reads
  * through channels, when its library runs the tokio engine (on Windows, the
- * only engine). In the multi-threaded arm neither engine, nor zenoh-pico, has
- * a call that steps the session on the program's thread: the program sends
- * and pulls, the read task does the rest. */
+ * only engine). In the multi-threaded arm zenoh-pico has no call that steps
+ * the session on the program's thread: the program sends and pulls, the read
+ * task does the rest. The cooperative engine has one, wz_ext_session_step: a
+ * library carries both ways, and the program picks one at each open. */
+
+/* wz's own result code of the step, outside zenoh-pico's own codes. */
+#define WZ_EXT_ERR_READ_TASK_RUNS (-26) /* the session's read task runs and
+                                           steps it: nothing was read */
+
+/* One step of a session the program runs on its own cycle, on the calling
+ * thread: the session reads what its links hold, waiting for input at most
+ * timeout_ms milliseconds (0: only what is ready now; the session's own wait
+ * on a quiet link bounds it as well), keeps each lease, dials a lost link
+ * again, runs what is due, and hands what it read to the callbacks before the
+ * call returns. The program picks it at the open: z_open with
+ * auto_start_read_task false in its z_open_options_t, then a step each cycle
+ * where the read task would run. Steps made from two threads at once each
+ * step the session, and each sample is handed out once. Declared in the
+ * multi-threaded arm only, whose read task it stands in for.
+ *
+ * Z_OK once the step ran; WZ_EXT_ERR_READ_TASK_RUNS while the session's read
+ * task runs (the open started it, or zp_start_read_task did since), nothing
+ * read; Z_ERR_SESSION_CLOSED for a closed session; WZ_EXT_ERR_UNSUPPORTED on
+ * the tokio engine, which runs the session on a thread of its own; Z_ERR_NULL
+ * for a NULL session. */
+#if defined(Z_FEATURE_MULTI_THREAD) && Z_FEATURE_MULTI_THREAD == 1
+z_result_t wz_ext_session_step(const z_loaned_session_t *session,
+                               uint32_t timeout_ms);
+#endif
 
 /* ================================================ callbacks
  *

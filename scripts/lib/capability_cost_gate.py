@@ -1207,8 +1207,9 @@ CASES: tuple[Case, ...] = (
          # accept loop, responder and scouting glue) are not linked.
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN, STD_RUNTIME),
-         # 812 exports: `wz_ext_callbacks_refused` (d80d315d1).
-         exports=812,
+         # 813 exports: `wz_ext_session_step`, the step of a session opened without its read task,
+         # which the multi-threaded arm has. 812 with `wz_ext_callbacks_refused` (d80d315d1).
+         exports=813,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
               "(`header_internals`: `_z_cancellation_token_clear`, "

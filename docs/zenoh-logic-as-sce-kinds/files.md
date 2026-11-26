@@ -350,6 +350,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/session_ext.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_memory.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_place.rs` | S7 | |
+| `crates/wz-capi-pico/src/session_step.rs` | S12 | |
 | `crates/wz-capi-pico/src/sized.rs` | S7 | |
 | `crates/wz-capi-pico/src/snapshot.rs` | S7 | |
 | `crates/wz-capi-pico/src/stream_supervision.rs` | S12 | |

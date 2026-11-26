@@ -161,10 +161,12 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | config-policy | `wz_ext_config_policy`, `wz_ext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
 | device-requires | `wz_ext_config_device_requires` | what an open of a config would ask of the operating system |
 | (every build) | `wz_ext_redeclare`, `wz_ext_get_to_peer` | declarations re-sent; a get addressed to one node |
+| (multi-threaded arm) | `wz_ext_session_step` | one step of a session opened without its read task, made on the program's own cycle |
 
 Each door returns zenoh-pico's result codes, and wz's own two outside their range:
 `WZ_EXT_ERR_POLICY_OFF` (-2), a call the build's policy does not allow, and
-`WZ_EXT_ERR_UNSUPPORTED` (-3), a call this engine or build does not do. A door that refuses a text
+`WZ_EXT_ERR_UNSUPPORTED` (-3), a call this engine or build does not do; `wz_ext_session_step`
+answers `WZ_EXT_ERR_READ_TASK_RUNS` (-26) while the session's read task runs. A door that refuses a text
 it reads (a profile, a catalog) writes why into the `z_owned_string_t` it is handed, which the
 program drops. The message payload's doors answer a refused call with `WZ_EXT_ERR_PAYLOAD_PATH`
 (-20), `_TYPE` (-21), `_RANGE` (-22), `_ABSENT` (-23) or `_WIRE` (-24), and
