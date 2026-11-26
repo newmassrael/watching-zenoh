@@ -213,7 +213,7 @@ fn spawn_router_hat_dialing(
 /// Leg 1 — the router-tier topology floor. wz `--router-hat` dials zenohd and
 /// converges its `routers_net` to 2, proving the cross-impl link-state exchange.
 // R311y423 — and this leg is scouting-gossip's cross-impl witness. The atom is
-// the link-state gossip flood (wz-routing-graph + linkstate_forward.rs,
+// the link-state gossip flood (wz-routing-graph + router_forward.rs,
 // FOUNDATIONAL/always-on), and the assertion below is precisely that wz
 // DECODED >=1 of zenohd's LinkStateList OAM floods -- `ingested() > 0`, not the
 // handshake-satisfiable convergence tick. zenohd->wz only: wz's own flood
@@ -1089,11 +1089,9 @@ fn wz_router_hat_and_zenohd_federate_a_pico_query_across_the_backbone() {
 ///
 /// The UNDECLARE-RE-ARM half is NOT cross-impl assertable (the real pico `z_querier`
 /// prints nothing when its write-filter re-arms, and the negative "gets stopped over
-/// time" is inherently flaky), so it stays unit-proven on the forwarder — router
+/// time" is inherently flaky), so it stays unit-proven on the forwarder —
 /// `withdrawing_the_last_backing_sub_undeclares_and_lets_a_re_declare_re_push`
-/// (router_forward.rs) + the peer twins (linkstate_forward.rs
-/// `peer_link_down_undeclares_to_the_client_querier`,
-/// `peer_partial_qabl_withdrawal_downgrades_the_client_querier_same_id`).
+/// (router_forward.rs).
 // wz-proves: declare-interest pico->wz partial
 // wz-proves: declare-queryable wz->pico
 // wz-proves: codec-declare wz->pico
@@ -1254,9 +1252,8 @@ fn wz_router_hat_pushes_a_future_queryable_to_a_pico_querier() {
 /// This is the POSITIVE pico-side observable of the re-arm (`z_querier_get_matching_status`
 /// = `!_z_write_filter_active`, zenoh-pico api.c), NOT the flaky negative "gets stopped
 /// over time" — so the withdrawal half is proven on a REAL pico querier, not only on
-/// the forwarder units (router_forward.rs
-/// `withdrawing_the_last_backing_sub_undeclares_and_lets_a_re_declare_re_push`,
-/// linkstate_forward.rs `peer_link_down_undeclares_to_the_client_querier`). Sequence:
+/// the forwarder unit (router_forward.rs
+/// `withdrawing_the_last_backing_sub_undeclares_and_lets_a_re_declare_re_push`). Sequence:
 /// querier (with -a) first → queryable second → "matching queryable" (future push
 /// deactivated) → KILL the queryable → "NO MORE matching queryables" (undeclare
 /// re-armed). The wz-side `pushed a future queryable` pins the deactivation was the

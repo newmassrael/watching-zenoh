@@ -17,14 +17,20 @@
 //! Query decode (`query::extract_query_attachment`), Query encode
 //! (`request_build`), and Push encode (`session_glue::build_body_extensions`).
 //! Housing the encode / decode pair here gives every attachment path one
-//! source of truth, mirroring the [`crate::source_info_ext`] precedent for
+//! source of truth, mirroring the `source_info_ext` precedent for
 //! the sibling `source_info` ext. The module is gated on `attachment-bytes`,
 //! the catalog primitive the `pubsub-attachment` / `query-attachment`
-//! consumer features select.
+//! consumer features select. A build without a heap reads an attachment where
+//! its frame lies (`decode_attachment_ext_in`); the owned and shared forms,
+//! the encoder and the kv-sequence helpers are the heap's (`alloc`).
 
+#[cfg(feature = "alloc")]
 use crate::ext_view::ExtEntryView;
+#[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::{Bounded, CodecError};
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_entry::{ExtEntryFrom, ExtEntryOwned, ExtEntryOwnedVariant};
+#[cfg(feature = "alloc")]
 use wz_codecs::ext_zbuf::{ExtZbufOwned, ExtZbufValueField};
 
 /// Attachment ext id inside a PUT push body — zenoh-pico
@@ -78,6 +84,7 @@ pub const ATTACHMENT_EXT_ID_QUERY: u8 = crate::ext_header::body_ext_id::QUERY_AT
 /// ENC_ZBUF marker packed into the ext header high bits: the 2-bit
 /// encoding field (`0b10`) shifted into bits 5..6 (`0b10 << 5 = 0x40`).
 /// The attachment ext never sets the mandatory bit (`0x10`).
+#[cfg(feature = "alloc")]
 const ATTACHMENT_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 
 /// Build the single attachment `ExtEntry` for the given carrier `ext_id`
@@ -85,6 +92,7 @@ const ATTACHMENT_EXT_HEADER_ENC_ZBUF: u8 = 0x40;
 /// surrounding codec applies the chain-continuation `Z` bit; this helper
 /// emits the entry with `Z` clear (terminator) so a caller appending it
 /// as the sole / last entry needs no fix-up.
+#[cfg(feature = "alloc")]
 pub fn encode_attachment_ext<S: for<'x> ExtEntryFrom<'x>>(
     ext_id: u8,
     payload: &[u8],
@@ -124,12 +132,15 @@ pub fn encode_attachment_ext<S: for<'x> ExtEntryFrom<'x>>(
 /// R3044 -- generic over the entry, because a Query's chain holds its own kind
 /// of entry and the other messages' chains hold the generic one
 /// ([`crate::ext_view`]).
+#[cfg(feature = "alloc")]
 pub fn decode_attachment_ext<E: ExtEntryView>(extensions: &[E], ext_id: u8) -> Option<&[u8]> {
     decode_attachment_ext_in(extensions, ext_id)
 }
 
-/// [`decode_attachment_ext`] over the entries a chain yields, by reference or by value (a chain
-/// walked where its frame lies): the bytes stay where they lie, for as long as `'c`.
+/// The attachment of a chain for the carrier `ext_id`, over the entries the chain yields, by
+/// reference or by value (a chain walked where its frame lies): the last entry of the extension's
+/// identity, read as `decode_attachment_ext` reads it, and the bytes stay where they lie, for as
+/// long as `'c`.
 pub fn decode_attachment_ext_in<'c, T: crate::ext_view::ExtEntryBytes<'c>>(
     extensions: impl IntoIterator<Item = T>,
     ext_id: u8,
@@ -157,6 +168,7 @@ const fn attachment_eid(ext_id: u8) -> u8 {
 /// Without `rx-shared-bytes` there is no storage to share (the wire profile is
 /// the owned default) and the answer is a copy of the same bytes, which is what
 /// every reader of the borrowed form made before there was a choice.
+#[cfg(feature = "alloc")]
 pub fn decode_attachment_ext_shared(
     extensions: &[ExtEntryOwned<crate::wire::WireStorage>],
     ext_id: u8,
@@ -197,6 +209,7 @@ pub fn decode_attachment_ext_shared(
 /// length are the zenoh `zsize` VLE (`_z_zsize_encode`), which wz's [`crate::vle`]
 /// SSOT (`encode_vle_u64_into` / `write_zbuf`) emits byte-identically, so the
 /// blob is decode-compatible by construction — no second varint here.
+#[cfg(feature = "alloc")]
 pub fn serialize_kv_attachment(pairs: &[(&[u8], &[u8])]) -> alloc::vec::Vec<u8> {
     let mut out = alloc::vec::Vec::new();
     crate::vle::encode_vle_u64_into(&mut out, pairs.len() as u64);
@@ -227,6 +240,7 @@ pub fn serialize_kv_attachment(pairs: &[(&[u8], &[u8])]) -> alloc::vec::Vec<u8> 
 /// [`crate::vle`] SSOT (`read_zbuf` = `ze_deserializer_deserialize_string`),
 /// the read twin of the [`crate::vle::write_zbuf`] `serialize_kv_attachment`
 /// builds from.
+#[cfg(feature = "alloc")]
 pub fn deserialize_kv_attachment(
     blob: &[u8],
 ) -> Option<alloc::vec::Vec<(alloc::vec::Vec<u8>, alloc::vec::Vec<u8>)>> {
@@ -241,7 +255,7 @@ pub fn deserialize_kv_attachment(
     Some(pairs)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
 

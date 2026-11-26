@@ -119,6 +119,16 @@ excluded="wz"
 # The reader of the feature sets a crate declares (`[package.metadata.wz-docs]`), by its path
 # before the directory changes.
 sets_reader="$(cd "$(dirname "$0")" && pwd)/doc_feature_sets.py"
+# A Zephyr image's set (`wz-capi-pico`'s `zephyr`) reads values `west build` passes from
+# Kconfig, a tick rate among them, and is clippied with the stand-ins the no-allocator census
+# builds those images with, as Layer C1bf clippies it: they set constants and decide no lint.
+if ! zephyr_standins="$(python3 "$(cd "$(dirname "$0")" && pwd)/no_allocator_link_gate.py" \
+    --zephyr-build-values)"; then
+    echo "  nondefault-features FAIL: no Zephyr build values to clippy an image's set with" \
+         "(the line above says why)" >&2
+    exit 1
+fi
+mapfile -t zephyr_values <<<"$zephyr_standins"
 
 cd "$(dirname "$0")/../../crates" || exit 1
 
@@ -218,7 +228,8 @@ for pkg in "${members[@]}"; do
             [[ -n "$label" ]] || continue
             read -r -a set_argv <<<"$set_args"
             # The line carries the targets before the features, as Layer C1bf's plan does.
-            if ! cargo clippy -p "$pkg" "${set_argv[@]}" --quiet -- -D warnings; then
+            if ! env "${zephyr_values[@]}" cargo clippy -p "$pkg" "${set_argv[@]}" --quiet \
+                -- -D warnings; then
                 echo "  nondefault-features FAIL: $pkg does not compile CLEAN in its" \
                      "declared feature set \`$label\` (at the targets the set declares)."
                 fail=1

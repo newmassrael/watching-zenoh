@@ -10,7 +10,7 @@
 # `RouteTable` lives in wz-session-core, its `RoutingForwarder` driver in
 # wz-runtime-tokio. This kernel cannot live in the `#![no_std]`
 # wz-session-core because `petgraph` is std-only; a std-allowed dedicated
-# crate satisfies both constraints. The tokio driver (`linkstate_forward`,
+# crate satisfies both constraints. The tokio driver (`RouterForwarder`,
 # the `FaceForwarder`) stays in wz-runtime-tokio and depends on this.
 
 [package]

@@ -73,7 +73,7 @@ pub(crate) struct AdminFace<'a> {
 ///
 /// A face whose role the INIT exchange never reported is recorded as a PEER —
 /// the same default the routing boundary applies to the same missing slot
-/// (`crates/wz-runtime-tokio/src/linkstate_forward.rs` @
+/// (`crates/wz-runtime-tokio/src/linkstate_routes.rs` @
 /// `fn peer_whatami_routing`), so the two places that must
 /// name a role for an unroled face name the same one.
 fn file_source(sources: &mut AdminSources, face: AdminFace<'_>) {

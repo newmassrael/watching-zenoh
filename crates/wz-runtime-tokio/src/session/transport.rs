@@ -774,7 +774,7 @@ impl<R: SessionRuntime, T: TimeSource> TransportState<R, T> for Multicast {
 /// the pico profile's put on a group fails as its put on a link does, and so is a message whose
 /// body refused it (`SendWireError::Codec`), as a session's send on a link refuses it.
 #[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
-fn group_sent(
+pub(super) fn group_sent(
     pushed: Result<
         wz_session_core::tx_deadline::PushOutcome,
         crate::multicast_pipeline::MulticastTxRefused,

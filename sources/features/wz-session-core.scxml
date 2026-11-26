@@ -39,7 +39,7 @@
   <sce:feature name="connect-endpoints"/>
   <sce:feature name="declarations-synced-event" requires="alloc"/>
   <sce:feature name="declare-final" requires="codec-declare"/>
-  <sce:feature name="declare-interest" requires="codec-declare"/>
+  <sce:feature name="declare-interest" requires="alloc codec-declare"/>
   <sce:feature name="declare-keyexpr" requires="alloc codec-declare"/>
   <sce:feature name="declare-queryable" requires="codec-declare"/>
   <sce:feature name="declare-subscriber" requires="codec-declare declare-final rx-control rx-push"/>

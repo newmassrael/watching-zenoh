@@ -207,14 +207,16 @@ fn main() {
             Z_OK
         );
         // A session opens its tables at what one of zenoh-pico's own programs holds, and this node
-        // holds more: the subscriber, the queryable and the token each declare a key of their own
-        // (`demo`, `demo/listener`, `demo/listener/alive`), a `token` line declares a fourth, and
-        // that token is held beside the first. A count past what the build reserves is refused here.
+        // holds more. The subscriber and the queryable declare the part of their key before its
+        // first wild chunk (`demo`, `demo/listener`), the token and the liveliness subscriber their
+        // whole key (`demo/listener/alive`, `demo/**`), as pico's doors do, and a `token` line
+        // declares a fifth, a token held beside the first. A count past what the build reserves is
+        // refused here.
         assert_eq!(
             zp_config_insert(
                 z_config_loan_mut(&mut cfg),
                 WZ_EXT_CONFIG_LIMITS_KEY,
-                c"MAX_DECLARED_KEYEXPRS=4,MAX_LOCAL_TOKENS=2".as_ptr()
+                c"MAX_DECLARED_KEYEXPRS=5,MAX_LOCAL_TOKENS=2".as_ptr()
             ),
             Z_OK
         );
@@ -303,8 +305,13 @@ fn main() {
                     if let Some(key) = line.strip_prefix("get ") {
                         get(&session, key);
                     } else if let Some(key) = line.strip_prefix("token ") {
-                        if let Some(token) = declare_token(&session, key) {
-                            held.insert(key.to_owned(), token);
+                        // A refusal is told on the error stream, which a test inherits, so a
+                        // token that never arrives is read there and not only as a timeout.
+                        match declare_token(&session, key) {
+                            Some(token) => {
+                                held.insert(key.to_owned(), token);
+                            }
+                            None => eprintln!("hold_a_listener: the token on {key} was refused"),
                         }
                     } else if let Some(key) = line.strip_prefix("untoken ") {
                         if let Some(mut token) = held.remove(key) {

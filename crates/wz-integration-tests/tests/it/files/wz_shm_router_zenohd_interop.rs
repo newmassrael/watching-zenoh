@@ -50,7 +50,8 @@ use wz_runtime_tokio::session_glue::{drive_session_until_terminal, WhatAmI};
 use wz_runtime_tokio::session_open::{
     connect_and_open_session, connect_and_open_session_with_shm, DialConfig, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::{PosixShmResolver, ShmBackedPayload};
+use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+use wz_runtime_tokio::shm_reader::ShmReaderResolver;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
 use wz_session_core::link::RxBytes;
@@ -285,7 +286,7 @@ async fn zenohd_shm_router_relays_a_wz_publishers_payload_to_a_subscriber_throug
 /// paths, so a leg can tell a payload that crossed as shared memory from one that
 /// merely arrived.
 struct CountingResolver {
-    inner: PosixShmResolver,
+    inner: ShmReaderResolver,
     resolved: Arc<AtomicUsize>,
     refused: Arc<AtomicUsize>,
 }
@@ -357,7 +358,7 @@ async fn zenoh_publishes_through_router_to_wz(offer_shm: bool) -> Option<Subscri
     let resolved = Arc::new(AtomicUsize::new(0));
     let refused = Arc::new(AtomicUsize::new(0));
     session.set_shm_resolver(Box::new(CountingResolver {
-        inner: PosixShmResolver,
+        inner: ShmReaderResolver::global(),
         resolved: resolved.clone(),
         refused: refused.clone(),
     }));
@@ -554,7 +555,7 @@ async fn wz_getter_through_router() -> Option<GetterRun> {
         )),
         Arc::new(opened.clock),
     );
-    session.set_shm_resolver(Box::new(PosixShmResolver));
+    session.set_shm_resolver(Box::new(ShmReaderResolver::global()));
     let timeouts = SessionTimeouts::spec_defaults();
     let drive = drive_session_until_terminal(
         &mut opened.inbound,

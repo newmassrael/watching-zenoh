@@ -31,7 +31,7 @@ use wz_runtime_coop::ClockSource;
 use crate::net::set_no_sigpipe;
 use crate::net::{
     call_at, errno, family_of, name_of, open_socket, poll_writable, set_close_on_exec, set_flag,
-    set_nonblocking, PosixNetError,
+    set_nonblocking, set_option, PosixNetError,
 };
 
 /// One connected TCP socket on the host, of the family of the address it connected to.
@@ -90,6 +90,14 @@ impl PosixTcpSocket {
         self.local = name_of(self.fd, libc::getsockname).map_err(PosixNetError::SockName)?;
         self.peer = name_of(self.fd, libc::getpeername).map_err(PosixNetError::PeerName)?;
         Ok(())
+    }
+
+    /// Hold what the kernel keeps of this stream for its reader to `bytes` (`SO_RCVBUF`, which
+    /// the kernel may round up), where it grows that buffer to megabytes as data arrives
+    /// otherwise: a peer that writes to an end that stopped reading then finds the stream full
+    /// after that much and what its own end holds. The `errno` of a refusal.
+    pub fn hold_receive_buffer(&self, bytes: c_int) -> Result<(), c_int> {
+        set_option(self.fd, libc::SOL_SOCKET, libc::SO_RCVBUF, &bytes)
     }
 }
 
@@ -497,6 +505,41 @@ mod tests {
     /// `port` on the IPv4 loopback.
     fn at(port: u16) -> SocketAddr {
         SocketAddr::from((LOOPBACK, port))
+    }
+
+    /// A receive buffer held small is what the kernel then reports for the stream, at most twice
+    /// what was asked (Linux keeps double the value for its own bookkeeping); CONTROL: the buffer
+    /// the kernel gave the stream before is larger than that.
+    #[test]
+    fn a_held_receive_buffer_is_the_one_the_kernel_reports() {
+        const ASKED: c_int = 4096;
+        let (near, _far) = pair();
+        let reported = |stream: &PosixTcpSocket| {
+            let mut bytes: c_int = 0;
+            let mut len = size_of::<c_int>() as libc::socklen_t;
+            // SAFETY: `bytes` and `len` are live and writable, and `len` is `bytes`'s size.
+            let rc = unsafe {
+                libc::getsockopt(
+                    stream.fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_RCVBUF,
+                    (&mut bytes as *mut c_int).cast(),
+                    &mut len,
+                )
+            };
+            assert_eq!(rc, 0, "the kernel reports the buffer");
+            bytes
+        };
+        assert!(
+            reported(&near) > 2 * ASKED,
+            "CONTROL: the stream began with a larger buffer"
+        );
+        assert_eq!(near.hold_receive_buffer(ASKED), Ok(()));
+        let held = reported(&near);
+        assert!(
+            (1..=2 * ASKED).contains(&held),
+            "the kernel holds {held} bytes for a buffer of {ASKED}"
+        );
     }
 
     /// A connection: this crate's socket, and the far end as std accepted it.

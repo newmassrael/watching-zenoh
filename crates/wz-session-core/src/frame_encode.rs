@@ -181,7 +181,8 @@ use crate::transport_profile::owned::InterestOwned;
 #[cfg(all(
     feature = "codec-linkstate",
     feature = "codec-push",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    feature = "alloc"
 ))]
 use crate::transport_profile::owned::OamOwned;
 #[cfg(all(feature = "codec-response-final", feature = "alloc"))]
@@ -744,7 +745,8 @@ pub(crate) fn push_capacity_hint(push: &PushOwned) -> usize {
 #[cfg(all(
     feature = "codec-linkstate",
     feature = "codec-push",
-    feature = "session-unicast"
+    feature = "session-unicast",
+    feature = "alloc"
 ))]
 pub(crate) fn oam_body(oam: &OamOwned) -> impl Fn(&mut TxSink<'_>) -> Result<(), CodecError> + '_ {
     move |sink| {
@@ -2576,7 +2578,8 @@ mod tests {
     #[cfg(all(
         feature = "codec-linkstate",
         feature = "codec-push",
-        feature = "session-unicast"
+        feature = "session-unicast",
+        feature = "alloc"
     ))]
     fn an_oam_id_past_u16_is_refused_at_the_emit_boundary() {
         use wz_codecs::ext_unit::ExtUnit;

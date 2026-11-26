@@ -3751,6 +3751,8 @@ dependencies = [
  "wz-storage",
  "wz-tls-pem",
  "x509-parser",
+ "zenoh-result 1.10.2",
+ "zenoh-shm 1.10.2",
  "zeroize",
 ]
 

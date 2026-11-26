@@ -24,7 +24,7 @@
 //! (`should_autoconnect` then `connect_peer`, inside the graph's ingest). wz
 //! keeps the type here, in the routing-graph crate — the lowest crate that has
 //! both [`Zid`](crate::Zid) (for the zid tie-break) and [`WhatAmIMatcher`] (for
-//! the role gate) — while the runtime driver (`linkstate_forward`) holds the
+//! the role gate) — while the runtime driver (`RouterForwarder`) holds the
 //! `AutoConnect` field and applies the gate at emit. wz splits the gate
 //! (forwarder, sync) from the dial (accept-loop, async) over a channel because
 //! its sync ingest cannot open an outbound link; zenoh keeps both in the graph

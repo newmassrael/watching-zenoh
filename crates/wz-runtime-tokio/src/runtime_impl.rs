@@ -55,10 +55,11 @@ use std::sync::Arc;
 
 use wz_runtime_core::{Runtime, RuntimeError, TimeSource, TimeoutElapsed};
 use wz_session_core::link::{BoxedLinkDriver, HeapRefused, LocalHeld, SessionRuntime, ShareValues};
-// `SessionLinkActions` lives behind wz-session-core's `session-unicast` gate,
-// which `transport-unicast` forwards (the only AP path that enables it); the
-// `ActionsHandle` GAT binding below is gated to match.
-#[cfg(feature = "transport-unicast")]
+// The session core declares the unicast items of `SessionRuntime` (and `SessionLinkActions`)
+// on features of its own that any crate of the graph may turn on, `transport-unicast` or not;
+// the build script relays what it declares as the cfgs `wz_unicast_runtime_items` and
+// `wz_wrap_actions` (`build.rs`), which the binding below and what it names read.
+#[cfg(wz_unicast_runtime_items)]
 use wz_session_core::session_actions::SessionLinkActions;
 
 /// AP-profile [`Runtime`] impl: every spawn routes through
@@ -168,6 +169,36 @@ impl Runtime for TokioRuntime {
     }
 }
 
+/// The AP profile's implementation of the §2.5 plugin-tier entropy
+/// port ([`wz_session_core::entropy::EntropySource`]): OS-backed
+/// cryptographic entropy via `getrandom`.
+///
+/// A unit struct because the source is a syscall, not a peripheral — there is
+/// no handle a board would own. It exists so the port has an implementor on
+/// BOTH profiles rather than only the one that needed it: the MCU construction
+/// seam takes an `EntropySource`, and a port with a single implementor is a
+/// shape nobody has checked composes. It is also what lets an MCU board's own
+/// source be diffed against the AP one, since the trait fixes the byte order
+/// of `try_next_u64`.
+///
+/// The AP's own `new_session_actions` draws through this, so the two profiles'
+/// construction seams differ in their SOURCE and in nothing else — which is
+/// the asymmetry that produced the MCU constant in the first place.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OsEntropy;
+
+impl wz_session_core::entropy::EntropySource for OsEntropy {
+    /// Delegates to `getrandom`, which fills completely or fails — the
+    /// no-partial-fill half of the port's contract, satisfied by the source
+    /// rather than re-checked here.
+    fn try_fill_bytes(
+        &mut self,
+        buf: &mut [u8],
+    ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
+        getrandom::getrandom(buf).map_err(|_| wz_session_core::entropy::EntropyUnavailable)
+    }
+}
+
 /// AP-profile [`SessionRuntime`] binding: the link sink is an
 /// `Arc<dyn BoxedLinkDriver + Send + Sync>` so the driver trait object
 /// can be shared across the multi-thread tokio runtime's worker threads
@@ -240,17 +271,17 @@ impl SessionRuntime for TokioRuntime {
     // clones it into spawned query / reply tasks that may move across
     // worker threads, so the refcount must be atomic (`Send + Sync`). The
     // lwIP MCU profile binds `Rc` instead (single-task, no atomics → M0+).
-    // Gated on `transport-unicast` to match the trait's `session-unicast`
-    // gate on the GAT (the bundle type it names is session-unicast-only).
-    #[cfg(feature = "transport-unicast")]
+    // Bound where the session core declares it, which its metadata says
+    // (`wz_unicast_runtime_items`), not where this crate's `transport-unicast` is.
+    #[cfg(wz_unicast_runtime_items)]
     type ActionsHandle<T: TimeSource> = Arc<SessionLinkActions<Self, T>>;
 
     // The AP's one source is the OS's, which no session owns: a zero-sized value stands for it
     // in every binding.
-    #[cfg(feature = "transport-unicast")]
-    type EntropyDraw = crate::session_glue::OsEntropy;
+    #[cfg(wz_unicast_runtime_items)]
+    type EntropyDraw = OsEntropy;
 
-    #[cfg(feature = "transport-unicast")]
+    #[cfg(wz_wrap_actions)]
     fn wrap_actions<T: TimeSource>(
         actions: SessionLinkActions<Self, T>,
     ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
@@ -1190,5 +1221,43 @@ mod tests {
         let result: Result<u32, TimeoutElapsed> =
             clock.timeout(50, std::future::pending::<u32>()).await;
         assert_eq!(result, Err(TimeoutElapsed));
+    }
+}
+
+// The unicast items of `SessionRuntime`, named through the trait for the AP profile in every
+// build whose session core declares them.
+#[cfg(all(test, wz_unicast_runtime_items))]
+mod session_runtime_items {
+    use super::*;
+
+    /// The entropy draw is the zero-sized OS source, and the action handle one counted pointer.
+    /// Turned red (E0046, the build of this test fails) by binding the two items on this crate's
+    /// `transport-unicast` again instead of `wz_unicast_runtime_items`, in a build that turns on
+    /// the session core's `session-unicast` without it
+    /// (`--no-default-features --features transport-qos`).
+    #[test]
+    fn the_unicast_items_are_bound_where_the_core_declares_them() {
+        assert_eq!(
+            core::mem::size_of::<<TokioRuntime as SessionRuntime>::EntropyDraw>(),
+            0
+        );
+        assert_eq!(
+            core::mem::size_of::<<TokioRuntime as SessionRuntime>::ActionsHandle<TokioTime>>(),
+            core::mem::size_of::<usize>()
+        );
+    }
+
+    /// The bundle of a session of this profile.
+    #[cfg(wz_wrap_actions)]
+    type Actions = SessionLinkActions<TokioRuntime, TokioTime>;
+
+    /// `wrap_actions` is the trait's, and hands out the profile's `Arc`. Turned red (E0046, the
+    /// build of this test fails) by binding it on this crate's `transport-unicast` again instead
+    /// of `wz_wrap_actions`, in the same build.
+    #[cfg(wz_wrap_actions)]
+    #[test]
+    fn wrap_actions_is_bound_where_the_core_declares_it() {
+        let _wrap: fn(Actions) -> Result<Arc<Actions>, HeapRefused> =
+            <TokioRuntime as SessionRuntime>::wrap_actions::<TokioTime>;
     }
 }

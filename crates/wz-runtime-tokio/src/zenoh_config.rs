@@ -4315,8 +4315,8 @@ pub const CONFIG_KEYS_PROVEN_ON_THE_WIRE: &[&str] = &[
     // R2203 (open-debt item 220) — the first key here whose subject is a node
     // with TWO links rather than a frame a lone node emits.
     //
-    // Both forwarders spend `timestamping.enabled` at exactly ONE site:
-    // `forward_push` (`router_forward.rs`, `linkstate_forward.rs`), the path an
+    // The forwarder spends `timestamping.enabled` at exactly ONE site:
+    // `route_push` (`router_forward.rs`), the path an
     // inbound Push takes on its way out the other faces, which is zenoh's own
     // single stamp point (`dispatcher/pubsub.rs:328`). The wire form is the Put's
     // `T` flag and the `timestamp` behind it (`zenoh-protocol` put.rs:43 / :50).

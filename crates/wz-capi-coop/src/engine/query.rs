@@ -517,7 +517,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> QueryHolder for C
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// How many arrivals at a queryable were refused for want of a row to hold their Final.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "std"))]
     pub(crate) fn queries_refused(&self) -> u64 {
         self.plane.refused()
     }
