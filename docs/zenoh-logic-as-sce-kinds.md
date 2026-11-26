@@ -591,9 +591,9 @@ slices' line numbers have moved.
 the code; 17,930 lines).
 | Verdict | Rows | What decides it |
 |---|---|---|
-| Fits now: 27 | S1 68; S2 8, 9, 10, 14, 17, 21, 27, 30, 32, 37, 39, 43; S4 25, 26, 55; S5 41, M2, M4, M5, M17; S7 3, 4, 10, 13; S9 9; S11 2 | Every table is a `map<K, V>[N]` or `set<K>[N]` of accepted keys and values, written by put, remove and clear and walked in first-put order; callbacks, sinks, handles and sockets stay in a host table under the same key. S2 30's AP rule is already generated (section 7.1) and S5 M5 waits for its MCU move. S5 41 and S5 M17 own no keyed table (two slots; pools of host objects), so U1 was a misreading for them. S5 M2 needs its key, `Endpoint(slot) | Node(zid)`, written as a record of a kind and its fields. S7 3's bound is a configured `max_faces`, so its `N` is a build constant at least the configured value. S7 13 states its bound since W16's first table (below): a `map<record:FinalKey, record:FinalHold>[N]` and a `set<record:FinalKey>[N]`, checked by a probe at the pin (Rust and C11 ok). S7 10 and S2 39 state theirs since W16's second and third tables (below) |
+| Fits now: 31 | S1 55, 68; S2 7, 8, 9, 10, 14, 17, 21, 27, 30, 32, 37, 39, 43; S4 25, 26, 55; S5 41, M2, M4, M5, M17; S7 3, 4, 10, 13; S8 53; S9 9; S10 22; S11 2 | Every table is a `map<K, V>[N]` or `set<K>[N]` of accepted keys and values, written by put, remove and clear and walked in first-put order; callbacks, sinks, handles and sockets stay in a host table under the same key. S2 30's AP rule is already generated (section 7.1) and S5 M5 waits for its MCU move. S5 41 and S5 M17 own no keyed table (two slots; pools of host objects), so U1 was a misreading for them. S5 M2 needs its key, `Endpoint(slot) | Node(zid)`, written as a record of a kind and its fields. S7 3's bound is a configured `max_faces`, so its `N` is a build constant at least the configured value. S7 13 states its bound since W16's first table (below): a `map<record:FinalKey, record:FinalHold>[N]` and a `set<record:FinalKey>[N]`, checked by a probe at the pin (Rust and C11 ok). S7 10 and S2 39 state theirs since W16's second and third tables (below), and S1 55, S2 7, S8 53 and S10 22 since its fourth to seventh (below) |
 | Waits for a nested value, item 4a (iii): 6 | S1 47; S2 34; S4 23; S5 61; S7 52, 76 | A value holds a set, a map, a queue or an optional list: the member scope's three sets (S1 47, which also runs one machine per member, U7), the consolidation cache inside each pending query (S2 34), a hat's own tables (S4 23), a request's optional path list (S5 61), a listener's replay queue (S7 52), a match's set of faces and a face's map of matches (S7 76) |
-| Has no stated bound: 7 | S1 55; S2 7, 44; S4 24, 58; S8 53; S10 22 | Every table fits the map, and nothing states how many entries it may hold (W16) |
+| Has no stated bound: 3 | S2 44; S4 24, 58 | Every table fits the map, and nothing states how many entries it may hold (W16) |
 | Reads a minimum by deadline: 3 | S2 31, 42; S7 18 | `next_deadline_ms` and the ticker's next due take the least deadline. A walk folds it (a P row to measure); S2 31 also lets two pending queries share a request id, which one key cannot hold, and S7 18 states no bound |
 | Walks in key order: 4 | S2 41; S4 61; S5 17, 57 | The accepted walk is in first-put order. S5 57 puts the protocols on the wire in ascending order and S2 41 drops a lost link's tokens lowest id first, with a second map kept in step; S4 61 and S5 17 order replies and admin leaves by key. S5 17 and S5 57 state no bound either |
 | Has a key the pin does not accept: 2 | S1 61; S4 73 | A key that is a sum type carrying data (`PeerKey`, `MeshDialKey` with an address or a path) needs a record encoding first; S1 61 also holds a generated machine in every entry (U7) and walks its keys in order |
@@ -620,7 +620,32 @@ the code; 17,930 lines).
   of a heap session's publishers and queriers together, are held to the same
   `MAX_MATCHING_LISTENERS`, and a listener past it is refused before its
   watch or its Interest (`crates/wz-session-core/src/observer.rs` @
-  `pub fn admits_matching_listener(&self) -> bool {`). Seven remain.
+  `pub fn admits_matching_listener(&self) -> bool {`). The link book (S1 55)
+  holds the rows `admitted_links` reserves, the dial and the `MAX_FACES` and
+  `MAX_ACCEPT_PENDING` a node's limits state, and gives a link past them no row
+  (`crates/wz-session-core/src/link_admission.rs` @
+  `pub fn admitted_links(limits: &SessionLimits) -> Quota {`); where a heap
+  build leaves either open, the tokio runtime's accept loop holds zenoh's
+  `max_sessions` and `accept_pending`. The namespace ingress (S2 7) remembers
+  the declarations it drops up to `MAX_REMOTE_DECLS` of a kind, the interests
+  up to `MAX_INBOUND_SUB_INTERESTS` and the definitions it parks up to
+  `MAX_PEER_KEYEXPR_ALIASES`; past a bound the message is dropped all the same
+  and its withdrawal reaches tables that hold nothing under its id
+  (`crates/wz-session-core/src/namespace.rs` @
+  `fn remember(set: &mut HashSet<u64>, id: u64, quota: Quota) {`). zenoh-pico
+  has no namespace to compare with. The C ABI's SHM client storage (S8 53)
+  resolves at most `SHM_PROTOCOL_SLOTS` protocols, the slots of the auth
+  segment that lists them, and a list that resolves to more is refused with
+  `Z_EINVAL`. The mesh client's held declarations (S10 22) are kept only for a
+  declaration its session admitted, so they are held to the session's
+  `MAX_SUBSCRIPTIONS`, `MAX_LIVELINESS_SUBSCRIPTIONS` and `MAX_LOCAL_TOKENS`
+  together (`crates/wz-mesh-client/src/lib.rs` @
+  `fn keep(held: &mut HashMap<u64, Box<dyn Any>>, next_id: &mut u64, what: Box<dyn Any>) -> u64 {`).
+  Three remain: the declaration sync (S2 44), whose waits are rows of the
+  declaration cache, which holds the matching interests of S4 58 among its
+  rows; a face's declaration numbers (S4 24), as many as the router's tables,
+  which state no bound; and the matching interests (S4 58), which
+  `declare_publisher` and `declare_querier` take with no way to refuse.
 
 **U3's 20 rows.** Read with a bounded byte-string field accepted, which S1 to S6
 read as refused, and checked by probes: a list of records with a `bytes[16]`
