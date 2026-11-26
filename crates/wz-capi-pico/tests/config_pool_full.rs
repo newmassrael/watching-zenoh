@@ -39,7 +39,7 @@ unsafe fn made() -> (z_owned_config_t, ZResult) {
 /// slot back (`free_config`).
 #[test]
 fn the_pool_holds_the_builds_count_of_configs_refuses_the_one_more_and_reuses_one_let_go() {
-    assert!(caps::HELD_CONFIGS > 0, "CONTROL: the build holds a config");
+    const { assert!(caps::HELD_CONFIGS > 0, "CONTROL: the build holds a config") };
     // SAFETY: every config below is made, loaned and dropped through the library's own doors, and
     // each one made is dropped once.
     unsafe {
