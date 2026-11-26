@@ -41,7 +41,19 @@ tokio engine left out (`wz_config.coop_features`); a capability asked that the c
 not run is refused by name. `reference --engine` records it (`wz_engine` in `reference.json`), the run
 carries it into `perf.json` (`record.engine`) and prints it, and the gate refuses a run against a
 table filled from the other engine. The other host modes of `scripts/pico-compare.sh` (`rtt`, `thr`,
-`nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings.
+`nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings, and
+their wz library is zenoh-pico's preset too (`wz_config.py --bench-cargo-args`, `bench_cargo_args`,
+`preset_named_features`), each program of it compiled against that build's own `config.h`
+(`--bench-config-h`, `target/pico-compare/include-W`).
+
+**The build.** Both arms are zenoh-pico's preset in wz (configs/zenoh-pico_defconfig,
+`wz_config.PICO_BENCH_ORIGINAL`; docs/win-budget/rss.md section 2.2), not the crate's default features,
+which carry planes zenoh-pico's own build has not. `reference` records it (`wz_preset` in
+`reference.json`), the run carries it into `perf.json` (`record.preset`; a reading that names none was
+made of the crate's default features), and the gate refuses a run against a table filled from another
+build (`preset`), as it refuses another engine. A Windows package is planned as the preset only when its
+features are exactly the preset's (`windows-plan`, `wz_preset`, with `wz_beyond_preset` and
+`wz_short_of_preset` otherwise).
 
 **The standard library.** Arm W is the library the release ships: without `std` (`os-host`,
 docs/c-abi-engine-and-memory.md phase P4), the one form
@@ -406,8 +418,9 @@ every repetition leaves the cell without a ratio.
 **The table.** A JSON object: `schema` `wz-pico-perf-ceiling/1`, `pair` (`W/P` or `W/X`), `engine` (the
 engine arm W was built on when the rows were filled; required of the W over P table, and a run of
 another engine is refused against it), `stdlib` (the standard library arm W was built with, `std` or
-`nostd`; required of the W over P table alike, and a run of the other form is refused against it),
-`tolerance`, and `rows`, one per row key, each of four shapes:
+`nostd`; required of the W over P table alike, and a run of the other form is refused against it), `preset`
+(the build arm W was compared as, `zenoh-pico`; required of the W over P table alike, and a run of another
+build is refused against it), `tolerance`, and `rows`, one per row key, each of four shapes:
 
 | row | holds |
 |---|---|
@@ -518,7 +531,7 @@ is left out of the run, `record.not_measured.multicast` says why with what each 
 prints that reason beside the rows it reports not measured. The runner reads and changes no firewall rule.
 
 **The table.** `deploy/pico_perf_ceiling_windows.json`: the rows of the default matrix, as the Linux table,
-with `platform` `windows-x64`, the engine `coop` and `stdlib` `nostd`, every row null until a run fills it. A reading states
+with `platform` `windows-x64`, the engine `coop`, `stdlib` `nostd` and `preset` `zenoh-pico`, every row null until a run fills it. A reading states
 the platform it was made on (`record.platform`; a reading that states none is Linux's, as every one before the
 field was) and a table the platform its rows were filled on (`platform`, Linux when absent). The gate judges a
 reading only against a table of its own platform and refuses any other (exit 2); without `--table` it reads the
