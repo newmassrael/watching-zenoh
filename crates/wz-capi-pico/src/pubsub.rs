@@ -336,11 +336,24 @@ impl SampleMarshal {
     /// `write` writes the view `view` names, and nothing else.
     unsafe fn view(&self, view: View, write: impl FnOnce(*mut Views)) -> *mut Views {
         let views = UnsafeCell::raw_get(&self.views).cast::<Views>();
+        if self.claim(view) {
+            write(views);
+            self.bound.fetch_or(view as u8, Ordering::Release);
+        }
+        views
+    }
+
+    /// Whether this thread is to write the view `view` names: `true` once it claimed the view's
+    /// writing bit, `false` once the view is written, waiting while another thread writes it.
+    /// Out of line and generic over nothing, so the wait is one body and not a copy in each
+    /// accessor's view.
+    #[inline(never)]
+    fn claim(&self, view: View) -> bool {
         let (written, writing) = (view as u8, view.writing());
-        let claimed = loop {
+        loop {
             let state = self.bound.load(Ordering::Acquire);
             if (state & written) != 0 {
-                break false;
+                return false;
             }
             if (state & writing) == 0
                 && self
@@ -353,15 +366,10 @@ impl SampleMarshal {
                     )
                     .is_ok()
             {
-                break true;
+                return true;
             }
             core::hint::spin_loop();
-        };
-        if claimed {
-            write(views);
-            self.bound.fetch_or(written, Ordering::Release);
         }
-        views
     }
 
     /// The views written, one bit each ([`View`]).
@@ -4754,6 +4762,21 @@ mod tests {
             assert!(inside(&marshal, source as usize));
             assert_eq!(marshal.written(), 0b1111, "each written once asked for");
         }
+    }
+
+    /// A view is claimed by the first asker alone, and not again once it is written, each view
+    /// apart from the others. Turned red by a claim that answers a written view as one to write
+    /// (a view written twice), or by one view's bit read for another's.
+    #[test]
+    fn a_view_is_claimed_once_and_each_view_apart() {
+        let marshal = SampleMarshal::unbound();
+        assert!(marshal.claim(View::Attachment), "the first asker writes it");
+        marshal
+            .bound
+            .fetch_or(View::Attachment as u8, Ordering::Release);
+        assert!(!marshal.claim(View::Attachment), "a written view is read");
+        assert!(marshal.claim(View::Encoding), "another view is its own");
+        assert_eq!(marshal.written(), View::Attachment as u8);
     }
 
     /// Two threads that ask one lent sample for its views at once, as a program may since pico's
