@@ -191,7 +191,7 @@ pub unsafe extern "C" fn zp_start_admin_space(zs: *mut z_loaned_session_t) -> ZR
 
 /// Declare the queryable that serves the resource snapshot at `wz/@/<zid>/snapshot`
 /// (`wz_session_core::wz_root::snapshot_key`), answering the latest snapshot the program has
-/// taken (`wz_ext_snapshot_poll`) and nothing before the first. There is no read permission in a
+/// taken (`zext_snapshot_poll`) and nothing before the first. There is no read permission in a
 /// pico node's admin space, so every query that reaches the key is allowed to read it.
 #[cfg(feature = "resource-snapshot")]
 fn declare_snapshot(handle: &PicoSessionHandle, zid: &str) -> Result<PlainQueryable, ZResult> {

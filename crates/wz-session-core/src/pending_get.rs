@@ -179,8 +179,9 @@ impl DueRow {
 
 /// A session's index of the earliest deadline of its gets: a tree of winners over its tables of
 /// pending gets (Knuth, TAOCP vol. 3, 5.4.1), a leaf for each table and a node for each leaf but
-/// one, whose root names the table with the earliest key. The membership is fixed at the open, so
-/// a key that moves replays the path from its leaf alone, and the root is read with no walk.
+/// one, whose root names the table with the earliest key. A key that moves replays the path from
+/// its leaf alone, and the root is read with no walk; a table that joins the index is told by one
+/// rebuild ([`Self::rebuild`]), the tree laid over the leaves it has then.
 ///
 /// A leaf's key is never later than its table's earliest deadline. A write that may add a deadline
 /// lowers it at once ([`Self::lower`]); an end, which only moves a table's earliest deadline later,
@@ -216,6 +217,16 @@ pub trait DueIndex {
         // From the last node up, so each is played after both its children.
         for node in (1..leaves).rev() {
             play(self, node);
+        }
+    }
+
+    /// Every leaf keyed by the earliest deadline its table holds now and every node played from its
+    /// children: what the index owes when a table joined it, the tree's shape being its count of
+    /// leaves. A key a table holds is kept, as a lowering from never brings each to it.
+    fn rebuild(&mut self) {
+        self.reset();
+        for leaf in 0..self.leaves() {
+            self.lower(leaf);
         }
     }
 
@@ -504,6 +515,37 @@ mod tests {
         tables.dues[2] = u64::MAX;
         assert_eq!(tables.due_by(200), None, "the swept table is named again");
         assert_eq!(tables.due_by(400), Some(0));
+    }
+
+    /// Tables that join an index holding deadlines are told by a rebuild, after which the index
+    /// answers what a walk of every table reads, the deadlines held before among them, at each
+    /// count of tables up to nine. Turned red by a rebuild that keys no leaf by its table.
+    #[test]
+    fn a_rebuild_after_tables_join_keeps_every_deadline_held() {
+        let mut tables = Tables::none(1);
+        tables.hold(0, 300);
+        for joined in 1..9u64 {
+            let due = if joined % 2 == 0 {
+                u64::MAX
+            } else {
+                500 - joined * 10
+            };
+            tables.dues.push(due);
+            tables.rows.push(DueRow::NEVER);
+            tables.rebuild();
+            assert_eq!(tables.earliest(), tables.walked(), "{} tables", joined + 1);
+        }
+        assert_eq!(
+            tables.earliest(),
+            Some(300),
+            "the first table's deadline came first"
+        );
+        tables.dues[0] = u64::MAX;
+        assert_eq!(
+            tables.earliest(),
+            Some(430),
+            "then the earliest of those that joined"
+        );
     }
 
     /// One table needs no node: its leaf is the root.

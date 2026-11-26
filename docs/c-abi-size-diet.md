@@ -434,7 +434,7 @@ the pico ABI must have reaches it, what was done, and the estimate (from the cod
 
 | # | feature (where) | reached from a required export | verdict | estimate |
 |---|-----------------|--------------------------------|---------|---------:|
-| 1 | policy and limit resolution (`policy_document`, `policy`, `limits`, `policy_binding`, `limit_binding`) | only through `wz_ext_config_policy` / `wz_ext_config_profile`, which `z_open` composes (`config_policy::PolicyStatements::compose_into`); with neither door called it is the build defaults | cut in round 3 (section 6, R3-e): the `config-policy` capability, off in the zenoh-pico preset | -6K to -12K |
+| 1 | policy and limit resolution (`policy_document`, `policy`, `limits`, `policy_binding`, `limit_binding`) | only through `zext_config_policy` / `zext_config_profile`, which `z_open` composes (`config_policy::PolicyStatements::compose_into`); with neither door called it is the build defaults | cut in round 3 (section 6, R3-e): the `config-policy` capability, off in the zenoh-pico preset | -6K to -12K |
 | 2 | the session's arena and its lent rows (`wz-capi-coop/arena.rs`, `bounded::Lent`, `Quota::lent_under`) | `z_open` | kept: it is the no-heap form decision D9 asks for (pico mallocs per object); the MCU heap work owns it | (6K to 10K, kept) |
 | 3 | the generated session machine (`sce_rust_runtime`, `session_fsm_unicast` and its binding) | every open | kept: the machine is the SCXML source's; pico's handshake is hand-written | (10K to 15K, kept) |
 | 4 | the owned Put and Delete with options (`push_build::build_push_*_with_meta`, `PushOwned` and its drop) | `z_put` / `z_publisher_put` with an encoding, attachment or timestamp, every delete | cut in round 3 (section 6, R3-a): `lent_push::write_publication` | -4K to -8K |
@@ -448,7 +448,7 @@ the pico ABI must have reaches it, what was done, and the estimate (from the cod
 | 12 | the owned encoders counted by a second instance | owned sends | cut (T11) | -2.5K to -5K |
 | 13 | the outbound key mappings in a `hashbrown` map with `foldhash` | `z_declare_keyexpr` | lighter form: a table of the build's `MAX_DECLARED_KEYEXPRS` rows; the no-heap work replaces it anyway | -1.5K to -3K |
 | 14 | typed refusals and their counters (`OpenError`, `EndpointRefusal`, `SendWireError`, `tx_refusals`, `InPlaceFallbacks`) | the doors map each to a code | kept: the codes a program reads; the words are formatted only by a program that prints them (T3) | (1K to 2K, kept) |
-| 15 | wz doors in every build (`wz_ext_conformance_digest`, the key-wire-form doors of `key_ids`) | none of pico's | the digest cut in round 3 (section 6, R3-e): the `conformance-digest` capability; the key-wire-form judgement of `key_ids` stays (no export, a comparison) | -0.1K to -0.3K |
+| 15 | wz doors in every build (`zext_conformance_digest`, the key-wire-form doors of `key_ids`) | none of pico's | the digest cut in round 3 (section 6, R3-e): the `conformance-digest` capability; the key-wire-form judgement of `key_ids` stays (no export, a comparison) | -0.1K to -0.3K |
 
 Items 1, 4, 5, 8, 10 and 13 together are the bulk of what a reading can name: -17K to -35K. Against
 the measured 542,460 and pico's 403,086 (the 1.0x goal needs -139K), code volume of this kind is
@@ -509,15 +509,15 @@ its `source_info` field (the lane is another worker's), which is `None` in such 
 `feat(capi-pico): Make the policy doors and the digest pico capabilities`. Upstream presets are
 presets of wz, so the doors stay available, as two capabilities in `deploy/wz-config.toml`:
 
-- `config-policy` (`WZ_CAP_CONFIG_POLICY`): `wz_ext_config_policy`, `wz_ext_config_profile` and
+- `config-policy` (`WZ_CAP_CONFIG_POLICY`): `zext_config_policy`, `zext_config_profile` and
   the open's resolution of what they state. Off, `PolicyStatements` is a type of no size, a config
   states nothing of its policies, and `z_open` runs the session under the build's policies and
   limits with no resolver linked: no `policy_document::resolve_under_into`, no statement parsing,
   no per-limit and per-policy setters a statement reaches, no `String`s of statements. Estimate
   -6K to -12K. `config-document` implies it (the document's statements go through the same open).
-  The runtime's limit document (`wz_ext_runtime_limits_document`) was already `config-document`'s,
+  The runtime's limit document (`zext_runtime_limits_document`) was already `config-document`'s,
   off in the preset, so a preset build's limits are the build's.
-- `conformance-digest` (`WZ_CAP_CONFORMANCE_DIGEST`): `wz_ext_conformance_digest`. Estimate about
+- `conformance-digest` (`WZ_CAP_CONFORMANCE_DIGEST`): `zext_conformance_digest`. Estimate about
   -0.15K (the door, the 72-byte string, one `.dynsym` and `.dynstr` entry).
 
 Both are on in a build that names nothing (the crate's `default`, and the Kconfig default), off in

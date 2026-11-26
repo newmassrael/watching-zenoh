@@ -593,6 +593,92 @@ impl<S: Clone> LentSlots<S> {
     }
 }
 
+/// The session's idle flush ([`BoxedLinkDriver::set_idle_flush`]) as a swap seam holds it, and
+/// the one rule both seams follow with it.
+///
+/// The seam owns the hook. It answers the session that what the session stages will be pulled,
+/// keeps the hook, and offers it to the live link now and to every link a later swap installs.
+/// The session decides once, when it is built, whether it batches; the links a reconnect
+/// installs come after that decision, so the answer has to hold for whichever link is live, and
+/// a seam that passed on the first link's answer would leave every reconnecting session behind
+/// a refusing first link unbatched, and behind a taking one batching into a link that may not
+/// pull.
+///
+/// A link that refuses the hook has no writer that runs it: it writes on the sender's thread.
+/// While such a link is live the seam runs the hook itself when the session says it staged
+/// frames ([`BoxedLinkDriver::tx_staged`]), on the sender's thread, which is where that link
+/// writes anyway, so a batching session always has something that pulls its frames. A flush
+/// that finds a conduit held by another sender ([`crate::link::IdleFlush::SenderHeld`]) leaves
+/// that conduit's frame to its holder, which says it staged once it lets go of the conduit.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+#[derive(Default)]
+struct IdleFlushHold {
+    /// The session's flush, once it has handed one over.
+    hook: Option<IdleFlushHook>,
+    /// Whether the live link took the hook, so that its own writer runs it.
+    live_pulls: bool,
+}
+
+/// The flush a session hands its link ([`BoxedLinkDriver::set_idle_flush`]).
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+type IdleFlushHook = alloc::sync::Arc<dyn Fn() -> crate::link::IdleFlush + Send + Sync>;
+
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+impl IdleFlushHold {
+    /// Keep `hook` and offer it to `live`, the link installed now. Answers `true` whatever
+    /// `live` answers: the seam pulls what the session stages whichever link is live.
+    fn hand_over<D: BoxedLinkDriver + ?Sized>(&mut self, hook: IdleFlushHook, live: &D) -> bool {
+        self.live_pulls = live.set_idle_flush(hook.clone());
+        self.hook = Some(hook);
+        true
+    }
+
+    /// Offer the kept hook to `next`, the link a swap is about to make live. Before the session
+    /// handed one over there is nothing to offer, and `next` is asked nothing.
+    fn install<D: BoxedLinkDriver + ?Sized>(&mut self, next: &D) {
+        if let Some(hook) = &self.hook {
+            self.live_pulls = next.set_idle_flush(hook.clone());
+        }
+    }
+
+    /// What a notice that the session staged frames comes to, read under the seam's lock and
+    /// run outside it ([`StagedPull::run`]): the live link's writer is woken when it took the
+    /// hook, and so is the live link of a session that handed none over, as it always was; the
+    /// seam flushes on the sender's thread when the live link refused the hook.
+    fn staged(&self) -> StagedPull {
+        match &self.hook {
+            Some(hook) if !self.live_pulls => StagedPull::FlushHere(hook.clone()),
+            _ => StagedPull::WakeLive,
+        }
+    }
+}
+
+/// What [`IdleFlushHold::staged`] decided.
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+enum StagedPull {
+    /// Pass the notice on to the live link.
+    WakeLive,
+    /// Run the session's flush on this thread.
+    FlushHere(IdleFlushHook),
+}
+
+#[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+impl StagedPull {
+    /// Act on the decision with `live`, the link that was live when it was read. Called holding
+    /// no lock of the seam: a link may run the flush from this thread when it is woken (the
+    /// stream link's inline flush), and the flush hands its frames to the seam.
+    fn run<D: BoxedLinkDriver + ?Sized>(self, live: &D) {
+        match self {
+            Self::WakeLive => live.tx_staged(),
+            // A frame left open behind another sender's conduit lock is that sender's to report
+            // (see `IdleFlushHold`), so the answer asks nothing more of this thread.
+            Self::FlushHere(hook) => {
+                let _ = hook();
+            }
+        }
+    }
+}
+
 /// Link-sink indirection for transport replacement — the wz mirror of pico
 /// swapping `_z_session_t._tp` under the session transport mutex while the
 /// session (and every handle into it) survives.
@@ -621,6 +707,10 @@ where
     /// ([`BoxedLinkDriver::tx_writer_only`]): asked of the live link, and of every link a
     /// swap installs after it.
     writer_only: R::Mutex<bool>,
+    /// The session's idle flush and whether the live link took it (`IdleFlushHold`). Taken
+    /// before `inner` wherever both are held, so a swap and a staged notice read the same link.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    idle_flush: R::Mutex<IdleFlushHold>,
 }
 
 impl<R: SessionRuntime> SwappableLink<R>
@@ -636,6 +726,8 @@ where
             inner: R::new_mutex(initial),
             lent: R::new_mutex(LentSlots::default()),
             writer_only: R::new_mutex(false),
+            #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+            idle_flush: R::new_mutex(IdleFlushHold::default()),
         }
     }
 
@@ -646,6 +738,16 @@ where
         if R::with_mutex_mut(&self.writer_only, |on| *on) {
             R::link_driver(&next).tx_writer_only();
         }
+        // The session's flush is offered to `next` before it is live, under the hold's lock, so
+        // a staged notice never pairs one link's answer with the other link.
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        {
+            R::with_mutex_mut(&self.idle_flush, |hold| {
+                hold.install(R::link_driver(&next));
+                R::with_mutex_mut(&self.inner, |slot| core::mem::replace(slot, next))
+            })
+        }
+        #[cfg(not(all(feature = "alloc", target_has_atomic = "ptr")))]
         R::with_mutex_mut(&self.inner, |slot| core::mem::replace(slot, next))
     }
 }
@@ -729,6 +831,38 @@ where
     fn watch_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
         let sink = R::with_mutex_mut(&self.inner, |sink| sink.clone());
         R::link_driver(&sink).watch_room(waker)
+    }
+
+    // The seam keeps the session's flush for every link it installs (`IdleFlushHold`).
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn set_idle_flush(
+        &self,
+        hook: alloc::sync::Arc<dyn Fn() -> crate::link::IdleFlush + Send + Sync>,
+    ) -> bool {
+        R::with_mutex_mut(&self.idle_flush, |hold| {
+            let live = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+            hold.hand_over(hook, R::link_driver(&live))
+        })
+    }
+
+    // Decided under the locks and acted on outside them, on a clone of the live sink: the live
+    // link may flush from this thread when woken, and the flush sends through this seam.
+    fn tx_staged(&self) {
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        {
+            let (live, pull) = R::with_mutex_mut(&self.idle_flush, |hold| {
+                (
+                    R::with_mutex_mut(&self.inner, |sink| sink.clone()),
+                    hold.staged(),
+                )
+            });
+            pull.run(R::link_driver(&live));
+        }
+        #[cfg(not(all(feature = "alloc", target_has_atomic = "ptr")))]
+        {
+            let live = R::with_mutex_mut(&self.inner, |sink| sink.clone());
+            R::link_driver(&live).tx_staged();
+        }
     }
 
     // R2952 — the block-first slot, forwarded on a clone like the room wait
@@ -946,6 +1080,9 @@ pub struct LocalSwappableLink<R: SessionRuntime> {
     lent: core::cell::RefCell<LentSlots<R::LinkSink>>,
     /// As `SwappableLink`'s: kept for every link a swap installs.
     writer_only: core::cell::Cell<bool>,
+    /// As `SwappableLink`'s: the session's idle flush, kept for every link a swap installs.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    idle_flush: core::cell::RefCell<IdleFlushHold>,
 }
 
 impl<R: SessionRuntime> LocalSwappableLink<R> {
@@ -956,6 +1093,8 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
             inner: core::cell::RefCell::new(initial),
             lent: core::cell::RefCell::new(LentSlots::default()),
             writer_only: core::cell::Cell::new(false),
+            #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+            idle_flush: core::cell::RefCell::new(IdleFlushHold::default()),
         }
     }
 
@@ -966,6 +1105,8 @@ impl<R: SessionRuntime> LocalSwappableLink<R> {
         if self.writer_only.get() {
             R::link_driver(&next).tx_writer_only();
         }
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        self.idle_flush.borrow_mut().install(R::link_driver(&next));
         self.inner.replace(next)
     }
 }
@@ -1028,6 +1169,30 @@ impl<R: SessionRuntime> BoxedLinkDriver for LocalSwappableLink<R> {
     fn watch_room(&self, waker: Option<alloc::sync::Arc<dyn Fn() + Send + Sync>>) {
         let sink = self.inner.borrow().clone();
         R::link_driver(&sink).watch_room(waker)
+    }
+
+    // The session's flush, kept as in the twin.
+    #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+    fn set_idle_flush(
+        &self,
+        hook: alloc::sync::Arc<dyn Fn() -> crate::link::IdleFlush + Send + Sync>,
+    ) -> bool {
+        let live = self.inner.borrow().clone();
+        self.idle_flush
+            .borrow_mut()
+            .hand_over(hook, R::link_driver(&live))
+    }
+
+    // As in the twin, acted on with no borrow held: the flush sends through this seam.
+    fn tx_staged(&self) {
+        let live = self.inner.borrow().clone();
+        #[cfg(all(feature = "alloc", target_has_atomic = "ptr"))]
+        {
+            let pull = self.idle_flush.borrow().staged();
+            pull.run(R::link_driver(&live));
+        }
+        #[cfg(not(all(feature = "alloc", target_has_atomic = "ptr")))]
+        R::link_driver(&live).tx_staged();
     }
 
     // R2952 — the block-first slot, forwarded as in the twin.
@@ -1571,5 +1736,133 @@ mod lent_slots_tests {
             .expect("the settled number is free");
         assert_eq!(again, first, "the settled number is given again");
         assert_eq!(lent.settle(second), Some((2, TxSlot(20))));
+    }
+}
+
+#[cfg(all(test, feature = "alloc", target_has_atomic = "ptr"))]
+mod idle_flush_hold_tests {
+    use super::{IdleFlushHold, IdleFlushHook};
+    use crate::link::{BoxedLinkDriver, IdleFlush, LinkSendOutcome};
+    use crate::reliability::Reliability;
+    use alloc::sync::Arc;
+    use core::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A link that takes the session's flush when `pulls`, and counts the flushes offered to it
+    /// and the notices that the session staged.
+    struct Link {
+        pulls: bool,
+        offered: AtomicUsize,
+        woken: AtomicUsize,
+    }
+
+    impl Link {
+        fn new(pulls: bool) -> Self {
+            Self {
+                pulls,
+                offered: AtomicUsize::new(0),
+                woken: AtomicUsize::new(0),
+            }
+        }
+
+        fn offered(&self) -> usize {
+            self.offered.load(Ordering::SeqCst)
+        }
+
+        fn woken(&self) -> usize {
+            self.woken.load(Ordering::SeqCst)
+        }
+    }
+
+    impl BoxedLinkDriver for Link {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn set_idle_flush(&self, _hook: IdleFlushHook) -> bool {
+            self.offered.fetch_add(1, Ordering::SeqCst);
+            self.pulls
+        }
+
+        fn tx_staged(&self) {
+            self.woken.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// A flush that counts its runs.
+    fn counting_flush() -> (IdleFlushHook, Arc<AtomicUsize>) {
+        let runs = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&runs);
+        let hook: IdleFlushHook = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            IdleFlush::Drained
+        });
+        (hook, runs)
+    }
+
+    /// The flush the session hands over is kept and offered to every link a swap installs after
+    /// it, and a link that takes it is woken to pull; before the session hands one over a link
+    /// is offered nothing and the staged notice reaches the live link as it always did. Turned
+    /// red by an `install` that does not offer the kept flush to the link a swap installs.
+    #[test]
+    fn the_flush_is_offered_to_every_link_a_swap_installs() {
+        let mut hold = IdleFlushHold::default();
+        let early = Link::new(true);
+        hold.install(&early);
+        assert_eq!(early.offered(), 0, "no flush handed over, none offered");
+        hold.staged().run(&early);
+        assert_eq!(early.woken(), 1, "the notice reaches the live link");
+
+        let (hook, runs) = counting_flush();
+        let live = Link::new(true);
+        assert!(hold.hand_over(hook, &live));
+        assert_eq!(live.offered(), 1, "the live link is offered the flush");
+        let next = Link::new(true);
+        hold.install(&next);
+        assert_eq!(next.offered(), 1, "the link a swap installs is offered it");
+        hold.staged().run(&next);
+        assert_eq!(next.woken(), 1, "a link that took the flush is woken");
+        assert_eq!(runs.load(Ordering::SeqCst), 0, "the seam runs nothing");
+    }
+
+    /// The seam takes the flush whatever the live link answers, and while the live link refuses
+    /// it the seam runs it itself on a staged notice, so the frames the session staged are
+    /// pulled whichever link is live. Turned red by a `hand_over` that answers with the live
+    /// link's refusal, or by a `staged` that passes the notice on to a link that refused the
+    /// flush (the flush never runs).
+    #[test]
+    fn a_link_that_refuses_the_flush_has_the_staged_frames_flushed_by_the_seam() {
+        let (hook, runs) = counting_flush();
+        let mut hold = IdleFlushHold::default();
+        let refusing = Link::new(false);
+        assert!(
+            hold.hand_over(hook, &refusing),
+            "the seam takes the flush whatever the live link answers"
+        );
+        hold.staged().run(&refusing);
+        assert_eq!(runs.load(Ordering::SeqCst), 1, "the seam ran the flush");
+        assert_eq!(refusing.woken(), 0, "a link with no writer is not woken");
+
+        let pulling = Link::new(true);
+        hold.install(&pulling);
+        hold.staged().run(&pulling);
+        assert_eq!(
+            (runs.load(Ordering::SeqCst), pulling.woken()),
+            (1, 1),
+            "a link that took the flush pulls by itself"
+        );
+
+        let refusing_later = Link::new(false);
+        hold.install(&refusing_later);
+        hold.staged().run(&refusing_later);
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "a refusing link swapped in later is flushed by the seam again"
+        );
+        assert_eq!(refusing_later.woken(), 0);
     }
 }

@@ -39,8 +39,8 @@
 
 /* The key-id doors are in a build with shared-key-ids only. Weak, so the party links against
  * every build and refuses a dictionary by name where the library has none. */
-#pragma weak wz_ext_config_key_ids
-#pragma weak wz_ext_config_key_wire_form_for
+#pragma weak zext_config_key_ids
+#pragma weak zext_config_key_wire_form_for
 
 #define MAX_FRAMES 256
 #define MAX_PARAMS 32
@@ -189,14 +189,14 @@ static int refused(const char *what, z_result_t rc, z_owned_string_t *reason) {
 /* The lane's class of a verdict: what every implementation's receiver can say of a frame. */
 static const char *class_of(uint8_t status) {
     switch (status) {
-        case WZ_EXT_E2E_OK:
-        case WZ_EXT_E2E_FIRST:
+        case ZEXT_E2E_OK:
+        case ZEXT_E2E_FIRST:
             return "intact";
-        case WZ_EXT_E2E_REPEATED:
-        case WZ_EXT_E2E_OUT_OF_RANGE:
-        case WZ_EXT_E2E_COUNTER_ERROR:
+        case ZEXT_E2E_REPEATED:
+        case ZEXT_E2E_OUT_OF_RANGE:
+        case ZEXT_E2E_COUNTER_ERROR:
             return "counter";
-        case WZ_EXT_E2E_INTEGRITY:
+        case ZEXT_E2E_INTEGRITY:
             return "integrity";
         default:
             return "other";
@@ -283,19 +283,19 @@ static int configure_keys(z_owned_config_t *config, const char *how, const char 
     snprintf(form_param, sizeof form_param, "key_form_%s", how);
     const char *form = param(form_param);
     if (key_count > 0) {
-        if (wz_ext_config_key_ids == NULL) {
+        if (zext_config_key_ids == NULL) {
             printf("refused key ids: the library was built without shared-key-ids\n");
             return 2;
         }
-        z_result_t rc = wz_ext_config_key_ids(z_config_loan_mut(config), key_ids, key_names, key_count);
+        z_result_t rc = zext_config_key_ids(z_config_loan_mut(config), key_ids, key_names, key_count);
         if (rc != Z_OK) return refused("key ids", rc, NULL);
     }
     if (form != NULL) {
-        if (wz_ext_config_key_wire_form_for == NULL) {
+        if (zext_config_key_wire_form_for == NULL) {
             printf("refused key wire form: the library was built without shared-key-ids\n");
             return 2;
         }
-        z_result_t rc = wz_ext_config_key_wire_form_for(z_config_loan_mut(config), locator, form);
+        z_result_t rc = zext_config_key_wire_form_for(z_config_loan_mut(config), locator, form);
         if (rc != Z_OK) return refused("key wire form", rc, NULL);
     }
     return 0;
@@ -331,16 +331,16 @@ static int open_session(z_owned_session_t *session, const char *how, const char 
 static uint8_t *frames[MAX_FRAMES];
 static size_t frame_len[MAX_FRAMES];
 
-static int protect_plan(const wz_ext_loaned_e2e_sender_t *tx, size_t *longest) {
+static int protect_plan(const zext_loaned_e2e_sender_t *tx, size_t *longest) {
     *longest = 0;
     for (size_t i = 0; i < plan_count; i++) {
         size_t size = 0;
-        z_result_t rc = wz_ext_e2e_sender_frame_size(tx, plan_len[i], &size);
+        z_result_t rc = zext_e2e_sender_frame_size(tx, plan_len[i], &size);
         if (rc != Z_OK) return refused("frame size", rc, NULL);
         frames[i] = malloc(size == 0 ? 1 : size);
         if (frames[i] == NULL) return refused("frame storage", _Z_ERR_GENERIC, NULL);
         z_owned_string_t reason;
-        rc = wz_ext_e2e_sender_protect(tx, 0, plan_payload[i], plan_len[i], frames[i], size, &frame_len[i], NULL,
+        rc = zext_e2e_sender_protect(tx, 0, plan_payload[i], plan_len[i], frames[i], size, &frame_len[i], NULL,
                                        &reason);
         if (rc != Z_OK) return refused("protect", rc, &reason);
         if (frame_len[i] > *longest) *longest = frame_len[i];
@@ -351,27 +351,27 @@ static int protect_plan(const wz_ext_loaned_e2e_sender_t *tx, size_t *longest) {
     return 0;
 }
 
-static int make_sender(wz_ext_owned_e2e_sender_t *sender) {
+static int make_sender(zext_owned_e2e_sender_t *sender) {
     char *profile = read_file("profile.json");
     char *values = read_file("values.json");
     if (profile == NULL || values == NULL) return refused("profile.json or values.json", _Z_ERR_GENERIC, NULL);
-    wz_ext_e2e_sender_options_t options;
-    wz_ext_e2e_sender_options_default(&options);
+    zext_e2e_sender_options_t options;
+    zext_e2e_sender_options_default(&options);
     options.first_counter = param_u64("first_counter", 0);
     z_owned_string_t reason;
-    z_result_t rc = wz_ext_e2e_sender_new(sender, profile, values, &options, &reason);
+    z_result_t rc = zext_e2e_sender_new(sender, profile, values, &options, &reason);
     free(profile);
     free(values);
     if (rc != Z_OK) return refused("e2e sender", rc, &reason);
     return 0;
 }
 
-static int make_receiver(wz_ext_owned_e2e_receiver_t *receiver) {
+static int make_receiver(zext_owned_e2e_receiver_t *receiver) {
     char *profile = read_file("profile.json");
     char *values = read_file("values.json");
     if (profile == NULL || values == NULL) return refused("profile.json or values.json", _Z_ERR_GENERIC, NULL);
     z_owned_string_t reason;
-    z_result_t rc = wz_ext_e2e_receiver_new(receiver, profile, values, NULL, &reason);
+    z_result_t rc = zext_e2e_receiver_new(receiver, profile, values, NULL, &reason);
     free(profile);
     free(values);
     if (rc != Z_OK) return refused("e2e receiver", rc, &reason);
@@ -382,7 +382,7 @@ static int make_receiver(wz_ext_owned_e2e_receiver_t *receiver) {
 
 /* Under segmented, every frame put goes out as the pieces this cutter writes, each under the
  * next transfer number; puts_done numbers the puts in the transcript. */
-static wz_ext_owned_segment_sender_t live_cutter;
+static zext_owned_segment_sender_t live_cutter;
 static int live_cut;
 static size_t live_chunk;
 static size_t puts_done;
@@ -412,8 +412,8 @@ static int make_live_cutter(void) {
         return refused("segment-profile.json, segment-values.json or chunk_bytes", _Z_ERR_GENERIC, NULL);
     }
     z_owned_string_t reason;
-    z_result_t rc = wz_ext_segment_sender_new(&live_cutter, profile, values, param_u64("first_transfer", 0),
-                                              WZ_EXT_SEGMENT_ROLLOVER_REFUSE, &reason);
+    z_result_t rc = zext_segment_sender_new(&live_cutter, profile, values, param_u64("first_transfer", 0),
+                                              ZEXT_SEGMENT_ROLLOVER_REFUSE, &reason);
     free(profile);
     free(values);
     if (rc != Z_OK) return refused("segment sender", rc, &reason);
@@ -424,9 +424,9 @@ static int make_live_cutter(void) {
 static void put_frame(const z_loaned_publisher_t *publisher, const uint8_t *frame, size_t len) {
     if (live_cut) {
         live_piece_t at = {publisher, puts_done, 0};
-        wz_ext_segment_result_t result = {.struct_size = sizeof(wz_ext_segment_result_t)};
+        zext_segment_result_t result = {.struct_size = sizeof(zext_segment_result_t)};
         z_owned_string_t reason;
-        z_result_t rc = wz_ext_segment_sender_split(wz_ext_segment_sender_loan(&live_cutter), frame, len, live_chunk,
+        z_result_t rc = zext_segment_sender_split(zext_segment_sender_loan(&live_cutter), frame, len, live_chunk,
                                                     put_piece, &at, &result, &reason);
         if (rc != Z_OK) refused("split", rc, &reason);
     } else {
@@ -438,12 +438,12 @@ static void put_frame(const z_loaned_publisher_t *publisher, const uint8_t *fram
 }
 
 static int role_send(const z_loaned_session_t *session, const char *key) {
-    wz_ext_owned_e2e_sender_t sender;
+    zext_owned_e2e_sender_t sender;
     int status = make_sender(&sender);
     if (status != 0) return status;
     size_t longest = 0;
-    status = protect_plan(wz_ext_e2e_sender_loan(&sender), &longest);
-    wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&sender));
+    status = protect_plan(zext_e2e_sender_loan(&sender), &longest);
+    zext_e2e_sender_drop(zext_e2e_sender_move(&sender));
     if (status != 0) return status;
     if (param_u64("segmented", 0) != 0) {
         status = make_live_cutter();
@@ -503,14 +503,14 @@ static int role_send(const z_loaned_session_t *session, const char *key) {
     printf("sent\n");
     int stopped = wait_for_file("stop");
     z_undeclare_publisher(z_publisher_move(&publisher));
-    if (live_cut) wz_ext_segment_sender_drop(wz_ext_segment_sender_move(&live_cutter));
+    if (live_cut) zext_segment_sender_drop(zext_segment_sender_move(&live_cutter));
     printf(stopped ? "done\n" : "timeout stop\n");
     return stopped ? 0 : 1;
 }
 
 /* ---- receive --------------------------------------------------------------------------- */
 
-static wz_ext_owned_e2e_receiver_t receiver;
+static zext_owned_e2e_receiver_t receiver;
 static z_clock_t started;
 
 static void on_frame(z_loaned_sample_t *sample, void *arg) {
@@ -519,11 +519,11 @@ static void on_frame(z_loaned_sample_t *sample, void *arg) {
     if (z_bytes_to_slice(z_sample_payload(sample), &slice) != Z_OK) return;
     const uint8_t *data = z_slice_data(z_slice_loan(&slice));
     size_t len = z_slice_len(z_slice_loan(&slice));
-    wz_ext_e2e_verdict_t verdict;
+    zext_e2e_verdict_t verdict;
     memset(&verdict, 0, sizeof verdict);
     verdict.struct_size = sizeof verdict;
     uint64_t now_ms = (uint64_t)z_clock_elapsed_ms(&started);
-    z_result_t rc = wz_ext_e2e_receiver_judge(wz_ext_e2e_receiver_loan(&receiver), 0, data, len, now_ms, &verdict);
+    z_result_t rc = zext_e2e_receiver_judge(zext_e2e_receiver_loan(&receiver), 0, data, len, now_ms, &verdict);
     if (rc == Z_OK && verdict.payload_offset + verdict.payload_len <= len) {
         seen_add(class_of(verdict.status), data + verdict.payload_offset, verdict.payload_len);
     } else {
@@ -551,7 +551,7 @@ static int probe_seen(void) {
  * from their pieces under segmented) for a receiver of pieces. */
 static int record_live;
 
-static void on_replay(void *context, const wz_ext_replay_sample_t *sample) {
+static void on_replay(void *context, const zext_replay_sample_t *sample) {
     (void)context;
     int wanted = record_live ? sample->from_replay == 0 : sample->from_replay == 1;
     if (!wanted) return;
@@ -565,13 +565,13 @@ static void on_replay(void *context, const wz_ext_replay_sample_t *sample) {
 
 static void on_replay_drop(void *context) { (void)context; }
 
-static wz_ext_replay_publisher_slot_t replay_slots[4];
+static zext_replay_publisher_slot_t replay_slots[4];
 static uint8_t *held_store;
 
 /* A replay subscriber of keyexpr judging by the receiver, which it takes: the ask role's,
  * and, with record_live, the receiver of pieces, which is the one wz door that joins them. */
 static int make_replay_subscriber(const z_loaned_session_t *session, const z_loaned_keyexpr_t *keyexpr, int live,
-                                  wz_ext_owned_replay_subscriber_t *subscriber) {
+                                  zext_owned_replay_subscriber_t *subscriber) {
     const char *suffix = param("suffix");
     if (suffix == NULL) return refused("suffix", _Z_ERR_GENERIC, NULL);
     char *segment_profile = NULL;
@@ -583,8 +583,8 @@ static int make_replay_subscriber(const z_loaned_session_t *session, const z_loa
     size_t held_len = 8 * (4 + held_cell);
     held_store = malloc(held_len);
     if (held_store == NULL) return refused("held store", _Z_ERR_GENERIC, NULL);
-    wz_ext_replay_subscriber_options_t options;
-    wz_ext_replay_subscriber_options_default(&options);
+    zext_replay_subscriber_options_t options;
+    zext_replay_subscriber_options_default(&options);
     options.slots = replay_slots;
     options.slot_count = sizeof replay_slots / sizeof replay_slots[0];
     options.held = held_store;
@@ -595,8 +595,8 @@ static int make_replay_subscriber(const z_loaned_session_t *session, const z_loa
     options.round_ms = 20000;
     options.segment_profile = segment_profile;
     record_live = live;
-    z_result_t rc = wz_ext_replay_subscriber_new(subscriber, session, keyexpr, suffix,
-                                                 wz_ext_e2e_receiver_move(&receiver), &options, on_replay,
+    z_result_t rc = zext_replay_subscriber_new(subscriber, session, keyexpr, suffix,
+                                                 zext_e2e_receiver_move(&receiver), &options, on_replay,
                                                  on_replay_drop, NULL);
     free(segment_profile);
     if (rc != Z_OK) return refused("replay subscriber", rc, NULL);
@@ -620,7 +620,7 @@ static int role_receive(const z_loaned_session_t *session, const char *key) {
     /* Whole frames are judged as they arrive; pieces are joined first, by the replay
      * subscriber, on a suffix no cache serves, so it asks nobody and hands on live frames. */
     z_owned_subscriber_t frame_subscriber;
-    wz_ext_owned_replay_subscriber_t joiner;
+    zext_owned_replay_subscriber_t joiner;
     z_result_t rc;
     if (pieces) {
         status = make_replay_subscriber(session, z_view_keyexpr_loan(&ke), 1, &joiner);
@@ -639,7 +639,7 @@ static int role_receive(const z_loaned_session_t *session, const char *key) {
                               z_closure_sample_move(&probe_closure), NULL);
     if (rc != Z_OK) {
         if (pieces) {
-            wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&joiner));
+            zext_replay_subscriber_drop(zext_replay_subscriber_move(&joiner));
         } else {
             z_subscriber_drop(z_subscriber_move(&frame_subscriber));
         }
@@ -654,22 +654,22 @@ static int role_receive(const z_loaned_session_t *session, const char *key) {
             printf("probe\n");
             probe_told = 1;
         }
-        if (pieces) wz_ext_replay_subscriber_poll(wz_ext_replay_subscriber_loan(&joiner));
+        if (pieces) zext_replay_subscriber_poll(zext_replay_subscriber_loan(&joiner));
         z_sleep_ms(STEP_MS);
     }
     z_subscriber_drop(z_subscriber_move(&probe_subscriber));
     if (pieces) {
-        wz_ext_replay_subscriber_counts_t counts;
+        zext_replay_subscriber_counts_t counts;
         memset(&counts, 0, sizeof counts);
         counts.struct_size = sizeof counts;
-        wz_ext_replay_subscriber_counts(wz_ext_replay_subscriber_loan(&joiner), &counts);
-        wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&joiner));
+        zext_replay_subscriber_counts(zext_replay_subscriber_loan(&joiner), &counts);
+        zext_replay_subscriber_drop(zext_replay_subscriber_move(&joiner));
         free(held_store);
         printf("counts given_up=%llu unjoined=%llu\n", (unsigned long long)counts.frames_given_up,
                (unsigned long long)counts.unjoined_pieces);
     } else {
         z_subscriber_drop(z_subscriber_move(&frame_subscriber));
-        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&receiver));
+        zext_e2e_receiver_drop(zext_e2e_receiver_move(&receiver));
     }
     print_seen();
     if (seen_count() < expect) {
@@ -700,20 +700,20 @@ static z_result_t print_piece(void *context, const uint8_t *piece, size_t len) {
  * first transfer as a first answer numbers them. */
 static int print_pieces(const char *segment_profile, const char *segment_values, uint64_t first_transfer,
                         size_t chunk_bytes) {
-    wz_ext_owned_segment_sender_t splitter;
+    zext_owned_segment_sender_t splitter;
     z_owned_string_t reason;
-    z_result_t rc = wz_ext_segment_sender_new(&splitter, segment_profile, segment_values, first_transfer,
-                                              WZ_EXT_SEGMENT_ROLLOVER_REFUSE, &reason);
+    z_result_t rc = zext_segment_sender_new(&splitter, segment_profile, segment_values, first_transfer,
+                                              ZEXT_SEGMENT_ROLLOVER_REFUSE, &reason);
     if (rc != Z_OK) return refused("segment sender", rc, &reason);
     int status = 0;
     for (size_t i = 0; i < plan_count && status == 0; i++) {
         piece_place_t place = {i, 0};
-        wz_ext_segment_result_t result = {.struct_size = sizeof(wz_ext_segment_result_t)};
-        rc = wz_ext_segment_sender_split(wz_ext_segment_sender_loan(&splitter), frames[i], frame_len[i], chunk_bytes,
+        zext_segment_result_t result = {.struct_size = sizeof(zext_segment_result_t)};
+        rc = zext_segment_sender_split(zext_segment_sender_loan(&splitter), frames[i], frame_len[i], chunk_bytes,
                                          print_piece, &place, &result, &reason);
         if (rc != Z_OK) status = refused("split", rc, &reason);
     }
-    wz_ext_segment_sender_drop(wz_ext_segment_sender_move(&splitter));
+    zext_segment_sender_drop(zext_segment_sender_move(&splitter));
     return status;
 }
 
@@ -733,12 +733,12 @@ static int role_serve(const z_loaned_session_t *session, const char *key) {
         }
     }
 
-    wz_ext_owned_e2e_sender_t sender;
+    zext_owned_e2e_sender_t sender;
     int status = make_sender(&sender);
     if (status != 0) return status;
     size_t longest = 0;
-    status = protect_plan(wz_ext_e2e_sender_loan(&sender), &longest);
-    wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&sender));
+    status = protect_plan(zext_e2e_sender_loan(&sender), &longest);
+    zext_e2e_sender_drop(zext_e2e_sender_move(&sender));
     if (status != 0) return status;
     if (segmented) {
         status = print_pieces(segment_profile, segment_values, first_transfer, chunk_bytes);
@@ -751,53 +751,53 @@ static int role_serve(const z_loaned_session_t *session, const char *key) {
     z_result_t rc = z_declare_publisher(session, &publisher, z_view_keyexpr_loan(&ke), NULL);
     if (rc != Z_OK) return refused("publisher", rc, NULL);
 
-    wz_ext_replay_shape_t shape;
+    zext_replay_shape_t shape;
     shape.frame_max = longest == 0 ? 1 : longest;
     shape.depth = (uint32_t)param_u64("depth", plan_count);
     shape.instances = 1;
-    size_t storage_len = wz_ext_replay_publisher_storage_size(&shape);
+    size_t storage_len = zext_replay_publisher_storage_size(&shape);
     uint8_t *storage = storage_len == 0 ? NULL : malloc(storage_len);
     if (storage == NULL) {
         z_undeclare_publisher(z_publisher_move(&publisher));
         return refused("replay storage", _Z_ERR_GENERIC, NULL);
     }
-    wz_ext_owned_replay_publisher_t cache;
+    zext_owned_replay_publisher_t cache;
     z_owned_string_t reason;
-    rc = wz_ext_replay_publisher_new(&cache, session, z_publisher_loan(&publisher), storage, storage_len, &shape,
+    rc = zext_replay_publisher_new(&cache, session, z_publisher_loan(&publisher), storage, storage_len, &shape,
                                      &reason);
     if (rc != Z_OK) {
         z_undeclare_publisher(z_publisher_move(&publisher));
         return refused("replay publisher", rc, &reason);
     }
-    const wz_ext_loaned_replay_publisher_t *loaned = wz_ext_replay_publisher_loan(&cache);
+    const zext_loaned_replay_publisher_t *loaned = zext_replay_publisher_loan(&cache);
     for (size_t i = 0; i < plan_count && status == 0; i++) {
-        rc = wz_ext_replay_publisher_record(loaned, 0, (uint64_t)(i + 1), frames[i], frame_len[i]);
+        rc = zext_replay_publisher_record(loaned, 0, (uint64_t)(i + 1), frames[i], frame_len[i]);
         if (rc != Z_OK) status = refused("record", rc, NULL);
     }
     if (status == 0) {
-        wz_ext_replay_serve_options_t options;
-        wz_ext_replay_serve_options_default(&options);
+        zext_replay_serve_options_t options;
+        zext_replay_serve_options_default(&options);
         if (segmented) {
             options.segment_profile = segment_profile;
             options.segment_values = segment_values;
             options.first_transfer = first_transfer;
             options.chunk_bytes = chunk_bytes;
         }
-        rc = wz_ext_replay_publisher_serve(loaned, z_view_keyexpr_loan(&ke), suffix, &options, &reason);
+        rc = zext_replay_publisher_serve(loaned, z_view_keyexpr_loan(&ke), suffix, &options, &reason);
         if (rc != Z_OK) status = refused("serve", rc, &reason);
     }
     if (status == 0) {
         printf("ready\n");
         int stopped = wait_for_file("stop");
-        wz_ext_replay_publisher_counts_t counts;
+        zext_replay_publisher_counts_t counts;
         memset(&counts, 0, sizeof counts);
         counts.struct_size = sizeof counts;
-        wz_ext_replay_publisher_counts(loaned, &counts);
+        zext_replay_publisher_counts(loaned, &counts);
         printf("answers %llu\n", (unsigned long long)counts.answers);
         printf(stopped ? "done\n" : "timeout stop\n");
         status = stopped ? 0 : 1;
     }
-    wz_ext_replay_publisher_drop(wz_ext_replay_publisher_move(&cache));
+    zext_replay_publisher_drop(zext_replay_publisher_move(&cache));
     z_undeclare_publisher(z_publisher_move(&publisher));
     free(storage);
     free(segment_profile);
@@ -809,15 +809,15 @@ static int role_serve(const z_loaned_session_t *session, const char *key) {
 
 static const char *round_name(uint8_t phase) {
     switch (phase) {
-        case WZ_EXT_REPLAY_ROUND_IDLE:
+        case ZEXT_REPLAY_ROUND_IDLE:
             return "idle";
-        case WZ_EXT_REPLAY_ROUND_ASKING:
+        case ZEXT_REPLAY_ROUND_ASKING:
             return "asking";
-        case WZ_EXT_REPLAY_ROUND_ANSWERING:
+        case ZEXT_REPLAY_ROUND_ANSWERING:
             return "answering";
-        case WZ_EXT_REPLAY_ROUND_ABANDONED:
+        case ZEXT_REPLAY_ROUND_ABANDONED:
             return "abandoned";
-        case WZ_EXT_REPLAY_ROUND_LIVE:
+        case ZEXT_REPLAY_ROUND_LIVE:
             return "live";
         default:
             return "none";
@@ -829,24 +829,24 @@ static int role_ask(const z_loaned_session_t *session, const char *key) {
     if (status != 0) return status;
     z_view_keyexpr_t ke;
     if (z_view_keyexpr_from_str(&ke, key) != Z_OK) return refused("key", _Z_ERR_GENERIC, NULL);
-    wz_ext_owned_replay_subscriber_t subscriber;
+    zext_owned_replay_subscriber_t subscriber;
     status = make_replay_subscriber(session, z_view_keyexpr_loan(&ke), 0, &subscriber);
     if (status != 0) return status;
     printf("ready\n");
 
-    const wz_ext_loaned_replay_subscriber_t *loaned = wz_ext_replay_subscriber_loan(&subscriber);
-    uint8_t phase = WZ_EXT_REPLAY_ROUND_IDLE;
+    const zext_loaned_replay_subscriber_t *loaned = zext_replay_subscriber_loan(&subscriber);
+    uint8_t phase = ZEXT_REPLAY_ROUND_IDLE;
     for (int waited = 0; waited < WAIT_MS; waited += STEP_MS) {
-        wz_ext_replay_subscriber_poll(loaned);
-        phase = wz_ext_replay_subscriber_phase(loaned);
-        if (phase == WZ_EXT_REPLAY_ROUND_LIVE || phase == WZ_EXT_REPLAY_ROUND_ABANDONED) break;
+        zext_replay_subscriber_poll(loaned);
+        phase = zext_replay_subscriber_phase(loaned);
+        if (phase == ZEXT_REPLAY_ROUND_LIVE || phase == ZEXT_REPLAY_ROUND_ABANDONED) break;
         z_sleep_ms(STEP_MS);
     }
-    wz_ext_replay_subscriber_counts_t counts;
+    zext_replay_subscriber_counts_t counts;
     memset(&counts, 0, sizeof counts);
     counts.struct_size = sizeof counts;
-    wz_ext_replay_subscriber_counts(loaned, &counts);
-    wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&subscriber));
+    zext_replay_subscriber_counts(loaned, &counts);
+    zext_replay_subscriber_drop(zext_replay_subscriber_move(&subscriber));
     print_seen();
     printf("round %s\n", round_name(phase));
     printf("counts duplicates=%llu stale=%llu abandoned=%llu given_up=%llu unjoined=%llu\n",
@@ -854,7 +854,7 @@ static int role_ask(const z_loaned_session_t *session, const char *key) {
            (unsigned long long)counts.abandoned, (unsigned long long)counts.frames_given_up,
            (unsigned long long)counts.unjoined_pieces);
     free(held_store);
-    if (phase != WZ_EXT_REPLAY_ROUND_LIVE && phase != WZ_EXT_REPLAY_ROUND_ABANDONED) {
+    if (phase != ZEXT_REPLAY_ROUND_LIVE && phase != ZEXT_REPLAY_ROUND_ABANDONED) {
         printf("timeout round\n");
         return 1;
     }

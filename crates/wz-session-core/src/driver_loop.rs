@@ -816,33 +816,48 @@ mod lent_delivery {
     /// batch with no record as the empty frame the walk reports; `false`, with nothing handed,
     /// for an outcome that carries no batch.
     pub(super) fn deliver(outcome: &DriverLoopOutcome, on_event: &mut dyn EventSink) -> bool {
-        let (batch, reliable, sn, priority) = match outcome {
+        // The records the test wrote, where it wrote them as messages: each must come out of the
+        // walk, or a fixture the wire cannot carry (a header of no message kind) would reach no
+        // table here while the owned form of the same test hands it on.
+        let (batch, written, reliable, sn, priority) = match outcome {
             DriverLoopOutcome::FramePayload {
                 reliable,
                 sn,
                 priority,
                 messages,
                 ..
-            } => (batch_of(messages), *reliable, *sn, *priority),
+            } => (
+                batch_of(messages),
+                Some(messages.len()),
+                *reliable,
+                *sn,
+                *priority,
+            ),
             DriverLoopOutcome::FramePlainPuts {
                 reliable,
                 sn,
                 priority,
                 payload,
                 ..
-            } => (payload.to_vec(), *reliable, *sn, *priority),
+            } => (payload.to_vec(), None, *reliable, *sn, *priority),
             _ => return false,
         };
         let mut record = new_record_buf();
-        let mut walked = false;
+        let mut walked = 0usize;
         try_for_each_record(&batch, &mut record, RecordForm::LentControl, |one| {
             report_lent_record(one, reliable, sn, priority, &mut *on_event);
-            walked = true;
+            walked += 1;
             Ok(())
         })
         .expect("a frame a test writes is walked whole");
+        if let Some(written) = written {
+            assert_eq!(
+                walked, written,
+                "every message a test writes into a frame is walked as a record"
+            );
+        }
         on_event.end_records();
-        if !walked {
+        if walked == 0 {
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::FramePayload {
                 reliable,
                 sn,

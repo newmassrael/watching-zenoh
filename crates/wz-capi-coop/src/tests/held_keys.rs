@@ -571,3 +571,85 @@ fn a_hold_whose_declaration_went_spares_the_one_that_took_its_id_again() {
     again.release(&*engine);
     assert!(engine.keyexpr_declarations().is_empty());
 }
+
+/// A copy of a hold the session placed at its row is one more count there, taken with no lock of
+/// the session and no new declaration; the copy's going leaves the declaration to the first
+/// holder, whose going, the last, retracts it. Turned red by a copy that reaches the session for
+/// its hold (a lock taken), by one that declares again (a second declaration), or by a copy whose
+/// going lets the declaration go.
+#[test]
+fn a_copy_of_a_placed_hold_counts_at_its_row_with_no_lock_and_no_declaration() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let program = engine
+        .acquire_keyexpr("demo/copy")
+        .expect("room for a declaration");
+    let id = program.mapping_id();
+    // SAFETY: the engine stands for the test, and the row while `program` holds it; the count is
+    // last read before `program` is released.
+    let count = unsafe { program.head() }.expect("the engine places its holds");
+    let holds = count.holds();
+    let locks = engine.takes.core.load(Ordering::SeqCst);
+    let copy = program.share(&*engine).expect("room for one more holder");
+    assert_eq!(
+        engine.takes.core.load(Ordering::SeqCst),
+        locks,
+        "no lock of the session is taken"
+    );
+    assert_eq!(count.holds(), holds + 1, "one more count at the row");
+    assert_eq!(copy.row(), program.row(), "the copy names the same row");
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/copy".to_owned())],
+        "and nothing new is declared"
+    );
+    copy.release(&*engine);
+    assert_eq!(count.holds(), holds, "the copy gave its count back");
+    assert_eq!(
+        engine.keyexpr_declarations(),
+        vec![(id, "demo/copy".to_owned())],
+        "the first holder holds it still"
+    );
+    program.release(&*engine);
+    assert!(
+        engine.keyexpr_declarations().is_empty(),
+        "the last holder retracts it"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live");
+}
+
+/// A copy of a hold made after the close takes no count: the close retracted the count where the
+/// row lies, so the copy holds nothing and names no row, and the holder's own going gives nothing
+/// back, each judged by the row's word with no reach of the session. Turned red by a close that
+/// leaves the counts as they were (the copy holds the row and its count).
+#[test]
+fn a_copy_of_a_hold_made_after_the_close_holds_no_count() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let program = engine
+        .acquire_keyexpr("demo/copy/closed")
+        .expect("room for a declaration");
+    // SAFETY: the engine stands for the test, and neither the close nor a release after it
+    // removes the row.
+    let count = unsafe { program.head() }.expect("the engine places its holds");
+    assert_eq!(
+        count.holds(),
+        1,
+        "CONTROL: open, the program's hold is counted"
+    );
+    SessionDrive::close(&*engine);
+    assert_eq!(count.holds(), 0, "the close retracted the count");
+    let copy = program
+        .share(&*engine)
+        .expect("a copy past the close is not refused");
+    assert_eq!(copy.row(), None, "the copy holds nothing");
+    assert_eq!(count.holds(), 0, "and took no count");
+    copy.release(&*engine);
+    program.release(&*engine);
+    assert_eq!(
+        count.holds(),
+        0,
+        "a hold given back after the close takes none"
+    );
+    assert_eq!(live_holds(&engine), 0, "no hold is live after the close");
+}

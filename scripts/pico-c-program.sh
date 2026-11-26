@@ -111,7 +111,7 @@ case "$form" in
         ;;
 esac
 roles="${WZ_PICO_PROGRAM_ROLES:-}"
-# wz's extension header, for a program that uses a wz_ext_* door.
+# wz's extension header, for a program that uses a zext_* door.
 ext_inc="$PWD/crates/wz-capi-core/include"
 os="${RUNNER_OS:-$(uname -s)}"
 # Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).
@@ -205,7 +205,7 @@ if [ "$sanitizer" = thread ] || [ "$sanitizer" = address ]; then
     fi
     if [ "$form" = nostd ]; then
         sanitized_dir="$WZ_ARTIFACTS/crates/target/sanitizer-$sanitizer"
-        engine_args+=(-Zbuild-std=std,panic_abort --target-dir "$sanitized_dir")
+        engine_args+=("-Zbuild-std=std,panic_abort" --target-dir "$sanitized_dir")
         lib_dir="$sanitized_dir/$host_triple/capi-nostd"
     else
         engine_args+=(-Zbuild-std --target "$host_triple")

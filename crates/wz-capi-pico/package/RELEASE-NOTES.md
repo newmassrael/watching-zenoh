@@ -18,7 +18,8 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
   the policies and limits of a session chosen when it opens, by a configuration document;
   end-to-end protection, its receiving judge and a judge per sender; supervision of periodic
   streams; message instances; the message catalog; the replay cache and the declaration watch;
-  and key ids shared by every node of a deployment. `README.md` lists their doors.
+  key ids shared by every node of a deployment; and a time base the program supplies, whose time
+  the timers of a session run on in place of the system's clock. `README.md` lists their doors.
 - The examples of the C API, a message catalog sample, the usage notes, the licence of the
   library and the notices of every package it links.
 

@@ -87,7 +87,7 @@ unsafe extern "C" fn on_drop_flag(ctx: *mut c_void) {
 
 // --- helpers ---------------------------------------------------------------
 
-use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
+use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::result::Z_ERR_TRANSPORT_TX_FAILED;
 use wz_runtime_tokio_test_support::free_port;
 
@@ -103,7 +103,7 @@ unsafe fn open_role(port: u16, key: u8, role: &str) -> z_owned_session_t {
     assert_eq!(
         zp_config_insert(
             z_config_loan_mut(&mut cfg),
-            WZ_EXT_CONFIG_LIMITS_KEY,
+            ZEXT_CONFIG_LIMITS_KEY,
             c"MAX_SUBSCRIPTIONS=2".as_ptr()
         ),
         Z_OK

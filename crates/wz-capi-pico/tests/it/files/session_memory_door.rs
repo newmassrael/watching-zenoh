@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The worst-case memory of a session through its C doors (`wz_ext_session_memory`,
-//! `wz_ext_session_memory_row`): a session that listens and one that dials it.
+//! The worst-case memory of a session through its C doors (`zext_session_memory`,
+//! `zext_session_memory_row`): a session that listens and one that dials it.
 //!
 //! What is held: the total is the sum of the rows that are bounded, and a report is bounded only
 //! when every row is; the rows of the tables are the session core's for the limits the session
@@ -18,8 +18,7 @@ use std::ffi::{CStr, CString};
 
 use wz_capi_pico::result::Z_EINVAL;
 use wz_capi_pico::session_memory::{
-    wz_ext_session_memory, wz_ext_session_memory_row, wz_ext_session_memory_row_t,
-    wz_ext_session_memory_t,
+    zext_session_memory, zext_session_memory_row, zext_session_memory_row_t, zext_session_memory_t,
 };
 use wz_capi_pico::{
     z_config_default, z_config_loan_mut, z_config_move, z_loaned_session_t, z_open,
@@ -59,17 +58,17 @@ unsafe fn open_config(mut cfg: z_owned_config_t) -> z_owned_session_t {
 struct Row {
     part: String,
     basis: String,
-    door: wz_ext_session_memory_row_t,
+    door: zext_session_memory_row_t,
 }
 
-unsafe fn report(session: *const z_loaned_session_t) -> (wz_ext_session_memory_t, Vec<Row>) {
-    let mut summary = wz_ext_session_memory_t::default();
-    assert_eq!(wz_ext_session_memory(session, &mut summary), Z_OK);
+unsafe fn report(session: *const z_loaned_session_t) -> (zext_session_memory_t, Vec<Row>) {
+    let mut summary = zext_session_memory_t::default();
+    assert_eq!(zext_session_memory(session, &mut summary), Z_OK);
     let rows = (0..summary.rows)
         .map(|index| {
-            let mut door: wz_ext_session_memory_row_t = std::mem::zeroed();
-            door.struct_size = std::mem::size_of::<wz_ext_session_memory_row_t>();
-            assert_eq!(wz_ext_session_memory_row(session, index, &mut door), Z_OK);
+            let mut door: zext_session_memory_row_t = std::mem::zeroed();
+            door.struct_size = std::mem::size_of::<zext_session_memory_row_t>();
+            assert_eq!(zext_session_memory_row(session, index, &mut door), Z_OK);
             Row {
                 part: CStr::from_ptr(door.part).to_str().unwrap().to_owned(),
                 basis: CStr::from_ptr(door.basis).to_str().unwrap().to_owned(),
@@ -294,30 +293,30 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
 fn a_row_past_the_last_and_null_arguments_are_refused() {
     let _program = crate::programs::admit();
     with_two_sessions(|_listener, dialer| unsafe {
-        let mut summary = wz_ext_session_memory_t::default();
-        assert_eq!(wz_ext_session_memory(dialer, &mut summary), Z_OK);
-        let mut out: wz_ext_session_memory_row_t = std::mem::zeroed();
-        out.struct_size = std::mem::size_of::<wz_ext_session_memory_row_t>();
+        let mut summary = zext_session_memory_t::default();
+        assert_eq!(zext_session_memory(dialer, &mut summary), Z_OK);
+        let mut out: zext_session_memory_row_t = std::mem::zeroed();
+        out.struct_size = std::mem::size_of::<zext_session_memory_row_t>();
         out.entry_bytes = 7;
         assert_eq!(
-            wz_ext_session_memory_row(dialer, summary.rows, &mut out),
+            zext_session_memory_row(dialer, summary.rows, &mut out),
             Z_EINVAL
         );
         assert_eq!(out.entry_bytes, 7, "a refused row leaves out as it was");
         assert_eq!(
-            wz_ext_session_memory(dialer, std::ptr::null_mut()),
+            zext_session_memory(dialer, std::ptr::null_mut()),
             Z_ERR_NULL
         );
         assert_eq!(
-            wz_ext_session_memory(std::ptr::null(), &mut summary),
+            zext_session_memory(std::ptr::null(), &mut summary),
             Z_ERR_NULL
         );
         assert_eq!(
-            wz_ext_session_memory_row(dialer, 0, std::ptr::null_mut()),
+            zext_session_memory_row(dialer, 0, std::ptr::null_mut()),
             Z_ERR_NULL
         );
         assert_eq!(
-            wz_ext_session_memory_row(std::ptr::null(), 0, &mut out),
+            zext_session_memory_row(std::ptr::null(), 0, &mut out),
             Z_ERR_NULL
         );
     });
@@ -335,7 +334,7 @@ const LOWERED_BATCH_BYTES: usize = 1031;
 #[test]
 fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
     let _program = crate::programs::admit();
-    use wz_capi_pico::config_policy::wz_ext_config_document;
+    use wz_capi_pico::config_policy::zext_config_document;
     use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_capi_pico::z_config_drop;
 
@@ -362,7 +361,7 @@ fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
             ),
             Z_OK
         );
-        let stated = wz_ext_config_document(z_config_loan_mut(&mut cfg), document.as_ptr());
+        let stated = zext_config_document(z_config_loan_mut(&mut cfg), document.as_ptr());
         if !selectable {
             assert_eq!(stated, Z_ERR_CONFIG_INVALID_VALUE);
             z_config_drop(z_config_move(&mut cfg));

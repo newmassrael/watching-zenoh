@@ -616,7 +616,7 @@ where
 }
 
 /// A dial of [`UnixpipeLinks`]: the stack's, or a unixpipe one.
-// Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
+// Held by value in its face's row of the dials, as `ip_stack::IpDial` is: not boxed.
 #[allow(clippy::large_enum_variant)]
 pub enum UnixpipeLinksDial<D, O: FifoOpen, N: CountKind = OneTask> {
     /// A dial of the stack the unixpipe links stand beside.

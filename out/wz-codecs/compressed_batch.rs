@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -92,54 +92,81 @@ impl<S: CompressedBatchStorage> CompressedBatchIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor
-    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
-    /// is left untouched so the caller can resume after appending more
-    /// bytes (RFC §synth-5-B L494-519).
+    /// Decode the next frame from `cursor`. On success the cursor advances
+    /// past the consumed bytes; on a refusal it does not move, so a caller that
+    /// receives `NeedMoreBytes` reads the frame again from the same place once
+    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: CompressedBatchFrom<'f> {
-        // A field past what the profile holds is read on and not held; the
-        // frame says so once it is read whole (docs/adr/0077 §7).
-        let mut _over = false;
+        cursor.read_frame(Self::read)
+    }
+
+    /// Decode the next frame from `cursor` into `_out`: the bytes, the bounds
+    /// and the errors of [`Self::decode`], with each bounded list and embedded
+    /// body built in the field where it will live.
+    ///
+    /// `decode` returns its value, and a `heapless::Vec` moves by copying its
+    /// whole declared capacity, so every hop a decoded list takes on the way
+    /// up (the struct literal, `Ok(..)`, a variant wrapper, the caller's own
+    /// binding) copies the declared maximum however few entries the wire held.
+    /// A caller on a path where that shows decodes into a destination it owns.
+    ///
+    /// A field past what the profile holds is read on and not held, and the
+    /// frame is refused with `CapacityExceeded` only once it is read whole and
+    /// every refusal of its own has had its turn (docs/adr/0077 §7), so this
+    /// node and one that holds more refuse a malformed frame alike. On `Err`,
+    /// `_out` holds the fields decoded so far and is not to be read; each of
+    /// them holds what its type says.
+    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: CompressedBatchFrom<'f> {
+        cursor.read_frame(|cursor| Self::read_into(cursor, _out))
+    }
+
+    /// Read the frame through `cursor`, the frame's reader, as a value built
+    /// once from its fields: every read total, each refusal recorded in the
+    /// reader and the first of them the frame's verdict, which the reader says
+    /// once the frame is read (docs/adr/0128). A codec that embeds or
+    /// dispatches to this one reads it through this one function, out of line
+    /// where the set reads it from two sites or more so that no site holds a
+    /// copy (docs/adr/0136, docs/adr/0137).
+    pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: CompressedBatchFrom<'f> {
         // Variable-length codec. RFC §synth-5-B B3 stream-correct shape:
         // a codec without `<sce:field sce:bit-size="tail">` consumes
         // only `min_bytes + length_value` rather than the entire
-        // cursor remaining. Codecs WITH a tail field still consume
-        // to end (tail's definition forces it). The prior
-        // "consume entire cursor" behaviour deferred to "the first
-        // multi-frame consumer" — the TLV chain is that consumer,
-        // so length-ref entry codecs now decode-iterably from a
-        // shared cursor without each entry eating the next entry's
-        // bytes.
-        let _frame_len = cursor.remaining();
-        if _frame_len < 1 {
-            return Err(CodecError::NeedMoreBytes);
-        }
-        let raw = cursor.peek_slice(_frame_len)?;
+        // remaining input. Codecs WITH a tail field still consume
+        // to end (tail's definition forces it). The TLV chain is the
+        // multi-frame consumer, so length-ref entry codecs decode
+        // iterably from a shared reader without each entry eating the
+        // next entry's bytes. The fixed head is at least `min_bytes`
+        // bytes, zeros once the frame has failed (docs/adr/0128), so
+        // its reads by constant offsets below it hold on either.
+        let raw = cursor.peek_at_least::<1>();
+        let _frame_len = raw.len();
         let header = raw[0];
         if (_frame_len - 1) > 65535 {
-            return Err(CodecError::LengthOutOfRange);
+            cursor.fail(CodecError::LengthOutOfRange);
         }
         let payload = &raw[1..];
-        let payload = ::sce_forge_runtime::codec::Bounded::new(payload).ok_or(CodecError::LengthOutOfRange)?;
-        let payload = ::sce_forge_runtime::codec::note_held(payload.store::<S, CompressedBatchPayloadField>(), &mut _over)?;
+        let payload = cursor.settle(::sce_forge_runtime::codec::Bounded::new(payload).ok_or(CodecError::LengthOutOfRange));
+        let payload = cursor.hold(payload.store::<S, CompressedBatchPayloadField>());
         let value = Self {
             header,
             payload,
         };
-        cursor.advance(_frame_len)?;
-        if _over {
-            return Err(CodecError::CapacityExceeded);
-        }
-        Ok(value)
+        cursor.advance(_frame_len);
+        value
     }
 
-    /// [`Self::decode`] into a destination the caller owns, so a codec that
-    /// embeds or dispatches to this one decodes it where it will live (see
-    /// `decode_into` on a codec that holds a bounded list). This body has no
-    /// list of its own to build in place, so it decodes and stores.
-    pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: CompressedBatchFrom<'f> {
-        *_out = Self::decode(cursor)?;
-        Ok(())
+    /// [`Self::read`] into a destination the caller owns, so a codec that
+    /// embeds or dispatches to this one reads it where it will live.
+    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: CompressedBatchFrom<'f> {
+        *_out = Self::read(cursor);
+    }
+
+    /// [`Self::read`], under the name every view reads with a chain hook
+    /// (docs/adr/0130): `CompressedBatch` is its own view and holds no chain,
+    /// so `_hook` is shown nothing.
+    #[inline(always)]
+    pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: CompressedBatchFrom<'f> {
+        Self::read(cursor)
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -374,8 +401,9 @@ pub struct CompressedBatchWalk;
 impl ::sce_forge_runtime::codec::ListWalk<0> for CompressedBatchWalk {
     type Entry<'b> = CompressedBatchView<'b>;
 
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        CompressedBatchView::decode(_c)
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        CompressedBatchView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }

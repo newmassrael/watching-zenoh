@@ -18,7 +18,7 @@ include!(concat!(env!("OUT_DIR"), "/conformance_digest.rs"));
 /// static for the life of the program. In a build with the `conformance-digest` capability, which a
 /// build that names nothing has and the zenoh-pico preset leaves out.
 #[no_mangle]
-pub extern "C" fn wz_ext_conformance_digest() -> *const core::ffi::c_char {
+pub extern "C" fn zext_conformance_digest() -> *const core::ffi::c_char {
     CONFORMANCE_DIGEST.as_ptr()
 }
 
@@ -45,7 +45,7 @@ mod tests {
     #[test]
     fn the_door_hands_out_the_digest() {
         // SAFETY: the door returns a pointer to a static NUL-terminated string.
-        let handed = unsafe { core::ffi::CStr::from_ptr(wz_ext_conformance_digest()) };
+        let handed = unsafe { core::ffi::CStr::from_ptr(zext_conformance_digest()) };
         assert_eq!(handed, CONFORMANCE_DIGEST);
     }
 }

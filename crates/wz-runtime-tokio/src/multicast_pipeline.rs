@@ -144,6 +144,53 @@ pub enum MulticastTxRefused {
     Namespace,
 }
 
+/// Room on a group's lanes that [`MulticastTxProducer::try_reserve`] promised one message: the
+/// room of every datagram the message can take, on the conduit it rides, of the pipeline that was
+/// attached when it was asked. While it lives the lanes count that room as taken, so no other push
+/// is given it, and the message pushed under it ([`MulticastTxProducer::push_reserved`]) asks for
+/// no room. Dropping it, pushed or not, gives the room back.
+///
+/// The message is pushed onto the pipeline the room is on, and onto no pipeline attached after
+/// it: a link that went meanwhile takes the message with it, as it takes whatever it queued.
+#[cfg(feature = "codec-push")]
+#[must_use = "a reservation that is dropped at once promises nothing: push under it, or do not ask"]
+pub struct MulticastTxReservation {
+    link: Arc<Link>,
+    /// The message, under the group's egress namespace already.
+    item: MulticastTxItem,
+    /// One promise per datagram the message can take.
+    room: Vec<crate::writer_queue::Permit>,
+}
+
+#[cfg(feature = "codec-push")]
+impl std::fmt::Debug for MulticastTxReservation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MulticastTxReservation")
+            .field("datagrams", &self.room.len())
+            .finish()
+    }
+}
+
+#[cfg(feature = "codec-push")]
+impl MulticastTxReservation {
+    /// How many datagrams of room the reservation holds: what the message can take.
+    pub fn datagrams(&self) -> usize {
+        self.room.len()
+    }
+
+    /// Push the message onto the pipeline the room is on, asking it for none. The room is held
+    /// until every datagram of the message is on the lanes, and given back then.
+    fn push(
+        self,
+        window_open: &std::sync::atomic::AtomicBool,
+    ) -> wz_session_core::tx_deadline::PushOutcome {
+        let Self { link, item, room } = self;
+        let outcome = link.push_staged::<true>(item, window_open);
+        drop(room);
+        outcome
+    }
+}
+
 /// One attached link's pipeline, as producers push onto it.
 struct Link {
     #[cfg(any(
@@ -399,6 +446,36 @@ impl MulticastTxProducer {
         self.shared.push(item)
     }
 
+    /// Promise the attached pipeline the room of every datagram `item` can take, on the conduit it
+    /// rides, without waiting and without marking a lane congested: what a publish that reaches
+    /// all of its links or none takes on a group before it sends on any link. `Ok(None)` is a
+    /// lane that cannot take all of it now, and nothing is held; `Unlinked` is a group with no
+    /// link to promise anything, and `Namespace` a key the group's namespace makes too long, each
+    /// of which a push would drop.
+    #[cfg(feature = "codec-push")]
+    pub fn try_reserve(
+        &self,
+        item: MulticastTxItem,
+    ) -> Result<Option<MulticastTxReservation>, MulticastTxRefused> {
+        let link = self.attached().ok_or(MulticastTxRefused::Unlinked)?;
+        link.reserve(item)
+    }
+
+    /// Push the message `reservation` holds room for, asking no lane for room: it waits for its
+    /// conduit's stage as a blocking push does, and is never a congestion drop. The room is given
+    /// back once the message is on the lanes.
+    ///
+    /// Under an owner's deferral, a push of a thread that defers is queued as its other pushes
+    /// are, the room given back, and pushed by the flush, which asks for room as any push does; a
+    /// push of a thread that does not defer leaves after what is queued.
+    #[cfg(feature = "codec-push")]
+    pub fn push_reserved(
+        &self,
+        reservation: MulticastTxReservation,
+    ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
+        self.shared.push_reserved(reservation)
+    }
+
     /// Give the group its owner's deferral, in place of any it had: from now on a push the
     /// calling thread makes while the deferral says it defers is queued, in the order it was
     /// made, and pushed by that thread's [`Self::flush_deferred_sends`]; a push of a thread that
@@ -525,6 +602,30 @@ impl Shared {
             }
         }
     }
+
+    /// [`MulticastTxProducer::push_reserved`].
+    #[cfg(feature = "codec-push")]
+    fn push_reserved(
+        &self,
+        reservation: MulticastTxReservation,
+    ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
+        let sends = &self.deferred;
+        if !sends.engaged() {
+            return Ok(reservation.push(&self.window_open));
+        }
+        if sends.defers_here() {
+            // A thread that defers holds the owner's lock, under which no push waits: the message
+            // waits in the queue instead, and the room it held is not kept across the wait.
+            sends.defer(reservation.item);
+            return Ok(wz_session_core::tx_deadline::PushOutcome::Pushed);
+        }
+        sends.after_queued(
+            |deferred| {
+                let _ = self.push_now(deferred);
+            },
+            || Ok(reservation.push(&self.window_open)),
+        )
+    }
 }
 
 /// A group is a sender its owner may owe a flush to, beside the unicast sessions it defers sends
@@ -571,10 +672,13 @@ impl Link {
         item: MulticastTxItem,
         window_open: &std::sync::atomic::AtomicBool,
     ) -> Result<wz_session_core::tx_deadline::PushOutcome, MulticastTxRefused> {
-        use wz_session_core::multicast_tx::{
-            multicast_tx_conduit, multicast_tx_droppable, multicast_tx_push,
-            multicast_tx_push_batched, MulticastTxConduit, MulticastTxTally,
-        };
+        let item = self.namespaced(item)?;
+        Ok(self.push_staged::<false>(item, window_open))
+    }
+
+    /// `item` under the group's egress namespace, or the refusal of a key the namespace makes too
+    /// long for the codec.
+    fn namespaced(&self, item: MulticastTxItem) -> Result<MulticastTxItem, MulticastTxRefused> {
         #[cfg_attr(not(feature = "routing-namespace"), allow(unused_mut))]
         let mut item = item;
         // §5.21 routing-namespace — the one egress chokepoint every producer's
@@ -587,6 +691,54 @@ impl Link {
                 return Err(MulticastTxRefused::Namespace);
             }
         }
+        Ok(item)
+    }
+
+    /// Promise this pipeline's lanes the room of every datagram `item` can take
+    /// (`multicast_tx_frames`) on the conduit it rides, without waiting and without marking a
+    /// lane congested: the reservation the message is then pushed under, or `None` and nothing
+    /// held when the lane cannot take all of it. A closed lane is a link that is gone, as a push
+    /// onto it is lost with it.
+    #[cfg(feature = "codec-push")]
+    fn reserve(
+        self: &Arc<Self>,
+        item: MulticastTxItem,
+    ) -> Result<Option<MulticastTxReservation>, MulticastTxRefused> {
+        use wz_session_core::multicast_tx::{multicast_tx_conduit, multicast_tx_frames};
+        let item = self.namespaced(item)?;
+        let band = multicast_tx_conduit(&item, &self.params);
+        let frames = multicast_tx_frames(&item, &self.params);
+        let mut room = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            match self.lanes.try_reserve(band) {
+                Ok(permit) => room.push(permit),
+                // What was promised before goes back with `room`.
+                Err(crate::writer_queue::ReserveError::Full) => return Ok(None),
+                Err(crate::writer_queue::ReserveError::Closed) => {
+                    return Err(MulticastTxRefused::Unlinked)
+                }
+            }
+        }
+        Ok(Some(MulticastTxReservation {
+            link: Arc::clone(self),
+            item,
+            room,
+        }))
+    }
+
+    /// Push `item`, already under the namespace, onto its conduit's lane. `RESERVED` is a push
+    /// whose sender holds the room of every datagram it takes (`MulticastTxReservation`): it
+    /// asks no lane for room, and it takes its stage as a blocking push does, since a promise
+    /// that a held stage could drop would break what it was taken for.
+    fn push_staged<const RESERVED: bool>(
+        &self,
+        item: MulticastTxItem,
+        window_open: &std::sync::atomic::AtomicBool,
+    ) -> wz_session_core::tx_deadline::PushOutcome {
+        use wz_session_core::multicast_tx::{
+            multicast_tx_conduit, multicast_tx_droppable, multicast_tx_push,
+            multicast_tx_push_batched, MulticastTxConduit, MulticastTxTally,
+        };
         let tally = MulticastTxTally::of(&item);
         let band = multicast_tx_conduit(&item, &self.params);
         // A droppable push does not wait for its stage as a blocking one does: a blocking push
@@ -596,7 +748,7 @@ impl Link {
         // held stage costs it instead is the queue profile's (`droppable_stage`).
         let mut conf = self.params.tx_queue;
         let sender = &self.senders[band as usize];
-        let stage = if multicast_tx_droppable(&item, &self.params) {
+        let stage = if !RESERVED && multicast_tx_droppable(&item, &self.params) {
             droppable_stage(&self.stages[band as usize], sender, &mut conf, |wait| {
                 self.lanes.link_room(band, wait)
             })
@@ -611,12 +763,12 @@ impl Link {
                 if let Some(pushed) = self.pushed.as_ref() {
                     let _ = pushed.send((tally, dropped));
                 }
-                return Ok(dropped);
+                return dropped;
             }
         };
         let inside = SenderInside::mark(sender);
         let Stage { sn, window, queued } = &mut *stage;
-        let mut queue = StageQueue {
+        let mut queue = StageQueue::<RESERVED> {
             lanes: &self.lanes,
             queued,
         };
@@ -648,7 +800,7 @@ impl Link {
         if let Some(pushed) = self.pushed.as_ref() {
             let _ = pushed.send((tally, outcome));
         }
-        Ok(outcome)
+        outcome
     }
 
     /// Put every conduit's open frame on the lanes, each under its own conduit's lock, the
@@ -660,7 +812,7 @@ impl Link {
             window.flush(
                 Priority::from_wire(index as u8),
                 &self.params,
-                &mut StageQueue {
+                &mut StageQueue::<false> {
                     lanes: &self.lanes,
                     queued,
                 },
@@ -765,13 +917,17 @@ impl Link {
 
 /// One conduit's lane, as [`multicast_tx_push`](wz_session_core::multicast_tx::multicast_tx_push)
 /// pushes onto it while its stage is held.
+///
+/// `RESERVED` is the queue of a push whose sender holds the room of every datagram it takes
+/// (`MulticastTxReservation`). A const parameter and not a field, so the queue of every other
+/// push is compiled as it was, with no branch that asks whether it is one.
 #[cfg(any(
     feature = "codec-push",
     feature = "codec-response",
     feature = "codec-response-final",
     any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
-struct StageQueue<'a> {
+struct StageQueue<'a, const RESERVED: bool> {
     lanes: &'a crate::writer_queue::OutboundTx,
     queued: &'a mut Queued,
 }
@@ -782,7 +938,7 @@ struct StageQueue<'a> {
     feature = "codec-response-final",
     any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
-impl StageQueue<'_> {
+impl<const RESERVED: bool> StageQueue<'_, RESERVED> {
     /// A control-plane datagram is a barrier between the data queued before it and after it, as
     /// on a unicast link (`BoxedLinkDriver::tx_fence`): the lanes serve their priorities in
     /// strict order, so without this a declaration queued behind a put on the group would leave
@@ -802,12 +958,21 @@ impl StageQueue<'_> {
     feature = "codec-response-final",
     any(feature = "liveliness-token", feature = "declare-subscriber")
 ))]
-impl wz_session_core::multicast_tx::MulticastTxQueue for StageQueue<'_> {
+impl<const RESERVED: bool> wz_session_core::multicast_tx::MulticastTxQueue
+    for StageQueue<'_, RESERVED>
+{
     fn wait_for_room(
         &mut self,
         priority: Priority,
         wait: wz_session_core::link::RoomWait,
     ) -> wz_session_core::link::RoomAnswer {
+        // The sender holds the room of every datagram of the message: asking would count its own
+        // promise against the lane and find it full when it is exactly full enough.
+        if RESERVED {
+            return wz_session_core::link::RoomAnswer::at_once(
+                wz_session_core::link::LinkRoom::Free,
+            );
+        }
         self.lanes.link_room(priority, wait)
     }
 
@@ -2189,5 +2354,111 @@ mod tests {
             producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
             Err(MulticastTxRefused::Unlinked)
         );
+    }
+
+    /// A push under a reservation asks the lane for no room: with the lane's one batch promised
+    /// to it, a push that asks is a congestion drop, and the reserved one is queued. Its room is
+    /// given back once it is on the lane. Turned red by a reserved stage queue that asks the lane
+    /// for room, which finds the lane's own promise there and drops the message.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_reserved_push_is_queued_on_a_lane_its_own_promise_fills() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        let reservation = producer
+            .try_reserve(final_of(1))
+            .expect("a link is attached")
+            .expect("the lane has room");
+        assert_eq!(reservation.datagrams(), 1);
+        assert!(
+            producer
+                .try_reserve(final_of(2))
+                .expect("a link is attached")
+                .is_none(),
+            "the lane's one batch is promised, and a second promise finds no room"
+        );
+        assert_eq!(
+            producer.push(terminal(Priority::DEFAULT, CongestionControl::Drop)),
+            Ok(PushOutcome::Congested),
+            "a push that asks the lane finds no room"
+        );
+
+        assert_eq!(producer.push_reserved(reservation), Ok(PushOutcome::Pushed));
+
+        assert_eq!(
+            finals_read(&mut tap),
+            [1],
+            "the reserved push is on the lane"
+        );
+        assert!(
+            producer
+                .try_reserve(final_of(3))
+                .expect("a link is attached")
+                .is_some(),
+            "the room was given back once the message was written"
+        );
+    }
+
+    /// A reservation the lane cannot take whole promises none of it, and a dropped reservation
+    /// gives its room back. With no link attached there is nothing to promise.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_reservation_is_room_held_until_it_is_dropped() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        let held = producer
+            .try_reserve(final_of(1))
+            .expect("a link is attached")
+            .expect("the lane has room");
+        assert!(producer
+            .try_reserve(final_of(2))
+            .expect("a link is attached")
+            .is_none());
+        drop(held);
+        assert!(
+            producer
+                .try_reserve(final_of(2))
+                .expect("a link is attached")
+                .is_some(),
+            "dropping a reservation gives its room back"
+        );
+        assert!(finals_read(&mut tap).is_empty(), "and pushes nothing");
+
+        let unlinked = MulticastTxProducer::new();
+        assert!(matches!(
+            unlinked.try_reserve(final_of(1)),
+            Err(MulticastTxRefused::Unlinked)
+        ));
+    }
+
+    /// A reserved push its thread defers is queued as the thread's other pushes are, and its
+    /// room is given back at once, since no push waits under the owner's lock: the lane takes
+    /// another promise meanwhile, and the flush pushes the message. Turned red by a deferral
+    /// that keeps the reservation's room while the message waits in the queue.
+    #[cfg(feature = "codec-push")]
+    #[test]
+    fn a_reserved_push_its_thread_defers_gives_its_room_back_and_waits_for_the_flush() {
+        let (producer, mut tap) = MulticastTxTap::attach(&params(false));
+        let (defers, deferred) = deferring(&producer);
+        let reservation = producer
+            .try_reserve(final_of(1))
+            .expect("a link is attached")
+            .expect("the lane has room");
+
+        assert_eq!(producer.push_reserved(reservation), Ok(PushOutcome::Pushed));
+
+        assert_eq!(deferred.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(
+            finals_read(&mut tap).is_empty(),
+            "nothing is on a lane before the flush"
+        );
+        assert!(
+            producer
+                .try_reserve(final_of(2))
+                .expect("a link is attached")
+                .is_some(),
+            "the deferred push holds no room"
+        );
+        defers.store(false, std::sync::atomic::Ordering::SeqCst);
+        producer.flush_deferred_sends();
+        assert_eq!(finals_read(&mut tap), [1], "the flush pushed it");
     }
 }

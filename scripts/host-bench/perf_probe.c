@@ -4,7 +4,7 @@
 // One program of the host performance matrix (scripts/host-bench/perf_matrix.py, docs/pico-perf-matrix.md),
 // in four roles. It uses only the zenoh-pico C API, so the SAME source is built once against zenoh-pico (the
 // reference, built as the same build) and once against libwz_capi_pico; built with PERF_PROGRAM_TRANSPORT it
-// also carries the session's links over a transport this program supplies (wz_ext_transport_*, wz_ext.h),
+// also carries the session's links over a transport this program supplies (zext_transport_*, wz_ext.h),
 // which exists only in wz, and is built only against it.
 //
 //   perf_probe pong -m peer (-l|-e) ENDPOINT [-b] [-T NAME]
@@ -81,14 +81,14 @@
 //
 // Built against wz's library (PERF_WZ_ARM, which a build with PERF_PROGRAM_TRANSPORT needs too), the program
 // states before its open the counts its roles hold on their session at once, PERF_SESSION_LIMITS, by the
-// config key wz_ext.h names (WZ_EXT_CONFIG_LIMITS_KEY): a session of that library opens its tables at the few
+// config key wz_ext.h names (ZEXT_CONFIG_LIMITS_KEY): a session of that library opens its tables at the few
 // zenoh-pico's own examples declare and takes no memory after its open, so a role that declares more than the
 // few without saying so has its declaration refused. zenoh-pico grows its lists on the heap and is told
 // nothing.
 //
 // -T NAME (PERF_PROGRAM_TRANSPORT only): every link of the session goes over the program's transport, here an
 // AF_UNIX stream in the abstract namespace under NAME. A tcp/ listen locator is a listening socket of that
-// name, whose accepted streams the program names with wz_ext_transport_accepted; a tcp/ connect locator is a
+// name, whose accepted streams the program names with zext_transport_accepted; a tcp/ connect locator is a
 // stream connected to it. Each link has one thread that reads it and hands the bytes in, and reports a link
 // whose send would block writable again; a send never blocks.
 //
@@ -110,6 +110,27 @@
 // VmHWM belongs to the memory exec made new. Linux prints no line when /proc gives no figure, so the
 // runner reads none rather than a zero.
 //
+// PERF_SMAPS=1 (Linux) asks what that resident set is made of (docs/win-budget/rss.md, cell R0). Once its
+// role has run, before it closes its session, so the session's arena and pools are still mapped, a role
+// prints
+//
+//   perf_probe smaps rollup rss_kib=<..> pss_kib=<..> anonymous_kib=<..> private_dirty_kib=<..>
+//     private_clean_kib=<..> shared_clean_kib=<..> shared_dirty_kib=<..>
+//
+// from /proc/self/smaps_rollup, then one line for each mapping of /proc/self/smaps that holds a resident
+// page,
+//
+//   perf_probe smaps region start=<hex> perms=<rwxp> size_kib=<..> rss_kib=<..> pss_kib=<..>
+//     private_dirty_kib=<..> anonymous_kib=<..> name=<the mapping's path or [heap], [stack], ..., empty>
+//
+// the name last, as the rest of its line, and after each executable mapping of a file the pages of it the
+// process holds (/proc/self/pagemap),
+//
+//   perf_probe smaps pages start=<hex> pages=<n> map=<a hex digit for four pages, lowest first> present=<n>
+//
+// Every line comes before the last one. Unset, it costs one look at the environment; on Windows it prints
+// nothing.
+//
 // Exit status: 0 when the role ran, 1 when the session or an entity could not be made, 2 for a usage error or
 // an option the build does not have.
 
@@ -117,12 +138,14 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -313,6 +336,134 @@ static void print_usage(void) {
     fflush(stdout);
 }
 
+// The fields of one mapping of /proc/self/smaps, or of the rollup, that a smaps line prints, in KiB.
+struct smaps_fields {
+    unsigned long long size, rss, pss, private_dirty, private_clean, shared_clean, shared_dirty, anonymous;
+};
+
+// Reads one "Name: <n> kB" line of smaps into the field it names; 0 when the line is no such field.
+static int smaps_field(const char *line, struct smaps_fields *f) {
+    static const struct {
+        const char *name;
+        size_t at;
+    } known[] = {
+        {"Size:", offsetof(struct smaps_fields, size)},
+        {"Rss:", offsetof(struct smaps_fields, rss)},
+        {"Pss:", offsetof(struct smaps_fields, pss)},
+        {"Private_Dirty:", offsetof(struct smaps_fields, private_dirty)},
+        {"Private_Clean:", offsetof(struct smaps_fields, private_clean)},
+        {"Shared_Clean:", offsetof(struct smaps_fields, shared_clean)},
+        {"Shared_Dirty:", offsetof(struct smaps_fields, shared_dirty)},
+        {"Anonymous:", offsetof(struct smaps_fields, anonymous)},
+    };
+    for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
+        const size_t n = strlen(known[i].name);
+        if (strncmp(line, known[i].name, n) == 0) {
+            unsigned long long kib = 0;
+            if (sscanf(line + n, " %llu kB", &kib) != 1) return 0;
+            *(unsigned long long *)((char *)f + known[i].at) = kib;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Reads a line of smaps whole into `line`, dropping what does not fit (a path longer than the buffer), so
+// the rest of a long line is never read as a line of its own. 0 at the end of the file.
+static int smaps_line(FILE *in, char *line, size_t size) {
+    if (fgets(line, (int)size, in) == NULL) return 0;
+    size_t n = strlen(line);
+    if (n > 0 && line[n - 1] == '\n') {
+        line[n - 1] = '\0';
+        return 1;
+    }
+    int c;
+    while ((c = fgetc(in)) != EOF && c != '\n') {
+    }
+    return 1;
+}
+
+// Which pages of an executable mapping are in the process's page table, from /proc/self/pagemap (bit 63 of
+// each page's entry, which needs no privilege), as one hex digit for four pages, the lowest page in the
+// lowest bit of the first digit: the pages of a library's code its run holds (docs/win-budget/rss.md, R3).
+static void print_pages(int pagemap, unsigned long long start, unsigned long long end) {
+    const long page = sysconf(_SC_PAGESIZE);
+    if (pagemap < 0 || page <= 0 || end <= start) return;
+    const unsigned long long pages = (end - start) / (unsigned long long)page;
+    unsigned long long present = 0;
+    printf("perf_probe smaps pages start=%llx pages=%llu map=", start, pages);
+    for (unsigned long long at = 0; at < pages; at += 4) {
+        unsigned digit = 0;
+        for (unsigned bit = 0; bit < 4 && at + bit < pages; bit++) {
+            uint64_t entry = 0;
+            const off_t offset = (off_t)((start / (unsigned long long)page + at + bit) * sizeof entry);
+            if (pread(pagemap, &entry, sizeof entry, offset) == (ssize_t)sizeof entry && (entry >> 63) != 0) {
+                digit |= 1U << bit;
+                present++;
+            }
+        }
+        putchar("0123456789abcdef"[digit]);
+    }
+    printf(" present=%llu\n", present);
+}
+
+static void print_region(int pagemap, unsigned long long start, unsigned long long end, const char *perms,
+                         const struct smaps_fields *f, const char *name) {
+    if (f->rss == 0) return;
+    printf("perf_probe smaps region start=%llx perms=%s size_kib=%llu rss_kib=%llu pss_kib=%llu "
+           "private_dirty_kib=%llu anonymous_kib=%llu name=%s\n",
+           start, perms, f->size, f->rss, f->pss, f->private_dirty, f->anonymous, name);
+    if (perms[2] == 'x' && name[0] == '/') print_pages(pagemap, start, end);
+}
+
+// What the resident set is made of, when PERF_SMAPS=1 asks (the header of this file).
+static void print_smaps(void) {
+    const char *asked = getenv("PERF_SMAPS");
+    if (asked == NULL || strcmp(asked, "1") != 0) return;
+    char line[1024];
+    FILE *rollup = fopen("/proc/self/smaps_rollup", "r");
+    if (rollup != NULL) {
+        struct smaps_fields f;
+        memset(&f, 0, sizeof f);
+        while (smaps_line(rollup, line, sizeof line)) smaps_field(line, &f);
+        fclose(rollup);
+        printf("perf_probe smaps rollup rss_kib=%llu pss_kib=%llu anonymous_kib=%llu private_dirty_kib=%llu "
+               "private_clean_kib=%llu shared_clean_kib=%llu shared_dirty_kib=%llu\n",
+               f.rss, f.pss, f.anonymous, f.private_dirty, f.private_clean, f.shared_clean, f.shared_dirty);
+    }
+    FILE *maps = fopen("/proc/self/smaps", "r");
+    if (maps != NULL) {
+        const int pagemap = open("/proc/self/pagemap", O_RDONLY);
+        struct smaps_fields f;
+        memset(&f, 0, sizeof f);
+        char name[sizeof line] = "";
+        char perms[8] = "";
+        unsigned long long start = 0, end = 0;
+        int open_region = 0;
+        while (smaps_line(maps, line, sizeof line)) {
+            unsigned long long from = 0, to = 0;
+            char mode[8];
+            int consumed = 0;
+            // A mapping's header: "<from>-<to> <perms> <offset> <dev> <inode> [<name>]".
+            if (sscanf(line, "%llx-%llx %7s %*s %*s %*s %n", &from, &to, mode, &consumed) == 3 && consumed > 0) {
+                if (open_region) print_region(pagemap, start, end, perms, &f, name);
+                memset(&f, 0, sizeof f);
+                start = from;
+                end = to;
+                snprintf(perms, sizeof perms, "%s", mode);
+                snprintf(name, sizeof name, "%s", line + consumed);
+                open_region = 1;
+            } else if (open_region) {
+                smaps_field(line, &f);
+            }
+        }
+        if (open_region) print_region(pagemap, start, end, perms, &f, name);
+        if (pagemap >= 0) close(pagemap);
+        fclose(maps);
+    }
+    fflush(stdout);
+}
+
 #endif
 
 // PERF_PROBE_TRACE=1 asks for one stderr line before and after each step of the teardown, on the clock the
@@ -362,7 +513,7 @@ static void drop_nothing(void *context) { (void)context; }
 
 struct pt_link {
     int used;
-    wz_ext_link_t link;
+    zext_link_t link;
     int fd;
     int wake[2];
     pthread_t reader;
@@ -376,17 +527,17 @@ struct pt_link {
 
 static struct {
     pthread_mutex_t lock;
-    wz_ext_owned_transport_t transport;
+    zext_owned_transport_t transport;
     const char *name;
     int listen_fd;
-    wz_ext_link_t listener;
+    zext_link_t listener;
     pthread_t acceptor;
     int acceptor_started;
     unsigned accepted;
     struct pt_link links[PT_MAX_LINKS];
 } pt = {.lock = PTHREAD_MUTEX_INITIALIZER, .listen_fd = -1};
 
-static const wz_ext_loaned_transport_t *pt_loan(void) { return wz_ext_transport_loan(&pt.transport); }
+static const zext_loaned_transport_t *pt_loan(void) { return zext_transport_loan(&pt.transport); }
 
 static socklen_t pt_address(struct sockaddr_un *addr) {
     memset(addr, 0, sizeof *addr);
@@ -398,7 +549,7 @@ static socklen_t pt_address(struct sockaddr_un *addr) {
     return (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + n);
 }
 
-static struct pt_link *pt_find(wz_ext_link_t link) {
+static struct pt_link *pt_find(zext_link_t link) {
     struct pt_link *found = NULL;
     pthread_mutex_lock(&pt.lock);
     for (int i = 0; i < PT_MAX_LINKS; i++) {
@@ -421,9 +572,9 @@ static void pt_wake(struct pt_link *l) {
 // as a program that gives no drained would retry) and hand the same bytes in again. 0 while the link lives.
 static int pt_hand_in(struct pt_link *l, const uint8_t *data, size_t len) {
     for (;;) {
-        z_result_t rc = wz_ext_transport_received(pt_loan(), l->link, data, len, NULL);
+        z_result_t rc = zext_transport_received(pt_loan(), l->link, data, len, NULL);
         if (rc == Z_OK) return 0;
-        if (rc != WZ_EXT_ERR_LINK_FULL) return -1;
+        if (rc != ZEXT_ERR_LINK_FULL) return -1;
         pthread_mutex_lock(&l->lock);
         if (!l->drained && !atomic_load(&l->closing)) {
             struct timespec until;
@@ -460,7 +611,7 @@ static void *pt_read(void *arg) {
         }
         if (atomic_load(&l->closing)) break;
         if ((fds[0].revents & POLLOUT) && atomic_exchange(&l->want_write, 0)) {
-            wz_ext_transport_event(pt_loan(), l->link, WZ_EXT_LINK_EVENT_WRITABLE);
+            zext_transport_event(pt_loan(), l->link, ZEXT_LINK_EVENT_WRITABLE);
         }
         if (fds[0].revents & (POLLIN | POLLHUP | POLLERR)) {
             ssize_t n = recv(l->fd, buf, sizeof buf, MSG_DONTWAIT);
@@ -468,7 +619,7 @@ static void *pt_read(void *arg) {
                 if (pt_hand_in(l, buf, (size_t)n) != 0) break;
             } else if (n == 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) {
                 // The other end went: the session hears it as a socket the peer closed.
-                if (!atomic_load(&l->closing)) wz_ext_transport_event(pt_loan(), l->link, WZ_EXT_LINK_EVENT_CLOSED);
+                if (!atomic_load(&l->closing)) zext_transport_event(pt_loan(), l->link, ZEXT_LINK_EVENT_CLOSED);
                 break;
             }
         }
@@ -477,7 +628,7 @@ static void *pt_read(void *arg) {
 }
 
 // A slot for `link` over `fd`, its reading thread started. 0, or -1 when the table is full.
-static int pt_add(wz_ext_link_t link, int fd) {
+static int pt_add(zext_link_t link, int fd) {
     struct pt_link *l = NULL;
     pthread_mutex_lock(&pt.lock);
     for (int i = 0; i < PT_MAX_LINKS; i++) {
@@ -526,73 +677,73 @@ static void *pt_accept(void *arg) {
         char remote[64];
         pthread_mutex_lock(&pt.lock);
         unsigned n = ++pt.accepted;
-        wz_ext_link_t listener = pt.listener;
+        zext_link_t listener = pt.listener;
         pthread_mutex_unlock(&pt.lock);
         // A synthetic address per stream (TEST-NET-1): the session tells accepted streams apart by it.
         snprintf(remote, sizeof remote, "tcp/192.0.2.2:%u", 40000U + n);
-        wz_ext_link_t link = 0;
-        if (wz_ext_transport_accepted(pt_loan(), listener, remote, &link) != Z_OK || pt_add(link, fd) != 0) {
+        zext_link_t link = 0;
+        if (zext_transport_accepted(pt_loan(), listener, remote, &link) != Z_OK || pt_add(link, fd) != 0) {
             close(fd);
         }
     }
 }
 
-static wz_ext_link_result_t pt_open(void *context, wz_ext_link_t link, wz_ext_link_kind_t kind,
+static zext_link_result_t pt_open(void *context, zext_link_t link, zext_link_kind_t kind,
                                     const char *locator) {
     (void)context;
     (void)locator;
     struct sockaddr_un addr;
     socklen_t len = pt_address(&addr);
-    if (kind == WZ_EXT_LINK_STREAM_LISTEN) {
+    if (kind == ZEXT_LINK_STREAM_LISTEN) {
         int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (fd < 0) return WZ_EXT_LINK_FAILED;
+        if (fd < 0) return ZEXT_LINK_FAILED;
         if (bind(fd, (struct sockaddr *)&addr, len) != 0 || listen(fd, 8) != 0) {
             close(fd);
-            return WZ_EXT_LINK_FAILED;
+            return ZEXT_LINK_FAILED;
         }
         pthread_mutex_lock(&pt.lock);
         pt.listen_fd = fd;
         pt.listener = link;
         pthread_mutex_unlock(&pt.lock);
-        if (pthread_create(&pt.acceptor, NULL, pt_accept, NULL) != 0) return WZ_EXT_LINK_FAILED;
+        if (pthread_create(&pt.acceptor, NULL, pt_accept, NULL) != 0) return ZEXT_LINK_FAILED;
         pt.acceptor_started = 1;
-        return WZ_EXT_LINK_OK;
+        return ZEXT_LINK_OK;
     }
-    if (kind == WZ_EXT_LINK_STREAM_DIAL) {
+    if (kind == ZEXT_LINK_STREAM_DIAL) {
         int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-        if (fd < 0) return WZ_EXT_LINK_FAILED;
+        if (fd < 0) return ZEXT_LINK_FAILED;
         if (connect(fd, (struct sockaddr *)&addr, len) != 0 || pt_add(link, fd) != 0) {
             close(fd);
-            return WZ_EXT_LINK_FAILED;  // the session dials again on its schedule
+            return ZEXT_LINK_FAILED;  // the session dials again on its schedule
         }
-        return WZ_EXT_LINK_OK;
+        return ZEXT_LINK_OK;
     }
-    return WZ_EXT_LINK_FAILED;  // this program carries streams only
+    return ZEXT_LINK_FAILED;  // this program carries streams only
 }
 
-static wz_ext_link_result_t pt_send(void *context, wz_ext_link_t link, const uint8_t *data, size_t len,
+static zext_link_result_t pt_send(void *context, zext_link_t link, const uint8_t *data, size_t len,
                                     size_t *written) {
     (void)context;
     struct pt_link *l = pt_find(link);
-    if (l == NULL) return WZ_EXT_LINK_CLOSED;
+    if (l == NULL) return ZEXT_LINK_CLOSED;
     for (;;) {
         ssize_t n = send(l->fd, data, len, MSG_DONTWAIT | MSG_NOSIGNAL);
         if (n > 0) {
             *written = (size_t)n;
-            return WZ_EXT_LINK_OK;
+            return ZEXT_LINK_OK;
         }
         if (n < 0 && errno == EINTR) continue;
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
             // The reading thread polls for room and reports the link writable.
             atomic_store(&l->want_write, 1);
             pt_wake(l);
-            return WZ_EXT_LINK_WOULD_BLOCK;
+            return ZEXT_LINK_WOULD_BLOCK;
         }
-        return WZ_EXT_LINK_CLOSED;
+        return ZEXT_LINK_CLOSED;
     }
 }
 
-static void pt_close(void *context, wz_ext_link_t link) {
+static void pt_close(void *context, zext_link_t link) {
     (void)context;
     if (link == pt.listener && pt.listen_fd >= 0) {
         shutdown(pt.listen_fd, SHUT_RDWR);
@@ -621,7 +772,7 @@ static void pt_close(void *context, wz_ext_link_t link) {
     pthread_mutex_unlock(&pt.lock);
 }
 
-static void pt_drained(void *context, wz_ext_link_t link) {
+static void pt_drained(void *context, zext_link_t link) {
     (void)context;
     struct pt_link *l = pt_find(link);
     if (l == NULL) return;
@@ -633,14 +784,14 @@ static void pt_drained(void *context, wz_ext_link_t link) {
 
 static int pt_attach(z_owned_config_t *config, const char *name) {
     pt.name = name;
-    wz_ext_transport_t calls;
+    zext_transport_t calls;
     memset(&calls, 0, sizeof calls);
     calls.open = pt_open;
     calls.send = pt_send;
     calls.close = pt_close;
     calls.drained = pt_drained;
-    if (wz_ext_transport_new(&pt.transport, &calls) != Z_OK) return -1;
-    return wz_ext_config_transport(z_config_loan_mut(config), pt_loan()) == Z_OK ? 0 : -1;
+    if (zext_transport_new(&pt.transport, &calls) != Z_OK) return -1;
+    return zext_config_transport(z_config_loan_mut(config), pt_loan()) == Z_OK ? 0 : -1;
 }
 
 #endif
@@ -1246,7 +1397,7 @@ int main(int argc, char **argv) {
     }
 #endif
 #ifdef PERF_WZ_ARM
-    if (zp_config_insert(z_config_loan_mut(&config), WZ_EXT_CONFIG_LIMITS_KEY, PERF_SESSION_LIMITS) != Z_OK) {
+    if (zp_config_insert(z_config_loan_mut(&config), ZEXT_CONFIG_LIMITS_KEY, PERF_SESSION_LIMITS) != Z_OK) {
         printf("perf_probe %s: unable to state the session's limits (%s)\n", o.role, PERF_SESSION_LIMITS);
         return 1;
     }
@@ -1285,6 +1436,9 @@ int main(int argc, char **argv) {
     const z_loaned_session_t *loaned = z_session_loan(&session);
     int rc = ping ? run_ping(loaned, &o) : pong ? run_pong(loaned, &o) : pub ? run_pub(loaned, &o) : run_sub(loaned, &o);
     trace("role done");
+#ifndef _WIN32
+    print_smaps();
+#endif
     // Closed first, so no callback runs while its publisher is dropped.
     trace("z_close begin");
     z_result_t closed = z_close(z_session_loan_mut(&session), NULL);
@@ -1298,7 +1452,7 @@ int main(int argc, char **argv) {
     z_session_drop(z_session_move(&session));
     trace("z_session_drop end");
 #ifdef PERF_PROGRAM_TRANSPORT
-    if (o.transport_name != NULL) wz_ext_transport_drop(wz_ext_transport_move(&pt.transport));
+    if (o.transport_name != NULL) zext_transport_drop(zext_transport_move(&pt.transport));
 #endif
     print_usage();
     return rc;

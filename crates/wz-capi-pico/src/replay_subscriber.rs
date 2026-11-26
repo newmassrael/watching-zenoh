@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_replay_subscriber_*`: the replay cache of a subscriber, from C. It subscribes to a
+//! `zext_replay_subscriber_*`: the replay cache of a subscriber, from C. It subscribes to a
 //! message's key, watches the session's peers for the message's replay queryable (the key plus
 //! the suffix the program states), asks each publisher as it appears for what it last sent, and
 //! hands the program every sample, replies and live samples alike, judged by one receiving judge,
 //! with a flag that says which it is.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `replay-cache` capability implies `unstable-api`. The round, the
 //! table of publishers and the held live samples are [`wz_session_core::replay_subscriber`]'s,
 //! the admission of a reply to the judge is [`wz_app_frame::replay_admission`]'s, and the judge
@@ -40,7 +40,7 @@
 //!
 //! Milliseconds in 32 bits that wrap: the program's clock, given in the options, or the library's
 //! monotonic clock from the creation when it gives none. The deadlines are judged by
-//! `wz_ext_replay_subscriber_poll`, which the program calls on its own cadence; the judge is
+//! `zext_replay_subscriber_poll`, which the program calls on its own cadence; the judge is
 //! handed the same reading as the time a sample arrived.
 //!
 //! # Threads
@@ -73,22 +73,21 @@ use wz_session_core::session_zid::ZID_MAX;
 
 use crate::abi::{z_loaned_bytes_t, z_loaned_keyexpr_t, z_view_keyexpr_t};
 use crate::decl_watch::{
-    wz_ext_decl_event_t, wz_ext_decl_watch_declare, wz_ext_decl_watch_drop,
-    wz_ext_owned_decl_watch_t, WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_LOST, WZ_EXT_DECL_QUERYABLE,
-    WZ_EXT_DECL_UNDECLARED,
+    zext_decl_event_t, zext_decl_watch_declare, zext_decl_watch_drop, zext_owned_decl_watch_t,
+    ZEXT_DECL_DECLARED, ZEXT_DECL_LOST, ZEXT_DECL_QUERYABLE, ZEXT_DECL_UNDECLARED,
 };
 use crate::e2e::{
     bytes_arg, keyexpr_text, locked, session_facts, unlocked, utf8_arg, Mutex, ReplayPolicies,
 };
-use crate::e2e_receiver::{to_c, wz_ext_e2e_verdict_t, wz_ext_moved_e2e_receiver_t};
-use crate::ext_interface::{wz_ext_interface_bytes_view, wz_ext_interface_run_in_callback};
+use crate::e2e_receiver::{to_c, zext_e2e_verdict_t, zext_moved_e2e_receiver_t};
+use crate::ext_interface::{zext_interface_bytes_view, zext_interface_run_in_callback};
 use crate::ffi::{catch, guard_val, guarded, SendPtr};
 use crate::get::{
     z_closure_reply, z_closure_reply_move, z_get, z_get_options_default, z_get_options_t,
     z_loaned_reply_t, z_owned_closure_reply_t, z_reply_is_ok, z_reply_ok,
     Z_CONSOLIDATION_MODE_NONE, Z_QUERY_TARGET_ALL,
 };
-use crate::get_to_peer::wz_ext_get_to_peer;
+use crate::get_to_peer::zext_get_to_peer;
 use crate::keyexpr::{z_view_keyexpr_from_substr, z_view_keyexpr_loan};
 use crate::pubsub::{
     z_closure_sample, z_closure_sample_move, z_declare_subscriber, z_loaned_sample_t,
@@ -96,8 +95,8 @@ use crate::pubsub::{
     z_undeclare_subscriber,
 };
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID,
-    Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+    ZResult, ZEXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL,
+    Z_ERR_SESSION_CLOSED, Z_OK,
 };
 use crate::session::z_loaned_session_t;
 use crate::sized::{Out, SizedOut};
@@ -107,47 +106,46 @@ use crate::zid::{z_id_t, Z_ID_SIZE};
 const _: () = assert!(Z_ID_SIZE == ZID_MAX);
 
 /// No publisher has appeared yet.
-pub const WZ_EXT_REPLAY_ROUND_IDLE: u8 = 0;
+pub const ZEXT_REPLAY_ROUND_IDLE: u8 = 0;
 /// A round's queries are out and no reply has come yet.
-pub const WZ_EXT_REPLAY_ROUND_ASKING: u8 = 1;
+pub const ZEXT_REPLAY_ROUND_ASKING: u8 = 1;
 /// At least one reply of the round came.
-pub const WZ_EXT_REPLAY_ROUND_ANSWERING: u8 = 2;
+pub const ZEXT_REPLAY_ROUND_ANSWERING: u8 = 2;
 /// A deadline passed, or the held samples filled their store, before the round was over.
-pub const WZ_EXT_REPLAY_ROUND_ABANDONED: u8 = 3;
+pub const ZEXT_REPLAY_ROUND_ABANDONED: u8 = 3;
 /// The round is over, or no publisher appeared before the round deadline.
-pub const WZ_EXT_REPLAY_ROUND_LIVE: u8 = 4;
-/// What `wz_ext_replay_subscriber_phase` answers for a null subscriber or the gravestone.
-pub const WZ_EXT_REPLAY_NO_SUBSCRIBER: u8 = 255;
+pub const ZEXT_REPLAY_ROUND_LIVE: u8 = 4;
+/// What `zext_replay_subscriber_phase` answers for a null subscriber or the gravestone.
+pub const ZEXT_REPLAY_NO_SUBSCRIBER: u8 = 255;
 
 /// One row of the program's table of publishers: four 64-bit words the subscriber owns.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct wz_ext_replay_publisher_slot_t {
+pub struct zext_replay_publisher_slot_t {
     _opaque: [u64; 4],
 }
 
 // The C header sizes the table by this type, and the subscriber writes `PublisherSlot` into it.
 const _: () = assert!(
-    core::mem::size_of::<wz_ext_replay_publisher_slot_t>() == core::mem::size_of::<PublisherSlot>()
-        && core::mem::align_of::<wz_ext_replay_publisher_slot_t>()
+    core::mem::size_of::<zext_replay_publisher_slot_t>() == core::mem::size_of::<PublisherSlot>()
+        && core::mem::align_of::<zext_replay_publisher_slot_t>()
             == core::mem::align_of::<PublisherSlot>()
 );
 
 /// The program's clock: writes the milliseconds of a monotonic source, in 32 bits that wrap, and
 /// returns 0, or returns anything else when it cannot say what time it is.
-pub type wz_ext_replay_clock_fn =
-    unsafe extern "C" fn(context: *mut c_void, now_ms: *mut u32) -> i8;
+pub type zext_replay_clock_fn = unsafe extern "C" fn(context: *mut c_void, now_ms: *mut u32) -> i8;
 
 /// One sample handed to the program. 128 bytes on a 64-bit target.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct wz_ext_replay_sample_t {
+pub struct zext_replay_sample_t {
     /// The frame as it arrived, valid only for the call.
     pub frame: *const u8,
     /// Its length.
     pub len: usize,
     /// The judge's verdict; zero but its `struct_size` when `judged` is 0.
-    pub verdict: wz_ext_e2e_verdict_t,
+    pub verdict: zext_e2e_verdict_t,
     /// 1 for a reply of a replay, 0 for a live sample.
     pub from_replay: u8,
     /// 1 when the judge judged it; 0 when the stream the subscriber was made with is not one the
@@ -161,19 +159,19 @@ pub struct wz_ext_replay_sample_t {
 }
 
 /// What the subscriber hands each sample to, with the program's context.
-pub type wz_ext_replay_deliver_fn =
-    unsafe extern "C" fn(context: *mut c_void, sample: *const wz_ext_replay_sample_t);
+pub type zext_replay_deliver_fn =
+    unsafe extern "C" fn(context: *mut c_void, sample: *const zext_replay_sample_t);
 
 /// What runs once when the subscriber lets go of the program's context.
-pub type wz_ext_replay_drop_fn = unsafe extern "C" fn(context: *mut c_void);
+pub type zext_replay_drop_fn = unsafe extern "C" fn(context: *mut c_void);
 
 /// How a subscriber is made.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct wz_ext_replay_subscriber_options_t {
+pub struct zext_replay_subscriber_options_t {
     /// The program's table of publishers, `slot_count` rows, owned by the subscriber while it
     /// lives; at least one row.
-    pub slots: *mut wz_ext_replay_publisher_slot_t,
+    pub slots: *mut zext_replay_publisher_slot_t,
     pub slot_count: usize,
     /// Under `hold-back`, the program's store of held live samples, `held_len` bytes cut into
     /// cells of 4 + `held_cell` bytes, owned by the subscriber while it lives; not read under
@@ -194,14 +192,14 @@ pub struct wz_ext_replay_subscriber_options_t {
     pub progress_ms: u32,
     pub round_ms: u32,
     /// The program's clock, or null for the library's monotonic clock.
-    pub clock: Option<wz_ext_replay_clock_fn>,
+    pub clock: Option<zext_replay_clock_fn>,
     pub clock_context: *mut c_void,
     /// Under `replay-reply-shape = segmented`, the segment profile the pieces are cut by
     /// (NUL-terminated JSON, BORROWED for the call); not read under `frame-per-sample`.
     pub segment_profile: *const c_char,
 }
 
-impl Default for wz_ext_replay_subscriber_options_t {
+impl Default for zext_replay_subscriber_options_t {
     fn default() -> Self {
         Self {
             slots: core::ptr::null_mut(),
@@ -224,7 +222,7 @@ impl Default for wz_ext_replay_subscriber_options_t {
 /// What a subscriber counted, written into a struct the program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_replay_subscriber_counts_t {
+pub struct zext_replay_subscriber_counts_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
@@ -247,13 +245,13 @@ pub struct wz_ext_replay_subscriber_counts_t {
     /// Under `segmented`, payloads that joined nothing: not a piece, a wrong CRC, no place.
     pub unjoined_pieces: u64,
     /// Declarations of the publishers' queryables the session's watch lost
-    /// (`WZ_EXT_DECL_LOST`): when not zero, the rounds may miss a publisher that appeared, or
+    /// (`ZEXT_DECL_LOST`): when not zero, the rounds may miss a publisher that appeared, or
     /// wait on one that went, until the subscriber is made again. Added in minor version 3, so a
     /// struct of an older program ends before it.
     pub declarations_lost: u64,
 }
 
-impl Default for wz_ext_replay_subscriber_counts_t {
+impl Default for zext_replay_subscriber_counts_t {
     /// Nothing counted, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -273,29 +271,29 @@ impl Default for wz_ext_replay_subscriber_counts_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_replay_subscriber_counts_t {
+unsafe impl SizedOut for zext_replay_subscriber_counts_t {
     const BASE: usize = core::mem::offset_of!(Self, declarations_lost);
 }
 
 /// An owned subscriber: the handle in its one word, null for the gravestone.
 #[repr(C)]
-pub struct wz_ext_owned_replay_subscriber_t {
+pub struct zext_owned_replay_subscriber_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned subscriber: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_replay_subscriber_t {
+pub struct zext_loaned_replay_subscriber_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved subscriber (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_replay_subscriber_t {
-    pub(crate) _this: wz_ext_owned_replay_subscriber_t,
+pub struct zext_moved_replay_subscriber_t {
+    pub(crate) _this: zext_owned_replay_subscriber_t,
 }
 
-impl wz_ext_owned_replay_subscriber_t {
+impl zext_owned_replay_subscriber_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
@@ -304,7 +302,7 @@ impl wz_ext_owned_replay_subscriber_t {
 }
 
 struct Clock {
-    read: Option<wz_ext_replay_clock_fn>,
+    read: Option<zext_replay_clock_fn>,
     context: SendPtr,
     origin: Instant,
 }
@@ -329,7 +327,7 @@ impl Clock {
 struct Dropped {
     duplicates: u64,
     stale: u64,
-    /// What the watch told it lost (`wz_ext_replay_subscriber_counts_t::declarations_lost`).
+    /// What the watch told it lost (`zext_replay_subscriber_counts_t::declarations_lost`).
     declarations_lost: u64,
 }
 
@@ -341,7 +339,7 @@ struct State {
     stream: usize,
     depth: usize,
     clock: Clock,
-    deliver: wz_ext_replay_deliver_fn,
+    deliver: zext_replay_deliver_fn,
     context: SendPtr,
     /// Room for one held sample, as it is released.
     released: Vec<u8>,
@@ -383,8 +381,8 @@ unsafe impl Sync for Shared {}
 struct Handle {
     shared: Arc<Shared>,
     subscriber: z_owned_subscriber_t,
-    watch: wz_ext_owned_decl_watch_t,
-    drop: Option<wz_ext_replay_drop_fn>,
+    watch: zext_owned_decl_watch_t,
+    drop: Option<zext_replay_drop_fn>,
     context: SendPtr,
 }
 
@@ -397,9 +395,9 @@ struct ReplyContext {
 
 /// One sample on its way to the program's callback.
 struct Handing<'a> {
-    deliver: wz_ext_replay_deliver_fn,
+    deliver: zext_replay_deliver_fn,
     context: *mut c_void,
-    sample: &'a wz_ext_replay_sample_t,
+    sample: &'a zext_replay_sample_t,
 }
 
 /// Hand a sample to the program's callback; the extension interface runs it.
@@ -420,7 +418,7 @@ unsafe extern "C" fn hand_over(handing: *mut c_void) {
 unsafe fn payload_bytes<'a>(payload: *const z_loaned_bytes_t) -> Option<&'a [u8]> {
     let mut data = core::ptr::null();
     let mut len = 0usize;
-    if wz_ext_interface_bytes_view(payload, &mut data, &mut len) != Z_OK {
+    if zext_interface_bytes_view(payload, &mut data, &mut len) != Z_OK {
         return None;
     }
     Some(bytes_arg(data, len))
@@ -432,9 +430,9 @@ impl State {
         let now_ms = u64::from(now.unwrap_or(0));
         let (verdict, judged) = match self.receiver.receive(self.stream, frame, now_ms) {
             Ok(verdict) => (to_c(&verdict), 1),
-            Err(_) => (wz_ext_e2e_verdict_t::default(), 0),
+            Err(_) => (zext_e2e_verdict_t::default(), 0),
         };
-        let mut sample = wz_ext_replay_sample_t {
+        let mut sample = zext_replay_sample_t {
             frame: frame.as_ptr(),
             len: frame.len(),
             verdict,
@@ -460,7 +458,7 @@ impl State {
         // not wait for the callback that is calling it.
         // SAFETY: `hand_over` reads the handing only during the call, which it outlives.
         unsafe {
-            wz_ext_interface_run_in_callback(
+            zext_interface_run_in_callback(
                 Some(hand_over),
                 core::ptr::addr_of!(handing).cast_mut().cast::<c_void>(),
             );
@@ -677,7 +675,7 @@ unsafe fn ask(shared: &Arc<Shared>, ask: Ask) {
     // ends the query.
     let _ = if targeted {
         let peer = z_id_t { id: ask.zid };
-        wz_ext_get_to_peer(
+        zext_get_to_peer(
             &shared.session,
             z_view_keyexpr_loan(&view),
             core::ptr::null(),
@@ -756,14 +754,14 @@ enum Heard<'a> {
 /// What `event` means to a subscriber whose publishers declare their queryables on `replay_key`.
 ///
 /// # Safety
-/// The key of a `WZ_EXT_DECL_DECLARED` is null or `keyexpr_len` readable bytes.
-unsafe fn heard<'a>(event: &'a wz_ext_decl_event_t, replay_key: &[u8]) -> Heard<'a> {
+/// The key of a `ZEXT_DECL_DECLARED` is null or `keyexpr_len` readable bytes.
+unsafe fn heard<'a>(event: &'a zext_decl_event_t, replay_key: &[u8]) -> Heard<'a> {
     let zid = event
         .zid
         .get(..usize::from(event.zid_len).min(ZID_MAX))
         .unwrap_or_default();
     match event.kind {
-        WZ_EXT_DECL_DECLARED => {
+        ZEXT_DECL_DECLARED => {
             if event.keyexpr.is_null() {
                 return Heard::Nothing;
             }
@@ -774,14 +772,14 @@ unsafe fn heard<'a>(event: &'a wz_ext_decl_event_t, replay_key: &[u8]) -> Heard<
                 Heard::Nothing
             }
         }
-        WZ_EXT_DECL_UNDECLARED => Heard::Gone(zid, event.id),
-        WZ_EXT_DECL_LOST => Heard::Lost(event.id),
+        ZEXT_DECL_UNDECLARED => Heard::Gone(zid, event.id),
+        ZEXT_DECL_LOST => Heard::Lost(event.id),
         _ => Heard::Nothing,
     }
 }
 
 /// A declaration the watch was told: a replay queryable appearing or leaving, or what it lost.
-unsafe extern "C" fn on_declaration(context: *mut c_void, event: *const wz_ext_decl_event_t) {
+unsafe extern "C" fn on_declaration(context: *mut c_void, event: *const zext_decl_event_t) {
     // The watch holds the share; this borrows it, to hand a clone to a get.
     let shared = ManuallyDrop::new(Arc::from_raw(context.cast_const().cast::<Shared>()));
     let _ = catch(|| match heard(&*event, shared.replay_key.as_bytes()) {
@@ -808,11 +806,11 @@ pub(crate) fn quota_of_count(count: usize) -> Quota {
 /// The C form of a phase.
 fn phase_code(phase: Phase) -> u8 {
     match phase {
-        Phase::Idle => WZ_EXT_REPLAY_ROUND_IDLE,
-        Phase::Asking => WZ_EXT_REPLAY_ROUND_ASKING,
-        Phase::Answering => WZ_EXT_REPLAY_ROUND_ANSWERING,
-        Phase::Abandoned => WZ_EXT_REPLAY_ROUND_ABANDONED,
-        Phase::Live => WZ_EXT_REPLAY_ROUND_LIVE,
+        Phase::Idle => ZEXT_REPLAY_ROUND_IDLE,
+        Phase::Asking => ZEXT_REPLAY_ROUND_ASKING,
+        Phase::Answering => ZEXT_REPLAY_ROUND_ANSWERING,
+        Phase::Abandoned => ZEXT_REPLAY_ROUND_ABANDONED,
+        Phase::Live => ZEXT_REPLAY_ROUND_LIVE,
     }
 }
 
@@ -830,7 +828,7 @@ fn create_code(refusal: CreateRefused) -> ZResult {
 ///
 /// # Safety
 /// `this_` is null or a loaned subscriber of this library.
-unsafe fn handle_of<'a>(this_: *const wz_ext_loaned_replay_subscriber_t) -> Option<&'a Handle> {
+unsafe fn handle_of<'a>(this_: *const zext_loaned_replay_subscriber_t) -> Option<&'a Handle> {
     if this_.is_null() {
         return None;
     }
@@ -845,7 +843,7 @@ unsafe fn handle_of<'a>(this_: *const wz_ext_loaned_replay_subscriber_t) -> Opti
 ///
 /// # Safety
 /// `receiver` is null or a moved receiver of this library.
-unsafe fn take_receiver(receiver: *mut wz_ext_moved_e2e_receiver_t) -> Option<Receiver> {
+unsafe fn take_receiver(receiver: *mut zext_moved_e2e_receiver_t) -> Option<Receiver> {
     if receiver.is_null() {
         return None;
     }
@@ -863,11 +861,11 @@ unsafe fn take_receiver(receiver: *mut wz_ext_moved_e2e_receiver_t) -> Option<Re
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_options_default(
-    this_: *mut wz_ext_replay_subscriber_options_t,
+pub unsafe extern "C" fn zext_replay_subscriber_options_default(
+    this_: *mut zext_replay_subscriber_options_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_replay_subscriber_options_t::default();
+        *this_ = zext_replay_subscriber_options_t::default();
     }
 }
 
@@ -885,7 +883,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_options_default(
 /// cell, a cell past 2^32 - 1, or a segment profile that is not UTF-8; `Z_ERR_INVALID` for a
 /// suffixed key that is not a key expression; under `replay-reply-shape = segmented`, `Z_ERR_NULL`
 /// for no segment profile and `_Z_ERR_CONFIG_INVALID_VALUE` for one refused;
-/// `WZ_EXT_ERR_UNSUPPORTED` for a session whose replay policy has a value this door does not know
+/// `ZEXT_ERR_UNSUPPORTED` for a session whose replay policy has a value this door does not know
 /// (a core of a later extension interface); otherwise what declaring the subscriber or the watch
 /// answers.
 ///
@@ -898,15 +896,15 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_options_default(
 /// module doc says.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
-    this_: *mut wz_ext_owned_replay_subscriber_t,
+pub unsafe extern "C" fn zext_replay_subscriber_new(
+    this_: *mut zext_owned_replay_subscriber_t,
     session: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
     suffix: *const c_char,
-    receiver: *mut wz_ext_moved_e2e_receiver_t,
-    options: *const wz_ext_replay_subscriber_options_t,
-    deliver: Option<wz_ext_replay_deliver_fn>,
-    drop: Option<wz_ext_replay_drop_fn>,
+    receiver: *mut zext_moved_e2e_receiver_t,
+    options: *const zext_replay_subscriber_options_t,
+    deliver: Option<zext_replay_deliver_fn>,
+    drop: Option<zext_replay_drop_fn>,
     context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
@@ -920,7 +918,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
         if this_.is_null() {
             return refuse(Z_ERR_NULL);
         }
-        *this_ = wz_ext_owned_replay_subscriber_t::null_value();
+        *this_ = zext_owned_replay_subscriber_t::null_value();
         let Some(receiver) = receiver else {
             return refuse(Z_ERR_NULL);
         };
@@ -938,7 +936,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
             return refuse(Z_ERR_SESSION_CLOSED);
         }
         let Some(policy) = ReplayPolicies::of(&facts) else {
-            return refuse(WZ_EXT_ERR_UNSUPPORTED);
+            return refuse(ZEXT_ERR_UNSUPPORTED);
         };
         let (Some(key), Some(suffix)) = (keyexpr_text(keyexpr), utf8_arg(suffix)) else {
             return refuse(Z_EINVAL);
@@ -1057,13 +1055,13 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_new(
             close(&mut locked(&shared.state));
             return refuse(declared);
         }
-        let mut watch = wz_ext_owned_decl_watch_t {
+        let mut watch = zext_owned_decl_watch_t {
             _val: core::ptr::null_mut(),
         };
-        let watched = wz_ext_decl_watch_declare(
+        let watched = zext_decl_watch_declare(
             &shared.session,
             &mut watch,
-            WZ_EXT_DECL_QUERYABLE,
+            ZEXT_DECL_QUERYABLE,
             Some(on_declaration),
             Some(on_share_drop),
             Arc::into_raw(Arc::clone(&shared))
@@ -1100,8 +1098,8 @@ fn close(state: &mut State) {
 /// # Safety
 /// `this_` is null or a loaned subscriber.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_poll(
-    this_: *const wz_ext_loaned_replay_subscriber_t,
+pub unsafe extern "C" fn zext_replay_subscriber_poll(
+    this_: *const zext_loaned_replay_subscriber_t,
 ) -> ZResult {
     guarded(|| {
         let Some(handle) = handle_of(this_) else {
@@ -1112,22 +1110,22 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_poll(
     })
 }
 
-/// Where the round stands: `WZ_EXT_REPLAY_ROUND_IDLE`, `_ASKING`, `_ANSWERING`, `_ABANDONED` or
-/// `_LIVE`, or `WZ_EXT_REPLAY_NO_SUBSCRIBER` for a null subscriber or the gravestone.
+/// Where the round stands: `ZEXT_REPLAY_ROUND_IDLE`, `_ASKING`, `_ANSWERING`, `_ABANDONED` or
+/// `_LIVE`, or `ZEXT_REPLAY_NO_SUBSCRIBER` for a null subscriber or the gravestone.
 ///
 /// # Safety
 /// `this_` is null or a loaned subscriber.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_phase(
-    this_: *const wz_ext_loaned_replay_subscriber_t,
+pub unsafe extern "C" fn zext_replay_subscriber_phase(
+    this_: *const zext_loaned_replay_subscriber_t,
 ) -> u8 {
     guard_val(|| {
         let Some(handle) = handle_of(this_) else {
-            return WZ_EXT_REPLAY_NO_SUBSCRIBER;
+            return ZEXT_REPLAY_NO_SUBSCRIBER;
         };
         match locked(&handle.shared.state).round.as_ref() {
             Some(round) => phase_code(round.phase()),
-            None => WZ_EXT_REPLAY_NO_SUBSCRIBER,
+            None => ZEXT_REPLAY_NO_SUBSCRIBER,
         }
     })
 }
@@ -1140,9 +1138,9 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_phase(
 /// `this_` is null or a loaned subscriber; `out` is null or a struct of `struct_size` writable
 /// bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
-    this_: *const wz_ext_loaned_replay_subscriber_t,
-    out: *mut wz_ext_replay_subscriber_counts_t,
+pub unsafe extern "C" fn zext_replay_subscriber_counts(
+    this_: *const zext_loaned_replay_subscriber_t,
+    out: *mut zext_replay_subscriber_counts_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
@@ -1157,7 +1155,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
             return Z_ERR_NULL;
         };
         let counts = round.counts();
-        out.put(&wz_ext_replay_subscriber_counts_t {
+        out.put(&zext_replay_subscriber_counts_t {
             struct_size: 0,
             late_replies: counts.late_replies,
             unknown_replies: counts.unknown_replies,
@@ -1179,22 +1177,22 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_counts(
 /// # Safety
 /// `this_` is null or an owned subscriber.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_loan(
-    this_: *const wz_ext_owned_replay_subscriber_t,
-) -> *const wz_ext_loaned_replay_subscriber_t {
-    this_.cast::<wz_ext_loaned_replay_subscriber_t>()
+pub unsafe extern "C" fn zext_replay_subscriber_loan(
+    this_: *const zext_owned_replay_subscriber_t,
+) -> *const zext_loaned_replay_subscriber_t {
+    this_.cast::<zext_loaned_replay_subscriber_t>()
 }
 
-/// The moved form of a subscriber, for `wz_ext_replay_subscriber_drop`: a cast, which nulls
+/// The moved form of a subscriber, for `zext_replay_subscriber_drop`: a cast, which nulls
 /// nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned subscriber.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_move(
-    this_: *mut wz_ext_owned_replay_subscriber_t,
-) -> *mut wz_ext_moved_replay_subscriber_t {
-    this_.cast::<wz_ext_moved_replay_subscriber_t>()
+pub unsafe extern "C" fn zext_replay_subscriber_move(
+    this_: *mut zext_owned_replay_subscriber_t,
+) -> *mut zext_moved_replay_subscriber_t {
+    this_.cast::<zext_moved_replay_subscriber_t>()
 }
 
 /// Stop the subscriber and leave the gravestone: nothing is handed on once this returns, the
@@ -1205,9 +1203,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_move(
 /// # Safety
 /// `this_` is null or a moved subscriber.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_subscriber_drop(
-    this_: *mut wz_ext_moved_replay_subscriber_t,
-) {
+pub unsafe extern "C" fn zext_replay_subscriber_drop(this_: *mut zext_moved_replay_subscriber_t) {
     let _ = guarded(|| {
         if this_.is_null() {
             return Z_OK;
@@ -1218,7 +1214,7 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_drop(
         }
         let mut handle = Box::from_raw(raw.cast::<Handle>());
         close(&mut locked(&handle.shared.state));
-        wz_ext_decl_watch_drop(&mut handle.watch);
+        zext_decl_watch_drop(&mut handle.watch);
         z_undeclare_subscriber(z_subscriber_move(&mut handle.subscriber));
         if let Some(drop) = handle.drop {
             drop(handle.context.0);
@@ -1232,11 +1228,11 @@ pub unsafe extern "C" fn wz_ext_replay_subscriber_drop(
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_replay_subscriber_null(
-    this_: *mut wz_ext_owned_replay_subscriber_t,
+pub unsafe extern "C" fn zext_internal_replay_subscriber_null(
+    this_: *mut zext_owned_replay_subscriber_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_owned_replay_subscriber_t::null_value();
+        *this_ = zext_owned_replay_subscriber_t::null_value();
     }
 }
 
@@ -1245,8 +1241,8 @@ pub unsafe extern "C" fn wz_ext_internal_replay_subscriber_null(
 /// # Safety
 /// `this_` is null or an owned subscriber.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_replay_subscriber_check(
-    this_: *const wz_ext_owned_replay_subscriber_t,
+pub unsafe extern "C" fn zext_internal_replay_subscriber_check(
+    this_: *const zext_owned_replay_subscriber_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -1259,22 +1255,22 @@ mod tests {
     #[test]
     fn the_sample_has_the_layout_the_header_declares() {
         use core::mem::{offset_of, size_of};
-        assert_eq!(size_of::<wz_ext_e2e_verdict_t>(), 88);
-        assert_eq!(size_of::<wz_ext_replay_sample_t>(), 128);
-        assert_eq!(offset_of!(wz_ext_replay_sample_t, verdict), 16);
-        assert_eq!(offset_of!(wz_ext_replay_sample_t, from_replay), 104);
-        assert_eq!(offset_of!(wz_ext_replay_sample_t, zid), 108);
-        assert_eq!(size_of::<wz_ext_replay_publisher_slot_t>(), 32);
+        assert_eq!(size_of::<zext_e2e_verdict_t>(), 88);
+        assert_eq!(size_of::<zext_replay_sample_t>(), 128);
+        assert_eq!(offset_of!(zext_replay_sample_t, verdict), 16);
+        assert_eq!(offset_of!(zext_replay_sample_t, from_replay), 104);
+        assert_eq!(offset_of!(zext_replay_sample_t, zid), 108);
+        assert_eq!(size_of::<zext_replay_publisher_slot_t>(), 32);
     }
 
     /// The counts are refused, untouched, to a struct a byte short of theirs, before the
     /// subscriber is read. Turned red by a write before the size is read.
     #[test]
     fn counts_short_of_their_struct_are_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_replay_subscriber_counts_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_replay_subscriber_counts_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size; no subscriber is named.
-                unsafe { wz_ext_replay_subscriber_counts(core::ptr::null(), out) }
+                unsafe { zext_replay_subscriber_counts(core::ptr::null(), out) }
             },
             Z_EINVAL,
         );
@@ -1285,11 +1281,8 @@ mod tests {
     #[cfg(target_pointer_width = "64")]
     #[test]
     fn an_older_counts_struct_ends_before_the_declarations_lost() {
-        assert_eq!(<wz_ext_replay_subscriber_counts_t as SizedOut>::BASE, 80);
-        assert_eq!(
-            core::mem::size_of::<wz_ext_replay_subscriber_counts_t>(),
-            88
-        );
+        assert_eq!(<zext_replay_subscriber_counts_t as SizedOut>::BASE, 80);
+        assert_eq!(core::mem::size_of::<zext_replay_subscriber_counts_t>(), 88);
     }
 
     /// What the watch's events mean to the subscriber: a queryable on its key appearing, any
@@ -1299,9 +1292,9 @@ mod tests {
     fn a_loss_is_heard_with_its_count() {
         let key = b"demo/replay/@r";
         let other = b"demo/other";
-        let event = |kind: u8, id: u64, keyexpr: Option<&[u8]>| wz_ext_decl_event_t {
+        let event = |kind: u8, id: u64, keyexpr: Option<&[u8]>| zext_decl_event_t {
             kind,
-            entity: WZ_EXT_DECL_QUERYABLE,
+            entity: ZEXT_DECL_QUERYABLE,
             zid_len: 2,
             reserved: 0,
             reserved2: 0,
@@ -1310,10 +1303,10 @@ mod tests {
             keyexpr_len: keyexpr.map_or(0, <[u8]>::len),
             zid: [7; ZID_MAX],
         };
-        let declared = event(WZ_EXT_DECL_DECLARED, 3, Some(key));
-        let elsewhere = event(WZ_EXT_DECL_DECLARED, 4, Some(other));
-        let gone = event(WZ_EXT_DECL_UNDECLARED, 3, None);
-        let lost = event(WZ_EXT_DECL_LOST, 5, None);
+        let declared = event(ZEXT_DECL_DECLARED, 3, Some(key));
+        let elsewhere = event(ZEXT_DECL_DECLARED, 4, Some(other));
+        let gone = event(ZEXT_DECL_UNDECLARED, 3, None);
+        let lost = event(ZEXT_DECL_LOST, 5, None);
         // SAFETY: each key is null or the bytes of a live slice of its length.
         unsafe {
             assert_eq!(heard(&declared, key), Heard::Appeared(&[7, 7], 3));
@@ -1328,8 +1321,8 @@ mod tests {
     #[test]
     fn a_samples_verdict_states_its_size() {
         assert_eq!(
-            wz_ext_e2e_verdict_t::default().struct_size,
-            core::mem::size_of::<wz_ext_e2e_verdict_t>()
+            zext_e2e_verdict_t::default().struct_size,
+            core::mem::size_of::<zext_e2e_verdict_t>()
         );
     }
 
@@ -1368,7 +1361,7 @@ mod tests {
             phase_code(Phase::Live),
         ];
         assert_eq!(codes, [0, 1, 2, 3, 4]);
-        assert!(!codes.contains(&WZ_EXT_REPLAY_NO_SUBSCRIBER));
+        assert!(!codes.contains(&ZEXT_REPLAY_NO_SUBSCRIBER));
     }
 
     /// The doors take the program's context and receiver on every path: each refusal runs its
@@ -1378,19 +1371,19 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         static DROPS: AtomicUsize = AtomicUsize::new(0);
-        unsafe extern "C" fn on_sample(_: *mut c_void, _: *const wz_ext_replay_sample_t) {}
+        unsafe extern "C" fn on_sample(_: *mut c_void, _: *const zext_replay_sample_t) {}
         unsafe extern "C" fn on_drop(_: *mut c_void) {
             DROPS.fetch_add(1, Ordering::SeqCst);
         }
         let mut stale = 0u8;
         // SAFETY: every pointer is null or a local the call may write; no session is named.
         unsafe {
-            let mut this = wz_ext_owned_replay_subscriber_t {
+            let mut this = zext_owned_replay_subscriber_t {
                 handle: core::ptr::addr_of_mut!(stale).cast::<c_void>(),
             };
-            let options = wz_ext_replay_subscriber_options_t::default();
+            let options = zext_replay_subscriber_options_t::default();
             assert_eq!(
-                wz_ext_replay_subscriber_new(
+                zext_replay_subscriber_new(
                     &mut this,
                     core::ptr::null(),
                     core::ptr::null(),
@@ -1404,10 +1397,10 @@ mod tests {
                 Z_ERR_NULL,
                 "no receiver"
             );
-            assert!(!wz_ext_internal_replay_subscriber_check(&this));
+            assert!(!zext_internal_replay_subscriber_check(&this));
             assert_eq!(DROPS.load(Ordering::SeqCst), 1);
             assert_eq!(
-                wz_ext_replay_subscriber_new(
+                zext_replay_subscriber_new(
                     core::ptr::null_mut(),
                     core::ptr::null(),
                     core::ptr::null(),
@@ -1423,15 +1416,15 @@ mod tests {
             );
             assert_eq!(DROPS.load(Ordering::SeqCst), 2);
             assert_eq!(
-                wz_ext_replay_subscriber_phase(wz_ext_replay_subscriber_loan(&this)),
-                WZ_EXT_REPLAY_NO_SUBSCRIBER
+                zext_replay_subscriber_phase(zext_replay_subscriber_loan(&this)),
+                ZEXT_REPLAY_NO_SUBSCRIBER
             );
             assert_eq!(
-                wz_ext_replay_subscriber_poll(wz_ext_replay_subscriber_loan(&this)),
+                zext_replay_subscriber_poll(zext_replay_subscriber_loan(&this)),
                 Z_ERR_NULL
             );
-            wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&mut this));
-            wz_ext_replay_subscriber_drop(core::ptr::null_mut());
+            zext_replay_subscriber_drop(zext_replay_subscriber_move(&mut this));
+            zext_replay_subscriber_drop(core::ptr::null_mut());
             assert_eq!(
                 DROPS.load(Ordering::SeqCst),
                 2,

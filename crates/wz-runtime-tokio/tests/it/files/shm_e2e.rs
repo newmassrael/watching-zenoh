@@ -20,7 +20,7 @@
 //!   1. `shm_negotiates_and_delivers_put_zero_copy_over_real_tcp` — the
 //!      end-to-end proof. Both sides reach Established with `is_shm()` true; the
 //!      publisher writes a payload into a /dev/shm segment and `publish_shm`s it;
-//!      the descriptor rides the TCP link; the acceptor's `PosixShmResolver` maps
+//!      the descriptor rides the TCP link; the acceptor's `ShmReaderResolver` maps
 //!      the segment and the subscriber receives the bytes BYTE-EXACT. The wire
 //!      carried a descriptor (proven deterministically by the push_build unit
 //!      test `build_push_shm_literal_carries_descriptor_and_marker`); here the
@@ -48,7 +48,8 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_shm, connect_and_open_session_with_shm, DialConfig, DialedLink,
     DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::{PosixShmResolver, ShmBackedPayload};
+use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+use wz_runtime_tokio::shm_reader::ShmReaderResolver;
 use wz_runtime_tokio_test_support::{establish_capability_pair, fixture_params_with_zid};
 use wz_session_core::locator::parse_any_locator;
 use wz_session_core::session_timeouts::SessionTimeouts;
@@ -108,7 +109,7 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
     observer
         .face()
         .subscribers
-        .set_shm_resolver(Box::new(PosixShmResolver));
+        .set_shm_resolver(Box::new(ShmReaderResolver::global()));
     {
         let fired = fired.clone();
         let expect = data.clone();
@@ -331,7 +332,7 @@ async fn a_unit_only_acceptor_does_not_half_complete_the_challenge() {
 ///
 /// The two arms differ in EXACTLY ONE bit — `set_shm_negotiated`. Everything the
 /// resolve needs is real and identical in both: the same live `/dev/shm` segment
-/// written with the same bytes, the same installed `PosixShmResolver`, the same
+/// written with the same bytes, the same installed `ShmReaderResolver`, the same
 /// valid descriptor, the same registered subscriber, the same Push. So the
 /// NOT-negotiated arm cannot pass for a boring reason (missing segment, missing
 /// resolver, malformed descriptor) — the negotiated arm proves each of those
@@ -356,7 +357,7 @@ fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
     observer
         .face()
         .subscribers
-        .set_shm_resolver(Box::new(PosixShmResolver));
+        .set_shm_resolver(Box::new(ShmReaderResolver::global()));
     let seen: Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     {
         let seen = seen.clone();

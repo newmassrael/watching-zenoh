@@ -1270,7 +1270,7 @@ async fn spawn_scouting_autoconnect(
     zid: &[u8],
     dial_tx: wz::runtime_tokio::accept_loop::DialIntentSender,
 ) -> io::Result<()> {
-    use wz::runtime_tokio::linkstate_forward::{AutoConnect, Zid};
+    use wz::runtime_tokio::routing_policy::{AutoConnect, Zid};
     use wz::runtime_tokio::scouting_autoconnect::{
         serve_autoconnect, AutoconnectPlan, AutoconnectStep,
     };
@@ -1384,8 +1384,8 @@ async fn spawn_scouting_autoconnect(
 /// bits accessor (it answers `matches`), so the bits are rebuilt through the
 /// same `to_api` bytes the matcher is built from.
 #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
-fn role_bits(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> u8 {
-    use wz::runtime_tokio::linkstate_forward::WhatAmI;
+fn role_bits(matcher: wz::runtime_tokio::routing_policy::WhatAmIMatcher) -> u8 {
+    use wz::runtime_tokio::routing_policy::WhatAmI;
     [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
         .into_iter()
         .filter(|w| matcher.matches(*w))
@@ -1395,8 +1395,8 @@ fn role_bits(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> u
 /// The matcher as the operator spelled it, for the banner. `none` for the empty
 /// set — the same spelling the flag accepts, so the line can be pasted back.
 #[cfg(all(feature = "scouting-active", feature = "routing-peer"))]
-fn role_names(matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher) -> String {
-    use wz::runtime_tokio::linkstate_forward::WhatAmI;
+fn role_names(matcher: wz::runtime_tokio::routing_policy::WhatAmIMatcher) -> String {
+    use wz::runtime_tokio::routing_policy::WhatAmI;
     let names: Vec<&str> = [WhatAmI::Router, WhatAmI::Peer, WhatAmI::Client]
         .into_iter()
         .filter(|w| matcher.matches(*w))
@@ -4088,7 +4088,7 @@ impl PublishBand {
 /// The gossip-autoconnect tie-break, named at module scope so [`PeerOpts`] can
 /// carry it (the rest of the facade surface is imported inside `run_peer_mode`).
 #[cfg(feature = "routing-peer")]
-pub(crate) use wz::runtime_tokio::linkstate_forward::AutoConnectStrategy;
+pub(crate) use wz::runtime_tokio::routing_policy::AutoConnectStrategy;
 
 /// R2141 (open-debt item 223) — the MULTICAST-scouting autoconnect policy as the
 /// argv parser and the config expansion both produce it: a role matcher and a
@@ -4109,10 +4109,10 @@ pub(crate) struct ScoutAutoconnectArgs {
     pub socket: crate::args::ScoutSocketArgs,
     /// Which discovered roles are dial candidates — zenoh
     /// `scouting/multicast/autoconnect`, already resolved for THIS node's mode.
-    pub matcher: wz::runtime_tokio::linkstate_forward::WhatAmIMatcher,
+    pub matcher: wz::runtime_tokio::routing_policy::WhatAmIMatcher,
     /// The per-target tie-break — zenoh
     /// `scouting/multicast/autoconnect_strategy`, likewise mode-resolved.
-    pub strategy: wz::runtime_tokio::linkstate_forward::AutoConnectStrategies,
+    pub strategy: wz::runtime_tokio::routing_policy::AutoConnectStrategies,
 }
 
 /// The authority of a node that hosts the lifecycle queries: one answer for every
@@ -4572,12 +4572,12 @@ async fn run_peer_until(
     use crate::args::NodeKind;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
-    use wz::runtime_tokio::linkstate_forward::{
+    use wz::runtime_tokio::router_forward::RouterForwarder;
+    use wz::runtime_tokio::routing_policy::{
         default_autoconnect_matcher, interval_from_freq, AutoConnect, DownsamplingMessage,
         DownsamplingRule, InterceptorConfig, InterceptorFlow, InterceptorLink, LowPassMessage,
         LowPassRule, WhatAmI, Zid,
     };
-    use wz::runtime_tokio::router_forward::RouterForwarder;
     use wz::runtime_tokio::sync::PlainMutex;
     // Per-peer routing zid: see `crate::args::resolve_node_zid`. (The periodic self-flood
     // cadence lives in the forwarder itself — R311rf, on the
@@ -6373,11 +6373,11 @@ pub(crate) struct RouterHatOpts {
     /// Carried as ROWS rather than as the `zid -> weight` map the forwarder
     /// takes, so the one refusal a well-formed row list can still earn — two
     /// rows naming the same destination — is made by
-    /// [`link_weights_from_config`](wz::runtime_tokio::linkstate_forward::link_weights_from_config),
+    /// [`link_weights_from_config`](wz::runtime_tokio::routing_policy::link_weights_from_config),
     /// which is where upstream makes it and where the CONFIG FILE path is
     /// judged too. Two entry points with one rule, rather than one rule per
     /// entry point.
-    pub router_link_weights: Vec<wz::runtime_tokio::linkstate_forward::TransportWeight>,
+    pub router_link_weights: Vec<wz::runtime_tokio::routing_policy::TransportWeight>,
     /// R2896 (open-debt item 751, rules 8d+8e) — `--peer-mode linkstate` on a
     /// router: its south peer region runs wz's link-state peer extension, so a
     /// subsystem of link-state peers keeps meshing through it. Off (gossip) is
@@ -6517,8 +6517,8 @@ async fn run_router_hat_until(
     let _ = scout_listen;
     use std::time::Duration;
     use wz::runtime_tokio::accept_loop::{peer_loop_shared, AcceptEvent, FaceSources};
-    use wz::runtime_tokio::linkstate_forward::Zid;
     use wz::runtime_tokio::router_forward::RouterForwarder;
+    use wz::runtime_tokio::routing_policy::Zid;
     // Cadence of the OBSERVE-only application driver (a pure router originates no
     // data); matches the peer's so the witnesses log promptly after convergence.
     const APP_TICK_MS: u64 = 250;

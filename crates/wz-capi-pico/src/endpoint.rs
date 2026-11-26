@@ -132,7 +132,7 @@ impl<'a> PicoEndpoint<'a> {
 }
 
 /// Whether a unicast endpoint the program wrote can be handed to a session of the cooperative
-/// engine as pico reads it ([`with_engine_text`]): a scheme this build has no link for is refused
+/// engine as pico reads it ([`engine_text`]): a scheme this build has no link for is refused
 /// first, with pico's `_Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN` ([`link_built`]), a malformed config
 /// with pico's
 /// `_Z_ERR_CONFIG_INVALID_VALUE`, and a kept text past the build's `MAX_LOCATOR_LEN`, the bound
@@ -186,20 +186,25 @@ fn link_built(scheme: &str) -> bool {
     BUILT.iter().any(|&(name, built)| built && name == scheme)
 }
 
-/// `use_text` handed a unicast endpoint the program wrote as pico reads it, for a session of the
-/// cooperative engine to dial or listen on: what pico's link reads stays for the engine, which
-/// carries it out or refuses it; the metadata and the config keys past the first one pico's link
-/// does not know are left out, as pico leaves them, so `tcp/127.0.0.1:7447#iface=lo` is dialled as
+/// The text a session of the cooperative engine dials or listens on for a unicast `endpoint` the
+/// program wrote, as pico reads it: what pico's link reads stays for the engine, which carries it
+/// out or refuses it; the metadata and the config keys past the first one pico's link does not
+/// know are left out, as pico leaves them, so `tcp/127.0.0.1:7447#iface=lo` is dialled as
 /// `tcp/127.0.0.1:7447`, which pico's TCP link binds to no interface either. A scheme whose
-/// config this ABI does not read goes on as written.
-///
-/// The text is made in a locator text of the stack, the form of the row the engine writes it
-/// into, so no text of an endpoint is a value of the heap. One [`checked_endpoint`] refused is
+/// config this ABI does not read goes on as written, and one [`checked_endpoint`] refused is
 /// handed over as written, for the engine to refuse by name.
+///
+/// The text is made in `kept`, a locator text of the caller's stack, the form of the row the
+/// engine writes it into, so no text of an endpoint is a value of the heap. The reading the open
+/// hands the engine, which reads each endpoint by it as it writes the endpoint's row
+/// (`wz_capi_coop::open_source::EndpointReading`), and the one `zext_config_device_requires`
+/// reads an endpoint by.
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn with_engine_text<R>(endpoint: &str, use_text: impl FnOnce(&str) -> R) -> R {
-    let mut kept = wz_session_core::locator_directory::LocatorText::new();
-    use_text(kept_text(endpoint, &mut kept).unwrap_or(endpoint))
+pub(crate) fn engine_text<'t>(
+    endpoint: &'t str,
+    kept: &'t mut wz_session_core::locator_directory::LocatorText,
+) -> &'t str {
+    kept_text(endpoint, kept).unwrap_or(endpoint)
 }
 
 /// What pico's link for the scheme of `endpoint` keeps of it, made in `kept`, or `endpoint`
@@ -256,7 +261,13 @@ mod tests {
             &mut wz_session_core::locator_directory::LocatorText::new(),
         )
         .map(|_| ())?;
-        Ok(with_engine_text(written, |text: &str| String::from(text)))
+        Ok(engine_string(written))
+    }
+
+    /// The text the engine is handed for `written`, as the open makes it.
+    fn engine_string(written: &str) -> String {
+        let mut kept = wz_session_core::locator_directory::LocatorText::new();
+        String::from(engine_text(written, &mut kept))
     }
 
     /// A TCP endpoint keeps what pico's TCP link reads and loses what it does not: an interface
@@ -347,12 +358,7 @@ mod tests {
         let read = PicoEndpoint::read("udp/127.0.0.1:9000#tout=5;iface=lo", keys);
         let kept = "udp/127.0.0.1:9000#iface=lo;tout=5";
         assert_eq!(read.text_len("#"), kept.len());
-        assert_eq!(
-            with_engine_text("udp/127.0.0.1:9000#tout=5;iface=lo", |text: &str| {
-                String::from(text)
-            }),
-            kept
-        );
+        assert_eq!(engine_string("udp/127.0.0.1:9000#tout=5;iface=lo"), kept);
 
         let host = "h".repeat(MAX_LOCATOR_LEN - "tcp/:9000".len());
         let at_bound = format!("tcp/{host}:9000");
@@ -414,16 +420,10 @@ mod tests {
         let host = "h".repeat(MAX_LOCATOR_LEN);
         let long = format!("tcp/{host}:9000#iface=lo");
         assert_eq!(checked_endpoint(&long), Err(Z_ERR_SYSTEM_OUT_OF_MEMORY));
-        assert_eq!(
-            with_engine_text(&long, |text: &str| String::from(text)),
-            long
-        );
+        assert_eq!(engine_string(&long), long);
         let malformed = "tcp/127.0.0.1:9000#tout";
         assert_eq!(checked_endpoint(malformed), Err(Z_ERR_CONFIG_INVALID_VALUE));
-        assert_eq!(
-            with_engine_text(malformed, |text: &str| String::from(text)),
-            malformed
-        );
+        assert_eq!(engine_string(malformed), malformed);
         let unread = "tls/127.0.0.1:9000#root_ca_certificate=x";
         let unread_checked = if cfg!(feature = "tls-mbedtls") {
             Ok(())
@@ -431,10 +431,7 @@ mod tests {
             Err(Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN)
         };
         assert_eq!(checked_endpoint(unread), unread_checked);
-        assert_eq!(
-            with_engine_text(unread, |text: &str| String::from(text)),
-            unread
-        );
+        assert_eq!(engine_string(unread), unread);
     }
 
     /// A scheme this build has no link for is refused before anything is opened, as zenoh-pico

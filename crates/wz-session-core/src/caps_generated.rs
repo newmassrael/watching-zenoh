@@ -81,6 +81,7 @@ pub(super) const MAX_INBOUND_SUB_INTERESTS: usize =
 pub(super) const MAX_PEER_KEYEXPR_ALIASES: usize =
     limit(option_env!("WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"), 16);
 pub(super) const MAX_SHARED_KEY_IDS: usize = limit(option_env!("WZ_LIMIT_MAX_SHARED_KEY_IDS"), 256);
+pub(super) const STATS_KEY_SERIES: usize = limit(option_env!("WZ_LIMIT_STATS_KEY_SERIES"), 8);
 pub(super) const MAX_REMOTE_DECLS: usize = limit(option_env!("WZ_LIMIT_MAX_REMOTE_DECLS"), 16);
 pub(super) const MAX_PENDING_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_REPLIES"), 8);
 pub(super) const MAX_PENDING_FINALS: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_FINALS"), 8);

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
- * Reception supervision of one periodic stream (wz_ext_stream_supervisor_*): a publisher
+ * Reception supervision of one periodic stream (zext_stream_supervisor_*): a publisher
  * sends a sample every period, the subscriber tells the supervisor of each, and when the
  * samples stop the supervisor tells the program once that the stream is lost.
  *
@@ -41,7 +41,7 @@ static struct {
     uint32_t now_ms;
 } model;
 
-static wz_ext_owned_stream_supervisor_t supervisor;
+static zext_owned_stream_supervisor_t supervisor;
 static uint32_t stream;
 static ex_counter_t received;
 
@@ -69,7 +69,7 @@ static void advance(uint32_t ms) {
 }
 
 /* Runs inside the poll, on the thread that polls. */
-static void on_loss(void *context, const wz_ext_stream_loss_t *lost) {
+static void on_loss(void *context, const zext_stream_loss_t *lost) {
     (void)context;
     loss.told++;
     loss.stream = lost->stream;
@@ -83,7 +83,7 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
     (void)arg;
     z_owned_slice_t slice;
     if (z_bytes_to_slice(z_sample_payload(sample), &slice) != Z_OK) return;
-    wz_ext_stream_supervisor_received(wz_ext_stream_supervisor_loan(&supervisor), stream,
+    zext_stream_supervisor_received(zext_stream_supervisor_loan(&supervisor), stream,
                                       z_slice_data(z_slice_loan(&slice)), z_slice_len(z_slice_loan(&slice)));
     z_slice_drop(z_slice_move(&slice));
     ex_counter_add(&received, 1);
@@ -91,7 +91,7 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
 
 static size_t poll_once(void) {
     size_t told = 0;
-    CHECK(wz_ext_stream_supervisor_poll(wz_ext_stream_supervisor_loan(&supervisor), &told) == Z_OK, "poll");
+    CHECK(zext_stream_supervisor_poll(zext_stream_supervisor_loan(&supervisor), &told) == Z_OK, "poll");
     return told;
 }
 
@@ -110,30 +110,30 @@ int main(void) {
     ex_counter_init(&received);
 
     /* The table is the program's storage; status-only keeps no value, so no value area. */
-    static wz_ext_stream_slot_t slots[2];
-    z_result_t rc = wz_ext_stream_supervisor_new(&supervisor, slots, 2, NULL, 0, 20, read_model_clock, NULL);
-    CHECK(rc == Z_OK, "wz_ext_stream_supervisor_new (rc %d)", (int)rc);
+    static zext_stream_slot_t slots[2];
+    z_result_t rc = zext_stream_supervisor_new(&supervisor, slots, 2, NULL, 0, 20, read_model_clock, NULL);
+    CHECK(rc == Z_OK, "zext_stream_supervisor_new (rc %d)", (int)rc);
     if (rc != Z_OK) return ex_finish();
-    const wz_ext_loaned_stream_supervisor_t *sv = wz_ext_stream_supervisor_loan(&supervisor);
-    CHECK(wz_ext_stream_supervisor_notify(sv) == WZ_EXT_STREAM_NOTIFY_STATUS_ONLY,
+    const zext_loaned_stream_supervisor_t *sv = zext_stream_supervisor_loan(&supervisor);
+    CHECK(zext_stream_supervisor_notify(sv) == ZEXT_STREAM_NOTIFY_STATUS_ONLY,
           "the build's e2e-supervision-notify is not its default, status-only");
-    CHECK(wz_ext_stream_supervisor_set_callback(sv, on_loss, NULL) == Z_OK, "set_callback");
+    CHECK(zext_stream_supervisor_set_callback(sv, on_loss, NULL) == Z_OK, "set_callback");
 
     /* The refused cases: a period of 0, and a reception of a stream there is none of. Both
      * answer the code wz_ext.h calls Z_ERR_INVALID, which zenoh-pico's header does not
      * name, so the program reads only that they were refused. */
-    rc = wz_ext_stream_supervisor_add(sv, 0, FACTOR, SENDER, true, NULL);
+    rc = zext_stream_supervisor_add(sv, 0, FACTOR, SENDER, true, NULL);
     CHECK(rc != Z_OK, "a period of 0 was not refused");
-    rc = wz_ext_stream_supervisor_received(sv, 99, NULL, 0);
+    rc = zext_stream_supervisor_received(sv, 99, NULL, 0);
     CHECK(rc != Z_OK, "a reception of stream 99, which was never added, was not refused");
-    CHECK(wz_ext_stream_supervisor_add(sv, PERIOD_MS, FACTOR, SENDER, true, &stream) == Z_OK, "add");
+    CHECK(zext_stream_supervisor_add(sv, PERIOD_MS, FACTOR, SENDER, true, &stream) == Z_OK, "add");
 
-    CHECK(poll_once() == 0 && wz_ext_stream_supervisor_phase(sv) == WZ_EXT_STREAM_DELAYING,
-          "the first clocked poll did not start the delay (phase %u)", (unsigned)wz_ext_stream_supervisor_phase(sv));
+    CHECK(poll_once() == 0 && zext_stream_supervisor_phase(sv) == ZEXT_STREAM_DELAYING,
+          "the first clocked poll did not start the delay (phase %u)", (unsigned)zext_stream_supervisor_phase(sv));
     advance(20);
-    CHECK(poll_once() == 0 && wz_ext_stream_supervisor_phase(sv) == WZ_EXT_STREAM_ACTIVE,
+    CHECK(poll_once() == 0 && zext_stream_supervisor_phase(sv) == ZEXT_STREAM_ACTIVE,
           "the supervisor is not active after its start delay (phase %u)",
-          (unsigned)wz_ext_stream_supervisor_phase(sv));
+          (unsigned)zext_stream_supervisor_phase(sv));
 
     char locator[64];
     snprintf(locator, sizeof locator, "tcp/127.0.0.1:%u", ex_port());
@@ -192,16 +192,16 @@ int main(void) {
             advance(PERIOD_MS);
             CHECK(poll_once() == 0, "a stream received again was told lost");
             uint8_t errors = 0;
-            CHECK(wz_ext_stream_supervisor_stream_errors(sv, stream, &errors) == Z_OK && errors == 1,
+            CHECK(zext_stream_supervisor_stream_errors(sv, stream, &errors) == Z_OK && errors == 1,
                   "the stream's error count is %u after it came back", (unsigned)errors);
-            CHECK(wz_ext_stream_supervisor_node_errors(sv) == 1, "the node's error count moved");
+            CHECK(zext_stream_supervisor_node_errors(sv) == 1, "the node's error count moved");
             ex_close(&dialer);
         }
         z_subscriber_drop(z_subscriber_move(&subscriber));
         ex_close(&listener);
     }
 
-    wz_ext_stream_supervisor_drop(wz_ext_stream_supervisor_move(&supervisor));
+    zext_stream_supervisor_drop(zext_stream_supervisor_move(&supervisor));
     ex_counter_drop(&received);
     z_mutex_drop(z_mutex_move(&model.lock));
     return ex_finish();

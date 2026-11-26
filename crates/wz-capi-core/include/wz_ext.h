@@ -6,7 +6,7 @@
  *
  * The drop-in headers declare upstream's functions only, drop-in and extension being
  * separate namespaces: a program that includes a drop-in header and not this one is
- * portable to the upstream library. Every function of wz's own is `wz_ext_*` and declared
+ * portable to the upstream library. Every function of wz's own is `zext_*` and declared
  * here, so a program that needs one says so by including this file, and the compiler tells
  * it what is not portable. scripts/lib/drop_in_header_gate.py holds both halves.
  *
@@ -41,16 +41,16 @@
  *
  * Z_OK with the object, or the code z_open would refuse the config with,
  * the string then naming the reason. */
-z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
+z_result_t zext_config_device_requires(const z_loaned_config_t *config,
                                          z_owned_string_t *out_requirement);
 
 /* The policies of the session z_open opens from this config, stated from
  * code. The open composes them, lowest first: the build defaults, the
- * profile (wz_ext_config_profile's, else the document's), the document's
- * wz/policies, then wz_ext_config_policy's statements. The first two doors
+ * profile (zext_config_profile's, else the document's), the document's
+ * wz/policies, then zext_config_policy's statements. The first two doors
  * are in a build with the config-policy capability (on in a build that
  * names nothing, off in the zenoh-pico preset, whose sessions run under the
- * build's policies and limits), wz_ext_config_document in a build with the
+ * build's policies and limits), zext_config_document in a build with the
  * config-document capability (it links a JSON5 reader); a build whose
  * domain of a policy holds one value refuses every other value of it.
  *
@@ -60,27 +60,27 @@ z_result_t wz_ext_config_device_requires(const z_loaned_config_t *config,
  * whose wz member has a refused shape answer _Z_ERR_CONFIG_INVALID_VALUE
  * and leave the config as it was. A null argument answers _Z_ERR_NULL.
  *
- * wz_ext_config_policy states that `policy` takes `value` (both by the
+ * zext_config_policy states that `policy` takes `value` (both by the
  * declaration's ids); a second statement of the policy replaces the first.
- * wz_ext_config_profile names the profile the session starts from, in place
- * of the one the document names. wz_ext_config_document hands the config a
+ * zext_config_profile names the profile the session starts from, in place
+ * of the one the document names. zext_config_document hands the config a
  * zenoh JSON5 document of which only the wz member is read, so the document
  * a zenoh-c program opens with configures these policies alike; a second
  * call replaces the first. In a build with the shared-key-ids capability the
  * member's wz/key-ids states the key ids every node shares (dictionary, a
  * list of { id, key }, and links, a list of { locator, form }), under what
- * wz_ext_config_key_ids and wz_ext_config_key_wire_form_for state; a build
+ * zext_config_key_ids and zext_config_key_wire_form_for state; a build
  * without it refuses wz/key-ids, and a refused part of it refuses the
  * document, as a refused policy does. The member's wz/limits states the
  * limits of the session by their ids, each a whole number or "unbounded";
  * a limit the build does not have, a limit only the build decides, a limit
  * of a runtime and a value the build's domain leaves out refuse the
  * document, and the session opens under the limits it states. */
-z_result_t wz_ext_config_policy(z_loaned_config_t *config, const char *policy,
+z_result_t zext_config_policy(z_loaned_config_t *config, const char *policy,
                                 const char *value);
-z_result_t wz_ext_config_profile(z_loaned_config_t *config,
+z_result_t zext_config_profile(z_loaned_config_t *config,
                                  const char *profile);
-z_result_t wz_ext_config_document(z_loaned_config_t *config,
+z_result_t zext_config_document(z_loaned_config_t *config,
                                   const char *json5);
 
 /* The config key (zp_config_insert) whose value states the limits of the
@@ -102,7 +102,7 @@ z_result_t wz_ext_config_document(z_loaned_config_t *config,
  * open reserves those pools at the counts its config states, each up to the
  * build's value, and fixes them; a later open that states more of one is
  * refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY. */
-#define WZ_EXT_CONFIG_LIMITS_KEY ((uint8_t)0xC0)
+#define ZEXT_CONFIG_LIMITS_KEY ((uint8_t)0xC0)
 
 /* The limits of the process's runtime, from a zenoh JSON5 document of which
  * only the wz member's wz/limits is read: the limits of the machines the
@@ -114,19 +114,19 @@ z_result_t wz_ext_config_document(z_loaned_config_t *config,
  * first. In a build with the config-document capability.
  *
  * ORDER. The process's first such machine takes the limits: the first call
- * of a wz_ext_supervision_* function, wz_ext_stream_supervisor_new or
- * wz_ext_message_catalog_new. A program states them before that call; a call
+ * of a zext_supervision_* function, zext_stream_supervisor_new or
+ * zext_message_catalog_new. A program states them before that call; a call
  * of this function after it answers Z_EINVAL and the process keeps the
  * limits it took.
  *
  * Text that is no JSON5 object, a document nested deeper than
  * CONFIG_DOCUMENT_DEPTH (the outermost object being 1), as
- * wz_ext_config_document refuses one, a wz member of a refused shape, a
+ * zext_config_document refuses one, a wz member of a refused shape, a
  * profile, a policy, key ids, a limit of a session, a limit the build does
  * not have or decides alone, and a value the build's domain leaves out or
  * that is over the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever
  * the call comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
-z_result_t wz_ext_runtime_limits_document(const char *json5);
+z_result_t zext_runtime_limits_document(const char *json5);
 
 /* A clock the program registers, which z_timestamp_new then stamps with in
  * place of the system clock: a disciplined hardware clock, or a time master
@@ -139,40 +139,40 @@ z_result_t wz_ext_runtime_limits_document(const char *json5);
  * set, not yet synchronised, its bus silent. It is called from whichever
  * thread stamps, possibly several at once, and must be safe to call that way;
  * context must stay valid for as long as the source is registered. */
-typedef int8_t wz_ext_clock_read_fn(void *context, uint64_t *secs,
+typedef int8_t zext_clock_read_fn(void *context, uint64_t *secs,
                                     uint32_t *nanos);
 
 /* Register a clock after those already registered: the first that can say
  * what time it is answers. If every registered clock is unable to, the library
  * knows no date, and z_timestamp_new fails; it does not fall back to the
  * system clock of a clock the program chose. out_handle receives the handle
- * wz_ext_clock_source_unregister takes and may be NULL.
+ * zext_clock_source_unregister takes and may be NULL.
  *
  * Z_OK; Z_ERR_NULL for a NULL callback; Z_ERR_OVERFLOW when the build's
  * CLOCK_SOURCES are all taken. */
-z_result_t wz_ext_clock_source_register(wz_ext_clock_read_fn *read,
+z_result_t zext_clock_source_register(zext_clock_read_fn *read,
                                         void *context, uint32_t *out_handle);
 
 /* Remove a clock registered earlier; the library then no longer calls the
  * callback. Z_ERR_INVALID for a handle that is not registered. */
-z_result_t wz_ext_clock_source_unregister(uint32_t handle);
+z_result_t zext_clock_source_unregister(uint32_t handle);
 
 /* What the program tells the library about the registered clock. The library
  * cannot know whether the clock follows a reference; the program can. A build
  * whose clock-quality-stamping policy is trusted-only stamps no data until the
- * program has reported WZ_EXT_CLOCK_SYNC_ACQUIRED: an advanced publisher, every
+ * program has reported ZEXT_CLOCK_SYNC_ACQUIRED: an advanced publisher, every
  * sample of which carries a time, refuses its put and delete until then, and
  * nothing is sent. z_timestamp_new, a program reading the clock, is given its
  * time whatever its standing. */
-typedef uint8_t wz_ext_clock_event_t;
-#define WZ_EXT_CLOCK_SYNC_ACQUIRED 0     /* it follows a reference */
-#define WZ_EXT_CLOCK_SYNC_LOST 1         /* the reference is gone */
-#define WZ_EXT_CLOCK_HOLDOVER_EXPIRED 2  /* the program's bound on running
+typedef uint8_t zext_clock_event_t;
+#define ZEXT_CLOCK_SYNC_ACQUIRED 0     /* it follows a reference */
+#define ZEXT_CLOCK_SYNC_LOST 1         /* the reference is gone */
+#define ZEXT_CLOCK_HOLDOVER_EXPIRED 2  /* the program's bound on running
                                             without a reference has passed */
 
 /* Z_OK; Z_ERR_INVALID for another value. Reporting what is already so is not
  * an error. */
-z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
+z_result_t zext_clock_report(zext_clock_event_t event);
 
 /* The node's event log: a ring of fixed-size records that the library and the
  * program write events into and that a program reads back. An event is a
@@ -186,49 +186,49 @@ z_result_t wz_ext_clock_report(wz_ext_clock_event_t event);
  * (overwrite-oldest) or the new one (drop-newest). */
 
 /* What a read found. */
-#define WZ_EXT_EVENT_RECORD 0 /* an event */
-#define WZ_EXT_EVENT_EMPTY 1  /* nothing newer than the cursor */
-#define WZ_EXT_EVENT_LOST 2   /* events were overwritten before they were read;
+#define ZEXT_EVENT_RECORD 0 /* an event */
+#define ZEXT_EVENT_EMPTY 1  /* nothing newer than the cursor */
+#define ZEXT_EVENT_LOST 2   /* events were overwritten before they were read;
                                  sequence is how many */
 
 /* What the library itself writes into the log. A program numbers its own
  * sources and levels; the library's events carry level 255 and a source from
- * 0xFF00 up, so a program keeps its sources below WZ_EXT_EVENT_SOURCE_LIBRARY
+ * 0xFF00 up, so a program keeps its sources below ZEXT_EVENT_SOURCE_LIBRARY
  * and a reader that filters by level keeps 255 to see what the node says about
  * itself. A source is assigned once and never reused; the integers of each are
  * written beside it. */
-#define WZ_EXT_EVENT_LEVEL_LIBRARY 255
-#define WZ_EXT_EVENT_SOURCE_LIBRARY 0xFF00
+#define ZEXT_EVENT_LEVEL_LIBRARY 255
+#define ZEXT_EVENT_SOURCE_LIBRARY 0xFF00
 /* A supervised checkpoint missed its deadline (a build with the supervision
  * capability too). One integer: the checkpoint's number. */
-#define WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED 0xFF00
+#define ZEXT_EVENT_SOURCE_SUPERVISION_EXPIRED 0xFF00
 /* A listener of a tls/ link took a connection and ended it without a stream
  * (the cooperative engine with the secure channel). Two integers: why, and the
  * channel's own code. This is how a program sees that the arena or the key
  * store had no room for a handshake, which a peer sees only as a closed
  * connection. */
-#define WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED 0xFF01
-#define WZ_EXT_EVENT_TLS_DROP_STALLED 0 /* a peer that stalled past the accept
+#define ZEXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED 0xFF01
+#define ZEXT_EVENT_TLS_DROP_STALLED 0 /* a peer that stalled past the accept
                                            budget; the code is 0 */
-#define WZ_EXT_EVENT_TLS_DROP_NO_ROOM 1 /* the arena or the key store had no
+#define ZEXT_EVENT_TLS_DROP_NO_ROOM 1 /* the arena or the key store had no
                                            room; the code is the channel's */
-#define WZ_EXT_EVENT_TLS_DROP_OTHER 2   /* any other failure, or a peer the
+#define ZEXT_EVENT_TLS_DROP_OTHER 2   /* any other failure, or a peer the
                                            policy refused; the code is the
                                            channel's, 0 where it has none */
 /* An instance key reported the samples it dropped (a build with the
- * instance-key capability too; see wz_ext_instance_keyer_new). Three integers:
+ * instance-key capability too; see zext_instance_keyer_new). Three integers:
  * why the latest of them was dropped, which key field, and how many were
  * dropped since the last report. */
-#define WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED 0xFF02
-#define WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE 0 /* the payload is not a message
+#define ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED 0xFF02
+#define ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE 0 /* the payload is not a message
                                                    of the schema */
-#define WZ_EXT_EVENT_INSTANCE_KEY_ABSENT 1      /* a key field with presence is
+#define ZEXT_EVENT_INSTANCE_KEY_ABSENT 1      /* a key field with presence is
                                                    absent */
-#define WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED 2  /* a key value is in no list */
+#define ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED 2  /* a key value is in no list */
 
-typedef struct wz_ext_event_t {
+typedef struct zext_event_t {
   size_t struct_size; /* sizeof this struct, set by the program */
-  uint8_t kind;      /* WZ_EXT_EVENT_RECORD, _EMPTY or _LOST */
+  uint8_t kind;      /* ZEXT_EVENT_RECORD, _EMPTY or _LOST */
   uint8_t level;     /* how serious, in the program's own scale */
   uint8_t arg_count; /* how many integers the event carries */
   uint8_t reserved;
@@ -238,7 +238,7 @@ typedef struct wz_ext_event_t {
                         gone */
   uint64_t timestamp; /* an NTP64 word, 0 where the clock did not know the
                          date */
-} wz_ext_event_t;
+} zext_event_t;
 
 /* Write an event. args is arg_count integers (NULL when 0); the log keeps as
  * many as the build allows. The time is the clock's now: the clocks the
@@ -246,7 +246,7 @@ typedef struct wz_ext_event_t {
  *
  * Z_OK; Z_ERR_OVERFLOW when a full log under drop-newest refused the event (it
  * is counted); Z_ERR_NULL for a NULL args with a count. */
-z_result_t wz_ext_event_emit(uint8_t level, uint16_t source,
+z_result_t zext_event_emit(uint8_t level, uint16_t source,
                              const uint64_t *args, size_t arg_count);
 
 /* Read the event at *cursor, the number the program reads next (0 at the
@@ -255,78 +255,78 @@ z_result_t wz_ext_event_emit(uint8_t level, uint16_t source,
  * args_capacity of them (args may be NULL when that is 0). Any number of
  * programs read the same log, each with a cursor of its own. Z_OK;
  * Z_ERR_NULL for a NULL cursor or out. */
-z_result_t wz_ext_event_read(uint64_t *cursor, wz_ext_event_t *out,
+z_result_t zext_event_read(uint64_t *cursor, zext_event_t *out,
                              uint64_t *args, size_t args_capacity);
 
 /* Say that every event before sequence number upto has been read and may be
  * overwritten. Only forward. Under overwrite-oldest nothing waits for it; under
  * drop-newest it is what makes room. */
-z_result_t wz_ext_event_release(uint64_t upto);
+z_result_t zext_event_release(uint64_t upto);
 
 /* How many events a full log refused under drop-newest. */
-uint32_t wz_ext_event_dropped(void);
+uint32_t zext_event_dropped(void);
 
 /* The node's supervisor: checkpoints a program feeds, each with a deadline, and
  * a hook that runs once for a checkpoint that missed its deadline. Part of the
  * unstable surface, and present only in a build with the supervision
  * capability. How many checkpoints there are is a limit of the process's
- * runtime (SUPERVISION_CHECKPOINTS, wz_ext_runtime_limits_document), at most
+ * runtime (SUPERVISION_CHECKPOINTS, zext_runtime_limits_document), at most
  * the build's, numbered from 0.
  *
  * A program that must keep making progress starts a checkpoint with a timeout
- * and feeds it on every pass, and calls wz_ext_supervision_check on its own
+ * and feeds it on every pass, and calls zext_supervision_check on its own
  * cadence: the library holds no thread and no timer. The supervisor is healthy
  * only while every checkpoint that is supervised has been fed in time, so a
- * node that feeds a hardware watchdog feeds it when wz_ext_supervision_healthy
+ * node that feeds a hardware watchdog feeds it when zext_supervision_healthy
  * is 1, and from nowhere else. Time is milliseconds on the monotonic clock. */
 
 /* The program's expiry hook. It runs on the thread that called
- * wz_ext_supervision_check, with no lock of the library held, so it may call
+ * zext_supervision_check, with no lock of the library held, so it may call
  * any of these functions. */
-typedef void wz_ext_supervision_hook_fn(void *context, uint8_t checkpoint);
+typedef void zext_supervision_hook_fn(void *context, uint8_t checkpoint);
 
 /* The state of a checkpoint. */
-#define WZ_EXT_SUPERVISION_DISARMED 0 /* not supervised */
-#define WZ_EXT_SUPERVISION_ARMED 1    /* supervised, and fed in time */
-#define WZ_EXT_SUPERVISION_EXPIRING 2 /* its hook is running */
-#define WZ_EXT_SUPERVISION_EXPIRED 3  /* its hook has run */
-#define WZ_EXT_SUPERVISION_NO_SUCH_CHECKPOINT 255
+#define ZEXT_SUPERVISION_DISARMED 0 /* not supervised */
+#define ZEXT_SUPERVISION_ARMED 1    /* supervised, and fed in time */
+#define ZEXT_SUPERVISION_EXPIRING 2 /* its hook is running */
+#define ZEXT_SUPERVISION_EXPIRED 3  /* its hook has run */
+#define ZEXT_SUPERVISION_NO_SUCH_CHECKPOINT 255
 
 /* Set the hook, or clear it with NULL. With none set, an expired checkpoint is
  * still marked expired and makes the supervisor unhealthy. The hook must be safe
- * to call from the thread that calls wz_ext_supervision_check, and context must
+ * to call from the thread that calls zext_supervision_check, and context must
  * stay valid, for as long as it is set. Z_OK. */
-z_result_t wz_ext_supervision_set_hook(wz_ext_supervision_hook_fn *hook,
+z_result_t zext_supervision_set_hook(zext_supervision_hook_fn *hook,
                                        void *context);
 
 /* Begin supervising a checkpoint, with a deadline timeout_ms after now and
  * after each feed. A checkpoint already supervised is left as it is. Z_OK;
  * Z_ERR_INVALID for a checkpoint the process does not watch, or a timeout of
  * 0 or past 2147483647. */
-z_result_t wz_ext_supervision_start(uint8_t checkpoint, uint32_t timeout_ms);
+z_result_t zext_supervision_start(uint8_t checkpoint, uint32_t timeout_ms);
 
 /* The program made progress: start the checkpoint's deadline again. A
  * checkpoint that is not armed ignores it, so a feed after an expiry does not
  * hide it (the build's supervision-after-expiry policy can have such a feed
  * supervise the checkpoint again). Z_OK; Z_ERR_INVALID for a checkpoint the
  * process does not watch. */
-z_result_t wz_ext_supervision_feed(uint8_t checkpoint);
+z_result_t zext_supervision_feed(uint8_t checkpoint);
 
 /* Stop supervising a checkpoint. Z_OK; Z_ERR_GENERIC when its hook is running:
  * it does not stop until the hook returns; Z_ERR_INVALID for a checkpoint the
  * process does not watch. */
-z_result_t wz_ext_supervision_stop(uint8_t checkpoint);
+z_result_t zext_supervision_stop(uint8_t checkpoint);
 
 /* Look at every supervised checkpoint now and run the hook once for each whose
  * deadline has passed. Z_OK. */
-z_result_t wz_ext_supervision_check(void);
+z_result_t zext_supervision_check(void);
 
 /* 1 when at least one checkpoint is supervised and every supervised one is
  * armed, 0 otherwise. Nothing under watch is not healthy. */
-uint8_t wz_ext_supervision_healthy(void);
+uint8_t zext_supervision_healthy(void);
 
 /* The state of a checkpoint, one of the values above. */
-uint8_t wz_ext_supervision_state(uint8_t checkpoint);
+uint8_t zext_supervision_state(uint8_t checkpoint);
 
 /* The node's resource snapshot: a fixed-layout, versioned record of the CPU
  * use, the heap and the tasks the platform reports, and of how the messages the
@@ -336,9 +336,9 @@ uint8_t wz_ext_supervision_state(uint8_t checkpoint);
  * The platform is the program's: it sets a source that answers what it can, and
  * a part it cannot answer is marked unavailable in the record, not read as zero.
  * The library holds no thread and no timer: the program calls
- * wz_ext_snapshot_poll on its own cadence, which takes a snapshot when the
+ * zext_snapshot_poll on its own cadence, which takes a snapshot when the
  * build's period (SNAPSHOT_PERIOD_MS) has passed since the last, and
- * wz_ext_snapshot_read copies the latest out as bytes. */
+ * zext_snapshot_read copies the latest out as bytes. */
 
 /* What the source writes: the readings it has, and which of them it has. A
  * field whose bit in available is clear is not read, whatever the source left in
@@ -346,52 +346,52 @@ uint8_t wz_ext_supervision_state(uint8_t checkpoint);
  * every field zeroed, and the source writes no byte past struct_size: a field is
  * only ever added at the end, so a source compiled before it leaves it
  * unanswered. */
-#define WZ_EXT_SNAPSHOT_HAS_CPU 1
-#define WZ_EXT_SNAPSHOT_HAS_HEAP 2
-#define WZ_EXT_SNAPSHOT_HAS_TASKS 4
+#define ZEXT_SNAPSHOT_HAS_CPU 1
+#define ZEXT_SNAPSHOT_HAS_HEAP 2
+#define ZEXT_SNAPSHOT_HAS_TASKS 4
 
-typedef struct wz_ext_resource_reading_t {
+typedef struct zext_resource_reading_t {
   size_t struct_size;    /* set by the library; see above */
-  uint8_t available;     /* the WZ_EXT_SNAPSHOT_HAS_* bits */
+  uint8_t available;     /* the ZEXT_SNAPSHOT_HAS_* bits */
   uint8_t reserved;
   uint16_t cpu_permille; /* busy share since the last reading, in thousandths */
   uint16_t tasks;        /* how many tasks the node runs */
   uint16_t reserved2;
   uint64_t heap_in_use;     /* bytes on the heap in use now */
   uint64_t heap_high_water; /* the most bytes there have been in use */
-} wz_ext_resource_reading_t;
+} zext_resource_reading_t;
 
 /* The program's source: fills out and returns 0, or returns anything else when
  * it cannot answer at all, which takes the snapshot with no part available. It
- * runs on the thread that called wz_ext_snapshot_poll, with no lock of the
+ * runs on the thread that called zext_snapshot_poll, with no lock of the
  * library held, so it may call any of these functions. */
-typedef int8_t wz_ext_snapshot_source_fn(void *context,
-                                         wz_ext_resource_reading_t *out);
+typedef int8_t zext_snapshot_source_fn(void *context,
+                                         zext_resource_reading_t *out);
 
 /* Set the source, or clear it with NULL. With none set, a snapshot is still
  * taken, with the message counts and no part of the platform's. The source must
- * be safe to call from the thread that calls wz_ext_snapshot_poll, and context
+ * be safe to call from the thread that calls zext_snapshot_poll, and context
  * must stay valid, for as long as it is set. Z_OK. */
-z_result_t wz_ext_snapshot_set_source(wz_ext_snapshot_source_fn *read,
+z_result_t zext_snapshot_set_source(zext_snapshot_source_fn *read,
                                       void *context);
 
 /* Take a snapshot if the build's period has passed since the last, of the
  * session's received messages and whatever the source answers. 1 when one was
  * taken, 0 when none was due, Z_ERR_NULL for a null or spent session. The first
  * call takes one. */
-z_result_t wz_ext_snapshot_poll(const z_loaned_session_t *session);
+z_result_t zext_snapshot_poll(const z_loaned_session_t *session);
 
-/* How many bytes wz_ext_snapshot_read writes: the size of this build's record,
+/* How many bytes zext_snapshot_read writes: the size of this build's record,
  * which grows with SNAPSHOT_HISTOGRAM_BUCKETS. */
-size_t wz_ext_snapshot_size(void);
+size_t zext_snapshot_size(void);
 
 /* Copy the latest snapshot into out, which has room for capacity bytes, and
  * write its length to length. The record is little-endian and starts with its
  * own layout version and size, so a reader of an older build can tell a newer
  * one. Z_OK; Z_ERR_GENERIC before the first snapshot; Z_ERR_OVERFLOW when
- * capacity is less than wz_ext_snapshot_size; Z_ERR_NULL for a null out or
+ * capacity is less than zext_snapshot_size; Z_ERR_NULL for a null out or
  * length. */
-z_result_t wz_ext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
+z_result_t zext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
 
 /* The sending side of a declared segment profile: one message of the program's
  * own cut into pieces, each an ordinary sample on the message's key whose
@@ -415,8 +415,8 @@ z_result_t wz_ext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
  * piece did not. After the largest value the field holds the next message is
  * refused, unless the sender restarts, which goes back to first_transfer.
  *
- * OWNERSHIP. A sender is owned by the program from wz_ext_segment_sender_new
- * until wz_ext_segment_sender_drop, which leaves the null state; a second drop
+ * OWNERSHIP. A sender is owned by the program from zext_segment_sender_new
+ * until zext_segment_sender_drop, which leaves the null state; a second drop
  * does nothing. The doors that use it take the loan. A refusal string, when
  * one is written, is the program's to drop with z_string_drop.
  *
@@ -425,38 +425,38 @@ z_result_t wz_ext_snapshot_read(uint8_t *out, size_t capacity, size_t *length);
  * interleave. A split callback runs on the calling thread, inside that lock, so
  * it must not call its own sender. */
 
-typedef uint8_t wz_ext_segment_rollover_t;
-#define WZ_EXT_SEGMENT_ROLLOVER_REFUSE 0  /* refuse the next message */
-#define WZ_EXT_SEGMENT_ROLLOVER_RESTART 1 /* go back to first_transfer */
+typedef uint8_t zext_segment_rollover_t;
+#define ZEXT_SEGMENT_ROLLOVER_REFUSE 0  /* refuse the next message */
+#define ZEXT_SEGMENT_ROLLOVER_RESTART 1 /* go back to first_transfer */
 
-typedef struct wz_ext_owned_segment_sender_t {
+typedef struct zext_owned_segment_sender_t {
   void *_handle;
-} wz_ext_owned_segment_sender_t;
-typedef struct wz_ext_loaned_segment_sender_t {
+} zext_owned_segment_sender_t;
+typedef struct zext_loaned_segment_sender_t {
   void *_handle;
-} wz_ext_loaned_segment_sender_t;
-typedef struct wz_ext_moved_segment_sender_t {
-  wz_ext_owned_segment_sender_t _this;
-} wz_ext_moved_segment_sender_t;
+} zext_loaned_segment_sender_t;
+typedef struct zext_moved_segment_sender_t {
+  zext_owned_segment_sender_t _this;
+} zext_moved_segment_sender_t;
 
 /* How far one put or split went. */
-typedef struct wz_ext_segment_result_t {
+typedef struct zext_segment_result_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   uint64_t transfer; /* the number the pieces carried; 0 when refused */
   size_t pieces;     /* how many pieces the message was cut into; 0 when
                         refused */
   size_t sent;       /* how many pieces went out */
-} wz_ext_segment_result_t;
+} zext_segment_result_t;
 
 /* The options of a put. timestamp is a const z_timestamp_t *, BORROWED for the
  * call, that every piece carries; NULL for none. */
-typedef struct wz_ext_segment_put_options_t {
+typedef struct zext_segment_put_options_t {
   const void *timestamp;
-} wz_ext_segment_put_options_t;
+} zext_segment_put_options_t;
 
 /* What a split hands each piece to. piece is valid only during the call.
  * Anything but Z_OK stops the split, which returns it. */
-typedef z_result_t wz_ext_segment_piece_fn(void *context, const uint8_t *piece,
+typedef z_result_t zext_segment_piece_fn(void *context, const uint8_t *piece,
                                            size_t len);
 
 /* A sender for the profile profile_json describes, with the program's fields in
@@ -469,15 +469,15 @@ typedef z_result_t wz_ext_segment_piece_fn(void *context, const uint8_t *piece,
  * (-75) for text that is not UTF-8 or an unknown rollover;
  * _Z_ERR_CONFIG_INVALID_VALUE (-89) for a profile or values text that is
  * refused. */
-z_result_t wz_ext_segment_sender_new(wz_ext_owned_segment_sender_t *this_,
+z_result_t zext_segment_sender_new(zext_owned_segment_sender_t *this_,
                                      const char *profile_json,
                                      const char *values_json,
                                      uint64_t first_transfer,
-                                     wz_ext_segment_rollover_t rollover,
+                                     zext_segment_rollover_t rollover,
                                      z_owned_string_t *refusal);
 
 /* Fill in the default put options: no timestamp. */
-void wz_ext_segment_put_options_default(wz_ext_segment_put_options_t *this_);
+void zext_segment_put_options_default(zext_segment_put_options_t *this_);
 
 /* Cut message into chunks of chunk_bytes and put each piece on publisher, in
  * order (options may be NULL). result and refusal may be NULL.
@@ -488,41 +488,41 @@ void wz_ext_segment_put_options_default(wz_ext_segment_put_options_t *this_);
  * no number used; the failing put's code, after result->sent pieces, when one
  * failed (the number is used); Z_ERR_NULL for a NULL or dropped sender, a NULL
  * publisher, or a NULL message with a length. */
-z_result_t wz_ext_segment_sender_put(
-    const wz_ext_loaned_segment_sender_t *this_,
+z_result_t zext_segment_sender_put(
+    const zext_loaned_segment_sender_t *this_,
     const z_loaned_publisher_t *publisher, const uint8_t *message, size_t len,
-    size_t chunk_bytes, const wz_ext_segment_put_options_t *options,
-    wz_ext_segment_result_t *result, z_owned_string_t *refusal);
+    size_t chunk_bytes, const zext_segment_put_options_t *options,
+    zext_segment_result_t *result, z_owned_string_t *refusal);
 
-/* As wz_ext_segment_sender_put, but each piece, header and chunk, is handed to
+/* As zext_segment_sender_put, but each piece, header and chunk, is handed to
  * emit with context instead of put: for a program that sends the pieces some
  * other way, as the replies of a query for instance. Returns what emit returned
  * when it stopped the split; Z_ERR_NULL for a NULL emit. */
-z_result_t wz_ext_segment_sender_split(
-    const wz_ext_loaned_segment_sender_t *this_, const uint8_t *message,
-    size_t len, size_t chunk_bytes, wz_ext_segment_piece_fn *emit,
-    void *context, wz_ext_segment_result_t *result, z_owned_string_t *refusal);
+z_result_t zext_segment_sender_split(
+    const zext_loaned_segment_sender_t *this_, const uint8_t *message,
+    size_t len, size_t chunk_bytes, zext_segment_piece_fn *emit,
+    void *context, zext_segment_result_t *result, z_owned_string_t *refusal);
 
 /* The number the next message carries. false, and nothing written, when the
  * largest was sent and the sender does not restart, or for a NULL argument or
  * a dropped sender. */
-bool wz_ext_segment_sender_next(const wz_ext_loaned_segment_sender_t *this_,
+bool zext_segment_sender_next(const zext_loaned_segment_sender_t *this_,
                                 uint64_t *out);
 
 /* Make value the number the next message carries. A value past the transfer
  * field's width is refused by the next message, as a first number is. Z_OK;
  * Z_ERR_NULL for a NULL or dropped sender. */
-z_result_t wz_ext_segment_sender_set(const wz_ext_loaned_segment_sender_t *this_,
+z_result_t zext_segment_sender_set(const zext_loaned_segment_sender_t *this_,
                                      uint64_t value);
 
-const wz_ext_loaned_segment_sender_t *wz_ext_segment_sender_loan(
-    const wz_ext_owned_segment_sender_t *this_);
-wz_ext_moved_segment_sender_t *wz_ext_segment_sender_move(
-    wz_ext_owned_segment_sender_t *this_);
-void wz_ext_segment_sender_drop(wz_ext_moved_segment_sender_t *this_);
-void wz_ext_internal_segment_sender_null(wz_ext_owned_segment_sender_t *this_);
-bool wz_ext_internal_segment_sender_check(
-    const wz_ext_owned_segment_sender_t *this_);
+const zext_loaned_segment_sender_t *zext_segment_sender_loan(
+    const zext_owned_segment_sender_t *this_);
+zext_moved_segment_sender_t *zext_segment_sender_move(
+    zext_owned_segment_sender_t *this_);
+void zext_segment_sender_drop(zext_moved_segment_sender_t *this_);
+void zext_internal_segment_sender_null(zext_owned_segment_sender_t *this_);
+bool zext_internal_segment_sender_check(
+    const zext_owned_segment_sender_t *this_);
 
 /* Reception supervision per stream: whether each periodic stream a program
  * receives keeps arriving. Part of the unstable surface, and present only in a
@@ -536,7 +536,7 @@ bool wz_ext_internal_segment_sender_check(
  *
  * WHEN ANYTHING IS JUDGED. Nothing is judged until start_delay_ms has passed
  * since the first poll that had a clock, and then only while the program's
- * condition holds (wz_ext_stream_supervisor_set_condition; it holds until the
+ * condition holds (zext_stream_supervisor_set_condition; it holds until the
  * program says otherwise). Each time the two come to hold together, every
  * stream that can time out has its deadline counted again from that poll and
  * every error count is reset to 0, so a stream that never arrived is lost one
@@ -549,13 +549,13 @@ bool wz_ext_internal_segment_sender_check(
  * marked present again, which counts their deadlines from that moment. The
  * sender is a number of the program's own, given with each stream.
  *
- * STORAGE. The table is the program's: an array of wz_ext_stream_slot_t, one
+ * STORAGE. The table is the program's: an array of zext_stream_slot_t, one
  * per stream, and under the build's e2e-supervision-notify policy last-value a
  * byte area of one cell per slot, where the last payload of each stream is
  * kept for the loss to hand back. The supervisor writes both when it is made
  * and owns them until it is dropped. How many streams one supervisor holds is
  * at most the process's E2E_SUPERVISED_STREAMS
- * (wz_ext_runtime_limits_document), itself at most the build's.
+ * (zext_runtime_limits_document), itself at most the build's.
  *
  * TIME is milliseconds in 32 bits that wrap: the program's clock, given at
  * creation, or the library's monotonic clock when it gives none.
@@ -569,18 +569,18 @@ bool wz_ext_internal_segment_sender_check(
  * polls, so neither may call a door of its own supervisor. */
 
 /* One row of the program's table, owned by the supervisor while it lives. */
-typedef struct wz_ext_stream_slot_t {
+typedef struct zext_stream_slot_t {
   uint32_t _opaque[5];
-} wz_ext_stream_slot_t;
+} zext_stream_slot_t;
 
 /* The program's clock: writes the milliseconds of a monotonic source and
  * returns 0, or returns anything else when it cannot say what time it is. */
-typedef int8_t wz_ext_stream_clock_fn(void *context, uint32_t *now_ms);
+typedef int8_t zext_stream_clock_fn(void *context, uint32_t *now_ms);
 
 /* One loss, as the callback reads it: 32 bytes on a 64-bit target, 24 on a
  * 32-bit one. It and the value it points to are valid only for the call. */
-typedef struct wz_ext_stream_loss_t {
-  uint32_t stream;      /* the number wz_ext_stream_supervisor_add gave it */
+typedef struct zext_stream_loss_t {
+  uint32_t stream;      /* the number zext_stream_supervisor_add gave it */
   uint32_t sender;      /* the sender it was added with */
   uint8_t errors;       /* the stream's error count, this loss included */
   uint8_t node_errors;  /* the node's error count, this loss included */
@@ -589,31 +589,31 @@ typedef struct wz_ext_stream_loss_t {
   const uint8_t *value; /* under last-value the stream's last payload; NULL
                            under status-only or when none was kept */
   size_t value_len;
-} wz_ext_stream_loss_t;
+} zext_stream_loss_t;
 
-typedef void wz_ext_stream_loss_fn(void *context,
-                                   const wz_ext_stream_loss_t *loss);
+typedef void zext_stream_loss_fn(void *context,
+                                   const zext_stream_loss_t *loss);
 
 /* Where the two gates stand. */
-#define WZ_EXT_STREAM_UNCLOCKED 0 /* no poll has had a clock */
-#define WZ_EXT_STREAM_DELAYING 1  /* the start delay runs */
-#define WZ_EXT_STREAM_INACTIVE 2  /* the condition does not hold */
-#define WZ_EXT_STREAM_ACTIVE 3    /* every poll judges the streams */
-#define WZ_EXT_STREAM_NO_SUPERVISOR 255
+#define ZEXT_STREAM_UNCLOCKED 0 /* no poll has had a clock */
+#define ZEXT_STREAM_DELAYING 1  /* the start delay runs */
+#define ZEXT_STREAM_INACTIVE 2  /* the condition does not hold */
+#define ZEXT_STREAM_ACTIVE 3    /* every poll judges the streams */
+#define ZEXT_STREAM_NO_SUPERVISOR 255
 
 /* What a loss carries: the build's e2e-supervision-notify policy. */
-#define WZ_EXT_STREAM_NOTIFY_STATUS_ONLY 0
-#define WZ_EXT_STREAM_NOTIFY_LAST_VALUE 1
+#define ZEXT_STREAM_NOTIFY_STATUS_ONLY 0
+#define ZEXT_STREAM_NOTIFY_LAST_VALUE 1
 
-typedef struct wz_ext_owned_stream_supervisor_t {
+typedef struct zext_owned_stream_supervisor_t {
   void *_handle;
-} wz_ext_owned_stream_supervisor_t;
-typedef struct wz_ext_loaned_stream_supervisor_t {
+} zext_owned_stream_supervisor_t;
+typedef struct zext_loaned_stream_supervisor_t {
   void *_handle;
-} wz_ext_loaned_stream_supervisor_t;
-typedef struct wz_ext_moved_stream_supervisor_t {
-  wz_ext_owned_stream_supervisor_t _this;
-} wz_ext_moved_stream_supervisor_t;
+} zext_loaned_stream_supervisor_t;
+typedef struct zext_moved_stream_supervisor_t {
+  zext_owned_stream_supervisor_t _this;
+} zext_moved_stream_supervisor_t;
 
 /* A supervisor of no stream yet over slot_count rows at slots and, under
  * last-value, slot_count cells of value_cell bytes at values (not read under
@@ -623,10 +623,10 @@ typedef struct wz_ext_moved_stream_supervisor_t {
  * Z_OK; Z_ERR_NULL for a NULL this_ or slots, or a NULL values under
  * last-value; Z_ERR_INVALID for a slot_count of 0 or past 2^32 - 1, a start
  * delay past 2147483647, or under last-value a value_cell of 0. */
-z_result_t wz_ext_stream_supervisor_new(
-    wz_ext_owned_stream_supervisor_t *this_, wz_ext_stream_slot_t *slots,
+z_result_t zext_stream_supervisor_new(
+    zext_owned_stream_supervisor_t *this_, zext_stream_slot_t *slots,
     size_t slot_count, uint8_t *values, size_t value_cell,
-    uint32_t start_delay_ms, wz_ext_stream_clock_fn *clock,
+    uint32_t start_delay_ms, zext_stream_clock_fn *clock,
     void *clock_context);
 
 /* Supervise a stream of period_ms that may miss factor periods, from sender,
@@ -637,8 +637,8 @@ z_result_t wz_ext_stream_supervisor_new(
  * Z_OK; Z_ERR_NULL for a NULL or dropped supervisor; Z_ERR_INVALID for a
  * period or factor of 0, or a deadline past 2147483646 ms; Z_ERR_OVERFLOW when
  * the table is full. */
-z_result_t wz_ext_stream_supervisor_add(
-    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t period_ms,
+z_result_t zext_stream_supervisor_add(
+    const zext_loaned_stream_supervisor_t *this_, uint32_t period_ms,
     uint16_t factor, uint32_t sender, bool awaited, uint32_t *out_stream);
 
 /* The stream was received now, carrying payload (NULL with 0 for none), which
@@ -648,55 +648,55 @@ z_result_t wz_ext_stream_supervisor_add(
  * length; Z_ERR_INVALID for a stream there is none of; Z_ERR_OVERFLOW under
  * last-value for a payload longer than the cell: the reception counts, the
  * value is not kept. */
-z_result_t wz_ext_stream_supervisor_received(
-    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t stream,
+z_result_t zext_stream_supervisor_received(
+    const zext_loaned_stream_supervisor_t *this_, uint32_t stream,
     const uint8_t *payload, size_t len);
 
 /* Whether the program's condition holds. Z_OK; Z_ERR_NULL for a NULL or
  * dropped supervisor. */
-z_result_t wz_ext_stream_supervisor_set_condition(
-    const wz_ext_loaned_stream_supervisor_t *this_, bool holds);
+z_result_t zext_stream_supervisor_set_condition(
+    const zext_loaned_stream_supervisor_t *this_, bool holds);
 
 /* Mark a sender present or absent. The error counts are left as they are.
  * Z_OK, also when it already was; Z_ERR_NULL for a NULL or dropped supervisor;
  * Z_ERR_INVALID when no stream was added with that sender. */
-z_result_t wz_ext_stream_supervisor_set_sender_present(
-    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t sender,
+z_result_t zext_stream_supervisor_set_sender_present(
+    const zext_loaned_stream_supervisor_t *this_, uint32_t sender,
     bool present);
 
 /* Set the callback, or clear it with NULL; a loss is counted either way. The
  * callback must be safe to call from the thread that polls, and context must
  * stay valid, for as long as it is set. Z_OK; Z_ERR_NULL for a NULL or dropped
  * supervisor. */
-z_result_t wz_ext_stream_supervisor_set_callback(
-    const wz_ext_loaned_stream_supervisor_t *this_, wz_ext_stream_loss_fn *call,
+z_result_t zext_stream_supervisor_set_callback(
+    const zext_loaned_stream_supervisor_t *this_, zext_stream_loss_fn *call,
     void *context);
 
 /* Look at every stream now and tell the callback once for each newly lost;
  * out_told (which may be NULL) receives how many. Z_OK; Z_ERR_NULL for a NULL
  * or dropped supervisor. */
-z_result_t wz_ext_stream_supervisor_poll(
-    const wz_ext_loaned_stream_supervisor_t *this_, size_t *out_told);
+z_result_t zext_stream_supervisor_poll(
+    const zext_loaned_stream_supervisor_t *this_, size_t *out_told);
 
 /* The stream's error count. Z_OK; Z_ERR_NULL for a NULL or dropped supervisor
  * or a NULL out; Z_ERR_INVALID for a stream there is none of. */
-z_result_t wz_ext_stream_supervisor_stream_errors(
-    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t stream,
+z_result_t zext_stream_supervisor_stream_errors(
+    const zext_loaned_stream_supervisor_t *this_, uint32_t stream,
     uint8_t *out);
 
 /* The node's error count since the last activation; 0 for a NULL supervisor. */
-uint8_t wz_ext_stream_supervisor_node_errors(
-    const wz_ext_loaned_stream_supervisor_t *this_);
+uint8_t zext_stream_supervisor_node_errors(
+    const zext_loaned_stream_supervisor_t *this_);
 
-/* One of WZ_EXT_STREAM_UNCLOCKED, _DELAYING, _INACTIVE, _ACTIVE, or
- * WZ_EXT_STREAM_NO_SUPERVISOR. */
-uint8_t wz_ext_stream_supervisor_phase(
-    const wz_ext_loaned_stream_supervisor_t *this_);
+/* One of ZEXT_STREAM_UNCLOCKED, _DELAYING, _INACTIVE, _ACTIVE, or
+ * ZEXT_STREAM_NO_SUPERVISOR. */
+uint8_t zext_stream_supervisor_phase(
+    const zext_loaned_stream_supervisor_t *this_);
 
-/* WZ_EXT_STREAM_NOTIFY_STATUS_ONLY or _LAST_VALUE, or
- * WZ_EXT_STREAM_NO_SUPERVISOR. */
-uint8_t wz_ext_stream_supervisor_notify(
-    const wz_ext_loaned_stream_supervisor_t *this_);
+/* ZEXT_STREAM_NOTIFY_STATUS_ONLY or _LAST_VALUE, or
+ * ZEXT_STREAM_NO_SUPERVISOR. */
+uint8_t zext_stream_supervisor_notify(
+    const zext_loaned_stream_supervisor_t *this_);
 
 /* The library polls every period_ms on a task of its own until stopped or
  * dropped; the callback then runs on that task. Z_OK; Z_ERR_NULL for a NULL or
@@ -705,23 +705,23 @@ uint8_t wz_ext_stream_supervisor_notify(
  * task, and is refused with Z_ERR_GENERIC from the task itself. Declared in the
  * multi-threaded arm only, as the tasks of the drop-in are. */
 #if defined(Z_FEATURE_MULTI_THREAD) && Z_FEATURE_MULTI_THREAD == 1
-z_result_t wz_ext_stream_supervisor_start_task(
-    const wz_ext_loaned_stream_supervisor_t *this_, uint32_t period_ms);
-z_result_t wz_ext_stream_supervisor_stop_task(
-    const wz_ext_loaned_stream_supervisor_t *this_);
+z_result_t zext_stream_supervisor_start_task(
+    const zext_loaned_stream_supervisor_t *this_, uint32_t period_ms);
+z_result_t zext_stream_supervisor_stop_task(
+    const zext_loaned_stream_supervisor_t *this_);
 #endif
 
-const wz_ext_loaned_stream_supervisor_t *wz_ext_stream_supervisor_loan(
-    const wz_ext_owned_stream_supervisor_t *this_);
-wz_ext_moved_stream_supervisor_t *wz_ext_stream_supervisor_move(
-    wz_ext_owned_stream_supervisor_t *this_);
+const zext_loaned_stream_supervisor_t *zext_stream_supervisor_loan(
+    const zext_owned_stream_supervisor_t *this_);
+zext_moved_stream_supervisor_t *zext_stream_supervisor_move(
+    zext_owned_stream_supervisor_t *this_);
 /* Stops the task first; the storage is the program's again once it returns.
  * Not from the callback or the clock. */
-void wz_ext_stream_supervisor_drop(wz_ext_moved_stream_supervisor_t *this_);
-void wz_ext_internal_stream_supervisor_null(
-    wz_ext_owned_stream_supervisor_t *this_);
-bool wz_ext_internal_stream_supervisor_check(
-    const wz_ext_owned_stream_supervisor_t *this_);
+void zext_stream_supervisor_drop(zext_moved_stream_supervisor_t *this_);
+void zext_internal_stream_supervisor_null(
+    zext_owned_stream_supervisor_t *this_);
+bool zext_internal_stream_supervisor_check(
+    const zext_owned_stream_supervisor_t *this_);
 
 /* End-to-end protection of the program's payload: a header in front of it
  * that lets a receiver judge whether the frame is the one its sender built
@@ -755,29 +755,29 @@ bool wz_ext_internal_stream_supervisor_check(
  * string is the program's to drop. One handle may be called from several
  * threads. */
 
-typedef uint8_t wz_ext_e2e_rollover_t;
-#define WZ_EXT_E2E_ROLLOVER_REFUSE 0 /* refuse a stream's next frame */
-#define WZ_EXT_E2E_ROLLOVER_WRAP 1   /* count on from zero */
+typedef uint8_t zext_e2e_rollover_t;
+#define ZEXT_E2E_ROLLOVER_REFUSE 0 /* refuse a stream's next frame */
+#define ZEXT_E2E_ROLLOVER_WRAP 1   /* count on from zero */
 
-typedef struct wz_ext_owned_e2e_sender_t {
+typedef struct zext_owned_e2e_sender_t {
   void *_handle;
-} wz_ext_owned_e2e_sender_t;
-typedef struct wz_ext_loaned_e2e_sender_t {
+} zext_owned_e2e_sender_t;
+typedef struct zext_loaned_e2e_sender_t {
   void *_handle;
-} wz_ext_loaned_e2e_sender_t;
-typedef struct wz_ext_moved_e2e_sender_t {
-  wz_ext_owned_e2e_sender_t _this;
-} wz_ext_moved_e2e_sender_t;
+} zext_loaned_e2e_sender_t;
+typedef struct zext_moved_e2e_sender_t {
+  zext_owned_e2e_sender_t _this;
+} zext_moved_e2e_sender_t;
 
-typedef struct wz_ext_e2e_sender_options_t {
+typedef struct zext_e2e_sender_options_t {
   uint64_t first_counter; /* the first frame of every stream carries it */
   size_t streams;         /* how many streams, at least 1 */
-  wz_ext_e2e_rollover_t rollover; /* WZ_EXT_E2E_ROLLOVER_* */
+  zext_e2e_rollover_t rollover; /* ZEXT_E2E_ROLLOVER_* */
   bool crc_cache;         /* keep each stream's last frame */
-} wz_ext_e2e_sender_options_t;
+} zext_e2e_sender_options_t;
 
 /* One stream, a first counter of 0, refuse after the largest, no cache. */
-void wz_ext_e2e_sender_options_default(wz_ext_e2e_sender_options_t *this_);
+void zext_e2e_sender_options_default(zext_e2e_sender_options_t *this_);
 
 /* A sender for profile_json with the fixed header values values_json, made as
  * options says (NULL: the defaults). this_ holds the null state on every
@@ -789,15 +789,15 @@ void wz_ext_e2e_sender_options_default(wz_ext_e2e_sender_options_t *this_);
  * _Z_ERR_CONFIG_INVALID_VALUE for a profile, values text or option refused (no
  * stream, a first counter the counter field cannot hold, values that state
  * the counter or leave a field out). */
-z_result_t wz_ext_e2e_sender_new(wz_ext_owned_e2e_sender_t *this_,
+z_result_t zext_e2e_sender_new(zext_owned_e2e_sender_t *this_,
                                  const char *profile_json,
                                  const char *values_json,
-                                 const wz_ext_e2e_sender_options_t *options,
+                                 const zext_e2e_sender_options_t *options,
                                  z_owned_string_t *refusal);
 
 /* The size of the frame that protects payload_len bytes. Z_OK; Z_ERR_NULL. */
-z_result_t wz_ext_e2e_sender_frame_size(
-    const wz_ext_loaned_e2e_sender_t *this_, size_t payload_len, size_t *out);
+z_result_t zext_e2e_sender_frame_size(
+    const zext_loaned_e2e_sender_t *this_, size_t payload_len, size_t *out);
 
 /* Protect payload on stream: the frame written to out (room for capacity
  * bytes), its length to written, the counter it carries to counter (may be
@@ -808,7 +808,7 @@ z_result_t wz_ext_e2e_sender_frame_size(
  * written, or a NULL payload with a length. Anything but Z_OK writes nothing
  * to out and consumes no counter value. The frame is written into out where
  * it lies, so out must not overlap payload. */
-z_result_t wz_ext_e2e_sender_protect(const wz_ext_loaned_e2e_sender_t *this_,
+z_result_t zext_e2e_sender_protect(const zext_loaned_e2e_sender_t *this_,
                                      size_t stream, const uint8_t *payload,
                                      size_t len, uint8_t *out, size_t capacity,
                                      size_t *written, uint64_t *counter,
@@ -816,93 +816,93 @@ z_result_t wz_ext_e2e_sender_protect(const wz_ext_loaned_e2e_sender_t *this_,
 
 /* The counter the stream's next frame carries; false when the stream is spent,
  * for no such stream, or a NULL argument. */
-bool wz_ext_e2e_sender_next(const wz_ext_loaned_e2e_sender_t *this_,
+bool zext_e2e_sender_next(const zext_loaned_e2e_sender_t *this_,
                             size_t stream, uint64_t *out);
 
 /* Make value the stream's next counter. Z_OK; Z_EINVAL for a value the counter
  * field cannot hold or no such stream; Z_ERR_NULL. */
-z_result_t wz_ext_e2e_sender_set(const wz_ext_loaned_e2e_sender_t *this_,
+z_result_t zext_e2e_sender_set(const zext_loaned_e2e_sender_t *this_,
                                  size_t stream, uint64_t value);
 
-const wz_ext_loaned_e2e_sender_t *wz_ext_e2e_sender_loan(
-    const wz_ext_owned_e2e_sender_t *this_);
-wz_ext_moved_e2e_sender_t *wz_ext_e2e_sender_move(
-    wz_ext_owned_e2e_sender_t *this_);
-void wz_ext_e2e_sender_drop(wz_ext_moved_e2e_sender_t *this_);
-void wz_ext_internal_e2e_sender_null(wz_ext_owned_e2e_sender_t *this_);
-bool wz_ext_internal_e2e_sender_check(const wz_ext_owned_e2e_sender_t *this_);
+const zext_loaned_e2e_sender_t *zext_e2e_sender_loan(
+    const zext_owned_e2e_sender_t *this_);
+zext_moved_e2e_sender_t *zext_e2e_sender_move(
+    zext_owned_e2e_sender_t *this_);
+void zext_e2e_sender_drop(zext_moved_e2e_sender_t *this_);
+void zext_internal_e2e_sender_null(zext_owned_e2e_sender_t *this_);
+bool zext_internal_e2e_sender_check(const zext_owned_e2e_sender_t *this_);
 
 /* How a receiver's streams are chosen. */
-#define WZ_EXT_E2E_KEYING_INDEXED 0         /* the program names the stream */
-#define WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL 1 /* a slot per sender, in arrival
+#define ZEXT_E2E_KEYING_INDEXED 0         /* the program names the stream */
+#define ZEXT_E2E_KEYING_SENDERS_ARRIVAL 1 /* a slot per sender, in arrival
                                                order (e2e-sender-demux) */
-#define WZ_EXT_E2E_KEYING_SENDERS_BOUND 2   /* a slot per listed sender
+#define ZEXT_E2E_KEYING_SENDERS_BOUND 2   /* a slot per listed sender
                                                (e2e-sender-demux) */
 
 /* What a verdict's status says. */
-#define WZ_EXT_E2E_OK 0            /* intact, and the next frame */
-#define WZ_EXT_E2E_FIRST 1         /* intact, and the stream's baseline */
-#define WZ_EXT_E2E_REPEATED 2      /* intact, the same counter again */
-#define WZ_EXT_E2E_OUT_OF_RANGE 3  /* intact, a step above the largest gap */
-#define WZ_EXT_E2E_COUNTER_ERROR 4 /* either of the two, under a profile that
+#define ZEXT_E2E_OK 0            /* intact, and the next frame */
+#define ZEXT_E2E_FIRST 1         /* intact, and the stream's baseline */
+#define ZEXT_E2E_REPEATED 2      /* intact, the same counter again */
+#define ZEXT_E2E_OUT_OF_RANGE 3  /* intact, a step above the largest gap */
+#define ZEXT_E2E_COUNTER_ERROR 4 /* either of the two, under a profile that
                                       reports them as one */
-#define WZ_EXT_E2E_INTEGRITY 5     /* not intact: failed says which check */
-#define WZ_EXT_E2E_UNSLOTTED 6     /* of a sender no slot holds */
+#define ZEXT_E2E_INTEGRITY 5     /* not intact: failed says which check */
+#define ZEXT_E2E_UNSLOTTED 6     /* of a sender no slot holds */
 
 /* The bits of failed. */
-#define WZ_EXT_E2E_FAILED_CRC 1
-#define WZ_EXT_E2E_FAILED_IDENT 2  /* the identifier is not the expected one */
-#define WZ_EXT_E2E_FAILED_LENGTH 4 /* the length field disagrees with the
+#define ZEXT_E2E_FAILED_CRC 1
+#define ZEXT_E2E_FAILED_IDENT 2  /* the identifier is not the expected one */
+#define ZEXT_E2E_FAILED_LENGTH 4 /* the length field disagrees with the
                                       frame */
-#define WZ_EXT_E2E_FAILED_SHORT 8  /* shorter than the header */
+#define ZEXT_E2E_FAILED_SHORT 8  /* shorter than the header */
 
 /* The values of unslotted. */
-#define WZ_EXT_E2E_SLOTTED 0
-#define WZ_EXT_E2E_NOT_LISTED 1 /* the bound list does not name the sender */
-#define WZ_EXT_E2E_SLOTS_FULL 2 /* every slot is another sender's */
+#define ZEXT_E2E_SLOTTED 0
+#define ZEXT_E2E_NOT_LISTED 1 /* the bound list does not name the sender */
+#define ZEXT_E2E_SLOTS_FULL 2 /* every slot is another sender's */
 
 /* The bits of has: which numbers of a verdict hold a value (0 otherwise). */
-#define WZ_EXT_E2E_HAS_COUNTER 1
-#define WZ_EXT_E2E_HAS_STEP 2
-#define WZ_EXT_E2E_HAS_KIND 4
-#define WZ_EXT_E2E_HAS_RESULT 8
-#define WZ_EXT_E2E_HAS_SENDER 16
-#define WZ_EXT_E2E_HAS_STREAM 32
-#define WZ_EXT_E2E_HAS_SILENCE 64
+#define ZEXT_E2E_HAS_COUNTER 1
+#define ZEXT_E2E_HAS_STEP 2
+#define ZEXT_E2E_HAS_KIND 4
+#define ZEXT_E2E_HAS_RESULT 8
+#define ZEXT_E2E_HAS_SENDER 16
+#define ZEXT_E2E_HAS_STREAM 32
+#define ZEXT_E2E_HAS_SILENCE 64
 
-typedef struct wz_ext_owned_e2e_receiver_t {
+typedef struct zext_owned_e2e_receiver_t {
   void *_handle;
-} wz_ext_owned_e2e_receiver_t;
-typedef struct wz_ext_loaned_e2e_receiver_t {
+} zext_owned_e2e_receiver_t;
+typedef struct zext_loaned_e2e_receiver_t {
   void *_handle;
-} wz_ext_loaned_e2e_receiver_t;
-typedef struct wz_ext_moved_e2e_receiver_t {
-  wz_ext_owned_e2e_receiver_t _this;
-} wz_ext_moved_e2e_receiver_t;
+} zext_loaned_e2e_receiver_t;
+typedef struct zext_moved_e2e_receiver_t {
+  zext_owned_e2e_receiver_t _this;
+} zext_moved_e2e_receiver_t;
 
-typedef struct wz_ext_e2e_receiver_options_t {
+typedef struct zext_e2e_receiver_options_t {
   uint64_t max_gap;       /* the largest gap, at most the profile's ceiling;
                              0 for the profile's own */
   const uint64_t *senders; /* the bound list, BORROWED for the call */
   size_t senders_len;
   size_t streams;         /* streams, or sender slots, at least 1 */
-  uint8_t keying;         /* WZ_EXT_E2E_KEYING_* */
-} wz_ext_e2e_receiver_options_t;
+  uint8_t keying;         /* ZEXT_E2E_KEYING_* */
+} zext_e2e_receiver_options_t;
 
 /* One stream named by the program, the profile's gap. */
-void wz_ext_e2e_receiver_options_default(wz_ext_e2e_receiver_options_t *this_);
+void zext_e2e_receiver_options_default(zext_e2e_receiver_options_t *this_);
 
 /* The verdict on one frame. The payload is frame + payload_offset, for
  * payload_len bytes, whatever the status. */
-typedef struct wz_ext_e2e_verdict_t {
+typedef struct zext_e2e_verdict_t {
   size_t struct_size; /* sizeof this struct, set by the program */
-  uint8_t status;    /* WZ_EXT_E2E_OK ... _UNSLOTTED */
-  uint8_t failed;    /* WZ_EXT_E2E_FAILED_* bits */
-  uint8_t has;       /* WZ_EXT_E2E_HAS_* bits */
+  uint8_t status;    /* ZEXT_E2E_OK ... _UNSLOTTED */
+  uint8_t failed;    /* ZEXT_E2E_FAILED_* bits */
+  uint8_t has;       /* ZEXT_E2E_HAS_* bits */
   uint8_t timeout;   /* 1 when the silence before it exceeded the profile's
                         timeout; never when the profile's timeout_ms is 0,
                         which states no timeout */
-  uint8_t unslotted; /* WZ_EXT_E2E_SLOTTED, _NOT_LISTED or _SLOTS_FULL */
+  uint8_t unslotted; /* ZEXT_E2E_SLOTTED, _NOT_LISTED or _SLOTS_FULL */
   uint8_t reserved[3];
   uint64_t counter;
   uint64_t step;     /* from the stream's baseline */
@@ -913,7 +913,7 @@ typedef struct wz_ext_e2e_verdict_t {
   size_t stream;     /* the stream or slot it was judged in */
   size_t payload_offset;
   size_t payload_len;
-} wz_ext_e2e_verdict_t;
+} zext_e2e_verdict_t;
 
 /* A receiver of profile_json's frames, made as options says (NULL: the
  * defaults). expected_json gives the identifier the profile's judge.ident
@@ -923,43 +923,43 @@ typedef struct wz_ext_e2e_verdict_t {
  *
  * Z_OK; Z_ERR_NULL for a NULL this_ or profile_json; Z_EINVAL (-75) for text
  * that is not UTF-8, an unknown keying, or a NULL senders with a length;
- * WZ_EXT_ERR_UNSUPPORTED for sender keying in a build without
+ * ZEXT_ERR_UNSUPPORTED for sender keying in a build without
  * e2e-sender-demux; _Z_ERR_CONFIG_INVALID_VALUE (-89) for a profile, expected
  * text or option refused (no stream, a gap above the profile's ceiling, sender
  * keying under a cell with no sender, more slots than E2E_SENDER_SLOTS, a bound
  * list that does not fit), refusal saying why. */
-z_result_t wz_ext_e2e_receiver_new(wz_ext_owned_e2e_receiver_t *this_,
+z_result_t zext_e2e_receiver_new(zext_owned_e2e_receiver_t *this_,
                                    const char *profile_json,
                                    const char *expected_json,
-                                   const wz_ext_e2e_receiver_options_t *options,
+                                   const zext_e2e_receiver_options_t *options,
                                    z_owned_string_t *refusal);
 
 /* Judge frame, received at now_ms (the program's clock) on stream; under
  * sender keying stream is 0 and the receiver chooses. Z_OK with the verdict;
  * Z_EINVAL for no such stream (out zeroed, nothing moved); Z_ERR_NULL for a
  * NULL receiver or out, or a NULL frame with a length. */
-z_result_t wz_ext_e2e_receiver_judge(const wz_ext_loaned_e2e_receiver_t *this_,
+z_result_t zext_e2e_receiver_judge(const zext_loaned_e2e_receiver_t *this_,
                                      size_t stream, const uint8_t *frame,
                                      size_t len, uint64_t now_ms,
-                                     wz_ext_e2e_verdict_t *out);
+                                     zext_e2e_verdict_t *out);
 
 /* With e2e-sender-demux: how many frames were judged in no slot, by reason
  * (either out may be NULL), and the sender a slot holds (false for a free
  * slot or no such slot). */
-z_result_t wz_ext_e2e_receiver_counts(
-    const wz_ext_loaned_e2e_receiver_t *this_, uint64_t *not_listed,
+z_result_t zext_e2e_receiver_counts(
+    const zext_loaned_e2e_receiver_t *this_, uint64_t *not_listed,
     uint64_t *full);
-bool wz_ext_e2e_receiver_slot_sender(const wz_ext_loaned_e2e_receiver_t *this_,
+bool zext_e2e_receiver_slot_sender(const zext_loaned_e2e_receiver_t *this_,
                                      size_t slot, uint64_t *out);
 
-const wz_ext_loaned_e2e_receiver_t *wz_ext_e2e_receiver_loan(
-    const wz_ext_owned_e2e_receiver_t *this_);
-wz_ext_moved_e2e_receiver_t *wz_ext_e2e_receiver_move(
-    wz_ext_owned_e2e_receiver_t *this_);
-void wz_ext_e2e_receiver_drop(wz_ext_moved_e2e_receiver_t *this_);
-void wz_ext_internal_e2e_receiver_null(wz_ext_owned_e2e_receiver_t *this_);
-bool wz_ext_internal_e2e_receiver_check(
-    const wz_ext_owned_e2e_receiver_t *this_);
+const zext_loaned_e2e_receiver_t *zext_e2e_receiver_loan(
+    const zext_owned_e2e_receiver_t *this_);
+zext_moved_e2e_receiver_t *zext_e2e_receiver_move(
+    zext_owned_e2e_receiver_t *this_);
+void zext_e2e_receiver_drop(zext_moved_e2e_receiver_t *this_);
+void zext_internal_e2e_receiver_null(zext_owned_e2e_receiver_t *this_);
+bool zext_internal_e2e_receiver_check(
+    const zext_owned_e2e_receiver_t *this_);
 
 /* ---- Instance keys (instance-key) --------------------------------------- */
 
@@ -978,12 +978,12 @@ bool wz_ext_internal_e2e_receiver_check(
  * presence reads as 0 or the empty string), or a value is in no list. Drops are
  * reported at the rate the description states: the first after a quiet
  * interval carries the count since the last report, and with the event-ring
- * capability each report is also an event of WZ_EXT_EVENT_SOURCE_
+ * capability each report is also an event of ZEXT_EVENT_SOURCE_
  * INSTANCE_KEY_DROPPED.
  *
  * The instance is the STREAM of the end-to-end doors: with e2e-receiver,
- * wz_ext_instance_keyer_judge judges a frame in the receiver's stream of the
- * instance its payload is; with e2e-sender, wz_ext_instance_keyer_protect
+ * zext_instance_keyer_judge judges a frame in the receiver's stream of the
+ * instance its payload is; with e2e-sender, zext_instance_keyer_protect
  * protects a payload on the sender's counter stream of its instance. A receiver
  * that keeps its streams per sender (e2e-sender-demux) is refused: instance
  * keys and sender slots are exclusive on one message. The last value of each
@@ -993,7 +993,7 @@ bool wz_ext_internal_e2e_receiver_check(
  * files into when the program is built (protoc --include_imports -o), handed
  * over as bytes. A build with the proto-text capability (WZ_FEATURE_PROTO_TEXT
  * of the config.h of the library's build) also reads the files' text itself,
- * through wz_ext_proto_file_t; a build without it links no text reader, and
+ * through zext_proto_file_t; a build without it links no text reader, and
  * those declarations are not made.
  *
  * OWNERSHIP AND THREADS. As for the end-to-end doors. The judging and
@@ -1003,58 +1003,58 @@ bool wz_ext_internal_e2e_receiver_check(
 #if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
 /* One .proto file: the name other files import it by, and its text, both
  * NUL-terminated UTF-8, borrowed for the call. */
-typedef struct wz_ext_proto_file_t {
+typedef struct zext_proto_file_t {
   const char *name;
   const char *text;
-} wz_ext_proto_file_t;
+} zext_proto_file_t;
 #endif
 
-typedef struct wz_ext_owned_instance_keyer_t {
+typedef struct zext_owned_instance_keyer_t {
   void *_handle;
-} wz_ext_owned_instance_keyer_t;
-typedef struct wz_ext_loaned_instance_keyer_t {
+} zext_owned_instance_keyer_t;
+typedef struct zext_loaned_instance_keyer_t {
   void *_handle;
-} wz_ext_loaned_instance_keyer_t;
-typedef struct wz_ext_moved_instance_keyer_t {
-  wz_ext_owned_instance_keyer_t _this;
-} wz_ext_moved_instance_keyer_t;
+} zext_loaned_instance_keyer_t;
+typedef struct zext_moved_instance_keyer_t {
+  zext_owned_instance_keyer_t _this;
+} zext_moved_instance_keyer_t;
 
-typedef struct wz_ext_instance_keyer_options_t {
+typedef struct zext_instance_keyer_options_t {
   uint8_t *storage;      /* the last values, value_capacity bytes per
                             instance; the program's, valid and untouched until
                             the keyer is dropped */
   size_t storage_len;
   size_t value_capacity; /* 0 keeps no last values */
-} wz_ext_instance_keyer_options_t;
+} zext_instance_keyer_options_t;
 
 /* What became of one sample. */
-#define WZ_EXT_INSTANCE_KEY_INDEXED 0     /* instance is its index */
-#define WZ_EXT_INSTANCE_KEY_UNDECODABLE 1 /* not a message of the schema, or a
+#define ZEXT_INSTANCE_KEY_INDEXED 0     /* instance is its index */
+#define ZEXT_INSTANCE_KEY_UNDECODABLE 1 /* not a message of the schema, or a
                                              frame shorter than its header */
-#define WZ_EXT_INSTANCE_KEY_ABSENT 2      /* field names the absent key field */
-#define WZ_EXT_INSTANCE_KEY_NOT_LISTED 3  /* field names the key field whose
+#define ZEXT_INSTANCE_KEY_ABSENT 2      /* field names the absent key field */
+#define ZEXT_INSTANCE_KEY_NOT_LISTED 3  /* field names the key field whose
                                              value is in no list */
 
 /* What became of the instance's last value. */
-#define WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT 0   /* none kept, or dropped */
-#define WZ_EXT_INSTANCE_KEY_LAST_RECORDED 1   /* the payload is now its last */
-#define WZ_EXT_INSTANCE_KEY_LAST_NOT_INTACT 2 /* the frame is not intact */
-#define WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG 3   /* longer than an instance's room */
+#define ZEXT_INSTANCE_KEY_LAST_NOT_KEPT 0   /* none kept, or dropped */
+#define ZEXT_INSTANCE_KEY_LAST_RECORDED 1   /* the payload is now its last */
+#define ZEXT_INSTANCE_KEY_LAST_NOT_INTACT 2 /* the frame is not intact */
+#define ZEXT_INSTANCE_KEY_LAST_TOO_LONG 3   /* longer than an instance's room */
 
-typedef struct wz_ext_instance_key_t {
+typedef struct zext_instance_key_t {
   size_t struct_size; /* sizeof this struct, set by the program */
-  uint8_t status;   /* WZ_EXT_INSTANCE_KEY_* */
+  uint8_t status;   /* ZEXT_INSTANCE_KEY_* */
   uint8_t reported; /* 1 when this drop carries the report of the drops since
                        the last one */
-  uint8_t last;     /* WZ_EXT_INSTANCE_KEY_LAST_* */
+  uint8_t last;     /* ZEXT_INSTANCE_KEY_LAST_* */
   uint8_t reserved;
   uint32_t field;   /* for _ABSENT and _NOT_LISTED, in the description's order */
   uint64_t dropped; /* when reported, the drops since the last report */
   size_t instance;  /* for _INDEXED */
-} wz_ext_instance_key_t;
+} zext_instance_key_t;
 
-void wz_ext_instance_keyer_options_default(
-    wz_ext_instance_keyer_options_t *this_);
+void zext_instance_keyer_options_default(
+    zext_instance_keyer_options_t *this_);
 
 /* A keyer of the message description names, over the schema in the len
  * bytes at bytes, a FileDescriptorSet. description is JSON:
@@ -1069,84 +1069,84 @@ void wz_ext_instance_keyer_options_default(
  * naming the limit exceeded. Z_ERR_NULL (-127) for a NULL argument the call
  * needs, NULL bytes with a length, or NULL storage with a value_capacity;
  * Z_EINVAL (-75) for a description that is not UTF-8. */
-z_result_t wz_ext_instance_keyer_from_descriptor_set(
-    wz_ext_owned_instance_keyer_t *this_, const uint8_t *bytes, size_t len,
-    const char *description, const wz_ext_instance_keyer_options_t *options,
+z_result_t zext_instance_keyer_from_descriptor_set(
+    zext_owned_instance_keyer_t *this_, const uint8_t *bytes, size_t len,
+    const char *description, const zext_instance_keyer_options_t *options,
     z_owned_string_t *refusal);
 #if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
 /* The same keyer over the file_count .proto files (every one is read, with
  * what it imports), in a build with proto-text. Z_ERR_NULL also for NULL files
  * with a count or a file with a NULL name or text; Z_EINVAL for any text that
  * is not UTF-8. */
-z_result_t wz_ext_instance_keyer_new(
-    wz_ext_owned_instance_keyer_t *this_, const wz_ext_proto_file_t *files,
+z_result_t zext_instance_keyer_new(
+    zext_owned_instance_keyer_t *this_, const zext_proto_file_t *files,
     size_t file_count, const char *description,
-    const wz_ext_instance_keyer_options_t *options,
+    const zext_instance_keyer_options_t *options,
     z_owned_string_t *refusal);
 #endif
-z_result_t wz_ext_instance_keyer_instances(
-    const wz_ext_loaned_instance_keyer_t *this_, size_t *out);
+z_result_t zext_instance_keyer_instances(
+    const zext_loaned_instance_keyer_t *this_, size_t *out);
 /* The instance payload, received or about to be sent at now_ms, is; an
  * indexed payload becomes the instance's last value. Z_OK whatever out says. */
-z_result_t wz_ext_instance_keyer_index(
-    const wz_ext_loaned_instance_keyer_t *this_, const uint8_t *payload,
-    size_t len, uint64_t now_ms, wz_ext_instance_key_t *out);
+z_result_t zext_instance_keyer_index(
+    const zext_loaned_instance_keyer_t *this_, const uint8_t *payload,
+    size_t len, uint64_t now_ms, zext_instance_key_t *out);
 /* The report of the drops held since the last one, when the interval has
  * passed: true, out naming the latest drop's reason and the count. */
-bool wz_ext_instance_keyer_flush(const wz_ext_loaned_instance_keyer_t *this_,
-                                 uint64_t now_ms, wz_ext_instance_key_t *out);
-z_result_t wz_ext_instance_keyer_counts(
-    const wz_ext_loaned_instance_keyer_t *this_, uint64_t *undecodable,
+bool zext_instance_keyer_flush(const zext_loaned_instance_keyer_t *this_,
+                                 uint64_t now_ms, zext_instance_key_t *out);
+z_result_t zext_instance_keyer_counts(
+    const zext_loaned_instance_keyer_t *this_, uint64_t *undecodable,
     uint64_t *absent, uint64_t *not_listed);
 /* Copy an instance's last value: Z_OK; Z_CHANNEL_NODATA (2) before its first;
  * Z_ERR_OVERFLOW (-74) when capacity is short (len is the value's length);
  * Z_EINVAL for an instance the keyer has not or a keyer without storage. */
-z_result_t wz_ext_instance_keyer_last(
-    const wz_ext_loaned_instance_keyer_t *this_, size_t instance, uint8_t *out,
+z_result_t zext_instance_keyer_last(
+    const zext_loaned_instance_keyer_t *this_, size_t instance, uint8_t *out,
     size_t capacity, size_t *len);
 /* Make value an instance's last value (what a publisher sends before its
  * first, say). Z_ERR_OVERFLOW for a value longer than an instance's room. */
-z_result_t wz_ext_instance_keyer_set_last(
-    const wz_ext_loaned_instance_keyer_t *this_, size_t instance,
+z_result_t zext_instance_keyer_set_last(
+    const zext_loaned_instance_keyer_t *this_, size_t instance,
     const uint8_t *value, size_t len);
 /* With e2e-receiver: judge frame in receiver's stream of the instance its
  * payload (what follows the receiver's header) is. Z_OK whatever key and
  * verdict say; verdict is zeroed for a dropped frame, which moves nothing.
  * _Z_ERR_CONFIG_INVALID_VALUE for a receiver kept per sender or with fewer
  * streams than the keyer has instances. */
-z_result_t wz_ext_instance_keyer_judge(
-    const wz_ext_loaned_instance_keyer_t *this_,
-    const wz_ext_loaned_e2e_receiver_t *receiver, const uint8_t *frame,
-    size_t len, uint64_t now_ms, wz_ext_instance_key_t *key,
-    wz_ext_e2e_verdict_t *verdict);
+z_result_t zext_instance_keyer_judge(
+    const zext_loaned_instance_keyer_t *this_,
+    const zext_loaned_e2e_receiver_t *receiver, const uint8_t *frame,
+    size_t len, uint64_t now_ms, zext_instance_key_t *key,
+    zext_e2e_verdict_t *verdict);
 /* With e2e-sender: protect payload on sender's counter stream of its
  * instance. Z_EINVAL when the payload is no instance (key says why; nothing is
  * built and no counter value consumed); Z_ERR_OVERFLOW when capacity is
  * short; _Z_ERR_CONFIG_INVALID_VALUE for a sender with fewer streams than the
  * keyer has instances. */
-z_result_t wz_ext_instance_keyer_protect(
-    const wz_ext_loaned_instance_keyer_t *this_,
-    const wz_ext_loaned_e2e_sender_t *sender, const uint8_t *payload,
+z_result_t zext_instance_keyer_protect(
+    const zext_loaned_instance_keyer_t *this_,
+    const zext_loaned_e2e_sender_t *sender, const uint8_t *payload,
     size_t len, uint64_t now_ms, uint8_t *out, size_t capacity,
-    size_t *written, uint64_t *counter, wz_ext_instance_key_t *key);
-const wz_ext_loaned_instance_keyer_t *wz_ext_instance_keyer_loan(
-    const wz_ext_owned_instance_keyer_t *this_);
-wz_ext_moved_instance_keyer_t *wz_ext_instance_keyer_move(
-    wz_ext_owned_instance_keyer_t *this_);
+    size_t *written, uint64_t *counter, zext_instance_key_t *key);
+const zext_loaned_instance_keyer_t *zext_instance_keyer_loan(
+    const zext_owned_instance_keyer_t *this_);
+zext_moved_instance_keyer_t *zext_instance_keyer_move(
+    zext_owned_instance_keyer_t *this_);
 /* The storage of the last values is the program's again once it returns. */
-void wz_ext_instance_keyer_drop(wz_ext_moved_instance_keyer_t *this_);
-void wz_ext_internal_instance_keyer_null(wz_ext_owned_instance_keyer_t *this_);
-bool wz_ext_internal_instance_keyer_check(
-    const wz_ext_owned_instance_keyer_t *this_);
+void zext_instance_keyer_drop(zext_moved_instance_keyer_t *this_);
+void zext_internal_instance_keyer_null(zext_owned_instance_keyer_t *this_);
+bool zext_internal_instance_keyer_check(
+    const zext_owned_instance_keyer_t *this_);
 
 /* wz's own result codes of the doors below, outside zenoh-pico's own codes
  * (-128 to -65), so a later zenoh-pico code cannot take them. */
-#define WZ_EXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what
+#define ZEXT_ERR_POLICY_OFF (-2)  /* the build's policy does not allow what
                                        the call states; nothing was sent */
-#define WZ_EXT_ERR_UNSUPPORTED (-3) /* the session's engine, or this build, does
+#define ZEXT_ERR_UNSUPPORTED (-3) /* the session's engine, or this build, does
                                        not do what the call asks; nothing was
                                        declared or sent */
-#define WZ_EXT_ERR_SCOUT_REENTERED (-25) /* z_scout, or a z_open that scouts,
+#define ZEXT_ERR_SCOUT_REENTERED (-25) /* z_scout, or a z_open that scouts,
                                             asked from inside a scout's callback
                                             on the cooperative engine: refused
                                             at once, nothing was sent */
@@ -1156,42 +1156,42 @@ bool wz_ext_internal_instance_keyer_check(
  * remote-declaration-watch or the declarations-synced-event capability.
  *
  * A watch is of one kind of entity, and is told each one a peer declares
- * (WZ_EXT_DECL_DECLARED, with the id the peer declared it under and its key)
- * and each one it retracts (WZ_EXT_DECL_UNDECLARED, with the id; the wire
+ * (ZEXT_DECL_DECLARED, with the id the peer declared it under and its key)
+ * and each one it retracts (ZEXT_DECL_UNDECLARED, with the id; the wire
  * names no key). With remote-declaration-watch every event names the peer, as
  * the zenoh id its link's handshake gave; without it zid_len is 0. With
  * declarations-synced-event a watch is told once for each establishment of a
  * link that the peer has sent everything it held when the link came up
- * (WZ_EXT_DECL_SYNCED); without it that event is never told.
+ * (ZEXT_DECL_SYNCED); without it that event is never told.
  *
  * A watch of subscribers or queryables is told first what each peer holds
- * when it is declared, as WZ_EXT_DECL_DECLARED events ahead of every live
+ * when it is declared, as ZEXT_DECL_DECLARED events ahead of every live
  * event of that link, then what the peers declare and retract from then on,
  * on every link the session holds and every link that comes up later. Each
  * declaration is told once, or, when the library had no room to hold the
- * events a watch is owed, the watch is told how many it lost (WZ_EXT_DECL_LOST,
+ * events a watch is owed, the watch is told how many it lost (ZEXT_DECL_LOST,
  * the count in id) ahead of its next event. A watch of tokens hears only what comes after it
  * is declared. A watch declared after a link's peer finished its initial
- * declarations is not told WZ_EXT_DECL_SYNCED for that link. A link that is
+ * declarations is not told ZEXT_DECL_SYNCED for that link. A link that is
  * lost tells no undeclaration for what its peer held, and the members of a
  * multicast group are not watched. */
 
 /* What an event says. */
-#define WZ_EXT_DECL_DECLARED 0
-#define WZ_EXT_DECL_UNDECLARED 1
-#define WZ_EXT_DECL_SYNCED 2
-#define WZ_EXT_DECL_LOST 3 /* added in minor version 3 */
+#define ZEXT_DECL_DECLARED 0
+#define ZEXT_DECL_UNDECLARED 1
+#define ZEXT_DECL_SYNCED 2
+#define ZEXT_DECL_LOST 3 /* added in minor version 3 */
 
 /* The kind of entity a watch is of. */
-#define WZ_EXT_DECL_SUBSCRIBER 0
-#define WZ_EXT_DECL_QUERYABLE 1
-#define WZ_EXT_DECL_TOKEN 2
+#define ZEXT_DECL_SUBSCRIBER 0
+#define ZEXT_DECL_QUERYABLE 1
+#define ZEXT_DECL_TOKEN 2
 
 /* One event, as the callback reads it: 48 bytes on a 64-bit target, 40 on a
  * 32-bit one. It and the key it points to are valid only for the call. */
-typedef struct wz_ext_decl_event_t {
-  uint8_t kind;      /* WZ_EXT_DECL_DECLARED, _UNDECLARED, _SYNCED or _LOST */
-  uint8_t entity;    /* the kind the watch is of: WZ_EXT_DECL_SUBSCRIBER,
+typedef struct zext_decl_event_t {
+  uint8_t kind;      /* ZEXT_DECL_DECLARED, _UNDECLARED, _SYNCED or _LOST */
+  uint8_t entity;    /* the kind the watch is of: ZEXT_DECL_SUBSCRIBER,
                         _QUERYABLE or _TOKEN */
   uint8_t zid_len;   /* how many bytes of zid name the peer; 0 when the peer
                         is not known */
@@ -1205,22 +1205,22 @@ typedef struct wz_ext_decl_event_t {
   size_t keyexpr_len;
   uint8_t zid[16];   /* the peer's zenoh id in the layout of z_id_t, zero past
                         zid_len */
-} wz_ext_decl_event_t;
+} zext_decl_event_t;
 
 /* The program's callback. It runs where the session hands out its callbacks,
  * with no lock of the library held, so it may call into the session. */
-typedef void wz_ext_decl_watch_fn(void *context,
-                                  const wz_ext_decl_event_t *event);
+typedef void zext_decl_watch_fn(void *context,
+                                  const zext_decl_event_t *event);
 
 /* Runs once, after the last call, when the watch lets go of context. */
-typedef void wz_ext_decl_watch_drop_fn(void *context);
+typedef void zext_decl_watch_drop_fn(void *context);
 
 /* An owned watch; NULL in _val when it holds none. */
-typedef struct wz_ext_owned_decl_watch_t {
+typedef struct zext_owned_decl_watch_t {
   void *_val;
-} wz_ext_owned_decl_watch_t;
+} zext_owned_decl_watch_t;
 
-/* Watch the peers of session for the entity kind named (WZ_EXT_DECL_SUBSCRIBER,
+/* Watch the peers of session for the entity kind named (ZEXT_DECL_SUBSCRIBER,
  * _QUERYABLE or _TOKEN), telling each event to call with context, and write
  * the watch to watch. drop may be NULL.
  *
@@ -1230,22 +1230,22 @@ typedef struct wz_ext_owned_decl_watch_t {
  *
  * Z_OK; Z_ERR_NULL for a NULL watch, call or session; Z_ERR_INVALID for
  * another entity kind; Z_ERR_SESSION_CLOSED for a closed session;
- * WZ_EXT_ERR_UNSUPPORTED when the session's engine does not watch, or the
+ * ZEXT_ERR_UNSUPPORTED when the session's engine does not watch, or the
  * build hears no declaration of that kind; _Z_ERR_SYSTEM_OUT_OF_MEMORY when
  * the session holds as many watches as its MAX_DECL_WATCHES admits, or as
  * many observers of what a peer declares as their bound allows. */
-z_result_t wz_ext_decl_watch_declare(const z_loaned_session_t *session,
-                                     wz_ext_owned_decl_watch_t *watch,
+z_result_t zext_decl_watch_declare(const z_loaned_session_t *session,
+                                     zext_owned_decl_watch_t *watch,
                                      uint8_t entity,
-                                     wz_ext_decl_watch_fn *call,
-                                     wz_ext_decl_watch_drop_fn *drop,
+                                     zext_decl_watch_fn *call,
+                                     zext_decl_watch_drop_fn *drop,
                                      void *context);
 
 /* Stop the watch and leave it NULL: no event is told after this returns, and
  * drop(context) has run by then, unless this is called from inside the
  * watch's own callback, when it runs as the callback returns. A NULL watch, or
  * one that holds none, is left as it is. */
-void wz_ext_decl_watch_drop(wz_ext_owned_decl_watch_t *watch);
+void zext_decl_watch_drop(zext_owned_decl_watch_t *watch);
 
 /* z_get, addressed to the one node peer names: it is asked on the link that
  * reaches that node and on no other, not of the session's own queryables and
@@ -1256,16 +1256,16 @@ void wz_ext_decl_watch_drop(wz_ext_owned_decl_watch_t *watch);
  *
  * callback and the moved parts of options are consumed on every path, as
  * z_get consumes them; on a refusal the callback's drop runs before this
- * returns. WZ_EXT_ERR_POLICY_OFF when the targeted-query policy is off;
+ * returns. ZEXT_ERR_POLICY_OFF when the targeted-query policy is off;
  * Z_ERR_INVALID for an all-zero peer; Z_ERR_NULL for a NULL peer;
- * WZ_EXT_ERR_UNSUPPORTED when the session's engine cannot address a get to
+ * ZEXT_ERR_UNSUPPORTED when the session's engine cannot address a get to
  * one node (the cooperative engine); each sends nothing. Otherwise what z_get
  * answers.
  *
  * Declared where the drop-in header declares z_get: its types are the query
  * plane's, which a header without Z_FEATURE_QUERY does not have. */
 #if defined(Z_FEATURE_QUERY) && Z_FEATURE_QUERY == 1
-z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
+z_result_t zext_get_to_peer(const z_loaned_session_t *session,
                               const z_loaned_keyexpr_t *keyexpr,
                               const char *parameters,
                               z_moved_closure_reply_t *callback,
@@ -1310,7 +1310,7 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
  * TIME is milliseconds: the program's own for a publisher's frames (it orders
  * an answer), and for a subscriber its clock in 32 bits that wrap, given in
  * the options, or the library's monotonic clock when it gives none; the
- * deadlines are judged by wz_ext_replay_subscriber_poll.
+ * deadlines are judged by zext_replay_subscriber_poll.
  *
  * THREADS. Each door runs under the object's lock. A subscriber's callback
  * runs inside that lock, one sample at a time in the order the judge saw them,
@@ -1318,44 +1318,44 @@ z_result_t wz_ext_get_to_peer(const z_loaned_session_t *session,
  * must not call a door of its own subscriber. Keep the session (and a
  * publisher's publisher) until the object is dropped. */
 
-#define WZ_EXT_REPLAY_SEND_PERIODIC 0
-#define WZ_EXT_REPLAY_SEND_EVENT 1
+#define ZEXT_REPLAY_SEND_PERIODIC 0
+#define ZEXT_REPLAY_SEND_EVENT 1
 
 /* What a put did. */
-#define WZ_EXT_REPLAY_SENT 0
-#define WZ_EXT_REPLAY_HELD 1
-#define WZ_EXT_REPLAY_HELD_REPLACED 2      /* the instance's earlier held frame
+#define ZEXT_REPLAY_SENT 0
+#define ZEXT_REPLAY_HELD 1
+#define ZEXT_REPLAY_HELD_REPLACED 2      /* the instance's earlier held frame
                                               will not go out */
-#define WZ_EXT_REPLAY_DEFERRED 3
-#define WZ_EXT_REPLAY_DEFERRED_OVERWROTE 4 /* the queue gave up its oldest */
+#define ZEXT_REPLAY_DEFERRED 3
+#define ZEXT_REPLAY_DEFERRED_OVERWROTE 4 /* the queue gave up its oldest */
 
 /* Where a publisher's cache stands. */
-#define WZ_EXT_REPLAY_SERVING_IDLE 0
-#define WZ_EXT_REPLAY_SERVING_ANSWERING 1
-#define WZ_EXT_REPLAY_SERVING_RELEASING 2
-#define WZ_EXT_REPLAY_NO_CACHE 255
+#define ZEXT_REPLAY_SERVING_IDLE 0
+#define ZEXT_REPLAY_SERVING_ANSWERING 1
+#define ZEXT_REPLAY_SERVING_RELEASING 2
+#define ZEXT_REPLAY_NO_CACHE 255
 
 /* Where a subscriber's round stands. */
-#define WZ_EXT_REPLAY_ROUND_IDLE 0
-#define WZ_EXT_REPLAY_ROUND_ASKING 1
-#define WZ_EXT_REPLAY_ROUND_ANSWERING 2
-#define WZ_EXT_REPLAY_ROUND_ABANDONED 3
-#define WZ_EXT_REPLAY_ROUND_LIVE 4
-#define WZ_EXT_REPLAY_NO_SUBSCRIBER 255
+#define ZEXT_REPLAY_ROUND_IDLE 0
+#define ZEXT_REPLAY_ROUND_ASKING 1
+#define ZEXT_REPLAY_ROUND_ANSWERING 2
+#define ZEXT_REPLAY_ROUND_ABANDONED 3
+#define ZEXT_REPLAY_ROUND_LIVE 4
+#define ZEXT_REPLAY_NO_SUBSCRIBER 255
 
-typedef struct wz_ext_replay_shape_t {
+typedef struct zext_replay_shape_t {
   size_t frame_max;   /* the longest frame kept, at least 1 */
   uint32_t depth;     /* frames per instance, 1 to REPLAY_DEPTH_MAX */
   uint32_t instances; /* at least 1 */
-} wz_ext_replay_shape_t;
+} zext_replay_shape_t;
 
-typedef struct wz_ext_replay_publisher_counts_t {
+typedef struct zext_replay_publisher_counts_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   uint64_t recorded;
   uint64_t deferred_overwritten;
   uint64_t periodic_replaced;
   uint64_t answers;
-} wz_ext_replay_publisher_counts_t;
+} zext_replay_publisher_counts_t;
 
 /* Under segmented: the segment profile and the program's values of its
  * fields (JSON, BORROWED for the call), the first transfer number and the
@@ -1363,26 +1363,26 @@ typedef struct wz_ext_replay_publisher_counts_t {
  * answered after the first, in the same answer or a later one, carries the
  * next number: answers are numbered on, back to first_transfer only past the
  * largest number the field holds. */
-typedef struct wz_ext_replay_serve_options_t {
+typedef struct zext_replay_serve_options_t {
   const char *segment_profile;
   const char *segment_values;
   uint64_t first_transfer;
   size_t chunk_bytes;
-} wz_ext_replay_serve_options_t;
+} zext_replay_serve_options_t;
 
-typedef struct wz_ext_owned_replay_publisher_t {
+typedef struct zext_owned_replay_publisher_t {
   void *_handle;
-} wz_ext_owned_replay_publisher_t;
-typedef struct wz_ext_loaned_replay_publisher_t {
+} zext_owned_replay_publisher_t;
+typedef struct zext_loaned_replay_publisher_t {
   void *_handle;
-} wz_ext_loaned_replay_publisher_t;
-typedef struct wz_ext_moved_replay_publisher_t {
-  wz_ext_owned_replay_publisher_t _this;
-} wz_ext_moved_replay_publisher_t;
+} zext_loaned_replay_publisher_t;
+typedef struct zext_moved_replay_publisher_t {
+  zext_owned_replay_publisher_t _this;
+} zext_moved_replay_publisher_t;
 
 /* The storage a cache of shape takes; 0 for a NULL shape, one with no depth,
  * instance or frame room, or one whose size overflows. */
-size_t wz_ext_replay_publisher_storage_size(const wz_ext_replay_shape_t *shape);
+size_t zext_replay_publisher_storage_size(const zext_replay_shape_t *shape);
 
 /* A cache of shape over storage, on session (whose policies and
  * REPLAY_DEPTH_MAX it reads once), putting the message on publisher. this_
@@ -1390,18 +1390,18 @@ size_t wz_ext_replay_publisher_storage_size(const wz_ext_replay_shape_t *shape);
  * for a NULL argument; Z_ERR_SESSION_CLOSED; _Z_ERR_CONFIG_INVALID_VALUE (-89)
  * for a shape out of range (a depth past the session's REPLAY_DEPTH_MAX among
  * them) or storage too short, refusal saying why. */
-z_result_t wz_ext_replay_publisher_new(wz_ext_owned_replay_publisher_t *this_,
+z_result_t zext_replay_publisher_new(zext_owned_replay_publisher_t *this_,
                                        const z_loaned_session_t *session,
                                        const z_loaned_publisher_t *publisher,
                                        uint8_t *storage, size_t storage_len,
-                                       const wz_ext_replay_shape_t *shape,
+                                       const zext_replay_shape_t *shape,
                                        z_owned_string_t *refusal);
 
 /* Record a frame sent at time_ms on instance, without putting it. Z_OK;
  * Z_EINVAL (-75) for no such instance or a frame past frame_max (nothing
  * recorded); Z_ERR_NULL. */
-z_result_t wz_ext_replay_publisher_record(
-    const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
+z_result_t zext_replay_publisher_record(
+    const zext_loaned_replay_publisher_t *this_, size_t instance,
     uint64_t time_ms, const uint8_t *frame, size_t len);
 
 /* Record a frame and put it, or hold it while an answer is served under
@@ -1411,13 +1411,13 @@ z_result_t wz_ext_replay_publisher_record(
  * put's code when it failed (the frame is recorded); Z_EINVAL for no such
  * instance, a frame past frame_max, an unknown kind, or a segmented cache that
  * does not serve yet (nothing recorded); Z_ERR_NULL. */
-z_result_t wz_ext_replay_publisher_put(
-    const wz_ext_loaned_replay_publisher_t *this_, size_t instance,
+z_result_t zext_replay_publisher_put(
+    const zext_loaned_replay_publisher_t *this_, size_t instance,
     uint64_t time_ms, const uint8_t *frame, size_t len, uint8_t kind,
     uint8_t *dispatch);
 
 /* No segment profile, chunks of 0 bytes. */
-void wz_ext_replay_serve_options_default(wz_ext_replay_serve_options_t *this_);
+void zext_replay_serve_options_default(zext_replay_serve_options_t *this_);
 
 /* Declare the cache's queryable on keyexpr followed by suffix. options may be
  * NULL under frame-per-sample. Z_OK; Z_ERR_NULL; Z_EINVAL for text that is not
@@ -1425,57 +1425,57 @@ void wz_ext_replay_serve_options_default(wz_ext_replay_serve_options_t *this_);
  * Z_ERR_INVALID for a suffixed key that is no key expression;
  * _Z_ERR_CONFIG_INVALID_VALUE for a segment profile or values refused;
  * otherwise what z_declare_queryable answers. */
-z_result_t wz_ext_replay_publisher_serve(
-    const wz_ext_loaned_replay_publisher_t *this_,
+z_result_t zext_replay_publisher_serve(
+    const zext_loaned_replay_publisher_t *this_,
     const z_loaned_keyexpr_t *keyexpr, const char *suffix,
-    const wz_ext_replay_serve_options_t *options, z_owned_string_t *refusal);
+    const zext_replay_serve_options_t *options, z_owned_string_t *refusal);
 
-/* WZ_EXT_REPLAY_SERVING_*, or WZ_EXT_REPLAY_NO_CACHE. */
-uint8_t wz_ext_replay_publisher_phase(
-    const wz_ext_loaned_replay_publisher_t *this_);
-z_result_t wz_ext_replay_publisher_counts(
-    const wz_ext_loaned_replay_publisher_t *this_,
-    wz_ext_replay_publisher_counts_t *out);
+/* ZEXT_REPLAY_SERVING_*, or ZEXT_REPLAY_NO_CACHE. */
+uint8_t zext_replay_publisher_phase(
+    const zext_loaned_replay_publisher_t *this_);
+z_result_t zext_replay_publisher_counts(
+    const zext_loaned_replay_publisher_t *this_,
+    zext_replay_publisher_counts_t *out);
 
-const wz_ext_loaned_replay_publisher_t *wz_ext_replay_publisher_loan(
-    const wz_ext_owned_replay_publisher_t *this_);
-wz_ext_moved_replay_publisher_t *wz_ext_replay_publisher_move(
-    wz_ext_owned_replay_publisher_t *this_);
+const zext_loaned_replay_publisher_t *zext_replay_publisher_loan(
+    const zext_owned_replay_publisher_t *this_);
+zext_moved_replay_publisher_t *zext_replay_publisher_move(
+    zext_owned_replay_publisher_t *this_);
 /* Undeclares the queryable; the storage is the program's again on return. */
-void wz_ext_replay_publisher_drop(wz_ext_moved_replay_publisher_t *this_);
-void wz_ext_internal_replay_publisher_null(
-    wz_ext_owned_replay_publisher_t *this_);
-bool wz_ext_internal_replay_publisher_check(
-    const wz_ext_owned_replay_publisher_t *this_);
+void zext_replay_publisher_drop(zext_moved_replay_publisher_t *this_);
+void zext_internal_replay_publisher_null(
+    zext_owned_replay_publisher_t *this_);
+bool zext_internal_replay_publisher_check(
+    const zext_owned_replay_publisher_t *this_);
 
 /* One row of a subscriber's table of publishers. */
-typedef struct wz_ext_replay_publisher_slot_t {
+typedef struct zext_replay_publisher_slot_t {
   uint64_t _opaque[4];
-} wz_ext_replay_publisher_slot_t;
+} zext_replay_publisher_slot_t;
 
 /* The program's clock: writes the milliseconds of a monotonic source and
  * returns 0, or returns anything else when it cannot say what time it is. */
-typedef int8_t wz_ext_replay_clock_fn(void *context, uint32_t *now_ms);
+typedef int8_t zext_replay_clock_fn(void *context, uint32_t *now_ms);
 
 /* One sample handed to the program: 128 bytes on a 64-bit target. It and the
  * frame it points to are valid only for the call. */
-typedef struct wz_ext_replay_sample_t {
+typedef struct zext_replay_sample_t {
   const uint8_t *frame;
   size_t len;
-  wz_ext_e2e_verdict_t verdict; /* zero but its struct_size when judged is 0 */
+  zext_e2e_verdict_t verdict; /* zero but its struct_size when judged is 0 */
   uint8_t from_replay;          /* 1 for a reply, 0 for a live sample */
   uint8_t judged;               /* 0 when stream is none the receiver has */
   uint8_t zid_len;              /* the replying publisher; 0 when live */
   uint8_t reserved;
   uint8_t zid[16];
-} wz_ext_replay_sample_t;
+} zext_replay_sample_t;
 
-typedef void wz_ext_replay_deliver_fn(void *context,
-                                      const wz_ext_replay_sample_t *sample);
-typedef void wz_ext_replay_drop_fn(void *context);
+typedef void zext_replay_deliver_fn(void *context,
+                                      const zext_replay_sample_t *sample);
+typedef void zext_replay_drop_fn(void *context);
 
-typedef struct wz_ext_replay_subscriber_options_t {
-  wz_ext_replay_publisher_slot_t *slots; /* at least one row */
+typedef struct zext_replay_subscriber_options_t {
+  zext_replay_publisher_slot_t *slots; /* at least one row */
   size_t slot_count;
   uint8_t *held;    /* under hold-back: cells of 4 + held_cell bytes */
   size_t held_len;
@@ -1486,13 +1486,13 @@ typedef struct wz_ext_replay_subscriber_options_t {
   size_t stream;    /* the receiver's stream (0 under sender keying) */
   uint32_t progress_ms; /* 1 to 2147483647, no default */
   uint32_t round_ms;    /* 1 to 2147483647, no default */
-  wz_ext_replay_clock_fn *clock; /* NULL: the library's clock */
+  zext_replay_clock_fn *clock; /* NULL: the library's clock */
   void *clock_context;
   const char *segment_profile; /* under segmented: the pieces' profile (JSON,
                                   BORROWED); not read otherwise */
-} wz_ext_replay_subscriber_options_t;
+} zext_replay_subscriber_options_t;
 
-typedef struct wz_ext_replay_subscriber_counts_t {
+typedef struct zext_replay_subscriber_counts_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   uint64_t late_replies;
   uint64_t unknown_replies;
@@ -1505,24 +1505,24 @@ typedef struct wz_ext_replay_subscriber_counts_t {
   uint64_t unjoined_pieces; /* segmented: not a piece, bad CRC, no place */
   uint64_t declarations_lost; /* added in minor version 3: declarations of the
                                  publishers' queryables the watch lost
-                                 (WZ_EXT_DECL_LOST); not zero, the rounds may
+                                 (ZEXT_DECL_LOST); not zero, the rounds may
                                  miss a publisher or wait on one that went */
-} wz_ext_replay_subscriber_counts_t;
+} zext_replay_subscriber_counts_t;
 
-typedef struct wz_ext_owned_replay_subscriber_t {
+typedef struct zext_owned_replay_subscriber_t {
   void *_handle;
-} wz_ext_owned_replay_subscriber_t;
-typedef struct wz_ext_loaned_replay_subscriber_t {
+} zext_owned_replay_subscriber_t;
+typedef struct zext_loaned_replay_subscriber_t {
   void *_handle;
-} wz_ext_loaned_replay_subscriber_t;
-typedef struct wz_ext_moved_replay_subscriber_t {
-  wz_ext_owned_replay_subscriber_t _this;
-} wz_ext_moved_replay_subscriber_t;
+} zext_loaned_replay_subscriber_t;
+typedef struct zext_moved_replay_subscriber_t {
+  zext_owned_replay_subscriber_t _this;
+} zext_moved_replay_subscriber_t;
 
 /* No storage, a depth of 1, the querier's bound, stream 0, the library's
  * clock, and no deadlines. */
-void wz_ext_replay_subscriber_options_default(
-    wz_ext_replay_subscriber_options_t *this_);
+void zext_replay_subscriber_options_default(
+    zext_replay_subscriber_options_t *this_);
 
 /* A replay subscriber of keyexpr on session, watching for keyexpr followed by
  * suffix, judging by receiver (taken), handing each sample to deliver. The
@@ -1539,34 +1539,34 @@ void wz_ext_replay_subscriber_options_default(
  * transfers of each answer from the same first number or on from its last
  * answer: both are joined alike, and a frame two answers carry is told by
  * its counter, never by its transfer number. */
-z_result_t wz_ext_replay_subscriber_new(
-    wz_ext_owned_replay_subscriber_t *this_, const z_loaned_session_t *session,
+z_result_t zext_replay_subscriber_new(
+    zext_owned_replay_subscriber_t *this_, const z_loaned_session_t *session,
     const z_loaned_keyexpr_t *keyexpr, const char *suffix,
-    wz_ext_moved_e2e_receiver_t *receiver,
-    const wz_ext_replay_subscriber_options_t *options,
-    wz_ext_replay_deliver_fn *deliver, wz_ext_replay_drop_fn *drop,
+    zext_moved_e2e_receiver_t *receiver,
+    const zext_replay_subscriber_options_t *options,
+    zext_replay_deliver_fn *deliver, zext_replay_drop_fn *drop,
     void *context);
 
 /* Judge the deadlines now and hand on what an ended round released. */
-z_result_t wz_ext_replay_subscriber_poll(
-    const wz_ext_loaned_replay_subscriber_t *this_);
-/* WZ_EXT_REPLAY_ROUND_*, or WZ_EXT_REPLAY_NO_SUBSCRIBER. */
-uint8_t wz_ext_replay_subscriber_phase(
-    const wz_ext_loaned_replay_subscriber_t *this_);
-z_result_t wz_ext_replay_subscriber_counts(
-    const wz_ext_loaned_replay_subscriber_t *this_,
-    wz_ext_replay_subscriber_counts_t *out);
+z_result_t zext_replay_subscriber_poll(
+    const zext_loaned_replay_subscriber_t *this_);
+/* ZEXT_REPLAY_ROUND_*, or ZEXT_REPLAY_NO_SUBSCRIBER. */
+uint8_t zext_replay_subscriber_phase(
+    const zext_loaned_replay_subscriber_t *this_);
+z_result_t zext_replay_subscriber_counts(
+    const zext_loaned_replay_subscriber_t *this_,
+    zext_replay_subscriber_counts_t *out);
 
-const wz_ext_loaned_replay_subscriber_t *wz_ext_replay_subscriber_loan(
-    const wz_ext_owned_replay_subscriber_t *this_);
-wz_ext_moved_replay_subscriber_t *wz_ext_replay_subscriber_move(
-    wz_ext_owned_replay_subscriber_t *this_);
+const zext_loaned_replay_subscriber_t *zext_replay_subscriber_loan(
+    const zext_owned_replay_subscriber_t *this_);
+zext_moved_replay_subscriber_t *zext_replay_subscriber_move(
+    zext_owned_replay_subscriber_t *this_);
 /* Nothing is handed on after this returns; drop(context) has run. */
-void wz_ext_replay_subscriber_drop(wz_ext_moved_replay_subscriber_t *this_);
-void wz_ext_internal_replay_subscriber_null(
-    wz_ext_owned_replay_subscriber_t *this_);
-bool wz_ext_internal_replay_subscriber_check(
-    const wz_ext_owned_replay_subscriber_t *this_);
+void zext_replay_subscriber_drop(zext_moved_replay_subscriber_t *this_);
+void zext_internal_replay_subscriber_null(
+    zext_owned_replay_subscriber_t *this_);
+bool zext_internal_replay_subscriber_check(
+    const zext_owned_replay_subscriber_t *this_);
 
 /* ---- Declarations told again ------------------------------------------- */
 
@@ -1578,9 +1578,9 @@ bool wz_ext_internal_replay_subscriber_check(
  * Part of the unstable surface.
  *
  * The number of links told (0 when none is up), Z_ERR_SESSION_CLOSED for a
- * closed session, WZ_EXT_ERR_UNSUPPORTED when the session's engine keeps no
+ * closed session, ZEXT_ERR_UNSUPPORTED when the session's engine keeps no
  * record of what it declared, Z_ERR_NULL for a null session. */
-z_result_t wz_ext_redeclare(const z_loaned_session_t *session);
+z_result_t zext_redeclare(const z_loaned_session_t *session);
 
 /* The conformance digest of this build, read from the configuration it
  * was built with: "sha256:" and 64 lowercase hex digits, NUL-terminated and
@@ -1590,7 +1590,7 @@ z_result_t wz_ext_redeclare(const z_loaned_session_t *session);
  * tester holding a statement can tell whether this library is that build.
  * In a build with the conformance-digest capability (on in a build that
  * names nothing, off in the zenoh-pico preset). */
-const char *wz_ext_conformance_digest(void);
+const char *zext_conformance_digest(void);
 
 /* ---- Key ids every node of a deployment shares (shared-key-ids) ---- */
 
@@ -1605,7 +1605,7 @@ const char *wz_ext_conformance_digest(void);
  * dictionary handed before. Every node of the deployment must hand the same
  * dictionary; a peer without it cannot read a key named by one of its ids.
  * The config's document may state the same as wz/key-ids
- * (wz_ext_config_document): a dictionary handed here replaces the
+ * (zext_config_document): a dictionary handed here replaces the
  * document's, a form stated for an endpoint here replaces the document's
  * for that endpoint, and what is not stated here is the document's.
  * Part of the unstable surface, and present only in a build with the
@@ -1621,7 +1621,7 @@ const char *wz_ext_conformance_digest(void);
  * states no dictionary, and with Z_ERR_OVERFLOW a dictionary of more entries
  * than the session's MAX_SHARED_KEY_IDS: the build's, or the value the
  * config's document states under wz/limits. */
-z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
+z_result_t zext_config_key_ids(z_loaned_config_t *config,
                                  const uint16_t *ids,
                                  const char *const *keys, size_t count);
 
@@ -1636,18 +1636,20 @@ z_result_t wz_ext_config_key_ids(z_loaned_config_t *config,
  *
  * Z_OK; Z_ERR_NULL for a NULL config, locator or form; Z_ERR_INVALID for text
  * that is not UTF-8, an empty locator, or a form the policy has no value of;
- * WZ_EXT_ERR_POLICY_OFF for a form the build's domain of key-wire-form leaves
+ * ZEXT_ERR_POLICY_OFF for a form the build's domain of key-wire-form leaves
  * out. A refused call leaves the config as it was. */
-z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
+z_result_t zext_config_key_wire_form_for(z_loaned_config_t *config,
                                            const char *locator,
                                            const char *form);
 
 /* ================================================ the periodic run API
  *
- * No door of wz's own: this section states the order in which a program that
- * runs its own scheduler calls zenoh-pico's run API on the pico C ABI, and
- * what each call does on each engine (docs/periodic-run-api.md has the table;
- * crates/wz-capi-pico/examples/c/periodic.c runs it).
+ * This section states the order in which a program that runs its own
+ * scheduler calls zenoh-pico's run API on the pico C ABI, and what each call
+ * does on each engine (docs/periodic-run-api.md has the table;
+ * crates/wz-capi-pico/examples/c/periodic.c runs it). Its one door of wz's
+ * own, declared at its end, steps a session the program opened without its
+ * read task.
  *
  *   1 open       z_open. Multi-threaded arm: the read task starts with the
  *                session unless the open options say not to.
@@ -1660,7 +1662,9 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  *                the channel's try_recv until Z_CHANNEL_NODATA.
  *   4 each cycle zp_batch_start, the cycle's puts, zp_batch_flush: the puts
  *                leave together at the flush, and the window stays open.
- *                Single-threaded: then zp_spin_once. Then pull the channels.
+ *                Single-threaded: then zp_spin_once; multi-threaded and
+ *                opened without the read task: then zext_session_step.
+ *                Then pull the channels.
  *                Then wait for the cycle's absolute deadline (z_clock_now,
  *                z_clock_advance_ms) with z_condvar_wait_until or a sleep.
  *   5 end        zp_batch_stop, the undeclarations, zp_stop_read_task if
@@ -1675,9 +1679,35 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
  * program built for the single-threaded arm's promise that callbacks run only
  * inside its own calls therefore locks what its callbacks share, or reads
  * through channels, when its library runs the tokio engine (on Windows, the
- * only engine). In the multi-threaded arm neither engine, nor zenoh-pico, has
- * a call that steps the session on the program's thread: the program sends
- * and pulls, the read task does the rest. */
+ * only engine). In the multi-threaded arm zenoh-pico has no call that steps
+ * the session on the program's thread: the program sends and pulls, the read
+ * task does the rest. The cooperative engine has one, zext_session_step: a
+ * library carries both ways, and the program picks one at each open. */
+
+/* wz's own result code of the step, outside zenoh-pico's own codes. */
+#define ZEXT_ERR_READ_TASK_RUNS (-26) /* the session's read task runs and
+                                           steps it: nothing was read */
+
+/* One step of a session the program runs on its own cycle, on the calling
+ * thread: the session reads what its links hold, waiting for input at most
+ * timeout_ms milliseconds (0: only what is ready now; the session's own wait
+ * on a quiet link bounds it as well), keeps each lease, dials a lost link
+ * again, runs what is due, and hands what it read to the callbacks before the
+ * call returns. The program picks it at the open: z_open with
+ * auto_start_read_task false in its z_open_options_t, then a step each cycle
+ * where the read task would run. Steps made from two threads at once each
+ * step the session, and each sample is handed out once. Declared in the
+ * multi-threaded arm only, whose read task it stands in for.
+ *
+ * Z_OK once the step ran; ZEXT_ERR_READ_TASK_RUNS while the session's read
+ * task runs (the open started it, or zp_start_read_task did since), nothing
+ * read; Z_ERR_SESSION_CLOSED for a closed session; ZEXT_ERR_UNSUPPORTED on
+ * the tokio engine, which runs the session on a thread of its own; Z_ERR_NULL
+ * for a NULL session. */
+#if defined(Z_FEATURE_MULTI_THREAD) && Z_FEATURE_MULTI_THREAD == 1
+z_result_t zext_session_step(const z_loaned_session_t *session,
+                               uint32_t timeout_ms);
+#endif
 
 /* ================================================ callbacks
  *
@@ -1717,26 +1747,26 @@ z_result_t wz_ext_config_key_wire_form_for(z_loaned_config_t *config,
 /* How many callbacks the library did not run because the threads already
  * inside callbacks filled its table; 0 in a library with std, which runs
  * every one. */
-size_t wz_ext_callbacks_refused(void);
+size_t zext_callbacks_refused(void);
 
 /* ================================================ the program's transport
  *
  * A transport the program supplies: a program with a network stack of its
  * own (its TCP/IP and UDP) gives the session that stack in place of the
  * system's sockets. The session calls the program's open, send and close; the
- * program calls wz_ext_transport_received, _event and _accepted when its stack
+ * program calls zext_transport_received, _event and _accepted when its stack
  * has something to say. Part of the unstable surface, and present only in a
  * build with the app-transport capability.
  *
- * WHAT IT CARRIES. A config given a transport (wz_ext_config_transport) opens
+ * WHAT IT CARRIES. A config given a transport (zext_config_transport) opens
  * every link of its session over it and none over the system's sockets:
- *   tcp/ connect   a stream the session dials        WZ_EXT_LINK_STREAM_DIAL
- *   tcp/ listen    a stream listener                 WZ_EXT_LINK_STREAM_LISTEN
- *   udp/ connect   a unicast datagram link           WZ_EXT_LINK_DATAGRAM
- *   udp/ listen    with #iface=, a multicast group   WZ_EXT_LINK_GROUP
- *   udp/ listen    without, a datagram listener      WZ_EXT_LINK_DATAGRAM_LISTEN
+ *   tcp/ connect   a stream the session dials        ZEXT_LINK_STREAM_DIAL
+ *   tcp/ listen    a stream listener                 ZEXT_LINK_STREAM_LISTEN
+ *   udp/ connect   a unicast datagram link           ZEXT_LINK_DATAGRAM
+ *   udp/ listen    with #iface=, a multicast group   ZEXT_LINK_GROUP
+ *   udp/ listen    without, a datagram listener      ZEXT_LINK_DATAGRAM_LISTEN
  * On a listener of either kind the program names each stream, or each
- * source that sends datagrams to it, with wz_ext_transport_accepted, and
+ * source that sends datagrams to it, with zext_transport_accepted, and
  * hands in what arrives on the link that returns.
  * Either engine of the library runs a session over it. z_open refuses a config
  * whose transport cannot carry what it names: another scheme (tls/, serial/,
@@ -1746,7 +1776,7 @@ size_t wz_ext_callbacks_refused(void);
  * _Z_ERR_CONFIG_LOCATOR_SCHEMA_UNKNOWN
  * (-92), as the same locator over the system's sockets is; a config with
  * neither connect nor listen (it would scout on the system's sockets) with
- * WZ_EXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a
+ * ZEXT_ERR_UNSUPPORTED (-3). A stream is framed by the session exactly as a
  * TCP socket is (the two-byte length before each batch), so the program
  * carries plain bytes. A datagram is one batch, taken whole or not at all: a
  * send answered with fewer bytes than it was given fails it. A group's
@@ -1758,7 +1788,7 @@ size_t wz_ext_callbacks_refused(void);
  * the build) of bytes the session has not read, in storage the link takes
  * when it is made, so nothing is allocated as bytes arrive. A call past the
  * bound, or past the storage the queued datagrams' locators also take, answers
- * WZ_EXT_ERR_LINK_FULL and takes nothing; once the session has read the queue
+ * ZEXT_ERR_LINK_FULL and takes nothing; once the session has read the queue
  * down to half, the transport calls the program's drained(context, link),
  * from a session thread, and the program hands the same bytes in again. A
  * program that gives no drained retries on its own. An empty queue takes any
@@ -1767,11 +1797,11 @@ size_t wz_ext_callbacks_refused(void);
  * Z_EINVAL, as no queue of the link could take it: a stream's bytes are
  * handed in again in smaller calls.
  *
- * WHO OWNS WHAT. The program makes the transport (wz_ext_transport_new) and
+ * WHO OWNS WHAT. The program makes the transport (zext_transport_new) and
  * names it in every call it makes, so it can hand in bytes while z_open is
  * still running the handshake of a dial. A config given the transport holds
  * a reference, and so does a session opened from it, for as long as it has a
- * link; the program's own reference goes with wz_ext_transport_drop. The
+ * link; the program's own reference goes with zext_transport_drop. The
  * program's drop(context), when it is not NULL, runs once, after the last
  * call of open, send and close, when the last reference goes.
  *
@@ -1779,16 +1809,16 @@ size_t wz_ext_callbacks_refused(void);
  * link it opens, and the handle is valid before open is called, so the
  * program may report it connected, or hand in its first bytes, from its own
  * thread before open returns. A stream the program accepts on a listener is
- * named by wz_ext_transport_accepted, which returns its handle. A handle is
+ * named by zext_transport_accepted, which returns its handle. A handle is
  * never 0 and never reused while the transport lives. When the session lets a
  * link go it closes it on the program (close): until that close returns, a
- * call that names the link answers WZ_EXT_ERR_LINK_CLOSED; once it has
+ * call that names the link answers ZEXT_ERR_LINK_CLOSED; once it has
  * returned, the transport holds the handle no more and the call answers
- * WZ_EXT_ERR_LINK_UNKNOWN. A program whose receive runs on a thread of its own
+ * ZEXT_ERR_LINK_UNKNOWN. A program whose receive runs on a thread of its own
  * can meet either while its close runs, and reads both as the end of the link.
  *
  * BUFFERS. The bytes of send are valid only during the call: the program
- * copies what it keeps. The bytes of wz_ext_transport_received are copied
+ * copies what it keeps. The bytes of zext_transport_received are copied
  * before it returns: the buffer is the program's again at once. Every string
  * either side passes is NUL-terminated and valid only during the call.
  *
@@ -1830,115 +1860,115 @@ size_t wz_ext_callbacks_refused(void);
  * WOULD_BLOCK.
  */
 
-typedef uint64_t wz_ext_link_t;
+typedef uint64_t zext_link_t;
 
-typedef uint8_t wz_ext_link_kind_t;
-#define WZ_EXT_LINK_STREAM_DIAL 0
-#define WZ_EXT_LINK_STREAM_LISTEN 1
-#define WZ_EXT_LINK_DATAGRAM 2
-#define WZ_EXT_LINK_GROUP 3
-#define WZ_EXT_LINK_DATAGRAM_LISTEN 4
+typedef uint8_t zext_link_kind_t;
+#define ZEXT_LINK_STREAM_DIAL 0
+#define ZEXT_LINK_STREAM_LISTEN 1
+#define ZEXT_LINK_DATAGRAM 2
+#define ZEXT_LINK_GROUP 3
+#define ZEXT_LINK_DATAGRAM_LISTEN 4
 
-typedef int8_t wz_ext_link_result_t;
-#define WZ_EXT_LINK_OK 0
-#define WZ_EXT_LINK_WOULD_BLOCK 1
-#define WZ_EXT_LINK_CLOSED 2
-#define WZ_EXT_LINK_FAILED 3
+typedef int8_t zext_link_result_t;
+#define ZEXT_LINK_OK 0
+#define ZEXT_LINK_WOULD_BLOCK 1
+#define ZEXT_LINK_CLOSED 2
+#define ZEXT_LINK_FAILED 3
 
-typedef uint8_t wz_ext_link_event_t;
-#define WZ_EXT_LINK_EVENT_CONNECTED 0
-#define WZ_EXT_LINK_EVENT_CLOSED 1
-#define WZ_EXT_LINK_EVENT_WRITABLE 2
+typedef uint8_t zext_link_event_t;
+#define ZEXT_LINK_EVENT_CONNECTED 0
+#define ZEXT_LINK_EVENT_CLOSED 1
+#define ZEXT_LINK_EVENT_WRITABLE 2
 
 /* What the program's calls into the transport return beyond Z_OK, Z_ERR_NULL
- * and Z_EINVAL (-75). wz's own, as WZ_EXT_ERR_POLICY_OFF is. */
-#define WZ_EXT_ERR_LINK_UNKNOWN (-4)  /* the transport holds no such link: it
+ * and Z_EINVAL (-75). wz's own, as ZEXT_ERR_POLICY_OFF is. */
+#define ZEXT_ERR_LINK_UNKNOWN (-4)  /* the transport holds no such link: it
                                          never gave the handle, or the session
                                          let the link go and the program's
                                          close of it returned */
-#define WZ_EXT_ERR_LINK_NOT_OPEN (-5) /* not up yet: bytes or an accept before
+#define ZEXT_ERR_LINK_NOT_OPEN (-5) /* not up yet: bytes or an accept before
                                          CONNECTED */
-#define WZ_EXT_ERR_LINK_CLOSED (-6)   /* closing or closed, and still held:
+#define ZEXT_ERR_LINK_CLOSED (-6)   /* closing or closed, and still held:
                                          nothing taken */
-#define WZ_EXT_ERR_LINK_KIND (-7)     /* not for this kind of link: bytes on a
+#define ZEXT_ERR_LINK_KIND (-7)     /* not for this kind of link: bytes on a
                                          listener, an accept on a stream */
-#define WZ_EXT_ERR_LINK_FULL (-8)     /* the link queues its bound: nothing
+#define ZEXT_ERR_LINK_FULL (-8)     /* the link queues its bound: nothing
                                          taken, hand it in again after
                                          drained */
 
 /* The calls the program supplies. open, send and close are required; drained
  * and drop may be NULL. */
-typedef struct wz_ext_transport_t {
+typedef struct zext_transport_t {
   void *context;
-  wz_ext_link_result_t (*open)(void *context, wz_ext_link_t link,
-                               wz_ext_link_kind_t kind, const char *locator);
-  wz_ext_link_result_t (*send)(void *context, wz_ext_link_t link,
+  zext_link_result_t (*open)(void *context, zext_link_t link,
+                               zext_link_kind_t kind, const char *locator);
+  zext_link_result_t (*send)(void *context, zext_link_t link,
                                const uint8_t *data, size_t len,
                                size_t *written);
-  void (*close)(void *context, wz_ext_link_t link);
-  void (*drained)(void *context, wz_ext_link_t link);
+  void (*close)(void *context, zext_link_t link);
+  void (*drained)(void *context, zext_link_t link);
   void (*drop)(void *context);
-} wz_ext_transport_t;
+} zext_transport_t;
 
-typedef struct wz_ext_owned_transport_t {
+typedef struct zext_owned_transport_t {
   void *_handle;
-} wz_ext_owned_transport_t;
-typedef struct wz_ext_loaned_transport_t {
+} zext_owned_transport_t;
+typedef struct zext_loaned_transport_t {
   void *_handle;
-} wz_ext_loaned_transport_t;
-typedef struct wz_ext_moved_transport_t {
-  wz_ext_owned_transport_t _this;
-} wz_ext_moved_transport_t;
+} zext_loaned_transport_t;
+typedef struct zext_moved_transport_t {
+  zext_owned_transport_t _this;
+} zext_moved_transport_t;
 
 /* A transport over the calls in transport, which is copied. this_ holds the
  * null state on every error. Z_OK; Z_ERR_NULL for a NULL this_ or transport,
  * or a NULL open, send or close. */
-z_result_t wz_ext_transport_new(wz_ext_owned_transport_t *this_,
-                                const wz_ext_transport_t *transport);
+z_result_t zext_transport_new(zext_owned_transport_t *this_,
+                                const zext_transport_t *transport);
 
 /* The session opened from config uses transport for every link its connect
  * and listen locators name; a second call replaces the first. The config
  * holds a reference of its own. Z_OK; Z_ERR_NULL for a NULL config, a NULL
  * transport or the null state. */
-z_result_t wz_ext_config_transport(z_loaned_config_t *config,
-                                   const wz_ext_loaned_transport_t *transport);
+z_result_t zext_config_transport(z_loaned_config_t *config,
+                                   const zext_loaned_transport_t *transport);
 
 /* Bytes that arrived on link, copied before this returns; source is the
  * locator a datagram came from, or NULL (a group's datagrams need one). Z_OK;
  * Z_ERR_NULL for a NULL transport, NULL data with a length, or a group's
  * datagram with no source; Z_EINVAL for a source that is not UTF-8, or for
  * more than the link could ever hold at once (THE RECEIVE BOUND);
- * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND; WZ_EXT_ERR_LINK_FULL
+ * ZEXT_ERR_LINK_UNKNOWN, _NOT_OPEN, _CLOSED or _KIND; ZEXT_ERR_LINK_FULL
  * past the receive bound, nothing taken. */
-z_result_t wz_ext_transport_received(const wz_ext_loaned_transport_t *transport,
-                                     wz_ext_link_t link, const uint8_t *data,
+z_result_t zext_transport_received(const zext_loaned_transport_t *transport,
+                                     zext_link_t link, const uint8_t *data,
                                      size_t len, const char *source);
 
-/* What happened to link: WZ_EXT_LINK_EVENT_CONNECTED, _CLOSED or _WRITABLE.
+/* What happened to link: ZEXT_LINK_EVENT_CONNECTED, _CLOSED or _WRITABLE.
  * Z_OK; Z_ERR_NULL for a NULL transport; Z_EINVAL for another event;
- * WZ_EXT_ERR_LINK_UNKNOWN, or WZ_EXT_ERR_LINK_CLOSED for a link already
+ * ZEXT_ERR_LINK_UNKNOWN, or ZEXT_ERR_LINK_CLOSED for a link already
  * closed. */
-z_result_t wz_ext_transport_event(const wz_ext_loaned_transport_t *transport,
-                                  wz_ext_link_t link,
-                                  wz_ext_link_event_t event);
+z_result_t zext_transport_event(const zext_loaned_transport_t *transport,
+                                  zext_link_t link,
+                                  zext_link_event_t event);
 
 /* A stream the program accepted on listener, whose remote end it names remote
  * (a locator such as "tcp/<address>:<port>"); out_link receives the new
  * link's handle, and 0 on every error. Z_OK; Z_ERR_NULL for a NULL transport,
  * remote or out_link; Z_EINVAL for a remote that is not UTF-8;
- * WZ_EXT_ERR_LINK_UNKNOWN, _NOT_OPEN (not listening yet), _CLOSED or _KIND
+ * ZEXT_ERR_LINK_UNKNOWN, _NOT_OPEN (not listening yet), _CLOSED or _KIND
  * (not a listener). */
-z_result_t wz_ext_transport_accepted(const wz_ext_loaned_transport_t *transport,
-                                     wz_ext_link_t listener, const char *remote,
-                                     wz_ext_link_t *out_link);
+z_result_t zext_transport_accepted(const zext_loaned_transport_t *transport,
+                                     zext_link_t listener, const char *remote,
+                                     zext_link_t *out_link);
 
-const wz_ext_loaned_transport_t *wz_ext_transport_loan(
-    const wz_ext_owned_transport_t *this_);
-wz_ext_moved_transport_t *wz_ext_transport_move(
-    wz_ext_owned_transport_t *this_);
-void wz_ext_transport_drop(wz_ext_moved_transport_t *this_);
-void wz_ext_internal_transport_null(wz_ext_owned_transport_t *this_);
-bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
+const zext_loaned_transport_t *zext_transport_loan(
+    const zext_owned_transport_t *this_);
+zext_moved_transport_t *zext_transport_move(
+    zext_owned_transport_t *this_);
+void zext_transport_drop(zext_moved_transport_t *this_);
+void zext_internal_transport_null(zext_owned_transport_t *this_);
+bool zext_internal_transport_check(const zext_owned_transport_t *this_);
 
 /* ================================================ a time base the program supplies
  *
@@ -1962,59 +1992,59 @@ bool wz_ext_internal_transport_check(const wz_ext_owned_transport_t *this_);
  * read task), so a deadline the program's time has passed is acted on at the
  * next step. A build whose sessions wait on threads of their own ends such a
  * wait only when the program says its time has moved on:
- * wz_ext_time_base_advanced. Call it each time the time moves on, whichever
+ * zext_time_base_advanced. Call it each time the time moves on, whichever
  * build the program links.
  *
- * WHO OWNS WHAT. The program makes the time base (wz_ext_time_base_new) and
+ * WHO OWNS WHAT. The program makes the time base (zext_time_base_new) and
  * holds it. A config given it holds a reference, and so does a session opened
  * from that config, for as long as the session runs; the program's own
- * reference goes with wz_ext_time_base_drop. The program's drop(context),
+ * reference goes with zext_time_base_drop. The program's drop(context),
  * when it is not NULL, runs once, after the last read, when the last
  * reference goes.
  */
 
 /* The calls the program supplies. now_ns is required; drop may be NULL. */
-typedef struct wz_ext_time_base_t {
+typedef struct zext_time_base_t {
   void *context;
   uint64_t (*now_ns)(void *context);
   void (*drop)(void *context);
-} wz_ext_time_base_t;
+} zext_time_base_t;
 
-typedef struct wz_ext_owned_time_base_t {
+typedef struct zext_owned_time_base_t {
   void *_handle;
-} wz_ext_owned_time_base_t;
-typedef struct wz_ext_loaned_time_base_t {
+} zext_owned_time_base_t;
+typedef struct zext_loaned_time_base_t {
   void *_handle;
-} wz_ext_loaned_time_base_t;
-typedef struct wz_ext_moved_time_base_t {
-  wz_ext_owned_time_base_t _this;
-} wz_ext_moved_time_base_t;
+} zext_loaned_time_base_t;
+typedef struct zext_moved_time_base_t {
+  zext_owned_time_base_t _this;
+} zext_moved_time_base_t;
 
 /* A time base over the calls in time_base, which are copied. this_ holds the
  * null state on every error. Z_OK; Z_ERR_NULL for a NULL this_ or time_base,
  * or a NULL now_ns. */
-z_result_t wz_ext_time_base_new(wz_ext_owned_time_base_t *this_,
-                                const wz_ext_time_base_t *time_base);
+z_result_t zext_time_base_new(zext_owned_time_base_t *this_,
+                                const zext_time_base_t *time_base);
 
 /* The session opened from config times its deadlines by time_base; a second
  * call replaces the first. The config holds a reference of its own. Z_OK;
  * Z_ERR_NULL for a NULL config, a NULL time base or the null state. */
-z_result_t wz_ext_config_time_base(z_loaned_config_t *config,
-                                   const wz_ext_loaned_time_base_t *time_base);
+z_result_t zext_config_time_base(z_loaned_config_t *config,
+                                   const zext_loaned_time_base_t *time_base);
 
 /* The program's time has moved on: every wait of a session on time_base whose
  * time has come by the program's reading now ends. Z_OK; Z_ERR_NULL for a
  * NULL time base or the null state. */
-z_result_t wz_ext_time_base_advanced(
-    const wz_ext_loaned_time_base_t *time_base);
+z_result_t zext_time_base_advanced(
+    const zext_loaned_time_base_t *time_base);
 
-const wz_ext_loaned_time_base_t *wz_ext_time_base_loan(
-    const wz_ext_owned_time_base_t *this_);
-wz_ext_moved_time_base_t *wz_ext_time_base_move(
-    wz_ext_owned_time_base_t *this_);
-void wz_ext_time_base_drop(wz_ext_moved_time_base_t *this_);
-void wz_ext_internal_time_base_null(wz_ext_owned_time_base_t *this_);
-bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
+const zext_loaned_time_base_t *zext_time_base_loan(
+    const zext_owned_time_base_t *this_);
+zext_moved_time_base_t *zext_time_base_move(
+    zext_owned_time_base_t *this_);
+void zext_time_base_drop(zext_moved_time_base_t *this_);
+void zext_internal_time_base_null(zext_owned_time_base_t *this_);
+bool zext_internal_time_base_check(const zext_owned_time_base_t *this_);
 
 /* ================================================ fixed pools for the library's objects
  *
@@ -2028,14 +2058,14 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * every build, reserved by its first object from the build's limits; these
  * doors, which let a program reserve them with counts of its own and read
  * what they hold, are part of the unstable surface and present only in a
- * build with the object-pool capability; wz_ext_object_pool_place also needs
+ * build with the object-pool capability; zext_object_pool_place also needs
  * object-pool-region.
  *
  * THE POOLS. One per kind of object, of as many slots as its count, each
  * slot the object's own size rounded up to 16 bytes. The pool of one kind
  * never lends a slot to another, so each kind holds what was stated for it
- * and no more. wz_ext_object_pool_class reports the pools by size class, of
- * WZ_EXT_OBJECT_POOL_CLASSES classes whose largest slots are 16 bytes, then
+ * and no more. zext_object_pool_class reports the pools by size class, of
+ * ZEXT_OBJECT_POOL_CLASSES classes whose largest slots are 16 bytes, then
  * each twice the one before: the pools whose slots a class holds together,
  * the kinds' and the payload blocks', with the bytes their slots take. A pool
  * of slots larger than the largest class is reported by none.
@@ -2098,12 +2128,12 @@ bool wz_ext_internal_time_base_check(const wz_ext_owned_time_base_t *this_);
  * which leave it null; an encoding whose schema is longer than
  * MAX_ENCODING_SCHEMA_BYTES is refused the same way). An object let go frees
  * its slot. Key expressions not declared, the handles of strings, slices and
- * string arrays, closures and the handles of the other wz_ext doors are the
+ * string arrays, closures and the handles of the other zext doors are the
  * heap's in either build. */
-#define WZ_EXT_OBJECT_POOL_CLASSES 11
+#define ZEXT_OBJECT_POOL_CLASSES 11
 
-typedef struct wz_ext_object_pool_counts_t {
-  size_t struct_size; /* sizeof(wz_ext_object_pool_counts_t), set by the
+typedef struct zext_object_pool_counts_t {
+  size_t struct_size; /* sizeof(zext_object_pool_counts_t), set by the
                        * program */
   size_t sessions;
   size_t publishers;
@@ -2133,9 +2163,9 @@ typedef struct wz_ext_object_pool_counts_t {
   size_t small_payload_blocks;
   size_t medium_payload_blocks;
   size_t large_payload_blocks;
-} wz_ext_object_pool_counts_t;
+} zext_object_pool_counts_t;
 
-typedef struct wz_ext_object_pool_class_t {
+typedef struct zext_object_pool_class_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   size_t slot_bytes;
   size_t slots;
@@ -2143,16 +2173,16 @@ typedef struct wz_ext_object_pool_class_t {
   size_t high_water;
   size_t refused;
   size_t bytes;
-} wz_ext_object_pool_class_t;
+} zext_object_pool_class_t;
 
 /* The bytes the pools of counts take, in out_bytes (0 on every error): the
- * memory wz_ext_object_pool_place needs. Z_OK; _Z_ERR_NULL for a NULL
+ * memory zext_object_pool_place needs. Z_OK; _Z_ERR_NULL for a NULL
  * argument; _Z_ERR_CONFIG_INVALID_VALUE for counts that make no pool (a
  * count left 0 whose limit holds no bound, or no slot at all);
  * _Z_ERR_SYSTEM_OUT_OF_MEMORY for more than the address space holds;
  * Z_EINVAL for a struct_size short of the base (THE SIZE) or a payload_bytes
  * not 0. */
-z_result_t wz_ext_object_pool_bytes(const wz_ext_object_pool_counts_t *counts,
+z_result_t zext_object_pool_bytes(const zext_object_pool_counts_t *counts,
                                     size_t *out_bytes);
 
 /* Reserve the pools of counts from the heap, in one allocation. Z_OK;
@@ -2161,34 +2191,34 @@ z_result_t wz_ext_object_pool_bytes(const wz_ext_object_pool_counts_t *counts,
  * memory; Z_EINVAL when pools are reserved already, for a struct_size short
  * of the base (THE SIZE), or for a payload_bytes not 0. A refusal leaves the
  * heap as it was. */
-z_result_t wz_ext_object_pool_reserve(const wz_ext_object_pool_counts_t *counts);
+z_result_t zext_object_pool_reserve(const zext_object_pool_counts_t *counts);
 
 /* Reserve the pools of counts over the len bytes at base, which the program
- * hands over until wz_ext_object_pool_release and must not touch meanwhile.
+ * hands over until zext_object_pool_release and must not touch meanwhile.
  * Z_OK; _Z_ERR_NULL for a NULL argument; _Z_ERR_CONFIG_INVALID_VALUE for
  * counts that make no pool; Z_EINVAL for a base not aligned to 16 bytes,
  * when pools are reserved already, for a struct_size short of the base
  * (THE SIZE) or a payload_bytes not 0; _Z_ERR_SYSTEM_OUT_OF_MEMORY for a len
- * under what wz_ext_object_pool_bytes answers. A refused call writes nothing
+ * under what zext_object_pool_bytes answers. A refused call writes nothing
  * at base. */
-z_result_t wz_ext_object_pool_place(void *base, size_t len,
-                                    const wz_ext_object_pool_counts_t *counts);
+z_result_t zext_object_pool_place(void *base, size_t len,
+                                    const zext_object_pool_counts_t *counts);
 
-/* The pools of size class (0 to WZ_EXT_OBJECT_POOL_CLASSES - 1) together, in
+/* The pools of size class (0 to ZEXT_OBJECT_POOL_CLASSES - 1) together, in
  * out: the class's largest slot (slot_bytes; each slot of an object is the
  * object's own size, rounded up to 16 bytes, so the slots of one class
  * differ), and while pools are reserved their slots, the bytes those take
  * (bytes), those in use, the most in use at once and the objects they
  * refused. Z_OK; _Z_ERR_NULL for a NULL out; Z_EINVAL for a class past the
  * last. */
-z_result_t wz_ext_object_pool_class(size_t class_index,
-                                    wz_ext_object_pool_class_t *out);
+z_result_t zext_object_pool_class(size_t class_index,
+                                    zext_object_pool_class_t *out);
 
 /* Give the pools up: the heap's memory is freed and the program's is the
  * program's again; the next object reserves the build's pools again. Z_OK,
  * also when none are reserved; Z_EINVAL while an object is held in them,
  * which keeps them. */
-z_result_t wz_ext_object_pool_release(void);
+z_result_t zext_object_pool_release(void);
 
 /* ================================================ the message catalog
  *
@@ -2210,30 +2240,30 @@ z_result_t wz_ext_object_pool_release(void);
  * change once read, so several threads may read one at once; a key expression
  * an entry points at lives as long as the catalog. */
 
-#define WZ_EXT_MESSAGE_PUBLISHES 1  /* the node publishes the message */
-#define WZ_EXT_MESSAGE_SUBSCRIBES 2 /* the node subscribes to it */
+#define ZEXT_MESSAGE_PUBLISHES 1  /* the node publishes the message */
+#define ZEXT_MESSAGE_SUBSCRIBES 2 /* the node subscribes to it */
 
 /* The bits of has: what an entry states. */
-#define WZ_EXT_MESSAGE_HAS_PERIOD 1
-#define WZ_EXT_MESSAGE_HAS_PROTECTION 2
-#define WZ_EXT_MESSAGE_HAS_SENDERS 4
-#define WZ_EXT_MESSAGE_HAS_INSTANCE_KEY 8
-#define WZ_EXT_MESSAGE_HAS_REPLAY 16
-#define WZ_EXT_MESSAGE_HAS_SUPERVISION 32
-#define WZ_EXT_MESSAGE_HAS_SEGMENT_PROFILE 64
+#define ZEXT_MESSAGE_HAS_PERIOD 1
+#define ZEXT_MESSAGE_HAS_PROTECTION 2
+#define ZEXT_MESSAGE_HAS_SENDERS 4
+#define ZEXT_MESSAGE_HAS_INSTANCE_KEY 8
+#define ZEXT_MESSAGE_HAS_REPLAY 16
+#define ZEXT_MESSAGE_HAS_SUPERVISION 32
+#define ZEXT_MESSAGE_HAS_SEGMENT_PROFILE 64
 
-typedef struct wz_ext_owned_message_catalog_t {
+typedef struct zext_owned_message_catalog_t {
   void *_handle;
-} wz_ext_owned_message_catalog_t;
-typedef struct wz_ext_loaned_message_catalog_t {
+} zext_owned_message_catalog_t;
+typedef struct zext_loaned_message_catalog_t {
   void *_handle;
-} wz_ext_loaned_message_catalog_t;
-typedef struct wz_ext_moved_message_catalog_t {
-  wz_ext_owned_message_catalog_t _this;
-} wz_ext_moved_message_catalog_t;
+} zext_loaned_message_catalog_t;
+typedef struct zext_moved_message_catalog_t {
+  zext_owned_message_catalog_t _this;
+} zext_moved_message_catalog_t;
 
 /* One message's entry. A number whose has bit is clear is 0. */
-typedef struct wz_ext_message_entry_t {
+typedef struct zext_message_entry_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   const char *key_expr;   /* the literal key it is put on, valid while the
                              catalog lives */
@@ -2241,15 +2271,15 @@ typedef struct wz_ext_message_entry_t {
   uint32_t period_ms;     /* 0 for an event message */
   uint32_t replay_depth;  /* 0 for no replay */
   uint16_t supervision_factor; /* 0 when its reception is not supervised */
-  uint8_t has;            /* WZ_EXT_MESSAGE_HAS_* */
+  uint8_t has;            /* ZEXT_MESSAGE_HAS_* */
   uint8_t supervision_awaited; /* 1 when a stream can be lost before its
                                   first reception */
   uint32_t senders;       /* how many senders its receivers bind slots to */
   uint32_t reserved;
-} wz_ext_message_entry_t;
+} zext_message_entry_t;
 
 /* Read and judge the catalog text, against the process's
- * MESSAGE_CATALOG_ENTRIES (wz_ext_runtime_limits_document) and the build's
+ * MESSAGE_CATALOG_ENTRIES (zext_runtime_limits_document) and the build's
  * REPLAY_DEPTH_MAX, E2E_SENDER_SLOTS,
  * INSTANCE_KEY_FIELDS and INSTANCES_PER_MESSAGE. this_ holds
  * the null state on every error; refusal may be NULL and, on
@@ -2259,76 +2289,76 @@ typedef struct wz_ext_message_entry_t {
  *
  * Z_OK; Z_ERR_NULL for a NULL this_ or text; Z_EINVAL (-75) for text that is
  * not UTF-8; _Z_ERR_CONFIG_INVALID_VALUE for a catalog refused. */
-z_result_t wz_ext_message_catalog_new(wz_ext_owned_message_catalog_t *this_,
+z_result_t zext_message_catalog_new(zext_owned_message_catalog_t *this_,
                                       const char *text,
                                       z_owned_string_t *refusal);
 
 /* How many messages it declares; 0 for a NULL catalog. */
-size_t wz_ext_message_catalog_len(const wz_ext_loaned_message_catalog_t *this_);
+size_t zext_message_catalog_len(const zext_loaned_message_catalog_t *this_);
 
 /* The index of the message put on key_expr, of the message of id, and of the
  * node called name. Z_OK; Z_ERR_INVALID (-1) when there is none; Z_EINVAL for
  * text that is not UTF-8; Z_ERR_NULL for a NULL argument. */
-z_result_t wz_ext_message_catalog_find(
-    const wz_ext_loaned_message_catalog_t *this_, const char *key_expr,
+z_result_t zext_message_catalog_find(
+    const zext_loaned_message_catalog_t *this_, const char *key_expr,
     size_t *out_index);
-z_result_t wz_ext_message_catalog_find_id(
-    const wz_ext_loaned_message_catalog_t *this_, uint32_t id,
+z_result_t zext_message_catalog_find_id(
+    const zext_loaned_message_catalog_t *this_, uint32_t id,
     size_t *out_index);
-z_result_t wz_ext_message_catalog_node(
-    const wz_ext_loaned_message_catalog_t *this_, const char *name,
+z_result_t zext_message_catalog_node(
+    const zext_loaned_message_catalog_t *this_, const char *name,
     size_t *out_node);
 
 /* The entry of message index, written to out (zeroed on every error). Z_OK;
  * Z_ERR_INVALID for no such message; Z_ERR_NULL for a NULL argument. */
-z_result_t wz_ext_message_catalog_entry(
-    const wz_ext_loaned_message_catalog_t *this_, size_t index,
-    wz_ext_message_entry_t *out);
+z_result_t zext_message_catalog_entry(
+    const zext_loaned_message_catalog_t *this_, size_t index,
+    zext_message_entry_t *out);
 
 /* Whether node publishes or subscribes to message index: the
- * WZ_EXT_MESSAGE_PUBLISHES and _SUBSCRIBES bits, 0 for neither or no such
+ * ZEXT_MESSAGE_PUBLISHES and _SUBSCRIBES bits, 0 for neither or no such
  * message or node. */
-uint8_t wz_ext_message_catalog_direction(
-    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node);
+uint8_t zext_message_catalog_direction(
+    const zext_loaned_message_catalog_t *this_, size_t index, size_t node);
 
 /* The start delay every reception supervisor of the deployment is made with,
  * in milliseconds; 0 when the catalog states none. */
-uint32_t wz_ext_message_catalog_supervision_start_delay(
-    const wz_ext_loaned_message_catalog_t *this_);
+uint32_t zext_message_catalog_supervision_start_delay(
+    const zext_loaned_message_catalog_t *this_);
 
 /* With e2e-sender: the sender node protects message index with, from the
  * message's profile and header values and the node's address, made as
- * options says (NULL: the defaults); the handle wz_ext_e2e_sender_new makes.
+ * options says (NULL: the defaults); the handle zext_e2e_sender_new makes.
  * out holds the null state on every error; refusal may be NULL.
  *
  * Z_OK; Z_ERR_INVALID for no such message or node; Z_EINVAL for an unknown
  * rollover; _Z_ERR_CONFIG_INVALID_VALUE when the node does not publish the
  * message, the message is not protected or an option is refused, refusal
  * saying why; Z_ERR_NULL for a NULL catalog or out. */
-z_result_t wz_ext_message_catalog_e2e_sender_new(
-    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
-    const wz_ext_e2e_sender_options_t *options, wz_ext_owned_e2e_sender_t *out,
+z_result_t zext_message_catalog_e2e_sender_new(
+    const zext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    const zext_e2e_sender_options_t *options, zext_owned_e2e_sender_t *out,
     z_owned_string_t *refusal);
 
 /* With e2e-receiver: the receiver node judges message index with, from the
  * message's profile and header values, with one slot per sender the entry
  * lists, bound to its identity, or one stream when it lists none; the handle
- * wz_ext_e2e_receiver_new makes. out holds the null state on every error.
+ * zext_e2e_receiver_new makes. out holds the null state on every error.
  *
- * Z_OK; Z_ERR_INVALID for no such message or node; WZ_EXT_ERR_UNSUPPORTED for
+ * Z_OK; Z_ERR_INVALID for no such message or node; ZEXT_ERR_UNSUPPORTED for
  * a message that lists senders in a build without e2e-sender-demux;
  * _Z_ERR_CONFIG_INVALID_VALUE when the node does not subscribe to the message
  * or it is not protected, refusal saying why; Z_ERR_NULL for a NULL catalog
  * or out. */
-z_result_t wz_ext_message_catalog_e2e_receiver_new(
-    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
-    wz_ext_owned_e2e_receiver_t *out, z_owned_string_t *refusal);
+z_result_t zext_message_catalog_e2e_receiver_new(
+    const zext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    zext_owned_e2e_receiver_t *out, z_owned_string_t *refusal);
 
 /* With e2e-supervision: how many rows a reception supervisor of node takes
  * for message index (one per sender the entry lists, else one), and the door
  * that adds them to supervisor: the message's period and factor, each row's
  * sender the index of the node that sends the stream (the number
- * wz_ext_stream_supervisor_set_sender_present takes). The stream numbers are
+ * zext_stream_supervisor_set_sender_present takes). The stream numbers are
  * written to out_streams in the order of the receiver's slots, and how many
  * to written.
  *
@@ -2336,25 +2366,25 @@ z_result_t wz_ext_message_catalog_e2e_receiver_new(
  * is added; Z_ERR_INVALID for no such message or node;
  * _Z_ERR_CONFIG_INVALID_VALUE when the node does not subscribe to the message
  * or its reception is not supervised; the code of
- * wz_ext_stream_supervisor_add when the supervisor refuses a row, the rows
+ * zext_stream_supervisor_add when the supervisor refuses a row, the rows
  * before it added and counted in written; Z_ERR_NULL for a NULL argument. */
-z_result_t wz_ext_message_catalog_supervision_rows(
-    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
+z_result_t zext_message_catalog_supervision_rows(
+    const zext_loaned_message_catalog_t *this_, size_t index, size_t node,
     size_t *out_rows, z_owned_string_t *refusal);
-z_result_t wz_ext_message_catalog_supervise(
-    const wz_ext_loaned_message_catalog_t *this_, size_t index, size_t node,
-    const wz_ext_loaned_stream_supervisor_t *supervisor, uint32_t *out_streams,
+z_result_t zext_message_catalog_supervise(
+    const zext_loaned_message_catalog_t *this_, size_t index, size_t node,
+    const zext_loaned_stream_supervisor_t *supervisor, uint32_t *out_streams,
     size_t capacity, size_t *written, z_owned_string_t *refusal);
 
-const wz_ext_loaned_message_catalog_t *wz_ext_message_catalog_loan(
-    const wz_ext_owned_message_catalog_t *this_);
-wz_ext_moved_message_catalog_t *wz_ext_message_catalog_move(
-    wz_ext_owned_message_catalog_t *this_);
-void wz_ext_message_catalog_drop(wz_ext_moved_message_catalog_t *this_);
-void wz_ext_internal_message_catalog_null(
-    wz_ext_owned_message_catalog_t *this_);
-bool wz_ext_internal_message_catalog_check(
-    const wz_ext_owned_message_catalog_t *this_);
+const zext_loaned_message_catalog_t *zext_message_catalog_loan(
+    const zext_owned_message_catalog_t *this_);
+zext_moved_message_catalog_t *zext_message_catalog_move(
+    zext_owned_message_catalog_t *this_);
+void zext_message_catalog_drop(zext_moved_message_catalog_t *this_);
+void zext_internal_message_catalog_null(
+    zext_owned_message_catalog_t *this_);
+bool zext_internal_message_catalog_check(
+    const zext_owned_message_catalog_t *this_);
 
 /* ================================================ the payload of a catalog message
  *
@@ -2362,11 +2392,11 @@ bool wz_ext_internal_message_catalog_check(
  * files the program hands over when it runs: a program that knows its
  * messages by name and its fields by path, with no code generated for them.
  * It reads a SCHEMA once (the FileDescriptorSet protoc compiled the .proto
- * files into, or with proto-text every file of wz_ext_proto_file_t, with what
+ * files into, or with proto-text every file of zext_proto_file_t, with what
  * each imports), makes a PAYLOAD for message index of a catalog, naming the
  * message type of the schema it is (its full name, package included), sets
  * values at field paths, encodes the protobuf bytes to put on the key
- * wz_ext_message_payload_key_expr gives, decodes the bytes a sample carries
+ * zext_message_payload_key_expr gives, decodes the bytes a sample carries
  * and reads values back. Part of the unstable surface, and present only in a
  * build with the message-payload capability, which implies message-catalog.
  *
@@ -2386,7 +2416,7 @@ bool wz_ext_internal_message_catalog_check(
  * not set reads as protobuf reads it: one without presence (a proto3 singular
  * field not optional, not in a oneof, not a message) as its default, one with
  * presence, or any field of a message that is not there, as
- * WZ_EXT_ERR_PAYLOAD_ABSENT. The bytes are written in ascending field
+ * ZEXT_ERR_PAYLOAD_ABSENT. The bytes are written in ascending field
  * number, a field without presence left out at its default, repeated numbers
  * packed in proto3 and unpacked in proto2 unless [packed = ...] says
  * otherwise; a proto2 required field that is not set refuses the encoding.
@@ -2394,7 +2424,7 @@ bool wz_ext_internal_message_catalog_check(
  * A refused call returns one of the codes below, or Z_ERR_OVERFLOW (-74) for
  * a buffer too small or a storage with no room left, and changes nothing,
  * except a decode whose values do not fit the storage, which leaves the
- * payload empty; wz_ext_message_payload_refusal gives the sentence of the
+ * payload empty; zext_message_payload_refusal gives the sentence of the
  * last refused call on the payload.
  *
  * STORAGE. A payload keeps its values in storage the program gives when it
@@ -2402,7 +2432,7 @@ bool wz_ext_internal_message_catalog_check(
  * values (each value, each element of a repeated field, each message field
  * holding others and each field kept as the wire wrote it takes one) and
  * bytes bytes of strings, bytes and kept fields, in
- * wz_ext_message_payload_storage_size(fields, bytes) bytes. Setting,
+ * zext_message_payload_storage_size(fields, bytes) bytes. Setting,
  * encoding, decoding and reading then take nothing from the heap.
  *
  * OWNERSHIP AND THREADS. A schema does not change once read and each payload
@@ -2410,198 +2440,198 @@ bool wz_ext_internal_message_catalog_check(
  * payloads live. A payload may be called from several threads, one call at a
  * time: each call holds its lock. */
 
-#define WZ_EXT_ERR_PAYLOAD_PATH (-20)   /* the path names no field the payload
+#define ZEXT_ERR_PAYLOAD_PATH (-20)   /* the path names no field the payload
                                            addresses */
-#define WZ_EXT_ERR_PAYLOAD_TYPE (-21)   /* a value of another type than the
+#define ZEXT_ERR_PAYLOAD_TYPE (-21)   /* a value of another type than the
                                            field's, or read as another */
-#define WZ_EXT_ERR_PAYLOAD_RANGE (-22)  /* a value the field (or the reader)
+#define ZEXT_ERR_PAYLOAD_RANGE (-22)  /* a value the field (or the reader)
                                            cannot hold, or an index past the
                                            end of its list */
-#define WZ_EXT_ERR_PAYLOAD_ABSENT (-23) /* not set: a field with presence, a
+#define ZEXT_ERR_PAYLOAD_ABSENT (-23) /* not set: a field with presence, a
                                            field of an absent message, a
                                            required field of an encoding */
-#define WZ_EXT_ERR_PAYLOAD_WIRE (-24)   /* the bytes are not a message of the
+#define ZEXT_ERR_PAYLOAD_WIRE (-24)   /* the bytes are not a message of the
                                            schema; the payload is as it was */
 
-typedef struct wz_ext_owned_payload_schema_t {
+typedef struct zext_owned_payload_schema_t {
   void *_handle;
-} wz_ext_owned_payload_schema_t;
-typedef struct wz_ext_loaned_payload_schema_t {
+} zext_owned_payload_schema_t;
+typedef struct zext_loaned_payload_schema_t {
   void *_handle;
-} wz_ext_loaned_payload_schema_t;
-typedef struct wz_ext_moved_payload_schema_t {
-  wz_ext_owned_payload_schema_t _this;
-} wz_ext_moved_payload_schema_t;
+} zext_loaned_payload_schema_t;
+typedef struct zext_moved_payload_schema_t {
+  zext_owned_payload_schema_t _this;
+} zext_moved_payload_schema_t;
 
-typedef struct wz_ext_owned_message_payload_t {
+typedef struct zext_owned_message_payload_t {
   void *_handle;
-} wz_ext_owned_message_payload_t;
-typedef struct wz_ext_loaned_message_payload_t {
+} zext_owned_message_payload_t;
+typedef struct zext_loaned_message_payload_t {
   void *_handle;
-} wz_ext_loaned_message_payload_t;
-typedef struct wz_ext_moved_message_payload_t {
-  wz_ext_owned_message_payload_t _this;
-} wz_ext_moved_message_payload_t;
+} zext_loaned_message_payload_t;
+typedef struct zext_moved_message_payload_t {
+  zext_owned_message_payload_t _this;
+} zext_moved_message_payload_t;
 
 /* Read the len bytes at bytes, a FileDescriptorSet (what protoc
  * --include_imports -o writes), into a schema. this_ holds the null state on
  * every error; on _Z_ERR_CONFIG_INVALID_VALUE (-89) refusal (which may be
  * NULL) holds why the bytes are refused. Z_ERR_NULL (-127) for a NULL this_,
  * or NULL bytes with a length. */
-z_result_t wz_ext_payload_schema_from_descriptor_set(
-    wz_ext_owned_payload_schema_t *this_, const uint8_t *bytes, size_t len,
+z_result_t zext_payload_schema_from_descriptor_set(
+    zext_owned_payload_schema_t *this_, const uint8_t *bytes, size_t len,
     z_owned_string_t *refusal);
 #if defined(WZ_FEATURE_PROTO_TEXT) && WZ_FEATURE_PROTO_TEXT == 1
 /* Read every file (each with what it imports) into a schema, in a build with
  * proto-text. As above, and refusal holds the text reader's diagnostic;
  * Z_ERR_NULL also for NULL files with a count, or a file with a NULL name or
  * text; Z_EINVAL (-75) for text that is not UTF-8. */
-z_result_t wz_ext_payload_schema_new(wz_ext_owned_payload_schema_t *this_,
-                                     const wz_ext_proto_file_t *files,
+z_result_t zext_payload_schema_new(zext_owned_payload_schema_t *this_,
+                                     const zext_proto_file_t *files,
                                      size_t file_count,
                                      z_owned_string_t *refusal);
 #endif
-const wz_ext_loaned_payload_schema_t *wz_ext_payload_schema_loan(
-    const wz_ext_owned_payload_schema_t *this_);
-wz_ext_moved_payload_schema_t *wz_ext_payload_schema_move(
-    wz_ext_owned_payload_schema_t *this_);
-void wz_ext_payload_schema_drop(wz_ext_moved_payload_schema_t *this_);
-void wz_ext_internal_payload_schema_null(wz_ext_owned_payload_schema_t *this_);
-bool wz_ext_internal_payload_schema_check(
-    const wz_ext_owned_payload_schema_t *this_);
+const zext_loaned_payload_schema_t *zext_payload_schema_loan(
+    const zext_owned_payload_schema_t *this_);
+zext_moved_payload_schema_t *zext_payload_schema_move(
+    zext_owned_payload_schema_t *this_);
+void zext_payload_schema_drop(zext_moved_payload_schema_t *this_);
+void zext_internal_payload_schema_null(zext_owned_payload_schema_t *this_);
+bool zext_internal_payload_schema_check(
+    const zext_owned_payload_schema_t *this_);
 
 /* How a payload is made: storage_len bytes at storage (NULL when the size is
- * 0), at least wz_ext_message_payload_storage_size(fields, bytes), the
+ * 0), at least zext_message_payload_storage_size(fields, bytes), the
  * program's and untouched until the payload is dropped. */
-typedef struct wz_ext_message_payload_options_t {
+typedef struct zext_message_payload_options_t {
   uint8_t *storage;
   size_t storage_len;
   size_t fields; /* values held at once */
   size_t bytes;  /* bytes of strings, bytes and kept fields held at once */
-} wz_ext_message_payload_options_t;
+} zext_message_payload_options_t;
 
 /* No storage, no value and no byte. */
-void wz_ext_message_payload_options_default(
-    wz_ext_message_payload_options_t *this_);
+void zext_message_payload_options_default(
+    zext_message_payload_options_t *this_);
 
 /* The storage a payload of fields values and bytes bytes takes, wherever it
  * begins; 0 for one whose size overflows, and for no value and no byte. */
-size_t wz_ext_message_payload_storage_size(size_t fields, size_t bytes);
+size_t zext_message_payload_storage_size(size_t fields, size_t bytes);
 
 /* An empty payload of message index of catalog, of the message type named
  * message in schema, keeping its values in the storage options gives. Z_OK;
  * Z_ERR_INVALID (-1) for a message the catalog has not;
  * _Z_ERR_CONFIG_INVALID_VALUE for a name the schema has no message of, a
- * storage shorter than wz_ext_message_payload_storage_size gives or a size
+ * storage shorter than zext_message_payload_storage_size gives or a size
  * that overflows, refusal saying why; Z_EINVAL for a name that is not UTF-8;
  * Z_ERR_NULL for a NULL argument or a NULL storage of a size. this_ holds the
  * null state on every error. */
-z_result_t wz_ext_message_payload_new(
-    wz_ext_owned_message_payload_t *this_,
-    const wz_ext_loaned_message_catalog_t *catalog, size_t index,
-    const wz_ext_loaned_payload_schema_t *schema, const char *message,
-    const wz_ext_message_payload_options_t *options,
+z_result_t zext_message_payload_new(
+    zext_owned_message_payload_t *this_,
+    const zext_loaned_message_catalog_t *catalog, size_t index,
+    const zext_loaned_payload_schema_t *schema, const char *message,
+    const zext_message_payload_options_t *options,
     z_owned_string_t *refusal);
 
 /* The key expression the payload's message is put on, valid while the
  * payload lives; NULL for a NULL payload. */
-const char *wz_ext_message_payload_key_expr(
-    const wz_ext_loaned_message_payload_t *this_);
+const char *zext_message_payload_key_expr(
+    const zext_loaned_message_payload_t *this_);
 
-/* Set the field path names. Z_OK; WZ_EXT_ERR_PAYLOAD_PATH, _TYPE or _RANGE;
+/* Set the field path names. Z_OK; ZEXT_ERR_PAYLOAD_PATH, _TYPE or _RANGE;
  * Z_ERR_OVERFLOW when the storage has no room for the value; Z_EINVAL for a
  * path or a string that is not UTF-8; Z_ERR_NULL for a NULL argument (data
  * may be NULL with a len of 0). */
-z_result_t wz_ext_message_payload_set_int(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_set_int(
+    const zext_loaned_message_payload_t *this_, const char *path,
     int64_t value);
-z_result_t wz_ext_message_payload_set_uint(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_set_uint(
+    const zext_loaned_message_payload_t *this_, const char *path,
     uint64_t value);
-z_result_t wz_ext_message_payload_set_double(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_set_double(
+    const zext_loaned_message_payload_t *this_, const char *path,
     double value);
-z_result_t wz_ext_message_payload_set_bool(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_set_bool(
+    const zext_loaned_message_payload_t *this_, const char *path,
     bool value);
-z_result_t wz_ext_message_payload_set_string(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_set_string(
+    const zext_loaned_message_payload_t *this_, const char *path,
     const char *value);
-z_result_t wz_ext_message_payload_set_bytes(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_set_bytes(
+    const zext_loaned_message_payload_t *this_, const char *path,
     const uint8_t *data, size_t len);
 
 /* Read the field path names into out, which is written only on Z_OK.
- * WZ_EXT_ERR_PAYLOAD_PATH, _TYPE, _RANGE or _ABSENT; Z_EINVAL; Z_ERR_NULL.
+ * ZEXT_ERR_PAYLOAD_PATH, _TYPE, _RANGE or _ABSENT; Z_EINVAL; Z_ERR_NULL.
  * The string door writes the text and a NUL, the bytes door the bytes, and
  * len their length (without the NUL); when capacity is too small they answer
  * Z_ERR_OVERFLOW with len set and out untouched, so a capacity of 0 asks for
  * the length. The string door reads an enum field as its value's name. */
-z_result_t wz_ext_message_payload_get_int(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_get_int(
+    const zext_loaned_message_payload_t *this_, const char *path,
     int64_t *out);
-z_result_t wz_ext_message_payload_get_uint(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_get_uint(
+    const zext_loaned_message_payload_t *this_, const char *path,
     uint64_t *out);
-z_result_t wz_ext_message_payload_get_double(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_get_double(
+    const zext_loaned_message_payload_t *this_, const char *path,
     double *out);
-z_result_t wz_ext_message_payload_get_bool(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_get_bool(
+    const zext_loaned_message_payload_t *this_, const char *path,
     bool *out);
-z_result_t wz_ext_message_payload_get_string(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_get_string(
+    const zext_loaned_message_payload_t *this_, const char *path,
     char *out, size_t capacity, size_t *len);
-z_result_t wz_ext_message_payload_get_bytes(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_get_bytes(
+    const zext_loaned_message_payload_t *this_, const char *path,
     uint8_t *out, size_t capacity, size_t *len);
 
 /* How many elements the repeated field path names holds (0 inside a message
  * that is not there); clear the field, or the one element, path names (the
  * elements after it moving down); clear every field. */
-z_result_t wz_ext_message_payload_count(
-    const wz_ext_loaned_message_payload_t *this_, const char *path,
+z_result_t zext_message_payload_count(
+    const zext_loaned_message_payload_t *this_, const char *path,
     size_t *out);
-z_result_t wz_ext_message_payload_clear(
-    const wz_ext_loaned_message_payload_t *this_, const char *path);
-z_result_t wz_ext_message_payload_reset(
-    const wz_ext_loaned_message_payload_t *this_);
+z_result_t zext_message_payload_clear(
+    const zext_loaned_message_payload_t *this_, const char *path);
+z_result_t zext_message_payload_reset(
+    const zext_loaned_message_payload_t *this_);
 
 /* The protobuf bytes of the payload into out, their count into written.
  * Z_ERR_OVERFLOW when capacity is less, written then holding the count and
- * out untouched (a capacity of 0 asks for the size); WZ_EXT_ERR_PAYLOAD_ABSENT
+ * out untouched (a capacity of 0 asks for the size); ZEXT_ERR_PAYLOAD_ABSENT
  * for a required field not set; _Z_ERR_CONFIG_INVALID_VALUE for a packed
  * option the writer cannot act on. */
-z_result_t wz_ext_message_payload_encode(
-    const wz_ext_loaned_message_payload_t *this_, uint8_t *out,
+z_result_t zext_message_payload_encode(
+    const zext_loaned_message_payload_t *this_, uint8_t *out,
     size_t capacity, size_t *written);
 /* Replace the payload's values with those the bytes carry.
- * WZ_EXT_ERR_PAYLOAD_WIRE for bytes that are not a message of the schema,
+ * ZEXT_ERR_PAYLOAD_WIRE for bytes that are not a message of the schema,
  * the payload then as it was; Z_ERR_OVERFLOW for values the storage has no
  * room for, the payload then empty. */
-z_result_t wz_ext_message_payload_decode(
-    const wz_ext_loaned_message_payload_t *this_, const uint8_t *bytes,
+z_result_t zext_message_payload_decode(
+    const zext_loaned_message_payload_t *this_, const uint8_t *bytes,
     size_t len);
 /* Why the last call on the payload was refused; the null state when it was
  * not. */
-z_result_t wz_ext_message_payload_refusal(
-    const wz_ext_loaned_message_payload_t *this_, z_owned_string_t *out);
+z_result_t zext_message_payload_refusal(
+    const zext_loaned_message_payload_t *this_, z_owned_string_t *out);
 
-const wz_ext_loaned_message_payload_t *wz_ext_message_payload_loan(
-    const wz_ext_owned_message_payload_t *this_);
-wz_ext_moved_message_payload_t *wz_ext_message_payload_move(
-    wz_ext_owned_message_payload_t *this_);
-void wz_ext_message_payload_drop(wz_ext_moved_message_payload_t *this_);
-void wz_ext_internal_message_payload_null(
-    wz_ext_owned_message_payload_t *this_);
-bool wz_ext_internal_message_payload_check(
-    const wz_ext_owned_message_payload_t *this_);
+const zext_loaned_message_payload_t *zext_message_payload_loan(
+    const zext_owned_message_payload_t *this_);
+zext_moved_message_payload_t *zext_message_payload_move(
+    zext_owned_message_payload_t *this_);
+void zext_message_payload_drop(zext_moved_message_payload_t *this_);
+void zext_internal_message_payload_null(
+    zext_owned_message_payload_t *this_);
+bool zext_internal_message_payload_check(
+    const zext_owned_message_payload_t *this_);
 
 /* ================================================ the most memory a session holds
  *
  * What a session holds at most, part by part, computed from the limits it
  * opened under: the snapshot its open resolved from the config, the limits of
- * a document handed to wz_ext_config_document included. A program reads it
+ * a document handed to zext_config_document included. A program reads it
  * once its session is open, to know what the limits it chose cost before the
  * session runs. Part of the unstable surface,
  * and present only in a build with the session-memory capability.
@@ -2633,16 +2663,16 @@ bool wz_ext_internal_message_payload_check(
  * closures' captures) is sized by no limit and is outside the rows, as are
  * the objects behind the handles a program holds. */
 
-typedef struct wz_ext_session_memory_t {
+typedef struct zext_session_memory_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   size_t total_bytes; /* the sum of the rows that are bounded */
-  size_t rows;        /* rows wz_ext_session_memory_row reports */
+  size_t rows;        /* rows zext_session_memory_row reports */
   uint8_t bounded;    /* 1 when every row is: total_bytes is then the most */
   uint8_t enforced;   /* 1 when the build refuses past every row as well */
   uint8_t reserved[6];
-} wz_ext_session_memory_t;
+} zext_session_memory_t;
 
-typedef struct wz_ext_session_memory_row_t {
+typedef struct zext_session_memory_row_t {
   size_t struct_size; /* sizeof this struct, set by the program */
   const char *part;   /* what holds the bytes; static */
   const char *basis;  /* the limit or build value that sizes it; static */
@@ -2652,19 +2682,19 @@ typedef struct wz_ext_session_memory_row_t {
   uint8_t bounded;    /* 1 when the row has a count */
   uint8_t enforced;   /* 1 when the build refuses past it */
   uint8_t reserved[6];
-} wz_ext_session_memory_row_t;
+} zext_session_memory_row_t;
 
 /* The most session holds, in out. A closed session reports what it held
  * while open. Z_OK; Z_ERR_NULL for a NULL out or a NULL session. */
-z_result_t wz_ext_session_memory(const z_loaned_session_t *session,
-                                 wz_ext_session_memory_t *out);
+z_result_t zext_session_memory(const z_loaned_session_t *session,
+                                 zext_session_memory_t *out);
 
 /* Row index of what session holds, in out, rows counted from 0 in the order
- * wz_ext_session_memory sums them. Z_OK; Z_ERR_NULL for a NULL out or a NULL
+ * zext_session_memory sums them. Z_OK; Z_ERR_NULL for a NULL out or a NULL
  * session; Z_EINVAL for an index past the last row, out then as it was. */
-z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
+z_result_t zext_session_memory_row(const z_loaned_session_t *session,
                                      size_t index,
-                                     wz_ext_session_memory_row_t *out);
+                                     zext_session_memory_row_t *out);
 
 /* ================================================ the extension interface
  *
@@ -2674,7 +2704,7 @@ z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
  * interface: those doors reach a session through the drop-in API and these
  * functions only, so a library of those features built apart from this one
  * calls the same. Part of the unstable surface, and present only in a build
- * with any of those capabilities; wz_ext_interface_session_facts also needs
+ * with any of those capabilities; zext_interface_session_facts also needs
  * the query plane, which every door that reads it has.
  *
  * Each struct states its size in its first field: the caller sets
@@ -2687,22 +2717,22 @@ z_result_t wz_ext_session_memory_row(const z_loaned_session_t *session,
  * minor N runs over a library of major M and minor N or later. Nothing one
  * side allocates is freed by the other. */
 
-#define WZ_EXT_INTERFACE_MAJOR 1
-#define WZ_EXT_INTERFACE_MINOR 3
+#define ZEXT_INTERFACE_MAJOR 1
+#define ZEXT_INTERFACE_MINOR 3
 
-typedef struct wz_ext_interface_version_t {
+typedef struct zext_interface_version_t {
     uint32_t struct_size;
     uint16_t major;
     uint16_t minor;
-} wz_ext_interface_version_t;
+} zext_interface_version_t;
 
 /* Z_OK; Z_ERR_NULL for a NULL out; Z_EINVAL as above. */
-z_result_t wz_ext_interface_version(wz_ext_interface_version_t *out);
+z_result_t zext_interface_version(zext_interface_version_t *out);
 
-#define WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE 0 /* one reply per frame */
-#define WZ_EXT_REPLAY_SHAPE_SEGMENTED 1        /* a frame as its pieces */
-#define WZ_EXT_REPLAY_LIVE_DELIVER 0           /* live samples as they come */
-#define WZ_EXT_REPLAY_LIVE_HOLD_BACK 1         /* after the first round */
+#define ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE 0 /* one reply per frame */
+#define ZEXT_REPLAY_SHAPE_SEGMENTED 1        /* a frame as its pieces */
+#define ZEXT_REPLAY_LIVE_DELIVER 0           /* live samples as they come */
+#define ZEXT_REPLAY_LIVE_HOLD_BACK 1         /* after the first round */
 
 /* What the library says of a session, a closed one included (closed is then
  * 1): its replay policies (replay-reply-shape, replay-serve-holds-sends as 1
@@ -2715,7 +2745,7 @@ z_result_t wz_ext_interface_version(wz_ext_interface_version_t *out);
  *
  * Z_OK; Z_ERR_NULL for a NULL out, a NULL session or the gravestone;
  * Z_EINVAL as above. */
-typedef struct wz_ext_session_facts_t {
+typedef struct zext_session_facts_t {
     uint32_t struct_size;
     uint8_t closed;
     uint8_t replay_reply_shape;
@@ -2725,26 +2755,26 @@ typedef struct wz_ext_session_facts_t {
     uint8_t reserved[7];
     size_t querier_max_pending_queries;
     size_t replay_depth_max;
-} wz_ext_session_facts_t;
-z_result_t wz_ext_interface_session_facts(const z_loaned_session_t *session,
-                                          wz_ext_session_facts_t *out);
+} zext_session_facts_t;
+z_result_t zext_interface_session_facts(const z_loaned_session_t *session,
+                                          zext_session_facts_t *out);
 
 /* What the library says of the process's runtime: the rows its limits lend
  * each machine a door of the additional features makes, how many messages
  * one message catalog may declare (MESSAGE_CATALOG_ENTRIES) and how many
  * streams one reception supervisor may hold (E2E_SUPERVISED_STREAMS). A door
  * asks it when it makes a machine, so the process's limits are taken from
- * then on (wz_ext_runtime_limits_document). Added in minor version 2. 24
+ * then on (zext_runtime_limits_document). Added in minor version 2. 24
  * bytes on a 64-bit target, 16 on a 32-bit one.
  *
  * Z_OK; Z_ERR_NULL for a NULL out; Z_EINVAL as above, nothing taken. */
-typedef struct wz_ext_runtime_facts_t {
+typedef struct zext_runtime_facts_t {
     uint32_t struct_size;
     uint32_t reserved;
     size_t message_catalog_entries;
     size_t e2e_supervised_streams;
-} wz_ext_runtime_facts_t;
-z_result_t wz_ext_interface_runtime_facts(wz_ext_runtime_facts_t *out);
+} zext_runtime_facts_t;
+z_result_t zext_interface_runtime_facts(zext_runtime_facts_t *out);
 
 /* Where the bytes of a payload are, in place: the library keeps a payload in
  * one buffer, so the view is the whole payload, copied from nothing and
@@ -2752,7 +2782,7 @@ z_result_t wz_ext_interface_runtime_facts(wz_ext_runtime_facts_t *out);
  *
  * Z_OK; Z_ERR_NULL for a NULL data or len, and for a NULL payload or the
  * gravestone, with *data NULL and *len 0. */
-z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
+z_result_t zext_interface_bytes_view(const z_loaned_bytes_t *bytes,
                                        const uint8_t **data, size_t *len);
 
 /* Run body(context) on the calling thread as one of the program's callbacks:
@@ -2764,15 +2794,15 @@ z_result_t wz_ext_interface_bytes_view(const z_loaned_bytes_t *bytes,
  * Z_OK once body returned; Z_ERR_NULL for a NULL body, which runs nothing;
  * _Z_ERR_SYSTEM_OUT_OF_MEMORY, running nothing, when the library marks the
  * threads in callbacks in a table of fixed room (a build without std) and
- * other threads fill it (wz_ext_callbacks_refused). */
-z_result_t wz_ext_interface_run_in_callback(void (*body)(void *context),
+ * other threads fill it (zext_callbacks_refused). */
+z_result_t zext_interface_run_in_callback(void (*body)(void *context),
                                             void *context);
 
 /* The major version, as the name of a function that answers it: a library of
  * the additional features built apart from this one calls it, so the system's
  * loader does not load that library over a library of another major version,
  * whose function has another name. */
-uint16_t wz_ext_interface_major_1(void);
+uint16_t zext_interface_major_1(void);
 
 /* ================================================ one library or two
  *
@@ -2789,7 +2819,7 @@ uint16_t wz_ext_interface_major_1(void);
  * core's z_string_drop; storage the program hands a door stays the program's);
  * no object of a language runtime (a FILE, a heap block of one C runtime to be
  * freed by another, a Rust value) crosses; and the version of the interface is
- * asked, by the loader through wz_ext_interface_major_1 and at run time below.
+ * asked, by the loader through zext_interface_major_1 and at run time below.
  *
  * The version of the extension interface the doors of the additional features
  * were built against, written into out (struct_size set as above), compared
@@ -2797,9 +2827,9 @@ uint16_t wz_ext_interface_major_1(void);
  * of those capabilities, in whichever library holds the doors.
  *
  * Z_OK when the core answers the same major version and the same or a later
- * minor one; WZ_EXT_ERR_UNSUPPORTED (-3) when it does not, out written all the
+ * minor one; ZEXT_ERR_UNSUPPORTED (-3) when it does not, out written all the
  * same with the version the doors need; Z_ERR_NULL for a NULL out; Z_EINVAL
  * for a struct_size smaller than the struct, nothing written. */
-z_result_t wz_ext_additional_interface(wz_ext_interface_version_t *out);
+z_result_t zext_additional_interface(zext_interface_version_t *out);
 
 #endif /* WZ_EXT_H */

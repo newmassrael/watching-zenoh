@@ -123,6 +123,15 @@ pub const fn block_bytes(len: usize) -> Option<usize> {
     }
 }
 
+/// The lock an arena's owner keeps it behind, as the debug check of the arena reads it: where the
+/// lock lies, and the owner's answer to whether the calling thread holds the lock that lies there.
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy)]
+struct OwnerLock {
+    at: *const (),
+    held_here: fn(*const ()) -> bool,
+}
+
 /// The state of a key arena, kept at the start of the span it was lent.
 struct KeyStore {
     /// The first byte of the blocks, aligned to [`BLOCK_ALIGN`].
@@ -139,10 +148,12 @@ struct KeyStore {
     peak: Cell<u32>,
     /// The keys refused for want of room.
     refused: Cell<u32>,
-    /// Whether the arena's owner keeps it behind one lock ([`KeySpace::guard_by_owner_lock`]).
+    /// The lock the arena's owner keeps it behind ([`KeySpace::guard_by_owner_lock`]), `None` for
+    /// an arena no lock guards. Written before a second thread reaches the arena, or by its owner
+    /// alone, so every read of it finds it written.
     #[cfg(debug_assertions)]
-    guarded: AtomicBool,
-    /// Whether that lock is held now.
+    guard: Cell<Option<OwnerLock>>,
+    /// Whether that lock is held now, by any thread.
     #[cfg(debug_assertions)]
     held: AtomicBool,
     /// The longest key the arena keeps: the session's `MAX_KEYEXPR_BYTES` its creator lent the
@@ -157,15 +168,20 @@ struct KeyStore {
 
 impl KeyStore {
     /// Fail at once, in a build with debug assertions, when a key of an arena its owner's lock
-    /// guards is made, shared or let go of with that lock not held: the counts are cells, and a
-    /// thread that touches them outside the lock races the one that holds it.
+    /// guards is made, shared or let go of by a thread that does not hold that lock: the counts are
+    /// cells, and a thread that touches them outside the lock races the one that holds it. The
+    /// owner's mark says whether any thread holds the lock, and the owner's answer for the calling
+    /// thread whether this one does, so a thread that runs beside the holder fails too, on the run
+    /// that takes the path, not only on one whose timing a race detector sees.
     #[inline]
     fn assert_owner_lock(&self) {
         #[cfg(debug_assertions)]
-        assert!(
-            !self.guarded.load(Ordering::Relaxed) || self.held.load(Ordering::Relaxed),
-            "a key of an arena its owner's lock guards was touched with that lock not held"
-        );
+        if let Some(lock) = self.guard.get() {
+            assert!(
+                self.held.load(Ordering::Relaxed) && (lock.held_here)(lock.at),
+                "a key of an arena its owner's lock guards was touched with that lock not held"
+            );
+        }
     }
 
     /// Header word `word` of the block at `at`.
@@ -378,7 +394,7 @@ impl KeySpace {
                 peak: Cell::new(0),
                 refused: Cell::new(0),
                 #[cfg(debug_assertions)]
-                guarded: AtomicBool::new(false),
+                guard: Cell::new(None),
                 #[cfg(debug_assertions)]
                 held: AtomicBool::new(false),
                 longest,
@@ -511,14 +527,25 @@ impl KeySpace {
         }
     }
 
-    /// Keep the arena behind its owner's one lock from now on: in a build with debug assertions a
-    /// key of it made, shared or let go of while the owner has not marked the lock held
-    /// ([`Self::owner_lock_taken`]) fails at once, so a path that lets go of a row's key after the
-    /// lock is let go of fails every test that takes it rather than racing a holder of the lock.
-    /// Nothing is kept or checked in a build without debug assertions.
-    pub fn guard_by_owner_lock(&self) {
+    /// Keep the arena behind its owner's one lock from now on, the lock that lies at `at`: in a
+    /// build with debug assertions a key of it made, shared or let go of while the owner has not
+    /// marked the lock held ([`Self::owner_lock_taken`]), or on a thread for which `held_here`
+    /// answers that it does not hold the lock at `at`, fails at once. A path that lets go of a
+    /// row's key after the lock is let go of so fails every test that takes it rather than racing
+    /// a holder of the lock. `held_here` answers `true` where the owner cannot tell, which leaves
+    /// the mark to answer alone. Nothing is kept or checked in a build without debug assertions.
+    pub fn guard_by_owner_lock(&self, at: *const (), held_here: fn(*const ()) -> bool) {
         #[cfg(debug_assertions)]
-        self.store().guarded.store(true, Ordering::Relaxed);
+        self.store().guard.set(Some(OwnerLock { at, held_here }));
+        #[cfg(not(debug_assertions))]
+        let _ = (at, held_here);
+    }
+
+    /// The owner holds the arena alone from here on, with no lock (its state is being let go of,
+    /// through an exclusive borrow): no other thread reaches it, so nothing is checked.
+    pub fn owner_alone(&self) {
+        #[cfg(debug_assertions)]
+        self.store().guard.set(None);
     }
 
     /// The owner took the lock that guards the arena.
@@ -1120,7 +1147,7 @@ mod tests {
     #[should_panic(expected = "that lock not held")]
     fn a_key_let_go_of_outside_its_owners_lock_fails() {
         let keys = keys_of(128);
-        keys.guard_by_owner_lock();
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_every_thread);
         keys.owner_lock_taken();
         let key = keys.key("demo/guarded").expect("room");
         let shared = key.clone();
@@ -1134,13 +1161,55 @@ mod tests {
     #[test]
     fn a_key_let_go_of_under_its_owners_lock_passes() {
         let keys = keys_of(128);
-        keys.guard_by_owner_lock();
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_every_thread);
         keys.owner_lock_taken();
         let key = keys.key("demo/guarded").expect("room");
         drop(key);
         keys.owner_lock_released();
         let unguarded = keys_of(128);
         drop(unguarded.key("demo/free").expect("room"));
+        assert_eq!(keys.counts().used, 0);
+    }
+
+    /// An owner whose answer is that every thread holds its lock, which leaves its mark to say
+    /// whether the lock is held.
+    fn held_by_every_thread(_: *const ()) -> bool {
+        true
+    }
+
+    /// An owner whose answer is that the calling thread does not hold its lock: the thread runs
+    /// beside the one that holds it.
+    fn held_by_another_thread(_: *const ()) -> bool {
+        false
+    }
+
+    /// A key let go of by a thread that does not hold its arena's lock fails a debug build at
+    /// once, though the mark says another thread holds the lock: the race the mark alone misses.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "that lock not held")]
+    fn a_key_let_go_of_beside_the_thread_that_holds_its_lock_fails() {
+        let keys = keys_of(128);
+        let key = keys.key("demo/beside").expect("room");
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_another_thread);
+        keys.owner_lock_taken();
+        drop(key);
+    }
+
+    /// The CONTROL: the same key let go of once the owner holds the arena alone passes, and so
+    /// does one let go of on a thread the owner answers holds the lock.
+    #[test]
+    fn a_key_let_go_of_by_its_owner_alone_passes() {
+        let keys = keys_of(128);
+        let alone = keys.key("demo/alone").expect("room");
+        let held = keys.key("demo/held").expect("room");
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_another_thread);
+        keys.owner_alone();
+        drop(alone);
+        keys.guard_by_owner_lock(core::ptr::null(), held_by_every_thread);
+        keys.owner_lock_taken();
+        drop(held);
+        keys.owner_lock_released();
         assert_eq!(keys.counts().used, 0);
     }
 

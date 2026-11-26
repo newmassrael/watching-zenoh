@@ -16,12 +16,21 @@ API and is compiled from the same source for each arm:
 | arm | library | headers | carries |
 |---|---|---|---|
 | P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
-| W | `wz-capi-pico`, its default capabilities on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, udp, multicast |
+| W | `wz-capi-pico` for zenoh-pico's preset (`configs/zenoh-pico_defconfig`, below) on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, udp, multicast |
 | W (program transport) | the same build with `app-transport` | the same, for that feature list | the program transport |
 | X | an external library of the pico API, named by the environment (below); measured only when named | its own, with its own `config.h` | tcp, udp, multicast |
 
 The program-transport cell is measured on its own build because a capability that is off adds
-nothing to a build, so the default build is the one the other transports are measured on.
+nothing to a build, so the preset's build is the one the other transports are measured on.
+
+**The preset.** Arm W carries the capabilities zenoh-pico's own default build has, no more:
+`configs/zenoh-pico_defconfig`, generated from the declaration's `upstream_on` and `upstream_off`
+(`deploy/wz-config.toml`), resolved as the parity matrix resolves its arm W
+(`wz_config.preset_named_features` over `wz_config.pico_bench_configuration`), on the engine of the run.
+The crate's default features are the Kconfig defaults, which turn on planes pico's default build has
+not (advanced, connectivity, the config policy, the conformance digest, the device requirements, the
+unstable API); a ratio read from them charges wz for code pico leaves out. `reference.json` records
+the original as `wz_preset`.
 
 **The engine.** Arm W is built on the engine the package for a host ships on, which its profile
 `configs/profiles/host-peer-ext.conf` chooses on the global axis `engine`, unless `PICO_CMP_ENGINE`
@@ -32,14 +41,26 @@ tokio engine left out (`wz_config.coop_features`); a capability asked that the c
 not run is refused by name. `reference --engine` records it (`wz_engine` in `reference.json`), the run
 carries it into `perf.json` (`record.engine`) and prints it, and the gate refuses a run against a
 table filled from the other engine. The other host modes of `scripts/pico-compare.sh` (`rtt`, `thr`,
-`nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings.
+`nodrop`, `profile`, `tids`, `batch`) build on the same answer and print it with their readings, and
+their wz library is zenoh-pico's preset too (`wz_config.py --bench-cargo-args`, `bench_cargo_args`,
+`preset_named_features`), each program of it compiled against that build's own `config.h`
+(`--bench-config-h`, `target/pico-compare/include-W`).
+
+**The build.** Both arms are zenoh-pico's preset in wz (configs/zenoh-pico_defconfig,
+`wz_config.PICO_BENCH_ORIGINAL`; docs/win-budget/rss.md section 2.2), not the crate's default features,
+which carry planes zenoh-pico's own build has not. `reference` records it (`wz_preset` in
+`reference.json`), the run carries it into `perf.json` (`record.preset`; a reading that names none was
+made of the crate's default features), and the gate refuses a run against a table filled from another
+build (`preset`), as it refuses another engine. A Windows package is planned as the preset only when its
+features are exactly the preset's (`windows-plan`, `wz_preset`, with `wz_beyond_preset` and
+`wz_short_of_preset` otherwise).
 
 **The standard library.** Arm W is the library the release ships: without `std` (`os-host`,
 docs/c-abi-engine-and-memory.md phase P4), the one form
 `pico_windows_package.RELEASE_STDLIBS` names, unless `PICO_CMP_STDLIB` (`std` or `nostd`) names the
 other to compare them; `perf_matrix.py bench-stdlib` is where a run learns it, and a release of more than
 one form makes a run name the one it measures. Its feature list is the cooperative engine's on the
-host, `os-host` (`wz_config.bench_named_features`, the rule the Windows package is made by); a capability that turns `std` on is refused by name, and
+host, `os-host` (`wz_config.preset_named_features`; the Windows package is made by the same engine rule); a capability that turns `std` on is refused by name, and
 so is the form without `std` on the tokio engine. `reference --stdlib` records it (`wz_stdlib` in
 `reference.json`), the run carries it into `perf.json` (`record.stdlib`; a reading that names none was
 made before the field, of a library with `std`), and the gate refuses a run against a table filled from
@@ -56,7 +77,7 @@ pinned pico's own, with the `config.h` of its own feature list in place of P's.
 
 **The same build.** Arm P is the build `scripts/lib/capability_cost_gate.py` measures the size of:
 every `Z_FEATURE_*` switch the declaration (`deploy/wz-config.toml`) answers is set from that answer
-for `wz-capi-pico`'s default features (`wz_config.pico_reference`), the rest keep pico's defaults,
+for arm W's features, the preset's (`wz_config.pico_reference`), the rest keep pico's defaults,
 Release, shared. `perf_matrix.py reference` asks the gate's own builder for it, so the library timed
 here and the library whose size the gate prints are one build, built under the gate's build rule
 (`build_env`: no path of the host and the commit's time in its bytes) and found again by the same
@@ -102,7 +123,7 @@ cells, and the gate records that (section 5).
 | program | listens on a `tcp/` locator over the program's own transport | dials it over the same |
 
 The program transport is the wz door through which a program gives a session its own network stack
-(`wz_ext_transport_*`, declared in `crates/wz-capi-core/include/wz_ext.h`). In the probe it is an
+(`zext_transport_*`, declared in `crates/wz-capi-core/include/wz_ext.h`). In the probe it is an
 AF_UNIX stream in the abstract namespace, one reading thread per link, and a send that never blocks
 (it answers would-block and reports the link writable when the socket has room again). zenoh-pico has
 no such door, so arm P's program cells are recorded as not applicable, with that reason, and arm X's
@@ -190,6 +211,7 @@ reference, to be answered by a run that holds one, not a figure of this matrix.
 | `cpu_ns_per_msg` | thr | the two above, summed: the CPU a delivered message cost both sides | lower |
 | `cpu_user_s_*`, `cpu_sys_s_*` | both | each process's whole user and system CPU (`getrusage` of the reaped child), client and server | lower |
 | `rss_kib_client`, `rss_kib_server`, `rss_kib` | both | each process's peak resident set, as the program prints it as its last line (VmHWM of `/proc/self/status`), and their sum; the maxrss of the reaped child is not read, since Linux keeps the resident set a process had before its exec as a floor of it, and a child of the runner is a copy of the runner until that exec | lower |
+| `smaps_<part>_kib`, `smaps_rollup_*` | both, with `PERF_SMAPS=1` | the resident KiB of each part of the two processes (`SMAPS_CLASSES`: the arm's library, libc, the loader, `libgcc_s`, other libraries, the program, the brk heap, the main stack, the anonymous mappings, the kernel's, the rest) and of their `/proc/self/smaps_rollup`, read by each program once its role has run and before its close, so below the peak; each side's mappings are kept in `perf.json` (`smaps_client`, `smaps_server`). Absent from a run that did not ask (docs/win-budget/rss.md, cell R0) | lower |
 
 The process CPU of a figure per round trip or per message is read by the process itself
 (`CLOCK_PROCESS_CPUTIME_ID`, all its threads) at the edges of its own span, so time a process spent
@@ -396,8 +418,9 @@ every repetition leaves the cell without a ratio.
 **The table.** A JSON object: `schema` `wz-pico-perf-ceiling/1`, `pair` (`W/P` or `W/X`), `engine` (the
 engine arm W was built on when the rows were filled; required of the W over P table, and a run of
 another engine is refused against it), `stdlib` (the standard library arm W was built with, `std` or
-`nostd`; required of the W over P table alike, and a run of the other form is refused against it),
-`tolerance`, and `rows`, one per row key, each of four shapes:
+`nostd`; required of the W over P table alike, and a run of the other form is refused against it), `preset`
+(the build arm W was compared as, `zenoh-pico`; required of the W over P table alike, and a run of another
+build is refused against it), `tolerance`, and `rows`, one per row key, each of four shapes:
 
 | row | holds |
 |---|---|
@@ -508,7 +531,7 @@ is left out of the run, `record.not_measured.multicast` says why with what each 
 prints that reason beside the rows it reports not measured. The runner reads and changes no firewall rule.
 
 **The table.** `deploy/pico_perf_ceiling_windows.json`: the rows of the default matrix, as the Linux table,
-with `platform` `windows-x64`, the engine `coop` and `stdlib` `nostd`, every row null until a run fills it. A reading states
+with `platform` `windows-x64`, the engine `coop`, `stdlib` `nostd` and `preset` `zenoh-pico`, every row null until a run fills it. A reading states
 the platform it was made on (`record.platform`; a reading that states none is Linux's, as every one before the
 field was) and a table the platform its rows were filled on (`platform`, Linux when absent). The gate judges a
 reading only against a table of its own platform and refuses any other (exit 2); without `--table` it reads the

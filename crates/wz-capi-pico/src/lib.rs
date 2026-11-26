@@ -127,8 +127,9 @@ pub mod c_runtime {
 /// host's heap (the one `z_malloc` hands a program on a POSIX host, the process heap on Windows),
 /// a panic handler that aborts the process, as a failed assertion in zenoh-pico does, and on a POSIX
 /// host the personality routine the toolchain's prebuilt `core` names in its unwind tables, which
-/// nothing calls because nothing unwinds (`src/os/no_std_host.rs`). Expanded once, by the C
-/// library's artifact `wz-capi-pico-lib` in a build that does not unwind, never in this rlib, so
+/// nothing calls because nothing unwinds (`src/os/no_std_host.rs`), and on Linux with the GNU C
+/// library the unwinder's `_Unwind_Resume` its cleanup paths name, for the same reason. Expanded
+/// once, by the C library's artifact `wz-capi-pico-lib` in a build that does not unwind, never in this rlib, so
 /// a Rust program or test that links this crate keeps `std`'s own. Empty in a build without `os-host`: the tokio engine's library
 /// links `std`, and a Zephyr image's C seams and board define them.
 #[cfg(feature = "os-host")]
@@ -148,6 +149,22 @@ macro_rules! c_library_runtime {
         extern "C" fn rust_eh_personality() -> ! {
             $crate::c_runtime::abort()
         }
+
+        // The prebuilt `core`'s and `alloc`'s cleanup paths call the unwinder's resume, which
+        // left undefined makes every program of the library map `libgcc_s` for that one name
+        // (docs/win-budget/rss.md, R4). No cleanup path is entered: an unwind reaches one only
+        // through a personality routine, and the one above aborts. The name is local to the
+        // library's object, so it is not exported and never stands for the unwinder of a program
+        // that links the static form.
+        // Named only by the assembly below, a use the dead-code pass need not see.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[allow(dead_code)]
+        extern "C" fn unwind_resume_unreached() -> ! {
+            $crate::c_runtime::abort()
+        }
+
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ::core::arch::global_asm!(".set _Unwind_Resume, {}", sym unwind_resume_unreached);
     };
 }
 /// The items a program without `std` needs from its last Rust crate: none in a build without
@@ -441,7 +458,7 @@ pub mod app_transport;
 pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
 pub mod c_enum;
-// The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`:
+// The conformance digest of this build (decision C15), handed out by `zext_conformance_digest`:
 // a wz door (`wz_ext.h`) in a build with `conformance-digest`, which the zenoh-pico preset leaves out.
 #[cfg(feature = "conformance-digest")]
 pub mod conformance;
@@ -501,7 +518,7 @@ pub mod e2e_receiver;
 #[cfg(feature = "e2e-sender")]
 #[cfg(not(wz_additional_apart))]
 pub mod e2e_sender;
-// `wz_ext_redeclare`: tell a session's peers what it holds again.
+// `zext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
 pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
@@ -582,7 +599,7 @@ pub mod platform;
 // process: in every library without the tokio engine, and in one with it that has their doors.
 #[cfg(wz_process_pools)]
 mod process_pool;
-// One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
+// One `.proto` file as a program hands it over (`zext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema from its text: the instance keys' and the message payloads', in a build that
 // links the text reader.
 #[cfg(all(
@@ -628,6 +645,10 @@ mod session_place;
 // (`wz_ext.h`) of the unstable surface, over the session core's rows.
 #[cfg(feature = "session-memory")]
 pub mod session_memory;
+// One step of a session the program runs on its own cycle, opened without its read task: a wz
+// door (`wz_ext.h`) of the multi-threaded arm, whose read task otherwise steps the session.
+#[cfg(feature = "multi-thread")]
+pub mod session_step;
 // The structs the doors write into memory the program sized: each starts with its size.
 #[cfg(any(
     feature = "object-pool",

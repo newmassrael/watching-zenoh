@@ -48,6 +48,8 @@ use crate::arena::AllocatorMemory;
 use crate::arena::CacheSpan;
 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use crate::arena::HandedTable;
+#[cfg(feature = "runtime-plan")]
+use crate::arena::OpenPlan;
 use crate::arena::{
     ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EnginePlace, EntityKind,
     EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
@@ -104,7 +106,7 @@ use wz_capi_port::{
     BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
     FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
     MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
-    SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    SessionEngine, SessionKeys, StatementNotHonoured, StepRefused, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -167,7 +169,7 @@ use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as Hands
 use wz_session_core::link_life::{LinkRole, LinkTimes, UnicastLink};
 use wz_session_core::locality::Locality;
 
-use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
+use crate::open_source::{Counted, EndpointList, OpenInput, OpenSource};
 use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
@@ -882,6 +884,9 @@ fn lend_session(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
+    #[cfg(feature = "runtime-plan")]
+    let mut plan = OpenPlan::blank();
+    #[cfg(not(feature = "runtime-plan"))]
     let mut plan = ArenaPlan::vacant();
     match from {
         PlanFrom::Region(region) => region.lay_out_on(&mut plan, config)?,
@@ -1372,6 +1377,10 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     reach: ReachEngine<Self>,
 }
 
+/// The bound of a read's wait for input that leaves the config's (`CoopConfig::idle_wait_ms`) the
+/// only one: the read task's and `zp_read`'s, which the program bounds by no step of its own.
+const NO_STEP_BOUND_MS: u32 = u32::MAX;
+
 /// What a step of the session came to ([`CoopEngine::step`]).
 #[cfg(wz_round)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1402,6 +1411,9 @@ pub(crate) struct Takes {
     pub(crate) polls: core::sync::atomic::AtomicUsize,
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
+    /// The faces' send places a publish's walk of the faces tried or held for a leg (`direct`).
+    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+    pub(crate) place_tries: core::sync::atomic::AtomicUsize,
     /// The sends on a face of a plain put written from the head its publisher's plain way made.
     pub(crate) planned: core::sync::atomic::AtomicUsize,
     /// The plain puts of a write filter's own way written from its plan, with nothing asked again.
@@ -1581,7 +1593,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// # Safety
     /// As for [`LockForm::init_at`], of a `Self`.
     unsafe fn init_at(at: NonNull<Self>, core: Core<L, C>) {
-        core.session.keys.guard_by_owner_lock();
+        // Named by the address each hold marks its thread with (`Self::lock`): the lock lies here
+        // from now on.
+        core.session
+            .keys
+            .guard_by_owner_lock(at.as_ptr().cast_const().cast(), session_held_here);
         // SAFETY: the caller's contract, for the one field.
         unsafe {
             <CoopForm as LockForm>::init_at(
@@ -1604,13 +1620,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
         Some(CoreGuard::taken(guard, held))
     }
 
-    /// The state with no lock, the engine being let go of: the key arena is marked held for the
-    /// rest of the engine's drop, which drops every row that keeps a key.
+    /// The state with no lock, the engine being let go of: the key arena is its owner's alone for
+    /// the rest of the engine's drop, which drops every row that keeps a key on whichever thread
+    /// let go of the engine last.
     fn dropping(&mut self) -> &mut Core<L, C> {
         let core = &mut <CoopForm as LockForm>::get_mut(&mut self.0).0;
-        core.session.keys.owner_lock_taken();
+        core.session.keys.owner_alone();
         core
     }
+}
+
+/// Whether the calling thread holds the session lock that lies at `lock`, as the key arena's check
+/// asks it ([`KeySpace::guard_by_owner_lock`]): by the marks each hold leaves on its thread, and
+/// `true` where they cannot tell, which leaves the arena's own mark to answer.
+fn session_held_here(lock: *const ()) -> bool {
+    wz_capi_port::sync::SessionHeld::held_on_this_thread(lock).unwrap_or(true)
 }
 
 /// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
@@ -4323,8 +4347,8 @@ impl SessionPlanes {
 /// after every other row: the one plan an open reserves by. Laid
 /// out where the plan lies, which `lend_session` reads in its own frame: a plan handed back by
 /// value would be moved again, twice, by the open that reads it.
-pub(crate) fn lay_out_open(
-    plan: &mut ArenaPlan,
+pub(crate) fn lay_out_open<const ROWS: usize>(
+    plan: &mut ArenaPlan<ROWS>,
     holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
     plan.lay_cells(holds.cells);
@@ -6016,18 +6040,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// What a read waits for before it steps the session: the link's next input, for at most
-    /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
+    /// [`CoopConfig::idle_wait_ms`] and at most `most_ms`, unless the link already holds some or
+    /// waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
-    fn idle_wait(&mut self) -> IdleWait {
+    fn idle_wait(&mut self, most_ms: u32) -> IdleWait {
         // What is due other than input, the earliest of it in milliseconds of the session's clock:
         // a get whose deadline comes first is swept when it is due, not up to a whole wait late
         // (read at the root of the index of the gets' deadlines, so no table is walked and a get
         // that ended bounds the wait no longer), and so is the next turn of a replay a link owes
         // its peer, a periodic job the program started, and a group's session when it is next due
         // with nothing arriving (its beacon, its sweep, what the session pushed onto it, its join
-        // again). A group that took a datagram is stepped again at once, its task taking one a
-        // step, so its own time is not asked.
+        // again). A group whose socket may hold a datagram not yet read is stepped again at once
+        // (its task took one, or the read's step of it read to its bound), so its own time is
+        // not asked.
         #[cfg(feature = "group")]
         let group_took = self.transport.group_took_input();
         let due_ms = [
@@ -6056,13 +6082,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The clock is read when something is due, and that reading serves every bound after it:
         // a wait with nothing due reads it not at all.
         let mut clock_now: Option<u64> = None;
+        let bound = self.config.idle_wait_ms.min(most_ms);
         let most = match due_ms {
             Some(due_ms) => Self::wait_until(
-                self.config.idle_wait_ms,
+                bound,
                 due_ms,
                 *clock_now.get_or_insert_with(|| self.now_us()),
             ),
-            None => self.config.idle_wait_ms,
+            None => bound,
         };
         // A group whose stack gives no wait for its input is looked at on its tick.
         #[cfg(feature = "group")]
@@ -6273,10 +6300,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// `Self::open_in` (a build with `runtime-plan`), its config read from `source` inside the
-    /// open, once, before anything else: an ABI that builds the config from its own values hands
-    /// the source (a maker of the config is one), so the config is never a value of its frame,
-    /// which the open's handshake runs under. The source writes the endpoints' texts into the rows the open lends for them, and is
-    /// let go of before anything is bound or dialled ([`OpenSource`]).
+    /// open, once, before anything else: a host that builds the config from its own values hands
+    /// the source (a maker of the config is one), so neither the config nor its endpoints' texts
+    /// are values of a frame the open's handshake runs under ([`OpenSource`]). An ABI that writes
+    /// the texts in its own form opens with [`Self::assemble`] and [`Self::open_assembled`].
     ///
     /// The open is two frames that never lie on the stack together. The first builds the engine
     /// where it is kept (the session's state and its arena's tables, in the engine's place in the
@@ -6300,7 +6327,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         key_ids: OpenKeyIds,
         storage: OpenStorage,
     ) -> Result<EngineHold<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, storage)?;
+        let engine = Self::assemble_from(links, clock, entropy, source, policy, key_ids, storage)?;
+        Self::open_assembled(engine)
+    }
+
+    /// [`Self::assemble`] of the input `source` makes, made in this frame, which has returned
+    /// before the first link is opened.
+    #[inline(never)]
+    fn assemble_from(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        source: impl OpenSource,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+        storage: OpenStorage,
+    ) -> Result<EngineHold<Self>, OpenError> {
+        source.open_with(|input| {
+            Self::assemble(links, clock, entropy, input, policy, key_ids, storage)
+        })
+    }
+
+    /// Open the links of `engine`, which [`Self::assemble`] built: an open that fails here ends
+    /// what it began as a dropped session does.
+    pub fn open_assembled(engine: EngineHold<Self>) -> Result<EngineHold<Self>, OpenError> {
         engine.open_links()?;
         Ok(engine)
     }
@@ -6314,13 +6364,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// One frame from the config to the state: the links, the config, the entropy and what the
     /// arena lent are each borrowed while the open decides, and a value borrowed once is copied
     /// when it is handed on by value. Made here, each is moved only into the state, which is moved
-    /// once, into the engine's place ([`Self::engine_of`]).
+    /// once, into the engine's place (`Self::engine_of`).
+    ///
+    /// The input is a value of no type of the ABI's ([`OpenInput`]): its config is moved into
+    /// the session and its texts read and written into the rows the arena lends for them by one
+    /// body of no type parameter, so no line of the ABI's is in this body.
     #[inline(never)]
-    fn assemble(
+    pub fn assemble(
         mut links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
-        source: impl OpenSource,
+        input: OpenInput<'_>,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         storage: OpenStorage,
@@ -6330,7 +6384,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             held,
             plan: from,
         } = storage;
-        let (config, write_endpoints) = source.into_parts();
+        let OpenInput { config, endpoints } = input;
         admit_sn_widths(&config)?;
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
@@ -6361,10 +6415,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
-        // The texts of the endpoints, each written once by the source into the row the plan laid
-        // out for it: the session names an endpoint by its row from here, and what the source
-        // held goes with its writer, here, before anything is bound or dialled.
-        let written = write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints));
+        // The texts of the endpoints, each read and written once into the row the plan laid out
+        // for it: the session names an endpoint by its row from here, and a text that has no row
+        // is refused here, before anything is bound or dialled.
+        let written = endpoints.write_into(&mut lent.transport.endpoints);
         // One refusal for the three, so what the arena lent is let go of on one path. The rooms
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
@@ -6889,7 +6943,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.transport.dial_settled() {
-                let mut wait = core.idle_wait();
+                let mut wait = core.idle_wait(NO_STEP_BOUND_MS);
                 wait.wait(core.rooms.waits(), sleep_ms);
                 core.transport.links.waited(wait);
                 core.run_tasks();
@@ -6956,14 +7010,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The plane the session's faces are told through, for a test that tells it rows itself.
-    #[cfg(all(test, feature = "connectivity"))]
+    #[cfg(all(test, feature = "std", feature = "connectivity"))]
     pub(crate) fn face_plane(&self) -> &FacePlane {
         &self.faces
     }
 
     /// The session's say on a second link to a node, the one its links' handshakes ask, for a
     /// test that asks it as they do.
-    #[cfg(all(test, feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "listen"))]
     pub(crate) fn link_admission(&self) -> PlacedRef<dyn LinkAdmission> {
         self.core.lock().0.transport.admission
     }
@@ -6972,7 +7026,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
     /// is used under it and a handle of it taken out is used only once the engine has gone. A
     /// session whose read steps each face where it lies runs no link as a task.
-    #[cfg(all(test, feature = "listen", wz_round))]
+    #[cfg(all(test, feature = "std", feature = "listen", wz_round))]
     pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
         f(&self.core.lock().0.local)
     }
@@ -7024,14 +7078,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// The waits for room a publish that finds the session held asks. Compiled where its
     /// readers are: the tests of a full group's stage over the program's transport, in both forms
     /// of the engine's calls (`tests::group_congested`).
-    #[cfg(all(test, feature = "group", feature = "app-transport"))]
+    #[cfg(all(test, feature = "std", feature = "group", feature = "app-transport"))]
     pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
-    #[cfg(all(test, feature = "group", feature = "app-transport"))]
+    #[cfg(all(test, feature = "std", feature = "group", feature = "app-transport"))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
             core.0
@@ -7048,8 +7102,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// where its readers are: the tests of a group's drops (`tests::group`, `transport-stats`).
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
+        feature = "threads",
         feature = "transport-stats"
     ))]
     pub(crate) fn stage_group_replies(
@@ -7169,6 +7225,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_polls(&self) -> usize {
         self.core.lock().0.link_polls.get()
+    }
+
+    /// How often the faces' tables were handed out to a write since the open
+    /// (`RegistryOf::faces_written`): what a test of the bookkeeping a received sample owes counts.
+    /// Read under the lock, uncounted as a take.
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads",
+        not(wz_round)
+    ))]
+    pub(crate) fn faces_written(&self) -> u64 {
+        self.core.lock().0.session.registry.faces_written()
     }
 
     /// How often a pass of the session's tasks read the clock to wake its timers since the open
@@ -7896,9 +7966,73 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // may be dropped is not held behind another holder of a face's place (`direct`).
         let congestion = opts.qos.unwrap_or(QosLevel::DEFAULT).congestion();
         let droppable = face_send::droppable(opts.reliable_bool(), congestion);
-        self.on_faces(droppable, |tx| {
-            self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx)
-        })
+        // Where each face's leg is sent apart, the groups' leg is a body of its own, which reads
+        // none of what a face's leg reads to send on a face's link.
+        #[cfg(all(not(wz_round), feature = "group"))]
+        {
+            self.on_publish_legs(
+                droppable,
+                |tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx),
+                |tx| self.publish_to_groups_on(keyexpr, wire, payload, opts, tx),
+            )
+        }
+        #[cfg(not(all(not(wz_round), feature = "group")))]
+        {
+            self.on_faces(droppable, |tx| {
+                self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx)
+            })
+        }
+    }
+
+    /// The groups' leg of a publish where each face's leg is sent apart
+    /// ([`Self::publish_to_link`]): the session taken as a face's leg takes it, and the put sent to
+    /// each group as the groups' part of a face's leg sends it ([`Self::publish_to_groups`]),
+    /// with none of that leg's work for the faces: no key looked up in the session's tables, no
+    /// plan of its publisher read, and no walk of the faces' links. A key a face's leg refuses
+    /// (`Self::leg_of`, an empty key, which names nothing whatever declaration it is named by) is
+    /// refused here too, as zenoh refuses a key that is not one on every transport alike.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    #[inline(never)]
+    fn publish_to_groups_on(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+        tx: LinkTx<'_, C>,
+    ) -> Result<usize, FanoutError> {
+        let meta = opts.push_metadata();
+        let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
+        let droppable = face_send::droppable(opts.reliable_bool(), congestion);
+        let mut core = match self.live_to_publish(droppable, tx.leg_place()) {
+            ToPublish::Live(core) => core,
+            ToPublish::Closed => return Ok(0),
+            ToPublish::DroppedOn { told } => {
+                return if told {
+                    Err(FanoutError::HeldConduit)
+                } else {
+                    Ok(0)
+                };
+            }
+        };
+        if NamedKey::literal(keyexpr).is_none() {
+            return Err(FanoutError::ExceedsCapacity);
+        }
+        let send = wz_session_core::session_actions::SendAs {
+            reliable: opts.reliable_bool(),
+            express: meta.is_express(),
+            priority: opts.priority_band(),
+        };
+        let put = Publication {
+            keyexpr,
+            wire,
+            payload,
+            opts,
+            meta: &meta,
+            plan: None,
+        };
+        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+        self.publish_to_groups(&mut core.0, &put, send, None, tx)
     }
 
     /// [`Self::publish_to_link`] through `tx`, what the caller holds of the one link.
@@ -8214,6 +8348,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         skip: Option<&DroppedOn>,
         tx: LinkTx<'_, C>,
     ) -> Result<usize, FanoutError> {
+        #[cfg(not(wz_round))]
+        if !tx.reaches_groups() {
+            return Ok(0);
+        }
         let Publication {
             keyexpr,
             wire,
@@ -8222,45 +8360,53 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             meta,
             ..
         } = *put;
+        let put = GroupPut {
+            keyexpr,
+            wire,
+            payload,
+            kind: opts.kind,
+            meta,
+            reliable: send.reliable,
+            priority: send.priority,
+        };
         #[cfg(not(wz_round))]
-        let _ = skip;
-        #[cfg(not(wz_round))]
-        if !tx.reaches_groups() {
-            return Ok(0);
+        {
+            let _ = skip;
+            self.put_on_groups(core, put)
         }
         #[cfg(wz_round)]
-        let _ = tx;
+        {
+            let _ = tx;
+            let mut outcome = Ok(0);
+            for group in &core.transport.groups {
+                if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
+                    continue;
+                }
+                let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
+                // A group whose queue is full runs the session's tasks while it waits for room
+                // (`group::SessionPace`): what they dispatch reaches the registry lent for that
+                // wait.
+                let sent = core
+                    .registry_lend
+                    .lend_for(&mut core.session.registry, || group.publish(put));
+                if sent.is_err() {
+                    outcome = sent;
+                }
+            }
+            outcome
+        }
+    }
+
+    /// `put` on each group the session joined, by the groups' one leg: what the last group that
+    /// failed came to, else `Ok(0)`. Where the read steps a group's session itself, a wait for
+    /// room runs no task, so nothing of the session is lent around a group's publish. Every group
+    /// is the groups' leg's, and a send on one is marked at that leg's place.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    #[inline(always)]
+    fn put_on_groups(&self, core: &Core<L, C>, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         let mut outcome = Ok(0);
         for group in &core.transport.groups {
-            #[cfg(wz_round)]
-            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
-                continue;
-            }
-            // Where each face's leg is sent apart, every group is the groups' one leg's, and a send
-            // on one is marked at that leg's place.
-            #[cfg(not(wz_round))]
-            let place = direct::GROUPS_LEG;
-            #[cfg(wz_round)]
-            let place = group.at();
-            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(place));
-            let put = GroupPut {
-                keyexpr,
-                wire,
-                payload,
-                kind: opts.kind,
-                meta,
-                reliable: send.reliable,
-                priority: send.priority,
-            };
-            // A group whose queue is full runs the session's tasks while it waits for room
-            // (`group::SessionPace`): what they dispatch reaches the registry lent for that wait.
-            // Where the read steps the group's session itself the wait runs no task, and the
-            // registry is lent to none.
-            #[cfg(wz_round)]
-            let sent = core
-                .registry_lend
-                .lend_for(&mut core.session.registry, || group.publish(put));
-            #[cfg(not(wz_round))]
+            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(direct::GROUPS_LEG));
             let sent = group.publish(put);
             if sent.is_err() {
                 outcome = sent;
@@ -9361,7 +9507,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Spend every interest id of the session of each face whose link is up, as a session that
     /// has asked `u32::MAX` Interests has.
-    #[cfg(all(test, feature = "liveliness-get"))]
+    #[cfg(all(test, feature = "std", feature = "liveliness-get"))]
     pub(crate) fn spend_interest_ids(&self) {
         let Some(guard) = self.live() else {
             return;
@@ -9554,25 +9700,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         params: &PlainPutParams,
         head: Option<wz_session_core::lent_push::PutHead>,
     ) -> FilteredPut {
+        if let Some(answered) = Self::plain_off_the_wire(on, keyexpr, params) {
+            return answered;
+        }
         let core = on.core;
-        // A put one of the session's own subscribers wants is not plain: the general publish
-        // sends it and delivers it there. A leg the first face's leg decided sends as that one
-        // did, and is not asked again.
-        #[cfg(feature = "local-subscriber")]
-        if !on.decided
-            && params.destination.allows_local()
-            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
-                tables(&core.session.registry),
-                keyexpr,
-            )
-        {
+        // A group is sent a put by the general publish, which pushes it onto the group's stage,
+        // where no leg of the put is the groups' own: a hold that reaches every face and every
+        // group. The groups' own leg sends the plain put itself (`Self::put_plain_on_groups`).
+        #[cfg(all(not(wz_round), feature = "group"))]
+        if !on.decided && on.tx.reaches_groups() && !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
-        if !params.destination.allows_remote() {
-            return FilteredPut::Sent(Ok(0));
-        }
-        // A group is sent a put by the general publish, which pushes it onto the group's stage.
-        #[cfg(feature = "group")]
+        #[cfg(all(wz_round, feature = "group"))]
         if !on.decided && !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
@@ -9584,6 +9723,73 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return FilteredPut::NotPlain;
         };
         self.send_plain(on, named, payload, params, head, false)
+    }
+
+    /// What a plain put through a write filter comes to before a leg sends it, when it is not
+    /// the wire's: `NotPlain` for a put one of the session's own subscribers wants, which the
+    /// general publish sends and delivers there, and nothing sent for one whose destination admits
+    /// no peer. A leg the first leg decided sends as that one did, and is not asked again.
+    #[inline(always)]
+    fn plain_off_the_wire(
+        on: Holding<'_, L, C>,
+        keyexpr: &str,
+        params: &PlainPutParams,
+    ) -> Option<FilteredPut> {
+        #[cfg(feature = "local-subscriber")]
+        if !on.decided
+            && params.destination.allows_local()
+            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
+                tables(&on.core.session.registry),
+                keyexpr,
+            )
+        {
+            return Some(FilteredPut::NotPlain);
+        }
+        #[cfg(not(feature = "local-subscriber"))]
+        let _ = (on, keyexpr);
+        if !params.destination.allows_remote() {
+            return Some(FilteredPut::Sent(Ok(0)));
+        }
+        None
+    }
+
+    /// The groups' own leg of a plain put through a write filter (`Self::put_through_filter_in`):
+    /// the put written from `params` onto each group the session joined, as the general
+    /// publish's groups' leg writes it (`Self::publish_to_groups`), its key named as `wire`
+    /// names it. Nothing is named in the session's tables, which a group's key does not read, and
+    /// no plan is kept. An empty key is left to the general publish (`NotPlain`), which refuses
+    /// it on every leg alike.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    fn put_plain_on_groups(
+        &self,
+        on: Holding<'_, L, C>,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        params: &PlainPutParams,
+    ) -> FilteredPut {
+        if let Some(answered) = Self::plain_off_the_wire(on, keyexpr, params) {
+            return answered;
+        }
+        if keyexpr.is_empty() {
+            return FilteredPut::NotPlain;
+        }
+        // A plain put carries its QoS and nothing else of a publication's.
+        let meta = PushMetadata {
+            qos: params.qos,
+            ..PushMetadata::default()
+        };
+        let put = GroupPut {
+            keyexpr,
+            wire,
+            payload,
+            kind: SampleKind::Put,
+            meta: &meta,
+            reliable: params.reliable,
+            priority: params.priority,
+        };
+        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+        FilteredPut::Sent(self.put_on_groups(on.core, put))
     }
 
     /// The plain put its write filter's row planned at the session's send epoch
@@ -9932,7 +10138,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // the session let go of as a read makes it; one asked from a callback's call leaves the
         // JOIN to the next read.
         #[cfg(not(wz_round))]
-        self.read_groups();
+        self.read_groups(None, None);
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();
         Ok(asked)
@@ -10626,7 +10832,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        self.put_through_filter(filter, keyexpr, payload, Some((declared, *params)))
+        // The declaration names the whole key, as a group is sent it too.
+        let wire = WireKey::aliased(declared.id, None).at_row(declared.row);
+        self.put_through_filter(filter, keyexpr, &wire, payload, Some((declared, *params)))
     }
 
     #[inline(never)]
@@ -10666,7 +10874,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             ));
         }
         // A write that brings nothing of its own goes in the plain form its filter's row keeps.
-        self.put_through_filter(filter, keyexpr, payload, None)
+        self.put_through_filter(filter, keyexpr, wire, payload, None)
     }
 
     /// Each group the session joined takes the step too, and is counted as a link is: a group's
@@ -11615,6 +11823,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // close finds it closed whatever still holds the engine.
         self.reach.clear();
         let core = &mut guard.0;
+        // A key the program keeps past the close copies and gives back its hold at its row, with
+        // no reach of the session: the row's word is what tells it the session is gone.
+        tables(&core.session.registry).close_keyexpr_counts();
         core.end_links();
         // The rows of the session's own declarations, and the callbacks they hold, go after the
         // lock is let go of, one row at a time (`Self::let_go_of_rows`).
@@ -11731,14 +11942,89 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         false
     }
 
-    // The read steps the one link itself (`direct`).
-    #[cfg(not(wz_round))]
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
-        self.read_direct()
+        self.read_within(NO_STEP_BOUND_MS)
     }
 
+    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        // The one link's place is taken before the session, as every send on it takes them.
+        self.live_on_link(|core, tx| {
+            // A link that is down has no lease to keep; the session is not closed.
+            for (_, wire) in core.up_wires_at() {
+                send_through(wire, tx, &|actions: &LinkActions<C>| {
+                    actions.send_keep_alive();
+                    true
+                });
+            }
+        })
+        .ok_or(SessionClosed)
+    }
+
+    fn spin_once(&self) -> bool {
+        self.read(false).is_ok()
+    }
+
+    fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        // The task steps the session itself; a step of the program's beside it would be a second
+        // reader the program did not choose at the open. A start made while this step runs reads
+        // beside it, as two reads may (`HandBack`).
+        #[cfg(feature = "threads")]
+        if SessionDrive::read_task_is_running(self) {
+            return Err(StepRefused::ReadTaskRuns);
+        }
+        self.read_within(most_ms).map_err(StepRefused::from)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
+#[cfg(feature = "query")]
+struct FanCancelled;
+
+/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
+/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
+/// that waits for the callbacks returns whether or not the session is stepped.
+#[cfg(feature = "query")]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
+    fn cancel_fan(&self, key: FanKey) {
+        loop {
+            let leg = self.live().and_then(|mut core| {
+                let core = &mut core.0;
+                let at = core
+                    .session
+                    .pending_gets
+                    .iter()
+                    .position(|pending| pending.fan == Some(key))?;
+                let pending = core.session.pending_gets.remove(at);
+                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
+                Some(pending.leg)
+            });
+            let Some(leg) = leg else {
+                break;
+            };
+            self.end_leg_now(leg);
+        }
+    }
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// [`SessionDrive::read`] with its wait for input bounded by `most_ms` as well as by the
+    /// config's ([`CoopConfig::idle_wait_ms`]): the read task and `zp_read` read with no bound of
+    /// their own ([`NO_STEP_BOUND_MS`]), and a step the program makes with the one it gives
+    /// ([`SessionDrive::step_once`]).
+    // The read steps its faces itself (`direct`).
+    #[cfg(not(wz_round))]
+    fn read_within(&self, most_ms: u32) -> Result<(), SessionClosed> {
+        self.read_direct(most_ms)
+    }
+
+    /// [`SessionDrive::read`] with its wait for input bounded by `most_ms` as well as by the
+    /// config's ([`CoopConfig::idle_wait_ms`]), as in a build whose read steps its faces itself.
     #[cfg(wz_round)]
-    fn read(&self, _single: bool) -> Result<(), SessionClosed> {
+    fn read_within(&self, most_ms: u32) -> Result<(), SessionClosed> {
         // The wait comes first and holds nothing of the session, so what arrives during it is
         // read by this call and a publisher on another thread is not held up by it. Input the last
         // step left held makes it none, which it is then without the session taken to say so:
@@ -11756,7 +12042,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
             // before the session is.
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-                let wait = core.0.idle_wait();
+                let wait = core.0.idle_wait(most_ms);
                 #[cfg(feature = "threads")]
                 if matches!(wait, IdleWait::Behind(_)) {
                     seen = Some(self.hand_back.enter());
@@ -11803,69 +12089,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         }
     }
 
-    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        // The one link's place is taken before the session, as every send on it takes them.
-        self.live_on_link(|core, tx| {
-            // A link that is down has no lease to keep; the session is not closed.
-            for (_, wire) in core.up_wires_at() {
-                send_through(wire, tx, &|actions: &LinkActions<C>| {
-                    actions.send_keep_alive();
-                    true
-                });
-            }
-        })
-        .ok_or(SessionClosed)
-    }
-
-    fn spin_once(&self) -> bool {
-        self.read(false).is_ok()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
-#[cfg(feature = "query")]
-struct FanCancelled;
-
-/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
-/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
-/// that waits for the callbacks returns whether or not the session is stepped.
-#[cfg(feature = "query")]
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
-    fn cancel_fan(&self, key: FanKey) {
-        loop {
-            let leg = self.live().and_then(|mut core| {
-                let core = &mut core.0;
-                let at = core
-                    .session
-                    .pending_gets
-                    .iter()
-                    .position(|pending| pending.fan == Some(key))?;
-                let pending = core.session.pending_gets.remove(at);
-                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
-                Some(pending.leg)
-            });
-            let Some(leg) = leg else {
-                break;
-            };
-            self.end_leg_now(leg);
-        }
-    }
-}
-
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
     /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
     /// one take of the session for each face, as zenoh-pico's put reads its filter's state and takes only its
     /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+    /// `wire` is how the entity names its key, which a group is sent the plain put by.
     #[inline(never)]
     fn put_through_filter(
         &self,
         filter: FilterId,
         keyexpr: &str,
+        wire: &WireKey,
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
@@ -11891,7 +12125,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     tx,
                     decided: answer.is_some(),
                 };
-                let sent = self.put_through_filter_in(on, filter, keyexpr, payload, given);
+                let sent = self.put_through_filter_in(on, filter, keyexpr, wire, payload, given);
                 answer = Some(fold_filtered(answer.take(), sent));
                 Ok(0)
             });
@@ -11908,7 +12142,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 tx,
                 decided: false,
             };
-            self.put_through_filter_in(on, filter, keyexpr, payload, given)
+            self.put_through_filter_in(on, filter, keyexpr, wire, payload, given)
         })
         .unwrap_or(FilteredPut::Sent(Ok(0)))
     }
@@ -11922,6 +12156,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         on: Holding<'_, L, C>,
         filter: FilterId,
         keyexpr: &str,
+        wire: &WireKey,
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
@@ -11969,6 +12204,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 (way.key, way.params, way.head)
             }
         };
+        // The groups' leg is sent the plain put from the same parts, with no key named in the
+        // session's tables and no plan kept: a group names the key as its declarations say.
+        #[cfg(all(not(wz_round), feature = "group"))]
+        if tx.is_groups_leg() {
+            return self.put_plain_on_groups(on, keyexpr, wire, payload, &params);
+        }
+        #[cfg(not(all(not(wz_round), feature = "group")))]
+        let _ = wire;
         let sent = self.put_plain_in(on, keyexpr, key, payload, &params, head);
         // The row's own way, sent plain to the peers of a filter that counts subscribers, is
         // planned at this epoch when every link names the filter's key as the session does, by
@@ -12077,6 +12320,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
     /// [`SessionDrive::spin_once`].
     pub fn spin_once(&self) -> bool {
         SessionDrive::spin_once(self.engine_ref())
+    }
+
+    /// [`SessionDrive::step_once`].
+    pub fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        SessionDrive::step_once(self.engine_ref(), most_ms)
     }
 }
 

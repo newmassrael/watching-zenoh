@@ -232,31 +232,15 @@ extern "C" {}
 ))]
 #[link(name = "c")]
 extern "C" {}
-// Windows: the C runtime, which the platform exports forward to as zenoh-pico's Windows backend
-// does (`z_malloc` is its `malloc`), and which the compiler's own code calls on an MSVC target
-// (`memcpy` and its kin, the stack probe, a 32-bit build's 64-bit division) and the DLL is entered
-// through (`_DllMainCRTStartup`): the runtime DLL's (`msvcrt`) or the static runtime (`libcmt`) as
-// the target's `crt-static` says, as `std` names it. The runtime defines `_fltused` and the frame
-// handler the prebuilt `core`'s tables name (`__CxxFrameHandler3`), so nothing stands in for
-// them here and the link keeps its default libraries (no `/NODEFAULTLIB`). `kernel32` is named
-// for the runtime's own startup code; the system calls of this crate and its dependencies name
-// their DLLs themselves (`windows-sys`'s `raw-dylib` imports).
-#[cfg(all(
-    feature = "os-host",
-    target_env = "msvc",
-    not(target_feature = "crt-static")
-))]
-#[link(name = "msvcrt")]
-#[link(name = "kernel32")]
-extern "C" {}
-#[cfg(all(
-    feature = "os-host",
-    target_env = "msvc",
-    target_feature = "crt-static"
-))]
-#[link(name = "libcmt")]
-#[link(name = "kernel32")]
-extern "C" {}
+// Windows names no library of Visual Studio. What the compiler's own code calls of the C runtime on
+// an MSVC target (`memcpy` and its kin, the stack probe, a 32-bit build's 64-bit division, the
+// DLL's entry, `_fltused`, the frame handler the prebuilt `core` names) is defined by the C
+// library's artifact (`wz-msvc-runtime`, linked by `wz-capi-pico-lib`); the C runtime's heap that
+// `z_malloc` hands a program is imported from the system's runtime DLL by name
+// (`src/os/windows.rs`); and every system call of this crate and its dependencies names its DLL
+// itself (`windows-sys`'s `raw-dylib` imports). So the library links without Visual Studio, and
+// its DLL imports no C runtime DLL of Visual Studio's (`VCRUNTIME140.dll`) for a program's machine
+// to carry.
 
 // The heap a library without `std` allocates from, the global allocator of the C library's
 // artifact (`c_library_runtime!`).
@@ -269,10 +253,25 @@ pub use process_heap::ProcessHeap as Heap;
 /// personality routine's answer if it were ever reached, since nothing unwinds. The prebuilt
 /// `core`'s unwind tables name that routine on a POSIX host; an MSVC build's name the C runtime's
 /// `__CxxFrameHandler3` instead.
-#[cfg(feature = "os-host")]
+#[cfg(all(feature = "os-host", unix))]
 pub fn abort() -> ! {
     // SAFETY: ends the process; nothing returns.
     unsafe { libc::abort() }
+}
+
+/// Ends the process as the C runtime's `abort` does on Windows with no handler to call:
+/// `__fastfail(FAST_FAIL_FATAL_APP_EXIT)`, which the system ends the process on at once, with the
+/// code a crash report names, and which nothing in the process can intercept.
+#[cfg(all(feature = "os-host", windows))]
+pub fn abort() -> ! {
+    const FAST_FAIL_FATAL_APP_EXIT: u32 = 7;
+    // SAFETY: the fast-fail interrupt ends the process; nothing returns.
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        core::arch::asm!("int 0x29", in("ecx") FAST_FAIL_FATAL_APP_EXIT, options(noreturn, nostack));
+        #[cfg(target_arch = "aarch64")]
+        core::arch::asm!("brk #0xf003", in("x0") FAST_FAIL_FATAL_APP_EXIT, options(noreturn, nostack));
+    }
 }
 
 // The host's allocator, held to the layouts a library asks for: on a POSIX host the C library's

@@ -203,7 +203,7 @@ impl<'a> SharedCarrier<'a> {
 /// A leg is kept with the memo of the client routes it was read from, and served only while the
 /// tables hold that same memo: every change that can move the leg (a subscriber of the region
 /// declared or withdrawn, a face that leaves) gives the tables another memo
-/// ([`bring_client_routes`](crate::linkstate_forward::bring_client_routes)). The memo is held
+/// ([`bring_client_routes`](crate::linkstate_routes::bring_client_routes)). The memo is held
 /// weakly, so a leg keeps none of its routes alive, and its address cannot be another memo's
 /// while the leg is kept.
 ///

@@ -120,6 +120,8 @@
 # binds pico's one); PICO_CMP_PINGS (default 20000), PICO_CMP_WARMUP_S (3) and
 # PICO_CMP_WINDOW_S (10) set the round trips and the window of the free-running throughput pair (a diagnostic of
 # `parity`, not a cell), and PICO_CMP_NODROP_TRIAL_S (3) the seconds of a trial of parity's no-drop search.
+# PICO_CMP_TRANSPORT (`subprofile`, `opprofile`): tcp, the default, or multicast, the transport the pair
+# measured runs on (the transport of subprofile and opprofile, below).
 #
 # What it does NOT show: anything about an MCU, and the cost in CPU of a lower round trip: read the
 # per-process CPU separately before claiming a latency win.
@@ -204,17 +206,17 @@ mkdir -p "$out/bin"
 # built; a run with PICO_CMP_NO_BUILD=1 reads the stamp and refuses a PICO_CMP_ENGINE that names another.
 wz_engine=""
 resolve_wz_engine() {
-    if [ -z "${PICO_CMP_ENGINE:-}" ]; then
-        bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
-            || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
-    fi
+    # Whatever engine is named, the cargo words name zenoh-pico's preset, which kconfiglib resolves.
+    bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
+        || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
     wz_engine="$(python3 -I scripts/lib/wz_config.py --bench-engine ${PICO_CMP_ENGINE:+"$PICO_CMP_ENGINE"})" \
         || { echo "pico-compare: NOT-MEASURED, the engine of the wz library did not resolve"; exit 2; }
     pico_form
 }
 
 # wz_cargo_args <features>: the cargo words of the wz library on $wz_engine with <features> (a comma list, empty for
-# none) over its default capabilities.
+# none) over zenoh-pico's preset (configs/zenoh-pico_defconfig, wz_config.preset_named_features), the build every
+# bench of the pico library compares with zenoh-pico.
 wz_cargo_args() {
     python3 -I scripts/lib/wz_config.py --bench-cargo-args "$wz_engine" ${1:+"$1"}
 }
@@ -241,11 +243,22 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" 
     # shellcheck disable=SC2086 # the cargo words are words on purpose
     (cd crates && cargo build "${wz_pico_args[@]}" -p wz-capi-pico-lib $wz_args) >"$out/build-wz.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the wz library did not build (see $out/build-wz.log)"; exit 2; }
+    rm -rf "$out/include-W"
+    mkdir -p "$out/include-W/zenoh-pico"
+    python3 -I scripts/lib/wz_config.py --bench-config-h "$wz_engine" >"$out/include-W/zenoh-pico/config.h" \
+        || { echo "pico-compare: NOT-MEASURED, the config.h of the wz library did not render"; exit 2; }
     echo "$wz_engine" >"$out/wz-engine"
 fi
+# A program of the wz arm finds the config.h of the library it links before the pico build's: against another
+# config.h it allocates the option structs of another build.
+wz_include=()
 case "${1:-}" in
     rtt | thr | nodrop | profile | tids)
         [ -n "$wz_engine" ] || stamped_engine "$(cat "$out/wz-engine" 2>/dev/null)"
+        [ -f "$out/include-W/zenoh-pico/config.h" ] \
+            || { echo "pico-compare: NOT-MEASURED, no config.h of the wz library under $out/include-W (build it first)"
+                 exit 2; }
+        wz_include=(-I"$out/include-W")
         ;;
 esac
 
@@ -289,14 +302,17 @@ include=(
 # build_example <example> <P|W>
 build_example() {
     local example="$1" variant="$2" lib name
+    local own=()
     if [ "$variant" = P ]; then
         lib="$pico_lib"
         name=zenohpico
     else
         lib="$wz_pico_lib"
         name=wz_capi_pico
+        own=(${wz_include[@]+"${wz_include[@]}"})
     fi
-    cc -O2 "$examples/$example.c" -DZENOH_LINUX "${include[@]}" -o "$out/bin/${example}_$variant" \
+    cc -O2 "$examples/$example.c" -DZENOH_LINUX ${own[@]+"${own[@]}"} "${include[@]}" \
+        -o "$out/bin/${example}_$variant" \
         -L"$lib" "-l$name" "-Wl,-rpath,$lib" -lpthread 2>"$out/build-${example}_$variant.log" \
         || { echo "pico-compare: NOT-MEASURED, $example against $variant did not build"; exit 2; }
 }
@@ -305,14 +321,17 @@ build_example() {
 # of the variant, with the same flags as the examples.
 build_bench() {
     local name="$1" variant="$2" lib libname
+    local own=()
     if [ "$variant" = P ]; then
         lib="$pico_lib"
         libname=zenohpico
     else
         lib="$wz_bench_lib"
         libname=wz_capi_pico
+        own=(${wz_include[@]+"${wz_include[@]}"})
     fi
-    cc -O2 "$root/scripts/host-bench/$name.c" -DZENOH_LINUX "${include[@]}" -o "$out/bin/${name}_$variant" \
+    cc -O2 "$root/scripts/host-bench/$name.c" -DZENOH_LINUX ${own[@]+"${own[@]}"} "${include[@]}" \
+        -o "$out/bin/${name}_$variant" \
         -L"$lib" "-l$libname" "-Wl,-rpath,$lib" -lpthread 2>"$out/build-${name}_$variant.log" \
         || { echo "pico-compare: NOT-MEASURED, $name against $variant did not build (see $out/build-${name}_$variant.log)"; exit 2; }
 }
@@ -582,6 +601,38 @@ tids() {
     done
 }
 
+# ── the transport of subprofile and opprofile ──────────────────────────────────────────────────────────────
+#
+# PICO_CMP_TRANSPORT (subprofile, opprofile): tcp, the default, where the receiving side listens on
+# tcp/127.0.0.1:<port> and the sending side connects to it, or multicast, where both listen on the group
+# udp/224.0.0.224:<port>#iface=lo as the multicast cells of the performance matrix do (perf_matrix.py
+# endpoint_args), so the counts are of the group's send and receive paths (docs/win-budget/ir-multicast.md).
+# The window and the idle run are the same on either.
+bench_transport="${PICO_CMP_TRANSPORT:-tcp}"
+
+# bench_transport_ok: whether PICO_CMP_TRANSPORT names a transport these modes run; says why not, and fails.
+bench_transport_ok() {
+    case "$bench_transport" in
+        tcp | multicast) return 0 ;;
+    esac
+    echo "pico-compare: NOT-MEASURED, PICO_CMP_TRANSPORT=$bench_transport is not tcp or multicast"
+    return 1
+}
+
+# bench_ends <port>: the endpoint words of the receiving side, in LISTEN_END, and of the sending side, in
+# SEND_END, on <port> of the transport PICO_CMP_TRANSPORT names.
+LISTEN_END=()
+SEND_END=()
+bench_ends() {
+    if [ "$bench_transport" = multicast ]; then
+        LISTEN_END=(-l "udp/224.0.0.224:$1#iface=lo")
+        SEND_END=(-l "udp/224.0.0.224:$1#iface=lo")
+    else
+        LISTEN_END=(-l "tcp/127.0.0.1:$1")
+        SEND_END=(-e "tcp/127.0.0.1:$1")
+    fi
+}
+
 # ── subprofile: where the subscriber's time goes ─────────────────────────────────────────────────────────────
 #
 # subprofile [size] [count] [rate]: count_sub of each library, fed [size] (8) byte messages by paced_pub of the
@@ -665,7 +716,7 @@ subprofile_trial() {
     pace="$(awk -v c="$count" -v s="$seconds" 'BEGIN { printf "%.6f", c / s }')"
     case "$tool" in
         strace) tool_words=(strace -f -c -o "$stem.strace") ;;
-        perfstat) tool_words=(perf stat -x , -o "$stem.perfstat" -e "$SUBPROF_EVENTS" --) ;;
+        perfstat) tool_words=(perf stat -x "," -o "$stem.perfstat" -e "$SUBPROF_EVENTS" --) ;;
         perfrecord)
             tool_words=(perf record -g --call-graph "${PICO_CMP_SUBPROF_CALLGRAPH:-dwarf}" -o "$stem.perf.data" --)
             ;;
@@ -683,13 +734,14 @@ subprofile_trial() {
         hold=(-a "$start" -g $((slack * 1000 + 2 * guard)))
     fi
     port="$(bench_port)"
+    bench_ends "$port"
     compose "$variant" "$sub_cpus" timeout $((listen + lead + 120)) "${tool_words[@]}" "$out/bin/count_sub_$variant" \
-        -m peer -l "tcp/127.0.0.1:$port" -d "$listen" "${window[@]}"
+        -m peer "${LISTEN_END[@]}" -d "$listen" "${window[@]}"
     "${CMD[@]}" >"$stem.sub" 2>&1 &
     local sub=$!
     sleep "$lead"
     compose "$variant" "$pub_cpus" timeout $((seconds + slack + 60)) "$out/bin/paced_pub_$variant" -m peer \
-        -e "tcp/127.0.0.1:$port" -s "$size" -r "$pace" -t "$seconds" "${hold[@]}"
+        "${SEND_END[@]}" -s "$size" -r "$pace" -t "$seconds" "${hold[@]}"
     "${CMD[@]}" >"$stem.pub" 2>&1
     wait "$sub" 2>/dev/null
 }
@@ -922,6 +974,7 @@ subprofile() {
     # (subprofile_trial): a guard that long would open the window before it is.
     [ "$guard" -lt 2000 ] \
         || { echo "pico-compare: NOT-MEASURED, PICO_CMP_SUBPROF_GUARD_MS $guard is not under the publisher's 2000 ms lead"; exit 2; }
+    bench_transport_ok || exit 2
     run="$out/subprofile-runs/host-$(date -u +%Y%m%dT%H%M%S)"
     mkdir -p "$run"
     : >"$run/per-message.tsv"
@@ -935,10 +988,11 @@ subprofile() {
         echo "valgrind=$(valgrind --version 2>/dev/null)"
         echo "strace=$(strace -V 2>/dev/null | head -1)"
         echo "size=$size base=$base count=$count rate=$rate callgrind_rate=$cg_rate wait_s=$wait_s slack_s=$slack guard_ms=$guard"
+        echo "transport=$bench_transport"
         echo "callgraph=${PICO_CMP_SUBPROF_CALLGRAPH:-dwarf} events=$SUBPROF_EVENTS"
         echo "sub_cpus=$sub_cpus pub_cpus=$pub_cpus wz_env=${wz_env:-none} wz_engine=$wz_engine"
     } >"$run/record.txt"
-    echo "subscriber profile, $size B, n=$base and n=$count over the seconds n=$count takes at $rate msg/s (callgrind $cg_rate, in a window with an idle run); subscriber on $sub_cpus, publisher on $pub_cpus; wz env: ${wz_env:-none}; wz engine: $wz_engine" \
+    echo "subscriber profile over $bench_transport, $size B, n=$base and n=$count over the seconds n=$count takes at $rate msg/s (callgrind $cg_rate, in a window with an idle run); subscriber on $sub_cpus, publisher on $pub_cpus; wz env: ${wz_env:-none}; wz engine: $wz_engine" \
         | tee -a "$run/report.txt"
     for tool in strace perfstat perfrecord callgrind; do
         if ! subprofile_has "$tool"; then
@@ -1010,6 +1064,10 @@ subprofile() {
 
 OPPROF_OPS=put,get,declare-sub,declare-pub,declare-qbl,open,none
 
+# The operations opprofile measures over multicast (PICO_CMP_TRANSPORT): the put the multicast cells of the
+# performance matrix carry, and the paced loop its net is taken from; [ops] unset there means these.
+OPPROF_GROUP_OPS=put,none
+
 # opprofile_counts <op>: the smaller and the larger count of <op>.
 opprofile_counts() {
     case "$1" in
@@ -1034,23 +1092,24 @@ opprofile_trial() {
     listen=$((lead + settle + seconds + 15))
     for try in $(seq 1 "$tries"); do
         port="$(bench_port)"
+        bench_ends "$port"
         start=$(($(monotonic_ns) + (lead + settle) * 1000000000))
         rm -f "$stem".peer.callgrind*
         if [ "$op" = get ]; then
             compose "$variant" "$sub_cpus" timeout $((listen + 120)) valgrind --tool=callgrind \
                 "--callgrind-out-file=$stem.peer.callgrind" "--zero-before=bench_window_open*" \
                 "--dump-before=bench_window_close*" "$out/bin/op_probe_$variant" -o queryable -m peer \
-                -l "tcp/127.0.0.1:$port" -s "$size" -d "$listen" -a "$start" -t "$seconds" -g "$guard"
+                "${LISTEN_END[@]}" -s "$size" -d "$listen" -a "$start" -t "$seconds" -g "$guard"
         else
             compose "$variant" "$sub_cpus" timeout $((listen + 60)) "$out/bin/count_sub_$variant" -m peer \
-                -l "tcp/127.0.0.1:$port" -d "$listen"
+                "${LISTEN_END[@]}" -d "$listen"
         fi
         "${CMD[@]}" >"$stem.peer" 2>&1 &
         peer=$!
         sleep "$lead"
         peer_alive "$peer" && break
         wait "$peer" 2>/dev/null
-        echo "  op=$op arm=$variant n=$count: the peer on tcp/127.0.0.1:$port was gone before the count (try $try of $tries); it said: $(grep -v '^==' "$stem.peer" 2>/dev/null | tail -n 1)" \
+        echo "  op=$op arm=$variant n=$count: the peer on ${LISTEN_END[1]} was gone before the count (try $try of $tries); it said: $(grep -v '^==' "$stem.peer" 2>/dev/null | tail -n 1)" \
             | tee -a "${stem%/*}/report.txt"
         if [ "$try" -eq "$tries" ]; then
             echo "pico-compare: op_probe not run, its peer did not stay up in $tries tries (see ${stem##*/}.peer)" >"$stem.op"
@@ -1059,7 +1118,7 @@ opprofile_trial() {
     done
     compose "$variant" "$pub_cpus" timeout $((settle + seconds + 300)) valgrind --tool=callgrind \
         "--callgrind-out-file=$stem.callgrind" "$out/bin/op_probe_$variant" -o "$op" -m peer \
-        -e "tcp/127.0.0.1:$port" -n "$count" -t "$seconds" -a "$start" -g $((2 * guard)) -s "$size"
+        "${SEND_END[@]}" -n "$count" -t "$seconds" -a "$start" -g $((2 * guard)) -s "$size"
     "${CMD[@]}" >"$stem.op" 2>&1
     # count_sub is not counted, so it need not listen out its time; the queryable is, and does.
     [ "$op" = get ] || kill "$peer" 2>/dev/null
@@ -1266,11 +1325,20 @@ opprofile() {
         echo "pico-compare: NOT-MEASURED, valgrind or callgrind_annotate is not on PATH"
         exit 2
     fi
+    bench_transport_ok || exit 2
+    [ -n "${1:-}" ] || [ "$bench_transport" != multicast ] || ops="$OPPROF_GROUP_OPS"
     IFS=, read -r -a list <<<"$ops"
     for op in "${list[@]}"; do
         case ",$OPPROF_OPS," in
             *",$op,"*) ;;
             *) echo "pico-compare: NOT-MEASURED, $op is not one of $OPPROF_OPS"; exit 2 ;;
+        esac
+        case ",$OPPROF_GROUP_OPS," in
+            *",$op,"*) ;;
+            *) if [ "$bench_transport" = multicast ]; then
+                   echo "pico-compare: NOT-MEASURED, $op is not measured over multicast, only $OPPROF_GROUP_OPS"
+                   exit 2
+               fi ;;
         esac
         read -r base count <<<"$(opprofile_counts "$op")"
         [[ "$base" =~ ^[0-9]+$ ]] && [[ "$count" =~ ^[0-9]+$ ]] && [ "$count" -gt "$base" ] \
@@ -1290,6 +1358,7 @@ opprofile() {
         echo "cpu=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)"
         echo "valgrind=$(valgrind --version 2>/dev/null)"
         echo "ops=$ops size=$size seconds=$seconds lead_s=$lead settle_s=$settle guard_ms=$guard"
+        echo "transport=$bench_transport"
         for op in "${list[@]}"; do
             echo "counts $op=$(opprofile_counts "$op")"
         done
@@ -1297,7 +1366,7 @@ opprofile() {
         echo "pico_lib=$pico_lib"
         echo "wz=$wz_engine"
     } >"$run/record.txt"
-    echo "instructions per operation, $size B, ops $ops over $seconds s a run; operation on $pub_cpus, peer on $sub_cpus; wz env: ${wz_env:-none}; wz arm: $wz_engine" \
+    echo "instructions per operation over $bench_transport, $size B, ops $ops over $seconds s a run; operation on $pub_cpus, peer on $sub_cpus; wz env: ${wz_env:-none}; wz arm: $wz_engine" \
         | tee -a "$run/report.txt"
     for op in "${list[@]}"; do
         read -r base count <<<"$(opprofile_counts "$op")"
@@ -1594,7 +1663,8 @@ parity() {
 # ── perf: the performance matrix of the pico ABI (docs/pico-perf-matrix.md) ──────────────────────────────
 #
 # One program, scripts/host-bench/perf_probe.c, built three times into $out/perf/bin: perf_probe_P against
-# zenoh-pico built as the same build as wz-capi-pico's default capabilities on the engine and with the standard
+# zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset (configs/zenoh-pico_defconfig, the
+# capabilities pico's own default build has; wz_config.preset_features) on the engine and with the standard
 # library resolved above (the capability cost gate's reference, which perf_matrix.py reference builds or finds,
 # by the gate's rule for that form), perf_probe_W against that wz-capi-pico build and perf_probe_Wapp against it
 # with the `app-transport` capability, the one arm that carries the program transport cell; both wz builds are
@@ -1651,7 +1721,7 @@ perf_external_arm() {
     fi
 }
 
-# perf_wz_arm <dir> <arm> <features>: wz-capi-pico-lib built as pico_form says for its default features and <features> (a comma
+# perf_wz_arm <dir> <arm> <features>: wz-capi-pico-lib built as pico_form says for zenoh-pico's preset and <features> (a comma
 # list, empty for none), its library copied to <dir>/lib-<arm> and the pico headers of its own arm to
 # <dir>/include-<arm>: the headers its zenoh-pico-sys build installs, with the config.h of the same feature list
 # (wz_config.py --pico-config-h) in place of the vendored default one, as scripts/pico-c-program.sh compiles a
@@ -1706,7 +1776,7 @@ stamped_stdlib() {
 }
 
 # perf_matrix_wz_arm <dir> <arm> <features>: arm <arm> of the perf matrix, wz-capi-pico on $wz_engine with $wz_stdlib
-# and <features> (a comma list, empty for none) over its default capabilities, built as the size gate builds the case
+# and <features> (a comma list, empty for none) over zenoh-pico's preset, built as the size gate builds the case
 # of that form, its library in <dir>/lib-<arm> and its headers in <dir>/include-<arm> (perf_matrix.py wz-arm, which
 # prints why when it builds nothing).
 perf_matrix_wz_arm() {

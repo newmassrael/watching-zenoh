@@ -152,13 +152,13 @@ pub(crate) unsafe fn keyexpr_text<'a>(
 #[cfg(feature = "replay-cache")]
 pub(crate) unsafe fn session_facts(
     session: *const crate::session::z_loaned_session_t,
-) -> Result<crate::ext_interface::wz_ext_session_facts_t, crate::result::ZResult> {
-    use crate::ext_interface::{wz_ext_interface_session_facts, wz_ext_session_facts_t};
+) -> Result<crate::ext_interface::zext_session_facts_t, crate::result::ZResult> {
+    use crate::ext_interface::{zext_interface_session_facts, zext_session_facts_t};
 
-    let mut facts: wz_ext_session_facts_t = core::mem::zeroed();
+    let mut facts: zext_session_facts_t = core::mem::zeroed();
     // The struct is a few dozen bytes.
-    facts.struct_size = core::mem::size_of::<wz_ext_session_facts_t>() as u32;
-    match wz_ext_interface_session_facts(session, &mut facts) {
+    facts.struct_size = core::mem::size_of::<zext_session_facts_t>() as u32;
+    match zext_interface_session_facts(session, &mut facts) {
         crate::result::Z_OK => Ok(facts),
         code => Err(code),
     }
@@ -177,16 +177,16 @@ pub(crate) struct ReplayPolicies {
 impl ReplayPolicies {
     /// The policies `facts` reports; `None` for a value these doors do not know, which only a core
     /// of a later interface than theirs can report.
-    pub(crate) fn of(facts: &crate::ext_interface::wz_ext_session_facts_t) -> Option<Self> {
+    pub(crate) fn of(facts: &crate::ext_interface::zext_session_facts_t) -> Option<Self> {
         use crate::ext_interface::{
-            WZ_EXT_REPLAY_LIVE_DELIVER, WZ_EXT_REPLAY_LIVE_HOLD_BACK,
-            WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE, WZ_EXT_REPLAY_SHAPE_SEGMENTED,
+            ZEXT_REPLAY_LIVE_DELIVER, ZEXT_REPLAY_LIVE_HOLD_BACK,
+            ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE, ZEXT_REPLAY_SHAPE_SEGMENTED,
         };
         use wz_session_core::policy::{ReplayLiveBeforeAnswer, ReplayReplyShape};
 
         let reply_shape = match facts.replay_reply_shape {
-            WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE => ReplayReplyShape::FramePerSample,
-            WZ_EXT_REPLAY_SHAPE_SEGMENTED => ReplayReplyShape::Segmented,
+            ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE => ReplayReplyShape::FramePerSample,
+            ZEXT_REPLAY_SHAPE_SEGMENTED => ReplayReplyShape::Segmented,
             _ => return None,
         };
         let serve_holds_sends = match facts.replay_serve_holds_sends {
@@ -195,8 +195,8 @@ impl ReplayPolicies {
             _ => return None,
         };
         let live_before_answer = match facts.replay_live_before_answer {
-            WZ_EXT_REPLAY_LIVE_DELIVER => ReplayLiveBeforeAnswer::Deliver,
-            WZ_EXT_REPLAY_LIVE_HOLD_BACK => ReplayLiveBeforeAnswer::HoldBack,
+            ZEXT_REPLAY_LIVE_DELIVER => ReplayLiveBeforeAnswer::Deliver,
+            ZEXT_REPLAY_LIVE_HOLD_BACK => ReplayLiveBeforeAnswer::HoldBack,
             _ => return None,
         };
         Some(Self {
@@ -242,10 +242,9 @@ mod tests {
     }
 
     #[cfg(feature = "replay-cache")]
-    fn facts(shape: u8, holds: u8, live: u8) -> crate::ext_interface::wz_ext_session_facts_t {
-        crate::ext_interface::wz_ext_session_facts_t {
-            struct_size: core::mem::size_of::<crate::ext_interface::wz_ext_session_facts_t>()
-                as u32,
+    fn facts(shape: u8, holds: u8, live: u8) -> crate::ext_interface::zext_session_facts_t {
+        crate::ext_interface::zext_session_facts_t {
+            struct_size: core::mem::size_of::<crate::ext_interface::zext_session_facts_t>() as u32,
             closed: 0,
             replay_reply_shape: shape,
             replay_serve_holds_sends: holds,
@@ -261,16 +260,16 @@ mod tests {
     #[test]
     fn the_replay_policies_are_the_codes_the_core_reports() {
         use crate::ext_interface::{
-            WZ_EXT_REPLAY_LIVE_DELIVER, WZ_EXT_REPLAY_LIVE_HOLD_BACK,
-            WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE, WZ_EXT_REPLAY_SHAPE_SEGMENTED,
+            ZEXT_REPLAY_LIVE_DELIVER, ZEXT_REPLAY_LIVE_HOLD_BACK,
+            ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE, ZEXT_REPLAY_SHAPE_SEGMENTED,
         };
         use wz_session_core::policy::{ReplayLiveBeforeAnswer, ReplayReplyShape};
 
         assert_eq!(
             ReplayPolicies::of(&facts(
-                WZ_EXT_REPLAY_SHAPE_SEGMENTED,
+                ZEXT_REPLAY_SHAPE_SEGMENTED,
                 1,
-                WZ_EXT_REPLAY_LIVE_HOLD_BACK
+                ZEXT_REPLAY_LIVE_HOLD_BACK
             )),
             Some(ReplayPolicies {
                 reply_shape: ReplayReplyShape::Segmented,
@@ -280,9 +279,9 @@ mod tests {
         );
         assert_eq!(
             ReplayPolicies::of(&facts(
-                WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
+                ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
                 0,
-                WZ_EXT_REPLAY_LIVE_DELIVER
+                ZEXT_REPLAY_LIVE_DELIVER
             )),
             Some(ReplayPolicies {
                 reply_shape: ReplayReplyShape::FramePerSample,

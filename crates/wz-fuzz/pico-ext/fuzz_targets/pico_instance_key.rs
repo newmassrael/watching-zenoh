@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The instance keys of the pico C ABI (`wz_ext_instance_keyer_*`): a keyer made from a schema's
+//! The instance keys of the pico C ABI (`zext_instance_keyer_*`): a keyer made from a schema's
 //! `FileDescriptorSet` and a description the fuzzer writes, then handed payloads to index, last
 //! values to set and read back, and reports to flush.
 //!
@@ -66,14 +66,13 @@ fuzz_target!(|data: &[u8]| {
     // The instances are known once a keyer is made, and the storage of the last values is sized
     // from them, so a keyer that keeps them is the second one made from the same text.
     let mut probe = new_keyer(set, &description, None);
-    if !unsafe { wz_ext_internal_instance_keyer_check(&probe) } {
+    if !unsafe { zext_internal_instance_keyer_check(&probe) } {
         return;
     }
     let mut instances = usize::MAX;
     // SAFETY: `probe` is a live owned keyer; `instances` is writable.
-    let rc = unsafe {
-        wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&probe), &mut instances)
-    };
+    let rc =
+        unsafe { zext_instance_keyer_instances(zext_instance_keyer_loan(&probe), &mut instances) };
     assert_eq!(
         rc, Z_OK,
         "instance_keyer_instances: a live keyer answered {rc}"
@@ -83,15 +82,15 @@ fuzz_target!(|data: &[u8]| {
     let mut keyer = if keep {
         drop_keyer(&mut probe);
         storage = vec![0u8; instances * room];
-        let mut options: wz_ext_instance_keyer_options_t = unsafe { core::mem::zeroed() };
+        let mut options: zext_instance_keyer_options_t = unsafe { core::mem::zeroed() };
         // SAFETY: `options` is writable.
-        unsafe { wz_ext_instance_keyer_options_default(&mut options) };
+        unsafe { zext_instance_keyer_options_default(&mut options) };
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = room;
         let keyer = new_keyer(set, &description, Some(&options));
         assert!(
-            unsafe { wz_ext_internal_instance_keyer_check(&keyer) },
+            unsafe { zext_internal_instance_keyer_check(&keyer) },
             "instance_keyer_new: a schema it made a keyer of is refused with room for each instance"
         );
         keyer
@@ -129,8 +128,8 @@ fuzz_target!(|data: &[u8]| {
     let (mut undecodable, mut absent, mut not_listed) = (u64::MAX, u64::MAX, u64::MAX);
     // SAFETY: `keyer` is a live owned keyer; the outs are writable.
     let rc = unsafe {
-        wz_ext_instance_keyer_counts(
-            wz_ext_instance_keyer_loan(&keyer),
+        zext_instance_keyer_counts(
+            zext_instance_keyer_loan(&keyer),
             &mut undecodable,
             &mut absent,
             &mut not_listed,
@@ -153,11 +152,11 @@ fuzz_target!(|data: &[u8]| {
     );
 
     drop_keyer(&mut keyer);
-    let mut out = wz_ext_instance_key_t::default();
+    let mut out = zext_instance_key_t::default();
     // SAFETY: `keyer` holds the gravestone; `out` is writable.
     let rc = unsafe {
-        wz_ext_instance_keyer_index(
-            wz_ext_instance_keyer_loan(&keyer),
+        zext_instance_keyer_index(
+            zext_instance_keyer_loan(&keyer),
             b"x".as_ptr(),
             1,
             now_ms,
@@ -175,14 +174,14 @@ fuzz_target!(|data: &[u8]| {
 fn new_keyer(
     set: &[u8],
     description: &CString,
-    options: Option<&wz_ext_instance_keyer_options_t>,
-) -> wz_ext_owned_instance_keyer_t {
-    let mut this: wz_ext_owned_instance_keyer_t = unsafe { core::mem::zeroed() };
+    options: Option<&zext_instance_keyer_options_t>,
+) -> zext_owned_instance_keyer_t {
+    let mut this: zext_owned_instance_keyer_t = unsafe { core::mem::zeroed() };
     let mut refusal = empty_string();
     let options = options.map_or(core::ptr::null(), |o| o as *const _);
     // SAFETY: every argument is valid for the call; the storage the options name outlives the keyer.
     let rc = unsafe {
-        wz_ext_instance_keyer_from_descriptor_set(
+        zext_instance_keyer_from_descriptor_set(
             &mut this,
             set.as_ptr(),
             set.len(),
@@ -197,7 +196,7 @@ fn new_keyer(
         rc,
         &[Z_OK, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE],
     );
-    let holds = unsafe { wz_ext_internal_instance_keyer_check(&this) };
+    let holds = unsafe { zext_internal_instance_keyer_check(&this) };
     assert_eq!(
         holds,
         rc == Z_OK,
@@ -218,12 +217,12 @@ fn new_keyer(
     this
 }
 
-fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8], now_ms: u64) {
-    let mut out = wz_ext_instance_key_t::default();
+fn index(keyer: &zext_owned_instance_keyer_t, model: &mut Model, payload: &[u8], now_ms: u64) {
+    let mut out = zext_instance_key_t::default();
     // SAFETY: `keyer` is a live owned keyer; `payload` is readable; `out` is writable.
     let rc = unsafe {
-        wz_ext_instance_keyer_index(
-            wz_ext_instance_keyer_loan(keyer),
+        zext_instance_keyer_index(
+            zext_instance_keyer_loan(keyer),
             payload.as_ptr(),
             payload.len(),
             now_ms,
@@ -233,7 +232,7 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
     assert_eq!(rc, Z_OK, "instance_keyer_index: a live keyer answered {rc}");
     assert!(out.reported <= 1, "a report flag of {}", out.reported);
     match out.status {
-        WZ_EXT_INSTANCE_KEY_INDEXED => {
+        ZEXT_INSTANCE_KEY_INDEXED => {
             assert!(
                 out.instance < model.instances,
                 "instance {} of {}",
@@ -243,11 +242,11 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
             assert_eq!(out.reported, 0, "an indexed payload carries a report");
             match &mut model.last {
                 None => assert_eq!(
-                    out.last, WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT,
+                    out.last, ZEXT_INSTANCE_KEY_LAST_NOT_KEPT,
                     "a last value kept by a keyer that keeps none"
                 ),
                 Some(last) => match out.last {
-                    WZ_EXT_INSTANCE_KEY_LAST_RECORDED => {
+                    ZEXT_INSTANCE_KEY_LAST_RECORDED => {
                         assert!(
                             payload.len() <= model.room,
                             "a value of {} bytes recorded in a room of {}",
@@ -256,7 +255,7 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
                         );
                         last[out.instance] = Some(payload.to_vec());
                     }
-                    WZ_EXT_INSTANCE_KEY_LAST_TOO_LONG => assert!(
+                    ZEXT_INSTANCE_KEY_LAST_TOO_LONG => assert!(
                         payload.len() > model.room,
                         "a value of {} bytes refused from a room of {}",
                         payload.len(),
@@ -266,9 +265,7 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
                 },
             }
         }
-        WZ_EXT_INSTANCE_KEY_UNDECODABLE
-        | WZ_EXT_INSTANCE_KEY_ABSENT
-        | WZ_EXT_INSTANCE_KEY_NOT_LISTED => {
+        ZEXT_INSTANCE_KEY_UNDECODABLE | ZEXT_INSTANCE_KEY_ABSENT | ZEXT_INSTANCE_KEY_NOT_LISTED => {
             model.drops[usize::from(out.status - 1)] += 1;
             assert_eq!(
                 out.instance, 0,
@@ -276,7 +273,7 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
                 out.instance
             );
             assert_eq!(
-                out.last, WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT,
+                out.last, ZEXT_INSTANCE_KEY_LAST_NOT_KEPT,
                 "a dropped payload's last value is {}",
                 out.last
             );
@@ -291,15 +288,15 @@ fn index(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, payload: &[u8
     }
 }
 
-fn flush(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, now_ms: u64) {
-    let mut out = wz_ext_instance_key_t::default();
+fn flush(keyer: &zext_owned_instance_keyer_t, model: &mut Model, now_ms: u64) {
+    let mut out = zext_instance_key_t::default();
     // SAFETY: `keyer` is a live owned keyer; `out` is writable.
     let due =
-        unsafe { wz_ext_instance_keyer_flush(wz_ext_instance_keyer_loan(keyer), now_ms, &mut out) };
+        unsafe { zext_instance_keyer_flush(zext_instance_keyer_loan(keyer), now_ms, &mut out) };
     if !due {
         assert_eq!(
             out,
-            wz_ext_instance_key_t::default(),
+            zext_instance_key_t::default(),
             "no report due, and the out is written"
         );
         return;
@@ -309,9 +306,7 @@ fn flush(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, now_ms: u64) 
     assert!(
         matches!(
             out.status,
-            WZ_EXT_INSTANCE_KEY_UNDECODABLE
-                | WZ_EXT_INSTANCE_KEY_ABSENT
-                | WZ_EXT_INSTANCE_KEY_NOT_LISTED
+            ZEXT_INSTANCE_KEY_UNDECODABLE | ZEXT_INSTANCE_KEY_ABSENT | ZEXT_INSTANCE_KEY_NOT_LISTED
         ),
         "a report says no reason: {}",
         out.status
@@ -319,16 +314,11 @@ fn flush(keyer: &wz_ext_owned_instance_keyer_t, model: &mut Model, now_ms: u64) 
     model.reported += out.dropped;
 }
 
-fn set_last(
-    keyer: &wz_ext_owned_instance_keyer_t,
-    model: &mut Model,
-    instance: usize,
-    value: &[u8],
-) {
+fn set_last(keyer: &zext_owned_instance_keyer_t, model: &mut Model, instance: usize, value: &[u8]) {
     // SAFETY: `keyer` is a live owned keyer; `value` is readable.
     let rc = unsafe {
-        wz_ext_instance_keyer_set_last(
-            wz_ext_instance_keyer_loan(keyer),
+        zext_instance_keyer_set_last(
+            zext_instance_keyer_loan(keyer),
             instance,
             value.as_ptr(),
             value.len(),
@@ -367,13 +357,13 @@ fn set_last(
     }
 }
 
-fn last(keyer: &wz_ext_owned_instance_keyer_t, model: &Model, instance: usize, capacity: usize) {
+fn last(keyer: &zext_owned_instance_keyer_t, model: &Model, instance: usize, capacity: usize) {
     let mut out = vec![0u8; capacity];
     let mut len = usize::MAX;
     // SAFETY: `keyer` is a live owned keyer; `out` is writable for `capacity` bytes.
     let rc = unsafe {
-        wz_ext_instance_keyer_last(
-            wz_ext_instance_keyer_loan(keyer),
+        zext_instance_keyer_last(
+            zext_instance_keyer_loan(keyer),
             instance,
             out.as_mut_ptr(),
             capacity,
@@ -441,14 +431,14 @@ fn last(keyer: &wz_ext_owned_instance_keyer_t, model: &Model, instance: usize, c
     }
 }
 
-fn drop_keyer(keyer: &mut wz_ext_owned_instance_keyer_t) {
+fn drop_keyer(keyer: &mut zext_owned_instance_keyer_t) {
     // SAFETY: an owned keyer slot, dropped twice; the second is a documented no-op.
     unsafe {
-        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(keyer));
+        zext_instance_keyer_drop(zext_instance_keyer_move(keyer));
         assert!(
-            !wz_ext_internal_instance_keyer_check(keyer),
+            !zext_internal_instance_keyer_check(keyer),
             "a dropped keyer is still held"
         );
-        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(keyer));
+        zext_instance_keyer_drop(zext_instance_keyer_move(keyer));
     }
 }

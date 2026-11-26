@@ -907,7 +907,7 @@ where
     T: StreamSocket + 'static;
 
 /// Where an [`IpDial`] stands: its link made, or a stream of either protocol being made.
-// A dial is held by value in its face's link, a place the session's face table reserved, so a
+// A dial is held by value in its face's row of the dials, a place the session reserved, so a
 // stream being made is not boxed to bring the made link's variant to its size: that would be an
 // allocation for each dial.
 #[allow(clippy::large_enum_variant)]
@@ -2889,6 +2889,7 @@ mod tests {
     #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
     mod udp_listener {
         use super::*;
+        use crate::link_cells::OneTask;
         use alloc::collections::VecDeque;
         use alloc::rc::Rc;
         use alloc::vec;
@@ -2942,7 +2943,8 @@ mod tests {
         /// An `InitSyn` header and a byte: what opens a session.
         const SYN: &[u8] = &[0x01, 0x09];
 
-        /// A listener over a fresh [`Inbox`], with the queue the test fills and what was sent.
+        /// A listener over a fresh [`Inbox`], with the queue the test fills and what was sent:
+        /// counted for one task, as the links it opens (`HeapLink`) are.
         fn listener() -> (IpUdpListener<Inbox, OneTask>, Queue, Sent) {
             let queued = Queue::default();
             let sent = Sent::default();

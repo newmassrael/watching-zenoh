@@ -8,6 +8,8 @@
 - <detail 1>
 - <detail 2>
 - <detail 3>
+
+Change-Id: I<40 hex digits>
 ```
 
 ## Rules
@@ -48,6 +50,23 @@
 - Reference RFC sections in `§N.M` form (e.g., §5.O, §6.2.6, §5.J.2)
 - Reference Open Questions explicitly (e.g., OQ-W15, Q13)
 - Reference SCE land via 8-char commit SHA when catching up upstream
+
+### 3a. Trailers: the change's identity
+- The message ends with one blank line and a trailer paragraph:
+  `Change-Id: I<40 hex digits>`, and `Supersedes: I<40 hex digits>` lines
+  when there are any. A trailer anywhere else is rejected.
+- The `commit-msg` hook writes the Change-Id (`bx-change-id`, installed with
+  bx) when the message has none; do not write one by hand. Rebase,
+  cherry-pick and amend keep it. A commit made where bx is not installed
+  (the landing queue's integrator account) keeps what its message has.
+- The Change-Id names the change whatever its commits look like: `bx-wt`
+  judges a branch commit whose every Change-Id is on main as merged, though
+  its patch differs (bx RFC 0087).
+- Work taken from another branch is taken with `git cherry-pick`, which keeps
+  its Change-Id. Work written again in a commit of its own names what it
+  replaces: `Supersedes: <that commit's Change-Id>`.
+- Work nobody wants is abandoned on the record (`bx-wt abandon <name>
+  --reason "..." --apply`), not left as a branch.
 
 ### 4. Style
 - **English only** — subject and body must be written in English so the

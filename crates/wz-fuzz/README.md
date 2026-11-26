@@ -25,12 +25,12 @@ Two surfaces take bytes wz did not make.
 | `config` | the config verdict of `wz-capi-c` |
 | `sender` | the end-to-end sender of `wz-capi-c` |
 
-**The pico C ABI's own doors** (`wz_ext_*`, package `wz-fuzz-pico-ext`), in the
+**The pico C ABI's own doors** (`zext_*`, package `wz-fuzz-pico-ext`), in the
 build the release package makes of the library:
 
 | target | what it drives |
 |--------|----------------|
-| `pico_transport` | a session dialled over a transport the program supplies, fed through `wz_ext_transport_received` as a stream or as datagrams, after a far end the harness plays answered its handshake |
+| `pico_transport` | a session dialled over a transport the program supplies, fed through `zext_transport_received` as a stream or as datagrams, after a far end the harness plays answered its handshake |
 | `pico_config` | the doors that state a config's policies, profile, zenoh document, key ids and key-wire forms, the runtime's limits document, and what an open would ask of the system |
 | `pico_e2e` | the end-to-end sender and the receiving judge, every frame the sender builds judged again by a receiver of the same profile |
 | `pico_instance_key` | the instance keyer over a schema and a description, its last values held to what was recorded or set |

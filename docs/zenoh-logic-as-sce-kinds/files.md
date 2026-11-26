@@ -241,6 +241,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/runtime_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/shared_key_ids.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/snapshot.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/step.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/timestamps.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/tx_pool.rs` | excluded: test | Test-only file by its name. |
@@ -352,6 +353,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/session_ext.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_memory.rs` | S7 | |
 | `crates/wz-capi-pico/src/session_place.rs` | S7 | |
+| `crates/wz-capi-pico/src/session_step.rs` | S12 | |
 | `crates/wz-capi-pico/src/sized.rs` | S7 | |
 | `crates/wz-capi-pico/src/snapshot.rs` | S7 | |
 | `crates/wz-capi-pico/src/stream_supervision.rs` | S12 | |
@@ -612,7 +614,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/link_rx_window.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/link_socket.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/link_tx_pool.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/linkstate_forward.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/linkstate_routes.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/linkstate_interest.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/linkstate_pending.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/liveness.rs` | S4 | |
@@ -669,6 +671,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/router_forward/table_sharing_pair_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/table_sharing_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/router_forward/tables_cell.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/routing_policy.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/routing_region.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/runtime_impl.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/runtime_pool.rs` | S5 | |
@@ -682,6 +685,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/session/admin_space.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/buffered.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/decl_listener.rs` | S4 | |
+| `crates/wz-runtime-tokio/src/session/group_reserve_tests.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-runtime-tokio/src/session/held_query.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/liveliness.rs` | S4 | |
 | `crates/wz-runtime-tokio/src/session/matching_listener.rs` | S4 | |
@@ -705,7 +709,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/session_spans.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_auth_segment.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_backend.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/shm_clients.rs` | S5 | |
+| `crates/wz-runtime-tokio/src/shm_reader.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_posix_backend.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_provider.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_relay.rs` | S5 | |

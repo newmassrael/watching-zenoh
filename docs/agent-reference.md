@@ -53,7 +53,7 @@ git config core.hooksPath .githooks
   has one writer, the bx landing queue (`bx --land`, bx RFC 0024; `[land]` in
   `bx.toml`). `land.sh` submits HEAD as `refs/bx-land/main/items/<id>` and
   waits; one integrator, a systemd user unit `bx-land@<key>.service` over its
-  own clone, cherry-picks it onto `main`, files the ledger round its descriptor
+  own clone, merges it onto `main`, files the ledger round its descriptor
   carries (`file-round`, placed on a machine that holds the pinned ledger CLI,
   with the number the store gives it on that tree), judges the result with
   this repository's pre-push hook and pushes. Once it landed, `land.sh` moves
@@ -65,6 +65,38 @@ git config core.hooksPath .githooks
   (`bx --land-queue`). Exit codes: 0 landed, 1 returned or a step refused,
   2 usage or a dirty tree, 3 not submitted, cancelled or not known, 4 landed but the move
   onto `origin/main` conflicted.
+
+  **Verification lanes run after the landing, not before it** (2026-11-26).
+  `land.sh` runs no lane: admission is the integrator's judgment. The lanes a
+  change moved run once, in the fleet, through `bash scripts/verify-once.sh`
+  (planner and store `scripts/lib/gate_ledger.py`): by the author when they
+  want a verdict before landing, and on `main` after a landing as the
+  post-merge run (`--base <main before it>`). It reads the lane set, each
+  lane's class and its digest D(L, t) from `scripts/lib/lane_digest.py`, which
+  hashes the definitions of `run-ci.sh` the lane runs (its function, what that
+  calls, the code outside functions), its environment and every tracked file it
+  can read; `lane_digest.py --explain <lane> --base <ref>` says why a lane
+  moved. A lane is run when its digest moved from the merge base with the base
+  and the clone holds no pass at that digest; the units run in one
+  `bx --checks ci` call, and a lane with a pass is INHERITED, printed with the
+  commit it was judged on. Class S lanes (statistics) are never run or reused
+  here. Each verdict is a receipt in the clone's receipt store,
+  `<git common dir>/wz-receipts/<lane>/<digest[0:2]>/<digest>/<sha256>.json`,
+  named by the hash of its bytes and published with link(2), so no receipt is
+  ever overwritten (the defect that removed the first receipts on 2026-10-19).
+  No receipt is written from a dirty or untracked checkout, a receipt whose bytes
+  or key do not match is ignored and reported, and a failure is never reused.
+  Nothing that admits a candidate to `main` reads receipts.
+
+  `verify-once.sh` modes: the default (the lanes the branch moved, without a
+  pass), `--only-red` (the lanes whose latest verdict at their current digest
+  failed), `--all --reason '<why>'` (every lane; without a reason it is refused
+  when the store already holds a verdict at any of their digests, with a line
+  starting `verify-once: REFUSED --all:` and exit 3; the reason is kept in each
+  receipt), `--plan` and `--check` (run nothing), `--summary` (one line per
+  judged lane: lane, digest, verdict, executor class, for a round's
+  verification). Do not chain `run-ci.sh` lanes by hand to get the same
+  answer: a chain re-runs every lane the store already judged.
 
   Gate 0p refuses a push to `main` from any clone that is not the
   integrator's (`git config wz.land-integrator true`). Refs of the queue

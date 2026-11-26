@@ -4020,6 +4020,13 @@ fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare
 }
 
 /// Every row `fan` pins, each call ended at once: the number each row's closure was given.
+#[cfg(any(
+    all(
+        feature = "keyexpr-wildcard-single",
+        feature = "keyexpr-wildcard-double"
+    ),
+    feature = "key-set-closed"
+))]
 fn pinned_in_turn(tables: &mut LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec<u32> {
     let mut seen = Vec::new();
     while let Some(call) = tables.pin_next_subscriber(fan) {
@@ -4035,6 +4042,11 @@ fn pinned_in_turn(tables: &mut LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec
 /// The walk that pins one row at a time reaches the rows a peer's fan-out reaches, in its order: a
 /// row whose locality hears no peer, or whose pattern does not meet the key, is passed. Turned red
 /// by a walk that skips a row, repeats one, or matches by another rule than the fan-out's.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
     use crate::pubsub::{LocalSubscribers, PeerDelivery};
@@ -4074,6 +4086,11 @@ fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
 /// in its order: a row whose locality hears only peers is passed, and one that hears only the
 /// session is reached. Turned red by a walk of the session's own message that matches the rows by
 /// a peer's origin.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn the_pinned_walk_of_the_sessions_own_message_reaches_the_rows_its_loopback_reaches() {
     use crate::pubsub::LocalSubscribers;
@@ -4179,6 +4196,11 @@ fn end_all<const N: usize>(
 /// table's end; a pin from where it ended pins nothing. Turned red by a pin that stops before the
 /// last row reached, matches by another rule than the walk's, or leaves the walk where a second pin
 /// begins the calls again.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn one_pin_of_every_row_begins_the_calls_the_walk_would_in_its_order() {
     let mut tables = latched_tables();
@@ -4193,8 +4215,9 @@ fn one_pin_of_every_row_begins_the_calls_the_walk_would_in_its_order() {
             .declare_subscriber(key, origin, KeyForm::default(), latched(n))
             .unwrap();
     }
-    type MakeFan = fn() -> PinnedFanOut<'static>;
-    let fans: [(MakeFan, Vec<u32>); 2] = [
+    // What makes a fresh fan-out of the message, beside the rows the walk reaches with it.
+    type FanOf = fn() -> PinnedFanOut<'static>;
+    let fans: [(FanOf, Vec<u32>); 2] = [
         (|| PinnedFanOut::new("a/b", None), std::vec![1, 2, 5]),
         (|| PinnedFanOut::local("a/b"), std::vec![1, 4, 5]),
     ];
@@ -4475,6 +4498,10 @@ fn a_closed_key_set_drops_from_the_pinned_walk_what_the_peers_row_does_not_allow
 
 /// Every liveliness subscriber `fan` pins, each call ended at once: the number each row's
 /// closure was given.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 fn tokens_pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedTokenFan<'_>) -> Vec<u32> {
     let mut seen = Vec::new();
     while let Some(call) = tables.pin_next_liveliness_subscriber(fan) {
@@ -4492,6 +4519,11 @@ fn tokens_pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedTokenFan<'_>) -
 /// undeclared before the walk reaches it begins no call. The CONTROL is the live token, which
 /// reaches the row that asked no history too. Turned red by a walk that matches by another rule
 /// than the token fan's (`token_reaches`), repeats a row, or pins a row undeclared.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn a_tokens_walk_pins_each_liveliness_subscriber_it_reaches_in_turn() {
     let mut tables = latched_tables();
@@ -4587,6 +4619,48 @@ fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_t
     assert_eq!(tables.keyexprs().len(), 1);
     assert_eq!(tables.undeclare_keyexpr(declared.handle), Some(declared.id));
     assert!(tables.keyexprs().is_empty());
+}
+
+/// The close retracts every declaration's count where its row lies: a copy of a hold taken
+/// before the close takes none at the row's address, a hold given back there lets go of nothing,
+/// and the table's own release finds no count left, while the rows stay where they were put.
+///
+/// # Control
+///
+/// A `close_keyexpr_counts` that leaves a count reds the first refusal (the copy is taken); one
+/// that removes the rows reds the length kept.
+#[test]
+fn the_close_retracts_every_declarations_count_where_its_row_lies() {
+    let mut tables = Tables::new();
+    let first = tables.declare_keyexpr("demo/close/a").unwrap();
+    let second = tables.declare_keyexpr("demo/close/b").unwrap();
+    let at: *const _ = tables.keyexprs().get(first.handle).unwrap().head().count();
+    // SAFETY: the close removes no row, so the count stands where it was put to the end.
+    let count = unsafe { &*at };
+    assert_eq!(
+        count.retain(first.handle),
+        Ok(()),
+        "CONTROL: open, a copy holds"
+    );
+    assert_eq!(count.holds(), 2);
+    tables.close_keyexpr_counts();
+    assert_eq!(
+        count.retain(first.handle),
+        Err(RowHoldRefused::Released),
+        "a copy after the close takes no hold"
+    );
+    assert_eq!(count.holds(), 0, "no holder is counted");
+    assert!(
+        !count.release_shared(first.handle),
+        "a hold given back at the row lets go of nothing"
+    );
+    assert!(!tables.retain_keyexpr(second.handle));
+    assert_eq!(
+        tables.undeclare_keyexpr(second.handle),
+        None,
+        "nothing to retract"
+    );
+    assert_eq!(tables.keyexprs().len(), 2, "the rows stay where they lie");
 }
 
 /// A row a declaration was retracted from whatever held it, taken again by the next declaration,

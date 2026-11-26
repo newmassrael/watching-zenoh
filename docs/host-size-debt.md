@@ -126,7 +126,7 @@ it leaves it out.
 | accept loop and the inbound handshake (`accept_loop`, `routing-accept`, which also turns on `codec-request` in a build without the query plane) | a lone listener | needed by `peer`; the cooperative engine's listener costs 63,954 for the same role | the tokio engine's own cost, Q1 |
 | the multicast transport (open-debt item 913) | yes (`Z_FEATURE_MULTICAST_TRANSPORT`) | `multicast-transport` off; `pico-default` read 4,216,542 with it and 3,790,610 without (case note, measured) | owned by item 913 |
 | the query plane | yes | its own features; on the cooperative engine 9.4 times pico's. The case notes of 2026-11-03 put the growth of that day in `decode_one_record` (1,438 to 18,628, the borrowed-to-owned conversions of every arm) and the views' `decode_into`; whether moving those conversions out of the decoder gives any of it back is the carry those notes left | R4 |
-| `wz_ext_config_device_requires` (`device_requires.rs` over `wz_session_core::facilities`), its own capability `device-requires` since it left `unstable-api`, so the `unstable-api` cases no longer carry it | none (a wz door) | it reads endpoints with `parse_any_locator`, the grammar of every scheme the tree knows, where the cooperative engine dials with `wz_session_mcu::dial::parse_locator`; the three `unstable-api` cooperative cases grew about 110,000 when the door came (case note, attributed by feature set, not by symbol) | decision Q6 |
+| `zext_config_device_requires` (`device_requires.rs` over `wz_session_core::facilities`), its own capability `device-requires` since it left `unstable-api`, so the `unstable-api` cases no longer carry it | none (a wz door) | it reads endpoints with `parse_any_locator`, the grammar of every scheme the tree knows, where the cooperative engine dials with `wz_session_mcu::dial::parse_locator`; the three `unstable-api` cooperative cases grew about 110,000 when the door came (case note, attributed by feature set, not by symbol) | decision Q6 |
 | the statechart runtime's BasicHTTP processor (`sce-rust-runtime`'s `http-send`, a default) | none | `default-features = false` with `std` and `macrostep-diagnostics`: R1, landed | small, under 5,000 |
 
 The generated codecs and machines (SCE) are in both engines alike and are the session's own logic;
@@ -228,7 +228,7 @@ code, as labelled.
   out needs a toolchain that builds `std` (`panic_immediate_abort`) or a host layer without
   `std`, which the cooperative engine's MCU build already is. Estimate 150,000 to 350,000 per
   case, the largest single item of the cooperative cases if it reads so.
-- **Q6. `wz_ext_config_device_requires` read with the build's own locator grammar.** The door
+- **Q6. `zext_config_device_requires` read with the build's own locator grammar.** The door
   would then answer an endpoint the build cannot dial with the refusal `z_open` gives it, as its
   documentation says it answers, and stop linking every scheme's parser. That changes the door's
   answer for such endpoints (today: a requirement with the endpoint listed as unknown). Estimate:

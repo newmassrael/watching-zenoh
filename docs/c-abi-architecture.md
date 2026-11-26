@@ -113,7 +113,7 @@ and its feature is measured by a sibling program; it is never retried until it p
 
 ```
   C program
-     │  z_* / zp_* / wz_ext_*            L4  façade        wz-capi-pico (one crate per preset ABI)
+     │  z_* / zp_* / zext_*            L4  façade        wz-capi-pico (one crate per preset ABI)
      ▼
   session core: entities, keys, routing  L3  session       wz-session-core (one table set)
      ▼

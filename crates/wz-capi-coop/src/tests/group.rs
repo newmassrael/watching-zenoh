@@ -483,6 +483,48 @@ fn a_member_whose_group_link_is_lost_joins_the_group_again() {
     SessionDrive::close(&*first);
 }
 
+/// A put on an empty key is refused on the groups' leg as a face's leg refuses it, whatever face
+/// the session has up: here none. The CONTROL is the put on a key, which the group takes. Turned
+/// red by a groups' leg that sends a key the session's tables name nothing by
+/// (`CoopEngine::publish_to_groups_on` without its refusal).
+#[test]
+fn a_put_on_an_empty_key_is_refused_on_the_groups_leg() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let remote = PublishOptions::put().with_locality(Locality::Remote);
+    assert!(
+        member
+            .publish_on_wire_all("demo/group/a", &WireKey::literal(), b"keyed", &remote)
+            .is_ok(),
+        "CONTROL: a key the group takes"
+    );
+    assert_eq!(
+        member.publish_on_wire_all("", &WireKey::literal(), b"no-key", &remote),
+        Err(wz_capi_port::FanoutError::ExceedsCapacity),
+        "an empty key is refused on the groups' leg"
+    );
+    SessionDrive::close(&*member);
+}
+
+/// A put of a member that dials nothing, whose dial role's face rests from the open, tries no
+/// face's send place: the face holds no link that is up, and the put goes to the group by the
+/// groups' leg alone. Turned red by a walk of the faces that tries a face at rest
+/// (`CoopEngine::on_face_legs` without its look at `DirectFace::rests`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_members_put_tries_no_send_place_of_a_face_at_rest() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let tried = member.takes.place_tries.load(Ordering::Relaxed);
+    put(&member, "demo/group/a", b"to-the-group");
+    assert_eq!(
+        member.takes.place_tries.load(Ordering::Relaxed),
+        tried,
+        "no face's send place was tried"
+    );
+    SessionDrive::close(&*member);
+}
+
 /// What a member's group received is in the session's message reading, and stays there when the
 /// group's join is replaced by a join again and when the session closes. Turned red by a reading of
 /// the links alone, or by a join replaced or let go of at the close with its count not retired
@@ -1530,6 +1572,82 @@ mod woken {
         SessionDrive::close(&*member);
     }
 
+    /// A publisher's bare put through its write filter, on a session whose one transport is a
+    /// group, goes to the group the plain way its filter's row keeps: it is answered as sent, its
+    /// datagram is written before the put returns, with one take of the session and no key named
+    /// in the session's tables. CONTROL: a filter whose row keeps no plain way is still answered
+    /// `NotPlain`, nothing sent, for the general publish to send. Turned red by a groups' leg that
+    /// answers `NotPlain` for the general publish to send the put again
+    /// (`CoopEngine::put_through_filter_in` without its `is_groups_leg` arm), which takes the
+    /// session twice, or by one that names the key in the session's tables.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_bare_put_through_its_filter_reaches_the_group_the_plain_way() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let hold = member
+            .acquire_keyexpr("demo/group/plain")
+            .expect("a session with ids left declares a keyexpr");
+        let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+        let declare = || {
+            member
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    "demo/group/plain",
+                    &WireKey::literal(),
+                    None,
+                    false,
+                )
+                .expect("a session with ids left declares")
+                .id
+        };
+        let bare = declare();
+        assert_eq!(
+            member.publish_filtered(bare, "demo/group/plain", &wire, b"general", None),
+            wz_capi_port::FilteredPut::NotPlain,
+            "CONTROL: a row that keeps no plain way sends nothing itself"
+        );
+        let filter = declare();
+        let params = PublishOptions::put()
+            .plain_put_params()
+            .expect("a plain put");
+        member.keep_write_filter_plain(filter, Some((params, wire.declared())));
+        let sent_before = stack.sent.lock().unwrap().len();
+        let (takes, namings) = (
+            member.takes.core.load(SeqCst),
+            member.takes.namings.load(SeqCst),
+        );
+        assert!(
+            matches!(
+                member.publish_filtered(filter, "demo/group/plain", &wire, b"plain", None),
+                wz_capi_port::FilteredPut::Sent(Ok(_))
+            ),
+            "the bare put is sent the plain way"
+        );
+        assert_eq!(
+            member.takes.core.load(SeqCst) - takes,
+            1,
+            "one take of the session for the put"
+        );
+        assert_eq!(
+            member.takes.namings.load(SeqCst),
+            namings,
+            "no key named in the session's tables"
+        );
+        let sent = stack.sent.lock().unwrap();
+        assert_eq!(
+            sent.len(),
+            sent_before + 1,
+            "one datagram, written before it returned"
+        );
+        assert!(sent
+            .last()
+            .is_some_and(|datagram| datagram.ends_with(b"plain")));
+        drop(sent);
+        drop(hold);
+        SessionDrive::close(&*member);
+    }
+
     /// A put made while a read waits on the group's socket is written by the putting thread before
     /// the put returns: the read, on a thread of its own, has no part in it, and the datagram it
     /// waits for ends its wait after.
@@ -1890,12 +2008,13 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
-    /// A burst of a member's datagrams is read by one read, each a step of the group's session of
-    /// its own, and the links are moved once at most for it, as one receive of a link's is read:
-    /// a step of a group moves no face's link, and the read looks at the faces' lives once, which
-    /// moves a link only where one is due or brought something. Turned red by a read that leaves
-    /// the datagrams after the first to the next read (the step after a datagram taken cut out of
-    /// `CoopEngine::step_groups`), or by one that moves the links once a datagram.
+    /// A burst of a member's datagrams is read by one read, in one step of the group's session
+    /// that reads up to the deploy's bound of them, and the links are moved once at most for it,
+    /// as one receive of a link's is read: a step of a group moves no face's link, and the read
+    /// looks at the faces' lives once, which moves a link only where one is due or brought
+    /// something. Turned red by a read that leaves the datagrams after the first to the next read
+    /// (a bound of one handed to the group's step in `CoopEngine::step_groups`), or by one that
+    /// moves the links once a datagram.
     #[test]
     fn a_burst_of_a_members_datagrams_moves_the_links_once() {
         const FRAMES: u64 = 8;
@@ -1935,6 +2054,60 @@ mod in_place {
         assert!(
             session.link_polls() - polls <= 1,
             "one move of the links at most for the burst"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// A member's datagrams of samples hand none of the face's tables out to a write: the member
+    /// the walk names ahead of each datagram's records is read by no plane and is not dispatched,
+    /// so a stream of samples leaves every answer read off the peers' declarations standing and
+    /// owes the read no bookkeeping. Turned red by a sink that dispatches that name as a record
+    /// (`DirectSink::event` without its `IterationEvent::MulticastSource` return), which counts a
+    /// write of the face's tables once a datagram.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_members_samples_write_none_of_the_faces_tables() {
+        const FRAMES: u64 = 8;
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        let heard = subscribe(&session, "demo/unwritten/**");
+        let read_until = |count: usize| {
+            for _ in 0..200 {
+                if heard.lock().unwrap().len() >= count {
+                    break;
+                }
+                SessionDrive::read(&*session, false).expect("the session reads");
+            }
+        };
+        // The member is admitted, which writes its face's tables, before the samples are counted.
+        let mut first = beacon(7);
+        first.extend_from_slice(&frame_of_puts(0, &["demo/unwritten/0"]));
+        hand_in(&network, 1, 7, &first);
+        read_until(1);
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1,
+            "CONTROL: the member's first put"
+        );
+        let written = session.faces_written();
+        for sn in 1..=FRAMES {
+            hand_in(
+                &network,
+                1,
+                7,
+                &frame_of_puts(sn, &[&format!("demo/unwritten/{sn}")]),
+            );
+        }
+        read_until(1 + FRAMES as usize);
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1 + FRAMES as usize,
+            "CONTROL: every datagram's sample"
+        );
+        assert_eq!(
+            session.faces_written(),
+            written,
+            "a member's samples handed the face's tables out to a write"
         );
         SessionDrive::close(&*session);
     }

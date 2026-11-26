@@ -213,6 +213,107 @@ impl PosixTcpListener {
     }
 }
 
+/// The errnos of a failed accept that leave nothing to take now: nothing waits, or the connection
+/// gave up before it was taken; the accept(2) errors it lists for retrying "as for EAGAIN" are
+/// connections the network dropped on the way, which leave nothing to take either.
+const NOTHING_TO_TAKE: &[c_int] = &[
+    libc::EAGAIN,
+    libc::EINTR,
+    libc::ECONNABORTED,
+    libc::EPROTO,
+    libc::ENETDOWN,
+    libc::ENOPROTOOPT,
+    libc::EHOSTDOWN,
+    libc::EHOSTUNREACH,
+    libc::EOPNOTSUPP,
+    libc::ENETUNREACH,
+];
+
+/// Linux's name for a host off the network, which leaves nothing to take as the others do.
+#[cfg(not(target_os = "macos"))]
+const OFF_THE_NETWORK: &[c_int] = &[libc::ENONET];
+/// Darwin has no such number.
+#[cfg(target_os = "macos")]
+const OFF_THE_NETWORK: &[c_int] = &[];
+
+/// The errnos of an accept with no descriptor or memory to give the connection: it stays queued
+/// and a later call tries again, as a full table is retried.
+const NO_ROOM: &[c_int] = &[libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM];
+
+/// The words that hold the bit of every errno an accept tells apart.
+const ACCEPT_ERRNO_WORDS: usize = errno_words(&[NOTHING_TO_TAKE, OFF_THE_NETWORK, NO_ROOM]);
+
+/// The accept's errnos as sets of bits, tested by the number. A `match` over them is lowered to a
+/// table of one entry for every number from the smallest to the largest (110 on Linux, `EINTR` to
+/// `EHOSTUNREACH`), which the library would hold resident for three outcomes.
+static NOTHING_TO_TAKE_BITS: [u64; ACCEPT_ERRNO_WORDS] =
+    errno_bits(&[NOTHING_TO_TAKE, OFF_THE_NETWORK]);
+static NO_ROOM_BITS: [u64; ACCEPT_ERRNO_WORDS] = errno_bits(&[NO_ROOM]);
+
+/// How many 64-bit words a set of bits needs to hold every errno of `lists`. The numbers are the
+/// C library's, which differ by system (QNX numbers its network errors past 230), so the count is
+/// read from them; a negative one does not compile.
+const fn errno_words(lists: &[&[c_int]]) -> usize {
+    let mut largest = 0;
+    let mut l = 0;
+    while l < lists.len() {
+        let list = lists[l];
+        let mut i = 0;
+        while i < list.len() {
+            assert!(list[i] >= 0, "an errno is not negative");
+            if list[i] as usize > largest {
+                largest = list[i] as usize;
+            }
+            i += 1;
+        }
+        l += 1;
+    }
+    largest / 64 + 1
+}
+
+/// The errnos of `lists` as bits, the bit of `e` at `e % 64` of word `e / 64`; a number the
+/// words cannot hold does not compile.
+const fn errno_bits<const WORDS: usize>(lists: &[&[c_int]]) -> [u64; WORDS] {
+    let mut bits = [0u64; WORDS];
+    let mut l = 0;
+    while l < lists.len() {
+        let list = lists[l];
+        let mut i = 0;
+        while i < list.len() {
+            assert!(
+                list[i] >= 0 && (list[i] as usize) < WORDS * 64,
+                "the words hold the errno"
+            );
+            let e = list[i] as usize;
+            bits[e / 64] |= 1 << (e % 64);
+            i += 1;
+        }
+        l += 1;
+    }
+    bits
+}
+
+/// Whether `errno` is one of the set `bits`; a negative number, or one past its words, is not.
+fn holds(bits: &[u64], errno: c_int) -> bool {
+    usize::try_from(errno).is_ok_and(|e| {
+        bits.get(e / 64)
+            .is_some_and(|word| word & (1 << (e % 64)) != 0)
+    })
+}
+
+/// What an accept that failed with `errno` answers: nothing to take now (`Ok`), no descriptor or
+/// memory to give the connection ([`LinkOpenError::Exhausted`]), or a bad descriptor, which no
+/// later call mends ([`LinkOpenError::Unsupported`]).
+fn accept_failure(errno: c_int) -> Result<(), LinkOpenError> {
+    if holds(&NOTHING_TO_TAKE_BITS, errno) {
+        Ok(())
+    } else if holds(&NO_ROOM_BITS, errno) {
+        Err(LinkOpenError::Exhausted)
+    } else {
+        Err(LinkOpenError::Unsupported)
+    }
+}
+
 impl StreamListen for PosixTcpListener {
     type Stream = PosixTcpSocket;
 
@@ -233,31 +334,7 @@ impl StreamListen for PosixTcpListener {
         // listener's own.
         let fd = unsafe { libc::accept(self.fd, core::ptr::null_mut(), core::ptr::null_mut()) };
         if fd < 0 {
-            return match errno() {
-                // Nothing waits, or the connection gave up before it was taken; the accept(2)
-                // errors it lists for retrying "as for EAGAIN" are connections the network
-                // dropped on the way, which leave nothing to take either.
-                libc::EAGAIN
-                | libc::EINTR
-                | libc::ECONNABORTED
-                | libc::EPROTO
-                | libc::ENETDOWN
-                | libc::ENOPROTOOPT
-                | libc::EHOSTDOWN
-                | libc::EHOSTUNREACH
-                | libc::EOPNOTSUPP
-                | libc::ENETUNREACH => Ok(None),
-                // Linux's name for a host off the network; Darwin has no such number.
-                #[cfg(not(target_os = "macos"))]
-                libc::ENONET => Ok(None),
-                // No descriptor or memory to give it: the connection stays queued and a later
-                // call tries again, as a full table is retried.
-                libc::EMFILE | libc::ENFILE | libc::ENOBUFS | libc::ENOMEM => {
-                    Err(LinkOpenError::Exhausted)
-                }
-                // The descriptor itself is bad: no later call mends it.
-                _ => Err(LinkOpenError::Unsupported),
-            };
+            return accept_failure(errno()).map(|()| None);
         }
         // Owned from here, so an early return closes it.
         let mut socket = PosixTcpSocket {
@@ -1076,5 +1153,46 @@ mod tests {
         drop(far);
         PosixTcpListener::bind(at(port))
             .expect("SO_REUSEADDR: the closed connections do not hold the port");
+    }
+
+    /// A failed accept answers by its errno as the accept(2) groups them: every number that leaves
+    /// nothing to take is `Ok`, every one of no room is `Exhausted`, and any other, a negative
+    /// one and one past the sets' words among them, is `Unsupported`. Turned red by a number left
+    /// out of its set, by a set tested at the wrong bit, or by a word of the sets read past its end.
+    #[test]
+    fn a_failed_accept_answers_by_its_errnos_set() {
+        for &e in NOTHING_TO_TAKE.iter().chain(OFF_THE_NETWORK) {
+            assert_eq!(accept_failure(e), Ok(()), "errno {e}");
+        }
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(accept_failure(libc::ENONET), Ok(()));
+        for e in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+            assert_eq!(
+                accept_failure(e),
+                Err(LinkOpenError::Exhausted),
+                "errno {e}"
+            );
+        }
+        let words = c_int::try_from(ACCEPT_ERRNO_WORDS * 64).expect("a few words");
+        for e in [
+            libc::EBADF,
+            libc::EINVAL,
+            libc::ENOTSOCK,
+            0,
+            -1,
+            words,
+            c_int::MAX,
+        ] {
+            assert_eq!(
+                accept_failure(e),
+                Err(LinkOpenError::Unsupported),
+                "errno {e}"
+            );
+        }
+        // Each errno lies in one set, so the order the sets are asked in decides nothing.
+        for e in 0..words {
+            let both = holds(&NOTHING_TO_TAKE_BITS, e) && holds(&NO_ROOM_BITS, e);
+            assert!(!both, "errno {e}");
+        }
     }
 }

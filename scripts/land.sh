@@ -38,6 +38,13 @@
 #
 # It never pushes `main`, and it passes nothing that turns a hook off.
 #
+# It runs no verification lane. Admission is the integrator's judgment; the lanes an
+# item moved run once, by digest, through `scripts/verify-once.sh`: by the author
+# when they want a verdict first, and on `main` after the landing as the post-merge
+# run, whose red re-runs that lane alone (`--only-red`). A lane run here would stand
+# between every item and the queue and judge a tree the queue has not merged yet
+# (docs/rfc/0001-a-lane-lands-alone-and-a-verdict-is-keyed-by-what-it-read.md, 7).
+#
 # ## Usage
 #
 #   bash scripts/land.sh                          # commits only, or rounds already

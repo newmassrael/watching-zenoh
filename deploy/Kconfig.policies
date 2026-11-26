@@ -405,9 +405,10 @@ config WZ_POLICY_MULTI_ROUTE_ATOMIC_TX
 	  does not stop the others. A payload too long to be sent whole reserves the room
 	  of every frame of its chain on every link before any frame is sent, links that
 	  share a queue counted together, and no frame of the chain asks for room again,
-	  so the chain reaches every link whole or no link at all. A multicast group
-	  takes no reservation: it is sent the frame only once every link promised room,
-	  and nothing when the publish delivered to nobody. A link whose frames are
+	  so the chain reaches every link whole or no link at all. A multicast group is
+	  reserved as a link is: it promises room for every datagram of the chain in the
+	  same first phase, and a group that has none ends the publish for every link
+	  and every group; a group with no link takes no part. A link whose frames are
 	  written in slots of a pool may still wait for a slot. A publish from shared
 	  memory reserves nothing and is refused when it asks. Only the tokio engine
 	  reads this policy; the others refuse a publish that asks.
@@ -1310,7 +1311,7 @@ choice WZ_POLICY_KEY_WIRE_FORM
 	  ends of the link must hold it. Every node that holds the dictionary reads an id
 	  only the dictionary names, whatever its own value. The value is the session's,
 	  and an endpoint the configuration dials or listens on may be stated a value of
-	  its own (wz/key-ids/links, wz_ext_config_key_wire_form_for), which every link
+	  its own (wz/key-ids/links, zext_config_key_wire_form_for), which every link
 	  to or from that endpoint takes. A session opened with `shared`, for itself or an
 	  endpoint, and no dictionary is refused, and so is one whose value is not
 	  `declared` in a build without the capability, and a router node, whose faces

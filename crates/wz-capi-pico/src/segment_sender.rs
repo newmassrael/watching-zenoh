@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_segment_*`: the SENDING side of a declared segment profile, from C. One message of the
+//! `zext_segment_*`: the SENDING side of a declared segment profile, from C. One message of the
 //! application's own is cut into the pieces whose header the profile declares, and the pieces are
 //! put on a publisher or handed to a callback, in order.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: the
 //! `segment-sender` capability implies `unstable-api`.
 //!
@@ -16,17 +16,17 @@
 //!
 //! # Ownership
 //!
-//! `wz_ext_segment_sender_new` makes a `wz_ext_owned_segment_sender_t`, and every door that uses it
-//! takes the loan (`wz_ext_segment_sender_loan`). `wz_ext_segment_sender_drop` releases it through
-//! the moved form (`wz_ext_segment_sender_move`) and leaves the gravestone, so a second drop does
-//! nothing; `wz_ext_internal_segment_sender_null` writes the gravestone and
-//! `wz_ext_internal_segment_sender_check` tells it from a sender, as pico's own owned types do.
+//! `zext_segment_sender_new` makes a `zext_owned_segment_sender_t`, and every door that uses it
+//! takes the loan (`zext_segment_sender_loan`). `zext_segment_sender_drop` releases it through
+//! the moved form (`zext_segment_sender_move`) and leaves the gravestone, so a second drop does
+//! nothing; `zext_internal_segment_sender_null` writes the gravestone and
+//! `zext_internal_segment_sender_check` tells it from a sender, as pico's own owned types do.
 //!
 //! # The transfer number
 //!
 //! A message refused before any piece (empty, longer than the profile admits, a chunk size of zero,
 //! a value that does not fit its field, a number past the largest under
-//! [`WZ_EXT_SEGMENT_ROLLOVER_REFUSE`]) emits nothing and consumes no number. A message whose first
+//! [`ZEXT_SEGMENT_ROLLOVER_REFUSE`]) emits nothing and consumes no number. A message whose first
 //! piece was handed on has consumed its number, whether or not every piece then went out.
 //!
 //! # Threads
@@ -52,37 +52,37 @@ use crate::result::{ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z
 use crate::sized::{Out, SizedOut};
 
 /// What a sender does after the message that carried the largest transfer number its field holds.
-pub type wz_ext_segment_rollover_t = u8;
+pub type zext_segment_rollover_t = u8;
 
 /// Refuse the next message. The value a caller passes unless its deployment states otherwise.
-pub const WZ_EXT_SEGMENT_ROLLOVER_REFUSE: wz_ext_segment_rollover_t = 0;
+pub const ZEXT_SEGMENT_ROLLOVER_REFUSE: zext_segment_rollover_t = 0;
 /// Go back to the number the sender was made with: "never 0, wrap to 1" is a sender made with 1
 /// that restarts.
-pub const WZ_EXT_SEGMENT_ROLLOVER_RESTART: wz_ext_segment_rollover_t = 1;
+pub const ZEXT_SEGMENT_ROLLOVER_RESTART: zext_segment_rollover_t = 1;
 
 /// An owned sender: the handle in its one word, null for the gravestone. wz's own, so there is no
 /// upstream size to pad to.
 #[repr(C)]
-pub struct wz_ext_owned_segment_sender_t {
+pub struct zext_owned_segment_sender_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned sender: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_segment_sender_t {
+pub struct zext_loaned_segment_sender_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved sender (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_segment_sender_t {
-    pub(crate) _this: wz_ext_owned_segment_sender_t,
+pub struct zext_moved_segment_sender_t {
+    pub(crate) _this: zext_owned_segment_sender_t,
 }
 
 /// How far one put or split went, written into a struct the program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_segment_result_t {
+pub struct zext_segment_result_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
@@ -94,7 +94,7 @@ pub struct wz_ext_segment_result_t {
     pub sent: usize,
 }
 
-impl Default for wz_ext_segment_result_t {
+impl Default for zext_segment_result_t {
     /// Nothing sent, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -107,7 +107,7 @@ impl Default for wz_ext_segment_result_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_segment_result_t {
+unsafe impl SizedOut for zext_segment_result_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -117,27 +117,27 @@ unsafe impl SizedOut for wz_ext_segment_result_t {
 /// # Safety
 /// `result` is null or a struct of `struct_size` writable bytes.
 unsafe fn result_out(
-    result: *mut wz_ext_segment_result_t,
-) -> Result<Option<Out<wz_ext_segment_result_t>>, ZResult> {
+    result: *mut zext_segment_result_t,
+) -> Result<Option<Out<zext_segment_result_t>>, ZResult> {
     if result.is_null() {
         return Ok(None);
     }
     Out::of(result).map(Some)
 }
 
-/// The options of [`wz_ext_segment_sender_put`].
+/// The options of [`zext_segment_sender_put`].
 #[repr(C)]
-pub struct wz_ext_segment_put_options_t {
+pub struct zext_segment_put_options_t {
     /// The timestamp every piece carries, BORROWED for the call; null for none.
     pub timestamp: *const z_timestamp_t,
 }
 
-/// What [`wz_ext_segment_sender_split`] hands each piece to, with the caller's context. A return
+/// What [`zext_segment_sender_split`] hands each piece to, with the caller's context. A return
 /// other than `Z_OK` stops the split, which returns it. The piece is valid only during the call.
-pub type wz_ext_segment_piece_fn =
+pub type zext_segment_piece_fn =
     unsafe extern "C" fn(context: *mut c_void, piece: *const u8, len: usize) -> ZResult;
 
-impl wz_ext_owned_segment_sender_t {
+impl zext_owned_segment_sender_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
@@ -156,7 +156,7 @@ impl wz_ext_owned_segment_sender_t {
 /// # Safety
 /// `this_` is null or a loaned sender of this library.
 unsafe fn sender_of<'a>(
-    this_: *const wz_ext_loaned_segment_sender_t,
+    this_: *const zext_loaned_segment_sender_t,
 ) -> Option<&'a Mutex<SegmentSender>> {
     if this_.is_null() {
         return None;
@@ -215,10 +215,10 @@ unsafe fn message_arg<'a>(message: *const u8, len: usize) -> &'a [u8] {
 }
 
 /// The rollover a C value names; `None` for a value this library does not know.
-fn rollover_of(value: wz_ext_segment_rollover_t) -> Option<Rollover> {
+fn rollover_of(value: zext_segment_rollover_t) -> Option<Rollover> {
     match value {
-        WZ_EXT_SEGMENT_ROLLOVER_REFUSE => Some(Rollover::Refuse),
-        WZ_EXT_SEGMENT_ROLLOVER_RESTART => Some(Rollover::Restart),
+        ZEXT_SEGMENT_ROLLOVER_REFUSE => Some(Rollover::Refuse),
+        ZEXT_SEGMENT_ROLLOVER_RESTART => Some(Rollover::Restart),
         _ => None,
     }
 }
@@ -239,12 +239,12 @@ fn rollover_of(value: wz_ext_segment_rollover_t) -> Option<Rollover> {
 /// `this_` is writable; `profile_json` and `values_json` are null or NUL-terminated C strings;
 /// `refusal` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_sender_new(
-    this_: *mut wz_ext_owned_segment_sender_t,
+pub unsafe extern "C" fn zext_segment_sender_new(
+    this_: *mut zext_owned_segment_sender_t,
     profile_json: *const c_char,
     values_json: *const c_char,
     first_transfer: u64,
-    rollover: wz_ext_segment_rollover_t,
+    rollover: zext_segment_rollover_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn wz_ext_segment_sender_new(
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        *this_ = wz_ext_owned_segment_sender_t::null_value();
+        *this_ = zext_owned_segment_sender_t::null_value();
         if profile_json.is_null() || values_json.is_null() {
             return Z_ERR_NULL;
         }
@@ -264,7 +264,7 @@ pub unsafe extern "C" fn wz_ext_segment_sender_new(
         };
         match SegmentSender::new(profile, values, first_transfer, rollover) {
             Ok(sender) => {
-                *this_ = wz_ext_owned_segment_sender_t::adopt(sender);
+                *this_ = zext_owned_segment_sender_t::adopt(sender);
                 Z_OK
             }
             Err(why) => {
@@ -280,11 +280,9 @@ pub unsafe extern "C" fn wz_ext_segment_sender_new(
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_put_options_default(
-    this_: *mut wz_ext_segment_put_options_t,
-) {
+pub unsafe extern "C" fn zext_segment_put_options_default(this_: *mut zext_segment_put_options_t) {
     if !this_.is_null() {
-        *this_ = wz_ext_segment_put_options_t {
+        *this_ = zext_segment_put_options_t {
             timestamp: core::ptr::null(),
         };
     }
@@ -296,17 +294,17 @@ pub unsafe extern "C" fn wz_ext_segment_put_options_default(
 /// # Safety
 /// The arguments are those of the two doors.
 unsafe fn split_reporting(
-    this_: *const wz_ext_loaned_segment_sender_t,
+    this_: *const zext_loaned_segment_sender_t,
     message: *const u8,
     len: usize,
     chunk_bytes: usize,
-    result: Option<&Out<wz_ext_segment_result_t>>,
+    result: Option<&Out<zext_segment_result_t>>,
     refusal: *mut z_owned_string_t,
     emit: impl FnMut(&[u8]) -> Result<(), ZResult>,
 ) -> ZResult {
     clear_refusal(refusal);
     if let Some(result) = result {
-        result.put(&wz_ext_segment_result_t::default());
+        result.put(&zext_segment_result_t::default());
     }
     let Some(sender) = sender_of(this_) else {
         return Z_ERR_NULL;
@@ -318,7 +316,7 @@ unsafe fn split_reporting(
     let (code, report) = match locked(sender).split(message, chunk_bytes, emit) {
         Ok(Split { transfer, pieces }) => (
             Z_OK,
-            wz_ext_segment_result_t {
+            zext_segment_result_t {
                 struct_size: 0,
                 transfer,
                 pieces,
@@ -345,7 +343,7 @@ unsafe fn split_reporting(
             );
             (
                 error,
-                wz_ext_segment_result_t {
+                zext_segment_result_t {
                     struct_size: 0,
                     transfer,
                     pieces,
@@ -379,14 +377,14 @@ unsafe fn split_reporting(
 /// `refusal` is null or writable; `result` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wz_ext_segment_sender_put(
-    this_: *const wz_ext_loaned_segment_sender_t,
+pub unsafe extern "C" fn zext_segment_sender_put(
+    this_: *const zext_loaned_segment_sender_t,
     publisher: *const z_loaned_publisher_t,
     message: *const u8,
     len: usize,
     chunk_bytes: usize,
-    options: *const wz_ext_segment_put_options_t,
-    result: *mut wz_ext_segment_result_t,
+    options: *const zext_segment_put_options_t,
+    result: *mut zext_segment_result_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -400,7 +398,7 @@ pub unsafe extern "C" fn wz_ext_segment_sender_put(
         if publisher.is_null() {
             clear_refusal(refusal);
             if let Some(result) = &result {
-                result.put(&wz_ext_segment_result_t::default());
+                result.put(&zext_segment_result_t::default());
             }
             return Z_ERR_NULL;
         }
@@ -454,14 +452,14 @@ pub unsafe extern "C" fn wz_ext_segment_sender_put(
 /// writable bytes.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wz_ext_segment_sender_split(
-    this_: *const wz_ext_loaned_segment_sender_t,
+pub unsafe extern "C" fn zext_segment_sender_split(
+    this_: *const zext_loaned_segment_sender_t,
     message: *const u8,
     len: usize,
     chunk_bytes: usize,
-    emit: Option<wz_ext_segment_piece_fn>,
+    emit: Option<zext_segment_piece_fn>,
     context: *mut c_void,
-    result: *mut wz_ext_segment_result_t,
+    result: *mut zext_segment_result_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -475,7 +473,7 @@ pub unsafe extern "C" fn wz_ext_segment_sender_split(
         let Some(emit) = emit else {
             clear_refusal(refusal);
             if let Some(result) = &result {
-                result.put(&wz_ext_segment_result_t::default());
+                result.put(&zext_segment_result_t::default());
             }
             return Z_ERR_NULL;
         };
@@ -503,8 +501,8 @@ pub unsafe extern "C" fn wz_ext_segment_sender_split(
 /// # Safety
 /// `this_` is null or a loaned sender; `out` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_sender_next(
-    this_: *const wz_ext_loaned_segment_sender_t,
+pub unsafe extern "C" fn zext_segment_sender_next(
+    this_: *const zext_loaned_segment_sender_t,
     out: *mut u64,
 ) -> bool {
     guard_val(|| {
@@ -530,8 +528,8 @@ pub unsafe extern "C" fn wz_ext_segment_sender_next(
 /// # Safety
 /// `this_` is null or a loaned sender.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_sender_set(
-    this_: *const wz_ext_loaned_segment_sender_t,
+pub unsafe extern "C" fn zext_segment_sender_set(
+    this_: *const zext_loaned_segment_sender_t,
     value: u64,
 ) -> ZResult {
     guarded(|| {
@@ -548,21 +546,21 @@ pub unsafe extern "C" fn wz_ext_segment_sender_set(
 /// # Safety
 /// `this_` is null or an owned sender.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_sender_loan(
-    this_: *const wz_ext_owned_segment_sender_t,
-) -> *const wz_ext_loaned_segment_sender_t {
-    this_.cast::<wz_ext_loaned_segment_sender_t>()
+pub unsafe extern "C" fn zext_segment_sender_loan(
+    this_: *const zext_owned_segment_sender_t,
+) -> *const zext_loaned_segment_sender_t {
+    this_.cast::<zext_loaned_segment_sender_t>()
 }
 
-/// The moved form of a sender, for `wz_ext_segment_sender_drop`: a cast, which nulls nothing.
+/// The moved form of a sender, for `zext_segment_sender_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned sender.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_sender_move(
-    this_: *mut wz_ext_owned_segment_sender_t,
-) -> *mut wz_ext_moved_segment_sender_t {
-    this_.cast::<wz_ext_moved_segment_sender_t>()
+pub unsafe extern "C" fn zext_segment_sender_move(
+    this_: *mut zext_owned_segment_sender_t,
+) -> *mut zext_moved_segment_sender_t {
+    this_.cast::<zext_moved_segment_sender_t>()
 }
 
 /// Release a sender and leave the gravestone. A second drop, and a drop of the gravestone, do
@@ -571,13 +569,13 @@ pub unsafe extern "C" fn wz_ext_segment_sender_move(
 /// # Safety
 /// `this_` is null or a moved sender.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_segment_sender_drop(this_: *mut wz_ext_moved_segment_sender_t) {
+pub unsafe extern "C" fn zext_segment_sender_drop(this_: *mut zext_moved_segment_sender_t) {
     let _ = guarded(|| {
         if this_.is_null() {
             return Z_OK;
         }
         let handle = (*this_)._this.handle;
-        (*this_)._this = wz_ext_owned_segment_sender_t::null_value();
+        (*this_)._this = zext_owned_segment_sender_t::null_value();
         if !handle.is_null() {
             drop(Box::from_raw(handle.cast::<Mutex<SegmentSender>>()));
         }
@@ -590,11 +588,11 @@ pub unsafe extern "C" fn wz_ext_segment_sender_drop(this_: *mut wz_ext_moved_seg
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_segment_sender_null(
-    this_: *mut wz_ext_owned_segment_sender_t,
+pub unsafe extern "C" fn zext_internal_segment_sender_null(
+    this_: *mut zext_owned_segment_sender_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_owned_segment_sender_t::null_value();
+        *this_ = zext_owned_segment_sender_t::null_value();
     }
 }
 
@@ -603,8 +601,8 @@ pub unsafe extern "C" fn wz_ext_internal_segment_sender_null(
 /// # Safety
 /// `this_` is null or an owned sender.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_segment_sender_check(
-    this_: *const wz_ext_owned_segment_sender_t,
+pub unsafe extern "C" fn zext_internal_segment_sender_check(
+    this_: *const zext_owned_segment_sender_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -617,11 +615,11 @@ mod tests {
     /// read. Turned red by a write before the size is read.
     #[test]
     fn a_result_short_of_its_struct_is_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_segment_result_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_segment_result_t, _>(
             |result| {
                 // SAFETY: `result` is a live struct of this build's size; nothing else is named.
                 unsafe {
-                    wz_ext_segment_sender_put(
+                    zext_segment_sender_put(
                         core::ptr::null(),
                         core::ptr::null(),
                         core::ptr::null(),
@@ -635,11 +633,11 @@ mod tests {
             },
             Z_EINVAL,
         );
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_segment_result_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_segment_result_t, _>(
             |result| {
                 // SAFETY: as above.
                 unsafe {
-                    wz_ext_segment_sender_split(
+                    zext_segment_sender_split(
                         core::ptr::null(),
                         core::ptr::null(),
                         0,

@@ -1246,7 +1246,13 @@ pub fn multicast_tx_publication<R>(
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
         crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
     };
-    let size = encoded_size(&body).ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+    // A publication with no body field has its length worked out from its parts, so its writer
+    // runs once, into the frame; one a field rides is counted by a run of the writer.
+    let size = match crate::lent_push::publication_len(mapping_id, suffix, kind, value, meta) {
+        Some(len) => (len > 0).then_some(len),
+        None => encoded_size(&body),
+    }
+    .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
     // The attachment is counted as far as the build writes it.
     #[cfg(all(feature = "transport-stats", feature = "pubsub-attachment"))]
     let attachment = meta.attachment.map_or(0, <[u8]>::len);
@@ -1651,6 +1657,45 @@ pub fn multicast_tx_bytes(item: &MulticastTxItem) -> usize {
         MulticastTxItem::Interest { interest } => {
             wz_codecs::interest::InterestWire::measure(&**interest).len()
         }
+    }
+}
+
+/// How many datagrams a push of `item` can take on a group of `params`, never fewer than it
+/// takes: one for a message that fits one frame, its fragment count for one that does not,
+/// measured over the body the push encodes and the frame budget it cuts by
+/// ([`chain_frames`](crate::frame_encode::chain_frames)). Without `transport-fragmentation` no
+/// message is cut, so every message counts one. What a sender that reserves the room of a whole
+/// chain on a group's lanes before it pushes asks for, as the unicast send asks its link for the
+/// room of every frame of a chain.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_frames(
+    item: &MulticastTxItem,
+    params: &crate::multicast_params::MulticastParams,
+) -> usize {
+    #[cfg(feature = "transport-fragmentation")]
+    {
+        multicast_tx_item_body(item, |encode| {
+            #[cfg(feature = "transport-tx-lend")]
+            let body_len = crate::tx_buf::try_encoded_len(encode);
+            #[cfg(not(feature = "transport-tx-lend"))]
+            let body_len = {
+                let mut buf = Vec::new();
+                let written = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut buf);
+                    encode.write_body(&mut sink)
+                };
+                written.map(|()| buf.len())
+            };
+            // A body the codec cannot write is refused by the push itself; one frame is asked.
+            body_len.map_or(1, |len| {
+                crate::frame_encode::chain_frames(len, params.frame_budget())
+            })
+        })
+    }
+    #[cfg(not(feature = "transport-fragmentation"))]
+    {
+        let _ = (item, params);
+        1
     }
 }
 
@@ -2204,15 +2249,30 @@ impl MulticastBatch {
     /// slot takes a copy of the frame and the batch keeps its storage; otherwise the frame is
     /// handed over: as a copy of exactly the frame when the storage is the batch the window
     /// writes into, which the batch keeps, and as the storage itself when that is the frame.
+    ///
+    /// Inline, so a push outside a window, which finds no frame open, reads the open mark where it
+    /// stands and calls nothing.
+    #[inline]
     pub fn flush<Q: MulticastTxQueue + ?Sized>(
         &mut self,
         priority: Priority,
         params: &crate::multicast_params::MulticastParams,
         queue: &mut Q,
     ) {
-        let Some(open) = self.open.take() else {
-            return;
-        };
+        if let Some(open) = self.open.take() {
+            self.flush_open(open, priority, params, queue);
+        }
+    }
+
+    /// [`Self::flush`] of `open`, the frame taken out of the batch.
+    #[inline(never)]
+    fn flush_open<Q: MulticastTxQueue + ?Sized>(
+        &mut self,
+        open: OpenFrame,
+        priority: Priority,
+        params: &crate::multicast_params::MulticastParams,
+        queue: &mut Q,
+    ) {
         // A compressing group's frame is compressed on its way to the queue, which only the
         // datagram handed over is.
         if !params.compression {
@@ -3003,6 +3063,49 @@ mod push_tests {
             reliable,
             priority: Priority::DEFAULT,
         }
+    }
+
+    /// What a sender that reserves the room of a whole chain on a group asks for: one datagram
+    /// for a message that fits a frame, and for one past the group's batch no fewer datagrams
+    /// than its push puts on the queue or asks room for. Turned red by a count of one for every
+    /// message, which leaves each fragment after the first to ask for room no reservation holds.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_push_is_counted_no_fewer_datagrams_than_it_puts_on_the_queue() {
+        assert_eq!(multicast_tx_frames(&put(true, b"x"), &params(2_048)), 1);
+
+        let narrow = params(64);
+        let item = put(true, &[0x5a; 400]);
+        let counted = multicast_tx_frames(&item, &narrow);
+        let mut queue = Scripted::default();
+        let mut tx_sn = MulticastTxConduits::new(mask_from_res(narrow.seq_num_res));
+        assert_eq!(
+            multicast_tx_push(item, &mut tx_sn, &narrow, &narrow.tx_queue, &mut queue),
+            PushOutcome::Pushed
+        );
+        let pushed = queue.enqueued.len();
+        assert!(
+            pushed >= 2,
+            "400 bytes at a batch of 64 is a chain: {pushed}"
+        );
+        assert!(counted >= pushed, "counted {counted}, pushed {pushed}");
+        assert!(
+            counted >= queue.asks.len(),
+            "counted {counted}, asked {}",
+            queue.asks.len()
+        );
+    }
+
+    /// A build that cuts no chain sends every message as one frame, so one datagram is all a
+    /// reservation of it holds, however long the message.
+    #[cfg(not(feature = "transport-fragmentation"))]
+    #[test]
+    fn without_fragmentation_every_push_is_counted_one_datagram() {
+        assert_eq!(multicast_tx_frames(&put(true, b"x"), &params(2_048)), 1);
+        assert_eq!(
+            multicast_tx_frames(&put(true, &[0x5a; 400]), &params(64)),
+            1
+        );
     }
 
     /// A lane lets messages on while it holds less than its bound, `sizes` batches of the group's
@@ -3942,6 +4045,38 @@ mod lend_tests {
         );
     }
 
+    /// A window with no frame open puts nothing on the queue when it is flushed, and one with a
+    /// frame open puts that frame on it once and holds none after. Turned red by a flush that reads
+    /// the open frame without taking it (`MulticastBatch::flush`), which would put it on twice.
+    #[test]
+    fn a_window_flushes_its_open_frame_once_and_an_empty_one_nothing() {
+        use sce_forge_runtime::codec::SceSink;
+        let budget = 64;
+        let params = params(64, false);
+        let mut queue = Lending::new(1_472, 65_600);
+        let mut window = MulticastBatch::with_budget(budget);
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(
+            (queue.offers, queue.lent.len(), queue.heap.len()),
+            (0, 0, 0),
+            "no frame open, nothing offered"
+        );
+        assert!(window.open_with(true, 3, budget, |buf| {
+            crate::tx_buf::TxSink::new(buf)
+                .write_bytes(&[9u8; 10])
+                .is_ok()
+        }));
+        assert!(!window.is_empty());
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert!(window.is_empty());
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(
+            queue.lent.len() + queue.heap.len(),
+            1,
+            "the frame went on the queue once"
+        );
+    }
+
     /// A window's frame is held to the batch in the window's own storage: a message that would
     /// carry it past the batch is refused before it is written, the storage does not grow, and a
     /// frame handed to a queue that lends nothing is a copy of exactly the frame, the storage
@@ -4460,14 +4595,22 @@ mod group_publications_written_from_parts {
             meta,
             true,
             Priority::DEFAULT,
-            |message| written(message.body),
+            |message| {
+                let bytes = written(message.body);
+                // Worked out from the parts where no body field rides, counted by the writer
+                // where one does: either way the bytes the frame carries.
+                assert_eq!(message.size, bytes.len(), "the size the push is asked with");
+                bytes
+            },
         )
         .expect("written from its parts")
     }
 
     /// A literal key, named `(0, Some(keyexpr))` as the group's publish names it, and an aliased
-    /// one, each a Put and a Del, plain and with metadata, are the owned builders' bytes. Turned
-    /// red by a literal named another way than the owned literal Push names it.
+    /// one, each a Put and a Del, plain and with metadata, are the owned builders' bytes, and the
+    /// size each is pushed with is its length. Turned red by a literal named another way than the
+    /// owned literal Push names it, or by a size worked out from the parts that is not the bytes
+    /// written (`lent_push::publication_len`).
     #[test]
     fn a_group_publication_written_from_its_parts_is_its_builders_bytes() {
         #[cfg_attr(not(feature = "pubsub-qos"), allow(unused_mut))]

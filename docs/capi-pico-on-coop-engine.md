@@ -1143,11 +1143,11 @@ engine's until it is rebuilt as `SlotObserverOf<HeapSinks>` over one `PeerTables
     had `vendor/sce` checked out at an older commit than the recorded pin).
   - A C program reads them through the node's event log, not a new door. The host provider holds
     the typed listener (`TlsDial::listen_counted`) and, in a build with `event-ring`, writes one
-    library event per drop: source `WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED` (0xFF01), level
-    255, two integers: why (`WZ_EXT_EVENT_TLS_DROP_STALLED`, `_NO_ROOM` or `_OTHER`) and the
+    library event per drop: source `ZEXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED` (0xFF01), level
+    255, two integers: why (`ZEXT_EVENT_TLS_DROP_STALLED`, `_NO_ROOM` or `_OTHER`) and the
     channel's own code. `tests/tls_handshake_drop_event.rs` (lane `C1co tls handshake drop
     event`, 2 passed guarded) holds two of the three words through the ABI and reads the event
-    back through `wz_ext_event_read`: a connection that is not TLS is `OTHER` with the channel's
+    back through `zext_event_read`: a connection that is not TLS is `OTHER` with the channel's
     code, and a connection that is made and says nothing is `STALLED` with the code 0 once the
     accept budget (`PICO_ACCEPT_TIMEOUT_MS`, 1000 ms) passes; the pair runs in 1.0 s. With the
     telling switched off the first fails for want of the event, and with the stalled word made

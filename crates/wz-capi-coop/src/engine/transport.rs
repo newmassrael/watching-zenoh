@@ -24,9 +24,9 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     // A build that takes no face beside its dial role's holds that one alone, so its walks over
     // the faces are one face and no place is looked up (`crate::arena::TAKES_FACES`).
     #[cfg(any(feature = "listen", feature = "group"))]
-    type Places = wz_runtime_coop::faces::ManyFaces<Self>;
+    type Places = wz_runtime_coop::faces::ManyFaces<Self, L::Dial>;
     #[cfg(not(any(feature = "listen", feature = "group")))]
-    type Places = wz_runtime_coop::faces::OneFace<Self>;
+    type Places = wz_runtime_coop::faces::OneFace<Self, L::Dial>;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
     type RouterPlace = super::RouterPlace;

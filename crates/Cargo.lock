@@ -4029,6 +4029,7 @@ version = "0.1.0"
 dependencies = [
  "wz-capi-pico",
  "wz-cdylib-build",
+ "wz-msvc-runtime",
 ]
 
 [[package]]
@@ -4345,6 +4346,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "wz-msvc-runtime"
+version = "0.1.0"
+
+[[package]]
 name = "wz-node-time"
 version = "0.1.0"
 dependencies = [
@@ -4528,6 +4533,8 @@ dependencies = [
  "wz-tls-pem",
  "wz-volume-abi",
  "x509-parser",
+ "zenoh-result",
+ "zenoh-shm",
  "zeroize",
 ]
 

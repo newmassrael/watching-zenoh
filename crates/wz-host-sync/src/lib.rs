@@ -251,6 +251,67 @@ impl Default for RawLock {
     }
 }
 
+/// A [`RawLock`] its holder may take again: the lock, the thread that holds it and how deep that
+/// thread is in it. What a process's one critical section is made of ([`process_section`]).
+pub struct ReentrantRawLock {
+    lock: RawLock,
+    /// The thread that holds `lock`, 0 when none does (no thread's number is 0). A thread writes
+    /// its own number here only while it holds `lock` and clears it before letting go, so a thread
+    /// that reads its own number back is the holder, in a nested take.
+    owner: core::sync::atomic::AtomicUsize,
+    /// How deep the holder is. Only the thread that holds `lock` reads or writes it, and the lock
+    /// orders one holder's writes before the next one's reads.
+    depth: core::sync::atomic::AtomicUsize,
+}
+
+impl ReentrantRawLock {
+    /// A lock no thread holds.
+    pub const fn new() -> Self {
+        Self {
+            lock: RawLock::new(),
+            owner: core::sync::atomic::AtomicUsize::new(0),
+            depth: core::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Take the lock, or go one level deeper in it when the calling thread holds it already.
+    #[inline]
+    pub fn enter(&self) {
+        let me = current_thread();
+        if self.owner.load(Ordering::Relaxed) != me {
+            self.lock.lock();
+            self.owner.store(me, Ordering::Relaxed);
+        }
+        self.depth.store(
+            self.depth.load(Ordering::Relaxed).saturating_add(1),
+            Ordering::Relaxed,
+        );
+    }
+
+    /// Leave the level the calling thread entered last; leaving the outermost lets the lock go,
+    /// its owner cleared first.
+    ///
+    /// # Safety
+    /// The calling thread entered the lock ([`Self::enter`]) and has not left that level.
+    #[inline]
+    pub unsafe fn leave(&self) {
+        let depth = self.depth.load(Ordering::Relaxed).saturating_sub(1);
+        self.depth.store(depth, Ordering::Relaxed);
+        if depth == 0 {
+            self.owner.store(0, Ordering::Relaxed);
+            // The caller's contract: this thread took `lock` at its outermost level, which ends
+            // here.
+            self.lock.unlock();
+        }
+    }
+}
+
+impl Default for ReentrantRawLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// [`RawCondvar`]'s word: the low bit says a thread waits; the rest counts notifications.
 const WAITERS: u32 = 1;
 
@@ -488,8 +549,40 @@ impl ThreadRecord {
     }
 }
 
-/// The process's pool of thread records.
-static RECORDS: [ThreadRecord; THREADS] = [const { ThreadRecord::new() }; THREADS];
+/// Bytes from the start of [`ProcessWords`] that lie on one page whatever page size the host has:
+/// its alignment, a divisor of every page size.
+const PROCESS_HEAD_BYTES: usize = 128;
+
+/// The words of the process every thread of a session writes: its critical section, and its pool of
+/// thread records, which a spawn takes from the first. The section lies before the first record, both
+/// inside the head's [`PROCESS_HEAD_BYTES`], so a process that spawns one thread and enters the
+/// section writes one page of the library's zeroed data and not two; laid apart, the linker places
+/// them where it chooses.
+#[repr(C, align(128))]
+struct ProcessWords {
+    section: ReentrantRawLock,
+    records: [ThreadRecord; THREADS],
+}
+
+const _: () = {
+    assert!(core::mem::align_of::<ProcessWords>() == PROCESS_HEAD_BYTES);
+    assert!(
+        core::mem::offset_of!(ProcessWords, records) + core::mem::size_of::<ThreadRecord>()
+            <= PROCESS_HEAD_BYTES,
+        "the section and the first thread record lie in the head"
+    );
+};
+
+/// The process's critical section and its pool of thread records.
+static PROCESS: ProcessWords = ProcessWords {
+    section: ReentrantRawLock::new(),
+    records: [const { ThreadRecord::new() }; THREADS],
+};
+
+/// The process's one critical section, beside the record of the first thread a spawn starts.
+pub fn process_section() -> &'static ReentrantRawLock {
+    &PROCESS.section
+}
 
 /// A record of `pool` no end holds, now held by both, its thread not yet finished; `None` when
 /// every record is held.
@@ -589,7 +682,7 @@ impl Drop for Thread {
 /// the body is moved into the record. A body larger than [`BODY_BYTES`] or aligned past a `u64`
 /// is refused when it is compiled.
 pub fn spawn_fn<F: FnOnce() + Send + 'static>(body: F) -> Option<Thread> {
-    spawn_in(&RECORDS, body)
+    spawn_in(&PROCESS.records, body)
 }
 
 /// [`spawn_fn`] on the records of `pool`. The part that depends on the body's type is the move
@@ -1067,6 +1160,54 @@ mod tests {
         sleep_ms(5);
         assert!(from.elapsed() >= Duration::from_millis(4));
         assert_eq!(from.duration_since(super::Instant::now()), Duration::ZERO);
+    }
+
+    /// The holder of a reentrant lock takes it again without waiting for itself, and another thread
+    /// takes it only once the holder has left every level it entered. Turned red by an `enter` that
+    /// takes the lock again on its holder's thread (it waits for itself), or a `leave` that lets it
+    /// go at a level that is not the outermost.
+    #[test]
+    fn a_reentrant_lock_is_taken_again_by_its_holder_and_let_go_at_its_outermost_level() {
+        static LOCK: ReentrantRawLock = ReentrantRawLock::new();
+        let entered = Arc::new(AtomicBool::new(false));
+        LOCK.enter();
+        LOCK.enter();
+        let other = {
+            let entered = entered.clone();
+            std::thread::spawn(move || {
+                LOCK.enter();
+                entered.store(true, Ordering::SeqCst);
+                // SAFETY: this thread entered the lock just above.
+                unsafe { LOCK.leave() };
+            })
+        };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!entered.load(Ordering::SeqCst), "held at two levels");
+        // SAFETY: this thread entered the lock twice above; this leaves the inner level.
+        unsafe { LOCK.leave() };
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(!entered.load(Ordering::SeqCst), "held at one level");
+        // SAFETY: as above, the outer level.
+        unsafe { LOCK.leave() };
+        other
+            .join()
+            .expect("the other thread enters once the holder has left");
+        assert!(entered.load(Ordering::SeqCst));
+    }
+
+    /// The process's section lies at the head of the process's words, on the page of the first
+    /// thread record, the one a spawn takes first. Turned red by a `ProcessWords` that drops its
+    /// alignment or lays the records before the section.
+    #[test]
+    fn the_process_section_lies_on_the_page_of_the_first_thread_record() {
+        const PAGE: usize = 4096;
+        let section = core::ptr::from_ref(process_section()) as usize;
+        let first = core::ptr::from_ref(&PROCESS.records[0]) as usize;
+        let first_end = first + core::mem::size_of::<ThreadRecord>() - 1;
+        assert_eq!(section, core::ptr::from_ref(&PROCESS) as usize);
+        assert_eq!(section % PROCESS_HEAD_BYTES, 0);
+        assert!(first > section);
+        assert_eq!(section / PAGE, first_end / PAGE);
     }
 
     #[test]

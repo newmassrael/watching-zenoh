@@ -442,20 +442,20 @@ object-pool|files::ext_handles_across_threads::"
     # transport, or fails as its raw socket does where `CAP_NET_RAW` is absent. The target is
     # compiled only with `raweth-transport` on Linux, which no other leg turns on.
     "wz-capi-pico|hook|raweth-transport,object-pool|--test=raweth_door"
-    # The clock a program registers (`wz_ext_clock_source_register` and its two siblings), which
+    # The clock a program registers (`zext_clock_source_register` and its two siblings), which
     # the stamp of `z_timestamp_new` reads: the unit tests of the module, and the target that opens a
     # session over a registered clock (`clock_source_stamps`, which `Cargo.toml` requires the feature
     # for). Off by default, as the pico oracle's build has no such door.
     "wz-capi-pico|hook|clock-source|"
-    # The node's event log written and read from C (`wz_ext_event_emit` and its three siblings):
+    # The node's event log written and read from C (`zext_event_emit` and its three siblings):
     # the unit tests of the module's types and the target that writes, reads, wraps and releases
     # through the doors (`event_log_doors`, which `Cargo.toml` requires the feature for).
     "wz-capi-pico|hook|event-ring|"
-    # The node's supervisor driven from C (`wz_ext_supervision_*`): the target that starts a
+    # The node's supervisor driven from C (`zext_supervision_*`): the target that starts a
     # checkpoint, feeds it, lets a deadline pass and checks that the hook runs once
     # (`supervision_doors`, which `Cargo.toml` requires the feature for).
     "wz-capi-pico|hook|supervision|"
-    # The node's resource snapshot taken and read from C (`wz_ext_snapshot_*`): the target that
+    # The node's resource snapshot taken and read from C (`zext_snapshot_*`): the target that
     # handshakes two sessions, takes a snapshot of the one that listened and reads it back as
     # bytes (`snapshot_doors`, which `Cargo.toml` requires the feature, and the peer mode, for),
     # and the target that asks a peer's admin space for the same snapshot as a document
@@ -465,24 +465,25 @@ object-pool|files::ext_handles_across_threads::"
     # clock's time on an event, a supervision expiry written as an event, the ring's loss count in
     # the snapshot (`observation_links`, which `Cargo.toml` requires all four features for).
     "wz-capi-pico|hook|clock-source,event-ring,supervision,resource-snapshot,peer|--test=observation_links"
-    # The sender of a declared segment profile driven from C (`wz_ext_segment_sender_*`): the file
+    # The sender of a declared segment profile driven from C (`zext_segment_sender_*`): the file
     # that splits to a callback, refuses what it cannot cut, and puts the pieces on a publisher
     # over loopback (`segment_sender_doors`, whose module is behind the feature, and its loopback
-    # half behind `peer` too). The doors have no unit tests of their own, so the file is the
-    # feature's whole population.
+    # half behind `peer` too). The module's unit tests (`segment_sender::tests::`), a result a byte
+    # short of its struct refused untouched, run over the same build.
     "wz-capi-pico|hook|segment-sender,peer,object-pool|--test=segment_sender_doors"
-    # Reception supervision per stream driven from C (`wz_ext_stream_supervisor_*`): the unit
+    "wz-capi-pico|hook|segment-sender,peer,object-pool|segment_sender::tests::"
+    # Reception supervision per stream driven from C (`zext_stream_supervisor_*`): the unit
     # tests of the module and the file that drives the doors on a model clock, its task half with
     # the default `multi-thread` (`stream_supervision_doors`, whose module is behind the feature).
     "wz-capi-pico|hook|e2e-supervision|"
-    # End-to-end protection driven from C (`wz_ext_e2e_sender_*`, `wz_ext_e2e_receiver_*`): the
+    # End-to-end protection driven from C (`zext_e2e_sender_*`, `zext_e2e_receiver_*`): the
     # file that round-trips frames through both doors and refuses what they cannot do
     # (`e2e_doors`, whose module needs both capabilities). With the receiver's sender slots, where
     # the slot tests run; and without them, where the file asserts that sender keying is refused
     # by name. The doors have no unit tests of their own; the mechanism's are `wz-app-frame`'s.
     "wz-capi-pico|hook|e2e-sender,e2e-sender-demux,object-pool|--test=e2e_doors"
     "wz-capi-pico|hook|e2e-sender,e2e-receiver,object-pool|--test=e2e_doors"
-    # The replay cache driven from C (`wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*`):
+    # The replay cache driven from C (`zext_replay_publisher_*`, `zext_replay_subscriber_*`):
     # the unit tests of the two modules and the file that answers a late subscriber's asking over
     # loopback, two publishers appearing at different times (`replay_cache_doors`, whose module is
     # behind the feature). The round, the ring and the admission have model tests of their own in
@@ -502,6 +503,13 @@ object-pool|files::ext_handles_across_threads::"
     # behind `shared-key-ids`). The filter is each module path.
     "wz-capi-pico|hook|app-transport|app_transport::tests::"
     "wz-capi-pico|hook|config-document|config_policy::tests::"
+    # The cooperative engine's dispatch in a build with the program's transport: the host's links
+    # and the program's are one type of links, so the engine is built once
+    # (`session::static_dispatch_tests::`, its transport test behind `app-transport`).
+    "wz-capi-pico|hook|app-transport|session::static_dispatch_tests::"
+    # The matching listeners of the cooperative engine under a session whose document states their
+    # limit (`matching::tests::`, its test of two listeners on one filter behind `config-document`).
+    "wz-capi-pico|hook|config-document|matching::tests::"
     # The process's runtime document with the three machines that read its limits: a document
     # that lowers each limit, and each machine refusing the one past what it was lent.
     "wz-capi-pico|hook|config-document,supervision,e2e-supervision,message-catalog|config_policy::tests::a_runtime_document"
@@ -558,7 +566,10 @@ object-pool|files::ext_handles_across_threads::"
     # size past the build's ceiling refused by name (`batch_size_per_session`, behind `config-document`
     # on top of the default `peer`). Two tests.
     "wz-capi-pico|hook|config-document,object-pool|--test=batch_size_per_session"
-    # A time base the program supplies (`wz_ext_time_base_*`): the doors' refusals and ownership
+    # A matching listener past the table a document lowered, refused with pico's out of memory and
+    # its slot left null (`files::matching_listener_refused::`, its test behind `config-document`).
+    "wz-capi-pico|hook|config-document,object-pool|files::matching_listener_refused::"
+    # A time base the program supplies (`zext_time_base_*`): the doors' refusals and ownership
     # and a listening session that runs on the program's time with its control on the system's
     # (`time_base::`), a silent inbound link held to the accept timeout of the program's time
     # (`files::time_base_accept::`), an open's scouting window of the program's time
@@ -568,6 +579,10 @@ object-pool|files::ext_handles_across_threads::"
     # cooperative one (8), where the session's clock itself and its read's word run too.
     "wz-capi-pico|hook|time-base|time_base"
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,connectivity,time-base|time_base"
+    # The files of the merged target `it` are built only with the pools' door, which the two rows
+    # above leave out: the scouting window of the program's time runs with it, over the build of
+    # the `time_base_accept` row.
+    "wz-capi-pico|hook|time-base,object-pool|files::open_scouts_for_a_locator::"
     # The code a refused open of the cooperative engine answers (`coop_open_refusal_tests`, behind
     # the engine the default build does not name): an arena the memory cannot give is pico's out of
     # memory, a session limit over the build's value an invalid value.
@@ -575,7 +590,7 @@ object-pool|files::ext_handles_across_threads::"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"
-    # The message catalog driven from C (`wz_ext_message_catalog_*`): the file that reads the
+    # The message catalog driven from C (`zext_message_catalog_*`): the file that reads the
     # reader's synthetic catalog, reads each entry back and refuses what the reader refuses
     # (`message_catalog_doors`, whose module is behind the feature). With the e2e doors and
     # supervision, where it holds the sender, receiver and supervision rows a catalog makes to
@@ -585,15 +600,18 @@ object-pool|files::ext_handles_across_threads::"
     "wz-capi-pico|hook|message-catalog,object-pool|--test=message_catalog_doors"
     "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-receiver,e2e-supervision,object-pool|--test=message_catalog_doors"
     "wz-capi-pico|hook|message-catalog,e2e-sender,e2e-sender-demux,object-pool|--test=message_catalog_doors"
-    # A catalog message's payload driven from C (`wz_ext_payload_schema_*`,
-    # `wz_ext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
+    # The module's unit tests (`message_catalog::tests::`): an entry a byte short of its struct
+    # refused untouched.
+    "wz-capi-pico|hook|message-catalog|message_catalog::tests::"
+    # A catalog message's payload driven from C (`zext_payload_schema_*`,
+    # `zext_message_payload_*`): the file that makes a schema and a payload, sets, encodes,
     # decodes and reads back, and refuses each misuse by its own code (`message_payload_doors`,
     # whose module is behind the feature). The payload's own tests are `wz-app-frame`'s, a leg
     # below. Alone the schema is read from a compiled descriptor set; with `proto-text` the file
     # also reads it from text and holds that door's refusals.
     "wz-capi-pico|hook|message-payload,object-pool|--test=message_payload_doors"
     "wz-capi-pico|hook|message-payload,proto-text,object-pool|--test=message_payload_doors"
-    # The object pools (`wz_ext_object_pool_*`): the unit tests of the doors, of the pools' plan and
+    # The object pools (`zext_object_pool_*`): the unit tests of the doors, of the pools' plan and
     # layout, which the tokio engine has only with the doors, and of the place an object is taken
     # from, and the file that reserves, exhausts, reuses and
     # releases the pools through the doors, a process of its own (`object_pool_doors`, which
@@ -627,7 +645,7 @@ object-pool|files::ext_handles_across_threads::"
     # and the writer's and the typed reader's own tests on schemas read from text run.
     "wz-app-frame|hook|message-payload|proto_descriptor_tests::"
     "wz-app-frame|hook|proto-text|"
-    # The keyer driven from C (`wz_ext_instance_keyer_*`): alone, where the file indexes, keeps
+    # The keyer driven from C (`zext_instance_keyer_*`): alone, where the file indexes, keeps
     # the last values and counts the drops; and with both end-to-end doors, the receiver's sender
     # slots and the event log, where it also judges and protects in the stream of an instance,
     # refuses a receiver kept per sender, and reads a report of drops back as an event; with
@@ -635,14 +653,18 @@ object-pool|files::ext_handles_across_threads::"
     "wz-capi-pico|hook|instance-key,object-pool|--test=instance_key_doors"
     "wz-capi-pico|hook|instance-key,proto-text,object-pool|--test=instance_key_doors"
     "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring,object-pool|--test=instance_key_doors"
-    # The declaration watch driven from C (`wz_ext_decl_watch_*`): the unit tests of the module and
+    # The module's unit tests (`instance_key::tests::`), each door refusing a struct a byte short
+    # of its own: the judging one behind `e2e-receiver` and the protecting one behind `e2e-sender`,
+    # so over the build of the row above, whose sender slots select the receiver.
+    "wz-capi-pico|hook|instance-key,e2e-sender,e2e-sender-demux,event-ring,object-pool|instance_key::tests::"
+    # The declaration watch driven from C (`zext_decl_watch_*`): the unit tests of the module and
     # the target that watches a peer's subscriber, queryable and token come and go over loopback
     # (`decl_watch_doors`, compiled with either capability). Both capabilities, where each event
     # names its peer and the sync is told; and the first alone, where the sync never is, which is
     # what the target asserts of a build without `declarations-synced-event`.
     "wz-capi-pico|hook|remote-declaration-watch,declarations-synced-event|"
     "wz-capi-pico|hook|remote-declaration-watch,object-pool|--test=decl_watch_doors"
-    # The most memory a session holds (`wz_ext_session_memory`, `_row`): the unit tests of the rows
+    # The most memory a session holds (`zext_session_memory`, `_row`): the unit tests of the rows
     # this ABI adds and of how a row is handed over (`session_memory::`), and the doors over a
     # listener and a session that dials it (`files::session_memory_door::`), on each engine: the
     # filter names both, and a listener's links are bounded as its engine bounds them. With the
@@ -2899,9 +2921,13 @@ for leg in "${LEGS[@]}"; do
     # not carry it, and the leg reported `-> 8 test(s)` over a file of 9. The
     # test was executed by nothing.
     #
-    # Three spellings carry their coverage by construction and are the only
+    # Four spellings carry their coverage by construction and are the only
     # ones admitted:
     #   * `--test=<target>`  -- the whole integration-test binary;
+    #   * `--test-target=<target>` -- a whole test target by its Cargo name,
+    #     every file of a merged one; admitted only when the package declares
+    #     that target (a `[[test]]` of that name, or `tests/<target>.rs`), so a
+    #     misspelled target is refused here rather than run as nothing;
     #   * a path containing `::` -- a module path, and every test under a
     #     module has it as a prefix by construction;
     #   * a bare name that IS a module of the package, for the same reason
@@ -2909,7 +2935,17 @@ for leg in "${LEGS[@]}"; do
     #     it has `multicast_glue::` in its path).
     # A bare name that is NOT a module is a name prefix, and that is the one
     # this refuses -- by shape, so the next row cannot reintroduce it.
-    if [[ -n "$filter" && "$filter" != --test=* && "$filter" != *"::"* ]]; then
+    if [[ "$filter" == --test-target=* ]]; then
+        leg_target="${filter#--test-target=}"
+        if [[ ! -f "$repo/crates/$pkg/tests/$leg_target.rs" ]] \
+            && ! grep -A4 -F '[[test]]' "$repo/crates/$pkg/Cargo.toml" \
+                | grep -qE "^name *= *\"$leg_target\""; then
+            echo "nondefault-tests: FAIL -- leg '$pkg' filters on '$filter', but" >&2
+            echo "  '$pkg' declares no test target '$leg_target' (no [[test]] of that" >&2
+            echo "  name and no tests/$leg_target.rs): the leg would run nothing." >&2
+            exit 1
+        fi
+    elif [[ -n "$filter" && "$filter" != --test=* && "$filter" != *"::"* ]]; then
         if [[ ! -f "$repo/crates/$pkg/src/$filter.rs" \
               && ! -f "$repo/crates/$pkg/src/$filter/mod.rs" ]]; then
             echo "nondefault-tests: FAIL -- leg '$pkg' filters on '$filter', which is" >&2

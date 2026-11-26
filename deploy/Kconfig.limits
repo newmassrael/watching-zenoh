@@ -248,7 +248,7 @@ config WZ_LIMIT_CALLBACK_THREADS
 	  that marks each such thread, since the library has no thread-local storage.
 	  A thread delivers as a session's read task, or as a program thread whose
 	  call delivers in place. A callback a thread past it would run is not run
-	  and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+	  and is counted (zext_callbacks_refused). The single-threaded arm holds
 	  one entry whatever this says, as one thread calls the library at a time.
 
 config WZ_LIMIT_ENGINE_ROWS
@@ -271,7 +271,7 @@ config WZ_LIMIT_HELD_SAMPLES
 	  The owned samples a program of the pico C ABI holds at once (taken out of
 	  a callback, cloned, or held in a channel): the most slots of the pool of
 	  samples the library reserves at its first open, the count that open's
-	  config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states
+	  config states (ZEXT_CONFIG_LIMITS_KEY) and this value where it states
 	  none, unless the program reserved the pools itself (object-pool). One more
 	  is refused, its source untouched.
 
@@ -282,7 +282,7 @@ config WZ_LIMIT_HELD_REPLIES
 	help
 	  The owned replies and reply errors a program of the pico C ABI holds at
 	  once: the most slots of the pool of replies the library reserves at its
-	  first open, the count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY)
+	  first open, the count that open's config states (ZEXT_CONFIG_LIMITS_KEY)
 	  and this value where it states none, unless the program reserved the pools
 	  itself (object-pool). One more is refused, its source untouched.
 
@@ -294,7 +294,7 @@ config WZ_LIMIT_HELD_QUERIES
 	  The owned queries a program of the pico C ABI holds at once, each keeping
 	  its query's answer open: the most slots of the pool of queries the library
 	  reserves at its first open, the count that open's config states
-	  (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none, unless the
+	  (ZEXT_CONFIG_LIMITS_KEY) and this value where it states none, unless the
 	  program reserved the pools itself (object-pool). One more is refused, its
 	  source untouched.
 
@@ -318,7 +318,7 @@ config WZ_LIMIT_HELD_HELLOS
 	  with as many locators as a scouting window keeps of one Hello: the most slots
 	  of the pool of kept hellos the library reserves at its first kept hello, or
 	  else at its first open, from the count that open's config states
-	  (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none. One more is
+	  (ZEXT_CONFIG_LIMITS_KEY) and this value where it states none. One more is
 	  refused with _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
 
 config WZ_LIMIT_PAYLOAD_SMALL_BLOCK_BYTES
@@ -355,7 +355,7 @@ config WZ_LIMIT_HELD_SMALL_PAYLOAD_BLOCKS
 	  The blocks of PAYLOAD_SMALL_BLOCK_BYTES bytes a program of the pico C ABI
 	  holds payload bytes in at once: the most blocks of the smallest of the three
 	  pools of payload blocks the library reserves at its first open, the count
-	  that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it
+	  that open's config states (ZEXT_CONFIG_LIMITS_KEY) and this value where it
 	  states none. A payload whose bytes no free
 	  block of a pool that holds them takes is refused with
 	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
@@ -368,7 +368,7 @@ config WZ_LIMIT_HELD_MEDIUM_PAYLOAD_BLOCKS
 	  The blocks of PAYLOAD_MEDIUM_BLOCK_BYTES bytes a program of the pico C ABI
 	  holds payload bytes in at once: the most blocks of the middle one of the
 	  three pools of payload blocks the library reserves at its first open, the
-	  count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value
+	  count that open's config states (ZEXT_CONFIG_LIMITS_KEY) and this value
 	  where it states none. A payload whose bytes no free
 	  block of a pool that holds them takes is refused with
 	  _Z_ERR_SYSTEM_OUT_OF_MEMORY and left null.
@@ -381,7 +381,7 @@ config WZ_LIMIT_HELD_LARGE_PAYLOAD_BLOCKS
 	  The blocks a program of the pico C ABI holds its largest payloads in at once:
 	  the most blocks of the largest of the three pools of payload blocks the
 	  library reserves at its first open, the count that open's config states
-	  (WZ_EXT_CONFIG_LIMITS_KEY) and this value where it states none, each block
+	  (ZEXT_CONFIG_LIMITS_KEY) and this value where it states none, each block
 	  holding the largest message a session of the build
 	  delivers (the larger of PICO_FRAG_MAX_BYTES, PICO_UNICAST_BATCH_BYTES and
 	  PICO_MULTICAST_BATCH_BYTES) and a 16-byte head. A payload larger than such a
@@ -396,7 +396,7 @@ config WZ_LIMIT_HELD_ENCODINGS
 	  The encodings with a schema (z_owned_encoding_t) a program of the pico C ABI
 	  holds at once, each schema of up to MAX_ENCODING_SCHEMA_BYTES bytes: the most
 	  slots of the pool of encodings the library reserves at its first open, the
-	  count that open's config states (WZ_EXT_CONFIG_LIMITS_KEY) and this value
+	  count that open's config states (ZEXT_CONFIG_LIMITS_KEY) and this value
 	  where it states none. An encoding
 	  takes one from the constructor, clone or schema setter that gives it a schema
 	  until it is dropped or moved into the call it describes, and a declared
@@ -454,7 +454,7 @@ config WZ_LIMIT_CONFIG_DOCUMENT_DEPTH
 	default 16
 	help
 	  How deep the zenoh JSON5 document a config of the pico C ABI is handed
-	  (wz_ext_config_document) may nest, the outermost object being 1: the reader
+	  (zext_config_document) may nest, the outermost object being 1: the reader
 	  walks the document keeping no tree, and this bounds the values it steps over.
 	  A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
 	  keeps what it held. From 3, which the wz member's policies and limits take.
@@ -513,6 +513,18 @@ config WZ_LIMIT_MAX_SHARED_KEY_IDS
 	  The entries of the key-id dictionary every node of a deployment shares
 	  (shared-key-ids) that one session may be given. A dictionary of more is
 	  refused when it is handed over, and no session holds it.
+
+config WZ_LIMIT_STATS_KEY_SERIES
+	int "STATS_KEY_SERIES"
+	default 8
+	help
+	  The per-key payload series one stats/filters key of a session holds in each
+	  direction: the label sets (space, priority, message kind, shared memory) of
+	  the payloads counted under it. The rows of every key of the list are
+	  reserved when the list is set. A payload of a label set past its key's
+	  rows, or one counted under a key the list does not hold, is counted under
+	  no key and is counted as refused; its other series are counted as ever.
+	  The payload family itself is not bounded by it: it holds every label set.
 
 config WZ_LIMIT_MAX_REMOTE_DECLS
 	int "MAX_REMOTE_DECLS"
