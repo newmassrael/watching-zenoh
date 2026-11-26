@@ -13652,6 +13652,66 @@ fn a_publisher_matching_listener_is_refused_once_every_interest_id_is_spent() {
     drop(control);
 }
 
+/// The matching listeners of a session's publishers and queriers are held to the one
+/// `MAX_MATCHING_LISTENERS` its creator stated: with two held, a third is refused on either
+/// plane before its watch is registered or its Interest emitted, and a listener let go makes room.
+/// Turned red by the publisher or the querier registering without asking
+/// `admits_matching_listener`, or by that answer counting one plane's watches alone.
+#[cfg(all(
+    feature = "session-matching",
+    feature = "declare-subscriber",
+    feature = "declare-queryable"
+))]
+#[test]
+fn a_matching_listener_past_the_sessions_bound_is_refused_on_either_plane() {
+    use wz_session_core::limit_binding::{LimitSpec, Quota};
+    use wz_session_core::limits::{MaxMatchingListeners, SessionLimits};
+
+    let mut limits = SessionLimits::defaults();
+    let stated = limits.select_max_matching_listeners(Quota::at_most(2));
+    if MaxMatchingListeners::DOMAIN.is_singleton() {
+        assert!(stated.is_err(), "a build of one value refuses two");
+        return;
+    }
+    stated.expect("two is inside the domain");
+    let (actions, driver) = recording_actions();
+    let observer = Arc::new(crate::sync::PlainMutex::new(
+        ApplicationLayerObserver::with_limits(&limits),
+    ));
+    let session = TokioSession::new(actions, observer, Arc::new(TokioTime::new()));
+    mark_session_established(&session);
+    let pubr = session.declare_publisher("demo/bound", PublishOptions::put());
+    let querier = session.declare_querier("demo/bound", QueryOptions::default());
+    let first = pubr
+        .declare_matching_listener(|_| {})
+        .expect("the first listener fits");
+    let _second = querier
+        .declare_matching_listener(|_| {})
+        .expect("the second listener fits");
+    let watches = || {
+        session.observer().lock().unwrap().read_app(|app_half| {
+            app_half.remote_subscribers.matching_listener_len()
+                + app_half.remote_queryables.matching_listener_len()
+        })
+    };
+    assert_eq!(watches(), 2);
+    let frames = driver.frame_count();
+    assert_eq!(
+        pubr.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::TableFull)
+    );
+    assert_eq!(
+        querier.declare_matching_listener(|_| {}).err(),
+        Some(MatchingListenerError::TableFull)
+    );
+    assert_eq!(watches(), 2, "no refused watch is registered");
+    assert_eq!(driver.frame_count(), frames, "no Interest is emitted");
+
+    assert!(first.undeclare());
+    pubr.declare_matching_listener(|_| {})
+        .expect("a listener let go makes room");
+}
+
 /// A matching listener's watch holds its publisher's key in place: on a key longer than it holds
 /// the listener is refused before anything is registered or emitted, while the poll of the same
 /// publisher, which keeps no key, still answers.

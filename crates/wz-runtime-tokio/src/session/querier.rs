@@ -837,15 +837,19 @@ impl<R: SessionRuntime, T: TimeSource> Querier<R, T> {
                     });
                 #[cfg(not(feature = "query-queryable"))]
                 let local = false;
+                // Refused at MAX_MATCHING_LISTENERS as the publisher's listener is.
                 obs.with_parts(|app, face| {
-                    app.remote_queryables.declare_matching_listener_seeded(
-                        &*face.remote_queryables,
-                        criterion,
-                        local,
-                        sink,
-                    )
+                    app.admits_matching_listener().then(|| {
+                        app.remote_queryables.declare_matching_listener_seeded(
+                            &*face.remote_queryables,
+                            criterion,
+                            local,
+                            sink,
+                        )
+                    })
                 })
-            });
+            })
+            .ok_or(MatchingListenerError::TableFull)?;
             // R311y771 — the QUERYABLE-plane twin of the emit in
             // `Publisher::declare_matching_listener`; read its comment for
             // the register-first ordering, the rollback, and the recorded
