@@ -138,7 +138,7 @@ impl<'f, S: MsgPutFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOw
 
     #[inline]
     fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
-        ExtEntryOwned::<S>::read(_r)
+        ExtEntryOwned::<S>::read_inline(_r)
     }
 
     fn follows(_e: &ExtEntryOwned<S>) -> bool {
@@ -207,8 +207,18 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    #[inline(always)]
+    /// Its body is [`Self::read_into_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
+    #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: MsgPutFrom<'f> {
+        Self::read_into_inline(cursor, _out);
+    }
+
+    /// [`Self::read_into`] held in place where it is called: the one text of
+    /// this codec's body, which each site on the build's hot path holds and
+    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: MsgPutFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -226,12 +236,12 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
             raw[0]
         };
         if (header & 0x20u8) != 0 {
-            TimestampOwned::<S>::read_into(cursor, _out.timestamp.get_or_insert_with(TimestampOwned::<S>::default));
+            TimestampOwned::<S>::read_into_inline(cursor, _out.timestamp.get_or_insert_with(TimestampOwned::<S>::default));
         } else {
             _out.timestamp = None;
         }
         if (header & 0x40u8) != 0 {
-            EncodingOwned::<S>::read_into(cursor, _out.encoding.get_or_insert_with(EncodingOwned::<S>::default));
+            EncodingOwned::<S>::read_into_inline(cursor, _out.encoding.get_or_insert_with(EncodingOwned::<S>::default));
         } else {
             _out.encoding = None;
         }
@@ -276,7 +286,7 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
             cursor.rewind(_extensions_at);
         }
         let payload_len = if !_has_extensions_18 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64_inline();
             Some(_v)
         } else {
             None
@@ -293,7 +303,7 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
         let payload = cursor.settle(payload.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
         let payload = cursor.hold(payload.map(|_v| _v.store::<S, MsgPutPayloadField>()).transpose());
         let slice_count = if _has_extensions_18 {
-            let _v = cursor.read_vle_u32();
+            let _v = cursor.read_vle_u32_inline();
             Some(_v)
         } else {
             None
@@ -304,7 +314,7 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
                 let mut _full = false;
                 for _ in 0.._n {
                     if cursor.failed() { break; }
-                    let _entry = ZbufSliceOwned::<S>::read(cursor);
+                    let _entry = ZbufSliceOwned::<S>::read_inline(cursor);
                     ::sce_forge_runtime::codec::push_keeping::<_, ::sce_forge_runtime::codec::NoKinds>(_vec, _entry, &mut _full);
                 }
                 if _full {
@@ -330,6 +340,15 @@ impl<S: MsgPutStorage> MsgPutIn<S> {
     pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: MsgPutFrom<'f> {
         let mut _out = Self::default();
         Self::read_into(cursor, &mut _out);
+        _out
+    }
+
+    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    #[inline(always)]
+    pub fn read_inline<'f>(cursor: &mut SceReader<'f>) -> Self where S: MsgPutFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into_inline(cursor, &mut _out);
         _out
     }
 
@@ -697,6 +716,23 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
+/// How a list of `MsgPut` a body on the build's hot path holds reads its
+/// entries when it carries nothing from one entry to the next: each entry read by
+/// its form held in place (docs/adr/0140).
+#[allow(dead_code)]
+pub struct MsgPutInlineWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutInlineWalk {
+    type Entry<'b> = MsgPutView<'b>;
+
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        MsgPutView::read_with_inline(_r, _h)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `MsgPutView` is what a decode of `MsgPut` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `MsgPut` holds it, an embedded body or a variant arm as its
@@ -709,7 +745,7 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutWalk {
 /// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
 /// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub type MsgPutExtensionsWalk = super::ext_entry::ExtEntryWalk;
+pub type MsgPutExtensionsWalk = super::ext_entry::ExtEntryInlineWalk;
 
 impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryView<'b>> for MsgPutExtensionsChain {
     fn follows(_e: &super::ext_entry::ExtEntryView<'b>) -> bool {
@@ -720,11 +756,11 @@ impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryVie
 /// How `slices` reads its entries: the walk of every list of `ZbufSliceView` that
 /// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub type MsgPutSlicesWalk = super::zbuf_slice::ZbufSliceWalk;
+pub type MsgPutSlicesWalk = super::zbuf_slice::ZbufSliceInlineWalk;
 
 /// The group `MsgPutExtensionsHas0x12` as `MsgPutView` holds it.
 #[allow(dead_code)]
-pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, super::ext_entry::ExtEntryWalk, 0>>, Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, super::ext_entry::ExtEntryInlineWalk, 0>>, Bounded<ListView<'a, super::zbuf_slice::ZbufSliceInlineWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -783,6 +819,14 @@ impl<'a> MsgPutView<'a> {
         Self::read_with(cursor, &mut ())
     }
 
+    /// [`Self::read`] held in place where it is called: the read a body on the
+    /// build's hot path calls where a length says how many bytes this view
+    /// occupies (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_inline(cursor: &mut SceReader<'a>) -> Self {
+        Self::read_with_inline(cursor, &mut ())
+    }
+
     /// [`Self::read`], each entry of every chain the frame holds, this view's
     /// and those of every body it reads, shown to `_hook` right after the entry
     /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.
@@ -790,8 +834,18 @@ impl<'a> MsgPutView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    #[inline(always)]
+    /// Its body is [`Self::read_with_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
+    #[inline(never)]
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
+        Self::read_with_inline(cursor, _hook)
+    }
+
+    /// [`Self::read_with`] held in place where it is called: the one text of
+    /// this view's body, which each site on the build's hot path holds and
+    /// [`Self::read_with`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
         // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -811,22 +865,22 @@ impl<'a> MsgPutView<'a> {
         #[allow(clippy::needless_late_init)]
         let timestamp: Option<TimestampView<'a>>;
         if (header & 0x20u8) != 0 {
-            timestamp = Some(TimestampView::read_with(cursor, _hook));
+            timestamp = Some(TimestampView::read_with_inline(cursor, _hook));
         } else {
             timestamp = None;
         }
         #[allow(clippy::needless_late_init)]
         let encoding: Option<EncodingView<'a>>;
         if (header & 0x40u8) != 0 {
-            encoding = Some(EncodingView::read_with(cursor, _hook));
+            encoding = Some(EncodingView::read_with_inline(cursor, _hook));
         } else {
             encoding = None;
         }
         #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryInlineWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, MsgPutExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryInlineWalk, MsgPutExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "msg_put", field: "extensions" },
                 args: [],
             });
@@ -836,7 +890,7 @@ impl<'a> MsgPutView<'a> {
         }
         let _has_extensions_18 = extensions.as_ref().is_some_and(|_c| _c.iter().any(|_e| (u64::from(_e.header) & 127u64) == 18u64));
         let payload_len = if !_has_extensions_18 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64_inline();
             Some(_v)
         } else {
             None
@@ -852,13 +906,13 @@ impl<'a> MsgPutView<'a> {
         };
         let payload = cursor.settle(payload.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
         let slice_count = if _has_extensions_18 {
-            let _v = cursor.read_vle_u32();
+            let _v = cursor.read_vle_u32_inline();
             Some(_v)
         } else {
             None
         };
         #[allow(clippy::needless_late_init)]
-        let slices: Option<Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>>;
+        let slices: Option<Bounded<ListView<'a, super::zbuf_slice::ZbufSliceInlineWalk, 0>, 4294967295>>;
         if let Some(_n) = slice_count {
             let _rest = cursor.rest();
             let mut _count: u32 = 0;
@@ -869,7 +923,7 @@ impl<'a> MsgPutView<'a> {
                 if _count == 4294967295 {
                     cursor.fail(CodecError::TooManyElements);
                 }
-                ZbufSliceView::read_with(cursor, _hook);
+                ZbufSliceView::read_with_inline(cursor, _hook);
                 _count += u32::from(!cursor.failed());
             }
             slices = cursor.settle(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements).map(Some));

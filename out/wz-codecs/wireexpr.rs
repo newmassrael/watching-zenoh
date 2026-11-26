@@ -158,8 +158,18 @@ impl<S: WireexprStorage> WireexprIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    /// Its body is [`Self::read_into_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8, tag: u8) where S: WireexprFrom<'f> {
+        Self::read_into_inline(cursor, _out, n, tag);
+    }
+
+    /// [`Self::read_into`] held in place where it is called: the one text of
+    /// this codec's body, which each site on the build's hot path holds and
+    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8, tag: u8) where S: WireexprFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -184,7 +194,7 @@ impl<S: WireexprStorage> WireexprIn<S> {
                     _out.body = WireexprVariantIn::WireexprNonlocal(WireexprNonlocalOwned::<S>::default());
                 }
                 if let WireexprVariantIn::WireexprNonlocal(_b) = &mut _out.body {
-                    WireexprNonlocalOwned::<S>::read_into(cursor, _b, n);
+                    WireexprNonlocalOwned::<S>::read_into_inline(cursor, _b, n);
                 }
             }
             1u8 => {
@@ -192,7 +202,7 @@ impl<S: WireexprStorage> WireexprIn<S> {
                     _out.body = WireexprVariantIn::WireexprLocal(WireexprLocalOwned::<S>::default());
                 }
                 if let WireexprVariantIn::WireexprLocal(_b) = &mut _out.body {
-                    WireexprLocalOwned::<S>::read_into(cursor, _b, n);
+                    WireexprLocalOwned::<S>::read_into_inline(cursor, _b, n);
                 }
             }
             // Build-time `codec/variant-arm-unreachable` proves the
@@ -209,6 +219,15 @@ impl<S: WireexprStorage> WireexprIn<S> {
     pub fn read<'f>(cursor: &mut SceReader<'f>, n: u8, tag: u8) -> Self where S: WireexprFrom<'f> {
         let mut _out = Self::default();
         Self::read_into(cursor, &mut _out, n, tag);
+        _out
+    }
+
+    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    #[inline(always)]
+    pub fn read_inline<'f>(cursor: &mut SceReader<'f>, n: u8, tag: u8) -> Self where S: WireexprFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into_inline(cursor, &mut _out, n, tag);
         _out
     }
 
@@ -474,6 +493,14 @@ impl<'a> WireexprView<'a> {
         Self::read_with(cursor, n, tag, &mut ())
     }
 
+    /// [`Self::read`] held in place where it is called: the read a body on the
+    /// build's hot path calls where a length says how many bytes this view
+    /// occupies (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_inline(cursor: &mut SceReader<'a>, n: u8, tag: u8) -> Self {
+        Self::read_with_inline(cursor, n, tag, &mut ())
+    }
+
     /// [`Self::read`], each entry of every chain the frame holds, this view's
     /// and those of every body it reads, shown to `_hook` right after the entry
     /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.
@@ -481,8 +508,18 @@ impl<'a> WireexprView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    /// Its body is [`Self::read_with_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, n: u8, tag: u8, _hook: &mut H) -> Self {
+        Self::read_with_inline(cursor, n, tag, _hook)
+    }
+
+    /// [`Self::read_with`] held in place where it is called: the one text of
+    /// this view's body, which each site on the build's hot path holds and
+    /// [`Self::read_with`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, n: u8, tag: u8, _hook: &mut H) -> Self {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -498,8 +535,8 @@ impl<'a> WireexprView<'a> {
         // default arm (when declared) carries the runtime tag value so encode
         // can round-trip it back onto the wire.
         let body = match tag {
-            0u8 => WireexprViewVariant::WireexprNonlocal(WireexprNonlocalView::read_with(cursor, n, _hook)),
-            1u8 => WireexprViewVariant::WireexprLocal(WireexprLocalView::read_with(cursor, n, _hook)),
+            0u8 => WireexprViewVariant::WireexprNonlocal(WireexprNonlocalView::read_with_inline(cursor, n, _hook)),
+            1u8 => WireexprViewVariant::WireexprLocal(WireexprLocalView::read_with_inline(cursor, n, _hook)),
             // Build-time `codec/variant-arm-unreachable` proves the
             // arm set covers the tag domain without a default, so no tag
             // read from its bits reaches here; a tag outside the arms is a

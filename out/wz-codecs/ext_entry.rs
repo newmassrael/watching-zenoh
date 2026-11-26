@@ -207,8 +207,18 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    #[inline(always)]
+    /// Its body is [`Self::read_into_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
+    #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: ExtEntryFrom<'f> {
+        Self::read_into_inline(cursor, _out);
+    }
+
+    /// [`Self::read_into`] held in place where it is called: the one text of
+    /// this codec's body, which each site on the build's hot path holds and
+    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: ExtEntryFrom<'f> {
         // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
         // sit before the variant suffix on the wire).
         let raw = cursor.take_array::<1>();
@@ -228,7 +238,7 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
                     _out.body = ExtEntryVariantIn::CodecZenohExtUnit(ExtUnit::default());
                 }
                 if let ExtEntryVariantIn::CodecZenohExtUnit(_b) = &mut _out.body {
-                    ExtUnit::read_into(cursor, _b);
+                    ExtUnit::read_into_inline(cursor, _b);
                 }
             }
             1u8 => {
@@ -236,7 +246,7 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
                     _out.body = ExtEntryVariantIn::CodecZenohExtZint(ExtZint::default());
                 }
                 if let ExtEntryVariantIn::CodecZenohExtZint(_b) = &mut _out.body {
-                    ExtZint::read_into(cursor, _b);
+                    ExtZint::read_into_inline(cursor, _b);
                 }
             }
             2u8 => {
@@ -244,7 +254,7 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
                     _out.body = ExtEntryVariantIn::CodecZenohExtZbuf(ExtZbufOwned::<S>::default());
                 }
                 if let ExtEntryVariantIn::CodecZenohExtZbuf(_b) = &mut _out.body {
-                    ExtZbufOwned::<S>::read_into(cursor, _b);
+                    ExtZbufOwned::<S>::read_into_inline(cursor, _b);
                 }
             }
             other => {
@@ -257,7 +267,7 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
                     };
                 }
                 if let ExtEntryVariantIn::Default { body: _b, .. } = &mut _out.body {
-                    ExtUnit::read_into(cursor, _b);
+                    ExtUnit::read_into_inline(cursor, _b);
                 }
             }
         }
@@ -270,6 +280,15 @@ impl<S: ExtEntryStorage> ExtEntryIn<S> {
     pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: ExtEntryFrom<'f> {
         let mut _out = Self::default();
         Self::read_into(cursor, &mut _out);
+        _out
+    }
+
+    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    #[inline(always)]
+    pub fn read_inline<'f>(cursor: &mut SceReader<'f>) -> Self where S: ExtEntryFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into_inline(cursor, &mut _out);
         _out
     }
 
@@ -613,6 +632,23 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for ExtEntryWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
+/// How a list of `ExtEntry` a body on the build's hot path holds reads its
+/// entries when it carries nothing from one entry to the next: each entry read by
+/// its form held in place (docs/adr/0140).
+#[allow(dead_code)]
+pub struct ExtEntryInlineWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for ExtEntryInlineWalk {
+    type Entry<'b> = ExtEntryView<'b>;
+
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        ExtEntryView::read_with_inline(_r, _h)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
 // `ExtEntryView` is what a decode of `ExtEntry` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `ExtEntry` holds it, an embedded body or a variant arm as its
@@ -680,6 +716,14 @@ impl<'a> ExtEntryView<'a> {
         Self::read_with(cursor, &mut ())
     }
 
+    /// [`Self::read`] held in place where it is called: the read a body on the
+    /// build's hot path calls where a length says how many bytes this view
+    /// occupies (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_inline(cursor: &mut SceReader<'a>) -> Self {
+        Self::read_with_inline(cursor, &mut ())
+    }
+
     /// [`Self::read`], each entry of every chain the frame holds, this view's
     /// and those of every body it reads, shown to `_hook` right after the entry
     /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.
@@ -687,8 +731,18 @@ impl<'a> ExtEntryView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    #[inline(always)]
+    /// Its body is [`Self::read_with_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
+    #[inline(never)]
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
+        Self::read_with_inline(cursor, _hook)
+    }
+
+    /// [`Self::read_with`] held in place where it is called: the one text of
+    /// this view's body, which each site on the build's hot path holds and
+    /// [`Self::read_with`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
         // Decode fixed prefix (RFC §synth-5-B variant primitive: fields
         // sit before the variant suffix on the wire).
         let raw = cursor.take_array::<1>();
@@ -699,12 +753,12 @@ impl<'a> ExtEntryView<'a> {
         // default arm (when declared) carries the runtime tag value so encode
         // can round-trip it back onto the wire.
         let body = match (header >> 5) & 0x03 {
-            0u8 => ExtEntryViewVariant::CodecZenohExtUnit(ExtUnitView::read_with(cursor, _hook)),
-            1u8 => ExtEntryViewVariant::CodecZenohExtZint(ExtZintView::read_with(cursor, _hook)),
-            2u8 => ExtEntryViewVariant::CodecZenohExtZbuf(ExtZbufView::read_with(cursor, _hook)),
+            0u8 => ExtEntryViewVariant::CodecZenohExtUnit(ExtUnitView::read_with_inline(cursor, _hook)),
+            1u8 => ExtEntryViewVariant::CodecZenohExtZint(ExtZintView::read_with_inline(cursor, _hook)),
+            2u8 => ExtEntryViewVariant::CodecZenohExtZbuf(ExtZbufView::read_with_inline(cursor, _hook)),
             other => ExtEntryViewVariant::Default {
                 tag: ExtEntryUnknownTag(other),
-                body: ExtUnitView::read_with(cursor, _hook),
+                body: ExtUnitView::read_with_inline(cursor, _hook),
             },
         };
         Self {

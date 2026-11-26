@@ -74,8 +74,18 @@ impl ExtUnit {
     /// dispatches to this one reads it through this one function, out of line
     /// where the set reads it from two sites or more so that no site holds a
     /// copy (docs/adr/0136, docs/adr/0137).
-    #[inline(always)]
+    /// Its body is [`Self::read_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
+    #[inline(never)]
     pub fn read(cursor: &mut SceReader<'_>) -> Self {
+        Self::read_inline(cursor)
+    }
+
+    /// [`Self::read`] held in place where it is called: the one text of this
+    /// codec's body, which each site on the build's hot path holds and
+    /// [`Self::read`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_inline(cursor: &mut SceReader<'_>) -> Self {
         // RFC §synth-5-B empty body — nothing to read; the surrounding
         // header byte (and the wire-protocol layer that demuxes it)
         // already proved this codec was selected, so return the
@@ -90,12 +100,27 @@ impl ExtUnit {
         *_out = Self::read(cursor);
     }
 
+    /// [`Self::read_inline`] into a destination the caller owns, so a codec that
+    /// embeds or dispatches to this one reads it where it will live.
+    #[inline(always)]
+    pub fn read_into_inline(cursor: &mut SceReader<'_>, _out: &mut Self) {
+        *_out = Self::read_inline(cursor);
+    }
+
     /// [`Self::read`], under the name every view reads with a chain hook
     /// (docs/adr/0130): `ExtUnit` is its own view and holds no chain,
     /// so `_hook` is shown nothing.
     #[inline(always)]
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'_>, _hook: &mut H) -> Self {
         Self::read(cursor)
+    }
+
+    /// [`Self::read_inline`], under the name every view reads with a chain hook
+    /// (docs/adr/0130): `ExtUnit` is its own view and holds no chain,
+    /// so `_hook` is shown nothing.
+    #[inline(always)]
+    pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'_>, _hook: &mut H) -> Self {
+        Self::read_inline(cursor)
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -246,6 +271,23 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for ExtUnitWalk {
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
         ExtUnitView::read_with(_r, _h)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+/// How a list of `ExtUnit` a body on the build's hot path holds reads its
+/// entries when it carries nothing from one entry to the next: each entry read by
+/// its form held in place (docs/adr/0140).
+#[allow(dead_code)]
+pub struct ExtUnitInlineWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for ExtUnitInlineWalk {
+    type Entry<'b> = ExtUnitView;
+
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        ExtUnitView::read_with_inline(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }

@@ -131,8 +131,18 @@ impl<S: EncodingStorage> EncodingIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    #[inline(always)]
+    /// Its body is [`Self::read_into_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
+    #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: EncodingFrom<'f> {
+        Self::read_into_inline(cursor, _out);
+    }
+
+    /// [`Self::read_into`] held in place where it is called: the one text of
+    /// this codec's body, which each site on the build's hot path holds and
+    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: EncodingFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
@@ -145,9 +155,9 @@ impl<S: EncodingStorage> EncodingIn<S> {
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let packed_id = cursor.read_vle_u32();
+        let packed_id = cursor.read_vle_u32_inline();
         let schema_len = if (packed_id & 0x00000001u32) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64_inline();
             Some(_v)
         } else {
             None
@@ -177,12 +187,29 @@ impl<S: EncodingStorage> EncodingIn<S> {
         _out
     }
 
+    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    #[inline(always)]
+    pub fn read_inline<'f>(cursor: &mut SceReader<'f>) -> Self where S: EncodingFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into_inline(cursor, &mut _out);
+        _out
+    }
+
     /// [`Self::read`], under the name every view reads with a chain hook
     /// (docs/adr/0130): `Encoding` is its own view and holds no chain,
     /// so `_hook` is shown nothing.
     #[inline(always)]
     pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: EncodingFrom<'f> {
         Self::read(cursor)
+    }
+
+    /// [`Self::read_inline`], under the name every view reads with a chain hook
+    /// (docs/adr/0130): `Encoding` is its own view and holds no chain,
+    /// so `_hook` is shown nothing.
+    #[inline(always)]
+    pub fn read_with_inline<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: EncodingFrom<'f> {
+        Self::read_inline(cursor)
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -379,6 +406,23 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for EncodingWalk {
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
         EncodingView::read_with(_r, _h)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+}
+
+/// How a list of `Encoding` a body on the build's hot path holds reads its
+/// entries when it carries nothing from one entry to the next: each entry read by
+/// its form held in place (docs/adr/0140).
+#[allow(dead_code)]
+pub struct EncodingInlineWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<0> for EncodingInlineWalk {
+    type Entry<'b> = EncodingView<'b>;
+
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        EncodingView::read_with_inline(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }

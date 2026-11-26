@@ -131,8 +131,17 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    #[inline(never)]
+    /// Its body is [`Self::read_into_inline`], which a body on the
+    /// build's hot path reads held in place (docs/adr/0140).
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8) where S: WireexprNonlocalFrom<'f> {
+        Self::read_into_inline(cursor, _out, n);
+    }
+
+    /// [`Self::read_into`] held in place where it is called: the one text of
+    /// this codec's body, which each site on the build's hot path holds and
+    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    #[inline(always)]
+    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8) where S: WireexprNonlocalFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an
         // input via `present-if` compile cleanly. The validator enforces
@@ -150,9 +159,9 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let id = cursor.read_vle_u16();
+        let id = cursor.read_vle_u16_inline();
         let suffix_len = if (n & 0x01u8) != 0 {
-            let _v = cursor.read_vle_u64();
+            let _v = cursor.read_vle_u64_inline();
             Some(_v)
         } else {
             None
@@ -183,12 +192,29 @@ impl<S: WireexprNonlocalStorage> WireexprNonlocalIn<S> {
         _out
     }
 
+    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    #[inline(always)]
+    pub fn read_inline<'f>(cursor: &mut SceReader<'f>, n: u8) -> Self where S: WireexprNonlocalFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into_inline(cursor, &mut _out, n);
+        _out
+    }
+
     /// [`Self::read`], under the name every view reads with a chain hook
     /// (docs/adr/0130): `WireexprNonlocal` is its own view and holds no chain,
     /// so `_hook` is shown nothing.
     #[inline(always)]
     pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, n: u8, _hook: &mut H) -> Self where S: WireexprNonlocalFrom<'f> {
         Self::read(cursor, n)
+    }
+
+    /// [`Self::read_inline`], under the name every view reads with a chain hook
+    /// (docs/adr/0130): `WireexprNonlocal` is its own view and holds no chain,
+    /// so `_hook` is shown nothing.
+    #[inline(always)]
+    pub fn read_with_inline<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, n: u8, _hook: &mut H) -> Self where S: WireexprNonlocalFrom<'f> {
+        Self::read_inline(cursor, n)
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -373,6 +399,23 @@ impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprNonlocalWalk {
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 1], _h: &mut H) -> Self::Entry<'b> {
         WireexprNonlocalView::read_with(_r, _a[0], _h)
+    }
+
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
+}
+
+/// How a list of `WireexprNonlocal` a body on the build's hot path holds reads its
+/// entries when it carries nothing from one entry to the next: each entry read by
+/// its form held in place (docs/adr/0140).
+#[allow(dead_code)]
+pub struct WireexprNonlocalInlineWalk;
+
+impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprNonlocalInlineWalk {
+    type Entry<'b> = WireexprNonlocalView<'b>;
+
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 1], _h: &mut H) -> Self::Entry<'b> {
+        WireexprNonlocalView::read_with_inline(_r, _a[0], _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
