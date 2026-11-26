@@ -47,7 +47,7 @@ use wz_codecs::push::{PushExtensionsField, PushIn, PushVariantIn};
 use wz_codecs::zbuf_slice::ZbufSliceOwned;
 
 use super::PushExts;
-use crate::ext_admit::{ExtAdmission, ExtCarrier, JudgedEntry, NetworkEnvelope, ZenohBody};
+use crate::ext_admit::{ExtAdmission, ExtCarrier, NetworkEnvelope, ZenohBody};
 
 /// The Push's `N` flag: a key suffix follows the id.
 const FLAG_N: u8 = 0x20;
@@ -210,9 +210,10 @@ impl<'f> PushExts<'f> {
 
 /// The admission rule over a chain read one entry at a time: what
 /// [`judge_ext_entries`](crate::ext_admit::judge_ext_entries) answers for the whole chain, its
-/// first offender, without a second walk of the chain to find it. Each entry goes to the rule's
-/// one body (`crate::ext_admit::judge_entry`), so the reader links no copy of the rule of its
-/// own. The carriers it judges are always named, so a chain read through is admissible.
+/// first offender, without a second walk of the chain to find it. Each entry goes through the
+/// rule's inline screen and, when the screen cannot pass it, the rule's one body
+/// (`crate::ext_admit::judge_one`), so the reader links no copy of the rule of its own. The
+/// carriers it judges are always named, so a chain read through is admissible.
 struct Judge {
     carrier: ExtCarrier,
     verdict: ExtAdmission,
@@ -228,22 +229,20 @@ impl Judge {
 
     /// The next entry: its header, and the body of an extension the carrier declares.
     fn entry(&mut self, entry: &ExtEntryView<'_>) {
-        self.judge(JudgedEntry::of(entry));
+        if self.verdict == ExtAdmission::Admissible {
+            self.verdict = crate::ext_admit::judge_one(self.carrier, entry)
+                .unwrap_or(ExtAdmission::Admissible);
+        }
     }
 
     /// The shared-memory marker a Put holds as a place: a unit, judged by its header alone.
     fn marker(&mut self) {
-        self.judge(JudgedEntry::header(
-            MsgPutExtensionsHas0x12Key::named().header,
-        ));
-    }
-
-    /// The verdict on `entry` unless an earlier entry was already refused: the first offender is
-    /// the one reported.
-    fn judge(&mut self, entry: JudgedEntry<'_>) {
         if self.verdict == ExtAdmission::Admissible {
-            self.verdict = crate::ext_admit::judge_entry(self.carrier, entry)
-                .unwrap_or(ExtAdmission::Admissible);
+            self.verdict = crate::ext_admit::judge_one_header(
+                self.carrier,
+                MsgPutExtensionsHas0x12Key::named().header,
+            )
+            .unwrap_or(ExtAdmission::Admissible);
         }
     }
 }
