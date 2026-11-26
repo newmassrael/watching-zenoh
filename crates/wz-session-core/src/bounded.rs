@@ -225,6 +225,12 @@ pub trait Storage: 'static {
     /// for it.
     type Epoch: EpochCounter;
 
+    /// What a form only the growable policy makes holds beside its own fields (a plain map of a
+    /// peer's keys, our own table of declarations standing in a sender's half): nothing on the
+    /// growable policy, and on a bounded one a type of no value, so the arm that reads such a form
+    /// ends where it starts ([`HeapOnly::granted`]) and is not compiled into the policy's reads.
+    type HeapForm: HeapOnly;
+
     /// Where the peer's side of a table of this policy composes a key it cannot lend while it
     /// delivers one of the peer's messages (a mapping's literal with the message's suffix after
     /// it, or a literal of the session's own space): the delivering call's own buffer on the
@@ -233,6 +239,27 @@ pub trait Storage: 'static {
     /// memory after it.
     #[cfg(feature = "storage-profile")]
     type Compose: crate::wireexpr_resolve::ComposeRoom;
+}
+
+/// A policy's [`Storage::HeapForm`]: the unit on the growable policy, and a type of no value on a
+/// bounded one.
+pub trait HeapOnly: Copy + Send + Sync + 'static {
+    /// Called first by an arm that reads a form only the growable policy makes: nothing there,
+    /// and on a bounded policy never reached, its value being one that cannot be made, so the
+    /// compiler drops the arm.
+    fn granted(self);
+}
+
+impl HeapOnly for () {
+    #[inline(always)]
+    fn granted(self) {}
+}
+
+impl HeapOnly for core::convert::Infallible {
+    #[inline(always)]
+    fn granted(self) {
+        match self {}
+    }
 }
 
 /// A type whose value of all zero bytes is valid and is its empty state: a table of no rows, a count
@@ -648,6 +675,7 @@ impl Storage for Heap {
     type Epoch = alloc::sync::Arc<core::sync::atomic::AtomicU64>;
     #[cfg(not(target_has_atomic = "64"))]
     type Epoch = ();
+    type HeapForm = ();
     #[cfg(feature = "storage-profile")]
     type Compose = ();
 }
@@ -670,6 +698,7 @@ impl Storage for Static {
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
     type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
+    type HeapForm = core::convert::Infallible;
     #[cfg(feature = "storage-profile")]
     type Compose = ();
 }
@@ -716,6 +745,7 @@ impl Storage for Lent {
     #[cfg(not(feature = "peer-row-pools"))]
     type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
+    type HeapForm = core::convert::Infallible;
     #[cfg(feature = "storage-profile")]
     type Compose = crate::wireexpr_resolve::ComposeRow;
 }
@@ -748,6 +778,7 @@ impl Storage for Region {
     type Ids<V, const N: usize> = crate::id_map::FixedIdMap<V, N>;
     type Pooled<T, const N: usize> = BoundedVec<T, N, Static>;
     type Epoch = ();
+    type HeapForm = core::convert::Infallible;
     #[cfg(feature = "storage-profile")]
     type Compose = crate::wireexpr_resolve::ComposeInline;
 }
@@ -2708,6 +2739,27 @@ impl<const N: usize, P: Storage> fmt::Write for BoundedString<N, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A form only the growable policy makes holds nothing more there, and on every bounded policy
+    /// a value of a type that has none, so the arms that read such a form are dropped from the
+    /// bounded policies' reads. Turned red by a bounded policy whose `HeapForm` has a value.
+    #[test]
+    fn only_the_growable_policy_has_a_value_of_its_heap_forms() {
+        use core::any::TypeId;
+        use core::convert::Infallible;
+        for bounded in [
+            TypeId::of::<<Static as Storage>::HeapForm>(),
+            TypeId::of::<<Lent as Storage>::HeapForm>(),
+            TypeId::of::<<Region as Storage>::HeapForm>(),
+        ] {
+            assert_eq!(bounded, TypeId::of::<Infallible>());
+        }
+        #[cfg(feature = "alloc")]
+        assert_eq!(
+            TypeId::of::<<Heap as Storage>::HeapForm>(),
+            TypeId::of::<()>()
+        );
+    }
 
     #[test]
     fn push_within_capacity_succeeds_on_both_backings() {
