@@ -67,11 +67,6 @@ use super::registry::Planes;
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
-/// The entries a quiet read keeps to wait on (`CoopEngine::read_quiet`): the face's link, each
-/// port and the clock's wake. A session with more ports than this has its faces read whole.
-#[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
-const QUIET_WAITS: usize = 8;
-
 /// The pump of the session's one link, which the read steps itself.
 type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink, LinkCount>>;
 
@@ -1824,10 +1819,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         let mut until_us = face.quiet_until_us.load(Ordering::Relaxed);
         let run = self.reader_run.load(Ordering::Acquire);
-        let mut kept = [LinkWait::input(WaitOn::Socket(0)); QUIET_WAITS];
         // The face's row is read off its slot, taken before the session's lock as a read takes
         // them, and what the run waits on is gathered once under that lock.
-        let (count, mut now_us) = {
+        let (mut kept, mut now_us) = {
             let Some(held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
                 return;
             };
@@ -1851,16 +1845,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             #[cfg(not(feature = "time-base"))]
             let beside = None;
-            let Some(count) = core
-                .transport
-                .links
-                .lone_waits(held.0.at(), beside, &mut kept)
-            else {
+            let Some(kept) = core.transport.links.lone_waits(held.0.at(), beside) else {
                 return;
             };
-            (count, core.now_us())
+            (kept, core.now_us())
         };
-        let waits = &mut kept[..count];
+        let waits: &mut [LinkWait] = &mut kept;
         let Some(own) = waits.first().map(|wait| wait.on) else {
             return;
         };
@@ -2291,7 +2281,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let moves_link = input != LinkInput::Tick || now_us >= slot.life_due_us;
         let mut ended = None;
         let mut replays = false;
-        #[cfg(all(test, feature = "std"))]
+        // Whether this look brought the link up, which owes its peer the replay's first turn.
+        #[cfg(any(
+            all(test, feature = "std"),
+            all(feature = "threads", any(feature = "listen", feature = "group"))
+        ))]
         let mut brought_up = false;
         if moves_link || chains_due || core.ledger.owes(now_us, core.seen()) {
             #[cfg(test)]
@@ -2312,7 +2306,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 // replay the turn that may be due.
                 Ok(()) => {
                     replays = slot.brought_up || ReplayPacing::REACHABLE;
-                    #[cfg(all(test, feature = "std"))]
+                    #[cfg(any(
+                        all(test, feature = "std"),
+                        all(feature = "threads", any(feature = "listen", feature = "group"))
+                    ))]
                     {
                         brought_up = slot.brought_up;
                     }
@@ -2370,7 +2367,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core,
             slot,
             now_us,
-            ended.is_none() && !replays && jobs_due_ms.is_none(),
+            ended.is_none() && !brought_up && jobs_due_ms.is_none(),
         ));
         Some(LinkTurn {
             #[cfg(feature = "liveliness")]
@@ -2389,13 +2386,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// When a quiet read of `face` ends, judged at its look under the session's lock `core`, its
     /// read slot held as `slot`, the look's reading of the clock `now_us`, and `settled` when
-    /// the look owes the face nothing more (no end, no replay's turn, no job due): `None` where
-    /// the face is not quiet. A quiet face's link is up and established, with no dial, no opened
-    /// link and no change of its send place owed; it holds no input, owes no write, waits for no
-    /// buffer and gives a wait of its own; every other face rests, no group is joined, no port is
-    /// to be asked, no chain is staged in its Router, and the bookkeeping owes nothing. The read
-    /// then ends by the earliest of the face's own due, the bookkeeping's, the next job and the
-    /// session's wait bound, which keeps every latency a read has.
+    /// the look owes the face nothing more (no end, no bring-up, no job due): `None` where the
+    /// face is not quiet. A quiet face's link is up and established, with no dial, no opened link
+    /// and no change of its send place owed; it holds no input, owes no write, waits for no buffer
+    /// and gives a wait of its own; every other face rests, no group is joined, no port is to be
+    /// asked, no chain is staged in its Router, and the bookkeeping owes nothing, a replay's next
+    /// turn among it. The read then ends by the earliest of the bookkeeping's due, the next job and
+    /// the session's wait bound, which keeps every latency a read has. The face's own due is not
+    /// read here: the step after this look moves the pump's, and the read takes it from the slot
+    /// once that step is made (`Self::read_quiet`).
     #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     fn quiet_until(
         &self,
@@ -2425,7 +2424,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let quiet = settled
             && lone_link
             && slot.opened.is_none()
-            && !slot.brought_up
             && !face.end.over()
             && slot.router.due_ms() == u64::MAX
             && slot
@@ -2448,7 +2446,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .tickers
             .next_due_ms()
             .map_or(bound_us, |due_ms| bound_us.min(due_ms.saturating_mul(1000)));
-        Some(bound_us.min(slot.due_us()).min(core.ledger.next_due_us()))
+        Some(bound_us.min(core.ledger.next_due_us()))
     }
 
     /// Step the pump with nothing of the session held: its own bookkeeping when it is due or owes

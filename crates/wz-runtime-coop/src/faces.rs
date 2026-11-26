@@ -22,9 +22,7 @@ use alloc::vec::Vec;
 use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
 
-#[cfg(feature = "session-unicast-accept")]
-use wz_session_core::bounded::Static;
-use wz_session_core::bounded::{push_text, BoundedVec, Lent};
+use wz_session_core::bounded::{push_text, BoundedVec, Lent, Static};
 use wz_session_core::caps;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::driver_loop::DriverOutcome;
@@ -1699,6 +1697,14 @@ impl IdleWait {
 #[cfg(feature = "session-unicast-accept")]
 pub type OwingWaits = BoundedVec<LinkWait, OWING_WAITS, Static>;
 
+/// What a read of one face alone waits on ([`LinkSupervisor::lone_waits`]), in the reading
+/// thread's own frame for the whole run of such reads: the face's link, each port and a wake of
+/// the stack's. A session with more ports than its room leaves has its faces read whole.
+pub type LoneWaits = BoundedVec<LinkWait, LONE_WAITS, Static>;
+
+/// The room of [`LoneWaits`].
+const LONE_WAITS: usize = 8;
+
 /// The room of [`OwingWaits`]: the fewer of the build's outbound slots and its faces.
 #[cfg(feature = "session-unicast-accept")]
 const OWING_WAITS: usize = {
@@ -2636,31 +2642,21 @@ impl<
         waits
     }
 
-    /// What a read of the face at place `at` alone waits on, written to the front of `into`: its
-    /// link's input first, then a connection on each port, then `beside` (a wake of the
-    /// stack's); how many entries. Made once for a run of such reads and kept for its whole length,
-    /// none of it written anew a wait. `None` where a wait on these alone would miss what a wait
-    /// over the whole session finds ([`Self::idle_wait`]): the face's link is not
-    /// [`WireLook::Quiet`] or waits in its own loop, a port gives no wait or the link's own (a
-    /// datagram port its faces share), or `into` has no room for every entry.
-    pub fn lone_waits(
-        &self,
-        at: usize,
-        beside: Option<LinkWait>,
-        into: &mut [LinkWait],
-    ) -> Option<usize> {
+    /// What a read of the face at place `at` alone waits on: its link's input first, then a
+    /// connection on each port, then `beside` (a wake of the stack's). Made once for a run of
+    /// such reads and kept for its whole length, none of it written anew a wait. `None` where a
+    /// wait on these alone would miss what a wait over the whole session finds
+    /// ([`Self::idle_wait`]): the face's link is not [`WireLook::Quiet`] or waits in its own
+    /// loop, a port gives no wait or the link's own (a datagram port its faces share), or the
+    /// entries are more than [`LoneWaits`] holds.
+    pub fn lone_waits(&self, at: usize, beside: Option<LinkWait>) -> Option<LoneWaits> {
         let wire = self.faces.get(at)?.link().wire()?;
         if wire.look() != WireLook::Quiet {
             return None;
         }
         let own = wire.input_wait()?;
-        let mut count = 0;
-        let mut put = |wait: LinkWait| -> Option<()> {
-            *into.get_mut(count)? = wait;
-            count += 1;
-            Some(())
-        };
-        put(LinkWait::input(own))?;
+        let mut waits = LoneWaits::new_static();
+        waits.push(LinkWait::input(own)).ok()?;
         #[cfg(feature = "listen")]
         for listening in &self.listeners {
             let on = listening
@@ -2670,12 +2666,12 @@ impl<
             if on == own {
                 return None;
             }
-            put(LinkWait::input(on))?;
+            waits.push(LinkWait::input(on)).ok()?;
         }
         if let Some(wake) = beside {
-            put(wake)?;
+            waits.push(wake).ok()?;
         }
-        Some(count)
+        Some(waits)
     }
 
     /// What a read waits for, for at most `most` milliseconds: the input of every link that

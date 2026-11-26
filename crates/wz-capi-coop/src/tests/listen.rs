@@ -889,8 +889,10 @@ fn a_quiet_read_turns_its_face_once_a_deadline_not_once_a_batch() {
 
 /// A connection that arrives while the listener reads its one face quietly ends that read at
 /// once: the port is in what the quiet read waits on, so the connection is taken long before the
-/// read's own deadline. CONTROL: the first face was found quiet. Turned red by a quiet read that
-/// waits on its face's link alone (`LinkSupervisor::lone_waits` leaving the port out).
+/// read's own deadline. The first client's lease is long, so the listener's keep-alive to it is
+/// due past that deadline too, and the puts it makes are what the listener reads. CONTROL: the
+/// first face was found quiet. Turned red by a quiet read that waits on its face's link alone
+/// (`LinkSupervisor::lone_waits` leaving the port out).
 #[cfg(not(wz_round))]
 #[test]
 fn a_connection_arriving_during_a_quiet_read_is_taken_at_once() {
@@ -899,8 +901,34 @@ fn a_connection_arriving_during_a_quiet_read_is_taken_at_once() {
         config.idle_wait_ms = 10_000;
         config.lease_ms = 60_000;
     });
-    let first = client(&endpoint, 0xc1);
+    let heard = Arc::new(AtomicUsize::new(0));
+    let count = heard.clone();
+    listener
+        .declare_subscriber_on_wire("demo/quiet/**", WireKey::literal(), Locality::Any, None, {
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the listener declares the subscriber");
+    let first = Stepped::new(open_with(CoopConfig {
+        endpoints: vec![endpoint.clone()],
+        zid: config_zid(0xc1),
+        lease_ms: 60_000,
+        ..client_config()
+    }));
     eventually("the first client's face", || listener.faces_up() == 1);
+    eventually("a put heard once the client knows the subscriber", || {
+        first
+            .publish_on_wire_all(
+                "demo/quiet/x",
+                &WireKey::literal(),
+                b"q",
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+        std::thread::sleep(Duration::from_millis(10));
+        heard.load(Ordering::SeqCst) > 0
+    });
     eventually("CONTROL: the face found quiet", || {
         listener.quiet_faces() == 1
     });
@@ -943,6 +971,49 @@ fn the_read_tasks_stop_ends_a_quiet_read_within_one_wait_bound() {
         "the stop waited past one wait bound: {took:?}"
     );
     drop(peer);
+}
+
+/// A face's own deadlines are served by its look and its step, not by the session's bookkeeping:
+/// a listener whose one client holds it to a short lease sends that client a keep-alive at each
+/// third of the lease, and runs its bookkeeping at none of them. CONTROL: the bookkeeping ran as
+/// the client's face came up, and the client's link is still up after several of its leases.
+/// Turned red by a ledger due by a face's own deadline (`Core::settle_ledger`), which the look
+/// reads before its step moves it, so that every keep-alive's look runs the bookkeeping.
+#[cfg(not(wz_round))]
+#[test]
+fn a_faces_keep_alive_runs_no_bookkeeping() {
+    let (listener, endpoint) = listening(|config| {
+        config.idle_wait_ms = 10_000;
+        config.lease_ms = 60_000;
+    });
+    let before_up = listener.services();
+    let peer = Stepped::new(open_with(CoopConfig {
+        endpoints: vec![endpoint.clone()],
+        zid: config_zid(0xc1),
+        lease_ms: 900,
+        ..client_config()
+    }));
+    eventually("the client's face", || {
+        listener.faces_up() == 1 && peer.faces_up() == 1
+    });
+    assert!(
+        listener.services() > before_up,
+        "CONTROL: the bookkeeping ran as the face came up"
+    );
+    // Whatever the bring-up left owed is served by the looks right after it.
+    std::thread::sleep(Duration::from_millis(500));
+    let before = listener.services();
+    std::thread::sleep(Duration::from_millis(2_700));
+    assert_eq!(
+        (listener.faces_up(), peer.faces_up()),
+        (1, 1),
+        "CONTROL: the client's lease of the listener ran out"
+    );
+    assert_eq!(
+        listener.services() - before,
+        0,
+        "the bookkeeping ran at a face's keep-alive"
+    );
 }
 
 /// A quiet read leaves at its pump's keep-alive, however long the session's wait bound: a listener
