@@ -538,7 +538,7 @@ impl<'a> ScoutingHelloView<'a> {
         let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, ScoutingHelloExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryColdScanWalk, ScoutingHelloExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "scouting_hello", field: "extensions" },
                 args: [],
             });

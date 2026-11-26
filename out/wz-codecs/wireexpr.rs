@@ -493,14 +493,6 @@ impl<'a> WireexprView<'a> {
         Self::read_with(cursor, n, tag, &mut ())
     }
 
-    /// [`Self::read`] held in place where it is called: the read a body on the
-    /// build's hot path calls where a length says how many bytes this view
-    /// occupies (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_inline(cursor: &mut SceReader<'a>, n: u8, tag: u8) -> Self {
-        Self::read_with_inline(cursor, n, tag, &mut ())
-    }
-
     /// [`Self::read`], each entry of every chain the frame holds, this view's
     /// and those of every body it reads, shown to `_hook` right after the entry
     /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.

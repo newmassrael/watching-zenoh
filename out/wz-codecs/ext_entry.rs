@@ -626,24 +626,24 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for ExtEntryWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        ExtEntryView::read_with(_r, _h)
+        ExtEntryView::read_with_inline(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How a list of `ExtEntry` a body on the build's hot path holds reads its
-/// entries when it carries nothing from one entry to the next: each entry read by
-/// its form held in place (docs/adr/0140).
+/// How the scan of a chain of `ExtEntry` in a body off the build's hot path
+/// reads its entries: each by its entry point, where the walk of its lists reads each
+/// by its form held in place (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub struct ExtEntryInlineWalk;
+pub(super) struct ExtEntryColdScanWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for ExtEntryInlineWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for ExtEntryColdScanWalk {
     type Entry<'b> = ExtEntryView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        ExtEntryView::read_with_inline(_r, _h)
+        ExtEntryView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
@@ -714,14 +714,6 @@ impl<'a> ExtEntryView<'a> {
     /// first of them is the frame's verdict.
     pub fn read(cursor: &mut SceReader<'a>) -> Self {
         Self::read_with(cursor, &mut ())
-    }
-
-    /// [`Self::read`] held in place where it is called: the read a body on the
-    /// build's hot path calls where a length says how many bytes this view
-    /// occupies (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_inline(cursor: &mut SceReader<'a>) -> Self {
-        Self::read_with_inline(cursor, &mut ())
     }
 
     /// [`Self::read`], each entry of every chain the frame holds, this view's

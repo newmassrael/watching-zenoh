@@ -666,24 +666,24 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for PushWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        PushView::read_with(_r, _h)
+        PushView::read_with_inline(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How a list of `Push` a body on the build's hot path holds reads its
-/// entries when it carries nothing from one entry to the next: each entry read by
-/// its form held in place (docs/adr/0140).
+/// How the scan of a chain of `Push` in a body off the build's hot path
+/// reads its entries: each by its entry point, where the walk of its lists reads each
+/// by its form held in place (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub struct PushInlineWalk;
+pub(super) struct PushColdScanWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for PushInlineWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for PushColdScanWalk {
     type Entry<'b> = PushView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        PushView::read_with_inline(_r, _h)
+        PushView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
@@ -718,7 +718,7 @@ impl<'a> Default for PushViewVariant<'a> {
 /// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
 /// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub type PushExtensionsWalk = super::ext_entry::ExtEntryInlineWalk;
+pub type PushExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryView<'b>> for PushExtensionsChain {
     fn follows(_e: &super::ext_entry::ExtEntryView<'b>) -> bool {
@@ -731,7 +731,7 @@ impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryVie
 pub struct PushView<'a> {
     pub header: u8,
     pub keyexpr: WireexprView<'a>,
-    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryInlineWalk, 0>, { usize::MAX }, 1>>,
+    pub extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>,
     pub body: PushViewVariant<'a>,
 }
 
@@ -779,14 +779,6 @@ impl<'a> PushView<'a> {
         Self::read_with(cursor, &mut ())
     }
 
-    /// [`Self::read`] held in place where it is called: the read a body on the
-    /// build's hot path calls where a length says how many bytes this view
-    /// occupies (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_inline(cursor: &mut SceReader<'a>) -> Self {
-        Self::read_with_inline(cursor, &mut ())
-    }
-
     /// [`Self::read`], each entry of every chain the frame holds, this view's
     /// and those of every body it reads, shown to `_hook` right after the entry
     /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.
@@ -820,10 +812,10 @@ impl<'a> PushView<'a> {
         let keyexpr: WireexprView<'a>;
         keyexpr = WireexprView::read_with_inline(cursor, (header >> 5) & 0x1, (header >> 6) & 0x1, _hook);
         #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryInlineWalk, 0>, { usize::MAX }, 1>>;
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryInlineWalk, PushExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, PushExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "push", field: "extensions" },
                 args: [],
             });

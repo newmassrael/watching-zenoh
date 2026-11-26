@@ -710,24 +710,24 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        MsgPutView::read_with(_r, _h)
+        MsgPutView::read_with_inline(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How a list of `MsgPut` a body on the build's hot path holds reads its
-/// entries when it carries nothing from one entry to the next: each entry read by
-/// its form held in place (docs/adr/0140).
+/// How the scan of a chain of `MsgPut` in a body off the build's hot path
+/// reads its entries: each by its entry point, where the walk of its lists reads each
+/// by its form held in place (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub struct MsgPutInlineWalk;
+pub(super) struct MsgPutColdScanWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutInlineWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutColdScanWalk {
     type Entry<'b> = MsgPutView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        MsgPutView::read_with_inline(_r, _h)
+        MsgPutView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
@@ -745,7 +745,7 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for MsgPutInlineWalk {
 /// How `extensions` reads its entries: the walk of every list of `ExtEntryView` that
 /// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub type MsgPutExtensionsWalk = super::ext_entry::ExtEntryInlineWalk;
+pub type MsgPutExtensionsWalk = super::ext_entry::ExtEntryWalk;
 
 impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryView<'b>> for MsgPutExtensionsChain {
     fn follows(_e: &super::ext_entry::ExtEntryView<'b>) -> bool {
@@ -756,11 +756,11 @@ impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryVie
 /// How `slices` reads its entries: the walk of every list of `ZbufSliceView` that
 /// carries nothing from one entry to the next.
 #[allow(dead_code)]
-pub type MsgPutSlicesWalk = super::zbuf_slice::ZbufSliceInlineWalk;
+pub type MsgPutSlicesWalk = super::zbuf_slice::ZbufSliceWalk;
 
 /// The group `MsgPutExtensionsHas0x12` as `MsgPutView` holds it.
 #[allow(dead_code)]
-pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, super::ext_entry::ExtEntryInlineWalk, 0>>, Bounded<ListView<'a, super::zbuf_slice::ZbufSliceInlineWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
+pub type MsgPutExtensionsHas0x12View<'a> = MsgPutExtensionsHas0x12<::sce_forge_runtime::codec::Without<ListView<'a, super::ext_entry::ExtEntryWalk, 0>>, Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>, ::sce_forge_runtime::codec::Bytes<'a, 4294967295>>;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -819,14 +819,6 @@ impl<'a> MsgPutView<'a> {
         Self::read_with(cursor, &mut ())
     }
 
-    /// [`Self::read`] held in place where it is called: the read a body on the
-    /// build's hot path calls where a length says how many bytes this view
-    /// occupies (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_inline(cursor: &mut SceReader<'a>) -> Self {
-        Self::read_with_inline(cursor, &mut ())
-    }
-
     /// [`Self::read`], each entry of every chain the frame holds, this view's
     /// and those of every body it reads, shown to `_hook` right after the entry
     /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.
@@ -877,10 +869,10 @@ impl<'a> MsgPutView<'a> {
             encoding = None;
         }
         #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryInlineWalk, 0>, { usize::MAX }, 1>>;
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryInlineWalk, MsgPutExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, MsgPutExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "msg_put", field: "extensions" },
                 args: [],
             });
@@ -912,7 +904,7 @@ impl<'a> MsgPutView<'a> {
             None
         };
         #[allow(clippy::needless_late_init)]
-        let slices: Option<Bounded<ListView<'a, super::zbuf_slice::ZbufSliceInlineWalk, 0>, 4294967295>>;
+        let slices: Option<Bounded<ListView<'a, super::zbuf_slice::ZbufSliceWalk, 0>, 4294967295>>;
         if let Some(_n) = slice_count {
             let _rest = cursor.rest();
             let mut _count: u32 = 0;
