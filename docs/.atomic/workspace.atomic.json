@@ -8078,6 +8078,11 @@
       "status": "deprecated",
       "reason": "CLOSED R311y857: the gate reports ZERO open rows. Do not quote a count from here -- run `python3 scripts/lib/analysis_surface_parity.py` (Layer C0), which stays and is the reason this can be closed rather than re-opened by the next capability. Closed in order: the four census planes (R311y851), the selector and its diagnostic (R311y854), the FIELD LAYER over a capture with both halves (R311y855), PAYLOAD FORMAT DECODING and the declared field names that ride it (R311y856, ABI 6 -- which needed the decoder, the declaration dialect and the decode core to move out of `wz-analyze` and beside the map first, because the cdylib must not link `ring` to walk varints), and the loss/health counters (R311y857). ONE CORRECTION belongs on the record: this row's own reason for the last item was OVERSTATED. It said the command line \"has no flag for these (capture drops, retransmits, sequence gaps, checksums, framing desyncs)\"; measured by RUNNING wz-analyze, the report's `capture` object had carried every one of those unconditionally. What that surface genuinely could not reach was exactly two things -- the fragment CHAIN statistics, and the checksums that VERIFIED or were ABSENT, so a reader saw a failure count with no denominator. The registry reason had outlived the code, which is the debt-47 shape, and it was found by running the binary rather than reading the row. Every surviving one-sided row now carries a stated DECISION and no \"not done yet\"; the gate's third arm refuses a reason that argues otherwise without leading with the tag."
     },
+    "debt-ap-large-sample-latency-behind-upstream": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, CAUSE NOT READ: a 4,000,000-byte sample takes the AP presets 5 to 10 times as long as upstream. `bash scripts/pico-compare.sh fanin 5 1 4000000 20 10 block PP,WW,PW,WP` on pc2 at aa7dbe41 (2026-11-26; 5 rounds of 10 s, one publisher at 20 Hz, TCP loopback; a pair is the subscriber's arm, then the publishers'): one-way latency p50 PP 1,123 us, WW 11,110 us, PW 5,992 us, WP 6,065 us; put p99 PP 1,930 us, WW 10,160 us, PW 9,553 us, WP 2,201 us; every sample delivered on every pair. Both ends contribute about 5 ms: a wz publisher's put is about 5x upstream's (PW), and a wz subscriber adds about 5 ms behind an upstream publisher (WP). Round 4618 first saw it in one 3 s round. debt-ap-presets-behind-upstream does not hold it: the D13 matrix reads latency TIE and has no large-sample row. Suspects to profile, none verified: the fragment TX path, and the heap chain growth on reassembly (HeapStaging grows a chain as fragments arrive). Closes when WW reads at or under PP's latency and put figures on this lane, or a profile names a cause that cannot move and the owner accepts it."
+    },
     "debt-ap-presets-behind-upstream": {
       "status": "active",
       "source": "open-debt register",
@@ -8542,6 +8547,11 @@
       "source": "open-debt register",
       "reason": "OPEN: debug stack frames of the face loop and the dial, measured on the --all-features lib test binary of wz-runtime-tokio (objdump prologues, 2026-11-22): accept_loop FaceLoopIo::new 84,168 bytes (the loop's state and shell built by value in one frame), session_open dial_locator_on 80,824 bytes (every scheme's arm in one poll frame), and the test a_node_dial_that_opens_restarts_the_nodes_wait_for_its_next_outage 151,944 bytes. Round 4609's carry. Closed when each is cut by structure (constructors in frames of their own, each dial arm its own boxed future) and the release text of the C1cs cases is read on one machine against the base."
     },
+    "debt-fanin-lane-legs-unmeasured": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: the fan-in lane (Round 4617; scripts/pico-compare.sh fanin, scripts/host-bench/fanin.py) measures one host over TCP loopback and nothing else. Not measured, each looked for on 2026-11-26: (1) two hosts: fanin.py runs every side on this host (its header says so); pc2 and pc4 share a 1 GbE segment, where three 4 MB x 50 Hz streams oversubscribe the link, so block and drop would be read under real queueing; (2) time to first message, open to first delivery: no script under scripts/ or conformance/ measures it; (3) the split of latency into kernel and user segments: no kprobe or LTTng probe under scripts/, conformance/ or deploy/; (4) the lane's figures are no rows of scripts/host-bench/ap_matrix.py or deploy/ap_superiority.json (neither names fanin), so the D13 ratchet holds none of them. Closes when the four are measured and the figures are rows of the AP matrix."
+    },
     "debt-field-values-window": {
       "status": "deprecated",
       "source": "carry of Round 4385",
@@ -8623,6 +8633,11 @@
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN 2026-11-21 (owner: wz smaller than zenoh-pico, ratchet + debt loop, docs/upstream-parity.md D9). The pico C ABI host libraries read 2.49 (cooperative client) to 7.7 (peer, default) times the text of zenoh-pico built as the same build in the same run (Layer C1cs, deploy/pico_host_ceiling.json). Each case is a ratchet row that may only move toward pico; paid largest ratio first, one case or one cause per round, the row tightened by the round's reading. Closed when every row of deploy/pico_host_ceiling.json is locked at WIN."
+    },
+    "debt-prepush-round-fed-gates-red-on-main": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, CAUSE OF THE LANDINGS NOT READ: two members of .githooks/pre-push gate 2z (round_fed_gates) fail on origin/main, and items keep landing past them. Round 4618's preflight (2026-11-23) saw feature_gate_diagnostic fail on wz-session-core limits-lent-at-open and rx-lent-only, and silent_skip_gate on wz-capi-coop tests; other tracks repaid those, and new failures took their place. At aa7dbe41 (2026-11-26): `python3 scripts/lib/feature_gate_diagnostic.py --check` fails 'wz-app-frame appears in NO_PUBLIC_PATH or AXIS but not both' (rows at feature_gate_diagnostic.py:130, 174 and 932; beb47e871 of 2026-11-25 last moved them); `python3 scripts/lib/silent_skip_gate.py --check` fails five wz-capi-pico tests that return early when a helper yields None while the helper says nothing: config_limits.rs:261 (subscriptions_bound, added by 4bf945da2), config_policy.rs:1029 and 1821, device_requires.rs:340 and scout.rs:1376 (refused_by_the_resolution). Gate 2z counts a failure as a refusal (_prepush_refuse); why the queue integrator's run of the hook did not refuse those items is not read. Closes when both pass on origin/main and that reason is read and fixed."
     },
     "debt-reliable-gap-reconnect-without-a-door": {
       "status": "deprecated",
