@@ -45,6 +45,7 @@ use wz_runtime_tokio::zenoh_config::{
     UNHONOURED_UPSTREAM_CONFIG_KEYS, UPSTREAM_INERT_CONFIG_KEYS, WZ_EXTENSION_CONFIG_KEYS,
 };
 #[cfg(feature = "routing-namespace")]
+use wz_session_core::ext_member;
 use wz_session_core::keyexpr_prefix::OwnedNonWildKeyExpr;
 use wz_session_core::limits::{RuntimeLimits, SessionLimits};
 use wz_session_core::process_limits::ProcessStatement;
@@ -255,14 +256,15 @@ pub fn session_defaults_of(node: &ZenohNodeConfig) -> Result<SessionDefaults, Op
             },
         },
         aggregation,
-        // The key ids the document's `wz/key-ids` states, read with its policies.
+        // The key ids the document's `zext/key-ids` states, read with its policies.
         #[cfg(feature = "shared-key-ids")]
         key_ids: node.key_ids.clone(),
         // A document states no time base: one is the program's object, which only a door that
         // takes it from the program hands an open.
         #[cfg(feature = "time-base")]
         time_base: None,
-        // The node's own address the document's `wz/owned-address` states, read with its policies.
+        // The node's own address the document's `zext/owned-address` states, read with its
+        // policies.
         owned_address: node.owned_address,
     })
 }
@@ -393,26 +395,26 @@ pub enum OpenRefusal {
     /// The document lists `stats/filters` in a build without `transport-stats`, which keeps no
     /// counter to count a payload under a filter in.
     StatsNotInBuild,
-    /// The document's `wz` member is refused
+    /// The document's `zext` member is refused
     /// ([`ConfigIngestError::PoliciesRefused`], whose text names each refusal): a policy, a value,
     /// a profile or a limit the build does not have, a value its domain leaves out, a limit only
-    /// the build decides, a member of `wz` it does not read. Reported before every refusal that
+    /// the build decides, a member of `zext` it does not read. Reported before every refusal that
     /// reads the rest of the document, as the reader refuses the whole document: a session is
     /// never opened on part of the policies or the limits it was given, nor on the build defaults
     /// in their place.
     Policies,
     /// The endpoints to dial are more than the node's runtime limits admit (`MAX_STATIC_CONNECT`
-    /// as `wz/limits` states it, [`ConfigIngestError::ConnectPastLimit`]). A node bounded to
+    /// as `zext/limits` states it, [`ConfigIngestError::ConnectPastLimit`]). A node bounded to
     /// fewer peers does not open on a part of the list.
     ConnectPastLimit,
-    /// `wz/limits` states a limit of the process's machines (`SUPERVISION_CHECKPOINTS`,
+    /// `zext/limits` states a limit of the process's machines (`SUPERVISION_CHECKPOINTS`,
     /// `MESSAGE_CATALOG_ENTRIES`, `E2E_SUPERVISED_STREAMS`) over the build's value, which a stage
     /// after the build may only lower.
     ProcessLimitOverBuild {
         /// The limit's id.
         limit: &'static str,
     },
-    /// `wz/limits` states a limit of the process's machines other than the one a machine of the
+    /// `zext/limits` states a limit of the process's machines other than the one a machine of the
     /// process was made under ([`OpenPlan::admit_process_limits`]). The process has one runtime,
     /// so a session that opened on another would state two.
     ProcessLimitsTaken,
@@ -443,18 +445,32 @@ impl OpenRefusal {
             Self::PluginHostNotInBuild => "plugins_loading/enabled",
             Self::Aggregation => "aggregation/subscribers, aggregation/publishers",
             Self::StatsNotInBuild => "stats/filters",
-            Self::Policies => "wz/profile, wz/policies, wz/limits",
-            Self::ConnectPastLimit => "connect/endpoints, wz/limits/MAX_STATIC_CONNECT",
-            Self::ProcessLimitOverBuild { limit } => match limit.as_bytes() {
-                b"SUPERVISION_CHECKPOINTS" => "wz/limits/SUPERVISION_CHECKPOINTS",
-                b"MESSAGE_CATALOG_ENTRIES" => "wz/limits/MESSAGE_CATALOG_ENTRIES",
-                b"E2E_SUPERVISED_STREAMS" => "wz/limits/E2E_SUPERVISED_STREAMS",
-                _ => "wz/limits",
-            },
-            Self::ProcessLimitsTaken => {
-                "wz/limits/SUPERVISION_CHECKPOINTS, wz/limits/MESSAGE_CATALOG_ENTRIES, \
-                 wz/limits/E2E_SUPERVISED_STREAMS"
+            Self::Policies => concat!(
+                ext_member!("profile"),
+                ", ",
+                ext_member!("policies"),
+                ", ",
+                ext_member!("limits")
+            ),
+            Self::ConnectPastLimit => {
+                concat!(
+                    "connect/endpoints, ",
+                    ext_member!("limits/MAX_STATIC_CONNECT")
+                )
             }
+            Self::ProcessLimitOverBuild { limit } => match limit.as_bytes() {
+                b"SUPERVISION_CHECKPOINTS" => ext_member!("limits/SUPERVISION_CHECKPOINTS"),
+                b"MESSAGE_CATALOG_ENTRIES" => ext_member!("limits/MESSAGE_CATALOG_ENTRIES"),
+                b"E2E_SUPERVISED_STREAMS" => ext_member!("limits/E2E_SUPERVISED_STREAMS"),
+                _ => ext_member!("limits"),
+            },
+            Self::ProcessLimitsTaken => concat!(
+                ext_member!("limits/SUPERVISION_CHECKPOINTS"),
+                ", ",
+                ext_member!("limits/MESSAGE_CATALOG_ENTRIES"),
+                ", ",
+                ext_member!("limits/E2E_SUPERVISED_STREAMS")
+            ),
         }
     }
 }
@@ -992,7 +1008,7 @@ pub struct OpenPlan {
     /// handed to the machines of the node the open runs: the directory of the locators it dials
     /// from reads its bound here and never from the build.
     pub runtime_limits: RuntimeLimits,
-    /// What the document's `wz/limits` states of the machines the process holds apart from any
+    /// What the document's `zext/limits` states of the machines the process holds apart from any
     /// session, already lent under the build's values; the open holds the process to it
     /// ([`Self::admit_process_limits`]).
     pub process_limits: ProcessStatement,
@@ -1000,7 +1016,7 @@ pub struct OpenPlan {
 
 /// The policies and the limits an open from `node` (the document the open read, or `None` when
 /// it read none) runs under: the one place the open of an [`OpenPlan`] decides them. The
-/// snapshots the document's `wz` member resolved to when the reader read it
+/// snapshots the document's `zext` member resolved to when the reader read it
 /// ([`ZenohNodeConfig::policies`]), which are the build defaults for a document with no such
 /// member; the build defaults when no document was read. A member the reader refused never
 /// reaches here: the open is refused with [`OpenRefusal::Policies`].
@@ -1910,12 +1926,13 @@ mod tests {
             .id()
     }
 
-    /// The plan runs under the snapshot the document's `wz` member resolved to, and a document
+    /// The plan runs under the snapshot the document's `zext` member resolved to, and a document
     /// without the member, or no document, under the build defaults.
     #[test]
     fn the_plan_runs_under_the_policies_the_document_states() {
         let value = a_chosen_overload();
-        let stated = format!(r#"{{ wz: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#);
+        let stated =
+            format!(r#"{{ zext: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#);
         let plan = plan_of(WhatAmI::Client, &["tcp/127.0.0.1:7447"], &[], &stated)
             .expect("a client told its router opens");
         assert_eq!(plan.session_policy.subscriber_overload().id(), value);
@@ -1929,7 +1946,7 @@ mod tests {
         assert_eq!(resolve_policy(None), SessionPolicy::defaults());
     }
 
-    /// A refused `wz` member refuses the open, before every refusal that reads the rest of the
+    /// A refused `zext` member refuses the open, before every refusal that reads the rest of the
     /// document: a client with nothing to dial is told of the member, not of its endpoints.
     #[test]
     fn a_refused_wz_member_refuses_the_open_first() {
@@ -1938,7 +1955,7 @@ mod tests {
                 WhatAmI::Client,
                 &["tcp/127.0.0.1:7447"],
                 &[],
-                r#"{ wz: { policies: { "key-set": "ajar" } } }"#
+                r#"{ zext: { policies: { "key-set": "ajar" } } }"#
             ),
             OpenRefusal::Policies
         );
@@ -1952,19 +1969,19 @@ mod tests {
                 WhatAmI::Client,
                 &[],
                 &[],
-                r#"{ scouting: { multicast: { enabled: false } }, wz: { limits: { NO_SUCH_LIMIT: 1 } } }"#
+                r#"{ scouting: { multicast: { enabled: false } }, zext: { limits: { NO_SUCH_LIMIT: 1 } } }"#
             ),
             OpenRefusal::Policies
         );
         assert_eq!(
             OpenRefusal::Policies.key(),
-            "wz/profile, wz/policies, wz/limits"
+            "zext/profile, zext/policies, zext/limits"
         );
     }
 
-    /// The plan holds the session limits the document's `wz/limits` states, for each member of
+    /// The plan holds the session limits the document's `zext/limits` states, for each member of
     /// the corpus every door is held to, as a node reads it; a member the reader refuses refuses
-    /// the open as a refused `wz` member.
+    /// the open as a refused `zext` member.
     #[test]
     fn the_plan_holds_the_session_limits_the_document_states() {
         use wz_session_core::limit_corpus::cases;
@@ -2003,7 +2020,7 @@ mod tests {
         );
     }
 
-    /// The plan holds the runtime limits the document's `wz/limits` states for the node, for
+    /// The plan holds the runtime limits the document's `zext/limits` states for the node, for
     /// each member of the corpus the plan takes, and the build's with no document.
     #[test]
     fn the_plan_holds_the_runtime_limits_the_document_states() {
@@ -2048,7 +2065,7 @@ mod tests {
         use wz_session_core::limits::MessageCatalogEntries;
 
         let document = |value: usize| {
-            format!("{{ wz: {{ limits: {{ MESSAGE_CATALOG_ENTRIES: {value} }} }} }}")
+            format!("{{ zext: {{ limits: {{ MESSAGE_CATALOG_ENTRIES: {value} }} }} }}")
         };
         let plan = |value: usize| {
             plan_of(
@@ -2064,7 +2081,7 @@ mod tests {
                 assert_eq!(limit, "MESSAGE_CATALOG_ENTRIES");
                 assert_eq!(
                     OpenRefusal::ProcessLimitOverBuild { limit }.key(),
-                    "wz/limits/MESSAGE_CATALOG_ENTRIES"
+                    "zext/limits/MESSAGE_CATALOG_ENTRIES"
                 );
             }
             Err(OpenRefusal::Policies) => {}
@@ -2147,7 +2164,7 @@ mod tests {
     fn max_static_connect_stated_as_two_refuses_three_by_name() {
         use wz_session_core::limit_binding::LimitSpec;
         use wz_session_core::limits::MaxStaticConnect;
-        let limits = r#"wz: { limits: { MAX_STATIC_CONNECT: 2 } }"#;
+        let limits = r#"zext: { limits: { MAX_STATIC_CONNECT: 2 } }"#;
         let stated = format!("{{ {limits} }}");
         let three = endpoints_to_dial(3);
         let texts: Vec<&str> = three.iter().map(String::as_str).collect();
@@ -3568,7 +3585,7 @@ mod tests {
         }
     }
 
-    /// The node's own address a document's `wz/owned-address` states reaches the session the
+    /// The node's own address a document's `zext/owned-address` states reaches the session the
     /// plan opens, through what the session applies above its links, and a document that states
     /// none hands none; a malformed one refuses the open as a refused policy does.
     #[test]
@@ -3578,7 +3595,7 @@ mod tests {
             &["tcp/127.0.0.1:1"],
             &[],
             r#"{ scouting: { multicast: { enabled: false } },
-                 wz: { "owned-address": "127.0.0.1" } }"#,
+                 zext: { "owned-address": "127.0.0.1" } }"#,
         )
         .expect("opens");
         assert_eq!(plan.session.owned_address, Some([127, 0, 0, 1]));
@@ -3596,14 +3613,14 @@ mod tests {
                 &["tcp/127.0.0.1:1"],
                 &[],
                 r#"{ scouting: { multicast: { enabled: false } },
-                     wz: { "owned-address": "127.0.0.1.1" } }"#,
+                     zext: { "owned-address": "127.0.0.1.1" } }"#,
             ),
             OpenRefusal::Policies,
             "a refused member refuses the open as a refused policy does"
         );
     }
 
-    /// The key ids a document's `wz/key-ids` states reach the session the plan opens, the same
+    /// The key ids a document's `zext/key-ids` states reach the session the plan opens, the same
     /// value the reader read, through what the session applies above its links.
     #[cfg(feature = "shared-key-ids")]
     #[test]
@@ -3616,7 +3633,7 @@ mod tests {
             &["tcp/127.0.0.1:1"],
             &[],
             r#"{ scouting: { multicast: { enabled: false } },
-                 wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ],
+                 zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ],
                                     links: [ { locator: "tcp/127.0.0.1:1", form: "literal" } ] } } }"#,
         )
         .expect("opens");
@@ -3635,7 +3652,7 @@ mod tests {
                 &["tcp/127.0.0.1:1"],
                 &[],
                 r#"{ scouting: { multicast: { enabled: false } },
-                     wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#,
+                     zext: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#,
             ),
             OpenRefusal::Policies,
             "a refused member refuses the open as a refused policy does"
@@ -3668,12 +3685,12 @@ mod tests {
         };
         let declared = arguments(
             r#"{ scouting: { multicast: { enabled: false } },
-                 wz: { policies: { "key-wire-form": "declared" } } }"#,
+                 zext: { policies: { "key-wire-form": "declared" } } }"#,
         );
         assert_eq!(declared.router_refusal(), None, "CONTROL: upstream's form");
         let literal = arguments(
             r#"{ scouting: { multicast: { enabled: false } },
-                 wz: { policies: { "key-wire-form": "literal" } } }"#,
+                 zext: { policies: { "key-wire-form": "literal" } } }"#,
         );
         assert_eq!(
             literal.router_refusal(),
@@ -3683,11 +3700,11 @@ mod tests {
         {
             let handed = arguments(
                 r#"{ scouting: { multicast: { enabled: false } },
-                     wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
+                     zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
             );
             assert_eq!(
                 handed.router_refusal(),
-                Some("the key ids every node shares (`wz/key-ids`)")
+                Some("the key ids every node shares (`zext/key-ids`)")
             );
         }
     }

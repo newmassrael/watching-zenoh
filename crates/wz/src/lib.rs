@@ -270,8 +270,8 @@ pub use wz_runtime_core as runtime_core;
 pub mod ext {
     /// The open's own layer of policies and what an open resolved, through the Rust API.
     ///
-    /// A configuration states the policies an open runs under in its `wz` member (`wz/profile`,
-    /// `wz/policies`), as the zenoh-c and zenoh-pico ABIs read the same document. Over it,
+    /// A configuration states the policies an open runs under in its `zext` member (`zext/profile`,
+    /// `zext/policies`), as the zenoh-c and zenoh-pico ABIs read the same document. Over it,
     /// `Config::state_policy` and `Config::state_profile` state the open's own layer
     /// ([`Origin::Api`](crate::ext::policies::Origin::Api)), and `Session::resolved_policies`
     /// answers the snapshot the open resolved with the layer each value came from

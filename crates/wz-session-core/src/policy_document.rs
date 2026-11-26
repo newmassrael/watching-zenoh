@@ -12,8 +12,8 @@
 //! 1. the snapshot it starts from, the build defaults ([`Origin::BuildDefault`]);
 //! 2. a named profile, a set of policy values the declaration states (`[[profile]]` of
 //!    `deploy/wz-config.toml`, generated into `PROFILES`), which the document names by
-//!    `wz/profile` ([`Origin::Profile`]);
-//! 3. the document's own `wz/policies` members ([`Origin::Document`]);
+//!    `zext/profile` ([`Origin::Profile`]);
+//! 3. the document's own `zext/policies` members ([`Origin::Document`]);
 //! 4. what the open's caller states beside the document ([`Origin::Api`]).
 //!
 //! [`resolve`] takes the layers as a slice, so a caller states the ones it has.
@@ -21,7 +21,7 @@
 //! # Limits
 //!
 //! The same resolution composes the limits a stage after the build may decide
-//! ([`crate::limits`]): the document's `wz/limits` states a limit by its id, as an integer or
+//! ([`crate::limits`]): the document's `zext/limits` states a limit by its id, as an integer or
 //! `unbounded`, and what the open's caller states beside the document ([`Overrides::limits`]) is
 //! the layer over it. No profile states a limit. A limit is selected into the snapshot that holds
 //! it, [`SessionLimits`] or [`RuntimeLimits`], through its field's `select_*`, which refuses a
@@ -44,19 +44,19 @@
 //!
 //! # The document
 //!
-//! With `alloc`, `statements_from_json5` reads the `wz` member of a parsed JSON5 document (the
+//! With `alloc`, `statements_from_json5` reads the `zext` member of a parsed JSON5 document (the
 //! zenoh configuration a node is opened with) into the profile it names and its statements, and
 //! `resolve_document` resolves them over a base. `resolve_document_under` adds what the open's
 //! caller states beside the document ([`Overrides`]), the same way for every ABI.
 //!
-//! `wz/key-ids` states the key ids every node of a deployment shares: `dictionary`, a list of
+//! `zext/key-ids` states the key ids every node of a deployment shares: `dictionary`, a list of
 //! `{ id, key }`, and `links`, a list of `{ locator, form }` that states the key-wire form of one
 //! endpoint apart from the session's. A build with the `shared-key-ids` capability reads it into
 //! the statements' `key_ids` (`crate::shared_key_ids::KeyIdsAtOpen`), and its refusals
 //! ([`KeyIdsReason`]) are found by the same reader, so they refuse the document as a refused
 //! policy does. A build without the capability refuses the member by name.
 //!
-//! `wz/owned-address` states the node's own IPv4 address, which heads the zid
+//! `zext/owned-address` states the node's own IPv4 address, which heads the zid
 //! `zid-derivation = address-ports` derives in place of a listener's, so a node that only dials
 //! has one (`crate::zid_derivation`). It is read into the statements' `owned_address`; text
 //! that is no IPv4 address of a node is refused ([`Reason::OwnedAddress`]) whichever value the
@@ -77,6 +77,30 @@ use crate::policy_binding::{
 };
 use crate::zid_derivation::OwnedAddressRefused;
 
+/// The name of the member of a document's top-level object that holds the extension statements
+/// (`profile`, `policies`, `limits`, `key-ids`), as a literal: `ext_member!()` is the member
+/// and `ext_member!("limits")` a path below it. A literal, so that a refusal's `&'static str` and
+/// a `concat!` of another crate spell the member from the one place
+/// [`EXT_MEMBER`](crate::policy_document::EXT_MEMBER) does.
+#[macro_export]
+macro_rules! ext_member {
+    () => {
+        "zext"
+    };
+    ($below:literal) => {
+        concat!($crate::ext_member!(), "/", $below)
+    };
+}
+
+/// The member of a document's top-level object that holds the extension statements. Every ABI's
+/// reader of a document reads this one name, so one document states the same to each of them.
+pub const EXT_MEMBER: &str = crate::ext_member!();
+
+/// The name the extension member had before [`EXT_MEMBER`]. A document that states it is refused
+/// ([`Reason::RetiredMember`]): statements under it are not dropped unread, and the refusal names
+/// the member that is read.
+pub const RETIRED_MEMBER: &str = "wz";
+
 /// Where a policy's value in a snapshot came from: the layer that stated it last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -84,7 +108,7 @@ pub enum Origin {
     BuildDefault,
     /// The named profile, by its id.
     Profile(&'static str),
-    /// The document's own `wz/policies`.
+    /// The document's own `zext/policies`.
     Document,
     /// What the open's caller stated beside the document.
     Api,
@@ -587,31 +611,34 @@ pub enum Reason<'a> {
     },
     /// A member that holds a value's id holds something other than a string.
     NotAString {
-        /// The member's parent, `wz` or `wz/policies`.
+        /// The member's parent, `zext` or `zext/policies`.
         within: &'static str,
         /// The member's key.
         member: &'a str,
     },
     /// A member that holds other members holds something other than an object.
     NotAnObject {
-        /// The member, `wz` or `wz/policies`.
+        /// The member, `zext` or `zext/policies`.
         member: &'static str,
     },
-    /// `wz/profile` names no profile of the build.
+    /// `zext/profile` names no profile of the build.
     UnknownProfile {
         /// The id it names.
         profile: &'a str,
     },
-    /// `wz` holds a member wz does not read.
+    /// `zext` holds a member wz does not read.
     UnknownMember {
         /// The member's key.
         member: &'a str,
     },
-    /// A member of the document's `wz` tree is stated more than once; JSON5 allows it, and a
+    /// The document states [`RETIRED_MEMBER`], the name the extension member had before
+    /// [`EXT_MEMBER`].
+    RetiredMember,
+    /// A member of the document's `zext` tree is stated more than once; JSON5 allows it, and a
     /// later one may not silently win.
     MemberStatedTwice {
-        /// The member: `wz`, `wz/profile`, `wz/policies`, `wz/limits`, `wz/key-ids`, one of
-        /// the two members of `wz/key-ids`, or `wz/owned-address`.
+        /// The member: `zext`, `zext/profile`, `zext/policies`, `zext/limits`, `zext/key-ids`,
+        /// one of the two members of `zext/key-ids`, or `zext/owned-address`.
         member: &'static str,
     },
     /// The statement names no limit of the build.
@@ -649,7 +676,7 @@ pub enum Reason<'a> {
         /// The scope whose snapshot holds it.
         scope: Scope,
     },
-    /// A member of `wz/limits` holds something other than a whole number a `usize` holds or
+    /// A member of `zext/limits` holds something other than a whole number a `usize` holds or
     /// `unbounded`: a bool, an object, a negative or fractional number, or other text.
     NotALimitValue {
         /// The member's key.
@@ -660,9 +687,9 @@ pub enum Reason<'a> {
         /// The limit.
         limit: &'static str,
     },
-    /// `wz/key-ids`, or a part of it, is refused.
+    /// `zext/key-ids`, or a part of it, is refused.
     KeyIds(KeyIdsReason<'a>),
-    /// `wz/owned-address` states text that is no IPv4 address of a node.
+    /// `zext/owned-address` states text that is no IPv4 address of a node.
     OwnedAddress {
         /// The text stated.
         text: &'a str,
@@ -671,20 +698,20 @@ pub enum Reason<'a> {
     },
 }
 
-/// Why `wz/key-ids`, or a part of it, was refused. An entry is named by its place in its list,
+/// Why `zext/key-ids`, or a part of it, was refused. An entry is named by its place in its list,
 /// counted from 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeyIdsReason<'a> {
     /// The build was made without the `shared-key-ids` capability, which reads the member.
     NotInBuild,
-    /// `wz/key-ids` holds a member other than `dictionary` and `links`.
+    /// `zext/key-ids` holds a member other than `dictionary` and `links`.
     UnknownMember {
         /// The member's key.
         member: &'a str,
     },
     /// `dictionary` or `links` holds something other than an array.
     NotAnArray {
-        /// The member, `wz/key-ids/dictionary` or `wz/key-ids/links`.
+        /// The member, `zext/key-ids/dictionary` or `zext/key-ids/links`.
         member: &'static str,
     },
     /// An entry of a list is something other than an object.
@@ -796,16 +823,19 @@ pub enum KeyIdsReason<'a> {
 impl fmt::Display for KeyIdsReason<'_> {
     /// What the layer states and why it is refused, as the words after the layer's name.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const DICTIONARY: &str = "wz/key-ids/dictionary";
+        const KEY_IDS: &str = crate::ext_member!("key-ids");
+        const DICTIONARY: &str = crate::ext_member!("key-ids/dictionary");
+        const LINKS: &str = crate::ext_member!("key-ids/links");
         const FORM: &str = <KeyWireForm as PolicyValue>::POLICY;
         match *self {
-            Self::NotInBuild => f.write_str(
-                "states `wz/key-ids`, which a build without the `shared-key-ids` capability does \
-                 not read",
+            Self::NotInBuild => write!(
+                f,
+                "states `{KEY_IDS}`, which a build without the `shared-key-ids` capability does \
+                 not read"
             ),
             Self::UnknownMember { member } => write!(
                 f,
-                "states `wz/key-ids/{member}`, which wz does not read (it reads `dictionary` and \
+                "states `{KEY_IDS}/{member}`, which wz does not read (it reads `dictionary` and \
                  `links`)"
             ),
             Self::NotAnArray { member } => {
@@ -856,10 +886,9 @@ impl fmt::Display for KeyIdsReason<'_> {
                 "states {stated} entries in `{DICTIONARY}`, and the session's limit admits \
                  {limit} (MAX_SHARED_KEY_IDS)"
             ),
-            Self::EmptyLocator { at } => write!(
-                f,
-                "states an empty `locator` in entry {at} of `wz/key-ids/links`"
-            ),
+            Self::EmptyLocator { at } => {
+                write!(f, "states an empty `locator` in entry {at} of `{LINKS}`")
+            }
             Self::UnknownForm { locator, form } => {
                 write!(
                     f,
@@ -877,7 +906,7 @@ impl fmt::Display for KeyIdsReason<'_> {
             ),
             Self::LinkStatedTwice { locator } => write!(
                 f,
-                "states the key-wire form of `{locator}` more than once in `wz/key-ids/links`"
+                "states the key-wire form of `{locator}` more than once in `{LINKS}`"
             ),
         }
     }
@@ -949,8 +978,14 @@ impl fmt::Display for Refusal<'_> {
             }
             Reason::UnknownMember { member } => write!(
                 f,
-                "{layer} states `wz/{member}`, which wz does not read (it reads `wz/profile`, \
-                 `wz/policies`, `wz/limits`, `wz/key-ids` and `wz/owned-address`)"
+                "{layer} states `{EXT_MEMBER}/{member}`, which wz does not read (it reads \
+                 `{EXT_MEMBER}/profile`, `{EXT_MEMBER}/policies`, `{EXT_MEMBER}/limits`, \
+                 `{EXT_MEMBER}/key-ids` and `{EXT_MEMBER}/owned-address`)"
+            ),
+            Reason::RetiredMember => write!(
+                f,
+                "{layer} states the member `{RETIRED_MEMBER}`, which is not read: the statements \
+                 it holds belong in the member `{EXT_MEMBER}`"
             ),
             Reason::MemberStatedTwice { member } => {
                 write!(f, "{layer} states `{member}` more than once")
@@ -981,8 +1016,8 @@ impl fmt::Display for Refusal<'_> {
             ),
             Reason::NotALimitValue { limit } => write!(
                 f,
-                "{layer} states `wz/limits/{limit}` as something other than a whole number from \
-                 0 to {} or `{UNBOUNDED}`",
+                "{layer} states `{EXT_MEMBER}/limits/{limit}` as something other than a whole \
+                 number from 0 to {} or `{UNBOUNDED}`",
                 usize::MAX
             ),
             Reason::LimitStatedTwice { limit } => write!(
@@ -992,7 +1027,7 @@ impl fmt::Display for Refusal<'_> {
             Reason::KeyIds(reason) => write!(f, "{layer} {reason}"),
             Reason::OwnedAddress { text, why } => write!(
                 f,
-                "{layer} states `wz/owned-address` = `{text}`, which is refused: {why}"
+                "{layer} states `{EXT_MEMBER}/owned-address` = `{text}`, which is refused: {why}"
             ),
         }
     }
@@ -1427,7 +1462,7 @@ fn select_limit<'a, S: 'static>(
 
 /// `base` with what a caller states and no document: the profile `overrides` names, then its
 /// statements and its limits ([`Origin::Api`]). It answers what `resolve_document_under` answers
-/// for a document with no `wz` member, without reading a document, so a build that is handed none
+/// for a document with no `zext` member, without reading a document, so a build that is handed none
 /// links no reader of one.
 // The refusals are held inline because the core has no heap to box them in.
 #[allow(clippy::result_large_err)]
@@ -1463,22 +1498,22 @@ pub fn resolve_under<'a>(
     }
 }
 
-/// What the `wz` member of a document states, read by a caller that keeps no tree of it: the
-/// profile it names, the statements of its `wz/policies` and those of its `wz/limits`, each read
-/// in the document's order or held by the build's table. `Default` is a document with no `wz`
-/// member.
+/// What the `zext` member of a document states, read by a caller that keeps no tree of it: the
+/// profile it names, the statements of its `zext/policies` and those of its `zext/limits`, each
+/// read in the document's order or held by the build's table. `Default` is a document with no
+/// `zext` member.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DocumentLayers<'s, 'a> {
-    /// The id `wz/profile` names, if it names one.
+    /// The id `zext/profile` names, if it names one.
     pub profile: Option<&'a str>,
-    /// The members of `wz/policies`.
+    /// The members of `zext/policies`.
     pub statements: Stated<'s, 'a>,
-    /// The members of `wz/limits`.
+    /// The members of `zext/limits`.
     pub limits: StatedLimits<'s, 'a>,
 }
 
 /// `base` with the document's layers and what the caller states over them, as
-/// `resolve_document_under` resolves a document whose `wz` member states `document`: the
+/// `resolve_document_under` resolves a document whose `zext` member states `document`: the
 /// profile `overrides` names, else the document's, then the document's statements
 /// ([`Origin::Document`]), then the caller's ([`Origin::Api`]), and the two layers of limits over
 /// the limits of `base`. For a reader that walks the document and keeps what it states in storage
@@ -1644,48 +1679,48 @@ mod from_json5 {
     use super::KeyIdsReason;
     use super::{
         compose_document, Base, DocumentLayers, LimitStatement, Origin, Overrides, Reason, Refusal,
-        Refusals, Resolved, Stated, StatedLimits, Statement,
+        Refusals, Resolved, Stated, StatedLimits, Statement, EXT_MEMBER, RETIRED_MEMBER,
     };
     use crate::json5::{number_as_u64, Json5Value};
     use crate::limit_binding::{LimitValue, UNBOUNDED};
     use crate::policy::{POLICIES, POLICY_COUNT};
     use crate::policy_binding::PolicyEntry;
 
-    /// What the `wz` member of a document states: the profile it names, the statements of its
-    /// `wz/policies` and of its `wz/limits`, each in the document's order, the key ids of its
-    /// `wz/key-ids`, and the node's own address its `wz/owned-address` states.
+    /// What the `zext` member of a document states: the profile it names, the statements of its
+    /// `zext/policies` and of its `zext/limits`, each in the document's order, the key ids of its
+    /// `zext/key-ids`, and the node's own address its `zext/owned-address` states.
     #[derive(Clone, Debug, Default, PartialEq, Eq)]
     pub struct DocumentStatements<'a> {
-        /// The id `wz/profile` names, if it names one.
+        /// The id `zext/profile` names, if it names one.
         pub profile: Option<&'a str>,
-        /// The members of `wz/policies`, each a policy's id and a value's id.
+        /// The members of `zext/policies`, each a policy's id and a value's id.
         pub statements: Vec<Statement<'a>>,
-        /// The members of `wz/limits`, each a limit's id and its value.
+        /// The members of `zext/limits`, each a limit's id and its value.
         pub limits: Vec<LimitStatement<'a>>,
-        /// The dictionary and the endpoints' key-wire forms `wz/key-ids` states; nothing when
+        /// The dictionary and the endpoints' key-wire forms `zext/key-ids` states; nothing when
         /// the document states no such member.
         #[cfg(feature = "shared-key-ids")]
         pub key_ids: crate::shared_key_ids::KeyIdsAtOpen,
-        /// The node's own IPv4 address `wz/owned-address` states, which heads a zid
+        /// The node's own IPv4 address `zext/owned-address` states, which heads a zid
         /// `zid-derivation = address-ports` derives; `None` when the document states none.
         pub owned_address: Option<[u8; 4]>,
     }
 
-    /// The profile and the statements the `wz` member of `tree` states, or every refusal of its
-    /// shape: a `wz`, `wz/policies` or `wz/limits` that is not an object, a policy's value that
-    /// is not a string, a limit's value that is neither a whole number nor `unbounded`, a member
-    /// of `wz` other than `profile`, `policies`, `limits`, `key-ids` and `owned-address`, a
-    /// member stated twice, every refusal of `wz/key-ids` ([`super::KeyIdsReason`]), and a
-    /// `wz/owned-address` that is not a string or names no IPv4 address of a node. A document
-    /// with no `wz` member states nothing. Whether the policies, the limits, the values and the profile exist
-    /// is for [`resolve_document`].
+    /// The profile and the statements the `zext` member of `tree` states, or every refusal of its
+    /// shape: a `zext`, `zext/policies` or `zext/limits` that is not an object, a policy's value
+    /// that is not a string, a limit's value that is neither a whole number nor `unbounded`, a
+    /// member of `zext` other than `profile`, `policies`, `limits`, `key-ids` and
+    /// `owned-address`, a member stated twice, every refusal of `zext/key-ids`
+    /// ([`super::KeyIdsReason`]), and a `zext/owned-address` that is not a string or names no
+    /// IPv4 address of a node. A document with no `zext` member states nothing. Whether the
+    /// policies, the limits, the values and the profile exist is for [`resolve_document`].
     // The refusals are held inline because the core has no heap to box them in.
     #[allow(clippy::result_large_err)]
     pub fn statements_from_json5(
         tree: &Json5Value,
     ) -> Result<DocumentStatements<'_>, Refusals<'_>> {
         let mut refusals = Refusals::new();
-        let read = read_wz(tree, &mut refusals);
+        let read = read_ext_member(tree, &mut refusals);
         if refusals.is_empty() {
             Ok(read)
         } else {
@@ -1693,9 +1728,9 @@ mod from_json5 {
         }
     }
 
-    /// `base` with the profile the `wz` member of `tree` names and then its own policies over
+    /// `base` with the profile the `zext` member of `tree` names and then its own policies over
     /// it ([`super::resolve`]), and its own limits over the limits of `base`, or every refusal
-    /// found, of the document's shape and of its statements. A document with no `wz` member is
+    /// found, of the document's shape and of its statements. A document with no `zext` member is
     /// `base`, every value from the build defaults. A `SessionPolicy` is a base that holds a
     /// session's limits alone ([`Base::session`]).
     // The refusals are held inline because the core has no heap to box them in.
@@ -1731,14 +1766,14 @@ mod from_json5 {
         overrides: Overrides<'_, 'a>,
     ) -> Result<Resolved, Refusals<'a>> {
         let mut refusals = Refusals::new();
-        let read = read_wz(tree, &mut refusals);
+        let read = read_ext_member(tree, &mut refusals);
         let document = DocumentLayers {
             profile: read.profile,
             statements: Stated::Read(&read.statements),
             limits: StatedLimits::Read(&read.limits),
         };
         let resolved = compose_document(table, base, document, overrides, &mut refusals);
-        // The reader of `wz/key-ids` cannot count the dictionary against a limit the same
+        // The reader of `zext/key-ids` cannot count the dictionary against a limit the same
         // document may state; the composed limits can.
         #[cfg(feature = "shared-key-ids")]
         if let Err(crate::shared_key_ids::KeyIdsRefused::TooMany { stated, limit }) =
@@ -1756,10 +1791,10 @@ mod from_json5 {
         }
     }
 
-    /// The members of the document's `wz` tree already read, so a second one is refused.
+    /// The members of the document's `zext` tree already read, so a second one is refused.
     #[derive(Default)]
     struct Seen {
-        wz: bool,
+        member: bool,
         profile: bool,
         policies: bool,
         limits: bool,
@@ -1774,32 +1809,40 @@ mod from_json5 {
         });
     }
 
-    /// Every `wz` member of `tree` read, each refusal of its shape pushed onto `refusals`.
-    fn read_wz<'a>(tree: &'a Json5Value, refusals: &mut Refusals<'a>) -> DocumentStatements<'a> {
+    /// Every `zext` member of `tree` read, each refusal of its shape pushed onto `refusals`, and
+    /// each member under the retired name refused whatever it holds.
+    fn read_ext_member<'a>(
+        tree: &'a Json5Value,
+        refusals: &mut Refusals<'a>,
+    ) -> DocumentStatements<'a> {
         let mut read = DocumentStatements::default();
         let Json5Value::Object(members) = tree else {
             return read;
         };
         let mut seen = Seen::default();
-        for (key, wz) in members {
-            if key != "wz" {
+        for (key, member) in members {
+            if key == RETIRED_MEMBER {
+                refuse(refusals, Reason::RetiredMember);
                 continue;
             }
-            if seen.wz {
-                refuse(refusals, Reason::MemberStatedTwice { member: "wz" });
+            if key != EXT_MEMBER {
+                continue;
             }
-            seen.wz = true;
-            match wz {
-                Json5Value::Object(wz_members) => {
-                    read_wz_members(wz_members, &mut seen, &mut read, refusals);
+            if seen.member {
+                refuse(refusals, Reason::MemberStatedTwice { member: EXT_MEMBER });
+            }
+            seen.member = true;
+            match member {
+                Json5Value::Object(members) => {
+                    read_ext_members(members, &mut seen, &mut read, refusals);
                 }
-                _ => refuse(refusals, Reason::NotAnObject { member: "wz" }),
+                _ => refuse(refusals, Reason::NotAnObject { member: EXT_MEMBER }),
             }
         }
         read
     }
 
-    fn read_wz_members<'a>(
+    fn read_ext_members<'a>(
         members: &'a [(alloc::string::String, Json5Value)],
         seen: &mut Seen,
         read: &mut DocumentStatements<'a>,
@@ -1812,7 +1855,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::MemberStatedTwice {
-                                member: "wz/profile",
+                                member: crate::ext_member!("profile"),
                             },
                         );
                     }
@@ -1826,7 +1869,7 @@ mod from_json5 {
                         _ => refuse(
                             refusals,
                             Reason::NotAString {
-                                within: "wz",
+                                within: EXT_MEMBER,
                                 member: "profile",
                             },
                         ),
@@ -1837,7 +1880,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::MemberStatedTwice {
-                                member: "wz/policies",
+                                member: crate::ext_member!("policies"),
                             },
                         );
                     }
@@ -1846,7 +1889,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::NotAnObject {
-                                member: "wz/policies",
+                                member: crate::ext_member!("policies"),
                             },
                         );
                         continue;
@@ -1859,7 +1902,7 @@ mod from_json5 {
                             _ => refuse(
                                 refusals,
                                 Reason::NotAString {
-                                    within: "wz/policies",
+                                    within: crate::ext_member!("policies"),
                                     member: policy.as_str(),
                                 },
                             ),
@@ -1871,7 +1914,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::MemberStatedTwice {
-                                member: "wz/key-ids",
+                                member: crate::ext_member!("key-ids"),
                             },
                         );
                     }
@@ -1892,7 +1935,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::MemberStatedTwice {
-                                member: "wz/limits",
+                                member: crate::ext_member!("limits"),
                             },
                         );
                     }
@@ -1901,7 +1944,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::NotAnObject {
-                                member: "wz/limits",
+                                member: crate::ext_member!("limits"),
                             },
                         );
                         continue;
@@ -1925,7 +1968,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::MemberStatedTwice {
-                                member: "wz/owned-address",
+                                member: crate::ext_member!("owned-address"),
                             },
                         );
                     }
@@ -1934,7 +1977,7 @@ mod from_json5 {
                         refuse(
                             refusals,
                             Reason::NotAString {
-                                within: "wz",
+                                within: EXT_MEMBER,
                                 member: "owned-address",
                             },
                         );
@@ -1960,7 +2003,7 @@ mod from_json5 {
         }
     }
 
-    /// The value a member of `wz/limits` states: a whole number a `usize` holds, read as every
+    /// The value a member of `zext/limits` states: a whole number a `usize` holds, read as every
     /// number of the configuration is ([`number_as_u64`]), or `unbounded`. `None` for anything
     /// else.
     fn limit_value(value: &Json5Value) -> Option<LimitValue> {
@@ -3116,7 +3159,7 @@ mod tests {
                 statements_from_json5(&tree),
                 Ok(DocumentStatements::default())
             );
-            let empty = parse(r#"{ wz: {} }"#).unwrap();
+            let empty = parse(r#"{ zext: {} }"#).unwrap();
             assert_eq!(
                 resolve_document(base, &empty),
                 Ok(Resolved::unchanged(base))
@@ -3126,7 +3169,7 @@ mod tests {
         #[test]
         fn the_wz_member_is_read_into_its_profile_and_statements() {
             let tree = parse(
-                r#"{ wz: { profile: "upstream", policies: { "key-set": "open", "sn-resolution": "bits-32" } } }"#,
+                r#"{ zext: { profile: "upstream", policies: { "key-set": "open", "sn-resolution": "bits-32" } } }"#,
             )
             .unwrap();
             let read = statements_from_json5(&tree).expect("well formed");
@@ -3151,8 +3194,9 @@ mod tests {
                     .find(|entry| entry.id() == statement.policy)
                     .is_some_and(|entry| entry.domain().contains(statement.value))
             });
-            let tree = parse(r#"{ wz: { profile: "upstream", policies: { "key-set": "open" } } }"#)
-                .unwrap();
+            let tree =
+                parse(r#"{ zext: { profile: "upstream", policies: { "key-set": "open" } } }"#)
+                    .unwrap();
             let resolved = resolve_document(SessionPolicy::defaults(), &tree);
             if !allowed {
                 // The build leaves an upstream value out of a domain: the profile is refused.
@@ -3176,7 +3220,7 @@ mod tests {
 
         #[test]
         fn a_profile_the_build_does_not_have_is_refused() {
-            let tree = parse(r#"{ wz: { profile: "no-such-profile" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "no-such-profile" } }"#).unwrap();
             let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
             let refusal = only(&refusals);
             assert_eq!(
@@ -3194,24 +3238,24 @@ mod tests {
 
         #[test]
         fn a_member_of_wz_it_does_not_read_is_refused() {
-            let tree = parse(r#"{ wz: { limits: {}, colour: "blue" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { limits: {}, colour: "blue" } }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(refusal.reason, Reason::UnknownMember { member: "colour" });
             assert_eq!(
                 format!("{refusal}"),
-                "the document states `wz/colour`, which wz does not read (it reads `wz/profile`, \
-                 `wz/policies`, `wz/limits`, `wz/key-ids` and `wz/owned-address`)"
+                "the document states `zext/colour`, which wz does not read (it reads `zext/profile`, \
+                 `zext/policies`, `zext/limits`, `zext/key-ids` and `zext/owned-address`)"
             );
         }
 
-        /// `wz/owned-address` is read into the statements as the node's four address bytes and
+        /// `zext/owned-address` is read into the statements as the node's four address bytes and
         /// states no policy; text that is no IPv4 address of a node, a value that is not a string
         /// and the member stated twice are refused, and with them the whole document.
         #[test]
         fn the_owned_address_is_read_and_a_malformed_one_refused() {
             use crate::zid_derivation::ZidDerivationError;
 
-            let tree = parse(r#"{ wz: { "owned-address": "127.0.0.1" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { "owned-address": "127.0.0.1" } }"#).unwrap();
             let read = statements_from_json5(&tree).expect("an address of a node");
             assert_eq!(read.owned_address, Some([127, 0, 0, 1]));
             assert!(read.statements.is_empty() && read.profile.is_none());
@@ -3219,7 +3263,7 @@ mod tests {
                 resolve_document(SessionPolicy::defaults(), &tree).expect("states no policy"),
                 Resolved::unchanged(SessionPolicy::defaults())
             );
-            let silent = parse(r#"{ wz: { profile: "upstream" } }"#).unwrap();
+            let silent = parse(r#"{ zext: { profile: "upstream" } }"#).unwrap();
             assert_eq!(
                 statements_from_json5(&silent).expect("reads").owned_address,
                 None,
@@ -3239,13 +3283,14 @@ mod tests {
                     OwnedAddressRefused::NamesNoNode(ZidDerivationError::Multicast),
                 ),
             ] {
-                let text_doc = format!(r#"{{ wz: {{ "owned-address": "{text}" }} }}"#);
+                let text_doc = format!(r#"{{ zext: {{ "owned-address": "{text}" }} }}"#);
                 let tree = parse(&text_doc).unwrap();
                 let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
                 let refusal = only(&refusals);
                 assert_eq!(refusal.reason, Reason::OwnedAddress { text, why }, "{text}");
                 assert!(
-                    format!("{refusal}").contains(&format!("states `wz/owned-address` = `{text}`")),
+                    format!("{refusal}")
+                        .contains(&format!("states `zext/owned-address` = `{text}`")),
                     "{refusal}"
                 );
                 assert_eq!(
@@ -3255,34 +3300,34 @@ mod tests {
                 );
             }
 
-            let tree = parse(r#"{ wz: { "owned-address": 2130706433 } }"#).unwrap();
+            let tree = parse(r#"{ zext: { "owned-address": 2130706433 } }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
                 Reason::NotAString {
-                    within: "wz",
+                    within: "zext",
                     member: "owned-address"
                 }
             );
             let tree =
-                parse(r#"{ wz: { "owned-address": "10.0.0.1", "owned-address": "10.0.0.2" } }"#)
+                parse(r#"{ zext: { "owned-address": "10.0.0.1", "owned-address": "10.0.0.2" } }"#)
                     .unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
                 Reason::MemberStatedTwice {
-                    member: "wz/owned-address"
+                    member: "zext/owned-address"
                 }
             );
         }
 
-        /// `wz/limits` is read into its statements, each a limit's id and its value, and the
+        /// `zext/limits` is read into its statements, each a limit's id and its value, and the
         /// resolution selects each into the snapshot that holds it, recorded as the document's.
         #[test]
         fn the_limits_the_document_states_are_read_and_selected() {
             let other = other_subscriptions();
             let text = format!(
-                r#"{{ wz: {{ limits: {{ MAX_SUBSCRIPTIONS: {other}, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
+                r#"{{ zext: {{ limits: {{ MAX_SUBSCRIPTIONS: {other}, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
             );
             let tree = parse(&text).unwrap();
             let read = statements_from_json5(&tree).expect("well formed");
@@ -3330,12 +3375,12 @@ mod tests {
             assert_eq!(resolved.provenance, Provenance::build_defaults());
         }
 
-        /// A member of `wz/limits` that is neither a whole number a `usize` holds nor
+        /// A member of `zext/limits` that is neither a whole number a `usize` holds nor
         /// `unbounded` is refused by the reader, before any limit is looked up.
         #[test]
         fn a_limit_value_that_is_no_whole_number_or_unbounded_is_refused() {
             let tree = parse(
-                r#"{ wz: { limits: { A: true, B: -1, C: 1.5, D: "lots", E: {}, F: 18446744073709551616, G: null } } }"#,
+                r#"{ zext: { limits: { A: true, B: -1, C: 1.5, D: "lots", E: {}, F: 18446744073709551616, G: null } } }"#,
             )
             .unwrap();
             let refusals = statements_from_json5(&tree).unwrap_err();
@@ -3348,7 +3393,7 @@ mod tests {
             assert_eq!(
                 format!("{}", refusals.iter().next().expect("one refusal")),
                 format!(
-                    "the document states `wz/limits/A` as something other than a whole number \
+                    "the document states `zext/limits/A` as something other than a whole number \
                      from 0 to {} or `unbounded`",
                     usize::MAX
                 )
@@ -3358,30 +3403,30 @@ mod tests {
                 resolve_document(SessionPolicy::defaults(), &tree).unwrap_err(),
                 refusals
             );
-            let tree = parse(r#"{ wz: { limits: [4] } }"#).unwrap();
+            let tree = parse(r#"{ zext: { limits: [4] } }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
                 Reason::NotAnObject {
-                    member: "wz/limits"
+                    member: "zext/limits"
                 }
             );
         }
 
-        /// JSON5 keeps `wz/limits` stated twice, and the later one must not win unnoticed.
+        /// JSON5 keeps `zext/limits` stated twice, and the later one must not win unnoticed.
         #[test]
         fn a_second_wz_limits_is_refused() {
-            let tree = parse(r#"{ wz: { limits: {}, limits: {} } }"#).unwrap();
+            let tree = parse(r#"{ zext: { limits: {}, limits: {} } }"#).unwrap();
             let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
                 Reason::MemberStatedTwice {
-                    member: "wz/limits"
+                    member: "zext/limits"
                 }
             );
             assert_eq!(
                 format!("{refusal}"),
-                "the document states `wz/limits` more than once"
+                "the document states `zext/limits` more than once"
             );
         }
 
@@ -3389,7 +3434,7 @@ mod tests {
         #[test]
         fn a_limit_the_document_states_twice_is_refused() {
             let tree = parse(
-                r#"{ wz: { limits: { QUERIER_MAX_PENDING_QUERIES: "unbounded", QUERIER_MAX_PENDING_QUERIES: "unbounded" } } }"#,
+                r#"{ zext: { limits: { QUERIER_MAX_PENDING_QUERIES: "unbounded", QUERIER_MAX_PENDING_QUERIES: "unbounded" } } }"#,
             )
             .unwrap();
             let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
@@ -3407,7 +3452,7 @@ mod tests {
         #[test]
         fn a_refused_limit_and_a_refused_policy_refuse_the_document_together() {
             let tree = parse(
-                r#"{ wz: { policies: { "key-set": "ajar" }, limits: { NO_SUCH_LIMIT: 1, MAX_TASKS: 2 } } }"#,
+                r#"{ zext: { policies: { "key-set": "ajar" }, limits: { NO_SUCH_LIMIT: 1, MAX_TASKS: 2 } } }"#,
             )
             .unwrap();
             let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
@@ -3438,7 +3483,7 @@ mod tests {
         fn the_overrides_limits_are_read_over_the_documents() {
             let (document, api) = (other_subscriptions(), subscriptions());
             let text = format!(
-                r#"{{ wz: {{ limits: {{ MAX_SUBSCRIPTIONS: {document}, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
+                r#"{{ zext: {{ limits: {{ MAX_SUBSCRIPTIONS: {document}, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
             );
             let tree = parse(&text).unwrap();
             let stated = [LimitStatement::new("MAX_SUBSCRIPTIONS", api.as_value())];
@@ -3486,7 +3531,7 @@ mod tests {
                     LimitValue::Integer(value) => format!("{value}"),
                 };
                 let tree =
-                    parse(&format!("{{ wz: {{ limits: {{ {limit}: {value} }} }} }}")).unwrap();
+                    parse(&format!("{{ zext: {{ limits: {{ {limit}: {value} }} }} }}")).unwrap();
                 let session =
                     only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
                 let node = resolve_document(Base::node(SessionPolicy::defaults()), &tree);
@@ -3524,7 +3569,7 @@ mod tests {
         fn a_limit_no_machine_reads_is_refused_to_the_document_and_a_read_one_is_selected() {
             let limit = unread(&SESSION_LIMITS).id();
             let tree = parse(&format!(
-                r#"{{ wz: {{ limits: {{ {limit}: 1, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
+                r#"{{ zext: {{ limits: {{ {limit}: 1, QUERIER_MAX_PENDING_QUERIES: "unbounded" }} }} }}"#
             ))
             .unwrap();
             let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
@@ -3537,8 +3582,9 @@ mod tests {
                      not read `{limit}` from a statement yet; they run with the build's value"
                 )
             );
-            let tree = parse(r#"{ wz: { limits: { QUERIER_MAX_PENDING_QUERIES: "unbounded" } } }"#)
-                .unwrap();
+            let tree =
+                parse(r#"{ zext: { limits: { QUERIER_MAX_PENDING_QUERIES: "unbounded" } } }"#)
+                    .unwrap();
             let resolved = resolve_document(SessionPolicy::defaults(), &tree)
                 .expect("a limit the machines read, at a value its domain holds");
             assert_eq!(
@@ -3553,20 +3599,20 @@ mod tests {
             assert_eq!(origin(limit), Some(Origin::BuildDefault));
         }
 
-        /// A build without the capability refuses `wz/key-ids` by name, whatever it holds, and
+        /// A build without the capability refuses `zext/key-ids` by name, whatever it holds, and
         /// with it the whole document.
         #[cfg(not(feature = "shared-key-ids"))]
         #[test]
         fn key_ids_are_refused_by_name_in_a_build_without_the_capability() {
             let tree =
-                parse(r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#)
+                parse(r#"{ zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#)
                     .unwrap();
             let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
             let refusal = only(&refusals);
             assert_eq!(refusal.reason, Reason::KeyIds(KeyIdsReason::NotInBuild));
             assert_eq!(
                 format!("{refusal}"),
-                "the document states `wz/key-ids`, which a build without the `shared-key-ids` \
+                "the document states `zext/key-ids`, which a build without the `shared-key-ids` \
                  capability does not read"
             );
             assert_eq!(
@@ -3578,50 +3624,51 @@ mod tests {
 
         #[test]
         fn a_value_that_is_not_a_string_is_refused() {
-            let tree = parse(r#"{ wz: { profile: 1, policies: { "key-set": true } } }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: 1, policies: { "key-set": true } } }"#).unwrap();
             let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
             let reasons: Vec<_> = refusals.iter().map(|refusal| refusal.reason).collect();
             assert_eq!(
                 reasons,
                 [
                     Reason::NotAString {
-                        within: "wz",
+                        within: "zext",
                         member: "profile"
                     },
                     Reason::NotAString {
-                        within: "wz/policies",
+                        within: "zext/policies",
                         member: "key-set"
                     }
                 ]
             );
             assert!(format!("{refusals}")
-                .contains("states `wz/policies/key-set` as something other than a string"));
+                .contains("states `zext/policies/key-set` as something other than a string"));
         }
 
         #[test]
-        fn a_wz_or_policies_that_is_not_an_object_is_refused() {
-            let tree = parse(r#"{ wz: "upstream" }"#).unwrap();
+        fn a_member_or_policies_that_is_not_an_object_is_refused() {
+            let tree = parse(r#"{ zext: "upstream" }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
-            assert_eq!(refusal.reason, Reason::NotAnObject { member: "wz" });
-            let tree = parse(r#"{ wz: { policies: ["key-set", "open"] } }"#).unwrap();
+            assert_eq!(refusal.reason, Reason::NotAnObject { member: "zext" });
+            let tree = parse(r#"{ zext: { policies: ["key-set", "open"] } }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
                 Reason::NotAnObject {
-                    member: "wz/policies"
+                    member: "zext/policies"
                 }
             );
             assert_eq!(
                 format!("{refusal}"),
-                "the document states `wz/policies` as something other than an object"
+                "the document states `zext/policies` as something other than an object"
             );
         }
 
         /// JSON5 keeps a member stated twice, and the later one must not win unnoticed.
         #[test]
         fn a_policy_or_a_member_stated_twice_in_the_document_is_refused() {
-            let tree = parse(r#"{ wz: { policies: { "key-set": "open", "key-set": "closed" } } }"#)
-                .unwrap();
+            let tree =
+                parse(r#"{ zext: { policies: { "key-set": "open", "key-set": "closed" } } }"#)
+                    .unwrap();
             let refusal = only(&resolve_document(SessionPolicy::defaults(), &tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
@@ -3630,24 +3677,59 @@ mod tests {
                     value: "closed"
                 }
             );
-            let tree = parse(r#"{ wz: { profile: "upstream" }, wz: {} }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "upstream" }, zext: {} }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
-            assert_eq!(refusal.reason, Reason::MemberStatedTwice { member: "wz" });
-            let tree = parse(r#"{ wz: { profile: "upstream", profile: "upstream" } }"#).unwrap();
+            assert_eq!(refusal.reason, Reason::MemberStatedTwice { member: "zext" });
+            let tree = parse(r#"{ zext: { profile: "upstream", profile: "upstream" } }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
                 Reason::MemberStatedTwice {
-                    member: "wz/profile"
+                    member: "zext/profile"
                 }
             );
+        }
+
+        /// The extension member is read under `zext`: what it states is the document's.
+        #[test]
+        fn the_ext_member_is_read() {
+            assert_eq!(EXT_MEMBER, "zext");
+            let tree = parse(r#"{ zext: { policies: { "key-set": "open" } } }"#).unwrap();
+            let read = statements_from_json5(&tree).unwrap();
+            assert_eq!(read.statements, [Statement::new("key-set", "open")]);
+        }
+
+        /// A document that states the member under its retired name is refused whatever that
+        /// member holds, `null` and an empty object too, beside a `zext` member as well, and the
+        /// refusal names the member that is read. Turned red by a reader that skips the retired
+        /// name as a key of zenoh's, or reads it as the extension member.
+        #[test]
+        fn the_retired_member_is_refused_by_the_name_of_the_one_read() {
+            assert_eq!(RETIRED_MEMBER, "wz");
+            for document in [
+                r#"{ wz: { policies: { "key-set": "open" } } }"#,
+                r#"{ wz: {} }"#,
+                r#"{ wz: null }"#,
+                r#"{ zext: { policies: { "key-set": "open" } }, wz: {} }"#,
+            ] {
+                let tree = parse(document).unwrap();
+                let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
+                let refusal = only(&refusals);
+                assert_eq!(refusal.reason, Reason::RetiredMember, "{document}");
+                assert_eq!(
+                    format!("{refusal}"),
+                    "the document states the member `wz`, which is not read: the statements it \
+                     holds belong in the member `zext`",
+                    "{document}"
+                );
+            }
         }
 
         /// A refusal of the document's shape and one of its statements are both reported.
         #[test]
         fn a_refusal_of_shape_does_not_hide_one_of_a_statement() {
             let tree =
-                parse(r#"{ wz: { colour: "blue", policies: { "key-set": "ajar" } } }"#).unwrap();
+                parse(r#"{ zext: { colour: "blue", policies: { "key-set": "ajar" } } }"#).unwrap();
             let refusals = resolve_document(SessionPolicy::defaults(), &tree).unwrap_err();
             assert_eq!(refusals.found(), 2, "{refusals}");
             let reasons: Vec<_> = refusals.iter().map(|refusal| refusal.reason).collect();
@@ -3682,7 +3764,7 @@ mod tests {
                 return;
             };
             let text = format!(
-                r#"{{ wz: {{ policies: {{ "event-ring-full": "{}" }} }} }}"#,
+                r#"{{ zext: {{ policies: {{ "event-ring-full": "{}" }} }} }}"#,
                 id_of(ring)
             );
             let tree = parse(&text).unwrap();
@@ -3726,7 +3808,7 @@ mod tests {
                 return;
             };
             let text = format!(
-                r#"{{ wz: {{ policies: {{ "event-ring-full": "{}" }}, limits: {{ MAX_SUBSCRIPTIONS: 3 }} }} }}"#,
+                r#"{{ zext: {{ policies: {{ "event-ring-full": "{}" }}, limits: {{ MAX_SUBSCRIPTIONS: 3 }} }} }}"#,
                 id_of(ring)
             );
             let tree = parse(&text).unwrap();
@@ -3772,7 +3854,7 @@ mod tests {
             assert!(resolve_layers_under(base, unknown, named).is_err());
         }
 
-        /// A caller handed no document resolves as one handed a document with no `wz` member:
+        /// A caller handed no document resolves as one handed a document with no `zext` member:
         /// `resolve_under` and the reader answer the same snapshot, the same provenance and the
         /// same refusals, for no statement, a statement, a profile, a profile the build does not
         /// have, a limit, a limit the build does not have and a limit no machine reads. Turned red by a path that composes
@@ -3833,7 +3915,7 @@ mod tests {
         /// own would be.
         #[test]
         fn the_profile_the_overrides_name_is_read_below_the_document() {
-            let tree = parse(r#"{ wz: { policies: { "key-set": "open" } } }"#).unwrap();
+            let tree = parse(r#"{ zext: { policies: { "key-set": "open" } } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("upstream"),
                 statements: Stated::Read(&[]),
@@ -3855,7 +3937,7 @@ mod tests {
         /// the build has.
         #[test]
         fn a_profile_the_overrides_name_and_the_build_does_not_have_is_refused_as_theirs() {
-            let tree = parse(r#"{ wz: { profile: "upstream" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "upstream" } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("no-such-profile"),
                 statements: Stated::Read(&[]),
@@ -3884,7 +3966,7 @@ mod tests {
         /// that the build does not have is refused although the open names another.
         #[test]
         fn the_documents_unknown_profile_is_refused_though_the_overrides_name_one() {
-            let tree = parse(r#"{ wz: { profile: "no-such-profile" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "no-such-profile" } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("upstream"),
                 statements: Stated::Read(&[]),
@@ -3937,7 +4019,7 @@ mod tests {
         /// No override is the document alone: [`resolve_document`] is the same resolution.
         #[test]
         fn no_override_is_the_document_alone() {
-            let tree = parse(r#"{ wz: { policies: { "key-set": "open" } } }"#).unwrap();
+            let tree = parse(r#"{ zext: { policies: { "key-set": "open" } } }"#).unwrap();
             let base = SessionPolicy::defaults();
             assert_eq!(
                 resolve_document_under(base, &tree, Overrides::default()),
@@ -3950,7 +4032,7 @@ mod tests {
         #[test]
         fn a_document_that_states_a_policy_only_the_build_decides_is_refused() {
             let table = table_with(PolicyEntry::of::<BuildOnly>());
-            let tree = parse(r#"{ wz: { policies: { "test-build-only": "on" } } }"#).unwrap();
+            let tree = parse(r#"{ zext: { policies: { "test-build-only": "on" } } }"#).unwrap();
             let refusals = from_json5::resolve_document_in(
                 &table,
                 Base::session(SessionPolicy::defaults()),

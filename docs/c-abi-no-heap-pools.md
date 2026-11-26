@@ -56,7 +56,7 @@ Nothing here invents a second fixed-memory mechanism. What exists, and is reused
 - **The limits and their bindings** (`deploy/wz-config.toml`, `[[limit]]`): 69 limits, each with
   its storage (`capacity`, `quota`, `both`) and when it binds on each profile
   (`binding_heap`, `binding_fixed`: `build`, `open`, `live`, `none`); the document's
-  `wz/limits` states them by id (`crates/wz-session-core/src/policy_document.rs`).
+  `zext/limits` states them by id (`crates/wz-session-core/src/policy_document.rs`).
 - **The worst-memory rows** on the unlanded branch `poc-q4-worst-memory` (commits `f44a06b0a`,
   `3487efa2d`, `17dc471ea`; referred to, not merged here): `session_tables` computes rows per
   table from `SessionLimits` and each registry's `ROW_BYTES`, and `memory_basis` in
@@ -379,7 +379,7 @@ device-requirements door's facilities, TLS material.
   `CONFIG_DOCUMENT_DEPTH` deep (default 16; zenoh's reference document nests 7), and its `wz`
   member is written straight into rows of the build's ids (`DocumentRows`: the profile, a row per
   policy, a row per limit of a session), which `policy_document::resolve_layers_under` composes as
-  `resolve_document_under` composes a tree; `wz/key-ids` is read where it lies by the same lexer
+  `resolve_document_under` composes a tree; `zext/key-ids` is read where it lies by the same lexer
   into the rows of its entries (`shared_key_ids::read_member_in`), by the rules of the tree reader
   the other ABIs read it with, which a test holds the two to. The dictionary those rows make is
   the one an open is handed (`KeyIdsAtOpen`), shared by the session's links behind an `Arc` and
@@ -697,7 +697,7 @@ suites (C1co, Layer Z) unchanged.
     the text and a key past the rows refused with the config kept, a clone apart from its source,
     the doors keeping the build's own ids. Done since: the document read with no tree into rows, at most
     `CONFIG_DOCUMENT_DEPTH` deep (the `config-document` row expected from 4 to 1, the config
-    object; an estimate), `wz/key-ids` among it (`shared_key_ids::read_member_in`, held to the
+    object; an estimate), `zext/key-ids` among it (`shared_key_ids::read_member_in`, held to the
     tree reader's verdicts by a test). Left: the config's slot in the process pools (U9).
 16. **U15. The remaining planes, one commit set each.** Liveliness (`wz-capi-pico`
     `liveliness.rs`, `wz-capi-coop` `engine/liveliness.rs`), scouting (`scout.rs` of both,
@@ -775,7 +775,7 @@ unit that takes each away. The process pools are in every such library, with or 
 
 The product decisions this design needed are Q1 to Q4 of `docs/c-abi-engine-and-memory.md`
 section 7, decided by the owner on 2026-11-21: the objects made before any session live in
-process pools the library reserves at its first call (Q1); the document's `wz/limits` only
+process pools the library reserves at its first call (Q1); the document's `zext/limits` only
 lowers a build value, so an arena never exceeds what the build fixes (Q2); every limit that sizes
 a pool is finite in the pico preset, zenoh-pico's own constant where pico has one (Q3); and a full
 delivery lane holds the reader for reliable, blocking traffic and drops and counts the rest (Q4).
@@ -1138,7 +1138,7 @@ one of each.
 
 **The two limits.** `MAX_FACES` (default 1,000, zenoh's `transport/unicast/max_sessions`) and
 `MAX_ACCEPT_PENDING` (default 100, zenoh's `transport/unicast/accept_pending`) are limits of the
-session, bound at the open and read from its snapshot, so a document's `wz/limits` states them; the
+session, bound at the open and read from its snapshot, so a document's `zext/limits` states them; the
 arena holds the config's two numbers to the session's values under the build's, and a config or a
 document over either is refused by the limit's name (`ArenaRefused::Limit`), as a stage after the
 build only lowers the memory the build fixes. The pico interface states the session's values for a

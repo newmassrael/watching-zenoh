@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The `wz/limits` members every door that reads a document is held to, and what each kind of
+//! The `zext/limits` members every door that reads a document is held to, and what each kind of
 //! creator resolves each one to: the limits it selects, or the refusals it meets. A door's tests
 //! hand every case to the door and compare what the session it opens runs under, or the refusal,
 //! with the case, so that every door reads one member as
@@ -124,12 +124,12 @@ impl Expected {
     }
 }
 
-/// One case: a `wz/limits` member, and what each kind of creator resolves it to.
+/// One case: a `zext/limits` member, and what each kind of creator resolves it to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LimitCase {
     /// What the member states, as a failure names the case.
     pub name: &'static str,
-    /// The `wz/limits` member, as JSON5 text.
+    /// The `zext/limits` member, as JSON5 text.
     pub limits: String,
     /// What a creator that holds the limits of a session alone resolves the member to
     /// ([`Base::session`](crate::policy_document::Base::session)).
@@ -140,14 +140,18 @@ pub struct LimitCase {
 }
 
 impl LimitCase {
-    /// The `wz` member that states the case's `wz/limits` and nothing else.
-    pub fn wz_member(&self) -> String {
+    /// The `zext` member that states the case's `zext/limits` and nothing else.
+    pub fn ext_member(&self) -> String {
         format!("{{ limits: {} }}", self.limits)
     }
 
-    /// A document whose one member is the case's `wz` member.
+    /// A document whose one member is the case's `zext` member.
     pub fn document(&self) -> String {
-        format!("{{ wz: {} }}", self.wz_member())
+        format!(
+            "{{ {}: {} }}",
+            crate::policy_document::EXT_MEMBER,
+            self.ext_member()
+        )
     }
 }
 
@@ -286,7 +290,7 @@ pub fn cases() -> Vec<LimitCase> {
     cases
 }
 
-/// `value` as a member of `wz/limits` states it: the number, or `unbounded` as a string.
+/// `value` as a member of `zext/limits` states it: the number, or `unbounded` as a string.
 pub fn json5_value(value: LimitValue) -> String {
     match value {
         LimitValue::Unbounded => format!("\"{UNBOUNDED}\""),
@@ -556,7 +560,7 @@ mod tests {
         }
     }
 
-    /// A value is written as a member of `wz/limits` states it, which the reader reads back.
+    /// A value is written as a member of `zext/limits` states it, which the reader reads back.
     #[test]
     fn a_value_is_written_as_the_reader_reads_it() {
         assert_eq!(json5_value(LimitValue::Integer(16)), "16");

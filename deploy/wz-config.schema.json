@@ -5,7 +5,7 @@
   "description": "The policies and limits a document may state when a node opens or while it runs. A policy the build fixes, a limit only the build sizes, and a limit no machine of the build reads from a statement are not here.",
   "type": "object",
   "properties": {
-    "wz": {
+    "zext": {
       "type": "object",
       "properties": {
         "profile": {

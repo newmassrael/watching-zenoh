@@ -1028,7 +1028,7 @@ mod device_requires_tests {
     }
 }
 
-/// A document's `wz` member through this ABI as a C program writes it: the session the open makes
+/// A document's `zext` member through this ABI as a C program writes it: the session the open makes
 /// runs under the policies the member states, and a member the reader refuses fails the open with
 /// the code of a configuration refused for what it states. The session is a peer, which a build
 /// without `peer` refuses before the document's policies are looked at.
@@ -1072,12 +1072,12 @@ mod policy_document_tests {
     }
 
     /// Open a peer that listens on the loopback and scouts for nobody, read by
-    /// `zc_config_from_str` from a document whose `wz` member is `wz`: the code of the open, and
+    /// `zc_config_from_str` from a document whose `zext` member is `member`: the code of the open, and
     /// the session it made, a gravestone when it made none.
-    unsafe fn open_with(wz: &str) -> (ZResult, z_owned_session_t) {
+    unsafe fn open_with(member: &str) -> (ZResult, z_owned_session_t) {
         let document = CString::new(format!(
             r#"{{ mode: "peer", listen: {{ endpoints: ["tcp/127.0.0.1:{}"] }},
-                  scouting: {{ multicast: {{ enabled: false }} }}, wz: {wz} }}"#,
+                  scouting: {{ multicast: {{ enabled: false }} }}, zext: {member} }}"#,
             free_port()
         ))
         .unwrap();
@@ -1124,9 +1124,9 @@ mod policy_document_tests {
     }
 
     /// Open the same peer as [`open_with`], its config made by `z_config_default` and one
-    /// `zc_config_insert_json5` per key, the keys of `wz` after the peer's own, each insert
+    /// `zc_config_insert_json5` per key, the keys of `zext` after the peer's own, each insert
     /// answering `Z_OK`: the code of the open, and the session it made.
-    unsafe fn open_inserting(wz: &[(&str, &str)]) -> (ZResult, z_owned_session_t) {
+    unsafe fn open_inserting(member: &[(&str, &str)]) -> (ZResult, z_owned_session_t) {
         let listen = format!(r#"["tcp/127.0.0.1:{}"]"#, free_port());
         let peer = [
             ("mode", r#""peer""#),
@@ -1135,7 +1135,7 @@ mod policy_document_tests {
         ];
         let mut cfg: z_owned_config_t = std::mem::zeroed();
         assert_eq!(z_config_default(&mut cfg), Z_OK);
-        for (key, value) in peer.iter().chain(wz) {
+        for (key, value) in peer.iter().chain(member) {
             let (k, v) = (CString::new(*key).unwrap(), CString::new(*value).unwrap());
             assert_eq!(
                 zc_config_insert_json5(z_config_loan_mut(&mut cfg), k.as_ptr(), v.as_ptr()),
@@ -1152,7 +1152,7 @@ mod policy_document_tests {
         (code, session)
     }
 
-    /// A policy stated by inserting under `wz/policies` reaches the session the open makes, as
+    /// A policy stated by inserting under `zext/policies` reaches the session the open makes, as
     /// the same statement in a document does.
     #[test]
     fn a_session_runs_under_the_policies_its_inserts_state() {
@@ -1161,7 +1161,7 @@ mod policy_document_tests {
         // SAFETY: as above.
         unsafe {
             let (code, mut session) =
-                open_inserting(&[("wz/policies/subscriber-overload", quoted.as_str())]);
+                open_inserting(&[("zext/policies/subscriber-overload", quoted.as_str())]);
             assert_eq!(code, Z_OK);
             let handle = session_handle(z_session_loan(&session)).expect("the open made a session");
             assert_eq!(handle.session_policy().subscriber_overload().id(), value);
@@ -1211,8 +1211,8 @@ mod policy_document_tests {
         }
     }
 
-    /// The limits stated by inserting `wz/limits`, or each `wz/limits/<id>` on its own, reach the
-    /// session the open makes, for each member of the corpus every door is held to, as a node
+    /// The limits stated by inserting `zext/limits`, or each `zext/limits/<id>` on its own, reach
+    /// the session the open makes, for each member of the corpus every door is held to, as a node
     /// reads it: a limit the build does not have, a value that is no whole number, a value its
     /// domain leaves out and a limit only the build decides fail the open.
     #[test]
@@ -1224,7 +1224,7 @@ mod policy_document_tests {
             unsafe {
                 open_held_to(
                     case.name,
-                    &[("wz/limits", case.limits.as_str())],
+                    &[("zext/limits", case.limits.as_str())],
                     &case.node,
                 );
             }
@@ -1234,7 +1234,7 @@ mod policy_document_tests {
                 .iter()
                 .map(|(limit, value)| {
                     let value = wz_session_core::limit_corpus::json5_value(*value);
-                    (format!("wz/limits/{limit}"), value)
+                    (format!("zext/limits/{limit}"), value)
                 })
                 .collect();
             if by_key.is_empty() {
@@ -1256,11 +1256,11 @@ mod policy_document_tests {
     #[test]
     fn a_refused_insert_fails_the_open_as_a_refused_configuration() {
         for refused in [
-            ("wz/policies/subscriber-overload", r#""sometimes""#),
-            ("wz/policies/no-such-policy", r#""on""#),
-            ("wz/profile", r#""no-such-profile""#),
-            ("wz", r#""upstream""#),
-            ("wz/limits", "{ NO_SUCH_LIMIT: 1 }"),
+            ("zext/policies/subscriber-overload", r#""sometimes""#),
+            ("zext/policies/no-such-policy", r#""on""#),
+            ("zext/profile", r#""no-such-profile""#),
+            ("zext", r#""upstream""#),
+            ("zext/limits", "{ NO_SUCH_LIMIT: 1 }"),
         ] {
             // SAFETY: as above; the open makes no session, so there is none to close.
             unsafe {

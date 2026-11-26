@@ -519,11 +519,11 @@ PAYLOAD_SET = (
 # question of what an open would ask of the system (the target's header comment
 # states each op).
 CONFIG_OPS = (
-    b"\0" + b'{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }',
-    b"\0" + b'{ mode: "peer", wz: { profile: "upstream" } }',
-    b"\0" + b"{ wz: { limits: { MAX_SUBSCRIPTIONS: 1 } } }",
-    b"\0" + b"{ wz: { limits: { NO_SUCH_LIMIT: 1 } } }",
-    b"\0" + b"{ wz: {}, wz: {} }",
+    b"\0" + b'{ zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }',
+    b"\0" + b'{ mode: "peer", zext: { profile: "upstream" } }',
+    b"\0" + b"{ zext: { limits: { MAX_SUBSCRIPTIONS: 1 } } }",
+    b"\0" + b"{ zext: { limits: { NO_SUCH_LIMIT: 1 } } }",
+    b"\0" + b"{ zext: {}, zext: {} }",
     b"\0" + b"not a document",
     b"\x01" + b"key-set\0closed\0",
     b"\x01" + b"sn-resolution\0bits-16\0",
@@ -535,8 +535,8 @@ CONFIG_OPS = (
     b"\x03\x00",
     b"\x04" + b"tcp/192.0.2.7:7447\0declared\0",
     b"\x04" + b"\0shared\0",
-    b"\x05" + b"{ wz: { limits: { MESSAGE_CATALOG_ENTRIES: 4 } } }",
-    b"\x05" + b'{ wz: { profile: "upstream" } }',
+    b"\x05" + b"{ zext: { limits: { MESSAGE_CATALOG_ENTRIES: 4 } } }",
+    b"\x05" + b'{ zext: { profile: "upstream" } }',
     bytes([6 + 8]) + b"tcp/192.0.2.7:7447\0",
     bytes([6 + 16]) + b"udp/192.0.2.8:7447\0",
     bytes([6]) + b"peer\0",

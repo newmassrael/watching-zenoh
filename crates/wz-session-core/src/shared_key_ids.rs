@@ -50,10 +50,10 @@
 //! ([`crate::limits::SessionLimits`]) bounds how many entries an open may hand it
 //! ([`KeyIdsAtOpen::check_limits`]). An image with no allocator has no dictionary yet.
 //!
-//! A configuration document states it as `wz/key-ids`, read with the rest of the document's `wz`
-//! member (`crate::policy_document`), whose refusals it shares ([`crate::policy_document::KeyIdsReason`]).
-//! What an open's caller states beside the document is composed over it
-//! ([`KeyIdsAtOpen::over`]), as the policies are.
+//! A configuration document states it as `zext/key-ids`, read with the rest of the document's
+//! `zext` member (`crate::policy_document`), whose refusals it shares
+//! ([`crate::policy_document::KeyIdsReason`]). What an open's caller states beside the document is
+//! composed over it ([`KeyIdsAtOpen::over`]), as the policies are.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -159,7 +159,7 @@ impl core::error::Error for KeyIdsRefused {}
 
 /// One fault of a dictionary's entries, borrowed from them: the rules of a dictionary stated once,
 /// for [`KeyIds::new`], which refuses the first, and for the reader of a document's
-/// `wz/key-ids`, which reports each ([`read_document_member`]). How many entries a session may
+/// `zext/key-ids`, which reports each ([`read_document_member`]). How many entries a session may
 /// hold is not a rule of the entries but of the session's limits ([`KeyIds::within`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fault<'a> {
@@ -662,12 +662,12 @@ impl KeyIdsAtOpen {
     }
 }
 
-/// The two lists of `wz/key-ids`, by the paths a refusal names them with.
-const DICTIONARY: &str = "wz/key-ids/dictionary";
-const LINKS: &str = "wz/key-ids/links";
+/// The two lists of `zext/key-ids`, by the paths a refusal names them with.
+const DICTIONARY: &str = crate::ext_member!("key-ids/dictionary");
+const LINKS: &str = crate::ext_member!("key-ids/links");
 
-/// The key ids the `wz/key-ids` member `value` of a document states, each refusal of it pushed
-/// onto `refusals` as the document's ([`KeyIdsReason`]): the reader of the `wz` member
+/// The key ids the `zext/key-ids` member `value` of a document states, each refusal of it pushed
+/// onto `refusals` as the document's ([`KeyIdsReason`]): the reader of the `zext` member
 /// (`crate::policy_document`) calls it, so a refused part of the member refuses the document as
 /// a refused policy does. `in_domain` is the build's domain of `key-wire-form`
 /// ([`form_in_domain`]). What it returns is the caller's to drop when a refusal was pushed.
@@ -685,7 +685,7 @@ pub(crate) fn read_document_member<'a>(
         refusals.push(Refusal {
             layer: Origin::Document,
             reason: Reason::NotAnObject {
-                member: "wz/key-ids",
+                member: crate::ext_member!("key-ids"),
             },
         });
         return read;
@@ -727,7 +727,7 @@ fn refuse<'a>(refusals: &mut Refusals<'a>, reason: KeyIdsReason<'a>) {
     });
 }
 
-/// The dictionary `wz/key-ids/dictionary` states, or `None` when it states no entry or a
+/// The dictionary `zext/key-ids/dictionary` states, or `None` when it states no entry or a
 /// refusal of it was pushed.
 fn read_dictionary<'a>(value: &'a Json5Value, refusals: &mut Refusals<'a>) -> Option<SharedKeyIds> {
     let Json5Value::Array(items) = value else {
@@ -778,7 +778,7 @@ fn read_dictionary<'a>(value: &'a Json5Value, refusals: &mut Refusals<'a>) -> Op
         .map(alloc::sync::Arc::new)
 }
 
-/// The endpoints' forms `wz/key-ids/links` states, in its order.
+/// The endpoints' forms `zext/key-ids/links` states, in its order.
 fn read_links<'a>(
     value: &'a Json5Value,
     in_domain: &impl Fn(KeyWireForm) -> bool,
@@ -911,7 +911,7 @@ fn two_fields<'a>(
     }
 }
 
-/// A `wz/key-ids` member [`read_member_in`] refused. The door that reads a member this way
+/// A `zext/key-ids` member [`read_member_in`] refused. The door that reads a member this way
 /// answers one code for every refusal, so it carries no reason: the reasons are the tree reader's
 /// (`read_document_member`), whose rules it applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -923,7 +923,7 @@ impl From<Json5Error> for MemberRefused {
     }
 }
 
-/// The key ids the `wz/key-ids` member whose value `lex` is at states, read with no tree: the
+/// The key ids the `zext/key-ids` member whose value `lex` is at states, read with no tree: the
 /// member is walked once, each entry of its lists decoded into the row it names, and `lex` is left
 /// past the member. What it accepts and what it refuses are `read_document_member`'s rules,
 /// refused whole at the first: a shape that is not an object of lists of objects, a member or a
@@ -955,7 +955,7 @@ pub fn read_member_in(
     Ok(read)
 }
 
-/// `wz/key-ids/dictionary` at `lex`: `None` for a list of no entry, as the tree reader reads it.
+/// `zext/key-ids/dictionary` at `lex`: `None` for a list of no entry, as the tree reader reads it.
 fn lexed_dictionary(
     lex: &mut Lexer<'_>,
     depth: usize,
@@ -1007,7 +1007,7 @@ fn lexed_dictionary(
         .map_err(|_| MemberRefused)
 }
 
-/// `wz/key-ids/links` at `lex`, in its order.
+/// `zext/key-ids/links` at `lex`, in its order.
 fn lexed_links(
     lex: &mut Lexer<'_>,
     depth: usize,
@@ -2115,7 +2115,7 @@ mod document_tests {
     use alloc::sync::Arc;
     use alloc::vec;
 
-    /// The key-id refusals the reader of the `wz` member found in `tree`, in their order; a
+    /// The key-id refusals the reader of the `zext` member found in `tree`, in their order; a
     /// refusal of another kind fails the test.
     fn key_id_reasons(tree: &Json5Value) -> Vec<KeyIdsReason<'_>> {
         statements_from_json5(tree)
@@ -2128,9 +2128,9 @@ mod document_tests {
             .collect()
     }
 
-    /// `member` as the `wz/key-ids` of a document.
+    /// `member` as the `zext/key-ids` of a document.
     fn document(member: &str) -> Json5Value {
-        parse(&format!(r#"{{ wz: {{ "key-ids": {member} }} }}"#)).expect("JSON5")
+        parse(&format!(r#"{{ zext: {{ "key-ids": {member} }} }}"#)).expect("JSON5")
     }
 
     fn dictionary_of(entries: &[(ExprId, &str)]) -> Option<SharedKeyIds> {
@@ -2182,7 +2182,7 @@ mod document_tests {
                 .key_ids;
             assert_eq!(read, KeyIdsAtOpen::default(), "{member}");
         }
-        let tree = parse(r#"{ wz: { policies: {} } }"#).unwrap();
+        let tree = parse(r#"{ zext: { policies: {} } }"#).unwrap();
         assert_eq!(
             statements_from_json5(&tree).expect("well formed").key_ids,
             KeyIdsAtOpen::default(),
@@ -2244,7 +2244,7 @@ mod document_tests {
             .collect()
     }
 
-    /// A `wz/key-ids` member whose dictionary names ids `1..=count`.
+    /// A `zext/key-ids` member whose dictionary names ids `1..=count`.
     fn dictionary_member(count: usize) -> String {
         let entries: Vec<String> = (1..=count)
             .map(|id| format!(r#"{{ id: {id}, key: "lab/k{id}" }}"#))
@@ -2283,7 +2283,7 @@ mod document_tests {
     fn a_dictionary_over_the_limit_its_document_states_is_refused_by_name() {
         let stated = |limit: usize, count: usize| {
             parse(&format!(
-                r#"{{ wz: {{ limits: {{ MAX_SHARED_KEY_IDS: {limit} }}, "key-ids": {} }} }}"#,
+                r#"{{ zext: {{ limits: {{ MAX_SHARED_KEY_IDS: {limit} }}, "key-ids": {} }} }}"#,
                 dictionary_member(count)
             ))
             .expect("JSON5")
@@ -2448,7 +2448,7 @@ mod document_tests {
         }
     }
 
-    /// Every refusal the reader of the `wz` member found in `tree`, in their order.
+    /// Every refusal the reader of the `zext` member found in `tree`, in their order.
     fn reasons_of(tree: &Json5Value) -> Vec<Reason<'_>> {
         statements_from_json5(tree)
             .expect_err("refused")
@@ -2459,11 +2459,11 @@ mod document_tests {
 
     #[test]
     fn a_member_stated_twice_or_of_the_wrong_kind_is_refused() {
-        let twice = parse(r#"{ wz: { "key-ids": {}, "key-ids": {} } }"#).unwrap();
+        let twice = parse(r#"{ zext: { "key-ids": {}, "key-ids": {} } }"#).unwrap();
         assert_eq!(
             reasons_of(&twice),
             [Reason::MemberStatedTwice {
-                member: "wz/key-ids"
+                member: "zext/key-ids"
             }]
         );
         let list_twice = document("{ dictionary: [], dictionary: [] }");
@@ -2475,7 +2475,7 @@ mod document_tests {
         assert_eq!(
             reasons_of(&not_an_object),
             [Reason::NotAnObject {
-                member: "wz/key-ids"
+                member: "zext/key-ids"
             }]
         );
     }
@@ -2485,7 +2485,7 @@ mod document_tests {
     #[test]
     fn a_refused_member_refuses_the_document_beside_the_policies() {
         let tree = parse(
-            r#"{ wz: { policies: { "no-such-policy": "on" },
+            r#"{ zext: { policies: { "no-such-policy": "on" },
                        "key-ids": { dictionary: [ { id: 0, key: "lab/a" } ] } } }"#,
         )
         .unwrap();
@@ -2509,7 +2509,7 @@ mod document_tests {
         );
         assert_eq!(
             format!("{}", refusals.iter().next().expect("one")),
-            "the document states id 0 in entry 0 of `wz/key-ids/dictionary`, and no key may \
+            "the document states id 0 in entry 0 of `zext/key-ids/dictionary`, and no key may \
              have it"
         );
     }

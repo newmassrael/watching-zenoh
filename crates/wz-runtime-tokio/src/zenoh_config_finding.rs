@@ -61,8 +61,8 @@ const KEY_ACCEPT_TIMEOUT: &str = "transport/unicast/accept_timeout";
 const KEY_ACCEPT_PENDING: &str = "transport/unicast/accept_pending";
 /// `transport/unicast/max_links`.
 const KEY_MAX_LINKS: &str = "transport/unicast/max_links";
-/// `wz`, the member of wz's own statements about the node; not a key of zenoh's.
-const KEY_WZ: &str = crate::zenoh_config::WZ_MEMBER;
+/// `zext`, the member of the extension statements about the node; not a key of zenoh's.
+const KEY_EXT: &str = crate::policy_document::EXT_MEMBER;
 
 /// One place a finding is about: a config key path, in a node.
 ///
@@ -212,7 +212,7 @@ impl ConfigIngestError {
             | ConfigIngestError::NotInBuild { path, .. } => Some(*path),
             ConfigIngestError::UnknownMode { .. } => Some(KEY_MODE),
             ConfigIngestError::UnknownKey { path } => Some(path.as_str()),
-            ConfigIngestError::PoliciesRefused { .. } => Some(KEY_WZ),
+            ConfigIngestError::PoliciesRefused { .. } => Some(KEY_EXT),
             ConfigIngestError::ConnectPastLimit { .. } => Some(EndpointList::Connect.key()),
         };
         let keys: Vec<&str> = key.into_iter().collect();
@@ -626,9 +626,9 @@ mod tests {
             ("[]", "NotAnObject", None),
             ("{", "Syntax", None),
             (
-                r#"{ "wz": { "policies": { "key-set": "ajar" } } }"#,
+                r#"{ "zext": { "policies": { "key-set": "ajar" } } }"#,
                 "PoliciesRefused",
-                Some(KEY_WZ),
+                Some(KEY_EXT),
             ),
         ] {
             let error = ZenohNodeConfig::from_json5(document).unwrap_err();

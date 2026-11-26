@@ -267,7 +267,7 @@ pub mod process_limits;
 // the reader of a JSON5 tree needs `alloc`. Documented from inside.
 pub mod policy_document;
 
-// The `wz/limits` members every door that reads a document is held to, and what each kind of
+// The `zext/limits` members every door that reads a document is held to, and what each kind of
 // creator resolves each one to: support for the tests of the doors, which live in other crates.
 // Needs `alloc`. Documented from inside.
 #[cfg(feature = "alloc")]

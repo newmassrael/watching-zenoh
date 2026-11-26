@@ -685,7 +685,7 @@ impl Engine {
         };
         let document = tokio_engine::document_of(&expanded, role, &zid)?;
         tokio_engine::refuse_repeated_ids(&document)?;
-        // The document is zenoh's configuration alone: the `wz` member was resolved with the
+        // The document is zenoh's configuration alone: the `zext` member was resolved with the
         // open's own layer before this, and the plan runs under those snapshots.
         let plan = OpenPlan::resolve_under(role, stated, Some(&document.to_string()), |_| snapshot)
             .map_err(tokio_engine::refusal_error)?;
@@ -5623,7 +5623,7 @@ impl RuntimeCore {
 #[cfg(feature = "open-policies")]
 impl Session {
     /// The policies the session's node was opened under, and the layer each value came from: the
-    /// build defaults, a profile, the configuration's `wz` member or the open's own statements
+    /// build defaults, a profile, the configuration's `zext` member or the open's own statements
     /// ([`Config::state_policy`](crate::config::Config::state_policy)).
     pub fn resolved_policies(&self) -> crate::config::Resolved {
         self.0.policies
@@ -7299,18 +7299,18 @@ mod tests {
             )
     }
 
-    /// The peer `peer` makes, with a `wz` member that states `subscriber-overload`.
+    /// The peer `peer` makes, with a `zext` member that states `subscriber-overload`.
     fn peer_stating_overload(id: &str, value: &str) -> Config {
         Config::from_json5(&format!(
             r#"{{ id: "{id}", mode: "peer",
                   listen: {{ endpoints: ["tcp/127.0.0.1:0"] }},
                   scouting: {{ multicast: {{ enabled: false }} }},
-                  wz: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#
+                  zext: {{ policies: {{ "subscriber-overload": "{value}" }} }} }}"#
         ))
         .expect("the member is held beside zenoh's configuration")
     }
 
-    /// The `wz` member of the configuration is what the session runs under, and a configuration
+    /// The `zext` member of the configuration is what the session runs under, and a configuration
     /// with none runs under the build defaults.
     #[test]
     fn a_session_runs_under_the_policies_its_wz_member_states() {
@@ -7344,11 +7344,11 @@ mod tests {
             r#"{ id: "c8a1b1", mode: "peer",
                  listen: { endpoints: ["tcp/127.0.0.1:0"] },
                  scouting: { multicast: { enabled: false } },
-                 wz: { profile: "no-such-profile", policies: { "key-set": "ajar" } } }"#,
+                 zext: { profile: "no-such-profile", policies: { "key-set": "ajar" } } }"#,
         )
         .expect("the member is judged at the open, not when it is read");
         let error = open(config).wait().map(|_| ()).unwrap_err().to_string();
-        assert!(error.contains("the `wz` member is refused"), "{error}");
+        assert!(error.contains("the `zext` member is refused"), "{error}");
         assert!(
             error.contains("names the profile `no-such-profile`"),
             "{error}"

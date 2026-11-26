@@ -81,7 +81,7 @@
 # The fixed profile decides the capacity of a limit that is `both` at the build, or at the open
 # where the storage is lent from the memory a session reserves when it opens (`bounded::Lent`,
 # docs/c-abi-no-heap-pools.md): the build's value is then the ceiling, and a document's
-# `wz/limits` may only lower it.
+# `zext/limits` may only lower it.
 #
 # `read` says where the machines of the limit's scope read it. `snapshot`: from the snapshot of
 # the limits their creator resolved and hands them, so a value a document states reaches them.
@@ -99,7 +99,7 @@
 # what upstream holds instead. The zenoh-pico counterpart is not stated here: it is the value switch
 # whose `[[upstream_switch]]` row anchors to the limit (`limit:<ID>`), written there once. A
 # counterpart is a comparison, not a second way to set the limit: a document sets a limit only under
-# `wz/limits`, and an upstream key keeps its own meaning.
+# `zext/limits`, and an upstream key keeps its own meaning.
 #
 # `[limit.pico_preset]` is for a limit zenoh-pico bounds by no value switch of its own, which wz
 # sizes memory by: `value` is what the pico preset holds instead of `default`, which sizes a host's
@@ -1594,14 +1594,14 @@ kconfig = "WZ_CAP_SHARED_KEY_IDS"
 # key-wire-form policy that use it only when a deployment asks for them. The pico ABI's doors are
 # zext_* and part of its unstable surface, as its other wz-own doors are; both engines hold the
 # dictionary and name each link's keys in that link's form. A configuration document states the
-# same in its wz/key-ids member, which the zenoh-c ABI reads from its config and the pico ABI from
+# same in its zext/key-ids member, which the zenoh-c ABI reads from its config and the pico ABI from
 # zext_config_document; the doors go over the document. The zenoh-c ABI adds no door and no type.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh", "zenoh-c", "zenoh-pico"]
 abis = ["core", "pico", "c"]
 implies = ["unstable-api"]
-help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the wz/key-ids member of a configuration document, and zext_config_key_ids and zext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
+help = "Key ids every node of a deployment shares: a dictionary of key expressions and their ids given at open, and the key-wire form of one endpoint stated apart (the zext/key-ids member of a configuration document, and zext_config_key_ids and zext_config_key_wire_form_for, wz-own doors over it), so a put, a query, a reply or a declaration names its key by the id with no declaration first, as the key-wire-form policy says."
 
 [[capability]]
 id = "rx-callback-offload"
@@ -1665,14 +1665,14 @@ kconfig = "WZ_CAP_CONFIG_DOCUMENT"
 # Off by default: zenoh-pico's config is a set of numbered keys and reads no document, and the door
 # links a JSON5 reader. A pico build with config-policy states its policies through
 # zext_config_policy and zext_config_profile; this one hands it the zenoh JSON5 document the
-# zenoh-c ABI reads, whose wz member states the policies of both ABIs alike, resolved by the same
+# zenoh-c ABI reads, whose zext member states the policies of both ABIs alike, resolved by the same
 # open, so it implies config-policy.
 default = "off"
 os_needs = []
 upstream_off = ["zenoh-pico"]
 abis = ["core", "pico"]
 implies = ["config-policy"]
-help = "zext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its wz member states the session's profile and policies (wz-own)."
+help = "zext_config_document: a pico config is handed the zenoh JSON5 document the zenoh-c ABI reads, and its zext member states the session's profile and policies (wz-own)."
 
 [[capability]]
 id = "device-requires"
@@ -3342,7 +3342,7 @@ How deep the zenoh JSON5 document a config of the pico C ABI is handed
 (zext_config_document) may nest, the outermost object being 1: the reader
 walks the document keeping no tree, and this bounds the values it steps over.
 A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
-keeps what it held. From 3, which the wz member's policies and limits take.
+keeps what it held. From 3, which the zext member's policies and limits take.
 '''
 
 [limit.upstream]
@@ -6301,7 +6301,7 @@ How a node makes its zid when the configuration states none. `random` draws all
 sixteen bytes, as upstream does. `address-ports` derives the first eight from
 where the node is reachable and draws the other eight: bytes 0 to 3 are the
 node's own IPv4 address, the one its configuration states as
-`wz/owned-address` or else the address of the first listen endpoint that binds
+`zext/owned-address` or else the address of the first listen endpoint that binds
 an address of the node, bytes 4 and 5 the lowest port of its tcp listeners and
 bytes 6 and 7 the lowest port of its udp listeners, each little-endian and 0
 for a node with no listener of that protocol. A wildcard, multicast or
@@ -6400,7 +6400,7 @@ that does not hold the same dictionary cannot read what `shared` sends, so both
 ends of the link must hold it. Every node that holds the dictionary reads an id
 only the dictionary names, whatever its own value. The value is the session's,
 and an endpoint the configuration dials or listens on may be stated a value of
-its own (wz/key-ids/links, zext_config_key_wire_form_for), which every link
+its own (zext/key-ids/links, zext_config_key_wire_form_for), which every link
 to or from that endpoint takes. A session opened with `shared`, for itself or an
 endpoint, and no dictionary is refused, and so is one whose value is not
 `declared` in a build without the capability, and a router node, whose faces
@@ -6433,12 +6433,12 @@ does.
 '''
 
 # A profile is a named set of policy values a run-time document starts from: the document names it
-# by `wz/profile`, and its own `wz/policies` override the profile's values. A profile states its
+# by `zext/profile`, and its own `zext/policies` override the profile's values. A profile states its
 # values in a `[profile.policies]` table, policy id = value; each value is one of its policy's, and
 # no policy that only the build decides is in a profile. Whether the build's domain allows a value
 # is decided when a document is applied: a profile whose value a build leaves out is refused by
 # that build. Each is generated into `PROFILES` (crates/wz-session-core/src/policy_generated.rs)
-# and into the enum of `wz/profile` in the schema.
+# and into the enum of `zext/profile` in the schema.
 #
 # `upstream` states every policy a document may state at its `default`, upstream's behaviour, so a
 # document that names it behaves as the original even where the build states other defaults

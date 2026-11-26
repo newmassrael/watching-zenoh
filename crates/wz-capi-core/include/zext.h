@@ -47,7 +47,7 @@ z_result_t zext_config_device_requires(const z_loaned_config_t *config,
 /* The policies of the session z_open opens from this config, stated from
  * code. The open composes them, lowest first: the build defaults, the
  * profile (zext_config_profile's, else the document's), the document's
- * wz/policies, then zext_config_policy's statements. The first two doors
+ * zext/policies, then zext_config_policy's statements. The first two doors
  * are in a build with the config-policy capability (on in a build that
  * names nothing, off in the zenoh-pico preset, whose sessions run under the
  * build's policies and limits), zext_config_document in a build with the
@@ -56,27 +56,29 @@ z_result_t zext_config_device_requires(const z_loaned_config_t *config,
  *
  * Each call is checked at once against the build, as the open will compose
  * it: a policy, value or profile the build does not have, a value the
- * build's domain leaves out, a policy only the build decides, and a document
- * whose wz member has a refused shape answer _Z_ERR_CONFIG_INVALID_VALUE
- * and leave the config as it was. A null argument answers _Z_ERR_NULL.
+ * build's domain leaves out, a policy only the build decides, a document
+ * whose zext member has a refused shape, and a document that states a
+ * member wz, the name the zext member had before, answer
+ * _Z_ERR_CONFIG_INVALID_VALUE and leave the config as it was. A null
+ * argument answers _Z_ERR_NULL.
  *
  * zext_config_policy states that `policy` takes `value` (both by the
  * declaration's ids); a second statement of the policy replaces the first.
  * zext_config_profile names the profile the session starts from, in place
  * of the one the document names. zext_config_document hands the config a
- * zenoh JSON5 document of which only the wz member is read, so the document
+ * zenoh JSON5 document of which only the zext member is read, so the document
  * a zenoh-c program opens with configures these policies alike; a second
  * call replaces the first. In a build with the shared-key-ids capability the
- * member's wz/key-ids states the key ids every node shares (dictionary, a
+ * member's zext/key-ids states the key ids every node shares (dictionary, a
  * list of { id, key }, and links, a list of { locator, form }), under what
  * zext_config_key_ids and zext_config_key_wire_form_for state; a build
- * without it refuses wz/key-ids, and a refused part of it refuses the
- * document, as a refused policy does. The member's wz/limits states the
+ * without it refuses zext/key-ids, and a refused part of it refuses the
+ * document, as a refused policy does. The member's zext/limits states the
  * limits of the session by their ids, each a whole number or "unbounded";
  * a limit the build does not have, a limit only the build decides, a limit
  * of a runtime and a value the build's domain leaves out refuse the
  * document, and the session opens under the limits it states. The member's
- * wz/owned-address states the node's own IPv4 address ("192.0.2.7"),
+ * zext/owned-address states the node's own IPv4 address ("192.0.2.7"),
  * which heads the zid the session derives under zid-derivation =
  * address-ports in place of the address of a listener, so a session that
  * only dials derives one; text that is no IPv4 address of a node refuses
@@ -110,7 +112,7 @@ z_result_t zext_config_document(z_loaned_config_t *config,
 #define ZEXT_CONFIG_LIMITS_KEY ((uint8_t)0xC0)
 
 /* The limits of the process's runtime, from a zenoh JSON5 document of which
- * only the wz member's wz/limits is read: the limits of the machines the
+ * only the zext member's zext/limits is read: the limits of the machines the
  * process makes apart from any session, its supervisor
  * (SUPERVISION_CHECKPOINTS), its message catalogs (MESSAGE_CATALOG_ENTRIES)
  * and its reception supervisors (E2E_SUPERVISED_STREAMS). Each is at most the
@@ -126,11 +128,12 @@ z_result_t zext_config_document(z_loaned_config_t *config,
  *
  * Text that is no JSON5 object, a document nested deeper than
  * CONFIG_DOCUMENT_DEPTH (the outermost object being 1), as
- * zext_config_document refuses one, a wz member of a refused shape, a
- * profile, a policy, key ids, a limit of a session, a limit the build does
- * not have or decides alone, and a value the build's domain leaves out or
- * that is over the build's value answer _Z_ERR_CONFIG_INVALID_VALUE, whenever
- * the call comes, and change nothing; a NULL json5 answers _Z_ERR_NULL. */
+ * zext_config_document refuses one, a zext member of a refused shape, a
+ * member wz, a profile, a policy, key ids, a limit of a session, a limit
+ * the build does not have or decides alone, and a value the build's domain
+ * leaves out or that is over the build's value answer
+ * _Z_ERR_CONFIG_INVALID_VALUE, whenever the call comes, and change nothing;
+ * a NULL json5 answers _Z_ERR_NULL. */
 z_result_t zext_runtime_limits_document(const char *json5);
 
 /* A clock the program registers, which z_timestamp_new then stamps with in
@@ -1609,7 +1612,7 @@ const char *zext_conformance_digest(void);
  * rest, whichever is cheaper than the whole key). A count of 0 takes back a
  * dictionary handed before. Every node of the deployment must hand the same
  * dictionary; a peer without it cannot read a key named by one of its ids.
- * The config's document may state the same as wz/key-ids
+ * The config's document may state the same as zext/key-ids
  * (zext_config_document): a dictionary handed here replaces the
  * document's, a form stated for an endpoint here replaces the document's
  * for that endpoint, and what is not stated here is the document's.
@@ -1625,7 +1628,7 @@ const char *zext_conformance_digest(void);
  * the form stated for one of its endpoints, is shared and whose config
  * states no dictionary, and with Z_ERR_OVERFLOW a dictionary of more entries
  * than the session's MAX_SHARED_KEY_IDS: the build's, or the value the
- * config's document states under wz/limits. */
+ * config's document states under zext/limits. */
 z_result_t zext_config_key_ids(z_loaned_config_t *config,
                                  const uint16_t *ids,
                                  const char *const *keys, size_t count);

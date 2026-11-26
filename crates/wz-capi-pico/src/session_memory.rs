@@ -7,7 +7,7 @@
 //! # The rows
 //!
 //! Every row is read from the session's own snapshot of its limits: the one its open resolved from
-//! the config, a document's `wz/limits` included, and handed the engine. The session's tables are
+//! the config, a document's `zext/limits` included, and handed the engine. The session's tables are
 //! the session core's rows (`wz_session_core::session_memory`) for that snapshot. This ABI adds
 //! what it holds itself and what each link of the session holds, each from the value the open
 //! handed the engine:

@@ -8,7 +8,7 @@
 //!
 //! Three pairs of sessions are open at once in this one process, each a listening session and a
 //! dialling one joined through a relay in this test: one pair states `PICO_UNICAST_BATCH_BYTES`
-//! as `SMALL` in the `wz/limits` of both configs' documents, one as `LARGE`, and one states
+//! as `SMALL` in the `zext/limits` of both configs' documents, one as `LARGE`, and one states
 //! nothing and runs on the build's value. The relay reads the stream link's framing, two
 //! little-endian length bytes before each batch, so what is held is the bytes on the wire and
 //! not a number a session reports about itself. Each dialling session opens a batching window and
@@ -86,9 +86,9 @@ const FLAG_SIZE: u8 = 0x40;
 /// The batch size an InitSyn without `S` stands for: zenoh's protocol default.
 const PROTOCOL_DEFAULT_BATCH: u16 = 65535;
 
-/// The document whose `wz/limits` states `batch` as the session's batch size.
+/// The document whose `zext/limits` states `batch` as the session's batch size.
 fn document(batch: usize) -> String {
-    format!(r#"{{"wz": {{"limits": {{"PICO_UNICAST_BATCH_BYTES": {batch}}}}}}}"#)
+    format!(r#"{{"zext": {{"limits": {{"PICO_UNICAST_BATCH_BYTES": {batch}}}}}}}"#)
 }
 
 /// Whether the build lets a later stage state `batch` as the session's batch size: a build that

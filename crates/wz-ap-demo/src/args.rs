@@ -2836,7 +2836,7 @@ pub(crate) struct StockConfigExpansion {
     /// know to read. Carried out as a value rather than printed inside the
     /// expansion for the reason `ignored` is: a test can assert on a value.
     pub(crate) mode_unstated: Option<wz::runtime_tokio::zenoh_config::UnstatedMode>,
-    /// The node's policies as the file's `wz` member resolved them over the build defaults, and
+    /// The node's policies as the file's `zext` member resolved them over the build defaults, and
     /// where each value came from: the node's snapshot, which `main` hands its tuning
     /// ([`TransportTuning::from_argv_under`]) and through it every session, router and socket of
     /// the node. Every value from the build defaults when the file has no
@@ -2901,7 +2901,7 @@ impl StockConfigExpansion {
                 ),
             ));
         }
-        // The policies the file's `wz` member chose, each with the layer it came from; none is
+        // The policies the file's `zext` member chose, each with the layer it came from; none is
         // printed when every value is the build's own.
         let chosen = self.chosen_policies();
         if !chosen.is_empty() {
@@ -2916,7 +2916,7 @@ impl StockConfigExpansion {
         out
     }
 
-    /// Each policy the file's `wz` member chose, as `<policy> = <value> (<layer>)`, in the order
+    /// Each policy the file's `zext` member chose, as `<policy> = <value> (<layer>)`, in the order
     /// of the build's policies; a policy left at the build default is not one of them.
     pub(crate) fn chosen_policies(&self) -> Vec<String> {
         use wz::runtime_tokio::policy_document::Origin;
@@ -5909,7 +5909,7 @@ mod stock_config_tests {
         // A file that lights up every axis at once: honoured keys that reach a
         // flag and ones that do not, an unhonoured key, a key stated only for
         // other modes, and no `mode` at all so the silence axis fires too.
-        // The `wz` member chooses a policy at the build's own value, which every
+        // The `zext` member chooses a policy at the build's own value, which every
         // build's domain allows, so the policies axis has a line in every build.
         let overload = wz::runtime_tokio::policy::SessionPolicy::defaults()
             .subscriber_overload()
@@ -5925,7 +5925,7 @@ mod stock_config_tests {
                      timestamping: {{ enabled: {{ peer: true }} }},
                      transport: {{ link: {{ tx: {{ threads: 8 }} }} }},
                      plugins: {{}},
-                     wz: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
+                     zext: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
             ),
         )
         .unwrap();
@@ -6035,7 +6035,7 @@ mod stock_config_tests {
         } = out;
     }
 
-    /// The file's `wz` member is the node's snapshot, each chosen value reported with its layer;
+    /// The file's `zext` member is the node's snapshot, each chosen value reported with its layer;
     /// a file without it leaves the build defaults and prints no policies line, and a member the
     /// reader refuses fails the expansion naming the refusal, so the node never starts on it.
     #[test]
@@ -6061,7 +6061,7 @@ mod stock_config_tests {
             &["--config", "z.json5"],
             &format!(
                 r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
-                     wz: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
+                     zext: {{ policies: {{ "subscriber-overload": "{overload}" }} }} }}"#
             ),
         )
         .unwrap();
@@ -6073,17 +6073,17 @@ mod stock_config_tests {
         let refused = expand(
             &["--config", "z.json5"],
             r#"{ connect: { endpoints: ["tcp/r:7447"] },
-                 wz: { policies: { "key-set": "ajar" } } }"#,
+                 zext: { policies: { "key-set": "ajar" } } }"#,
         )
         .unwrap_err();
         assert!(
-            refused.starts_with("--config: z.json5: the `wz` member is refused: "),
+            refused.starts_with("--config: z.json5: the `zext` member is refused: "),
             "{refused}"
         );
         assert!(refused.contains("`key-set` = `ajar`"), "{refused}");
     }
 
-    /// The file's `wz` member states the node's runtime limits too, and the tuning `main` reads
+    /// The file's `zext` member states the node's runtime limits too, and the tuning `main` reads
     /// hands them to the machines the node makes for itself; a file that states none, and a node
     /// no file describes, run under the build defaults.
     #[test]
@@ -6115,7 +6115,7 @@ mod stock_config_tests {
             &["--config", "z.json5"],
             &format!(
                 r#"{{ connect: {{ endpoints: ["tcp/r:7447"] }},
-                     wz: {{ limits: {{ SNAPSHOT_PERIOD_MS: {value} }} }} }}"#
+                     zext: {{ limits: {{ SNAPSHOT_PERIOD_MS: {value} }} }} }}"#
             ),
         )
         .unwrap();
@@ -6126,7 +6126,7 @@ mod stock_config_tests {
         assert_eq!(tuning.runtime_limits.snapshot_period_ms(), value);
     }
 
-    /// The runtime limits a file's `wz/limits` states reach the node: the expansion carries them,
+    /// The runtime limits a file's `zext/limits` states reach the node: the expansion carries them,
     /// the tuning `main` reads under them holds them for every dial, and a connect list longer
     /// than a stated `MAX_STATIC_CONNECT` is refused by the limit's name.
     #[test]
@@ -6135,14 +6135,14 @@ mod stock_config_tests {
         let stated = expand(
             &["--config", "z.json5"],
             r#"{ connect: { endpoints: ["tcp/r:7447"] },
-                 wz: { limits: { MAX_LOCATOR_LEN: 32, MAX_STATIC_CONNECT: 1 } } }"#,
+                 zext: { limits: { MAX_LOCATOR_LEN: 32, MAX_STATIC_CONNECT: 1 } } }"#,
         );
         let stated = match stated {
             Ok(stated) => stated,
             // A build that keeps each limit at the build's value refuses the statement itself.
             Err(refused) => {
                 assert!(
-                    refused.starts_with("--config: z.json5: the `wz` member is refused: "),
+                    refused.starts_with("--config: z.json5: the `zext` member is refused: "),
                     "{refused}"
                 );
                 return;
@@ -6162,7 +6162,7 @@ mod stock_config_tests {
         let refused = expand(
             &["--config", "z.json5"],
             r#"{ connect: { endpoints: ["tcp/r:7447", "tcp/s:7447"] },
-                 wz: { limits: { MAX_STATIC_CONNECT: 1 } } }"#,
+                 zext: { limits: { MAX_STATIC_CONNECT: 1 } } }"#,
         )
         .unwrap_err();
         assert!(refused.starts_with("--config: z.json5: "), "{refused}");
@@ -10952,15 +10952,15 @@ pub(crate) struct TransportTuning {
     /// handed it, and the defaults above that a policy decides are taken from it.
     pub(crate) policy: wz::runtime_tokio::policy::SessionPolicy,
     /// The node's runtime limits: the build's ([`resolve_runtime_limits`]), or those a `--config`
-    /// file's `wz/limits` states (`StockConfigExpansion::policies`), which `main` hands the tuning
-    /// ([`Self::with_runtime_limits`]). The machines the node makes for itself, its clock and its
-    /// resource snapshot, and every dial config it makes are handed them.
+    /// file's `zext/limits` states (`StockConfigExpansion::policies`), which `main` hands the
+    /// tuning ([`Self::with_runtime_limits`]). The machines the node makes for itself, its clock
+    /// and its resource snapshot, and every dial config it makes are handed them.
     pub(crate) runtime_limits: wz::runtime_tokio::limits::RuntimeLimits,
 }
 
 /// The snapshot of the policies of a demo node no `--config` file describes, and of the sessions
-/// a sessions document runs, which has no `wz` member: the build defaults. A node a file
-/// describes runs under the snapshot the file's `wz` member resolved
+/// a sessions document runs, which has no `zext` member: the build defaults. A node a file
+/// describes runs under the snapshot the file's `zext` member resolved
 /// (`StockConfigExpansion::policies`), which `main` hands its tuning
 /// ([`TransportTuning::from_argv_under`]) and its scouting sockets.
 pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
@@ -10968,7 +10968,7 @@ pub(crate) fn resolve_policy() -> wz::runtime_tokio::policy::SessionPolicy {
 }
 
 /// The runtime limits of a demo node no `--config` file describes: the build defaults. A node a
-/// file describes runs under the limits the file's `wz` member resolved
+/// file describes runs under the limits the file's `zext` member resolved
 /// (`StockConfigExpansion::policies`), which `main` hands its tuning
 /// ([`TransportTuning::with_runtime_limits`]).
 pub(crate) fn resolve_runtime_limits() -> wz::runtime_tokio::limits::RuntimeLimits {

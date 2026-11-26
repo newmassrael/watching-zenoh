@@ -66,7 +66,7 @@ Every figure here is a committed reading or a reading a gate prints; an estimate
   one cooperative engine per core with its faces partitioned among them (thread-per-core, nothing
   shared).
 - **E3. No heap in the C ABI presets.** All memory a session uses is reserved when it opens, sized
-  from the limits it opens under (the configuration document's `wz/limits` over the build's
+  from the limits it opens under (the configuration document's `zext/limits` over the build's
   limits, which it may only lower: decision Q2), so no allocation happens after open: the
   rule of the functional-safety coding standards that nothing is allocated after
   initialisation. An exhausted pool answers with the code pico
@@ -140,7 +140,7 @@ What is lost, stated:
   the pico preset (phase P3).
 - **What the deployer must configure.** Every limit of `docs/c-abi-no-heap-pools.md` section 4
   that sizes a pool, either in the build (Kconfig, the defaults of `deploy/wz-config.toml`) or in
-  the configuration document's `wz/limits`, within the build's ceiling where the limit has one.
+  the configuration document's `zext/limits`, within the build's ceiling where the limit has one.
   The new limits that section names are added to `deploy/wz-config.toml` by the units that need
   them.
 
@@ -299,7 +299,7 @@ The questions this record left open, decided. Each keeps its number, so a refere
   (`zext_object_pool_reserve`, `_place`) may be offered beside it, for a program that places
   the memory itself. Reason: the drop-in contract. An existing pico program runs unchanged, and
   no pico program calls a door pico does not have.
-- **Q2. The document's `wz/limits` may only lower a build value, never raise it.** Reason: the
+- **Q2. The document's `zext/limits` may only lower a build value, never raise it.** Reason: the
   build fixes the worst-case memory, which is the basis a certification is made on; the
   document chooses within it. A host library is configured without a rebuild inside that bound,
   and the MCU images keep the build as their ceiling as before.

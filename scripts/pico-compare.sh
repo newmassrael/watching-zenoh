@@ -84,7 +84,7 @@
 #                                             the unicast batch size on the wire: zenoh-pico built once per size
 #                                             (BATCH_UNICAST_SIZE, default sizes 512,2048,8192) against one
 #                                             wz-capi-pico build with `config-document` whose sessions are handed
-#                                             each size by their configuration document (`wz/limits`); one program
+#                                             each size by their configuration document (`zext/limits`); one program
 #                                             (scripts/host-bench/batch_probe.c) puts [count] (1200) samples in a
 #                                             batching window through a relay that reads each batch's length off the
 #                                             stream; run by scripts/host-bench/batch_control.py, left under

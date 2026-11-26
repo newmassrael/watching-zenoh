@@ -188,7 +188,7 @@ What is wz's own is in `config\`:
   text of its own catalog to that door.
 * `message-catalog.schema.json`: the shape of a catalog, with the words of each refusal.
 * `wz-config.schema.json`: the policies and limits a stage after the build may decide, the shape
-  of the `wz` member of a configuration document (next section). Their values in this build are
+  of the `zext` member of a configuration document (next section). Their values in this build are
   in `build-statement.json`.
 
 ## Choosing policies and limits at run time
@@ -202,14 +202,14 @@ z_owned_config_t config;
 z_config_default(&config);
 zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447");
 z_result_t rc = zext_config_document(z_config_loan_mut(&config),
-    "{ wz: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
+    "{ zext: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
 if (rc != Z_OK) { /* refused: the config is as it was */ }
 z_open(&session, z_config_move(&config), NULL);
 ```
 
 The document is the zenoh JSON5 document a zenoh-c program opens with; this library reads only
-its `wz` member, so one file configures both. A program reads the file and hands its text to
-`zext_config_document`; a second call replaces the first. The members of `wz`, whose every
+its `zext` member, so one file configures both. A program reads the file and hands its text to
+`zext_config_document`; a second call replaces the first. The members of `zext`, whose every
 name and value `config\wz-config.schema.json` lists:
 
 * `profile`: a named set of policy values the session starts from. `upstream` states every
@@ -224,7 +224,7 @@ A session's policies are composed lowest first: this build's defaults, the profi
 
 The door checks the document when it is handed, as the open will compose it, and answers
 `_Z_ERR_CONFIG_INVALID_VALUE` (-89), leaving the config with what it held before, for: text
-that is no JSON5 object; a `wz` member that is not an object, that names a member other than
+that is no JSON5 object; a `zext` member that is not an object, that names a member other than
 these four, or that names one twice; a profile, a policy, a value or a limit this build does
 not have; a value of a policy that this build's domain leaves out; a policy or a limit only the
 build decides; a limit of a runtime rather than of a session; a limit's value that is neither a

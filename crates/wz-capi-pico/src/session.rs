@@ -1847,7 +1847,7 @@ struct OpenRequest {
     /// The id the config names for the session, as an INIT carries it, `None` for one the
     /// engine mints.
     zid: Option<SessionZid>,
-    /// The node's own address the config states (`wz/owned-address`), which heads a zid the
+    /// The node's own address the config states (`zext/owned-address`), which heads a zid the
     /// engine derives under `zid-derivation = address-ports`; `None` for a config that states
     /// none.
     owned_address: Option<[u8; 4]>,

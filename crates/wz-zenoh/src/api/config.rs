@@ -47,11 +47,11 @@ use zenoh_result::{bail, ZResult};
 /// Most options are optional as a way to keep defaults flexible. Some of the options have different
 /// default values depending on the rest of the configuration.
 ///
-/// The document may also hold a `wz` member, wz's own statements about the node (`wz/profile`,
-/// `wz/policies`), which the open resolves; zenoh's own configuration has no such key, so the
+/// The document may also hold a `zext` member, wz's own statements about the node (`zext/profile`,
+/// `zext/policies`), which the open resolves; zenoh's own configuration has no such key, so the
 /// member is held beside it.
 #[derive(Default, Debug, Clone)]
-pub struct Config(pub(crate) zenoh_config::Config, pub(crate) WzStatements);
+pub struct Config(pub(crate) zenoh_config::Config, pub(crate) ExtStatements);
 
 impl Config {
     /// Default environment variable containing the file path used in [`Config::from_env`].
@@ -73,7 +73,7 @@ impl Config {
 
     /// Load configuration from the JSON5 string `input`.
     pub fn from_json5(input: &str) -> ZResult<Config> {
-        let mut wz = WzStatements::default();
+        let mut wz = ExtStatements::default();
         let mut deserializer = json5::Deserializer::from_str(input)?;
         let read = zenoh_config::Config::from_deserializer(wz.splitting(&mut deserializer));
         match read {
@@ -96,7 +96,7 @@ impl Config {
 
     /// Inserts configuration value `value` at `key`.
     pub fn insert_json5(&mut self, key: &str, value: &str) -> ZResult<()> {
-        if let Some(path) = wz_path(key) {
+        if let Some(path) = ext_path(key)? {
             return self.1.insert(path, value);
         }
         self.0
@@ -113,7 +113,7 @@ impl Config {
 
     /// Returns a JSON string containing the configuration at `key`.
     pub fn get_json(&self, key: &str) -> ZResult<String> {
-        if let Some(path) = wz_path(key) {
+        if let Some(path) = ext_path(key)? {
             return self.1.get_json(path);
         }
         self.0.get_json(key).map_err(|err| zerror!("{err}").into())
@@ -130,7 +130,7 @@ impl Config {
     where
         Self: serde::Deserialize<'d>,
     {
-        let mut wz = WzStatements::default();
+        let mut wz = ExtStatements::default();
         let read = zenoh_config::Config::from_deserializer(wz.splitting(d));
         match read {
             Ok(config) => Ok(Config(config, wz)),
@@ -145,17 +145,17 @@ impl Config {
 #[cfg(feature = "engine-tokio")]
 impl Config {
     /// The policies an open of the configuration runs under: the build defaults, then the profile
-    /// the open's caller names or else the one the `wz` member names, then the member's
-    /// `wz/policies`, then what the caller states, each value with the layer that set it. The
-    /// limits the member's `wz/limits` states are resolved with them, over the build defaults of
+    /// the open's caller names or else the one the `zext` member names, then the member's
+    /// `zext/policies`, then what the caller states, each value with the layer that set it. The
+    /// limits the member's `zext/limits` states are resolved with them, over the build defaults of
     /// a session's limits; a session holds no runtime's limits, so a runtime's limit is refused. A
     /// refusal of any of them refuses the open, with every refusal named.
     pub(crate) fn resolve_policies(&self) -> ZResult<wz_session_core::policy_document::Resolved> {
         self.1.resolve()
     }
 
-    /// The key ids an open of the configuration hands its session: what the `wz` member's
-    /// `wz/key-ids` states, read by the reader that resolves its policies
+    /// The key ids an open of the configuration hands its session: what the `zext` member's
+    /// `zext/key-ids` states, read by the reader that resolves its policies
     /// ([`Self::resolve_policies`]), which refuses the member first when it refuses any of it.
     #[cfg(feature = "shared-key-ids")]
     pub(crate) fn resolve_key_ids(&self) -> ZResult<wz_session_core::shared_key_ids::KeyIdsAtOpen> {
@@ -166,7 +166,7 @@ impl Config {
 /// The door of the open's own layer of policies, wz's beyond upstream's surface.
 #[cfg(feature = "open-policies")]
 impl Config {
-    /// State `value` for the policy `policy` at the open, over what the document's `wz` member
+    /// State `value` for the policy `policy` at the open, over what the document's `zext` member
     /// states. A second statement of the same policy replaces the first.
     ///
     /// Judged at once against the build: a policy it does not have, a value the policy does not
@@ -191,7 +191,7 @@ impl Config {
         })
     }
 
-    /// Name the profile the open starts from, in place of the one the document's `wz` member
+    /// Name the profile the open starts from, in place of the one the document's `zext` member
     /// names. A second profile replaces the first.
     ///
     /// Judged at once against the build: a profile it does not have, or one that states a value
@@ -221,7 +221,7 @@ fn judge_alone(overrides: wz_session_core::policy_document::Overrides<'_, '_>) -
 }
 
 impl Serialize for Config {
-    /// zenoh's configuration, and each `wz` member after it when the document states one.
+    /// zenoh's configuration, and each `zext` member after it when the document states one.
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         if self.1.member.is_empty() {
             return self.0.serialize(serializer);
@@ -237,40 +237,60 @@ impl Serialize for Config {
             map.serialize_entry(key, value)?;
         }
         for member in &self.1.member {
-            map.serialize_entry(WZ_MEMBER, member)?;
+            map.serialize_entry(EXT_MEMBER, member)?;
         }
         map.end()
     }
 }
 
 impl<'de> Deserialize<'de> for Config {
-    /// zenoh's configuration, with each `wz` member taken out of it before zenoh's reader, which
+    /// zenoh's configuration, with each `zext` member taken out of it before zenoh's reader, which
     /// has no such key, judges the rest.
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let mut wz = WzStatements::default();
+        let mut wz = ExtStatements::default();
         let config = zenoh_config::Config::deserialize(wz.splitting(deserializer))?;
         Ok(Config(config, wz))
     }
 }
 
-/// The top-level member of a document that holds wz's own statements about the node.
-const WZ_MEMBER: &str = "wz";
+/// The top-level member of a document that holds the extension statements about the node, by the
+/// name every ABI's reader of the document reads (`wz_session_core::policy_document::EXT_MEMBER`,
+/// which a test holds this one to; that crate is not in every build of this one).
+const EXT_MEMBER: &str = "zext";
 
-/// The path under the `wz` member that `key` names (`""` for the member itself), or `None` for a
-/// key of zenoh's. Leading separators are dropped, as zenoh's own keys drop them.
-fn wz_path(key: &str) -> Option<&str> {
-    match key.trim_start_matches('/').strip_prefix(WZ_MEMBER)? {
+/// The name the member had before [`EXT_MEMBER`]. A document, an insert or a read that names it
+/// is refused by the name of the member that is read ([`RETIRED_REFUSAL`]), rather than handed to
+/// zenoh's reader as a key it does not have.
+const RETIRED_MEMBER: &str = "wz";
+
+/// Why a statement under [`RETIRED_MEMBER`] is refused, in the words of the other ABIs' reader.
+const RETIRED_REFUSAL: &str = "the document states the member `zext`, which is not read: the \
+                               statements it holds belong in the member `zext`";
+
+/// The path under the member that `key` names under `member` (`""` for the member itself), or
+/// `None` for a key of zenoh's. Leading separators are dropped, as zenoh's own keys drop them.
+fn path_under<'k>(member: &str, key: &'k str) -> Option<&'k str> {
+    match key.trim_start_matches('/').strip_prefix(member)? {
         "" => Some(""),
         rest => rest.strip_prefix('/'),
     }
 }
 
-/// wz's own statements in a configuration: the `wz` member of the document it was read from and
+/// The path under [`EXT_MEMBER`] that `key` names, or `None` for a key of zenoh's; a key under
+/// [`RETIRED_MEMBER`] is refused.
+fn ext_path(key: &str) -> ZResult<Option<&str>> {
+    if path_under(RETIRED_MEMBER, key).is_some() {
+        bail!("{RETIRED_REFUSAL}");
+    }
+    Ok(path_under(EXT_MEMBER, key))
+}
+
+/// wz's own statements in a configuration: the `zext` member of the document it was read from and
 /// what the open's caller states beside it. The member is kept as stated, a member stated twice
 /// included, so that the open judges it as the other ABIs judge the same text.
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct WzStatements {
-    /// Each top-level `wz` member of the document other than a `null`, which states nothing.
+pub(crate) struct ExtStatements {
+    /// Each top-level `zext` member of the document other than a `null`, which states nothing.
     member: Vec<Stated>,
     /// The profile the open's caller names.
     profile: Option<String>,
@@ -279,8 +299,8 @@ pub(crate) struct WzStatements {
     policies: wz_session_core::policy_document::PolicySet,
 }
 
-impl WzStatements {
-    /// `inner` with each top-level `wz` member it holds taken into this.
+impl ExtStatements {
+    /// `inner` with each top-level `zext` member it holds taken into this.
     fn splitting<D>(&mut self, inner: D) -> Splitting<'_, D> {
         Splitting {
             inner,
@@ -288,12 +308,12 @@ impl WzStatements {
         }
     }
 
-    /// Set `value`, a JSON5 text, at `path` under the `wz` member (`""` for the member itself).
+    /// Set `value`, a JSON5 text, at `path` under the `zext` member (`""` for the member itself).
     /// A value already there is replaced; a member on the way that holds something other than an
     /// object refuses the insert, which then changes nothing.
     fn insert(&mut self, path: &str, value: &str) -> ZResult<()> {
         let value: Stated = json5::from_str(value)
-            .map_err(|error| zerror!("`wz/{path}` cannot be set to {value}: {error}"))?;
+            .map_err(|error| zerror!("`{EXT_MEMBER}/{path}` cannot be set to {value}: {error}"))?;
         if path.is_empty() {
             self.member = match value {
                 Stated::Null => Vec::new(),
@@ -303,19 +323,19 @@ impl WzStatements {
         }
         let segments: Vec<&str> = path.split('/').collect();
         if segments.iter().any(|segment| segment.is_empty()) {
-            bail!("`wz/{path}` names a member with no name");
+            bail!("`{EXT_MEMBER}/{path}` names a member with no name");
         }
         let Some((key, rest)) = segments.split_first() else {
-            bail!("`wz/{path}` names no member");
+            bail!("`{EXT_MEMBER}/{path}` names no member");
         };
         if self.member.is_empty() {
             self.member.push(Stated::Object(Vec::new()));
         }
         let last = self.member.len() - 1;
-        insert_at(&mut self.member[last], WZ_MEMBER, key, rest, value)
+        insert_at(&mut self.member[last], EXT_MEMBER, key, rest, value)
     }
 
-    /// The JSON text of what is stated at `path` under the `wz` member, the last of a member
+    /// The JSON text of what is stated at `path` under the `zext` member, the last of a member
     /// stated twice as a reader takes it.
     fn get_json(&self, path: &str) -> ZResult<String> {
         let mut found = self.member.last();
@@ -333,29 +353,29 @@ impl WzStatements {
         }
         match found {
             Some(value) => serde_json::to_string(value).map_err(|error| zerror!("{error}").into()),
-            None => bail!("the configuration states nothing at `{WZ_MEMBER}/{path}`"),
+            None => bail!("the configuration states nothing at `{EXT_MEMBER}/{path}`"),
         }
     }
 
-    /// Each `wz` member, gathered in its order as the members of a document of its own, which is
+    /// Each `zext` member, gathered in its order as the members of a document of its own, which is
     /// what the reader of the member reads.
     #[cfg(feature = "engine-tokio")]
     fn tree(&self) -> wz_session_core::json5::Json5Value {
         wz_session_core::json5::Json5Value::Object(
             self.member
                 .iter()
-                .map(|member| (WZ_MEMBER.to_owned(), member.to_json5()))
+                .map(|member| (EXT_MEMBER.to_owned(), member.to_json5()))
                 .collect(),
         )
     }
 
-    /// The key ids the member states (`wz/key-ids`).
+    /// The key ids the member states (`zext/key-ids`).
     #[cfg(feature = "shared-key-ids")]
     fn key_ids(&self) -> ZResult<wz_session_core::shared_key_ids::KeyIdsAtOpen> {
         let tree = self.tree();
         wz_session_core::policy_document::statements_from_json5(&tree)
             .map(|read| read.key_ids)
-            .map_err(|refusals| zerror!("the `wz` member is refused: {refusals}").into())
+            .map_err(|refusals| zerror!("the `{EXT_MEMBER}` member is refused: {refusals}").into())
     }
 
     #[cfg(feature = "engine-tokio")]
@@ -372,7 +392,7 @@ impl WzStatements {
             ..Overrides::default()
         };
         resolve_document_under(SessionPolicy::defaults(), &tree, overrides)
-            .map_err(|refusals| zerror!("the `wz` member is refused: {refusals}").into())
+            .map_err(|refusals| zerror!("the `{EXT_MEMBER}` member is refused: {refusals}").into())
     }
 }
 
@@ -550,7 +570,7 @@ impl<'de> de::Visitor<'de> for StatedVisitor {
 }
 
 /// A deserializer of zenoh's configuration that hands its reader every top-level member but
-/// `wz`, which it keeps. The reader's own deserializer reads every key, so what it refuses and
+/// `zext`, which it keeps. The reader's own deserializer reads every key, so what it refuses and
 /// where it says it is as without the member.
 struct Splitting<'s, D> {
     inner: D,
@@ -641,7 +661,7 @@ impl<'de, A: de::MapAccess<'de>> de::MapAccess<'de> for SplittingMap<'_, A> {
             match self.inner.next_key_seed(KeySeed(seed))? {
                 None => return Ok(None),
                 Some(Key::Other(key)) => return Ok(Some(key)),
-                Some(Key::Wz(unused)) => {
+                Some(Key::Ext(unused)) => {
                     let stated: Stated = self.inner.next_value()?;
                     if !matches!(stated, Stated::Null) {
                         self.member.push(stated);
@@ -664,10 +684,10 @@ impl<'de, A: de::MapAccess<'de>> de::MapAccess<'de> for SplittingMap<'_, A> {
     }
 }
 
-/// A key of the configuration's top level: the `wz` member, with the reader's seed handed back
+/// A key of the configuration's top level: the `zext` member, with the reader's seed handed back
 /// unused, or a key of zenoh's as the reader's seed read it.
 enum Key<K, T> {
-    Wz(K),
+    Ext(K),
     Other(T),
 }
 
@@ -696,8 +716,11 @@ impl<'de, K: de::DeserializeSeed<'de>> de::Visitor<'de> for KeyVisitor<K> {
     }
 
     fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
-        if value == WZ_MEMBER {
-            return Ok(Key::Wz(self.0));
+        if value == EXT_MEMBER {
+            return Ok(Key::Ext(self.0));
+        }
+        if value == RETIRED_MEMBER {
+            return Err(E::custom(RETIRED_REFUSAL));
         }
         self.0
             .deserialize(de::value::StrDeserializer::<E>::new(value))
@@ -705,8 +728,11 @@ impl<'de, K: de::DeserializeSeed<'de>> de::Visitor<'de> for KeyVisitor<K> {
     }
 
     fn visit_bytes<E: de::Error>(self, value: &[u8]) -> Result<Self::Value, E> {
-        if value == WZ_MEMBER.as_bytes() {
-            return Ok(Key::Wz(self.0));
+        if value == EXT_MEMBER.as_bytes() {
+            return Ok(Key::Ext(self.0));
+        }
+        if value == RETIRED_MEMBER.as_bytes() {
+            return Err(E::custom(RETIRED_REFUSAL));
         }
         self.0
             .deserialize(de::value::BytesDeserializer::<E>::new(value))
@@ -739,7 +765,7 @@ impl std::ops::DerefMut for Config {
 #[doc(hidden)]
 impl From<zenoh_config::Config> for Config {
     fn from(value: zenoh_config::Config) -> Self {
-        Self(value, WzStatements::default())
+        Self(value, ExtStatements::default())
     }
 }
 
@@ -751,7 +777,7 @@ impl From<Config> for zenoh_config::Config {
 }
 
 impl fmt::Display for Config {
-    /// zenoh's own text, and each `wz` member after its members when the document states one.
+    /// zenoh's own text, and each `zext` member after its members when the document states one.
     /// zenoh's text is kept as it is because only its writer knows which values to keep private.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.1.member.is_empty() {
@@ -770,7 +796,7 @@ impl fmt::Display for Config {
             }
             first = false;
             let text = serde_json::to_string(member).map_err(|_| fmt::Error)?;
-            write!(f, "\"{WZ_MEMBER}\":{text}")?;
+            write!(f, "\"{EXT_MEMBER}\":{text}")?;
         }
         f.write_str("}")
     }
@@ -930,7 +956,7 @@ impl zenoh_config::IConfig for Notifier<ExpandedConfig> {
 mod tests {
     use zenoh_config::{InterceptorFlow, QosOverwriteItemConf};
 
-    use super::{Stated, WzStatements};
+    use super::{ExtStatements, Stated};
     use crate::Config;
 
     fn text(value: &str) -> Stated {
@@ -951,7 +977,7 @@ mod tests {
     #[test]
     fn a_wz_member_is_held_beside_zenohs_configuration_as_stated() {
         let config = Config::from_json5(
-            r#"{ mode: "peer", wz: { policies: { "key-set": "open", "key-set": "closed" } } }"#,
+            r#"{ mode: "peer", zext: { policies: { "key-set": "open", "key-set": "closed" } } }"#,
         )
         .expect("zenoh's reader does not see the member");
         assert_eq!(
@@ -968,7 +994,7 @@ mod tests {
     #[test]
     fn a_configuration_with_no_wz_member_is_zenohs_alone() {
         let config = Config::from_json5(r#"{ mode: "peer" }"#).expect("zenoh's");
-        assert_eq!(config.1, WzStatements::default());
+        assert_eq!(config.1, ExtStatements::default());
         assert_eq!(config.to_string(), config.0.to_string());
         assert_eq!(
             serde_json::to_value(&config).unwrap(),
@@ -981,7 +1007,7 @@ mod tests {
         assert!(error.contains("unknown field `colour`"), "{error}");
     }
 
-    /// The member's `wz/limits`, read whole or inserted, resolves as the reader of a document
+    /// The member's `zext/limits`, read whole or inserted, resolves as the reader of a document
     /// resolves it for a creator that holds a session's limits, for each member of the corpus
     /// every door is held to: the limits it selects, or the refusals it meets, each named.
     #[cfg(feature = "engine-tokio")]
@@ -994,7 +1020,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", case.name));
             let mut inserted = Config::default();
             inserted
-                .insert_json5("wz/limits", &case.limits)
+                .insert_json5("zext/limits", &case.limits)
                 .unwrap_or_else(|error| panic!("{}: {error}", case.name));
             for config in [read, inserted] {
                 match (&case.session, config.resolve_policies()) {
@@ -1022,71 +1048,131 @@ mod tests {
     #[test]
     fn every_top_level_wz_member_but_a_null_is_kept() {
         let config =
-            Config::from_json5(r#"{ wz: { profile: "upstream" }, wz: null, wz: {} }"#).unwrap();
+            Config::from_json5(r#"{ zext: { profile: "upstream" }, zext: null, zext: {} }"#)
+                .unwrap();
         assert_eq!(
             config.1.member,
             [object(&[("profile", text("upstream"))]), object(&[])]
         );
     }
 
-    /// An insert under `wz` replaces what the path held, as an insert of a zenoh key does, and
+    /// An insert under `zext` replaces what the path held, as an insert of a zenoh key does, and
     /// one the member cannot take changes nothing.
     #[test]
     fn an_insert_under_wz_replaces_and_a_refused_one_changes_nothing() {
         let mut config = Config::default();
         config
-            .insert_json5("wz/policies/key-set", r#""open""#)
+            .insert_json5("zext/policies/key-set", r#""open""#)
             .unwrap();
         config
-            .insert_json5("wz/policies/key-set", r#""closed""#)
+            .insert_json5("zext/policies/key-set", r#""closed""#)
             .unwrap();
         assert_eq!(
-            config.get_json("wz/policies/key-set").unwrap(),
+            config.get_json("zext/policies/key-set").unwrap(),
             r#""closed""#
         );
         assert_eq!(
-            config.get_json("wz").unwrap(),
+            config.get_json("zext").unwrap(),
             r#"{"policies":{"key-set":"closed"}}"#
         );
         config
-            .insert_json5("wz", r#"{ profile: "upstream" }"#)
+            .insert_json5("zext", r#"{ profile: "upstream" }"#)
             .unwrap();
-        assert_eq!(config.get_json("wz").unwrap(), r#"{"profile":"upstream"}"#);
-        assert!(config.insert_json5("wz/profile/id", r#""x""#).is_err());
-        assert!(config.insert_json5("wz//profile", r#""x""#).is_err());
-        assert!(config.insert_json5("wz/profile", "{").is_err());
-        assert_eq!(config.get_json("wz").unwrap(), r#"{"profile":"upstream"}"#);
-        assert!(config.get_json("wz/policies").is_err());
+        assert_eq!(
+            config.get_json("zext").unwrap(),
+            r#"{"profile":"upstream"}"#
+        );
+        assert!(config.insert_json5("zext/profile/id", r#""x""#).is_err());
+        assert!(config.insert_json5("zext//profile", r#""x""#).is_err());
+        assert!(config.insert_json5("zext/profile", "{").is_err());
+        assert_eq!(
+            config.get_json("zext").unwrap(),
+            r#"{"profile":"upstream"}"#
+        );
+        assert!(config.get_json("zext/policies").is_err());
         // A key that only begins with the member's name is zenoh's, which has no such key.
-        assert!(config.insert_json5("wzx", "1").is_err());
-        config.insert_json5("wz", "null").unwrap();
-        assert_eq!(config.1, WzStatements::default());
+        assert!(config.insert_json5("zextx", "1").is_err());
+        config.insert_json5("zext", "null").unwrap();
+        assert_eq!(config.1, ExtStatements::default());
+    }
+
+    /// The member's retired name is refused by the name of the member that is read: in a
+    /// document, through serde, and by an insert or a read of a path under it, which changes
+    /// nothing. Turned red by a reader that hands the retired name to zenoh's, which would
+    /// refuse it as a key it does not have and name no member.
+    #[test]
+    fn the_retired_member_is_refused_naming_the_member_read() {
+        for document in [
+            r#"{ wz: { policies: { "key-set": "open" } } }"#,
+            r#"{ mode: "peer", wz: null }"#,
+        ] {
+            let error = Config::from_json5(document).unwrap_err().to_string();
+            assert!(
+                error.contains("belong in the member `zext`"),
+                "{document}: {error}"
+            );
+        }
+        let error = serde_json::from_str::<Config>(r#"{ "wz": {} }"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("belong in the member `zext`"), "{error}");
+        let mut config = Config::default();
+        for key in ["wz", "wz/policies/key-set", "/wz/profile"] {
+            let error = config
+                .insert_json5(key, r#""open""#)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("belong in the member `zext`"),
+                "{key}: {error}"
+            );
+            assert!(config.get_json(key).is_err(), "{key}");
+        }
+        assert_eq!(config.1, ExtStatements::default());
+        // A key that only begins with the retired name is zenoh's, which has no such key.
+        let error = config.insert_json5("wzx", "1").unwrap_err().to_string();
+        assert!(!error.contains("`zext`"), "{error}");
+    }
+
+    /// The names and the refusal are those of the reader every ABI shares.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn the_member_names_are_those_of_the_shared_reader() {
+        use wz_session_core::policy_document::{self, Origin, Reason, Refusal};
+
+        assert_eq!(super::EXT_MEMBER, policy_document::EXT_MEMBER);
+        assert_eq!(super::RETIRED_MEMBER, policy_document::RETIRED_MEMBER);
+        let refusal = Refusal {
+            layer: Origin::Document,
+            reason: Reason::RetiredMember,
+        };
+        assert_eq!(super::RETIRED_REFUSAL, refusal.to_string());
     }
 
     /// The member is written after zenoh's own members, by the text and by serde, and read back.
     #[test]
     fn the_member_is_written_with_the_configuration_and_read_back() {
-        let config = Config::from_json5(r#"{ wz: { profile: "upstream" } }"#).unwrap();
+        let config = Config::from_json5(r#"{ zext: { profile: "upstream" } }"#).unwrap();
         let written = config.to_string();
         assert!(
-            written.ends_with(r#","wz":{"profile":"upstream"}}"#),
+            written.ends_with(r#","zext":{"profile":"upstream"}}"#),
             "{written}"
         );
         let parsed: serde_json::Value = serde_json::from_str(&written).expect("JSON");
-        assert_eq!(parsed["wz"]["profile"], "upstream");
+        assert_eq!(parsed["zext"]["profile"], "upstream");
         let serialized = serde_json::to_value(&config).unwrap();
         assert_eq!(
-            serialized["wz"],
+            serialized["zext"],
             serde_json::json!({ "profile": "upstream" })
         );
         let read: Config =
-            serde_json::from_str(r#"{ "mode": "peer", "wz": { "profile": "upstream" } }"#)
+            serde_json::from_str(r#"{ "mode": "peer", "zext": { "profile": "upstream" } }"#)
                 .expect("serde reads the member as from_json5 does");
         assert_eq!(read.1.member, config.1.member);
         assert_eq!(read.get_json("mode").unwrap(), r#""peer""#);
     }
 
-    /// The member resolves as the document's `wz` member does on every ABI, and a refused one
+    /// The member resolves as the document's `zext` member does on every ABI, and a refused one
     /// names each refusal.
     #[cfg(feature = "engine-tokio")]
     #[test]
@@ -1094,7 +1180,7 @@ mod tests {
         use wz_session_core::{json5::parse, policy::SessionPolicy, policy_document};
 
         let document =
-            r#"{ wz: { policies: { "subscriber-overload": "block", "key-set": "open" } } }"#;
+            r#"{ zext: { policies: { "subscriber-overload": "block", "key-set": "open" } } }"#;
         let config = Config::from_json5(document).unwrap();
         let tree = parse(document).unwrap();
         assert_eq!(
@@ -1108,16 +1194,19 @@ mod tests {
             ))
         );
         let refused =
-            Config::from_json5(r#"{ wz: { profile: "no-such-profile", colour: "blue" } }"#)
+            Config::from_json5(r#"{ zext: { profile: "no-such-profile", colour: "blue" } }"#)
                 .unwrap();
         let error = refused.resolve_policies().unwrap_err().to_string();
-        assert!(error.starts_with("the `wz` member is refused: "), "{error}");
-        assert!(error.contains("`wz/colour`"), "{error}");
+        assert!(
+            error.starts_with("the `zext` member is refused: "),
+            "{error}"
+        );
+        assert!(error.contains("`zext/colour`"), "{error}");
         assert!(error.contains("`no-such-profile`"), "{error}");
     }
 
     /// The key ids the member states are read as a document's are on every ABI: the member read
-    /// whole and its `wz/key-ids` inserted give the same key ids, and a refused part of it
+    /// whole and its `zext/key-ids` inserted give the same key ids, and a refused part of it
     /// refuses the policies of the member with it.
     #[cfg(feature = "shared-key-ids")]
     #[test]
@@ -1134,14 +1223,14 @@ mod tests {
             links: vec![("tcp/192.0.2.7:7447".to_owned(), KeyWireForm::Literal)],
         };
         let read = Config::from_json5(&format!(
-            r#"{{ mode: "peer", wz: {{ "key-ids": {member} }} }}"#
+            r#"{{ mode: "peer", zext: {{ "key-ids": {member} }} }}"#
         ))
         .expect("zenoh's reader does not see the member");
         assert_eq!(read.resolve_key_ids().ok(), Some(expected.clone()));
         assert!(read.resolve_policies().is_ok());
         let mut inserted = Config::default();
         inserted
-            .insert_json5("wz/key-ids", member)
+            .insert_json5("zext/key-ids", member)
             .expect("the member takes an object");
         assert_eq!(inserted.resolve_key_ids().ok(), Some(expected));
         assert_eq!(
@@ -1149,24 +1238,24 @@ mod tests {
             Some(KeyIdsAtOpen::default())
         );
         let refused = Config::from_json5(
-            r#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#,
+            r#"{ zext: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#,
         )
         .unwrap();
         let error = refused.resolve_policies().unwrap_err().to_string();
         assert!(
-            error.contains("id 0 in entry 0 of `wz/key-ids/dictionary`"),
+            error.contains("id 0 in entry 0 of `zext/key-ids/dictionary`"),
             "{error}"
         );
         assert!(refused.resolve_key_ids().is_err());
     }
 
-    /// A build without the capability refuses `wz/key-ids` with the policies of the member, by
+    /// A build without the capability refuses `zext/key-ids` with the policies of the member, by
     /// name, and opens nothing on it.
     #[cfg(all(feature = "engine-tokio", not(feature = "shared-key-ids")))]
     #[test]
     fn the_members_key_ids_are_refused_without_the_capability() {
         let config = Config::from_json5(
-            r#"{ wz: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
+            r#"{ zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }"#,
         )
         .unwrap();
         let error = config.resolve_policies().unwrap_err().to_string();
@@ -1199,7 +1288,7 @@ mod tests {
             error.contains("names the profile `no-such-profile`"),
             "{error}"
         );
-        assert_eq!(config.1, WzStatements::default());
+        assert_eq!(config.1, ExtStatements::default());
         let held = wz_session_core::policy::SessionPolicy::defaults()
             .key_set()
             .id();

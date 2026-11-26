@@ -11,7 +11,7 @@
 //! session names its keys as the form stated for its endpoint, or the session's, says.
 //!
 //! A config handed a document (`zext_config_document`, the `config-document` capability) may
-//! state the same in the document's `wz/key-ids`; what these doors state goes over it, as the
+//! state the same in the document's `zext/key-ids`; what these doors state goes over it, as the
 //! policy doors go over the document's policies.
 //!
 //! What every build has here is the open's judgement of the key-wire form (`admit_at_open`): a
@@ -62,7 +62,7 @@ unsafe fn state_of<'c>(config: *mut z_loaned_config_t) -> Option<&'c mut ConfigS
 /// `z_open` makes of the config holds the dictionary: it reads an id only the dictionary names,
 /// declares no key expression under one of its ids, and names a key by one as its key-wire form
 /// says. A `count` of 0 takes back a dictionary handed before. A dictionary handed here replaces
-/// the one the config's document states (`zext_config_document`, `wz/key-ids`); with none
+/// the one the config's document states (`zext_config_document`, `zext/key-ids`); with none
 /// handed here, the document's stands.
 ///
 /// `Z_OK`; `Z_ERR_NULL` for a NULL config, a NULL array with entries, or a NULL key;
@@ -167,7 +167,7 @@ pub unsafe extern "C" fn zext_config_key_wire_form_for(
 
 /// The key ids a session opened from `cfg` holds, or the code `z_open` answers. What the doors
 /// state (`zext_config_key_ids`, `zext_config_key_wire_form_for`) goes over what the
-/// `wz/key-ids` of the config's document states (`zext_config_document`), the order the config's
+/// `zext/key-ids` of the config's document states (`zext_config_document`), the order the config's
 /// policies are composed in: a dictionary handed through the door replaces the document's, and a
 /// form stated for an endpoint replaces the document's for that endpoint. A `count` of 0 at the
 /// door states no dictionary, so the document's stands.
@@ -446,7 +446,7 @@ mod tests {
     /// The document the tests of both C ABIs hand a config (the zenoh-c ABI's twin is in its
     /// `config` tests), and the key ids it states.
     #[cfg(feature = "config-document")]
-    const DOCUMENT: &CStr = cr#"{ mode: "peer", wz: { "key-ids": {
+    const DOCUMENT: &CStr = cr#"{ mode: "peer", zext: { "key-ids": {
         dictionary: [ { id: 40, key: "lab/rig" }, { id: 41, key: "lab/rig/alpha" } ],
         links: [ { locator: "tcp/192.0.2.7:7447", form: "literal" } ] } } }"#;
 
@@ -587,14 +587,14 @@ mod tests {
         assert_eq!(
             hand_document(
                 &mut state,
-                cr#"{ wz: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#
+                cr#"{ zext: { "key-ids": { dictionary: [ { id: 0, key: "lab/rig" } ] } } }"#
             ),
             Z_ERR_CONFIG_INVALID_VALUE
         );
         assert_eq!(
             hand_document(
                 &mut state,
-                cr#"{ wz: { "key-ids": { links: [ { locator: "tcp/192.0.2.7:7447", form: "loud" } ] } } }"#
+                cr#"{ zext: { "key-ids": { links: [ { locator: "tcp/192.0.2.7:7447", form: "loud" } ] } } }"#
             ),
             Z_ERR_CONFIG_INVALID_VALUE
         );
