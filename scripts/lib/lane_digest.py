@@ -525,7 +525,9 @@ def _resolve_call(ctx: Ctx, call: Call) -> tuple[list[tuple[str, str]], list[str
         link = _in_gitlink(ctx, manifest)
         if link is not None:
             return [], [link], ""
-        found = next((m for m in (manifest, f"crates/{manifest}") if m in ctx.tree.entries), None)
+        cwd = _clean_path(call.cwd) if call.cwd else None
+        tried = ([posixpath.normpath(posixpath.join(cwd, manifest))] if cwd else []) + [manifest, f"crates/{manifest}"]
+        found = next((m for m in tried if m in ctx.tree.entries), None)
         if found is None:
             return [], [], f"cargo {call.sub} --manifest-path {call.manifest} names no tracked manifest"
         directory = posixpath.dirname(found)
@@ -539,13 +541,23 @@ def _resolve_call(ctx: Ctx, call: Call) -> tuple[list[tuple[str, str]], list[str
             name = lane_graph.package_name(ctx.tree.text(found) or "")
             pairs = [(root, k) for k in (ws.members if (name is None or call.whole) else ws.find(name))]
         return (pairs, [], "") if pairs else ([], [], f"{found} builds no package of {root}/Cargo.lock")
+    cwd = _clean_path(call.cwd) if call.cwd else None
     if call.packages:
-        pairs = [pair for name in call.packages for pair in lane_graph.resolve(ctx.spaces, name)]
-        missing = [n for n in call.packages if not lane_graph.resolve(ctx.spaces, n)]
+        # In a directory of a workspace that has the package, cargo builds it there; elsewhere the
+        # package is read where it is a member.
+        here = _workspace_of(ctx, cwd) if cwd else None
+        local = ctx.spaces[here] if here is not None else None
+        pairs: list[tuple[str, str]] = []
+        missing: list[str] = []
+        for name in call.packages:
+            got = [(here, k) for k in local.find(name) if not local.packages[k].source] if local else []
+            got = got or lane_graph.resolve(ctx.spaces, name)
+            pairs.extend(got)
+            if not got:
+                missing.append(name)
         if missing:
             return [], [], f"cargo {call.sub} -p {', '.join(missing)}: no workspace has the package"
         return pairs, [], ""
-    cwd = _clean_path(call.cwd) if call.cwd else None
     if cwd is None:
         return [], [], f"cargo {call.sub} with no package and no directory this reader can see"
     link = _in_gitlink(ctx, cwd)

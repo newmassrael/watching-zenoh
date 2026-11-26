@@ -169,14 +169,19 @@ def _dep_target(dep: str, by_name: dict[str, list[dict]], where: str) -> dict:
 # -- manifests -----------------------------------------------------------------------------------
 
 _SECTION = re.compile(r"^\s*\[([^\[\]]+)\]\s*(?:#.*)?$")
+_ARRAY_SECTION = re.compile(r"^\s*\[\[([^\[\]]+)\]\]\s*(?:#.*)?$")
 
 
 def _sections(text: str) -> list[tuple[str, str]]:
     """(header, body) of every table of a manifest; the text before the first header is ("", ...)."""
     out: list[tuple[str, list[str]]] = [("", [])]
     for line in text.splitlines():
+        array = _ARRAY_SECTION.match(line)
         m = _SECTION.match(line)
-        if m and not line.lstrip().startswith("[["):
+        if array:
+            # `[[bin]]`, `[[test]]`: a table of its own, never a dependency table.
+            out.append((f"[{array.group(1).strip()}]", []))
+        elif m:
             out.append((m.group(1).strip(), []))
         else:
             out[-1][1].append(line)
@@ -571,10 +576,10 @@ def selftest() -> int:
         expect("a package spec resolves where it is a member", resolve(spaces, "core") == [("crates", ws.find("core")[0])], resolve(spaces, "core"))
         expect("<ws>:* is every member", sorted(ws.packages[k].name for _, k in resolve(spaces, "crates:*")) == ["app", "core", "leaf", "support"])
         expect("no fixture workspace is broken", broken(tree) == {}, broken(tree))
-        bad_rev = fx.commit({"tool/Cargo.lock": FIXTURE["tool/Cargo.lock"] + '\n[[package]]\nname = "ghost"\nversion = "0.1.0"\n'})
+        bad_rev = fx.commit({"tool/Cargo.lock": FIXTURE["tool/Cargo.lock"] + '\n[[package]]\nname = "ghost"\nversion = "0.1.0"\ndependencies = [\n "nowhere",\n]\n'})
         bad_tree = GitTree(fx.root, bad_rev)
         # Red if a workspace that does not read is dropped silently or fails the others.
-        expect("a lock naming a local package with no manifest breaks its own workspace only",
+        expect("a lock whose dependency names no package of it breaks its own workspace only",
                sorted(workspaces(bad_tree)) == ["crates"] and "tool" in broken(bad_tree), broken(bad_tree))
         expect("an unknown package resolves to nothing", resolve(spaces, "nope") == [] and resolve(spaces, "nows:app") == [])
     for text, what in (
@@ -598,6 +603,9 @@ def selftest() -> int:
     # The conservative kind reading: a name seen outside the dev table is normal.
     manifest = '[dependencies]\nx = { path = "x" }\n\n[dev-dependencies]\nx = { path = "x" }\ny = "1"\nz2 = { package = "zed", version = "1" }\n'
     expect("dev-only names are read conservatively", dev_only_names(manifest) == {"y", "zed"}, dev_only_names(manifest))
+    # Red if an array table after a dev table is read as part of it (`_ARRAY_SECTION`).
+    binned = manifest + '\n[[bin]]\nname = "tool"\n\n[dependencies.y]\nversion = "1"\n'
+    expect("an array table ends a dev table, and a table-form dependency is normal", dev_only_names(binned) == {"zed"}, dev_only_names(binned))
     print(f"lane_graph selftest: {cases} cases pass")
     return 0
 
