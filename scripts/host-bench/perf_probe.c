@@ -110,6 +110,22 @@
 // VmHWM belongs to the memory exec made new. Linux prints no line when /proc gives no figure, so the
 // runner reads none rather than a zero.
 //
+// PERF_SMAPS=1 (Linux) asks what that resident set is made of (docs/win-budget/rss.md, cell R0). Once its
+// role has run, before it closes its session, so the session's arena and pools are still mapped, a role
+// prints
+//
+//   perf_probe smaps rollup rss_kib=<..> pss_kib=<..> anonymous_kib=<..> private_dirty_kib=<..>
+//     private_clean_kib=<..> shared_clean_kib=<..> shared_dirty_kib=<..>
+//
+// from /proc/self/smaps_rollup, then one line for each mapping of /proc/self/smaps that holds a resident
+// page,
+//
+//   perf_probe smaps region start=<hex> perms=<rwxp> size_kib=<..> rss_kib=<..> pss_kib=<..>
+//     private_dirty_kib=<..> anonymous_kib=<..> name=<the mapping's path or [heap], [stack], ..., empty>
+//
+// the name last, as the rest of its line. Every line comes before the last one. Unset, it costs one look at
+// the environment; on Windows it prints nothing.
+//
 // Exit status: 0 when the role ran, 1 when the session or an entity could not be made, 2 for a usage error or
 // an option the build does not have.
 
@@ -117,6 +133,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -310,6 +327,106 @@ static void print_usage(void) {
     fclose(status);
     if (!found) return;
     printf("perf_probe usage peak_rss_kib=%llu\n", kib);
+    fflush(stdout);
+}
+
+// The fields of one mapping of /proc/self/smaps, or of the rollup, that a smaps line prints, in KiB.
+struct smaps_fields {
+    unsigned long long size, rss, pss, private_dirty, private_clean, shared_clean, shared_dirty, anonymous;
+};
+
+// Reads one "Name: <n> kB" line of smaps into the field it names; 0 when the line is no such field.
+static int smaps_field(const char *line, struct smaps_fields *f) {
+    static const struct {
+        const char *name;
+        size_t at;
+    } known[] = {
+        {"Size:", offsetof(struct smaps_fields, size)},
+        {"Rss:", offsetof(struct smaps_fields, rss)},
+        {"Pss:", offsetof(struct smaps_fields, pss)},
+        {"Private_Dirty:", offsetof(struct smaps_fields, private_dirty)},
+        {"Private_Clean:", offsetof(struct smaps_fields, private_clean)},
+        {"Shared_Clean:", offsetof(struct smaps_fields, shared_clean)},
+        {"Shared_Dirty:", offsetof(struct smaps_fields, shared_dirty)},
+        {"Anonymous:", offsetof(struct smaps_fields, anonymous)},
+    };
+    for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
+        const size_t n = strlen(known[i].name);
+        if (strncmp(line, known[i].name, n) == 0) {
+            unsigned long long kib = 0;
+            if (sscanf(line + n, " %llu kB", &kib) != 1) return 0;
+            *(unsigned long long *)((char *)f + known[i].at) = kib;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Reads a line of smaps whole into `line`, dropping what does not fit (a path longer than the buffer), so
+// the rest of a long line is never read as a line of its own. 0 at the end of the file.
+static int smaps_line(FILE *in, char *line, size_t size) {
+    if (fgets(line, (int)size, in) == NULL) return 0;
+    size_t n = strlen(line);
+    if (n > 0 && line[n - 1] == '\n') {
+        line[n - 1] = '\0';
+        return 1;
+    }
+    int c;
+    while ((c = fgetc(in)) != EOF && c != '\n') {
+    }
+    return 1;
+}
+
+static void print_region(unsigned long long start, const char *perms, const struct smaps_fields *f,
+                         const char *name) {
+    if (f->rss == 0) return;
+    printf("perf_probe smaps region start=%llx perms=%s size_kib=%llu rss_kib=%llu pss_kib=%llu "
+           "private_dirty_kib=%llu anonymous_kib=%llu name=%s\n",
+           start, perms, f->size, f->rss, f->pss, f->private_dirty, f->anonymous, name);
+}
+
+// What the resident set is made of, when PERF_SMAPS=1 asks (the header of this file).
+static void print_smaps(void) {
+    const char *asked = getenv("PERF_SMAPS");
+    if (asked == NULL || strcmp(asked, "1") != 0) return;
+    char line[1024];
+    FILE *rollup = fopen("/proc/self/smaps_rollup", "r");
+    if (rollup != NULL) {
+        struct smaps_fields f;
+        memset(&f, 0, sizeof f);
+        while (smaps_line(rollup, line, sizeof line)) smaps_field(line, &f);
+        fclose(rollup);
+        printf("perf_probe smaps rollup rss_kib=%llu pss_kib=%llu anonymous_kib=%llu private_dirty_kib=%llu "
+               "private_clean_kib=%llu shared_clean_kib=%llu shared_dirty_kib=%llu\n",
+               f.rss, f.pss, f.anonymous, f.private_dirty, f.private_clean, f.shared_clean, f.shared_dirty);
+    }
+    FILE *maps = fopen("/proc/self/smaps", "r");
+    if (maps != NULL) {
+        struct smaps_fields f;
+        memset(&f, 0, sizeof f);
+        char name[sizeof line] = "";
+        char perms[8] = "";
+        unsigned long long start = 0;
+        int open_region = 0;
+        while (smaps_line(maps, line, sizeof line)) {
+            unsigned long long from = 0, to = 0;
+            char mode[8];
+            int consumed = 0;
+            // A mapping's header: "<from>-<to> <perms> <offset> <dev> <inode> [<name>]".
+            if (sscanf(line, "%llx-%llx %7s %*s %*s %*s %n", &from, &to, mode, &consumed) == 3 && consumed > 0) {
+                if (open_region) print_region(start, perms, &f, name);
+                memset(&f, 0, sizeof f);
+                start = from;
+                snprintf(perms, sizeof perms, "%s", mode);
+                snprintf(name, sizeof name, "%s", line + consumed);
+                open_region = 1;
+            } else if (open_region) {
+                smaps_field(line, &f);
+            }
+        }
+        if (open_region) print_region(start, perms, &f, name);
+        fclose(maps);
+    }
     fflush(stdout);
 }
 
@@ -1285,6 +1402,9 @@ int main(int argc, char **argv) {
     const z_loaned_session_t *loaned = z_session_loan(&session);
     int rc = ping ? run_ping(loaned, &o) : pong ? run_pong(loaned, &o) : pub ? run_pub(loaned, &o) : run_sub(loaned, &o);
     trace("role done");
+#ifndef _WIN32
+    print_smaps();
+#endif
     // Closed first, so no callback runs while its publisher is dropped.
     trace("z_close begin");
     z_result_t closed = z_close(z_session_loan_mut(&session), NULL);

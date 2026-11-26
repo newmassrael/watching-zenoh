@@ -190,6 +190,7 @@ reference, to be answered by a run that holds one, not a figure of this matrix.
 | `cpu_ns_per_msg` | thr | the two above, summed: the CPU a delivered message cost both sides | lower |
 | `cpu_user_s_*`, `cpu_sys_s_*` | both | each process's whole user and system CPU (`getrusage` of the reaped child), client and server | lower |
 | `rss_kib_client`, `rss_kib_server`, `rss_kib` | both | each process's peak resident set, as the program prints it as its last line (VmHWM of `/proc/self/status`), and their sum; the maxrss of the reaped child is not read, since Linux keeps the resident set a process had before its exec as a floor of it, and a child of the runner is a copy of the runner until that exec | lower |
+| `smaps_<part>_kib`, `smaps_rollup_*` | both, with `PERF_SMAPS=1` | the resident KiB of each part of the two processes (`SMAPS_CLASSES`: the arm's library, libc, the loader, `libgcc_s`, other libraries, the program, the brk heap, the main stack, the anonymous mappings, the kernel's, the rest) and of their `/proc/self/smaps_rollup`, read by each program once its role has run and before its close, so below the peak; each side's mappings are kept in `perf.json` (`smaps_client`, `smaps_server`). Absent from a run that did not ask (docs/win-budget/rss.md, cell R0) | lower |
 
 The process CPU of a figure per round trip or per message is read by the process itself
 (`CLOCK_PROCESS_CPUTIME_ID`, all its threads) at the edges of its own span, so time a process spent

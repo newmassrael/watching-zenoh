@@ -233,6 +233,22 @@ METRICS = {
     "cpu_sys_s_server": "lower", "rss_kib_client": "lower", "rss_kib_server": "lower", "rss_kib": "lower",
 }
 
+#: What a mapping of a probe's resident set is counted as (`smaps_class`), when the run asks with PERF_SMAPS=1
+#: (perf_probe.c; docs/win-budget/rss.md, cell R0): the library of the arm, the C library, the loader, the
+#: compiler's runtime, any other library, the program itself, the brk heap, the main thread's stack, every
+#: anonymous mapping (the session's arena, the pools' pages, the other threads' stacks, a malloc arena), the
+#: kernel's pages and the rest.
+SMAPS_CLASSES = ("library", "libc", "loader", "libgcc_s", "other_libraries", "program", "heap", "stack",
+                 "anonymous", "kernel", "other")
+#: The figures of the rollup each probe prints, summed over a cell's two processes as `smaps_rollup_<key>`.
+SMAPS_ROLLUP_KEYS = ("rss_kib", "pss_kib", "anonymous_kib", "private_dirty_kib")
+#: The libraries a matrix arm is: wz's pico C library and zenoh-pico.
+SMAPS_ARM_LIBRARIES = ("libwz_capi_pico", "libzenohpico")
+#: A cell's figures of the resident set by part, each the two processes' sum, which the summary and the report
+#: carry with W over P as they carry every figure.
+SMAPS_FIGURES = tuple(f"smaps_{c}_kib" for c in SMAPS_CLASSES) + tuple(f"smaps_rollup_{k}" for k in SMAPS_ROLLUP_KEYS)
+METRICS.update({name: "lower" for name in SMAPS_FIGURES})
+
 PING_KEYS = ("round_trips", "lost", "aborted", "p50_ns", "p90_ns", "p99_ns", "min_ns", "max_ns", "mean_ns",
              "all_round_trips", "cpu_ns")
 PONG_KEYS = ("answered", "cpu_ns", "stopped_by")
@@ -244,6 +260,8 @@ SUB_MARK_KEYS = ("pub_sent", "received_before_end")
 USAGE_KEYS = ("peak_rss_kib",)
 #: How that line starts. Every role prints it as it ends, so it says nothing of why a role ended.
 USAGE_PREFIX = "perf_probe usage "
+#: The lines a probe prints of its resident set by mapping, when PERF_SMAPS=1 asks (perf_probe.c).
+SMAPS_PREFIX = "perf_probe smaps "
 #: The transports whose links are reliable streams: a put under congestion control block is delivered there or
 #: refused, so one that answered success and never arrived loses its cell (`delivery`). A zenoh-pico peer, whose
 #: stream sockets do not block, leaves a batch it could not write whole to no one and answers success
@@ -307,9 +325,9 @@ def fields(text: str, role: str, keys: tuple[str, ...]) -> dict[str, str] | None
 
 def last_words(text: str) -> str:
     """What a program said last, for the reason of a lost cell: its last line before the usage line it ends
-    with (USAGE_PREFIX), or that line when it said nothing else."""
+    with (USAGE_PREFIX) and its resident set by mapping (SMAPS_PREFIX), or that line when it said nothing else."""
     lines = [line for line in text.splitlines() if line.strip()]
-    said = [line for line in lines if not line.startswith(USAGE_PREFIX)] or lines
+    said = [line for line in lines if not line.startswith((USAGE_PREFIX, SMAPS_PREFIX))] or lines
     return said[-1][:160] if said else "nothing"
 
 
@@ -320,6 +338,8 @@ class Usage:
     user_s: float
     sys_s: float
     rss_kib: int | None
+    #: What its resident set was made of (`smaps_of`), when the run asked with PERF_SMAPS=1.
+    smaps: dict | None = None
 
 
 def peak_rss_kib(text: str) -> int | None:
@@ -329,21 +349,90 @@ def peak_rss_kib(text: str) -> int | None:
     return None if found is None else int(found["peak_rss_kib"])
 
 
+def smaps_class(name: str) -> str:
+    """The part of the resident set (SMAPS_CLASSES) a mapping of the name /proc/self/smaps gives it is."""
+    if not name:
+        return "anonymous"
+    if name == "[heap]":
+        return "heap"
+    if name == "[stack]":
+        return "stack"
+    if name in ("[vdso]", "[vvar]", "[vvar_vclock]", "[vsyscall]"):
+        return "kernel"
+    if name.startswith("["):
+        return "other"
+    base = name.rsplit("/", 1)[-1]
+    if base.startswith(SMAPS_ARM_LIBRARIES):
+        return "library"
+    if base.startswith("libc.so"):
+        return "libc"
+    if base.startswith("ld-linux"):
+        return "loader"
+    if base.startswith("libgcc_s"):
+        return "libgcc_s"
+    if base.startswith("perf_probe"):
+        return "program"
+    if ".so" in base:
+        return "other_libraries"
+    return "other"
+
+
+def smaps_of(text: str) -> dict | None:
+    """What a program printed of its resident set (perf_probe.c, PERF_SMAPS=1): its rollup's figures, the
+    resident KiB of each part (SMAPS_CLASSES, every part present, 0 for none) and each mapping as it printed
+    it; None when it printed no rollup (the run did not ask, or /proc gave nothing)."""
+    rollup = None
+    regions = []
+    for line in text.splitlines():
+        if line.startswith(SMAPS_PREFIX + "rollup "):
+            words = dict(w.split("=", 1) for w in line[len(SMAPS_PREFIX + "rollup "):].split() if "=" in w)
+            rollup = {k: int(words[k]) for k in SMAPS_ROLLUP_KEYS if k in words}
+        elif line.startswith(SMAPS_PREFIX + "region "):
+            head, _, name = line[len(SMAPS_PREFIX + "region "):].partition("name=")
+            words = dict(w.split("=", 1) for w in head.split() if "=" in w)
+            regions.append({"name": name.strip(), "perms": words.get("perms", ""),
+                            "size_kib": int(words.get("size_kib", 0)), "rss_kib": int(words.get("rss_kib", 0)),
+                            "private_dirty_kib": int(words.get("private_dirty_kib", 0))})
+    if rollup is None:
+        return None
+    parts = dict.fromkeys(SMAPS_CLASSES, 0)
+    for region in regions:
+        parts[smaps_class(region["name"])] += region["rss_kib"]
+    return {"rollup": rollup, "parts": parts, "regions": regions}
+
+
+def smaps_figures(client: dict | None, server: dict | None) -> dict:
+    """A cell's figures of its resident set by part (SMAPS_FIGURES), each the two processes' sum, and each
+    side's reading; none when a side printed none, so a sum never stands for one process."""
+    if client is None or server is None:
+        return {}
+    figures: dict = {f"smaps_{c}_kib": client["parts"][c] + server["parts"][c] for c in SMAPS_CLASSES}
+    for key in SMAPS_ROLLUP_KEYS:
+        if key in client["rollup"] and key in server["rollup"]:
+            figures[f"smaps_rollup_{key}"] = client["rollup"][key] + server["rollup"][key]
+    figures["smaps_client"] = client
+    figures["smaps_server"] = server
+    return figures
+
+
 def usage_of(proc: Process) -> Usage:
     """The CPU of the reaped child and the peak resident set the program printed. The maxrss of the reaped
     child is not that figure: Linux keeps the resident set a process had before its exec as a floor of it,
     and the child is a copy of this runner until it executes the program."""
-    rss = peak_rss_kib(proc.text())
+    text = proc.text()
+    rss, smaps = peak_rss_kib(text), smaps_of(text)
     if proc.rusage is None:
-        return Usage(0.0, 0.0, rss)
-    return Usage(proc.rusage.ru_utime, proc.rusage.ru_stime, rss)
+        return Usage(0.0, 0.0, rss, smaps)
+    return Usage(proc.rusage.ru_utime, proc.rusage.ru_stime, rss, smaps)
 
 
-def process_figures(client: Usage, server: Usage) -> dict[str, float | None]:
+def process_figures(client: Usage, server: Usage) -> dict:
     both = None if client.rss_kib is None or server.rss_kib is None else client.rss_kib + server.rss_kib
-    return {"cpu_user_s_client": client.user_s, "cpu_sys_s_client": client.sys_s,
-            "cpu_user_s_server": server.user_s, "cpu_sys_s_server": server.sys_s,
-            "rss_kib_client": client.rss_kib, "rss_kib_server": server.rss_kib, "rss_kib": both}
+    figures = {"cpu_user_s_client": client.user_s, "cpu_sys_s_client": client.sys_s,
+               "cpu_user_s_server": server.user_s, "cpu_sys_s_server": server.sys_s,
+               "rss_kib_client": client.rss_kib, "rss_kib_server": server.rss_kib, "rss_kib": both}
+    figures.update(smaps_figures(client.smaps, server.smaps))
+    return figures
 
 
 def rtt_figures(ping: dict[str, str], pong: dict[str, str] | None, client: Usage,
@@ -2008,6 +2097,47 @@ def cmd_selftest() -> int:
     unsaid = process_figures(Usage(1.0, 0.5, None), server)
     expect("a side that printed no peak RSS leaves the cell's sum out and keeps the other side's",
            unsaid["rss_kib"] is None and unsaid["rss_kib_client"] is None and unsaid["rss_kib_server"] == 6000)
+    smaps_text = ("perf_probe sub received=500\n"
+                  "perf_probe smaps rollup rss_kib=3000 pss_kib=1800 anonymous_kib=700 private_dirty_kib=800 "
+                  "private_clean_kib=10 shared_clean_kib=2000 shared_dirty_kib=0\n"
+                  "perf_probe smaps region start=7f00 perms=r-xp size_kib=1116 rss_kib=1000 pss_kib=500 "
+                  "private_dirty_kib=0 anonymous_kib=0 name=/run/lib-W/libwz_capi_pico.so\n"
+                  "perf_probe smaps region start=7f40 perms=rw-p size_kib=64 rss_kib=56 pss_kib=56 "
+                  "private_dirty_kib=56 anonymous_kib=56 name=/run/lib-W/libwz_capi_pico.so\n"
+                  "perf_probe smaps region start=7e00 perms=rw-p size_kib=288 rss_kib=40 pss_kib=40 "
+                  "private_dirty_kib=40 anonymous_kib=40 name=\n"
+                  "perf_probe smaps region start=5500 perms=rw-p size_kib=132 rss_kib=8 pss_kib=8 "
+                  "private_dirty_kib=8 anonymous_kib=8 name=[heap]\n"
+                  "perf_probe smaps region start=7f80 perms=r-xp size_kib=140 rss_kib=60 pss_kib=30 "
+                  "private_dirty_kib=0 anonymous_kib=0 name=/lib/x86_64-linux-gnu/libgcc_s.so.1\n"
+                  "perf_probe usage peak_rss_kib=3100\n")
+    read_smaps = smaps_of(smaps_text)
+    expect("a program's resident set is read by part, the mappings of one library summed",
+           read_smaps is not None and read_smaps["rollup"]["rss_kib"] == 3000
+           and read_smaps["parts"]["library"] == 1056 and read_smaps["parts"]["anonymous"] == 40
+           and read_smaps["parts"]["heap"] == 8 and read_smaps["parts"]["libgcc_s"] == 60
+           and read_smaps["parts"]["libc"] == 0 and len(read_smaps["regions"]) == 5
+           and read_smaps["regions"][2]["size_kib"] == 288)
+    expect("a mapping is counted as the part its name says",
+           [smaps_class(n) for n in ("", "[heap]", "[stack]", "[vdso]", "/usr/lib/libc.so.6",
+                                     "/usr/lib/ld-linux-x86-64.so.2", "/x/lib-P/libzenohpico.so",
+                                     "/x/bin/perf_probe_W", "/usr/lib/libm.so.6", "[anon:x]")]
+           == ["anonymous", "heap", "stack", "kernel", "libc", "loader", "library", "program",
+               "other_libraries", "other"])
+    expect("a program that printed no rollup has no resident set by part",
+           smaps_of("perf_probe usage peak_rss_kib=3100\n") is None)
+    by_part = process_figures(Usage(1.0, 0.5, 4000, read_smaps), Usage(0.25, 0.125, 6000, read_smaps))
+    expect("a cell's resident set by part is its two processes' sum, beside its peak",
+           by_part["smaps_library_kib"] == 2112 and by_part["smaps_rollup_rss_kib"] == 6000
+           and by_part["smaps_libc_kib"] == 0 and by_part["rss_kib"] == 10000
+           and by_part["smaps_client"] is read_smaps)
+    expect("every figure of the resident set by part is a figure the summary knows, and lower is better",
+           set(numbers(by_part)) - set(numbers(figs)) == set(SMAPS_FIGURES)
+           and all(METRICS[n] == "lower" for n in SMAPS_FIGURES))
+    expect("a side that printed no resident set by part leaves every such figure out",
+           not any(n.startswith("smaps_") for n in process_figures(Usage(1.0, 0.5, 4000, read_smaps), server)))
+    expect("a lost cell's last words are not its resident set by part",
+           last_words(smaps_text) == "perf_probe sub received=500")
     started, control, held = started_peak_rss()
     expect("control: the maxrss of a reaped child carries the resident set of the runner that started it",
            control >= held)
