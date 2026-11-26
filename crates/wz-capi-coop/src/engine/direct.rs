@@ -4,11 +4,11 @@
 //! The read of a session that steps each face's link session itself, the dial role's and, with
 //! `listen`, each a port gave or an attach dialled, then, with `group`, each group's session,
 //! and hands each record out as it is read: a build without `threads`, and with `threads` one
-//! whose form gives each value a lock of its own and that joins no group (`build.rs`). A
-//! connection a port holds is taken by the read with no face's slot held, and its face's place is
-//! taken before the session's lock (`CoopEngine::accept_links`). A group's session lies in a read
-//! slot the session holds between two reads, taken out of it for each step
-//! (`CoopEngine::step_groups`).
+//! whose form gives each value a lock of its own (`build.rs`). A connection a port holds is taken
+//! by the read with no face's slot held, and its face's place is taken before the session's lock
+//! (`CoopEngine::accept_links`). A group's session lies in a read slot the session holds between
+//! two reads, taken out of it for each step and stepped, with other threads, under the session's
+//! lock but while a record it read is handed out (`CoopEngine::step_groups`).
 //!
 //! The link's session lies in the engine's face ([`DirectFace`]), apart from the session's state,
 //! in two parts as a send and a receive use it: the receive (the pump, what its steps are handed,
@@ -1681,37 +1681,56 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 at = at.saturating_add(1);
                 continue;
             };
+            // A group's session is of one thread's types, which it shares with the group's face in
+            // the session's state (the stage, the link, the members' rows, the end): with other
+            // threads (`threads`) it is stepped with the session's lock held, as every reach of
+            // that face is, so they are reached by one thread at a time (`UnderCoreLock`). The
+            // lock is let go of only while a record the step read is handed out, which takes it
+            // again for the record's dispatch (`DirectSink`) and calls its callbacks with it let
+            // go of. With no other thread nothing else reaches them meanwhile, and nothing is held.
+            #[cfg(feature = "threads")]
+            let mut held = Some(self.core.lock());
             let ended = pump.step(&mut |records, event| {
+                #[cfg(feature = "threads")]
+                drop(held.take());
                 DirectSink {
                     engine: self,
                     records,
                 }
                 .event(event);
+                #[cfg(feature = "threads")]
+                {
+                    held = Some(self.core.lock());
+                }
             });
+            #[cfg(feature = "threads")]
+            drop(held);
             DirectSink {
                 engine: self,
                 records: pump.records(),
             }
             .end_records();
+            // What the slot shares with the group's face is let go of, stepped or put back under
+            // the session's lock, closed or not: a close let go of the face's handles under it.
+            let mut core = self.core.lock();
             // The ended session's transport goes before the session's poll joins the group again
             // (`Self::poll_groups`), a join that takes what the transport held of the stack's.
             if ended {
                 pump.let_go();
             }
-            let unplaced = {
-                let Some(mut held) = self.live() else {
-                    pump.leave();
-                    return;
-                };
-                match held.0.group_pumps.get_mut(at) {
-                    Some(slot) => {
-                        *slot = Some(pump);
-                        None
-                    }
-                    None => Some(pump),
+            if self.closed.load(Ordering::Acquire) {
+                pump.leave();
+                return;
+            }
+            let unplaced = match core.0.group_pumps.get_mut(at) {
+                Some(slot) => {
+                    *slot = Some(pump);
+                    None
                 }
+                None => Some(pump),
             };
             drop(unplaced);
+            drop(core);
             at = at.saturating_add(1);
         }
     }

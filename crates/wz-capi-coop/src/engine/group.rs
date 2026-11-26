@@ -1555,7 +1555,10 @@ pub(super) struct GroupSeat {
 /// The read slot of a group (`docs/c-abi-architecture.md` 8.8): the group's session, in the
 /// place its read steps it, and what that read notes each event against before it is handed out.
 /// It lies apart from the group's face, which the session's state holds, so that the read steps
-/// it with the session let go of and takes the session's lock once for each record it dispatches.
+/// it with the session let go of while each record it read is handed out, and takes the session's
+/// lock for each record it dispatches. Its values are one thread's, shared with the group's face:
+/// where other threads reach the session (`threads`) the rest of a step is made under the
+/// session's lock (`CoopEngine::step_groups`).
 /// The place is made once for the group, at the session's open: a session that ended is let go of
 /// with the place kept (`Self::let_go`), and each join again builds its session there.
 #[cfg(not(wz_round))]
