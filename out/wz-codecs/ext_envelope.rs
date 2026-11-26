@@ -454,7 +454,7 @@ impl<'a> ExtEnvelopeView<'a> {
         let extensions: Bounded<::sce_forge_runtime::codec::NonEmptyListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>;
         {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryColdScanWalk, ExtEnvelopeExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, ExtEnvelopeExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "ext_envelope", field: "extensions" },
                 args: [],
             });

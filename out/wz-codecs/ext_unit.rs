@@ -74,16 +74,21 @@ impl ExtUnit {
     /// dispatches to this one reads it through this one function, out of line
     /// where the set reads it from two sites or more so that no site holds a
     /// copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_inline`], held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read(cursor: &mut SceReader<'_>) -> Self {
-        Self::read_inline(cursor)
+        // RFC §synth-5-B empty body — nothing to read; the surrounding
+        // header byte (and the wire-protocol layer that demuxes it)
+        // already proved this codec was selected, so return the
+        // envelope without touching the reader.
+        let _ = cursor;
+        Self {}
     }
 
-    /// [`Self::read`] held in place where it is called: the one text of this
-    /// codec's body, which each site on the build's hot path holds and
-    /// [`Self::read`] holds for every other site (docs/adr/0140).
+    /// [`Self::read`] held in place where it is called: the same body, which
+    /// each site on the build's hot path holds, reading each body it holds by
+    /// its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_inline(cursor: &mut SceReader<'_>) -> Self {
         // RFC §synth-5-B empty body — nothing to read; the surrounding
@@ -270,27 +275,30 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for ExtUnitWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        ExtUnitView::read_with_inline(_r, _h)
+        ExtUnitView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How the scan of a chain of `ExtUnit` in a body off the build's hot path
-/// reads its entries: each by its entry point, where the walk of its lists reads each
-/// by its form held in place (docs/adr/0140). No list names it as its type.
+/// How the scan of a chain of `ExtUnit` in a body on the build's hot path reads
+/// its entries: each by its form held in place, where the walk of its lists reads each
+/// by its entry point (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub(super) struct ExtUnitColdScanWalk;
+pub(super) struct ExtUnitHeldWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for ExtUnitColdScanWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for ExtUnitHeldWalk {
     type Entry<'b> = ExtUnitView;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        ExtUnitView::read_with(_r, _h)
+        ExtUnitView::read_with_inline(_r, _h)
     }
 
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+    #[inline(always)]
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
+        <ExtUnitWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
+    }
 }
 
 // `ExtUnit` holds no bounded list, embedded body or variant, so a

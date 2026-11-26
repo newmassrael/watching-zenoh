@@ -188,11 +188,35 @@ impl<'f, S: PushFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwne
 
     #[inline]
     fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
-        ExtEntryOwned::<S>::read_inline(_r)
+        ExtEntryOwned::<S>::read(_r)
     }
 
     fn follows(_e: &ExtEntryOwned<S>) -> bool {
         _e.z()
+    }
+}
+
+/// How the chain `extensions` is read by the form held in place of this
+/// codec's body (docs/adr/0140): as [`PushExtensionsChain`] reads it, each entry read
+/// by its form held in place.
+#[allow(dead_code)]
+struct PushExtensionsHeldChain;
+
+impl ::sce_forge_runtime::codec::ChainEnds for PushExtensionsHeldChain {
+    const END: ::sce_forge_runtime::codec::ChainEnd = <PushExtensionsChain as ::sce_forge_runtime::codec::ChainEnds>::END;
+    const DEPTH: Option<u32> = <PushExtensionsChain as ::sce_forge_runtime::codec::ChainEnds>::DEPTH;
+}
+
+impl<'f, S: PushFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0> for PushExtensionsHeldChain {
+    type Kinds = ::sce_forge_runtime::codec::NoKinds;
+
+    #[inline]
+    fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
+        ExtEntryOwned::<S>::read_inline(_r)
+    }
+
+    fn follows(_e: &ExtEntryOwned<S>) -> bool {
+        <PushExtensionsChain as ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0>>::follows(_e)
     }
 }
 
@@ -246,15 +270,76 @@ impl<S: PushStorage> PushIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_into_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: PushFrom<'f> {
-        Self::read_into_inline(cursor, _out);
+        // RFC §synth-5-B peek-byte / streaming-prefix:
+        // streaming prefix decode (variable-length fields supported via
+        // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
+        // mode additionally peeks the cursor's next byte for the variant
+        // tag without advancing — the arm body decoder reads the peeked
+        // byte as its own header byte (Zenoh response/request body MID
+        // dispatch shape per network.c:347-364 + 220-235).
+        let header = {
+            let raw = cursor.take_array::<1>();
+            raw[0]
+        };
+        WireexprOwned::<S>::read_into(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1);
+        if (header & 0x80u8) != 0 {
+            cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
+                ::sce_forge_runtime::codec::read_chain_into::<PushExtensionsChain, _, 0>(cursor, _vec, [], &mut [])
+            }));
+        } else {
+            _out.extensions = None;
+        }
+        let _peek = cursor.peek_u8();
+        // Dispatch on the tag field; each arm reads its body codec from the
+        // reader where `_out.body` holds it, so no arm body is returned up
+        // through the variant wrapper (docs/adr/0049). An arm is installed,
+        // holding its body's default, only where `_out.body` holds another
+        // arm: a destination that holds the arm already, as one a caller
+        // reads frame after frame into does, is read into as it is, every
+        // field of the body written by its read (docs/adr/0128). The default
+        // arm (when declared) carries the runtime tag value so encode can
+        // round-trip it back onto the wire.
+        match _peek & 0x1F {
+            1u8 => {
+                if !matches!(_out.body, PushVariantIn::CodecZenohMsgPut(_)) {
+                    _out.body = PushVariantIn::CodecZenohMsgPut(MsgPutOwned::<S>::default());
+                }
+                if let PushVariantIn::CodecZenohMsgPut(_b) = &mut _out.body {
+                    MsgPutOwned::<S>::read_into(cursor, _b);
+                }
+            }
+            2u8 => {
+                if !matches!(_out.body, PushVariantIn::CodecZenohMsgDel(_)) {
+                    _out.body = PushVariantIn::CodecZenohMsgDel(MsgDelOwned::<S>::default());
+                }
+                if let PushVariantIn::CodecZenohMsgDel(_b) = &mut _out.body {
+                    MsgDelOwned::<S>::read_into(cursor, _b);
+                }
+            }
+            other => {
+                if let PushVariantIn::Default { tag, .. } = &mut _out.body {
+                    *tag = PushUnknownTag(other);
+                } else {
+                    _out.body = PushVariantIn::Default {
+                        tag: PushUnknownTag(other),
+                        body: MsgPutOwned::<S>::default(),
+                    };
+                }
+                if let PushVariantIn::Default { body: _b, .. } = &mut _out.body {
+                    MsgPutOwned::<S>::read_into(cursor, _b);
+                }
+            }
+        }
+        _out.header = header;
+
     }
 
-    /// [`Self::read_into`] held in place where it is called: the one text of
-    /// this codec's body, which each site on the build's hot path holds and
-    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    /// [`Self::read_into`] held in place where it is called: the same body,
+    /// which each site on the build's hot path holds, reading each body it
+    /// holds by its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: PushFrom<'f> {
         // RFC §synth-5-B peek-byte / streaming-prefix:
@@ -271,7 +356,7 @@ impl<S: PushStorage> PushIn<S> {
         WireexprOwned::<S>::read_into_inline(cursor, &mut _out.keyexpr, (header >> 5) & 0x1, (header >> 6) & 0x1);
         if (header & 0x80u8) != 0 {
             cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
-                ::sce_forge_runtime::codec::read_chain_into::<PushExtensionsChain, _, 0>(cursor, _vec, [], &mut [])
+                ::sce_forge_runtime::codec::read_chain_into::<PushExtensionsHeldChain, _, 0>(cursor, _vec, [], &mut [])
             }));
         } else {
             _out.extensions = None;
@@ -666,27 +751,30 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for PushWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        PushView::read_with_inline(_r, _h)
+        PushView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How the scan of a chain of `Push` in a body off the build's hot path
-/// reads its entries: each by its entry point, where the walk of its lists reads each
-/// by its form held in place (docs/adr/0140). No list names it as its type.
+/// How the scan of a chain of `Push` in a body on the build's hot path reads
+/// its entries: each by its form held in place, where the walk of its lists reads each
+/// by its entry point (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub(super) struct PushColdScanWalk;
+pub(super) struct PushHeldWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for PushColdScanWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for PushHeldWalk {
     type Entry<'b> = PushView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        PushView::read_with(_r, _h)
+        PushView::read_with_inline(_r, _h)
     }
 
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+    #[inline(always)]
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
+        <PushWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
+    }
 }
 
 // `PushView` is what a decode of `Push` learned, not a
@@ -786,15 +874,61 @@ impl<'a> PushView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_with_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_with_inline`], held in place (docs/adr/0140).
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
-        Self::read_with_inline(cursor, _hook)
+        // RFC §synth-5-B peek-byte / streaming-prefix:
+        // streaming prefix decode (variable-length fields supported via
+        // per-field present_if/tlv-chain/embed/repeat helpers). Peek-byte
+        // mode additionally peeks the cursor's next byte for the variant
+        // tag without advancing — the arm body decoder reads the peeked
+        // byte as its own header byte (Zenoh response/request body MID
+        // dispatch shape per network.c:347-364 + 220-235).
+        let header = {
+            let raw = cursor.take_array::<1>();
+            raw[0]
+        };
+        #[allow(clippy::needless_late_init)]
+        let keyexpr: WireexprView<'a>;
+        keyexpr = WireexprView::read_with(cursor, (header >> 5) & 0x1, (header >> 6) & 0x1, _hook);
+        #[allow(clippy::needless_late_init)]
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
+        if (header & 0x80u8) != 0 {
+            let _rest = cursor.rest();
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, PushExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+                site: ::sce_forge_runtime::codec::ChainSite { codec: "push", field: "extensions" },
+                args: [],
+            });
+            extensions = cursor.settle(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements).map(Some));
+        } else {
+            extensions = None;
+        }
+        let _peek = cursor.peek_u8();
+        // Dispatch on the tag field; each arm reads its body's view as a value
+        // from the reader and is made of it once, so no arm is installed
+        // holding a default body before its body is read (docs/adr/0128). The
+        // default arm (when declared) carries the runtime tag value so encode
+        // can round-trip it back onto the wire.
+        let body = match _peek & 0x1F {
+            1u8 => PushViewVariant::CodecZenohMsgPut(MsgPutView::read_with(cursor, _hook)),
+            2u8 => PushViewVariant::CodecZenohMsgDel(MsgDelView::read_with(cursor, _hook)),
+            other => PushViewVariant::Default {
+                tag: PushUnknownTag(other),
+                body: MsgPutView::read_with(cursor, _hook),
+            },
+        };
+        Self {
+            header,
+            keyexpr,
+            extensions,
+            body,
+        }
+
     }
 
-    /// [`Self::read_with`] held in place where it is called: the one text of
-    /// this view's body, which each site on the build's hot path holds and
-    /// [`Self::read_with`] holds for every other site (docs/adr/0140).
+    /// [`Self::read_with`] held in place where it is called: the same body,
+    /// which each site on the build's hot path holds, reading each body it
+    /// holds by its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
         // RFC §synth-5-B peek-byte / streaming-prefix:
@@ -815,7 +949,7 @@ impl<'a> PushView<'a> {
         let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, PushExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryHeldWalk, PushExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "push", field: "extensions" },
                 args: [],
             });

@@ -131,16 +131,49 @@ impl<S: EncodingStorage> EncodingIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_into_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: EncodingFrom<'f> {
-        Self::read_into_inline(cursor, _out);
+        // Streaming decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let packed_id = cursor.read_vle_u32();
+        let schema_len = if (packed_id & 0x00000001u32) != 0 {
+            let _v = cursor.read_vle_u64();
+            Some(_v)
+        } else {
+            None
+        };
+        let schema = if let Some(_len) = schema_len {
+            if _len > 255 {
+                cursor.fail(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
+            Some(cursor.take_slice(_n))
+        } else {
+            None
+        };
+        let schema = cursor.settle(schema.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
+        let schema = cursor.hold(schema.map(|_v| _v.store::<S, EncodingSchemaField>()).transpose());
+        _out.packed_id = packed_id;
+        _out.schema_len = schema_len;
+        _out.schema = schema;
+
     }
 
-    /// [`Self::read_into`] held in place where it is called: the one text of
-    /// this codec's body, which each site on the build's hot path holds and
-    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    /// [`Self::read_into`] held in place where it is called: the same body,
+    /// which each site on the build's hot path holds, reading each body it
+    /// holds by its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: EncodingFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
@@ -405,27 +438,30 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for EncodingWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        EncodingView::read_with_inline(_r, _h)
+        EncodingView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How the scan of a chain of `Encoding` in a body off the build's hot path
-/// reads its entries: each by its entry point, where the walk of its lists reads each
-/// by its form held in place (docs/adr/0140). No list names it as its type.
+/// How the scan of a chain of `Encoding` in a body on the build's hot path reads
+/// its entries: each by its form held in place, where the walk of its lists reads each
+/// by its entry point (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub(super) struct EncodingColdScanWalk;
+pub(super) struct EncodingHeldWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for EncodingColdScanWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for EncodingHeldWalk {
     type Entry<'b> = EncodingView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        EncodingView::read_with(_r, _h)
+        EncodingView::read_with_inline(_r, _h)
     }
 
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+    #[inline(always)]
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
+        <EncodingWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
+    }
 }
 
 // `Encoding` holds no bounded list, embedded body or variant, so a

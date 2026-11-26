@@ -131,15 +131,54 @@ impl<S: WireexprLocalStorage> WireexprLocalIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_into_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8) where S: WireexprLocalFrom<'f> {
-        Self::read_into_inline(cursor, _out, n);
+        // Declared-but-unconsumed flag inputs: defensive suppress per declared
+        // `<sce:flag-input>` so codecs that haven't (yet) consumed an
+        // input via `present-if` compile cleanly. The validator enforces
+        // declaration; consumption is a per-codec design choice.
+        let _ = n;
+        // Streaming decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let id = cursor.read_vle_u16();
+        let suffix_len = if (n & 0x01u8) != 0 {
+            let _v = cursor.read_vle_u64();
+            Some(_v)
+        } else {
+            None
+        };
+        let suffix = if let Some(_len) = suffix_len {
+            if _len > 65535 {
+                cursor.fail(CodecError::LengthOutOfRange);
+            }
+            let _n = _len as usize;
+            let raw = cursor.take_slice(_n);
+            Some(cursor.settle(core::str::from_utf8(raw).map_err(|_| CodecError::InvalidUtf8)))
+        } else {
+            None
+        };
+        let suffix = cursor.settle(suffix.map(|_v| ::sce_forge_runtime::codec::Bounded::new(_v).ok_or(CodecError::LengthOutOfRange)).transpose());
+        let suffix = cursor.hold(suffix.map(|_v| _v.store::<S, WireexprLocalSuffixField>()).transpose());
+        _out.id = id;
+        _out.suffix_len = suffix_len;
+        _out.suffix = suffix;
+
     }
 
-    /// [`Self::read_into`] held in place where it is called: the one text of
-    /// this codec's body, which each site on the build's hot path holds and
-    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    /// [`Self::read_into`] held in place where it is called: the same body,
+    /// which each site on the build's hot path holds, reading each body it
+    /// holds by its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, n: u8) where S: WireexprLocalFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
@@ -398,27 +437,30 @@ impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprLocalWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 1], _h: &mut H) -> Self::Entry<'b> {
-        WireexprLocalView::read_with_inline(_r, _a[0], _h)
+        WireexprLocalView::read_with(_r, _a[0], _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
 }
 
-/// How the scan of a chain of `WireexprLocal` in a body off the build's hot path
-/// reads its entries: each by its entry point, where the walk of its lists reads each
-/// by its form held in place (docs/adr/0140). No list names it as its type.
+/// How the scan of a chain of `WireexprLocal` in a body on the build's hot path reads
+/// its entries: each by its form held in place, where the walk of its lists reads each
+/// by its entry point (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub(super) struct WireexprLocalColdScanWalk;
+pub(super) struct WireexprLocalHeldWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprLocalColdScanWalk {
+impl ::sce_forge_runtime::codec::ListWalk<1> for WireexprLocalHeldWalk {
     type Entry<'b> = WireexprLocalView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 1], _h: &mut H) -> Self::Entry<'b> {
-        WireexprLocalView::read_with(_r, _a[0], _h)
+        WireexprLocalView::read_with_inline(_r, _a[0], _h)
     }
 
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {  }
+    #[inline(always)]
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 1]) {
+        <WireexprLocalWalk as ::sce_forge_runtime::codec::ListWalk<1>>::advance(_e, _s)
+    }
 }
 
 // `WireexprLocal` holds no bounded list, embedded body or variant, so a

@@ -103,11 +103,35 @@ impl<'f, S: TransportFrameHeaderFrom<'f>> ::sce_forge_runtime::codec::ChainRule<
 
     #[inline]
     fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
-        ExtEntryOwned::<S>::read_inline(_r)
+        ExtEntryOwned::<S>::read(_r)
     }
 
     fn follows(_e: &ExtEntryOwned<S>) -> bool {
         _e.z()
+    }
+}
+
+/// How the chain `extensions` is read by the form held in place of this
+/// codec's body (docs/adr/0140): as [`TransportFrameHeaderExtensionsChain`] reads it, each entry read
+/// by its form held in place.
+#[allow(dead_code)]
+struct TransportFrameHeaderExtensionsHeldChain;
+
+impl ::sce_forge_runtime::codec::ChainEnds for TransportFrameHeaderExtensionsHeldChain {
+    const END: ::sce_forge_runtime::codec::ChainEnd = <TransportFrameHeaderExtensionsChain as ::sce_forge_runtime::codec::ChainEnds>::END;
+    const DEPTH: Option<u32> = <TransportFrameHeaderExtensionsChain as ::sce_forge_runtime::codec::ChainEnds>::DEPTH;
+}
+
+impl<'f, S: TransportFrameHeaderFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0> for TransportFrameHeaderExtensionsHeldChain {
+    type Kinds = ::sce_forge_runtime::codec::NoKinds;
+
+    #[inline]
+    fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
+        ExtEntryOwned::<S>::read_inline(_r)
+    }
+
+    fn follows(_e: &ExtEntryOwned<S>) -> bool {
+        <TransportFrameHeaderExtensionsChain as ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0>>::follows(_e)
     }
 }
 
@@ -161,15 +185,41 @@ impl<S: TransportFrameHeaderStorage> TransportFrameHeaderIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_into_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: TransportFrameHeaderFrom<'f> {
-        Self::read_into_inline(cursor, _out);
+        // Streaming decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let header = {
+            let raw = cursor.take_array::<1>();
+            raw[0]
+        };
+        let sn = cursor.read_vle_u64();
+        if (header & 0x80u8) != 0 {
+            cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
+                ::sce_forge_runtime::codec::read_chain_into::<TransportFrameHeaderExtensionsChain, _, 0>(cursor, _vec, [], &mut [])
+            }));
+        } else {
+            _out.extensions = None;
+        }
+        _out.header = header;
+        _out.sn = sn;
+
     }
 
-    /// [`Self::read_into`] held in place where it is called: the one text of
-    /// this codec's body, which each site on the build's hot path holds and
-    /// [`Self::read_into`] holds for every other site (docs/adr/0140).
+    /// [`Self::read_into`] held in place where it is called: the same body,
+    /// which each site on the build's hot path holds, reading each body it
+    /// holds by its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: TransportFrameHeaderFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
@@ -191,7 +241,7 @@ impl<S: TransportFrameHeaderStorage> TransportFrameHeaderIn<S> {
         let sn = cursor.read_vle_u64_inline();
         if (header & 0x80u8) != 0 {
             cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
-                ::sce_forge_runtime::codec::read_chain_into::<TransportFrameHeaderExtensionsChain, _, 0>(cursor, _vec, [], &mut [])
+                ::sce_forge_runtime::codec::read_chain_into::<TransportFrameHeaderExtensionsHeldChain, _, 0>(cursor, _vec, [], &mut [])
             }));
         } else {
             _out.extensions = None;
@@ -475,27 +525,30 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for TransportFrameHeaderWalk {
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        TransportFrameHeaderView::read_with_inline(_r, _h)
+        TransportFrameHeaderView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How the scan of a chain of `TransportFrameHeader` in a body off the build's hot path
-/// reads its entries: each by its entry point, where the walk of its lists reads each
-/// by its form held in place (docs/adr/0140). No list names it as its type.
+/// How the scan of a chain of `TransportFrameHeader` in a body on the build's hot path reads
+/// its entries: each by its form held in place, where the walk of its lists reads each
+/// by its entry point (docs/adr/0140). No list names it as its type.
 #[allow(dead_code)]
-pub(super) struct TransportFrameHeaderColdScanWalk;
+pub(super) struct TransportFrameHeaderHeldWalk;
 
-impl ::sce_forge_runtime::codec::ListWalk<0> for TransportFrameHeaderColdScanWalk {
+impl ::sce_forge_runtime::codec::ListWalk<0> for TransportFrameHeaderHeldWalk {
     type Entry<'b> = TransportFrameHeaderView<'b>;
 
     #[inline(always)]
     fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        TransportFrameHeaderView::read_with(_r, _h)
+        TransportFrameHeaderView::read_with_inline(_r, _h)
     }
 
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
+    #[inline(always)]
+    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
+        <TransportFrameHeaderWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
+    }
 }
 
 // `TransportFrameHeaderView` is what a decode of `TransportFrameHeader` learned, not a
@@ -576,15 +629,49 @@ impl<'a> TransportFrameHeaderView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// Its body is [`Self::read_with_inline`], which a body on the
-    /// build's hot path reads held in place (docs/adr/0140).
+    /// A body on the build's hot path reads the same body by
+    /// [`Self::read_with_inline`], held in place (docs/adr/0140).
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
-        Self::read_with_inline(cursor, _hook)
+        // Streaming decode (SSOT selection: `needs_streaming`).
+        // The positional `raw[byte_off]` path is valid only when every
+        // field's absolute offset is fixed at codegen time; this branch
+        // handles every codec where it is not — present-if-gated fields
+        // (runtime presence), VLE / repeat / TLV-chain / embed fields
+        // (runtime width), string fields (UTF-8 decode), and a fixed field
+        // after a variable-length payload (offset depends on the payload
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
+        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
+        // every other field flows through `present_if_decode_stmt`, whose
+        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
+        let header = {
+            let raw = cursor.take_array::<1>();
+            raw[0]
+        };
+        let sn = cursor.read_vle_u64();
+        #[allow(clippy::needless_late_init)]
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
+        if (header & 0x80u8) != 0 {
+            let _rest = cursor.rest();
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, TransportFrameHeaderExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+                site: ::sce_forge_runtime::codec::ChainSite { codec: "transport_frame_header", field: "extensions" },
+                args: [],
+            });
+            extensions = cursor.settle(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements).map(Some));
+        } else {
+            extensions = None;
+        }
+        Self {
+            header,
+            sn,
+            extensions,
+        }
+
     }
 
-    /// [`Self::read_with`] held in place where it is called: the one text of
-    /// this view's body, which each site on the build's hot path holds and
-    /// [`Self::read_with`] holds for every other site (docs/adr/0140).
+    /// [`Self::read_with`] held in place where it is called: the same body,
+    /// which each site on the build's hot path holds, reading each body it
+    /// holds by its form held in place (docs/adr/0140).
     #[inline(always)]
     pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
         // Streaming decode (SSOT selection: `needs_streaming`).
@@ -608,7 +695,7 @@ impl<'a> TransportFrameHeaderView<'a> {
         let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, TransportFrameHeaderExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryHeldWalk, TransportFrameHeaderExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "transport_frame_header", field: "extensions" },
                 args: [],
             });
