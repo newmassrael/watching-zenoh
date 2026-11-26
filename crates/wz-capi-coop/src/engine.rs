@@ -2581,8 +2581,9 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The links as the last move left them, when it left them settled ([`Self::move_links`]).
     #[cfg(wz_round)]
     links_settled: Option<LinksSettled>,
-    /// When the one link the read steps is next due, on the session's clock in microseconds: its
-    /// life's next look and its session's own deadlines (`direct`); `u64::MAX` for none.
+    /// When the faces the read steps are next due, on the session's clock in microseconds, as the
+    /// read's wait was given it (`direct`): what bounds that wait ([`Self::idle_wait`]);
+    /// `u64::MAX` for none.
     #[cfg(not(wz_round))]
     link_due_us: u64,
     /// When the step's bookkeeping is owed next ([`Self::owes_bookkeeping`]).

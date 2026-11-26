@@ -2350,14 +2350,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // Noted outside the slot for the other faces' reads; the one face's due is the read's
             // own, noted as its turn ends.
             #[cfg(any(feature = "listen", feature = "group"))]
-            {
-                face.note_due(slot);
-                core.link_due_us = self.faces_due_us();
-            }
-            #[cfg(not(any(feature = "listen", feature = "group")))]
-            {
-                core.link_due_us = slot.due_us();
-            }
+            face.note_due(slot);
             core.settle_ledger();
         }
         let jobs_due_ms = core.jobs_due_at(now_us);
