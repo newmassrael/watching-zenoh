@@ -67,6 +67,8 @@ use sce_forge_runtime::codec::{Bounded, CodecError};
 use crate::driver_loop::DriverLoopOutcome;
 use crate::interest_build::{interest_body, interest_body_mut};
 use crate::keyexpr_prefix::{strip_nonwild_prefix, OwnedNonWildKeyExpr};
+use crate::limit_binding::Quota;
+use crate::limits::SessionLimits;
 use crate::network_message::NetworkMessage;
 use wz_codecs::wireexpr::{WireexprFrom, WireexprOwned, WireexprOwnedVariant, WireexprStorage};
 use wz_codecs::wireexpr_local::WireexprLocalSuffixField;
@@ -436,12 +438,46 @@ pub struct NamespaceIngress {
     /// (always compiled); populated only by a `DeclareKeyExpr` definition
     /// (`codec-declare`).
     incomplete: HashMap<crate::wire_id::ExprId, String>,
+    /// `MAX_REMOTE_DECLS` as the session's creator stated it: how many dropped declarations
+    /// each `blocked_*` set of a declaration kind remembers, as many as the peer may hold open of
+    /// one kind.
+    #[cfg(feature = "codec-declare")]
+    remote_decls: Quota,
+    /// `MAX_INBOUND_SUB_INTERESTS` as stated: the dropped interests `blocked_interests` remembers.
+    remote_interests: Quota,
+    /// `MAX_PEER_KEYEXPR_ALIASES` as stated: the definitions `incomplete` parks.
+    aliases: Quota,
+}
+
+/// Remember `id` in `set` where `quota` leaves room for one more, or where it is held already.
+///
+/// The sets grow on the heap, so the quota is compared whatever the build fixes. An id not
+/// remembered leaves its message dropped all the same; its id-only withdrawal then reaches the
+/// session's tables, which hold nothing under the id because its declaration never reached them,
+/// as a declaration the session's own table refuses at its quota is withdrawn into nothing.
+/// zenoh keeps these sets with no bound (`net/routing/namespace.rs`), and zenoh-pico has no
+/// namespace to compare with.
+fn remember(set: &mut HashSet<u64>, id: u64, quota: Quota) {
+    if set.contains(&id) || quota.admits(set.len().saturating_add(1)) {
+        set.insert(id);
+    }
 }
 
 impl NamespaceIngress {
-    /// Build the ingress decorator for `namespace`.
+    /// Build the ingress decorator for `namespace`, its correlation held to the build's limits.
     pub fn new(namespace: OwnedNonWildKeyExpr) -> Self {
+        Self::with_limits(namespace, &SessionLimits::BUILD)
+    }
+
+    /// Build the ingress decorator for `namespace`, its correlation held to `limits`: the
+    /// `blocked_*` sets of declarations to `MAX_REMOTE_DECLS` each, `blocked_interests` to
+    /// `MAX_INBOUND_SUB_INTERESTS` and `incomplete` to `MAX_PEER_KEYEXPR_ALIASES`.
+    pub fn with_limits(namespace: OwnedNonWildKeyExpr, limits: &SessionLimits) -> Self {
         Self {
+            #[cfg(feature = "codec-declare")]
+            remote_decls: limits.max_remote_decls(),
+            remote_interests: limits.max_inbound_sub_interests(),
+            aliases: limits.max_peer_keyexpr_aliases(),
             namespace,
             #[cfg(feature = "codec-declare")]
             blocked_subscribers: HashSet::new(),
@@ -588,8 +624,15 @@ impl NamespaceIngress {
                 // Not under the namespace. A non-matching DeclareKeyExpr
                 // definition (Sender-mapped) is parked so later references to it
                 // can be reconstructed; everything else is simply dropped.
+                // Past MAX_PEER_KEYEXPR_ALIASES the definition is dropped unparked: a later
+                // reference to its id names an alias the session's table never held, which
+                // resolves to no key.
                 if let (Some(mid), true) = (decl_id, sender) {
-                    self.incomplete.insert(mid, key.to_string());
+                    if self.incomplete.contains_key(&mid)
+                        || self.aliases.admits(self.incomplete.len().saturating_add(1))
+                    {
+                        self.incomplete.insert(mid, key.to_string());
+                    }
                 }
                 false
             }
@@ -619,7 +662,7 @@ impl NamespaceIngress {
                 if self.strip(&mut m.keyexpr, None) {
                     true
                 } else {
-                    self.blocked_subscribers.insert(id);
+                    remember(&mut self.blocked_subscribers, id, self.remote_decls);
                     false
                 }
             }
@@ -629,7 +672,7 @@ impl NamespaceIngress {
                 if self.strip(&mut m.keyexpr, None) {
                     true
                 } else {
-                    self.blocked_queryables.insert(id);
+                    remember(&mut self.blocked_queryables, id, self.remote_decls);
                     false
                 }
             }
@@ -639,7 +682,7 @@ impl NamespaceIngress {
                 if self.strip(&mut m.keyexpr, None) {
                     true
                 } else {
-                    self.blocked_tokens.insert(id);
+                    remember(&mut self.blocked_tokens, id, self.remote_decls);
                     false
                 }
             }
@@ -689,7 +732,7 @@ impl NamespaceIngress {
                 if self.strip_mapped(we, None, sender) {
                     true
                 } else {
-                    self.blocked_interests.insert(id);
+                    remember(&mut self.blocked_interests, id, self.remote_interests);
                     false
                 }
             }
@@ -903,6 +946,141 @@ mod tests {
         assert!(ing.apply(&mut undecl));
         // The namespace PREFIX survives: an in-namespace declare still strips+passes.
         assert!(ing.apply(&mut decl_sub(4, "myns/foo")));
+    }
+
+    /// The limits a test states, or `None` where the build's domain of one of them is one value
+    /// and no other can be stated.
+    fn one_of_each() -> Option<SessionLimits> {
+        use crate::limit_binding::LimitSpec;
+        use crate::limits::{MaxInboundSubInterests, MaxPeerKeyexprAliases, MaxRemoteDecls};
+
+        if MaxRemoteDecls::DOMAIN.is_singleton()
+            || MaxInboundSubInterests::DOMAIN.is_singleton()
+            || MaxPeerKeyexprAliases::DOMAIN.is_singleton()
+        {
+            return None;
+        }
+        let mut limits = SessionLimits::defaults();
+        limits
+            .select_max_remote_decls(Quota::at_most(1))
+            .expect("one is inside the domain");
+        limits
+            .select_max_inbound_sub_interests(Quota::at_most(1))
+            .expect("one is inside the domain");
+        limits
+            .select_max_peer_keyexpr_aliases(Quota::at_most(1))
+            .expect("one is inside the domain");
+        Some(limits)
+    }
+
+    /// The dropped interests are remembered up to the stated `MAX_INBOUND_SUB_INTERESTS` and the
+    /// parked definitions up to `MAX_PEER_KEYEXPR_ALIASES`: past either the message is dropped
+    /// all the same and nothing more is held, a correlation consumed makes room, and an id held
+    /// already needs none. Turned red by an insert that does not ask its quota, or by
+    /// `with_limits` not keeping the stated one.
+    #[test]
+    fn ingress_interests_and_aliases_are_held_to_the_stated_bounds() {
+        let Some(limits) = one_of_each() else {
+            return;
+        };
+        let mut ing = NamespaceIngress::with_limits(ns("myns"), &limits);
+        assert!(!ing.apply(&mut interest(INTEREST_C, 8, Some("other/x"))));
+        assert!(
+            !ing.apply(&mut interest(INTEREST_C, 9, Some("other/y"))),
+            "an interest past the bound is still dropped"
+        );
+        assert!(ing.blocked_interests.contains(&8));
+        assert!(!ing.blocked_interests.contains(&9), "nothing more is held");
+        assert!(
+            ing.apply(&mut interest(0, 9, None)),
+            "the Final of an interest not held reaches the session"
+        );
+        assert!(!ing.apply(&mut interest(0, 8, None)));
+        assert!(!ing.apply(&mut interest(INTEREST_C, 9, Some("other/y"))));
+        assert!(
+            ing.blocked_interests.contains(&9),
+            "a correlation consumed makes room"
+        );
+
+        let mut first = literal("my");
+        assert!(!ing.strip(&mut first, Some(5)));
+        let mut second = literal("yo");
+        assert!(
+            !ing.strip(&mut second, Some(6)),
+            "a definition past the bound is still dropped"
+        );
+        assert_eq!(ing.incomplete.len(), 1);
+        assert!(ing.incomplete.contains_key(&5));
+        let mut again = literal("m");
+        assert!(!ing.strip(&mut again, Some(5)));
+        assert_eq!(
+            ing.incomplete.get(&5).map(String::as_str),
+            Some("m"),
+            "a definition parked again under its id takes no new room"
+        );
+    }
+
+    /// The dropped declarations of one kind are remembered up to the stated `MAX_REMOTE_DECLS`:
+    /// past it the declaration is dropped and its withdrawal reaches the session, which holds
+    /// nothing under its id, while each kind keeps its own room. Turned red by a blocked set that
+    /// does not ask the quota, or by the kinds sharing one count.
+    #[cfg(feature = "codec-declare")]
+    #[test]
+    fn ingress_blocked_declarations_are_held_to_the_stated_bound() {
+        use crate::transport_profile::owned::{DeclareOwned, DeclareOwnedVariant as DV};
+        use alloc::boxed::Box;
+
+        let Some(limits) = one_of_each() else {
+            return;
+        };
+        let declare = |body| {
+            NetworkMessage::Declare(Box::new(DeclareOwned {
+                header: 0,
+                interest_id: None,
+                extensions: None,
+                body,
+            }))
+        };
+        let decl_sub = |id, ke| {
+            declare(DV::CodecZenohDeclSubscriber(
+                wz_codecs::decl_subscriber::DeclSubscriberOwned {
+                    header: 0,
+                    id,
+                    keyexpr: literal(ke),
+                    extensions: None,
+                },
+            ))
+        };
+        let undecl_sub = |id| {
+            declare(DV::CodecZenohUndeclSubscriber(
+                wz_codecs::undecl_subscriber::UndeclSubscriberOwned {
+                    header: 0,
+                    id,
+                    extensions: None,
+                },
+            ))
+        };
+        let mut ing = NamespaceIngress::with_limits(ns("myns"), &limits);
+        assert!(!ing.apply(&mut decl_sub(3, "other/a")));
+        assert!(
+            !ing.apply(&mut decl_sub(4, "other/b")),
+            "a declaration past the bound is still dropped"
+        );
+        assert_eq!(ing.blocked_subscribers.len(), 1);
+        assert!(ing.blocked_subscribers.contains(&3));
+        assert!(
+            ing.apply(&mut undecl_sub(4)),
+            "the withdrawal of a declaration not held reaches the session"
+        );
+        assert!(!ing.apply(&mut undecl_sub(3)));
+        assert!(ing.blocked_subscribers.is_empty());
+
+        assert!(!ing.apply(&mut interest(INTEREST_C, 8, Some("other/x"))));
+        assert!(!ing.apply(&mut decl_sub(5, "other/c")));
+        assert!(
+            ing.blocked_subscribers.contains(&5),
+            "an interest held takes no room of the subscribers"
+        );
     }
 
     #[test]

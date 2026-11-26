@@ -206,6 +206,10 @@ pub enum MatchingListenerError {
     /// [`MAX_KEYEXPR_BYTES`](wz_session_core::caps::MAX_KEYEXPR_BYTES) a watch holds in place,
     /// so no listener was registered and no Interest was emitted.
     KeyexprTooLong,
+    /// The session holds as many matching listeners, of its publishers and its queriers
+    /// together, as its `MAX_MATCHING_LISTENERS` allows, so no listener was registered and no
+    /// Interest was emitted.
+    TableFull,
 }
 
 impl core::fmt::Display for MatchingListenerError {
@@ -229,6 +233,10 @@ impl core::fmt::Display for MatchingListenerError {
             Self::KeyexprTooLong => f.write_str(
                 "declare_matching_listener: the keyexpr is longer than a watch \
                  holds; no watch was registered",
+            ),
+            Self::TableFull => f.write_str(
+                "declare_matching_listener: the session holds as many matching \
+                 listeners as its bound allows; no watch was registered",
             ),
         }
     }
