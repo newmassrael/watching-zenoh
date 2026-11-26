@@ -54,7 +54,10 @@ impl Kept {
         }
     }
 
-    /// Take a count for another holder.
+    /// Take a count for another holder. Out of line, as [`Self::release`] is: a holder is taken
+    /// and let go of at many places of many held types, each of which would carry the count's
+    /// exchange and its bound inline.
+    #[inline(never)]
     pub fn retain(&self) {
         let before = self.count.fetch_add(1, Ordering::Relaxed);
         if before > MOST_HOLDERS {
@@ -74,11 +77,13 @@ impl Kept {
             .is_ok()
     }
 
-    /// Give back a count; the last one runs what the count was made with.
+    /// Give back a count; the last one runs what the count was made with. Out of line: every
+    /// holder's drop, of every held type, gives its count back through this one body.
     ///
     /// # Safety
     /// `this` is a live count the caller holds one of, given back here once; the caller reads
     /// nothing through it after.
+    #[inline(never)]
     pub unsafe fn release(this: NonNull<Self>) {
         // SAFETY: the caller holds a count, so the place is live.
         let kept = unsafe { this.as_ref() };
