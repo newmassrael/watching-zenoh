@@ -6,7 +6,7 @@
 // once against zenoh-pico and once against libwz_capi_pico, so the two counts are of the libraries.
 //
 //   op_probe -o OP -m peer (-e ENDPOINT | -l ENDPOINT) [-n COUNT] [-t SECONDS] [-w SECONDS] [-s SIZE]
-//            [-k KEY] [-d SECONDS]
+//            [-k KEY] [-d SECONDS] [-a START] [-g MS]
 //
 // OP is one of
 //   put          a publisher's put of SIZE bytes (the publisher declared once, before the count);
@@ -25,11 +25,20 @@
 // session does by the clock (its lease, its keep-alives) is the same in both. The waits sleep: a spin
 // would be counted as instructions. Two runs under callgrind then differ by the operations alone. An
 // operation that starts a slot or more late is counted in late=, and a run with late operations did not
-// keep the time equal. The last line is
+// keep the time equal. A COUNT of 0 does no operation and keeps the same time: the idle run.
+//
+// With -a START (an instant on CLOCK_MONOTONIC, in nanoseconds; scripts/host-bench/bench_window.h) the
+// count begins at START instead of after -w: the session is opened at once, a put's publisher declared,
+// and the program waits until START, so that a receiver given the same instant counts the same window;
+// one that is not ready by then says so and exits 1. -g MS keeps the session open MS past the end of
+// SECONDS, so that it outlasts the receiver's window. The queryable with -a counts a window: it calls
+// bench_window_open() at START less -g MS and bench_window_close() at START + SECONDS plus -g MS, and
+// in_window= says how many queries it answered between the two. The last line is
 //
 //   op_probe op=<OP> done=<operations that returned 0> failed=<that did not> late=<n> replies=<n>
+//            [open_lead_ms=<how long before START the session was open, with -a>]
 //
-// or, for queryable, op_probe op=queryable answered=<queries answered>.
+// or, for queryable, op_probe op=queryable answered=<queries answered> [in_window=<n>, with -a].
 //
 // The wait of a get and the counters use POSIX threads and C11 atomics, not the library's own mutex and
 // condition variable, so the library under test pays for neither. It needs a library of more than one
@@ -45,6 +54,7 @@
 #include <unistd.h>
 
 #include "bench_api.h"
+#include "bench_window.h"
 
 #if Z_FEATURE_MULTI_THREAD == 1 && Z_FEATURE_PUBLICATION == 1 && Z_FEATURE_SUBSCRIPTION == 1 && \
     Z_FEATURE_QUERY == 1 && Z_FEATURE_QUERYABLE == 1
@@ -66,18 +76,6 @@ static pthread_cond_t final_seen = PTHREAD_COND_INITIALIZER;
 static int final_done;
 static _Atomic unsigned long replies;
 static _Atomic unsigned long answered;
-
-static uint64_t now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static void sleep_until(uint64_t target_ns) {
-    const struct timespec ts = {(time_t)(target_ns / 1000000000ULL), (long)(target_ns % 1000000000ULL)};
-    while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {
-    }
-}
 
 static int make_config(z_owned_config_t *config) {
     z_config_default(config);
@@ -199,8 +197,49 @@ static const struct {
 static int usage(void) {
     fprintf(stderr,
             "usage: op_probe -o OP -m peer (-e ENDPOINT | -l ENDPOINT) [-n COUNT] [-t SECONDS] [-w SECONDS] "
-            "[-s SIZE] [-k KEY] [-d SECONDS]\n");
+            "[-s SIZE] [-k KEY] [-d SECONDS] [-a START] [-g MS]\n");
     return 2;
+}
+
+// The queryable: answers for -d SECONDS from its declaration, and with -a counts the window around START.
+static int serve(unsigned listen_s, uint64_t start_ns, unsigned seconds, unsigned margin_ms) {
+    reply_data = (uint8_t *)malloc(size);
+    if (reply_data == NULL) return 1;
+    memset(reply_data, 1, size);
+    z_owned_closure_query_t callback;
+    z_closure(&callback, on_query, NULL, NULL);
+    z_owned_queryable_t queryable;
+    if (z_declare_queryable(z_loan(session), &queryable, z_loan(key), z_move(callback), NULL) < 0) {
+        printf("op_probe: unable to declare the queryable\n");
+        return 1;
+    }
+    const uint64_t listen_end = bench_now_ns() + (uint64_t)listen_s * 1000000000ULL;
+    if (start_ns == 0) {
+        bench_sleep_until_ns(listen_end);
+        printf("op_probe op=queryable answered=%lu\n", atomic_load_explicit(&answered, memory_order_relaxed));
+    } else {
+        const uint64_t margin_ns = (uint64_t)margin_ms * 1000000ULL;
+        const uint64_t open_ns = start_ns - margin_ns;
+        const uint64_t close_ns = start_ns + (uint64_t)seconds * 1000000000ULL + margin_ns;
+        if (bench_now_ns() >= open_ns) {
+            printf("op_probe: the queryable was declared after its window opened\n");
+            return 1;
+        }
+        bench_sleep_until_ns(open_ns);
+        const unsigned long before = atomic_load_explicit(&answered, memory_order_relaxed);
+        bench_window_open();
+        bench_sleep_until_ns(close_ns);
+        bench_window_close();
+        const unsigned long in_window = atomic_load_explicit(&answered, memory_order_relaxed) - before;
+        if (listen_end > close_ns) bench_sleep_until_ns(listen_end);
+        printf("op_probe op=queryable answered=%lu in_window=%lu\n",
+               atomic_load_explicit(&answered, memory_order_relaxed), in_window);
+    }
+    fflush(stdout);
+    z_undeclare_queryable(z_move(queryable));
+    z_drop(z_move(session));
+    free(reply_data);
+    return 0;
 }
 
 int main(int argc, char **argv) {
@@ -209,8 +248,10 @@ int main(int argc, char **argv) {
     unsigned seconds = 10;
     unsigned settle = 1;
     unsigned listen_s = 10;
+    uint64_t start_ns = 0;
+    unsigned margin_ms = 0;
     int opt;
-    while ((opt = getopt(argc, argv, "o:m:e:l:n:t:w:s:k:d:")) != -1) {
+    while ((opt = getopt(argc, argv, "o:m:e:l:n:t:w:s:k:d:a:g:")) != -1) {
         switch (opt) {
             case 'o':
                 op = optarg;
@@ -242,6 +283,13 @@ int main(int argc, char **argv) {
             case 'd':
                 listen_s = (unsigned)strtoul(optarg, NULL, 10);
                 break;
+            case 'a':
+                start_ns = bench_parse_instant(optarg);
+                if (start_ns == 0) return usage();
+                break;
+            case 'g':
+                margin_ms = (unsigned)strtoul(optarg, NULL, 10);
+                break;
             default:
                 return usage();
         }
@@ -251,41 +299,26 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < sizeof OPS / sizeof OPS[0]; i++) {
         if (strcmp(op, OPS[i].name) == 0) run = OPS[i].run;
     }
-    const int serve = strcmp(op, "queryable") == 0;
-    if (run == NULL && !serve) return usage();
+    const int serves = strcmp(op, "queryable") == 0;
+    if (run == NULL && !serves) return usage();
     if (z_view_keyexpr_from_str(&key, keyexpr) < 0) {
         printf("op_probe: %s is not a key expression\n", keyexpr);
         return 1;
     }
 
     const int opens = run == op_open;
+    uint64_t opened_ns = 0;
     if (!opens) {
         z_owned_config_t config;
         if (make_config(&config) < 0 || z_open(&session, z_move(config), NULL) < 0) {
             printf("op_probe: unable to open the session\n");
             return 1;
         }
+        opened_ns = bench_now_ns();
     }
-    if (serve) {
-        reply_data = (uint8_t *)malloc(size);
-        if (reply_data == NULL) return 1;
-        memset(reply_data, 1, size);
-        z_owned_closure_query_t callback;
-        z_closure(&callback, on_query, NULL, NULL);
-        z_owned_queryable_t queryable;
-        if (z_declare_queryable(z_loan(session), &queryable, z_loan(key), z_move(callback), NULL) < 0) {
-            printf("op_probe: unable to declare the queryable\n");
-            return 1;
-        }
-        sleep(listen_s);
-        printf("op_probe op=queryable answered=%lu\n", atomic_load_explicit(&answered, memory_order_relaxed));
-        fflush(stdout);
-        z_undeclare_queryable(z_move(queryable));
-        z_drop(z_move(session));
-        free(reply_data);
-        return 0;
-    }
-    if (!opens) sleep(settle);
+    if (serves) return serve(listen_s, start_ns, seconds, margin_ms);
+    // Without an instant the peer's declarations get -w SECONDS; with one, the time until START.
+    if (!opens && start_ns == 0) sleep(settle);
     if (run == op_put) {
         z_publisher_options_t options;
         z_publisher_options_default(&options);
@@ -299,15 +332,27 @@ int main(int argc, char **argv) {
         z_bytes_from_buf(&payload, value, size, free_with_context, NULL);
     }
 
+    uint64_t t0;
+    if (start_ns != 0) {
+        const uint64_t ready = bench_now_ns();
+        if (ready >= start_ns) {
+            printf("op_probe: ready %llu ms after the start instant\n",
+                   (unsigned long long)((ready - start_ns) / 1000000ULL));
+            return 1;
+        }
+        bench_sleep_until_ns(start_ns);
+        t0 = start_ns;
+    } else {
+        t0 = bench_now_ns();
+    }
     unsigned long done = 0, failed = 0, late = 0;
     const uint64_t span = (uint64_t)seconds * 1000000000ULL;
     const uint64_t slot = count > 0 ? span / count : span;
-    const uint64_t t0 = now_ns();
     for (unsigned long i = 0; i < count; i++) {
         const uint64_t target = t0 + span * i / count;
-        const uint64_t now = now_ns();
+        const uint64_t now = bench_now_ns();
         if (now < target) {
-            sleep_until(target);
+            bench_sleep_until_ns(target);
         } else if (now - target >= slot) {
             late++;
         }
@@ -317,10 +362,15 @@ int main(int argc, char **argv) {
             failed++;
         }
     }
-    sleep_until(t0 + span);
-    printf("op_probe op=%s done=%lu failed=%lu late=%lu replies=%lu\n", op, done, failed, late,
+    bench_sleep_until_ns(t0 + span);
+    printf("op_probe op=%s done=%lu failed=%lu late=%lu replies=%lu", op, done, failed, late,
            atomic_load_explicit(&replies, memory_order_relaxed));
+    if (start_ns != 0 && !opens) {
+        printf(" open_lead_ms=%llu", (unsigned long long)((start_ns - opened_ns) / 1000000ULL));
+    }
+    printf("\n");
     fflush(stdout);
+    bench_sleep_until_ns(t0 + span + (uint64_t)margin_ms * 1000000ULL);
 
     if (run == op_put) {
         z_drop(z_move(publisher));
