@@ -14211,6 +14211,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
+    // Cold and out of line: a message past the budget is the rare send, and inlined into each of
+    // its three callers the chain's walk would be copied into the hot frame writers with it.
+    #[cold]
+    #[inline(never)]
     fn emit_fragments_encoded(
         &self,
         batch: &mut BatchTx,
@@ -14258,6 +14262,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
+    // Out of line, so the heap frame's emit and the lent entry share one walk.
+    #[cold]
+    #[inline(never)]
     fn emit_fragment_chain(
         &self,
         batch: &mut BatchTx,
@@ -14481,6 +14488,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
+    // Out of line: the chain writes a fragment from its loop and its stop marker from one body.
+    #[inline(never)]
     fn send_fragment(
         &self,
         batch: &mut BatchTx,
