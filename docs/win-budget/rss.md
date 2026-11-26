@@ -467,6 +467,45 @@ only one the padding concerned, and it now reads initialised words. The handle p
 its own view: the static's initialiser takes the address of a field of itself (`addr_of!(VIEWS[id].state)`),
 which reads nothing of it. `is_constant` tests whether a state's address lies in `VIEWS`, the one table.
 
+#### 5.3.2 The size ledger's reading of the rows, and the rows taken back
+
+Read on the size ledger's case (`pico-client-coop-nostd`) at bb00b495c, every row committed, against the
+same case at d1f048a89, before the first of them; both against origin/main 73eb00092, so the difference of
+the two readings is the rows' (`nm -S -C` by owner and by symbol). Text, bytes:
+
+| part | before the rows | with every row | the rows |
+|---|---:|---:|---:|
+| `sessions` | -649 | -175 | +474 |
+| `doors` | -516 | -386 | +130 |
+| `transport` | -82 | +51 | +133 |
+| `driver` | -209 | -243 | -34 |
+| `keyexpr` | -292 | -392 | -100 |
+| `codec` | -259 | -272 | -13 |
+| `language` | -1,579 | -1,544 | +35 |
+| unclassified | 0 | +5 | +5 |
+| **together** | **-3,586** | **-2,956** | **+630** |
+
+By row, from the symbols each one changes:
+
+| row | text on the ledger's case | what reads it | judged |
+|---|---:|---|---|
+| R2.1 | about +300, the rest: the compares of `judge_entry` +129, `UnicastLink::input` +78, SCE's `first_enabled_transition` of four machines +135, the control readers' `read_control_in_place` and `dispatch_copied` about +90, the coop engine's `drive_link`, `send_on_links` and `link_turn` +67, against `CanonWalk::next` -100 and `read_push` -251 | at most -2.6 KB of `.rodata`, which crosses a page only beside R2.2 and R2.3 and was not read | taken back |
+| R3.3 | about +200 by owner (`encoding_ids` +150, `encoding_hint` +55), +264 by symbol (`ref_from_bytes` +126, `z_encoding_to_string` +138): the walk of the `u16` ends where a slice of `&str` was indexed | -848 RELRO, no page by itself | taken back |
+| R3.2 | +113 by owner (`limit_binding` +79, `config_limits` +34), `position_named` out of line +87 | -5,040 RELRO, +3.4 KB `.rodata`; alone it trades a RELRO page for a `.rodata` one (section 5.3) | taken back |
+| R3.4, the pools' stage | +28 by symbol (`lay_stage` +33, `give_back` -3, `Reserved::stage` -2): the tag the enum writes and reads where `Option`'s niche was the value itself | 4,720 B of `.data` to `.bss`, a page or none by the linker's layout, and the first open writes them anyway | taken back |
+| R3.4, the scout table | 0: the case is a client that does not scout | -1,256 B of `.data` | kept |
+| R2.3 | about 0 (`encoding` -34, the `_fill` word written by `store_encoding`, `HeldEncoding::write_at` and the two sample marshals +33) | -1,696 B of `.rodata` | kept |
+| R2.2 | 0: the case does not accept | -440 B of `.rodata` in a build that listens | kept |
+
+**The rule this applies.** A row that grows the ledger's text is taken back until R0's per-mapping figures read
+a page it takes: the text is resident in every process and counted by the size gate, while a table moved out of
+`.rodata` or RELRO counts only where it crosses a page (section 5.3), and none of these rows crosses one alone.
+What stays, R2.2, R2.3 and the scout table, takes about 2.1 KB of `.rodata` (4 pages still: 3 need 3,530 B
+fewer) and 1,256 B of `.data`; by section 5.3's arithmetic it moves no page of `.rodata` or RELRO, and the next
+run of R0 reads the `rw-p` mapping. R2.1's flag returns only with a reading of the preset's `.rodata` on a page
+boundary that the text it costs is weighed against; R3.2 and R3.3 return in a form whose readers are no larger
+than the indexing of a slice of `&str` they replace, measured on the ledger before they land.
+
 ## 6. Measurement cells
 
 - **R0, the absolute figure and its parts.** `PERF_SMAPS=1` in the matrix's environment makes
@@ -535,9 +574,8 @@ which reads nothing of it. `is_constant` tests whether a state's address lies in
 - C1: SHA-256 compiled small in the C libraries (`sha256-compact` under `os-host`, `sha2` at `opt-level = "s"`
   in `capi-small` and `capi-nostd`), section 5.2.
 - Section 5.3: R2 and R3 read part by part on the preset's run, and the bundle that crosses their pages.
-- R2 and R3's rows, one commit each, measured one by one by R0's per-mapping figures: R2.1 (the jump
-  table floor in `.cargo/capi-nostd.toml`), R2.2 (the accept's errnos as bit sets), R3.3 (the encoding
-  names as one string and `u16` ends), R2.3 (each constant's state in its view, its padding read first,
-  section 5.3.1), R3.4 (an empty pool stage a tag of zero, the scout table made in place per window) and
-  R3.2 (a limit row's id as offsets into its snapshot's ids, `LimitNames`, emitted by the generator; the
-  generated module is regenerated where the branch is merged). R3.1 (a) stays a design.
+- R2 and R3's rows that do not grow the size ledger's text (section 5.3.2): R2.2 (the accept's errnos as bit
+  sets), R2.3 (each constant's state in its view, its padding read first, section 5.3.1) and R3.4's scout
+  table (made in place per window). R2.1 (the jump table floor), R3.2 (a limit row's id as offsets), R3.3
+  (the encoding names as one string) and R3.4's pool stage (a tag of zero) were committed and taken back:
+  each grew the text with no page read. R3.1 (a) stays a design.
