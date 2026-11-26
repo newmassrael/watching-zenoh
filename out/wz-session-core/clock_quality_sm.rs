@@ -785,6 +785,8 @@ compile_error!("feature `codec-response` requires `codec-frame`, which this buil
 compile_error!("feature `declarations-synced-event` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "declare-final", not(feature = "codec-declare")))]
 compile_error!("feature `declare-final` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "declare-interest", not(feature = "alloc")))]
+compile_error!("feature `declare-interest` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "declare-interest", not(feature = "codec-declare")))]
 compile_error!("feature `declare-interest` requires `codec-declare`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "declare-keyexpr", not(feature = "alloc")))]
@@ -869,6 +871,8 @@ compile_error!("feature `multicast-declarations` requires `session-multicast`, w
 compile_error!("feature `multicast-ingress-gate` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "multicast-ingress-gate", not(feature = "session-multicast")))]
 compile_error!("feature `multicast-ingress-gate` requires `session-multicast`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "peer-row-pools", not(feature = "storage-profile")))]
+compile_error!("feature `peer-row-pools` requires `storage-profile`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "pubsub-attachment", not(feature = "attachment-bytes")))]
 compile_error!("feature `pubsub-attachment` requires `attachment-bytes`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "pubsub-congestion-control", not(feature = "pubsub-qos")))]
@@ -987,8 +991,6 @@ compile_error!("feature `transport-compression` requires `alloc`, which this bui
 compile_error!("feature `transport-fragmentation` requires `codec-fragment`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "transport-fragmentation", not(feature = "reassembly")))]
 compile_error!("feature `transport-fragmentation` requires `reassembly`, which this build leaves out (feature model `wz-session-core`)");
-#[cfg(all(feature = "transport-link-raweth", not(feature = "alloc")))]
-compile_error!("feature `transport-link-raweth` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "transport-link-serial", not(feature = "alloc")))]
 compile_error!("feature `transport-link-serial` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "transport-lowlatency", not(feature = "alloc")))]

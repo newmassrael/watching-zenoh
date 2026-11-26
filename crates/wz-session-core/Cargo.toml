@@ -1067,7 +1067,10 @@ keyexpr-prefix = []
 declare-keyexpr = ["codec-declare", "alloc"]
 declare-token = ["codec-declare", "rx-control"]
 declare-final = ["codec-declare"]
-declare-interest = ["codec-declare"]
+# `declare-interest` implies `alloc` too: an Interest the session originates is built by the
+# heap's builders (`interest_build`), or written from its parts (`lent_control`) by a lend-only
+# session that has the heap, so a build without the heap has no form of one to send.
+declare-interest = ["codec-declare", "alloc"]
 declare-undeclare = ["codec-declare"]
 # R2386 — `liveliness-token` gains `declare-final` for the same reason
 # `declare-subscriber` does: the TOKEN interest response is a chain of

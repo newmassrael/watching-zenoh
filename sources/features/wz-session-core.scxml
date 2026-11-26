@@ -39,7 +39,7 @@
   <sce:feature name="connect-endpoints"/>
   <sce:feature name="declarations-synced-event" requires="alloc"/>
   <sce:feature name="declare-final" requires="codec-declare"/>
-  <sce:feature name="declare-interest" requires="codec-declare"/>
+  <sce:feature name="declare-interest" requires="alloc codec-declare"/>
   <sce:feature name="declare-keyexpr" requires="alloc codec-declare"/>
   <sce:feature name="declare-queryable" requires="codec-declare"/>
   <sce:feature name="declare-subscriber" requires="codec-declare declare-final rx-control rx-push"/>
@@ -67,7 +67,8 @@
   <sce:feature name="log"/>
   <sce:feature name="multicast-declarations" requires="alloc codec-declare codec-push session-multicast"/>
   <sce:feature name="multicast-ingress-gate" requires="alloc session-multicast"/>
-  <sce:feature name="peer-row-pools"/>
+  <sce:feature name="peer-row-pools" requires="storage-profile"/>
+  <sce:feature name="policy-selection"/>
   <sce:feature name="pool-monitor"/>
   <sce:feature name="pubsub-attachment" requires="attachment-bytes"/>
   <sce:feature name="pubsub-congestion-control" requires="pubsub-qos"/>
@@ -132,8 +133,9 @@
   <sce:feature name="transport-compression" requires="alloc"/>
   <sce:feature name="transport-fragmentation" requires="codec-fragment reassembly"/>
   <sce:feature name="transport-keepalive"/>
-  <sce:feature name="transport-link-raweth" requires="alloc"/>
+  <sce:feature name="transport-link-raweth"/>
   <sce:feature name="transport-link-serial" requires="alloc"/>
+  <sce:feature name="transport-link-ws"/>
   <sce:feature name="transport-lowlatency" requires="alloc codec-frame session-unicast"/>
   <sce:feature name="transport-multilink" requires="session-extauth"/>
   <sce:feature name="transport-qos" requires="alloc codec-frame session-unicast"/>
