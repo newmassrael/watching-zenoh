@@ -978,7 +978,9 @@ fn the_read_tasks_stop_ends_a_quiet_read_within_one_wait_bound() {
 /// third of the lease, and runs its bookkeeping at none of them. CONTROL: the bookkeeping ran as
 /// the client's face came up, and the client's link is still up after several of its leases.
 /// Turned red by a ledger due by a face's own deadline (`Core::settle_ledger`), which the look
-/// reads before its step moves it, so that every keep-alive's look runs the bookkeeping.
+/// reads before its step moves it, or by a keep-alive's verdict dispatched to the face's tables
+/// (`DirectSink`), which counts as a write of them: either has each keep-alive's look run the
+/// bookkeeping.
 #[cfg(not(wz_round))]
 #[test]
 fn a_faces_keep_alive_runs_no_bookkeeping() {
@@ -1078,8 +1080,10 @@ fn a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is() {
             heard.load(Ordering::SeqCst) == n
         });
     }
+    // A wait is counted as it begins: the first put may end the one under way as the count was
+    // read, and each put after it ends a wait begun after its predecessor was heard.
     assert!(
-        peer.takes.polls.load(Ordering::SeqCst) - polls >= PUTS,
+        peer.takes.polls.load(Ordering::SeqCst) - polls >= PUTS - 1,
         "each put was read after a wait on the link's input"
     );
     assert!(

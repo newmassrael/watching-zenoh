@@ -341,6 +341,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
     for DirectSink<'_, L, C, A>
 {
     fn event(&mut self, event: IterationEvent<'_, '_>) {
+        // A verdict of the link's own timers (its lease, its keep-alive) and a unit that only
+        // stamped the lease (a peer's keep-alive) carry no record, and no plane reads one:
+        // dispatched, each would count as a write of the peers' tables (`Registry::split`) and
+        // owe the session's bookkeeping at the face's next look.
+        if matches!(
+            event,
+            IterationEvent::Lease(_)
+                | IterationEvent::KeepAlive(_)
+                | IterationEvent::Poll(DriverLoopOutcome::SideEffectOnly)
+        ) {
+            return;
+        }
         let push = lent_push(&event);
         // What the Pushes before this record put off is done before it, as it was after each.
         if !push {
