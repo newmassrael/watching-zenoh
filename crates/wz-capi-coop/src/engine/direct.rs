@@ -1822,7 +1822,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !face.quiet.load(Ordering::Acquire) {
             return;
         }
-        let until_us = face.quiet_until_us.load(Ordering::Relaxed);
+        let mut until_us = face.quiet_until_us.load(Ordering::Relaxed);
         let run = self.reader_run.load(Ordering::Acquire);
         let mut kept = [LinkWait::input(WaitOn::Socket(0)); QUIET_WAITS];
         // The face's row is read off its slot, taken before the session's lock as a read takes
@@ -1831,6 +1831,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let Some(held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
                 return;
             };
+            // The step of the turn that made the look may have moved the pump's due or staged a
+            // chain after the look judged them.
+            if held.0.router.due_ms() != u64::MAX {
+                return;
+            }
+            until_us = until_us.min(held.0.due_us());
             let Some(core) = self.live() else {
                 return;
             };
@@ -1916,6 +1922,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             slot.tell_facts(&face.site, mark);
             slot.pump_due_us = due_us;
+            until_us = until_us.min(due_us);
             if ended {
                 face.end.ended.store(true, Ordering::Release);
                 slot.life_due_us = now_us;

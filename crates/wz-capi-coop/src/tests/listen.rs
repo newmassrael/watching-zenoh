@@ -945,6 +945,33 @@ fn the_read_tasks_stop_ends_a_quiet_read_within_one_wait_bound() {
     drop(peer);
 }
 
+/// A quiet read leaves at its pump's keep-alive, however long the session's wait bound: a listener
+/// whose lease is short and whose wait bound is long keeps its one client's link up while
+/// nothing but keep-alives crosses it. CONTROL: the face was found quiet. Turned red by a quiet
+/// read whose deadline leaves out the pump's due (`CoopEngine::quiet_until`, or the run's own
+/// after each step), which would wait past the lease the client holds the listener to.
+#[cfg(not(wz_round))]
+#[test]
+fn a_quiet_read_sends_the_keep_alive_on_time() {
+    let (listener, endpoint) = listening(|config| {
+        config.idle_wait_ms = 10_000;
+        config.lease_ms = 1_000;
+    });
+    let peer = client(&endpoint, 0xc1);
+    eventually("the client's face", || {
+        listener.faces_up() == 1 && peer.faces_up() == 1
+    });
+    eventually("CONTROL: the face found quiet", || {
+        listener.quiet_faces() == 1
+    });
+    std::thread::sleep(Duration::from_millis(3_000));
+    assert_eq!(
+        (listener.faces_up(), peer.faces_up()),
+        (1, 1),
+        "the link went while the listener read it quietly"
+    );
+}
+
 /// A session whose one link is a stream waits on that link's input with nothing of the session
 /// held, and the step after the wait reads what came: each put a listener makes reaches it after
 /// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.
