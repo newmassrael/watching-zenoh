@@ -1601,8 +1601,8 @@ mod lent_window {
     }
 
     /// Two reliable puts share the window's frame, and a best-effort put sends that frame and
-    /// opens one of its own. Turned red by `append_lent_batch` not comparing the open frame's
-    /// reliability, whose best-effort put rides the reliable frame, or by a window's opening that
+    /// opens one of its own. Turned red by `write_n_msg` not comparing the open frame's
+    /// reliability (its `open_channel == reliability` taken as true), whose best-effort put rides the reliable frame, or by a window's opening that
     /// does not keep its frame open (`write_n_msg` sending the slot it should keep), whose first
     /// put leaves alone.
     #[test]
@@ -1648,7 +1648,7 @@ mod lent_window {
 
     /// A put the window's frame has no room left for sends that frame once and is written whole
     /// into the next. Turned red by an append that answers a put it did not write as written
-    /// (`append_lent_batch` keeping the frame after its encoder was refused), whose second put is
+    /// (`write_n_msg` keeping the frame after its encoder was refused), whose second put is
     /// lost, or by an overflow that does not send the open frame, whose second put finds no slot.
     #[test]
     fn a_put_the_open_frame_has_no_room_for_sends_it_once_and_opens_the_next() {
