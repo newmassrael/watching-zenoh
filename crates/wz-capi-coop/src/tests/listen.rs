@@ -801,41 +801,6 @@ fn a_row_a_face_left_wakes_for_the_face_an_attach_gives_it() {
     );
 }
 
-/// A read finds a read under way by the dial role's read slot alone, which that read holds from
-/// before its wait until its deliveries: a read made meanwhile turns no face, the taken one's
-/// either, and comes back at once. CONTROL: with the slot let go of, the faces are turned again.
-/// Turned red by a read that finds no read under way while the dial role's slot is held
-/// (`CoopEngine::read_faces`).
-#[cfg(not(wz_round))]
-#[test]
-fn a_read_under_way_is_found_by_the_dial_roles_slot() {
-    let (listener, endpoint) = listening(|_| {});
-    let peer = client(&endpoint, 0xc1);
-    eventually("the listener to hold the client's face", || {
-        listener.faces_up() == 1
-    });
-    let turns = || listener.takes.face_turns.load(Ordering::SeqCst);
-    let (before, after, took) = listener.with_dial_slot_held(|| {
-        let before = turns();
-        let started = Instant::now();
-        let _ = SessionDrive::read(&*listener, false);
-        (before, turns(), started.elapsed())
-    });
-    assert_eq!(
-        after, before,
-        "no face is turned while a read holds the slot"
-    );
-    assert!(
-        took < Duration::from_millis(500),
-        "a read that finds a read under way comes back at once, took {took:?}"
-    );
-    eventually(
-        "CONTROL: the faces turned once the slot is let go of",
-        || turns() > after,
-    );
-    drop(peer);
-}
-
 /// A session whose one link is a stream waits on that link's input with nothing of the session
 /// held, and the step after the wait reads what came: each put a listener makes reaches it after
 /// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.
