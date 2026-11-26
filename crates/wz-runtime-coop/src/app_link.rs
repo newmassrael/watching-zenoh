@@ -23,7 +23,9 @@
 //!
 //! This engine's stream seam takes every byte or fails ([`StreamSocket::write`] of a stream that
 //! does not write without waiting), where the program may take part of them or none
-//! (would-block). What the program did not take is held in
+//! (would-block). Part of them taken is not a would-block: the program takes bytes now and will
+//! say nothing more, so the rest is offered again at once, until it has taken all of it or takes
+//! none. What it would not take is held in
 //! the transport's table ([`AppLinkTable::hold_remainder`](wz_session_core::app_link_table::AppLinkTable::hold_remainder)),
 //! behind anything held before, and offered to the program again at the start of every send and
 //! every turn of the link's loop (each read and wait), so the stream's bytes leave in order once
@@ -488,36 +490,47 @@ impl Held {
         }
     }
 
-    /// Offer the program what is held for it, until it would block or has taken all of it: each
-    /// run lent in place by the transport ([`AppTransport::offer_remainder`]) and offered with no
-    /// lock held, nothing copied. Another writer offering the link's remainder now offers it for
-    /// this one.
+    /// Offer the program what is held for it, until it takes none of it (it would block, or
+    /// another send is out) or has taken all of it: each run lent in place by the transport
+    /// ([`AppTransport::offer_remainder`]) and offered with no lock held, nothing copied. A run
+    /// taken in part is offered on from where the program stopped, since nothing it does would
+    /// announce that it takes the rest. Another writer offering the link's remainder now offers
+    /// it for this one.
     fn flush(&self) -> Result<(), AppLinkError> {
         loop {
             let mut sent = Ok(0);
-            let Some((taken, offered)) = self.transport.offer_remainder(self.handle, |bytes| {
+            let Some((taken, _)) = self.transport.offer_remainder(self.handle, |bytes| {
                 sent = self.send_once(bytes);
                 sent.as_ref().map_or(0, |taken| *taken)
             }) else {
                 return Ok(());
             };
             sent?;
-            if taken < offered {
+            if taken == 0 {
                 return Ok(());
             }
         }
     }
 
-    /// Send `bytes` behind what is held: what the program does not take now is held for it.
+    /// Send `bytes` behind what is held, offered on from where the program stopped while it
+    /// takes part of them: what it takes none of is held for it.
     fn send_all(&self, bytes: &[u8]) -> Result<(), AppLinkError> {
         self.flush()?;
         let held = self
             .transport
             .with(|table| table.holds_remainder(self.handle));
-        let taken = if held { 0 } else { self.send_once(bytes)? };
-        if taken < bytes.len() {
-            // What the program did not take: `taken` is below the length here.
-            let rest = bytes.get(taken..).unwrap_or_default();
+        let mut rest = bytes;
+        if !held {
+            while !rest.is_empty() {
+                let taken = self.send_once(rest)?;
+                if taken == 0 {
+                    break;
+                }
+                // The table refuses a count past what was offered, so `taken` is within `rest`.
+                rest = rest.get(taken..).unwrap_or_default();
+            }
+        }
+        if !rest.is_empty() {
             self.transport
                 .with(|table| table.hold_remainder(self.handle, rest))
                 .map_err(|_| AppLinkError::Full)?;
@@ -605,9 +618,10 @@ impl AppWaits {
 
     /// Whether `wait` already has what it waits for, keeping `waker` for each side it asks when it
     /// has not: input, room when it asks for it, a link whose handle names none any more, or bytes
-    /// the link holds for a program that takes bytes now (it took part of a write), which a step
-    /// offers again and no call of the program's announces. A handle of another stack's is never
-    /// ready here; [`LinkWaits::wait`] bounds the wait at a look for it.
+    /// the link holds for a program that takes bytes again (it said it is writable, or another
+    /// send was out when they were held), which a step offers and no later call of the program's
+    /// announces. A handle of another stack's is never ready here; [`LinkWaits::wait`] bounds the
+    /// wait at a look for it.
     fn ready(&self, wait: LinkWait, waker: Option<&core::task::Waker>) -> bool {
         let handle = match wait.on {
             WaitOn::AppLink(handle) => handle,
@@ -1802,6 +1816,58 @@ mod tests {
         assert!(!transport.with(|table| table.holds_remainder(stream.held.handle)));
     }
 
+    /// A program that takes part of what it is offered is offered the rest at once, from where it
+    /// stopped, until it has taken all of it: nothing is held for it, as nothing it does would
+    /// announce that it takes more. Turned red by a send that holds the rest after a part taken.
+    #[test]
+    fn a_part_taken_is_followed_by_the_rest_at_once() {
+        let (script, transport) = transport();
+        *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2), ProgramSend::Wrote(1)];
+        let stream = AppStreamDial {
+            transport: session(&transport, 64),
+            waits: AppWaits::new(Arc::clone(&transport)),
+            open_bound: None,
+        }
+        .dial(PEER)
+        .unwrap();
+        assert_eq!(stream.write(b"abcdef"), Ok(6));
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"abcdef");
+        assert!(
+            !transport.with(|table| table.holds_remainder(stream.held.handle)),
+            "nothing is held for a program that takes bytes"
+        );
+    }
+
+    /// What is held across a would-block is offered on, once the program is writable, through
+    /// every part it takes, in one turn of the link's loop. The CONTROL is the turn before the
+    /// writable, which offers nothing. Turned red by a flush that stops at the first part taken.
+    #[test]
+    fn a_held_remainder_is_offered_on_through_every_part_the_program_takes() {
+        let (script, transport) = transport();
+        *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
+        let stream = AppStreamDial {
+            transport: session(&transport, 64),
+            waits: AppWaits::new(Arc::clone(&transport)),
+            open_bound: None,
+        }
+        .dial(PEER)
+        .unwrap();
+        assert_eq!(stream.write(b"abcdef"), Ok(6), "held, not failed");
+        let mut buf = [0u8; 4];
+        assert_eq!(stream.try_read(&mut buf), Ok(None));
+        assert!(
+            script.sent.lock().unwrap().is_empty(),
+            "CONTROL: a program that would block is offered nothing"
+        );
+        *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(1), ProgramSend::Wrote(2)];
+        transport
+            .event(stream.held.handle, ProgramEvent::Writable)
+            .unwrap();
+        assert_eq!(stream.try_read(&mut buf), Ok(None));
+        assert_eq!(script.sent.lock().unwrap().as_slice(), b"abcdef");
+        assert!(!transport.with(|table| table.holds_remainder(stream.held.handle)));
+    }
+
     #[test]
     fn a_remainder_past_the_bound_fails_the_send() {
         let (script, transport) = transport();
@@ -2706,9 +2772,9 @@ mod tests {
 
     /// The owner's wait on a stream link: waited out while nothing is queued, ended by bytes the
     /// program hands in from another thread, at once while bytes are queued, and at once while the
-    /// link holds bytes for a program that takes bytes (it took part of a write), which the step
-    /// after the wait offers again; while the program would block the wait is for its word that
-    /// the link is writable.
+    /// link holds bytes for a program that said it is writable again, which the step after the
+    /// wait offers; while the program would block the wait is for its word that the link is
+    /// writable.
     #[cfg(feature = "host-lock")]
     #[test]
     fn a_streams_wait_for_its_owner_ends_on_input_and_on_bytes_owed_to_the_program() {
@@ -2757,19 +2823,11 @@ mod tests {
         let mut buf = [0u8; 8];
         assert_eq!(stream.try_read(&mut buf), Ok(Some(2)));
 
-        // The program takes two bytes of six: the rest is held, and the wait ends at once.
-        *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2)];
+        // The program takes two bytes of six and then would block: the rest is held, and the wait
+        // is waited out until it says writable, then ends on the bytes owed to it, and the next
+        // offer leaves the rest.
+        *script.answers.lock().unwrap() = vec![ProgramSend::Wrote(2), ProgramSend::WouldBlock];
         assert_eq!(stream.write(b"abcdef"), Ok(6), "held, not failed");
-        let started = Instant::now();
-        waits.wait(&ready, 10_000);
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "bytes owed to a program that takes bytes end the wait"
-        );
-        // The step's offer finds the program blocked: the wait is waited out until it says
-        // writable, and then ends, and the next offer leaves the rest.
-        *script.answers.lock().unwrap() = vec![ProgramSend::WouldBlock];
-        assert_eq!(stream.try_read(&mut buf), Ok(None));
         assert_eq!(held(&transport, handle), b"cdef");
         let started = Instant::now();
         waits.wait(&ready, 50);
