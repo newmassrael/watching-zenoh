@@ -358,37 +358,49 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
             }
             return LinkInput::Tick;
         }
-        let links = &core.transport.links;
-        let Some(answer) = self.dial.as_mut().and_then(|dial| links.answer_dial(dial)) else {
-            return LinkInput::Tick;
-        };
-        let Some(dial) = self.dial.take() else {
-            return LinkInput::Tick;
-        };
-        self.answered(core, dial.into_endpoint(), answer)
+        self.take_dial_answer(core).unwrap_or(LinkInput::Tick)
     }
 
     /// Dial the session's endpoint at `row`, as the life asked: what the dial came to at once.
     fn dial_row(&mut self, core: &Core<L, C>, row: usize) -> LinkInput {
         self.dial = None;
         let transport = &core.transport;
-        let begun = match transport.begin_dial(transport.endpoints.dial_text(row)) {
-            Ok(begun) => begun,
+        match transport.begin_dial(transport.endpoints.dial_text(row)) {
+            Ok(begun) => self.dial = Some(Dial::begun(DialEndpoint::Listed(row), begun)),
             Err(refused) => {
                 self.last = Some(OpenError::from(refused));
                 return LinkInput::DialRefused;
             }
-        };
-        let mut dial = Dial::begun(DialEndpoint::Listed(row), begun);
-        match transport.links.answer_dial(&mut dial) {
-            None => {
-                self.dial = Some(dial);
-                LinkInput::DialPending
-            }
-            // A dial that answered has handed out all it held for its link, so it is let go of
-            // before the link is opened.
-            Some(answer) => self.answered(core, dial.into_endpoint(), answer),
         }
+        self.take_dial_answer(core)
+            .unwrap_or(LinkInput::DialPending)
+    }
+
+    /// Ask the dial under way once over the session's links: what its answer makes of it, the
+    /// link kept or why the network refused it, or `None` while the network has not answered (or
+    /// no dial is under way). A dial that answered has handed out all it held for its link, so it
+    /// is let go of before the link is opened. Out of line and cold: a dial begun and a dial under
+    /// way at a look at the life take their answer in this one body, and no look once a link is
+    /// made reaches it.
+    #[cold]
+    #[inline(never)]
+    fn take_dial_answer(&mut self, core: &Core<L, C>) -> Option<LinkInput> {
+        let links = &core.transport.links;
+        let answer = self
+            .dial
+            .as_mut()
+            .and_then(|dial| links.answer_dial(dial))?;
+        let dial = self.dial.take()?;
+        Some(self.answered(core, dial.into_endpoint(), answer))
+    }
+
+    /// Keep why the endpoint `text` came to no link, `why`: what the session ends with when its
+    /// life ends it. Out of line and cold: each way the life gives up on an endpoint keeps its
+    /// refusal here.
+    #[cold]
+    #[inline(never)]
+    fn keep_refusal(&mut self, text: &str, why: Refusal) {
+        self.last = Some(OpenError::Unreachable(EndpointRefusal::new(text, why)));
     }
 
     /// The answer of a dial of `endpoint`: the link kept until its handshake is begun, or why
@@ -740,10 +752,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if effects.dial().is_some() || effects.backs_off() || effects.ends_session() {
                 if let Some(dial) = slot.dial.take() {
                     let endpoint = dial.into_endpoint();
-                    slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
+                    slot.keep_refusal(
                         core.transport.endpoint_text(Some(&endpoint)),
                         Refusal::NoAnswerInTime,
-                    )));
+                    );
                 }
             }
             if effects.end_handshake() {
@@ -754,10 +766,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     _ => 0,
                 };
                 let why = core.transport.end_handshake(0);
-                slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
-                    core.transport.endpoints.dial_text(row),
-                    why,
-                )));
+                slot.keep_refusal(core.transport.endpoints.dial_text(row), why);
                 slot.drop_pump();
                 core.transport.links.put_link(0, Link::Idle);
             }
@@ -776,10 +785,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 core.lose_face_link(0, DIAL_FACE);
                 slot.drop_pump();
                 if effects.ends_session() {
-                    slot.last = Some(OpenError::Unreachable(EndpointRefusal::new(
-                        "",
-                        Refusal::LinkLost,
-                    )));
+                    slot.keep_refusal("", Refusal::LinkLost);
                 }
             }
             if effects.bring_up() {
