@@ -259,14 +259,19 @@ pub trait GroupReceive {
         false
     }
 
-    /// Wait in the receive itself, for at most `timeout_us` microseconds as `now_us` reads them,
-    /// for a member's datagram, and keep it ([`Self::keep`]) for the next [`Self::recv_with`] to
-    /// lend: `true` once one is kept, `false` when the time ran out or the receive failed. What the
-    /// group's own sender sent is dropped inside the wait, which goes on for what is left of the
-    /// time, as zenoh-pico's receive loops past its own datagrams. The provided form waits for
-    /// nothing.
-    fn await_input(&mut self, timeout_us: u64, now_us: &mut dyn FnMut() -> u64) -> bool {
-        let _ = (timeout_us, now_us);
+    /// Wait in the receive itself, for at most `timeout_us` microseconds past `since_us`, the
+    /// caller's last reading of the clock `now_us` reads, for a member's datagram, and keep it
+    /// ([`Self::keep`]) for the next [`Self::recv_with`] to lend: `true` once one is kept, `false`
+    /// when the time ran out or the receive failed. What the group's own sender sent is dropped
+    /// inside the wait, which goes on for what is left of the time, as zenoh-pico's receive loops
+    /// past its own datagrams; the clock is read only then. The provided form waits for nothing.
+    fn await_input(
+        &mut self,
+        timeout_us: u64,
+        since_us: u64,
+        now_us: &mut dyn FnMut() -> u64,
+    ) -> bool {
+        let _ = (timeout_us, since_us, now_us);
         false
     }
 
@@ -609,7 +614,7 @@ mod tests {
         assert!(member, "the half reads what the transport would have");
         assert!(!half.failed() && !half.keeps_input() && half.input_wait().is_none());
         assert!(
-            !half.awaits_input() && !half.await_input(1_000, &mut || 0),
+            !half.awaits_input() && !half.await_input(1_000, 0, &mut || 0),
             "the provided half waits for nothing"
         );
     }

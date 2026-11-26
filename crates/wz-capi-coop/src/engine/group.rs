@@ -1797,16 +1797,22 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             .is_some_and(|rx| rx.borrow().awaits_input())
     }
 
-    /// Wait in the group's receive, for at most `timeout_us` of the session's clock, for a
-    /// member's datagram, kept for the step that follows to read first; what the group's own
-    /// sender sent is dropped inside the wait (`GroupReceive::await_input`). Whether one was kept.
-    pub(super) fn await_input(&mut self, timeout_us: u64) -> bool {
+    /// Wait in the group's receive, for at most `timeout_us` of the session's clock past its
+    /// reading `since_us`, for a member's datagram, kept for the step that follows to read first;
+    /// what the group's own sender sent is dropped inside the wait (`GroupReceive::await_input`).
+    /// Whether one was kept.
+    pub(super) fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool {
         let Some(rx) = &self.rx else {
             return false;
         };
         let place = &self.place;
         rx.borrow_mut()
-            .await_input(timeout_us, &mut || place.now_us())
+            .await_input(timeout_us, since_us, &mut || place.now_us())
+    }
+
+    /// Whether the last step read as many datagrams as it was bound to.
+    pub(super) fn read_to_bound(&self) -> bool {
+        self.place.read_to_bound()
     }
 
     /// Whether the slot holds a session a read steps: from a join to the session's end.
@@ -2238,6 +2244,65 @@ mod told_tests {
     }
 }
 
+/// What a read that waits in a group's receive does with the group between two turns of its own
+/// ([`read_awaited`]): the group's pump, stepped by the read's engine.
+#[cfg(not(wz_round))]
+pub(super) trait AwaitedReads {
+    /// Wait in the group's receive for at most `timeout_us` past the reading `since_us`
+    /// ([`GroupPump::await_input`]): whether a member's datagram was kept.
+    fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool;
+
+    /// A reading of the session's clock.
+    fn now_us(&mut self) -> u64;
+
+    /// A step of the group at `now_us`, reading up to `most` datagrams: whether its session
+    /// ended.
+    fn step(&mut self, most: core::num::NonZeroUsize, now_us: u64) -> bool;
+
+    /// Whether the last step read as many datagrams as it was bound to.
+    fn read_to_bound(&self) -> bool;
+
+    /// Whether the read owes the session a turn of its own at `now_us` (its bookkeeping, a
+    /// periodic job), which only the read's turn takes.
+    fn owed(&mut self, now_us: u64) -> bool;
+}
+
+/// The reads of a group that is the one input its read waits on, on a receive half whose receive
+/// waits (`GroupPump::awaits`), up to `deadline_us`, the end of the read's wait, from the read's
+/// reading `since_us`: each a wait in the group's receive for what is left of the time, then a
+/// step that reads the datagram the wait kept, as zenoh-pico's read task handles a datagram a
+/// receive (`vendor/zenoh-pico/src/transport/multicast/read.c` @
+/// `ret = _z_transport_message_decode(&t_msg, &zbuf);`). The read's own turn and its wait are so
+/// paid once a deadline and not once a datagram. The reads end at a wait that kept nothing, which
+/// is stepped with `most` as a read with no wait of its own steps, at the session's end, at a step
+/// that read nothing, at the deadline, and where the read owes the session a turn, which the read
+/// then takes: a datagram that wrote the face's tables, or a job that fell due, waits for no later
+/// datagram. Whether the session ended.
+#[cfg(not(wz_round))]
+pub(super) fn read_awaited(
+    reads: &mut impl AwaitedReads,
+    most: core::num::NonZeroUsize,
+    deadline_us: u64,
+    since_us: u64,
+) -> bool {
+    let mut now_us = since_us;
+    loop {
+        let kept = reads.await_input(deadline_us.saturating_sub(now_us), now_us);
+        now_us = reads.now_us();
+        if !kept {
+            return reads.step(most, now_us);
+        }
+        // One datagram a step: the next is waited for in the receive, where a step's own receive
+        // would find none and cost a system call that answers nothing, when the reader keeps up.
+        if reads.step(core::num::NonZeroUsize::MIN, now_us) {
+            return true;
+        }
+        if !reads.read_to_bound() || now_us >= deadline_us || reads.owed(now_us) {
+            return false;
+        }
+    }
+}
+
 #[cfg(all(test, not(wz_round)))]
 mod side_tests {
     use super::*;
@@ -2367,6 +2432,117 @@ mod side_tests {
         assert!(
             !awaits_on(&Waiting(true), &LinkWait::input(WaitOn::Socket(8))),
             "another socket's input"
+        );
+    }
+
+    /// A group whose waits keep what `kept` says in turn, whose clock reads `clock` in turn, whose
+    /// read is owed a turn from the reading `owed_at` on, and whose steps end the session or read
+    /// to their bound as `ends` and `reads` say; each wait and step is noted with what it was asked.
+    struct Script {
+        kept: alloc::vec::Vec<bool>,
+        clock: alloc::vec::Vec<u64>,
+        owed_at: u64,
+        ends: bool,
+        reads: bool,
+        waits: alloc::vec::Vec<(u64, u64)>,
+        steps: alloc::vec::Vec<(usize, u64)>,
+    }
+
+    impl Script {
+        fn new(kept: &[bool], clock: &[u64]) -> Self {
+            Self {
+                kept: kept.to_vec(),
+                clock: clock.to_vec(),
+                owed_at: u64::MAX,
+                ends: false,
+                reads: true,
+                waits: alloc::vec::Vec::new(),
+                steps: alloc::vec::Vec::new(),
+            }
+        }
+    }
+
+    impl AwaitedReads for Script {
+        fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool {
+            self.waits.push((timeout_us, since_us));
+            !self.kept.is_empty() && self.kept.remove(0)
+        }
+
+        fn now_us(&mut self) -> u64 {
+            if self.clock.is_empty() {
+                u64::MAX
+            } else {
+                self.clock.remove(0)
+            }
+        }
+
+        fn step(&mut self, most: core::num::NonZeroUsize, now_us: u64) -> bool {
+            self.steps.push((most.get(), now_us));
+            self.ends
+        }
+
+        fn read_to_bound(&self) -> bool {
+            self.reads
+        }
+
+        fn owed(&mut self, now_us: u64) -> bool {
+            now_us >= self.owed_at
+        }
+    }
+
+    /// The bound of a read's steps in these tests.
+    const MOST: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(7);
+
+    /// A read that waits in a group's receive steps each datagram a wait kept, one a step, at the
+    /// reading taken after its wait, and waits again for what is left of its time, measured from
+    /// that reading; a wait that keeps nothing is stepped with the read's bound, and ends the
+    /// reads. Turned red by reads that return to the read after the first datagram
+    /// (`read_awaited` without its loop), which pays the read's turn once a datagram, or by a
+    /// wait asked for its whole time again.
+    #[test]
+    fn a_waiting_read_steps_each_kept_datagram_and_waits_on_for_what_is_left() {
+        let mut script = Script::new(&[true, true, true, false], &[10, 20, 30, 40]);
+        assert!(!read_awaited(&mut script, MOST, 100, 0));
+        assert_eq!(script.waits, [(100, 0), (90, 10), (80, 20), (70, 30)]);
+        assert_eq!(script.steps, [(1, 10), (1, 20), (1, 30), (8, 40)]);
+    }
+
+    /// The reads end at the deadline, where the read owes the session a turn, at the session's
+    /// end, and at a step that read nothing, each after the step of the datagram kept. Turned red
+    /// by reads that wait past the read's deadline, that leave a turn owed to a later datagram, or
+    /// that wait again on a session that ended or a datagram no step took.
+    #[test]
+    fn a_waiting_read_ends_at_its_deadline_a_turn_owed_an_end_and_a_step_that_read_none() {
+        let mut deadline = Script::new(&[true, true, true], &[50, 100, 150]);
+        assert!(!read_awaited(&mut deadline, MOST, 100, 0));
+        assert_eq!(
+            deadline.steps,
+            [(1, 50), (1, 100)],
+            "none past the deadline"
+        );
+        assert_eq!(deadline.waits, [(100, 0), (50, 50)]);
+
+        let mut owed = Script::new(&[true, true, true], &[10, 20, 30]);
+        owed.owed_at = 20;
+        assert!(!read_awaited(&mut owed, MOST, 100, 0));
+        assert_eq!(
+            owed.steps,
+            [(1, 10), (1, 20)],
+            "the turn owed is the read's next"
+        );
+
+        let mut ended = Script::new(&[true, true], &[10, 20]);
+        ended.ends = true;
+        assert!(read_awaited(&mut ended, MOST, 100, 0), "the session ended");
+        assert_eq!(ended.steps, [(1, 10)]);
+
+        let mut none = Script::new(&[true, true], &[10, 20]);
+        none.reads = false;
+        assert!(!read_awaited(&mut none, MOST, 100, 0));
+        assert_eq!(
+            none.waits,
+            [(100, 0)],
+            "no wait again for a datagram no step took"
         );
     }
 }

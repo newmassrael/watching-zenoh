@@ -809,12 +809,18 @@ impl<S: MulticastSocket> HostGroupReceive<S> {
         }
     }
 
-    /// Wait in the joined socket's receive, for at most `timeout_us` as `now_us` reads it, for a
-    /// datagram a member sent, past those the group's own send socket sent, and keep it for the
-    /// next receive to lend: `true` once one is kept. The socket's timeout is set in whole
-    /// milliseconds, again only when what is left of the time needs another, so a stream of
+    /// Wait in the joined socket's receive, for at most `timeout_us` past `since_us`, the caller's
+    /// reading of the clock `now_us` reads, for a datagram a member sent, past those the group's
+    /// own send socket sent, and keep it for the next receive to lend: `true` once one is kept.
+    /// The clock is read only after a datagram of the group's own. The socket's timeout is set in
+    /// whole milliseconds, again only when what is left of the time needs another, so a stream of
     /// datagrams sets it once. A half whose socket's receive does not wait waits for nothing.
-    pub fn await_member(&mut self, timeout_us: u64, now_us: &mut dyn FnMut() -> u64) -> bool {
+    pub fn await_member(
+        &mut self,
+        timeout_us: u64,
+        since_us: u64,
+        now_us: &mut dyn FnMut() -> u64,
+    ) -> bool {
         if self.kept.is_some() {
             return true;
         }
@@ -824,7 +830,7 @@ impl<S: MulticastSocket> HostGroupReceive<S> {
         let Some(socket) = &self.read else {
             return false;
         };
-        let deadline_us = now_us().saturating_add(timeout_us);
+        let deadline_us = since_us.saturating_add(timeout_us);
         let mut left_us = timeout_us;
         loop {
             let ms = c_int::try_from(left_us.div_ceil(1000)).unwrap_or(c_int::MAX);
@@ -1057,8 +1063,13 @@ wz_runtime_coop::with_heap_link_seams! {
             self.waits && self.read.is_some()
         }
 
-        fn await_input(&mut self, timeout_us: u64, now_us: &mut dyn FnMut() -> u64) -> bool {
-            self.await_member(timeout_us, now_us)
+        fn await_input(
+            &mut self,
+            timeout_us: u64,
+            since_us: u64,
+            now_us: &mut dyn FnMut() -> u64,
+        ) -> bool {
+            self.await_member(timeout_us, since_us, now_us)
         }
 
         fn close(&mut self) {
@@ -1597,15 +1608,20 @@ mod tests {
             let started = Instant::now();
             let mut now_us = || u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
             let waited = Instant::now();
-            assert!(!half.await_input(30_000, &mut now_us), "nothing was sent");
+            let since_us = now_us();
+            assert!(
+                !half.await_input(30_000, since_us, &mut now_us),
+                "nothing was sent"
+            );
             assert!(
                 waited.elapsed() >= Duration::from_millis(25),
                 "the time was waited out in the receive"
             );
             group.send_to_group(b"own");
             member.send_to(to, b"member").expect("sent");
+            let since_us = now_us();
             assert!(
-                half.await_input(5_000_000, &mut now_us),
+                half.await_input(5_000_000, since_us, &mut now_us),
                 "the member's datagram"
             );
             let mut seen = None;

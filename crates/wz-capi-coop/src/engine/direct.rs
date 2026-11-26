@@ -456,6 +456,44 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
     // over it ends, as the sink's default does.
 }
 
+/// A group's pump taken out of its place by a read that waits in the group's receive, stepped
+/// by the read's engine ([`super::group::read_awaited`]).
+#[cfg(feature = "group")]
+struct AwaitedGroup<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: &'a CoopEngine<L, C>,
+    pump: &'a mut super::group::GroupPump<C>,
+}
+
+#[cfg(feature = "group")]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> super::group::AwaitedReads
+    for AwaitedGroup<'_, L, C>
+{
+    #[inline]
+    fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool {
+        self.pump.await_input(timeout_us, since_us)
+    }
+
+    #[inline]
+    fn now_us(&mut self) -> u64 {
+        self.pump.now_us()
+    }
+
+    #[inline]
+    fn step(&mut self, most: core::num::NonZeroUsize, now_us: u64) -> bool {
+        self.engine.step_group(self.pump, most, now_us)
+    }
+
+    #[inline]
+    fn read_to_bound(&self) -> bool {
+        self.pump.read_to_bound()
+    }
+
+    #[inline]
+    fn owed(&mut self, now_us: u64) -> bool {
+        self.engine.read_owed(now_us)
+    }
+}
+
 /// The owner of the place of the one link's parts ([`DirectFace`]).
 #[cfg(not(feature = "threads"))]
 pub(super) enum DirectOwner {}
@@ -1816,8 +1854,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// stepped. One a read finds the session closed after is stepped once more, which tells the
     /// group it leaves.
     /// A group whose receive waits is handed `awaited_us`, the time the read made no wait for:
-    /// its step waits in its receive for a member's datagram first, with nothing of the session
-    /// held, and is made at the clock's reading after that wait.
+    /// it is read in its receive, with nothing of the session held while it waits, a datagram a
+    /// step, until that time is out or the read owes the session a turn
+    /// ([`super::group::read_awaited`]).
     #[cfg(feature = "group")]
     fn step_groups(&self, now_us: Option<u64>, mut awaited_us: Option<u64>) {
         let mut at = 0;
@@ -1849,15 +1888,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             // A burst read to its bound leaves the group's mark of input for the next read's
             // wait, so that read does not wait for what the socket already holds.
-            let now_us = match awaited_us {
+            let ended = match awaited_us {
                 Some(timeout_us) if pump.awaits_input() => {
                     awaited_us = None;
-                    pump.await_input(timeout_us);
-                    pump.now_us()
+                    let since_us = now_us.unwrap_or_else(|| pump.now_us());
+                    super::group::read_awaited(
+                        &mut AwaitedGroup {
+                            engine: self,
+                            pump: &mut pump,
+                        },
+                        most,
+                        since_us.saturating_add(timeout_us),
+                        since_us,
+                    )
                 }
-                _ => now_us.unwrap_or_else(|| pump.now_us()),
+                _ => {
+                    let now_us = now_us.unwrap_or_else(|| pump.now_us());
+                    self.step_group(&mut pump, most, now_us)
+                }
             };
-            let ended = self.step_group(&mut pump, most, now_us);
             // What the slot shares with the group's face is let go of, stepped or put back under
             // the session's lock, closed or not: a close let go of the face's handles under it.
             let mut core = self.core.lock();
@@ -1927,6 +1976,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         .end_records();
         ended
+    }
+
+    /// Whether the read owes the session a turn of its own at `now_us`: its bookkeeping
+    /// (`Ledger::owes`, what a face's turn looks at first) or a periodic job due. A closed
+    /// session is owed the read's end.
+    #[cfg(feature = "group")]
+    fn read_owed(&self, now_us: u64) -> bool {
+        let Some(held) = self.live() else {
+            return true;
+        };
+        held.0.ledger.owes(now_us, held.0.seen()) || held.0.jobs_due_at(now_us).is_some()
     }
 
     /// Read the end of each group's session a step left, join again each group whose time came
