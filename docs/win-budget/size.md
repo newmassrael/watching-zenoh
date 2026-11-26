@@ -196,6 +196,24 @@ it removes: the second and later copies of the key path and the slot path, about
 bodies above; what it keeps: one body per job. Its gate is the doors row of this case, and the
 receive doors (`marshal_sample` and the sample views) are out of its scope.
 
+What the explain report of 2026-11-26 shows of this design, read before its step: the composed
+doors are one body per job already, each reached from its exports as shells. `session_write`
+(`z_put`, `z_delete`), `publisher_write` (the publisher's put and delete),
+`declare_subscriber_with` (both subscriber doors), `declare_on_filter` (every matching listener
+door), `key_from` (every key constructor and judgement), `kept_with` (every copy and extension
+of a key), `open_request` (the open's reading of its config), `put_options` and
+`PutCarried::fold` are each one symbol, and their helpers are out of line (`outbound_keyexpr`,
+`EntityKey::up_to`, `Lender::lend`, `PublisherQos::apply`). In this build each of those bodies
+has one family of callers, and the ledger places a body's bytes at its source lines, so taking
+`open_on_coop` (2,008 of `z_open`) or `declare_entity_at` (the 695 of `write_filter` in
+`z_declare_publisher`) out of line moves bytes between symbols and leaves the area where it is.
+The one helper the report shows copied into several declaring bodies was `refusal_code` (194 in
+four), now one body. The rest of the gap is the work these bodies do in the door crate: the write
+filter's plain form and record (`write_filter` 807), the places a session lends (`object_slot`
+1,341, `process_pool` 1,978), the key's holds and its text in the key arena (`keyexpr` 5,154),
+the open's composition. What removes it is less work per declaration and per open (S1's pipeline,
+T-OPEN's plan), measured on this row, not a second split of the doors.
+
 ### 3.3 Transport: one batch writer, and the handshake's machine on tables
 
 The send side is 10,700 bytes against pico's 3,500 because a message is written through
