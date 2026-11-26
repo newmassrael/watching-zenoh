@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The read of a session that runs no read task beside the program's calls and joins no group (a
-//! build with neither `threads` nor `group`): the read steps each face's link session itself,
-//! the dial role's and, with `listen`, each a port gave or an attach dialled, and hands each
-//! record out as it is read. A connection a port holds is taken by the read with no face's slot
-//! held, and its face's place is taken before the session's lock (`CoopEngine::accept_links`).
+//! The read of a session that runs no read task beside the program's calls (a build without
+//! `threads`): the read steps each face's link session itself, the dial role's and, with
+//! `listen`, each a port gave or an attach dialled, then, with `group`, each group's session,
+//! and hands each record out as it is read. A connection a port holds is taken by the read with no
+//! face's slot held, and its face's place is taken before the session's lock
+//! (`CoopEngine::accept_links`). A group's session lies in a read slot the session holds between
+//! two reads, taken out of it for each step (`CoopEngine::step_groups`).
 //!
 //! The link's session lies in the engine's face ([`DirectFace`]), apart from the session's state,
 //! in two parts as a send and a receive use it: the receive (the pump, what its steps are handed,

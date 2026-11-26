@@ -504,7 +504,9 @@ mod group {
 
     /// Two members of one thread, each on a thread of its own, learn each other by their JOINs,
     /// which each one's reads beacon and take, and a put of the first crosses the group; the second,
-    /// closed, tells the group it leaves, which the first hears. Twin of
+    /// closed, tells the group it leaves, which the first hears. A put is heard once: its leg to
+    /// the group is one, whatever the session's faces (turned red by a group leg sent with each
+    /// face's). Twin of
     /// `group::two_members_learn_each_other_by_their_joins_and_a_put_crosses_the_group`.
     #[test]
     fn two_members_of_one_thread_learn_each_other_and_a_put_crosses_the_group() {
@@ -540,6 +542,22 @@ mod group {
                 .iter()
                 .any(|got| got == b"over-the-group")
         });
+        // A put reaches the group once, whatever faces it is sent on beside the group: a second put,
+        // heard in the first member's order after every copy of the first, closes the count.
+        put(&first, "demo/group/b", b"after-it");
+        eventually("the second member to hear the second put", || {
+            heard.lock().unwrap().iter().any(|got| got == b"after-it")
+        });
+        assert_eq!(
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|got| *got == b"over-the-group")
+                .count(),
+            1,
+            "the first put is heard once"
+        );
 
         drop(second);
         assert_eq!(
