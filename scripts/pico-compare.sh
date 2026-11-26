@@ -204,17 +204,17 @@ mkdir -p "$out/bin"
 # built; a run with PICO_CMP_NO_BUILD=1 reads the stamp and refuses a PICO_CMP_ENGINE that names another.
 wz_engine=""
 resolve_wz_engine() {
-    if [ -z "${PICO_CMP_ENGINE:-}" ]; then
-        bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
-            || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
-    fi
+    # Whatever engine is named, the cargo words name zenoh-pico's preset, which kconfiglib resolves.
+    bash scripts/provision-kconfiglib.sh >"$out/build-kconfiglib.log" 2>&1 \
+        || { echo "pico-compare: NOT-MEASURED, kconfiglib did not install (see $out/build-kconfiglib.log)"; exit 2; }
     wz_engine="$(python3 -I scripts/lib/wz_config.py --bench-engine ${PICO_CMP_ENGINE:+"$PICO_CMP_ENGINE"})" \
         || { echo "pico-compare: NOT-MEASURED, the engine of the wz library did not resolve"; exit 2; }
     pico_form
 }
 
 # wz_cargo_args <features>: the cargo words of the wz library on $wz_engine with <features> (a comma list, empty for
-# none) over its default capabilities.
+# none) over zenoh-pico's preset (configs/zenoh-pico_defconfig, wz_config.preset_named_features), the build every
+# bench of the pico library compares with zenoh-pico.
 wz_cargo_args() {
     python3 -I scripts/lib/wz_config.py --bench-cargo-args "$wz_engine" ${1:+"$1"}
 }
@@ -241,11 +241,22 @@ if [ "${PICO_CMP_NO_BUILD:-0}" != 1 ] && [ "${1:-}" != nodrop-c ] && [ "${1:-}" 
     # shellcheck disable=SC2086 # the cargo words are words on purpose
     (cd crates && cargo build "${wz_pico_args[@]}" -p wz-capi-pico-lib $wz_args) >"$out/build-wz.log" 2>&1 \
         || { echo "pico-compare: NOT-MEASURED, the wz library did not build (see $out/build-wz.log)"; exit 2; }
+    rm -rf "$out/include-W"
+    mkdir -p "$out/include-W/zenoh-pico"
+    python3 -I scripts/lib/wz_config.py --bench-config-h "$wz_engine" >"$out/include-W/zenoh-pico/config.h" \
+        || { echo "pico-compare: NOT-MEASURED, the config.h of the wz library did not render"; exit 2; }
     echo "$wz_engine" >"$out/wz-engine"
 fi
+# A program of the wz arm finds the config.h of the library it links before the pico build's: against another
+# config.h it allocates the option structs of another build.
+wz_include=()
 case "${1:-}" in
     rtt | thr | nodrop | profile | tids)
         [ -n "$wz_engine" ] || stamped_engine "$(cat "$out/wz-engine" 2>/dev/null)"
+        [ -f "$out/include-W/zenoh-pico/config.h" ] \
+            || { echo "pico-compare: NOT-MEASURED, no config.h of the wz library under $out/include-W (build it first)"
+                 exit 2; }
+        wz_include=(-I"$out/include-W")
         ;;
 esac
 
@@ -289,14 +300,17 @@ include=(
 # build_example <example> <P|W>
 build_example() {
     local example="$1" variant="$2" lib name
+    local own=()
     if [ "$variant" = P ]; then
         lib="$pico_lib"
         name=zenohpico
     else
         lib="$wz_pico_lib"
         name=wz_capi_pico
+        own=(${wz_include[@]+"${wz_include[@]}"})
     fi
-    cc -O2 "$examples/$example.c" -DZENOH_LINUX "${include[@]}" -o "$out/bin/${example}_$variant" \
+    cc -O2 "$examples/$example.c" -DZENOH_LINUX ${own[@]+"${own[@]}"} "${include[@]}" \
+        -o "$out/bin/${example}_$variant" \
         -L"$lib" "-l$name" "-Wl,-rpath,$lib" -lpthread 2>"$out/build-${example}_$variant.log" \
         || { echo "pico-compare: NOT-MEASURED, $example against $variant did not build"; exit 2; }
 }
@@ -305,14 +319,17 @@ build_example() {
 # of the variant, with the same flags as the examples.
 build_bench() {
     local name="$1" variant="$2" lib libname
+    local own=()
     if [ "$variant" = P ]; then
         lib="$pico_lib"
         libname=zenohpico
     else
         lib="$wz_bench_lib"
         libname=wz_capi_pico
+        own=(${wz_include[@]+"${wz_include[@]}"})
     fi
-    cc -O2 "$root/scripts/host-bench/$name.c" -DZENOH_LINUX "${include[@]}" -o "$out/bin/${name}_$variant" \
+    cc -O2 "$root/scripts/host-bench/$name.c" -DZENOH_LINUX ${own[@]+"${own[@]}"} "${include[@]}" \
+        -o "$out/bin/${name}_$variant" \
         -L"$lib" "-l$libname" "-Wl,-rpath,$lib" -lpthread 2>"$out/build-${name}_$variant.log" \
         || { echo "pico-compare: NOT-MEASURED, $name against $variant did not build (see $out/build-${name}_$variant.log)"; exit 2; }
 }
@@ -1594,7 +1611,8 @@ parity() {
 # ── perf: the performance matrix of the pico ABI (docs/pico-perf-matrix.md) ──────────────────────────────
 #
 # One program, scripts/host-bench/perf_probe.c, built three times into $out/perf/bin: perf_probe_P against
-# zenoh-pico built as the same build as wz-capi-pico's default capabilities on the engine and with the standard
+# zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset (configs/zenoh-pico_defconfig, the
+# capabilities pico's own default build has; wz_config.preset_features) on the engine and with the standard
 # library resolved above (the capability cost gate's reference, which perf_matrix.py reference builds or finds,
 # by the gate's rule for that form), perf_probe_W against that wz-capi-pico build and perf_probe_Wapp against it
 # with the `app-transport` capability, the one arm that carries the program transport cell; both wz builds are
@@ -1651,7 +1669,7 @@ perf_external_arm() {
     fi
 }
 
-# perf_wz_arm <dir> <arm> <features>: wz-capi-pico-lib built as pico_form says for its default features and <features> (a comma
+# perf_wz_arm <dir> <arm> <features>: wz-capi-pico-lib built as pico_form says for zenoh-pico's preset and <features> (a comma
 # list, empty for none), its library copied to <dir>/lib-<arm> and the pico headers of its own arm to
 # <dir>/include-<arm>: the headers its zenoh-pico-sys build installs, with the config.h of the same feature list
 # (wz_config.py --pico-config-h) in place of the vendored default one, as scripts/pico-c-program.sh compiles a
@@ -1706,7 +1724,7 @@ stamped_stdlib() {
 }
 
 # perf_matrix_wz_arm <dir> <arm> <features>: arm <arm> of the perf matrix, wz-capi-pico on $wz_engine with $wz_stdlib
-# and <features> (a comma list, empty for none) over its default capabilities, built as the size gate builds the case
+# and <features> (a comma list, empty for none) over zenoh-pico's preset, built as the size gate builds the case
 # of that form, its library in <dir>/lib-<arm> and its headers in <dir>/include-<arm> (perf_matrix.py wz-arm, which
 # prints why when it builds nothing).
 perf_matrix_wz_arm() {

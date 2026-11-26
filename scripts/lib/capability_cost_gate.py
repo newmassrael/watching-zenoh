@@ -840,7 +840,7 @@ CASES: tuple[Case, ...] = (
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
                  MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
-         forbid_undefined=(r"^rust_eh_personality$",),
+         forbid_undefined=(r"^rust_eh_personality$", r"^_Unwind_Resume(@|$)"),
          require_needed=(r"^libc\.so",),
          # 443 exports: `wz_ext_callbacks_refused` (d80d315d1).
          exports=443, profile="capi-nostd",
@@ -856,7 +856,11 @@ CASES: tuple[Case, ...] = (
               "the prebuilt `core`'s unwind tables name it and LTO keeps the reference "
               "(measured: undefined in the first build, so no C program linked), so the library "
               "defines it, as an abort that nothing reaches (`src/os/no_std_host.rs`), and a "
-              "`#[no_mangle]` item of a cdylib is exported. No `critical-section` "
+              "`#[no_mangle]` item of a cdylib is exported. `_Unwind_Resume`, which the prebuilt "
+              "crates' cleanup paths call, is defined too, local to the library and so not "
+              "exported: left undefined, the C compiler's as-needed link mapped `libgcc_s` into "
+              "every program of the library for that one name (docs/win-budget/rss.md, R4). "
+              "No `critical-section` "
               "implementation: the locks are the host's own calls through `wz-host-sync`"),
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
@@ -1857,7 +1861,7 @@ def grade(case: Case, got: Measured, stated: str | None = None, door: bool = Tru
         if hits:
             findings.append(
                 f"{case.id}: the library leaves {hits[0]} undefined, a name it expects whoever "
-                f"loads it to define; no C program that links it does, so the program's link fails."
+                f"loads it to define and is to define itself (the case's note says why)."
             )
     for pattern in case.require_needed:
         if not any(re.search(pattern, n) for n in got.needed):
@@ -2639,6 +2643,11 @@ def cmd_selftest() -> int:
            == 1)
     expect("the same name defined, or another left undefined, is not",
            grade(personality, Measured(900, ["rust_eh_personality"], 3, (), ("malloc",))) == [])
+    resume = [p for p in {c.id: c for c in CASES}["pico-client-coop-nostd"].forbid_undefined
+              if re.search(p, "_Unwind_Resume")]
+    expect("the client without std refuses the unwinder's resume left undefined, by either spelling",
+           len(resume) == 1 and re.search(resume[0], "_Unwind_Resume@GCC_3.0") is not None
+           and re.search(resume[0], "_Unwind_Resume_or_Rethrow") is None)
     libc_named = Case("t", "p", "l", "", 1000, require_needed=(r"^libc\.so",))
     expect("a library that names no C library is a finding",
            len(grade(libc_named, Measured(900, [], 3, (), (), ()))) == 1)

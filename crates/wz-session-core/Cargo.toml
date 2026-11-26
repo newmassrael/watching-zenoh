@@ -550,6 +550,14 @@ codec-open-body = ["wz-codecs/codec-open-body", "dep:keccak"]
 # that has one does not select this. It selects an implementation and adds no code, so enabling it
 # beside the default is safe: the compact one is used.
 initial-sn-compact = []
+# SHA-256 compiled small: `sha2`'s rolled software compression (`force-soft-compact`) in place of
+# its unrolled one and of the SHA-NI form it picks at run time. What hashes here is the acceptor's
+# cookie MAC (`signing_key`), a few compressions a handshake and none on a frame after it, so the
+# digest is the same bit for bit and only its speed and its text move. A dependency's feature is
+# the graph's: every crate of one cargo invocation that hashes with `sha2` 0.10 takes the rolled
+# form too, so only a final build that hashes nothing else per sample selects it (`wz-capi-pico`'s
+# `os-host`).
+sha256-compact = ["sha2/force-soft-compact"]
 codec-keep-alive = ["wz-codecs/codec-keep-alive"]
 codec-close = ["wz-codecs/codec-close"]
 # R311kt — codec-join forwards the wz-codecs JOIN body codec. Gates the
