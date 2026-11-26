@@ -2715,23 +2715,16 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     if let Some(row) = owed.first() {
         assert_eq!(row.count, peer.peers().pools.remote_decls);
     }
-    // The ports' rows are the peer's alone: the client listens on nothing.
-    let ports: Vec<_> = peer
-        .rows()
-        .filter(|row| PORT_PARTS.contains(&row.part()))
-        .map(|row| row.part())
-        .collect();
-    assert_eq!(
-        ports, PORT_PARTS,
-        "the peer lays out every row of its ports"
-    );
+    // The peer listens on `tcp/` alone and binds no udp port, so neither lays out a port's row.
     assert!(
-        client.rows().all(|row| !PORT_PARTS.contains(&row.part())),
-        "the client lays out no row of a port"
+        peer.rows()
+            .chain(client.rows())
+            .all(|row| !PORT_PARTS.contains(&row.part())),
+        "a session that binds no udp port lays out no row of one"
     );
     let rows: Vec<_> = peer
         .rows()
-        .filter(|row| row.part() != "owed tokens" && !PORT_PARTS.contains(&row.part()))
+        .filter(|row| row.part() != "owed tokens")
         .collect();
     assert_eq!(rows.len(), client.rows().count());
     for (theirs, ours) in rows.into_iter().zip(client.rows()) {

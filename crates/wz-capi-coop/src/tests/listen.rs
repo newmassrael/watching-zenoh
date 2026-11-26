@@ -873,7 +873,12 @@ fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
         .acquire_keyexpr(&long)
         .expect("room for a declaration")
         .mapping_id();
-    let remote = PublishOptions::put().with_locality(Locality::Remote);
+    // Blocking: under the client's pico profile a droppable put that finds its link's send held
+    // by the client's own read task (a reply to the listener's interest as the face comes up) is
+    // dropped and told, and every put is what the listener's counts are read for here.
+    let remote = PublishOptions::put()
+        .with_locality(Locality::Remote)
+        .with_congestion_control(CongestionControl::Block);
     let long_key = format!("{long}/x");
     for (id, key) in [(fits, "demo/c/x"), (past, long_key.as_str())] {
         peer.publish_on_wire_all(
