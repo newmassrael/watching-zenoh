@@ -168,8 +168,8 @@ the conformance digest (section 5.1).
 | row | W - P (count) | structure that removes it | files | lane | state |
 |---|---:|---|---|---|---|
 | R1 library text pages | +800,696 B mapped | (a0) both arms built as zenoh-pico's preset (section 2.2), so neither carries a plane pico's default build has not; (a) the text lane's areas (`text.md`), read here on the bench's features, where the gap is 3.84 and not 1.38: the engine (`wz_capi_coop::engine` 166 KB) and the session core (352 KB) carry the doors of every default capability; (b) code a run never calls kept off the pages it does: the doors of the capabilities a program may not use (advanced, liveliness, scouting, connectivity, the conformance digest, about 190 KB by name in section 2.1) laid out together, apart from the open, put and read, so their 64 KiB windows are never faulted (GNU ld already puts `.text.unlikely.*` first; a `#[cold]` door is placed there); (c) float formatting and the digest out of the no_std form | `text.md`; the door modules of `wz-capi-pico`; `wz-capi-pico-lib` link script; (a0) `wz_config.py`, `perf_matrix.py` | text, rss | (a0) **landed in this lane**, R1 read again on it; (b) and (c): cell R3 first, since which windows a run faults is read, not counted |
-| R2 `.rodata` | +58,692 B | no message text in the no_std form beyond what a door returns; constant tables (`sha2`'s round constants, float formatting's) leave with their code | | text | count, R1 |
-| R3 RW, relocated | +53,176 B | fewer pointers the library holds to itself: each vtable, string slice and panic location in `.data.rel.ro` is a relocation the loader writes, so a page of them is dirty in every process (`c-abi-size-diet.md` T5) | | text | count |
+| R2 `.rodata` | +58,692 B on the crate default's build; +10,234 B and +8 KiB resident a process on the preset's (section 5.3) | the jump tables of short matches lowered to compares, the encoding constants' states folded into their views, the errno match of the accept as a set; the bytes count only where they cross a page (section 5.3) | `.cargo/capi-nostd.toml`; `wz-capi-pico` `encoding.rs`; `wz-runtime-posix` `stream.rs` | rss, text | designed, section 5.3; measured first |
+| R3 RW, relocated | +53,176 B on the crate default's build; +21,480 B and +20 KiB resident a process on the preset's (section 5.3) | fewer pointers the library holds to itself: the link drivers dispatched over the build's closed set, not through vtables; the limits' and the encodings' names as offsets into one string, so their tables carry no pointer | `wz-runtime-coop`, `wz-capi-coop` (the links); `wz-session-core` `limit_binding.rs` and the generator of `limits_generated.rs`; `wz-codecs` `encoding_ids.rs` | rss, text | designed, section 5.3; measured first |
 | R4 `libgcc_s.so.1` | its mapped pages, W only | define `_Unwind_Resume` in the library as a local symbol that aborts, as `rust_eh_personality` is: the library is `panic = "abort"`, its personality aborts and its unwind tables are discarded, so no landing pad is ever entered and the name is never called; with it defined, the C compiler's as-needed link of `libgcc_s` drops the library, and the size gate refuses the name undefined | `wz-capi-pico/src/lib.rs` (`c_library_runtime!`), `scripts/lib/capability_cost_gate.py` | rss | **landed in this lane** |
 | R5 session arena and pools | rows written by the open | `heap.md` H1 to H7 (counts from the open's config, smaller rows, one pool across faces, dedup, no round), with rss-zero's fresh pages so an empty row is never written | `heap.md` | heap | in the heap lanes |
 | R6 face supervisor | +7,568 B | gone with the link tasks (`heap.md` 5.7) | | heap | in the heap lanes |
@@ -355,6 +355,77 @@ holds a few tens of bytes for each handshake in flight, as pico and `fixed` do, 
 binding), C2 (the smallest MAC, a 64-bit tag) and C3 (a 128-bit tag at about C1's size). Each is a
 change to the handshake's proof, so none is a build switch this lane flips.
 
+### 5.3 R2 and R3 on the preset's build: what the read-only data and the relocated data are
+
+Read from the run of 2026-11-26 16:15 (`perf-runs/host-20261126T071557`, a build of 031e54507, before this lane's
+A1 and A3, arm W the preset's): `readelf -SW`, `readelf -lW` and `readelf -rW` of `lib-W` and `lib-P`, `nm -S -C`,
+the words of `.data.rel.ro` read with `readelf -x` and each relocated word named by the section and symbol it
+points at, the jump tables of `.rodata` found by the code that addresses them (`objdump -d`), and the
+per-mapping figures of the same run's `perf.json` (`smaps_client`, `smaps_server`).
+
+**What the run holds of them.** In every cell read (tcp round trip, multicast throughput, both roles), each
+mapping of these segments is resident whole:
+
+| segment | W bytes | W resident | P bytes | P resident | W - P resident |
+|---|---:|---:|---:|---:|---:|
+| `.rodata` (`r--p`) | 15,818 | 16 KiB of 16 | 5,584 | 8 KiB of 8 | +8 |
+| RELRO (`r--p` after the loader's writes): `.data.rel.ro` 17,896, `.got` 632, `.dynamic` 496, init and fini arrays 16 | 19,040 | 20 KiB, all dirty | 1,680 (`.data.rel.ro` 64, `.got` 1,056) | 4 KiB | +16 |
+| `.data` and the `.bss` on its pages (`rw-p`); P: `.got.plt` 8,880 and `.data` 472 | 6,024 + 7,440 | 8 KiB file, 8 KiB anonymous | 9,360 | 12 KiB | +4 |
+| **together** | | **52 KiB** | | **24 KiB** | **+28 KiB a process** |
+
+So R2 and R3 are +28 KiB a process, 56 of a cell's two, against the crate default's build's +58,692 and
++53,176 bytes (section 2): the preset took most of them. Two facts set how they can shrink:
+
+- A segment this small is resident whole (fault-around maps every page of the mapping the page cache holds),
+  so a table moved from RELRO into `.rodata` is counted in both as before; only bytes deleted count, and only
+  where they cross a page. RELRO ends on a page (the linker places its start so: `0xce5a0 + 0x4a60 =
+  0xd3000`), so it is `ceil(bytes / 4096)` pages: 19,040 B are 5, and 4 need 2,656 B fewer, 3 need 6,752 B
+  fewer. `.rodata` starts on a page: 15,818 B are 4, with 566 B to the fourth page's end, and 3 need 3,530 B
+  fewer.
+- The relocations are not the cost: the 951 relative relocations of W take 304 bytes packed (`.relr.dyn`,
+  `pack-relative-relocs`), against P's 1,107 `JUMP_SLOT` and 132 `GLOB_DAT` (pico calls its own exports
+  through its PLT, R7). The cost is the pages they make dirty: 948 of W's lie in `.data.rel.ro`, spread over
+  all five of its pages.
+
+**R2, `.rodata`, +10,234 B, +2 pages.**
+
+| what is large | W bytes | pico | structure that removes it | expected |
+|---|---:|---|---|---:|
+| R2.1 jump tables: 179 tables of the code's `match`es, 120 of 4 or 5 entries (2,064 B), 140 of fewer than 8 (2,608 B); no panic location and no format string is among them, nor anywhere in `.data.rel.ro` | 4,840 | 820 | a match of fewer than 8 arms lowered to compares, not to a table: `-C llvm-args=-min-jump-table-entries=8` beside `force-unwind-tables=no` (`crates/.cargo/capi-nostd.toml:28`), for the host library without `std` alone. A 4-arm table costs 16 bytes of `.rodata` and its dispatch (bound check, `lea`, `movslq`, `add`, `jmp`) about as much text as the compares that replace it; that is a count, and the size ledger and the instruction counts read it | -2.6 KB |
+| R2.2 the accept's errno match, one of R2.1's tables though not one R2.1 takes: 110 entries, `EAGAIN` (11) to `EHOSTUNREACH` (113), for three outcomes (`crates/wz-runtime-posix/src/stream.rs:228-251`) | 440 | none (pico returns the error) | the errnos that mean "no connection now" as one constant set of bits tested by the errno, the exhaustion group as a second; the outcomes unchanged | -0.4 KB |
+| R2.3 the well-known encodings' states (`wz_capi_pico::encoding::STATES`, `encoding.rs:722`), 53 of 32 bytes, each a constant's view's target | 1,696 | pico's 53 constants are 40 bytes each, self-contained, in its `.rodata` | each constant's state in its own view: a `z_loaned_encoding_t` is a handle and 32 bytes the C side never reads (`encoding.rs:388-391`), so the view of a constant can hold the state its handle points at, and `VIEWS` is the one table. The state must then have no padding (a view is copied as five pointers), and `is_constant` (`encoding.rs:316`) tests the views' range | -1.7 KB |
+| R2.4 constants the compiler materialises and copies from: initial values and switch tables of `read_declare` 754, `open_request` 699, `z_open` 698, `LinkSession` 573, the router session task's poll 472, `Reserved::stage` 427, `read_response_final` 356, SCE's machines' data reached through slices about 890, and smaller | 5,853 | a C initialiser is stores in the code | none as a rule: each is the compiler's trade of text for data; a site where a value is built from a template it then overwrites is a text-lane item, read per site | 0 here |
+| R2.5 names: the limits' ids and the held values' (about 1,700, read by the limits key, `config_limits.rs:4-18`), the encodings' (about 760; pico has the same) | 2,821, with the smaller strings | 947 | none: the key's vocabulary and the encodings' wire names | 0 |
+| R2.6 the integer formatting's digit pairs (200), `core::unicode`'s white space map (256), the link names `TCP` and `UDP` (144) | 600 | libc's | with R1 (c), the formatting out of the no_std form | < 0.6 KB |
+
+R2.1, R2.2 and R2.3 together, about 4.7 KB, take `.rodata` to 3 pages: -4 KiB a process.
+
+**R3, the relocated data, +21,480 B, +5 pages (RELRO +4, `.data` and `.bss` +1).**
+
+| what is large | W bytes | pico | structure that removes it | expected |
+|---|---:|---|---|---:|
+| R3.1 vtables: 718 pointers to code (5,744 B) and each vtable's size and alignment words. By trait: `BoxedLinkDriver` 112 slots, `ReplyView` 107, `SessionDatagramLink` 75, `QueryView` 49, `TxBuf` 49, SCE's `MainLoop` 43 and `Behaviour` 42, drop glue 31, `WireWrite` 28, `ReplyOut` 19, `GroupTransport` 17, `EventSink` 16, `SampleView` 14 | about 7,500 (and about 110 vtables' size and alignment words) | pico's function pointers (a link's `_z_link_t` operations, a callback's closure) are written into heap objects at run time, none in RELRO | (a) the links: the coop runtime's drivers (the TCP stream driver, the UDP drivers over a socket and over a port peer; `BoxedLinkDriver`, `crates/wz-session-core/src/link.rs:823`, `SessionDatagramLink`, `GroupTransport`, the listeners) are a set the build closes (`IpLinks`), so a call on one is a match over that set, not an indirect call through a table of every method of every driver: 213 slots. (b) The views (`ReplyView`, `QueryView`, `SampleView`, `ReplyOut`, the sinks) stay: they keep one body of each C door for every message type, which is text the size lane won. (c) SCE's machines' dispatch is SCE's (its runtime) | (a) about -1.8 KB; text measured |
+| R3.2 the session limits' table (`SESSION_LIMITS`, `crates/wz-session-core/src/limits_generated.rs:3879`): 70 rows of 72 bytes (`LimitRow`, `limit_binding.rs:847-859`), each holding its id as a `&'static str`, so all 70 are relocated. It is read only by a config that states the limits key (`config_limits::state_over`), yet dirty in every process | 5,040 | none | the ids as offsets into one string of every id, which the generator emits beside the table (`wz_config.py --emit rust-limit-snapshots`), read through the snapshot type (an associated constant of the names), so a row holds no pointer and lies in `.rodata`; the row packed (the word as a `u16`, the capacity without its own tag), about 48 bytes | -5,040 RELRO, +3.4 KB `.rodata` |
+| R3.3 the encodings: `ENCODING_ID_TO_STR` (`crates/wz-codecs/src/encoding_ids.rs:41`), 53 `&str` (848 B, 53 relocations), and `VIEWS` (2,120 B), whose 53 handles point into `STATES` | 2,968 | `ENCODING_VALUES_ID_TO_STR` 424 B in `.data`, 53 relocations (8-byte `char *`) | the names as one string and 54 `u16` ends, built when the library is compiled from the one table (no second transcription; `lookup_id` and the readers walk the ends); `VIEWS` stays relocated (the C side is handed an address), with R2.3's states inside it | -848 RELRO, +108 `.rodata` |
+| R3.4 `.data`: the process pools' reservation (`process_pool.rs:1399`, 4,720 B) is there for three words, each stage's `None` (`0xff..ff`, a niche of `Pools`, `process_pool.rs:1037`); the scout window's table (`scout.rs:141`, 1,256 B) for five bytes | 5,976 | `.data` 472 | a stage slot whose empty value is zero (an enum with an explicit tag), and the table's initial counts at zero, so both lie in `.bss`: the file loses them and a page of them nobody writes is not resident. The first open lays every stage (`Reserved::stage`), so the reservation stays written; the window's table and its buffer (`.bss`, 2,048) are written only by a scout | 0 to -4 KiB, by where the linker lays them |
+| R3.5 `.bss`: the thread records (5,120), the scout window's buffer (2,048), the critical section's words | 7,440 | 8 | A3 (landed after this run): the section's words beside the first record | the next run reads it |
+| R3.6 the remaining slices: the held values' ids (8), the locator's config keys (8), the whatami names (8), SCE's tables' `&[u16]` (about 24) | about 770 | | with R3.2's form where a table is read only by name | small |
+| R3.7 `.got`, `.dynamic` | 1,128 | 1,256 with `.got.plt` 8,880 | none: W calls its own code directly (R7) | 0 |
+
+R3.2 alone takes RELRO to 4 pages but costs `.rodata` its fifth (566 B of room), so it pays only beside R2's
+items. With R2.1, R2.2, R2.3, R3.1 (a), R3.2 and R3.3, `.rodata` is about 14.5 KB (4 pages, as now) and RELRO
+about 11.4 KB (3 pages): -8 KiB a process. Without R3.2, `.rodata` is about 11.2 KB (3 pages) and RELRO about
+16.4 KB, a few bytes past 4 pages, so R3.6 decides between -4 and -8. R3.4 and A3 may each take one page of
+`.data` and `.bss` more. Of the +28 KiB, 12 to 20 stay: R2.4, R2.5, R3.1 (b) and (c), the written `.bss`.
+
+**Order, and why nothing of it lands in this round.** Each item alone moves no page, so the perf matrix
+cannot tell any of them from noise, and two of them move code by an amount only a build reads (R2.1's
+compares, R3.1's matches). The order: R2.1 measured first (one line; the size ledger's text and `.rodata`, the
+instruction counts), since its sign decides whether `.rodata` has room for R3.2; then R3.2 and R3.3 with
+R2.3 (`.rodata` neutral, RELRO -1 page); then R3.1 (a) (RELRO -1 page). R2.2 and R3.4 are local and go with
+whichever lands first. The cell that reads each is R0's per-mapping figures, the `r--p` and `rw-p` mappings of
+`lib-W` above.
+
 ## 6. Measurement cells
 
 - **R0, the absolute figure and its parts.** `PERF_SMAPS=1` in the matrix's environment makes
@@ -422,3 +493,4 @@ change to the handshake's proof, so none is a build switch this lane flips.
   judges R5's rows, largest first, and answers whether A2 made a second copy of the walk.
 - C1: SHA-256 compiled small in the C libraries (`sha256-compact` under `os-host`, `sha2` at `opt-level = "s"`
   in `capi-small` and `capi-nostd`), section 5.2.
+- Section 5.3: R2 and R3 read part by part on the preset's run, and the bundle that crosses their pages.
