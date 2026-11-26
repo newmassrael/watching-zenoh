@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut Engine<Self>` and per-state
+// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -84,9 +84,10 @@ use sce_rust_runtime::{Engine, StatePolicy};
 /// The document's states, declared in document order. Each variant's
 /// discriminant is its position in that order, which is the number the
 /// runtime's tables know the state by (docs/adr/0064), so a state is its number
-/// at no cost.
+/// at no cost. It is held in the smallest integer that holds every number, and
+/// all-zero bytes are its first state (docs/adr/0130 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[repr(u16)]
+#[repr(u8)]
 pub enum AppLinkState {
     // W3C SCXML 3.2: `<scxml initial>` state — the machine's `Default`.
     #[default]
@@ -116,9 +117,10 @@ impl AppLinkState {
 
 /// The events the document names, and the null event. Each variant's
 /// discriminant is the number the runtime knows the event by, its position in
-/// `StatePolicy::EVENTS`.
+/// `StatePolicy::EVENTS`, held in the smallest integer that holds every number
+/// and the null event's (docs/adr/0130 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
+#[repr(u8)]
 pub enum AppLinkEvent {
     CloseDone = 0,
     LinkAccepted = 1,
@@ -195,14 +197,31 @@ pub type AppLinkConfiguration = ::sce_rust_runtime::helpers::hierarchy::BoundedV
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
+/// `selection` is what enables each written transition (docs/adr/0127): each
+/// state's range of written transitions (`first_written`, one entry past the
+/// last state), and for each transition the list of events that enable it
+/// (`triggers`, a position in `trigger_events`, each list its length first),
+/// as the numbers of `AppLinkEvent`. The general walk's selection
+/// reads them and asks this machine only whether a guard holds (`guard_holds`).
+///
+/// `candidates` is what a document the row walk serves selects from instead
+/// (docs/adr/0135): the same lists fused over each atomic state's ancestors,
+/// so for each atomic state and each event the transitions the selection
+/// tries, the state's own then each ancestor's, as compressed sparse rows
+/// (`first_cell` each state's range of `cells`, one past the last; a cell an
+/// event and the position of its list in `candidates`, each list its length
+/// first). Such a document's tables carry these and no `selection`, any
+/// other's `selection` and no candidates.
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const APP_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
-        Target, TransitionId, TransitionRow,
+        Candidate, CandidateCell, CandidateRows, DocumentTables, EntryRow, EntryStep, EventId,
+        HistoryId, HistoryRow, SelectionRows, StateId, StateKind, StateRow, Target, TransitionId,
+        TransitionRow, TriggerEvent, TriggerRow,
     };
     DocumentTables {
         states: &[
@@ -261,6 +280,12 @@ pub const APP_LINK_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
         entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(4), false), EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
+        selection: None,
+        candidates: Some(CandidateRows {
+            first_cell: &[0, 4, 9, 12, 14, 14],
+            cells: &[CandidateCell::new(EventId(1), 0), CandidateCell::new(EventId(2), 2), CandidateCell::new(EventId(3), 4), CandidateCell::new(EventId(8), 6), CandidateCell::new(EventId(2), 8), CandidateCell::new(EventId(5), 10), CandidateCell::new(EventId(6), 12), CandidateCell::new(EventId(7), 14), CandidateCell::new(EventId(8), 16), CandidateCell::new(EventId(2), 18), CandidateCell::new(EventId(4), 20), CandidateCell::new(EventId(8), 22), CandidateCell::new(EventId(0), 24), CandidateCell::new(EventId(2), 26)],
+            candidates: &[Candidate::count(1), Candidate::new(TransitionId(1)), Candidate::count(1), Candidate::new(TransitionId(2)), Candidate::count(1), Candidate::new(TransitionId(0)), Candidate::count(1), Candidate::new(TransitionId(3)), Candidate::count(1), Candidate::new(TransitionId(7)), Candidate::count(1), Candidate::new(TransitionId(4)), Candidate::count(1), Candidate::new(TransitionId(5)), Candidate::count(1), Candidate::new(TransitionId(6)), Candidate::count(1), Candidate::new(TransitionId(8)), Candidate::count(1), Candidate::new(TransitionId(10)), Candidate::count(1), Candidate::new(TransitionId(9)), Candidate::count(1), Candidate::new(TransitionId(11)), Candidate::count(1), Candidate::new(TransitionId(12)), Candidate::count(1), Candidate::new(TransitionId(13))],
+        }),
     }
 };
 
@@ -531,6 +556,44 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0144: a number is its value by the discriminant each variant is
+    // written with, so the way back is a match of each number to its variant,
+    // which the compiler reads as the identity with one bound and not as a
+    // read of `STATES`: a comparison of the value against a variant is a
+    // comparison of the number.
+    fn state_of(id: ::sce_rust_runtime::StateId) -> Self::State {
+        match id.0 {
+            0 => AppLinkState::Opening,
+            1 => AppLinkState::Open,
+            2 => AppLinkState::Blocked,
+            3 => AppLinkState::Closing,
+            4 => AppLinkState::Closed,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
+    fn history_of(id: ::sce_rust_runtime::HistoryId) -> Self::History {
+        // No `<history>`, so no number names one.
+        let _ = id;
+        ::sce_rust_runtime::helpers::tables::row_missing()
+    }
+
+    fn event_of(id: ::sce_rust_runtime::EventId) -> Self::Event {
+        match id.0 {
+            0 => AppLinkEvent::CloseDone,
+            1 => AppLinkEvent::LinkAccepted,
+            2 => AppLinkEvent::LinkClosed,
+            3 => AppLinkEvent::LinkConnected,
+            4 => AppLinkEvent::LinkWritable,
+            5 => AppLinkEvent::SendBlocked,
+            6 => AppLinkEvent::SendClosed,
+            7 => AppLinkEvent::SendFailed,
+            8 => AppLinkEvent::SessionClose,
+            9 => AppLinkEvent::Null,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -654,7 +717,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: app_link.scxml:55 :: _machine"]
 // SCE-MAP: app_link.scxml:55 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
         match state {
             AppLinkState::ID_Closed => {
                 // SCE-MAP: app_link.scxml:98 :: Closed :: _state_body
@@ -703,7 +766,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -715,124 +778,6 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
 
 
 
-
-    // Appendix D selectTransitions, the half only this document can answer:
-    // the first of `state`'s own transitions, in document order, that `event`
-    // enables, as its row of the tables, which holds its targets and its
-    // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
-    // state and the event are the numbers the tables are indexed by
-    // (docs/adr/0123).
-    #[doc = "SCE-MAP: app_link.scxml:55 :: _machine"]
-// SCE-MAP: app_link.scxml:55 :: _machine
-    fn first_enabled_transition(
-        &mut self,
-        state: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-        sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match state {
-            AppLinkState::ID_Blocked => {
-                if event == AppLinkEvent::ID_LinkWritable {
-                    {
-                        // Blocked, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(9));
-                    }
-                }
-                if event == AppLinkEvent::ID_LinkClosed {
-                    {
-                        // Blocked, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(10));
-                    }
-                }
-                if event == AppLinkEvent::ID_SessionClose {
-                    {
-                        // Blocked, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(11));
-                    }
-                }
-                None
-            }
-            AppLinkState::ID_Closing => {
-                if event == AppLinkEvent::ID_CloseDone {
-                    {
-                        // Closing, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(12));
-                    }
-                }
-                if event == AppLinkEvent::ID_LinkClosed {
-                    {
-                        // Closing, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(13));
-                    }
-                }
-                None
-            }
-            AppLinkState::ID_Open => {
-                if event == AppLinkEvent::ID_SendBlocked {
-                    {
-                        // Open, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(4));
-                    }
-                }
-                if event == AppLinkEvent::ID_SendClosed {
-                    {
-                        // Open, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(5));
-                    }
-                }
-                if event == AppLinkEvent::ID_SendFailed {
-                    {
-                        // Open, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(6));
-                    }
-                }
-                if event == AppLinkEvent::ID_LinkClosed {
-                    {
-                        // Open, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(7));
-                    }
-                }
-                if event == AppLinkEvent::ID_SessionClose {
-                    {
-                        // Open, transition 4
-                        return Some(::sce_rust_runtime::TransitionId(8));
-                    }
-                }
-                None
-            }
-            AppLinkState::ID_Opening => {
-                if event == AppLinkEvent::ID_LinkConnected {
-                    {
-                        // Opening, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(0));
-                    }
-                }
-                if event == AppLinkEvent::ID_LinkAccepted {
-                    {
-                        // Opening, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(1));
-                    }
-                }
-                if event == AppLinkEvent::ID_LinkClosed {
-                    {
-                        // Opening, transition 2
-                        return Some(::sce_rust_runtime::TransitionId(2));
-                    }
-                }
-                if event == AppLinkEvent::ID_SessionClose {
-                    {
-                        // Opening, transition 3
-                        return Some(::sce_rust_runtime::TransitionId(3));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -842,7 +787,7 @@ impl<A: AppLinkActions + 'static> StatePolicy for AppLinkPolicy<A> {
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.
         let _ = (transition, engine);

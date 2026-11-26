@@ -801,6 +801,250 @@ fn a_row_a_face_left_wakes_for_the_face_an_attach_gives_it() {
     );
 }
 
+/// A listener's one client face, up with nothing owed while the dial role's face rests, is found
+/// quiet by its look; no face is while a second client's face is up beside it, and the first is
+/// again once the second has gone. CONTROL: a listener with no client has no quiet face. Turned
+/// red by a look that never marks its face quiet (`CoopEngine::quiet_until`), or one that marks
+/// a face quiet beside another that does not rest.
+#[cfg(not(wz_round))]
+#[test]
+fn a_lone_face_is_found_quiet_by_its_look_and_not_beside_another() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 2);
+    assert_eq!(
+        listener.quiet_faces(),
+        0,
+        "CONTROL: a listener with no client has no quiet face"
+    );
+    let first = client(&endpoint, 0xc1);
+    eventually("the first client's face", || listener.faces_up() == 1);
+    eventually("the lone face found quiet", || listener.quiet_faces() == 1);
+    let second = client(&endpoint, 0xc2);
+    eventually("the second client's face", || listener.faces_up() == 2);
+    eventually("no face found quiet beside another", || {
+        listener.quiet_faces() == 0
+    });
+    drop(second);
+    eventually("the first face alone, and quiet again", || {
+        listener.faces_up() == 1 && listener.quiet_faces() == 1
+    });
+    drop(first);
+}
+
+/// A listener's read task reads its one quiet client face alone to the look's deadline: a run of
+/// puts, each its own batch, each read in a take of its own, costs the face a few turns, not one
+/// a batch. The CONTROL is the takes, one a put at least. Turned red by a read that never enters
+/// the quiet read (`CoopEngine::read_quiet`), or a look that never marks its face quiet.
+#[cfg(not(wz_round))]
+#[test]
+fn a_quiet_read_turns_its_face_once_a_deadline_not_once_a_batch() {
+    const PUTS: usize = 40;
+    let (listener, endpoint) = listening(|config| {
+        config.idle_wait_ms = 1_000;
+        config.lease_ms = 60_000;
+    });
+    let heard = Arc::new(AtomicUsize::new(0));
+    let count = heard.clone();
+    listener
+        .declare_subscriber_on_wire("demo/quiet/**", WireKey::literal(), Locality::Any, None, {
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the listener declares the subscriber");
+    let peer = client(&endpoint, 0xc1);
+    let put = || {
+        peer.publish_on_wire_all(
+            "demo/quiet/x",
+            &WireKey::literal(),
+            b"q",
+            &PublishOptions::put().with_locality(Locality::Remote),
+        )
+        .expect("a put the link carries");
+    };
+    eventually("a put heard once the client knows the subscriber", || {
+        put();
+        std::thread::sleep(Duration::from_millis(10));
+        heard.load(Ordering::SeqCst) > 0
+    });
+    eventually("the listener's face found quiet", || {
+        listener.quiet_faces() == 1
+    });
+    let from = heard.load(Ordering::SeqCst);
+    let (turns, takes) = (
+        listener.takes.face_turns.load(Ordering::SeqCst),
+        listener.takes.pump_reads.load(Ordering::SeqCst),
+    );
+    for n in 1..=PUTS {
+        put();
+        eventually("the put heard", || heard.load(Ordering::SeqCst) >= from + n);
+    }
+    let turns = listener.takes.face_turns.load(Ordering::SeqCst) - turns;
+    let takes = listener.takes.pump_reads.load(Ordering::SeqCst) - takes;
+    assert!(takes >= PUTS, "CONTROL: one take a put at least, {takes}");
+    assert!(
+        turns * 4 < PUTS,
+        "the face was turned {turns} times for {PUTS} batches"
+    );
+}
+
+/// A connection that arrives while the listener reads its one face quietly ends that read at
+/// once: the port is in what the quiet read waits on, so the connection is taken long before the
+/// read's own deadline. The first client's lease is long, so the listener's keep-alive to it is
+/// due past that deadline too, and the puts it makes are what the listener reads. CONTROL: the
+/// first face was found quiet. Turned red by a quiet read that waits on its face's link alone
+/// (`LinkSupervisor::lone_waits` leaving the port out).
+#[cfg(not(wz_round))]
+#[test]
+fn a_connection_arriving_during_a_quiet_read_is_taken_at_once() {
+    let (listener, endpoint) = listening(|config| {
+        config.max_faces = 2;
+        config.idle_wait_ms = 10_000;
+        config.lease_ms = 60_000;
+    });
+    let heard = Arc::new(AtomicUsize::new(0));
+    let count = heard.clone();
+    listener
+        .declare_subscriber_on_wire("demo/quiet/**", WireKey::literal(), Locality::Any, None, {
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the listener declares the subscriber");
+    let first = Stepped::new(open_with(CoopConfig {
+        endpoints: vec![endpoint.clone()],
+        zid: config_zid(0xc1),
+        lease_ms: 60_000,
+        ..client_config()
+    }));
+    eventually("the first client's face", || listener.faces_up() == 1);
+    eventually("a put heard once the client knows the subscriber", || {
+        first
+            .publish_on_wire_all(
+                "demo/quiet/x",
+                &WireKey::literal(),
+                b"q",
+                &PublishOptions::put().with_locality(Locality::Remote),
+            )
+            .expect("a put the link carries");
+        std::thread::sleep(Duration::from_millis(10));
+        heard.load(Ordering::SeqCst) > 0
+    });
+    eventually("CONTROL: the face found quiet", || {
+        listener.quiet_faces() == 1
+    });
+    // The quiet read is under way once its pass has waited at least once.
+    std::thread::sleep(Duration::from_millis(50));
+    let started = Instant::now();
+    let second = client(&endpoint, 0xc2);
+    eventually("the second client's face", || listener.faces_up() == 2);
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(3),
+        "the connection waited for the quiet read's deadline: {took:?}"
+    );
+    drop(second);
+    drop(first);
+}
+
+/// The read task's stop ends a quiet read within one wait bound of the session: the read's
+/// deadline is never past the look's reading and `idle_wait_ms`, however far the face's own due
+/// lies. CONTROL: the face was found quiet. Turned red by a deadline without that bound
+/// (`CoopEngine::quiet_until`), whose read would wait for the pump's keep-alive.
+#[cfg(not(wz_round))]
+#[test]
+fn the_read_tasks_stop_ends_a_quiet_read_within_one_wait_bound() {
+    let (listener, endpoint) = listening(|config| {
+        config.idle_wait_ms = 300;
+        config.lease_ms = 60_000;
+    });
+    let peer = client(&endpoint, 0xc1);
+    eventually("the client's face", || listener.faces_up() == 1);
+    eventually("CONTROL: the face found quiet", || {
+        listener.quiet_faces() == 1
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    let started = Instant::now();
+    SessionDrive::stop_read_task(&*listener).expect("the read task stops");
+    let took = started.elapsed();
+    assert!(
+        took < Duration::from_secs(2),
+        "the stop waited past one wait bound: {took:?}"
+    );
+    drop(peer);
+}
+
+/// A face's own deadlines are served by its look and its step, not by the session's bookkeeping:
+/// a listener whose one client holds it to a short lease sends that client a keep-alive at each
+/// third of the lease, and runs its bookkeeping at none of them. CONTROL: the bookkeeping ran as
+/// the client's face came up, and the client's link is still up after several of its leases.
+/// Turned red by a ledger due by a face's own deadline (`Core::settle_ledger`), which the look
+/// reads before its step moves it, or by a keep-alive's verdict dispatched to the face's tables
+/// (`DirectSink`), which counts as a write of them: either has each keep-alive's look run the
+/// bookkeeping.
+#[cfg(not(wz_round))]
+#[test]
+fn a_faces_keep_alive_runs_no_bookkeeping() {
+    let (listener, endpoint) = listening(|config| {
+        config.idle_wait_ms = 10_000;
+        config.lease_ms = 60_000;
+    });
+    let before_up = listener.services();
+    let peer = Stepped::new(open_with(CoopConfig {
+        endpoints: vec![endpoint.clone()],
+        zid: config_zid(0xc1),
+        lease_ms: 900,
+        ..client_config()
+    }));
+    eventually("the client's face", || {
+        listener.faces_up() == 1 && peer.faces_up() == 1
+    });
+    assert!(
+        listener.services() > before_up,
+        "CONTROL: the bookkeeping ran as the face came up"
+    );
+    // Whatever the bring-up left owed is served by the looks right after it.
+    std::thread::sleep(Duration::from_millis(500));
+    let before = listener.services();
+    std::thread::sleep(Duration::from_millis(2_700));
+    assert_eq!(
+        (listener.faces_up(), peer.faces_up()),
+        (1, 1),
+        "CONTROL: the client's lease of the listener ran out"
+    );
+    assert_eq!(
+        listener.services() - before,
+        0,
+        "the bookkeeping ran at a face's keep-alive"
+    );
+}
+
+/// A quiet read leaves at its pump's keep-alive, however long the session's wait bound: a listener
+/// whose lease is short and whose wait bound is long keeps its one client's link up while
+/// nothing but keep-alives crosses it. CONTROL: the face was found quiet. Turned red by a quiet
+/// read whose deadline leaves out the pump's due (`CoopEngine::quiet_until`, or the run's own
+/// after each step), which would wait past the lease the client holds the listener to.
+#[cfg(not(wz_round))]
+#[test]
+fn a_quiet_read_sends_the_keep_alive_on_time() {
+    let (listener, endpoint) = listening(|config| {
+        config.idle_wait_ms = 10_000;
+        config.lease_ms = 1_000;
+    });
+    let peer = client(&endpoint, 0xc1);
+    eventually("the client's face", || {
+        listener.faces_up() == 1 && peer.faces_up() == 1
+    });
+    eventually("CONTROL: the face found quiet", || {
+        listener.quiet_faces() == 1
+    });
+    std::thread::sleep(Duration::from_millis(3_000));
+    assert_eq!(
+        (listener.faces_up(), peer.faces_up()),
+        (1, 1),
+        "the link went while the listener read it quietly"
+    );
+}
+
 /// A session whose one link is a stream waits on that link's input with nothing of the session
 /// held, and the step after the wait reads what came: each put a listener makes reaches it after
 /// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.
@@ -836,8 +1080,10 @@ fn a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is() {
             heard.load(Ordering::SeqCst) == n
         });
     }
+    // A wait is counted as it begins: the first put may end the one under way as the count was
+    // read, and each put after it ends a wait begun after its predecessor was heard.
     assert!(
-        peer.takes.polls.load(Ordering::SeqCst) - polls >= PUTS,
+        peer.takes.polls.load(Ordering::SeqCst) - polls >= PUTS - 1,
         "each put was read after a wait on the link's input"
     );
     assert!(

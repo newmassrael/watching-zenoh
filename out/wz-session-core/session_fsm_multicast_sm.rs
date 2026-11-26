@@ -39,7 +39,7 @@
 // `use sce_rust_runtime::{Engine, StatePolicy};`; fixtures with no
 // `<send delay=...>` and no engine-borrowing actions never reference
 // `Duration`/`Engine`, leaving the imports unused.
-// Method parameters such as `_engine: &mut Engine<Self>` and per-state
+// Method parameters such as `_engine: &mut ::sce_rust_runtime::EngineState<Self>` and per-state
 // fields (`pending_event_invokeid`, `script_engine_initialized`, ...) are
 // emitted on every fixture for the StatePolicy trait shape but read only
 // by fixtures that actually exercise the corresponding W3C feature.
@@ -84,9 +84,10 @@ use sce_rust_runtime::{Engine, StatePolicy};
 /// The document's states, declared in document order. Each variant's
 /// discriminant is its position in that order, which is the number the
 /// runtime's tables know the state by (docs/adr/0064), so a state is its number
-/// at no cost.
+/// at no cost. It is held in the smallest integer that holds every number, and
+/// all-zero bytes are its first state (docs/adr/0130 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[repr(u16)]
+#[repr(u8)]
 pub enum SessionFsmMulticastState {
     // W3C SCXML 3.2: `<scxml initial>` state — the machine's `Default`.
     #[default]
@@ -114,9 +115,10 @@ impl SessionFsmMulticastState {
 
 /// The events the document names, and the null event. Each variant's
 /// discriminant is the number the runtime knows the event by, its position in
-/// `StatePolicy::EVENTS`.
+/// `StatePolicy::EVENTS`, held in the smallest integer that holds every number
+/// and the null event's (docs/adr/0130 §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u16)]
+#[repr(u8)]
 pub enum SessionFsmMulticastEvent {
     LinkLost = 0,
     LinkReady = 1,
@@ -183,14 +185,31 @@ pub type SessionFsmMulticastConfiguration = ::sce_rust_runtime::helpers::hierarc
 /// row walk reads them. Any other document carries the general walk, which
 /// computes them, and no rows.
 ///
+/// `selection` is what enables each written transition (docs/adr/0127): each
+/// state's range of written transitions (`first_written`, one entry past the
+/// last state), and for each transition the list of events that enable it
+/// (`triggers`, a position in `trigger_events`, each list its length first),
+/// as the numbers of `SessionFsmMulticastEvent`. The general walk's selection
+/// reads them and asks this machine only whether a guard holds (`guard_holds`).
+///
+/// `candidates` is what a document the row walk serves selects from instead
+/// (docs/adr/0135): the same lists fused over each atomic state's ancestors,
+/// so for each atomic state and each event the transitions the selection
+/// tries, the state's own then each ancestor's, as compressed sparse rows
+/// (`first_cell` each state's range of `cells`, one past the last; a cell an
+/// event and the position of its list in `candidates`, each list its length
+/// first). Such a document's tables carry these and no `selection`, any
+/// other's `selection` and no candidates.
+///
 /// A `const` and not a `static`: `StatePolicy::TABLES` refers to it, and a
 /// constant may refer to a static only from Rust 1.83 on, past the toolchain
 /// the runtime supports. The reference is to one constant allocation all the
 /// same.
 pub const SESSION_FSM_MULTICAST_TABLES: ::sce_rust_runtime::DocumentTables<'static> = {
     use ::sce_rust_runtime::{
-        DocumentTables, EntryRow, EntryStep, HistoryId, HistoryRow, StateId, StateKind, StateRow,
-        Target, TransitionId, TransitionRow,
+        Candidate, CandidateCell, CandidateRows, DocumentTables, EntryRow, EntryStep, EventId,
+        HistoryId, HistoryRow, SelectionRows, StateId, StateKind, StateRow, Target, TransitionId,
+        TransitionRow, TriggerEvent, TriggerRow,
     };
     DocumentTables {
         states: &[
@@ -229,6 +248,12 @@ pub const SESSION_FSM_MULTICAST_TABLES: ::sce_rust_runtime::DocumentTables<'stat
         entry_paths: &[EntryStep::count(1), EntryStep::new(StateId(1), false), EntryStep::count(1), EntryStep::new(StateId(2), false), EntryStep::count(1), EntryStep::new(StateId(3), false), EntryStep::count(1), EntryStep::new(StateId(0), false)],
         history: None,
         parallel: None,
+        selection: None,
+        candidates: Some(CandidateRows {
+            first_cell: &[0, 1, 3, 5, 5],
+            cells: &[CandidateCell::new(EventId(2), 0), CandidateCell::new(EventId(0), 2), CandidateCell::new(EventId(1), 4), CandidateCell::new(EventId(0), 6), CandidateCell::new(EventId(3), 8)],
+            candidates: &[Candidate::count(1), Candidate::new(TransitionId(0)), Candidate::count(1), Candidate::new(TransitionId(2)), Candidate::count(1), Candidate::new(TransitionId(1)), Candidate::count(1), Candidate::new(TransitionId(4)), Candidate::count(1), Candidate::new(TransitionId(3))],
+        }),
     }
 };
 
@@ -489,6 +514,38 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0144: a number is its value by the discriminant each variant is
+    // written with, so the way back is a match of each number to its variant,
+    // which the compiler reads as the identity with one bound and not as a
+    // read of `STATES`: a comparison of the value against a variant is a
+    // comparison of the number.
+    fn state_of(id: ::sce_rust_runtime::StateId) -> Self::State {
+        match id.0 {
+            0 => SessionFsmMulticastState::Idle,
+            1 => SessionFsmMulticastState::LinkOpening,
+            2 => SessionFsmMulticastState::Running,
+            3 => SessionFsmMulticastState::Stopped,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
+    fn history_of(id: ::sce_rust_runtime::HistoryId) -> Self::History {
+        // No `<history>`, so no number names one.
+        let _ = id;
+        ::sce_rust_runtime::helpers::tables::row_missing()
+    }
+
+    fn event_of(id: ::sce_rust_runtime::EventId) -> Self::Event {
+        match id.0 {
+            0 => SessionFsmMulticastEvent::LinkLost,
+            1 => SessionFsmMulticastEvent::LinkReady,
+            2 => SessionFsmMulticastEvent::MulticastCreate,
+            3 => SessionFsmMulticastEvent::MulticastStop,
+            4 => SessionFsmMulticastEvent::Null,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states
@@ -600,7 +657,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
     // W3C SCXML 3.7: Execute <onentry> actions for a state
     #[doc = "SCE-MAP: session_fsm_multicast.scxml:81 :: _machine"]
 // SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
-    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::Engine<Self>, is_default_entry: bool) {
+    fn execute_entry_actions(&mut self, state: ::sce_rust_runtime::StateId, sce_event_data: Self::EventData<'_>, engine: &mut sce_rust_runtime::EngineState<Self>, is_default_entry: bool) {
         match state {
             SessionFsmMulticastState::ID_LinkOpening => {
                 // SCE-MAP: session_fsm_multicast.scxml:100 :: LinkOpening :: _state_body
@@ -649,7 +706,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
         &mut self,
         state: ::sce_rust_runtime::StateId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // §scxml-D-exitStates orders one state's exit as onexit, then
         // cancelInvoke, then configuration.delete(s), so `In(s)` inside s's
@@ -661,67 +718,6 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
 
 
 
-
-    // Appendix D selectTransitions, the half only this document can answer:
-    // the first of `state`'s own transitions, in document order, that `event`
-    // enables, as its row of the tables, which holds its targets and its
-    // type. The engine walks the atomic states and their ancestors and keeps
-    // the ordered set. `Event::ID_Null` asks for eventless transitions. The
-    // state and the event are the numbers the tables are indexed by
-    // (docs/adr/0123).
-    #[doc = "SCE-MAP: session_fsm_multicast.scxml:81 :: _machine"]
-// SCE-MAP: session_fsm_multicast.scxml:81 :: _machine
-    fn first_enabled_transition(
-        &mut self,
-        state: ::sce_rust_runtime::StateId,
-        event: ::sce_rust_runtime::EventId,
-        sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
-    ) -> Option<::sce_rust_runtime::TransitionId> {
-        match state {
-            SessionFsmMulticastState::ID_Idle => {
-                if event == SessionFsmMulticastEvent::ID_MulticastCreate {
-                    {
-                        // Idle, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(0));
-                    }
-                }
-                None
-            }
-            SessionFsmMulticastState::ID_LinkOpening => {
-                if event == SessionFsmMulticastEvent::ID_LinkReady {
-                    {
-                        // LinkOpening, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(1));
-                    }
-                }
-                if event == SessionFsmMulticastEvent::ID_LinkLost {
-                    {
-                        // LinkOpening, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(2));
-                    }
-                }
-                None
-            }
-            SessionFsmMulticastState::ID_Running => {
-                if event == SessionFsmMulticastEvent::ID_MulticastStop {
-                    {
-                        // Running, transition 0
-                        return Some(::sce_rust_runtime::TransitionId(3));
-                    }
-                }
-                if event == SessionFsmMulticastEvent::ID_LinkLost {
-                    {
-                        // Running, transition 1
-                        return Some(::sce_rust_runtime::TransitionId(4));
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
-    }
-
     // W3C SCXML 3.13: a transition's executable content, run by the engine
     // between the microstep's exits and its entries. `transition` is a
     // written transition's row, one whose row says it has content.
@@ -731,7 +727,7 @@ impl<A: SessionFsmMulticastActions + 'static> StatePolicy for SessionFsmMulticas
         &mut self,
         transition: ::sce_rust_runtime::TransitionId,
         sce_event_data: Self::EventData<'_>,
-        engine: &mut sce_rust_runtime::Engine<Self>,
+        engine: &mut sce_rust_runtime::EngineState<Self>,
     ) {
         // W3C SCXML 3.13: no transition in this document has content.
         let _ = (transition, engine);

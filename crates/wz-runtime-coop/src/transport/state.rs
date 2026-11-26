@@ -132,8 +132,12 @@ pub trait TransportFaces {
         Dial = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Dial,
     >;
     /// The table the engine keeps its faces in by their places: one face alone for a session that
-    /// only dials, a place for each face for one that takes faces beside it.
-    type Places: FacePlaces<Self::Face>;
+    /// only dials, a place for each face for one that takes faces beside it; each place holds the
+    /// dial under way of its face.
+    type Places: FacePlaces<
+        Self::Face,
+        Dial = <Self::Links as SessionLinks<<Self::Lock as LockKind>::LinkCount>>::Dial,
+    >;
     /// The engine's record of one group the session joined.
     #[cfg(feature = "group")]
     type Group: GroupRecord;

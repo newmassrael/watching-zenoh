@@ -2601,8 +2601,9 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// The links as the last move left them, when it left them settled ([`Self::move_links`]).
     #[cfg(wz_round)]
     links_settled: Option<LinksSettled>,
-    /// When the one link the read steps is next due, on the session's clock in microseconds: its
-    /// life's next look and its session's own deadlines (`direct`); `u64::MAX` for none.
+    /// When the faces the read steps are next due, on the session's clock in microseconds, as the
+    /// read's wait was given it (`direct`): what bounds that wait ([`Self::idle_wait`]);
+    /// `u64::MAX` for none.
     #[cfg(not(wz_round))]
     link_due_us: u64,
     /// When the step's bookkeeping is owed next ([`Self::owes_bookkeeping`]).
@@ -4990,8 +4991,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .map_or(u64::MAX, |settled| settled.due_us),
             self.links_settled.is_none(),
         );
-        // The one link is due by its own deadlines, which the read reads, and by the next turn of
-        // the replay it owes its peer, which only the bookkeeping takes (`direct`).
+        // A face's own deadlines are its look's and its step's, which each read makes at them
+        // (`direct`); the links owe the bookkeeping only the next turn of a replay a link owes
+        // its peer, which only the bookkeeping takes. A face's due held here would be the one its
+        // look saw before its step moved it, and would owe the bookkeeping at the next look.
         #[cfg(not(wz_round))]
         let (links_due_us, unsettled) = (
             self.transport
@@ -4999,9 +5002,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
                 .faces()
                 .filter_map(|face| face.replay.next_turn_ms())
                 .min()
-                .map_or(self.link_due_us, |turn_ms| {
-                    self.link_due_us.min(turn_ms.saturating_mul(1000))
-                }),
+                .map_or(u64::MAX, |turn_ms| turn_ms.saturating_mul(1000)),
             false,
         );
         let seen = self.seen();
