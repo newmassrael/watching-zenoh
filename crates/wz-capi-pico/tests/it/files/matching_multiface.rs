@@ -284,6 +284,7 @@ unsafe fn put(session: &z_owned_session_t, keyexpr: &CStr, payload: &CStr) {
 
 #[test]
 fn the_c_verdict_is_the_or_across_two_peer_faces() {
+    let _program = crate::programs::admit();
     // TWO peers subscribe to the publisher's keyexpr and then both leave. The C
     // side must be told exactly twice: `true` when the FIRST arrives and `false`
     // when the LAST leaves. See this file's header for the four builds this
@@ -391,6 +392,7 @@ unsafe fn z_undeclare_matching(listener: &mut z_owned_matching_listener_t) {
 
 #[test]
 fn undeclaring_a_publisher_retracts_its_matching_listeners() {
+    let _program = crate::programs::admit();
     // R311y528 DEFECT 2. pico ties the write-filter context to the publisher, so
     // `z_undeclare_publisher` takes its matching callbacks with it. wz keys the
     // matching SSOT on the SESSION (it has to — the verdict is aggregated across
@@ -479,6 +481,7 @@ unsafe extern "C" fn on_reentrant_drop(ctx: *mut c_void) {
 
 #[test]
 fn a_matching_callback_may_reenter_the_session_while_the_aggregate_is_held() {
+    let _program = crate::programs::admit();
     // The lock order the R311y528 fix rests on, exercised rather than argued.
     //
     // `deliver_matching_flip` holds the entry's aggregate mutex across the C
@@ -664,6 +667,7 @@ fn vanishing_subscriber_peer(
 
 #[test]
 fn a_vanishing_peer_is_purged_from_the_matching_aggregate() {
+    let _program = crate::programs::admit();
     // `face_down`'s aggregate purge, which R311y527 shipped and nothing tested.
     //
     // A peer that VANISHES cannot retract its subscriber — the link that would
@@ -749,6 +753,7 @@ fn a_vanishing_peer_is_purged_from_the_matching_aggregate() {
 /// chose.
 #[test]
 fn a_querier_matches_on_remote_queryables_not_remote_subscribers() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::querier::{
         z_declare_querier, z_owned_querier_t, z_querier_declare_matching_listener,
         z_querier_get_matching_status, z_querier_loan, z_querier_move, z_undeclare_querier,

@@ -134,6 +134,7 @@ unsafe fn declare(
 #[cfg(feature = "config-document")]
 #[test]
 fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::config_policy::wz_ext_config_document;
     use wz_capi_pico::matching::{
         z_matching_listener_move, z_publisher_declare_background_matching_listener,
@@ -212,6 +213,7 @@ fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
 /// returns.
 #[test]
 fn a_listener_on_a_closed_session_is_refused_and_its_slot_null() {
+    let _program = crate::programs::admit();
     let drops = Arc::new(AtomicUsize::new(0));
     // SAFETY: every handle is made here and let go of once; `drops` outlives every closure.
     unsafe {

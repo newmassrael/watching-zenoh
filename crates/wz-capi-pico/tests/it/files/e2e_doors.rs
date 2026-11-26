@@ -204,6 +204,7 @@ fn indexed(streams: usize) -> wz_ext_e2e_receiver_options_t {
 
 #[test]
 fn a_round_trip_through_the_doors_is_the_reference_frame_judged_in_order() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut options: wz_ext_e2e_sender_options_t = std::mem::zeroed();
         wz_ext_e2e_sender_options_default(&mut options);
@@ -307,6 +308,7 @@ fn a_round_trip_through_the_doors_is_the_reference_frame_judged_in_order() {
 
 #[test]
 fn a_refusal_is_a_code_and_a_reason_and_consumes_nothing() {
+    let _program = crate::programs::admit();
     unsafe {
         let stated =
             r#"{"ident": {"app": 1, "msg": 2}, "cell": {"kind": 5}, "counter": 4, "@address": 1}"#;
@@ -413,6 +415,7 @@ fn a_refusal_is_a_code_and_a_reason_and_consumes_nothing() {
 #[cfg(feature = "e2e-sender-demux")]
 #[test]
 fn a_receiver_keyed_by_sender_keeps_a_slot_per_sender_and_counts_the_rest() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut options = indexed(1);
         options.keying = WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL;
@@ -478,6 +481,7 @@ fn a_receiver_keyed_by_sender_keeps_a_slot_per_sender_and_counts_the_rest() {
 #[cfg(not(feature = "e2e-sender-demux"))]
 #[test]
 fn a_build_without_sender_slots_refuses_sender_keying_by_name() {
+    let _program = crate::programs::admit();
     unsafe {
         for keying in [
             WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL,

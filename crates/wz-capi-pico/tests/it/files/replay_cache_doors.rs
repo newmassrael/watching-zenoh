@@ -360,6 +360,7 @@ fn replays(got: &[Got]) -> Vec<u64> {
 
 #[test]
 fn a_late_subscriber_is_answered_each_publishers_ring_and_then_its_live_frames() {
+    let _program = crate::programs::admit();
     let policy = SessionPolicy::from_build();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -465,6 +466,7 @@ fn a_late_subscriber_is_answered_each_publishers_ring_and_then_its_live_frames()
 /// publisher is asked all the same.
 #[test]
 fn a_subscriber_made_after_its_publisher_appeared_still_asks_it() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: as the test above.
@@ -492,6 +494,7 @@ fn a_subscriber_made_after_its_publisher_appeared_still_asks_it() {
 
 #[test]
 fn an_empty_cache_answers_the_final_alone_and_the_round_goes_live() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: as the test above.
@@ -515,6 +518,7 @@ fn an_empty_cache_answers_the_final_alone_and_the_round_goes_live() {
 
 #[test]
 fn the_publisher_doors_refuse_by_name() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     // SAFETY: as the test above.
@@ -603,6 +607,7 @@ fn the_publisher_doors_refuse_by_name() {
 /// open and then closed.
 #[test]
 fn the_core_reports_a_session_s_facts_through_the_extension_interface() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::ext_interface::{
         wz_ext_interface_session_facts, wz_ext_session_facts_t, WZ_EXT_REPLAY_LIVE_DELIVER,
         WZ_EXT_REPLAY_LIVE_HOLD_BACK, WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,

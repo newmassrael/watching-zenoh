@@ -31,6 +31,7 @@ const BUDGET: Duration = Duration::from_millis(300);
 
 #[test]
 fn an_open_with_no_locator_scouts_and_fails_when_nobody_answers() {
+    let _program = crate::programs::admit();
     // A group and port nobody else on the host scouts on, so no node can answer.
     let group = CString::new(format!("udp/224.0.0.225:{}", free_port())).unwrap();
     let budget = CString::new(BUDGET.as_millis().to_string()).unwrap();
@@ -87,6 +88,7 @@ impl Handed {
 #[cfg(feature = "time-base")]
 #[test]
 fn an_open_on_a_time_base_scouts_for_a_budget_of_the_programs_time() {
+    let _program = crate::programs::admit();
     use std::sync::atomic::{AtomicU64, Ordering};
     use wz_capi_pico::time_base::{
         wz_ext_config_time_base, wz_ext_owned_time_base_t, wz_ext_time_base_advanced,

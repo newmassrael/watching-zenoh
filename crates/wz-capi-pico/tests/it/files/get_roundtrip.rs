@@ -494,6 +494,7 @@ unsafe fn converge_face_up(zs: *const wz_capi_pico::z_loaned_session_t, expect: 
 /// its reply lands in the C reply callback, followed by exactly one completion.
 #[test]
 fn c_get_receives_a_native_queryables_reply_over_loopback_tcp() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     const ANSWER: &str = "answer-to-the-c-getter";
@@ -572,6 +573,7 @@ fn c_get_receives_a_native_queryables_reply_over_loopback_tcp() {
 ///   deadline hook lands at ~3333 ms and fails here.
 #[test]
 fn c_get_completes_at_its_timeout_when_the_peer_never_finals() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     const ANSWER: &str = "answer-before-going-silent";
@@ -665,6 +667,7 @@ fn c_get_completes_at_its_timeout_when_the_peer_never_finals() {
 /// catch it.
 #[test]
 fn c_get_with_no_peer_completes_immediately_without_a_reply() {
+    let _program = crate::programs::admit();
     let port = free_port();
 
     unsafe {
@@ -719,6 +722,7 @@ fn c_get_with_no_peer_completes_immediately_without_a_reply() {
 /// come from the face-death drop.
 #[test]
 fn c_get_completes_promptly_when_the_face_dies_mid_flight() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     const ANSWER: &str = "answer-before-dying";
@@ -866,6 +870,7 @@ fn native_silent_listener(endpoint: String, bound_tx: mpsc::Sender<()>) {
 /// provably up the moment the open succeeds.
 #[test]
 fn c_dialed_get_completes_at_its_timeout_when_the_peer_never_finals() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -953,6 +958,7 @@ fn c_dialed_get_completes_at_its_timeout_when_the_peer_never_finals() {
 /// close can complete the get inside the bound.
 #[test]
 fn c_close_completes_an_in_flight_get() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let endpoint = format!("tcp/127.0.0.1:{port}");
     const ANSWER: &str = "answer-before-close";
@@ -1041,6 +1047,7 @@ fn c_close_completes_an_in_flight_get() {
 /// completion with only one reply.
 #[test]
 fn c_get_fans_every_face_and_completes_once() {
+    let _program = crate::programs::admit();
     let port = free_port();
     const ANSWER_A: &str = "answer-from-peer-a";
     const ANSWER_B: &str = "answer-from-peer-b";
@@ -1137,6 +1144,7 @@ unsafe extern "C" fn program_now_ns(context: *mut c_void) -> u64 {
 #[cfg(feature = "time-base")]
 #[test]
 fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout() {
+    let _program = crate::programs::admit();
     use std::sync::atomic::AtomicU64;
     use wz_capi_pico::time_base::{
         wz_ext_config_time_base, wz_ext_owned_time_base_t, wz_ext_time_base_advanced,

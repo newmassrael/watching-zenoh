@@ -471,6 +471,7 @@ impl Pair {
 
 #[test]
 fn each_session_frames_its_link_to_the_batch_its_document_states() {
+    let _program = crate::programs::admit();
     let ceiling = ceiling();
     let singleton = PicoUnicastBatchBytes::DOMAIN.is_singleton();
     let (taken, refused): (Vec<usize>, Vec<usize>) =
@@ -521,6 +522,7 @@ fn each_session_frames_its_link_to_the_batch_its_document_states() {
 
 #[test]
 fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
+    let _program = crate::programs::admit();
     let ceiling = ceiling();
     let text = document(ceiling + 1);
 

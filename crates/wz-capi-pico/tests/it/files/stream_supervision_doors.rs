@@ -159,6 +159,7 @@ fn drop_supervisor(owned: &mut wz_ext_owned_stream_supervisor_t) {
 
 #[test]
 fn a_stream_that_stops_is_told_once_after_the_start_delay_from_the_first_clocked_poll() {
+    let _program = crate::programs::admit();
     let mut storage = storage();
     let clock = ModelClock::at(5_000);
     clock.known.store(false, Ordering::SeqCst);
@@ -234,6 +235,7 @@ fn a_stream_that_stops_is_told_once_after_the_start_delay_from_the_first_clocked
 
 #[test]
 fn an_absent_sender_is_not_judged_and_a_failing_condition_tells_nothing() {
+    let _program = crate::programs::admit();
     let mut storage = storage();
     let clock = ModelClock::at(0);
     let losses = Losses::default();
@@ -300,6 +302,7 @@ fn an_absent_sender_is_not_judged_and_a_failing_condition_tells_nothing() {
 
 #[test]
 fn what_the_table_cannot_hold_is_refused_with_the_code_the_header_names() {
+    let _program = crate::programs::admit();
     let mut storage = storage();
     let clock = ModelClock::at(0);
     let losses = Losses::default();
@@ -372,6 +375,7 @@ fn what_the_table_cannot_hold_is_refused_with_the_code_the_header_names() {
 #[cfg(feature = "multi-thread")]
 #[test]
 fn a_task_of_the_library_polls_until_it_is_stopped() {
+    let _program = crate::programs::admit();
     use std::time::{Duration, Instant};
 
     let mut storage = storage();

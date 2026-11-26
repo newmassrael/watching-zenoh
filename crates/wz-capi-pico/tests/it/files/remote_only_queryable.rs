@@ -138,6 +138,7 @@ unsafe fn get_once(session: &z_owned_session_t, keyexpr: &std::ffi::CStr, ctx: *
 /// queryable does answer a real peer.
 #[test]
 fn a_pico_sessions_own_get_does_not_reach_its_own_queryable() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

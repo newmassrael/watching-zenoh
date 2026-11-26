@@ -194,6 +194,7 @@ unsafe fn close(session: &mut z_owned_session_t) {
 /// reported as the listener registers, and nothing after it says the same again.
 #[test]
 fn a_listener_declared_on_a_match_is_told_once() {
+    let _program = crate::programs::admit();
     let seen: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
     // SAFETY: every handle is made here and let go of once; `seen` outlives the listener, whose
     // closure has no drop of its own to run.
@@ -233,6 +234,7 @@ fn a_listener_declared_on_a_match_is_told_once() {
 /// has returned and the closure's drop has run, not while the callback still reads its context.
 #[test]
 fn undeclaring_a_listener_waits_for_its_running_callback_and_its_drop() {
+    let _program = crate::programs::admit();
     let probe = Arc::new(Probe::default());
     // SAFETY: every handle is made here and let go of once; `probe` outlives the closure, whose
     // drop the undeclare waits for.
@@ -283,6 +285,7 @@ fn undeclaring_a_listener_waits_for_its_running_callback_and_its_drop() {
 /// listener's running callback has returned and its closure's drop has run.
 #[test]
 fn dropping_a_publisher_waits_for_its_background_listeners_callback_and_its_drop() {
+    let _program = crate::programs::admit();
     let probe = Arc::new(Probe::default());
     // SAFETY: as above; the publisher's drop is what waits for the closure's drop.
     unsafe {

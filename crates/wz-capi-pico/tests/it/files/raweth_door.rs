@@ -41,6 +41,7 @@ fn may_open_a_raw_socket() -> bool {
 
 #[test]
 fn a_reth_listen_opens_the_raweth_transport_or_fails_as_its_link_does() {
+    let _program = crate::programs::admit();
     let endpoint = CString::new("reth/02:00:00:00:00:01#iface=lo").unwrap();
     // SAFETY: the C ABI's own calls on values this test owns, in the order a C program makes.
     let rc = unsafe {

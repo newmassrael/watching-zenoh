@@ -191,6 +191,7 @@ unsafe fn get_once(session: &z_owned_session_t, seen: &Arc<Mutex<Vec<Seen>>>, wa
 
 #[test]
 fn the_encoding_of_an_error_reply_crosses_the_wire_and_null_options_leave_it_absent() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

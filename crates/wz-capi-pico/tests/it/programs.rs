@@ -1,25 +1,28 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The share of the process pools this executable states before its first test.
+//! The share of the process pools this executable states before its first test, and the permits
+//! that hold the tests running at once to it.
 //!
 //! The pools are the process's, and a program's first object reserves them for one program: its
 //! `HELD_*` values and the sessions it opens. libtest runs the tests of this executable, each a
 //! program of its own, on its threads in one process at once, so held to one program's share the
 //! tests started together find a pool empty though none of them holds more than a program may. A
 //! host that runs several programs in one process states their share itself, through the pools'
-//! door: this harness declares that it runs as many programs at once as libtest runs tests at
-//! once, and reserves that many programs' share before `main`, so before any test makes an object.
-//! The target requires the door for that (`Cargo.toml`).
+//! door, and runs no more of them at once than it stated: this harness reserves the share of as
+//! many programs as the host runs threads in parallel before `main`, so before any test makes an
+//! object, and each test runs while it holds one of as many permits ([`admit`]). The target
+//! requires the door for that (`Cargo.toml`).
 //!
-//! The count is libtest's own, read by its rule from where libtest reads it, so the share covers
-//! every test libtest runs at once whatever the run names: a share smaller than that would leave
-//! the tests started together to find a pool empty by how they fall, a result that moves with the
-//! thread count. Before `main` the command line is read from the system's own copy of it, which
-//! needs nothing of the standard library's reading, and a test holds the reservation to libtest's
-//! count read again once `main` runs.
+//! The permits, not libtest's thread count, bound the programs running at once: a share sized by
+//! the thread count a run names would grow with it past what the process is given beside the pools
+//! (its threads, its memory), and a test would then be refused by how the tests started together
+//! fall, a result that moves with the thread count. A test past the permits waits for one, so every
+//! test runs among as many programs whatever the run names. Each test of `files/` opens with its
+//! permit, and a test of this file refuses one that does not.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use wz_capi_pico::object_pool::{
     wz_ext_object_pool_bytes, wz_ext_object_pool_counts_t, wz_ext_object_pool_reserve,
@@ -30,75 +33,10 @@ use wz_session_core::caps;
 /// How many programs the share was reserved for, as the reservation before `main` counted them.
 static RESERVED_FOR: AtomicUsize = AtomicUsize::new(0);
 
-/// How many tests libtest runs at once, by its own rule over `args` (a command line, the
-/// program's name first), `env` (the value of `RUST_TEST_THREADS`) and `host` (the threads the
-/// host runs in parallel): the count `--test-threads` names, else the variable's, else the host's;
-/// one at least. A count that is not a positive number is passed over, as libtest runs no test
-/// with one.
-fn threads_of(args: impl IntoIterator<Item = String>, env: Option<&str>, host: usize) -> usize {
-    let positive = |count: &str| count.parse::<usize>().ok().filter(|count| *count > 0);
-    let mut args = args.into_iter();
-    let mut stated = None;
-    while let Some(arg) = args.next() {
-        let count = if arg == "--test-threads" {
-            args.next()
-        } else {
-            arg.strip_prefix("--test-threads=").map(str::to_owned)
-        };
-        if let Some(count) = count.as_deref().and_then(positive) {
-            stated = Some(count);
-            break;
-        }
-    }
-    stated
-        .or_else(|| env.and_then(positive))
-        .unwrap_or(host)
-        .max(1)
-}
-
-/// The threads the host runs in parallel, as libtest counts them when nothing names a count.
-fn host_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
-}
-
-/// The command line of this process, its name first, from the kernel's copy of it: the standard
-/// library reads its own copy from a constructor the loader orders against this harness's only on
-/// some systems, and not at all before `main` on others. A kernel that shows none leaves the
-/// standard library's.
-#[cfg(any(target_os = "linux", target_os = "android"))]
-fn command_line() -> Vec<String> {
-    match std::fs::read("/proc/self/cmdline") {
-        Ok(line) => line
-            .split(|byte| *byte == 0)
-            .map(|arg| String::from_utf8_lossy(arg).into_owned())
-            .collect(),
-        Err(_) => std_command_line(),
-    }
-}
-
-/// The command line of this process, its name first, as the standard library reads it from the
-/// system on each call (`GetCommandLineW` on Windows, `_NSGetArgv` on Apple's systems), before
-/// `main` as after it.
-#[cfg(not(any(target_os = "linux", target_os = "android")))]
-fn command_line() -> Vec<String> {
-    std_command_line()
-}
-
-/// The command line as the standard library holds it.
-fn std_command_line() -> Vec<String> {
-    std::env::args_os()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect()
-}
-
-/// How many programs this executable runs at once, which is the harness's declaration of how
-/// many share the process: as many as libtest runs tests at once, read before `main`.
+/// How many programs this executable runs at once: as many as the host runs threads in parallel,
+/// libtest's own count when a run names none; one at least.
 fn programs() -> usize {
-    threads_of(
-        command_line(),
-        std::env::var("RUST_TEST_THREADS").ok().as_deref(),
-        host_threads(),
-    )
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
 }
 
 /// The counts of `programs` programs, each holding what the build reserves for one: its
@@ -134,6 +72,76 @@ fn share(programs: usize) -> wz_ext_object_pool_counts_t {
     }
 }
 
+/// The line each test of `files/` opens with, which holds its program's permit to its end.
+const PERMIT_LINE: &str = "let _program = crate::programs::admit();";
+
+/// The programs running at once, each holding a permit.
+struct Gate {
+    running: Mutex<usize>,
+    freed: Condvar,
+}
+
+impl Gate {
+    const fn new() -> Self {
+        Self {
+            running: Mutex::new(0),
+            freed: Condvar::new(),
+        }
+    }
+
+    /// The count of programs running. A test that panicked holding the lock left the count as it
+    /// was, so the lock is taken as it stands.
+    fn running(&self) -> MutexGuard<'_, usize> {
+        self.running.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A program's permit, waited for while `programs` run.
+    fn admit(&self, programs: usize) -> Permit<'_> {
+        let mut running = self
+            .freed
+            .wait_while(self.running(), |running| *running >= programs)
+            .unwrap_or_else(PoisonError::into_inner);
+        *running += 1;
+        Permit(self)
+    }
+
+    /// A program's permit, or none while `programs` run.
+    fn try_admit(&self, programs: usize) -> Option<Permit<'_>> {
+        let mut running = self.running();
+        if *running >= programs {
+            return None;
+        }
+        *running += 1;
+        Some(Permit(self))
+    }
+}
+
+/// A program's place among those running at once, given back when it drops, a test's unwinding
+/// included.
+#[must_use = "a program runs while it holds its permit"]
+pub(crate) struct Permit<'gate>(&'gate Gate);
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        *self.0.running() -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+/// The permits of this executable's programs.
+static GATE: Gate = Gate::new();
+
+/// The permit a test holds while it runs, waited for while as many programs run as the share was
+/// reserved for. Every test of `files/` opens with it (`PERMIT_LINE`).
+pub(crate) fn admit() -> Permit<'static> {
+    let programs = RESERVED_FOR.load(Ordering::Acquire);
+    assert!(
+        programs > 0,
+        "the share of the programs was not reserved before main"
+    );
+    GATE.admit(programs)
+}
+
 /// Reserve the share of the programs this executable runs at once. A refusal leaves every test
 /// to fail on a pool it does not find, so it ends the process before any runs, with the code.
 extern "C" fn reserve_the_programs_share() {
@@ -145,7 +153,7 @@ extern "C" fn reserve_the_programs_share() {
         eprintln!("the test harness could not reserve the share of its programs: {code}");
         std::process::abort();
     }
-    RESERVED_FOR.store(programs, Ordering::Relaxed);
+    RESERVED_FOR.store(programs, Ordering::Release);
 }
 
 // Run by the loader before `main`, as the platform's C runtime runs its constructors.
@@ -227,52 +235,71 @@ fn the_share_is_one_programs_held_values_times_the_programs() {
     assert!(bytes > 0);
 }
 
-/// The count is read as libtest reads it: `--test-threads` in either spelling first, then
-/// `RUST_TEST_THREADS`, then the host's threads, a count that is not positive passed over, one at
-/// least. Turned red by a reading that leaves the command line out, or that takes the larger of the
-/// variable and the host's count in place of the variable alone.
+/// The permits let as many programs run as they are for and hold the one more back until one is
+/// given back, a dropped permit giving its place to the next. Turned red by a gate that does not
+/// count a permit it gives, or a drop that does not give its place back.
 #[test]
-fn the_program_count_is_read_as_libtest_reads_it() {
-    let line = |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
-    assert_eq!(
-        threads_of(line(&["it", "--test-threads=3"]), Some("7"), 5),
-        3,
-        "the command line first"
+fn the_permits_hold_the_programs_running_at_once_to_their_count() {
+    let gate = Gate::new();
+    let first = gate.admit(2);
+    let second = gate.try_admit(2).expect("two programs run at once");
+    assert!(gate.try_admit(2).is_none(), "the one more is held back");
+    drop(first);
+    let third = gate
+        .try_admit(2)
+        .expect("a permit given back is taken again");
+    assert!(
+        gate.try_admit(2).is_none(),
+        "and the count is reached again"
     );
-    assert_eq!(
-        threads_of(line(&["it", "--test-threads", "40", "files::"]), None, 5),
-        40,
-        "in its spaced spelling, past the host's count"
+    drop((second, third));
+    assert_eq!(*gate.running(), 0, "every permit was given back");
+    let waited = std::thread::scope(|scope| {
+        let held = gate.admit(1);
+        let waiter = scope.spawn(|| drop(gate.admit(1)));
+        drop(held);
+        waiter.join().is_ok()
+    });
+    assert!(
+        waited,
+        "a program waiting for a permit runs once one is given back"
     );
-    assert_eq!(
-        threads_of(line(&["it", "files::"]), Some("2"), 5),
-        2,
-        "then the variable, below the host's count"
-    );
-    assert_eq!(threads_of(line(&["it"]), None, 5), 5, "then the host's");
-    assert_eq!(
-        threads_of(line(&["it", "--test-threads=0"]), Some("none"), 6),
-        6,
-        "a count that is not positive is passed over"
-    );
-    assert_eq!(
-        threads_of(line(&["it", "--test-threads-x=9"]), None, 2),
-        2,
-        "no other flag names the count"
-    );
-    assert_eq!(threads_of(line(&["it"]), None, 0), 1, "one at least");
 }
 
-/// The share was reserved before `main` for as many programs as libtest runs at once, its count
-/// read again from the command line the standard library holds once `main` runs. Turned red by a
-/// reading before `main` that leaves the command line out, in a run that names a
-/// `--test-threads` other than the host's count.
+/// Every test of `files/` opens with its program's permit, so none runs past the share: a test
+/// that holds none would run beside as many programs as libtest runs at once, and find a pool
+/// empty by how they fall. Turned red by a test of `files/` whose first line is not
+/// `PERMIT_LINE`.
 #[test]
-fn the_share_is_reserved_for_as_many_programs_as_libtest_runs_at_once() {
-    let libtest = threads_of(
-        std::env::args(),
-        std::env::var("RUST_TEST_THREADS").ok().as_deref(),
-        host_threads(),
+fn every_test_of_the_files_opens_with_its_programs_permit() {
+    let files = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/it/files");
+    let mut tests = 0usize;
+    let mut without = Vec::new();
+    for entry in std::fs::read_dir(&files).expect("the files of the executable") {
+        let path = entry.expect("a file of the executable").path();
+        if path.extension() != Some(std::ffi::OsStr::new("rs")) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("a file of the executable");
+        let lines: Vec<&str> = text.lines().map(str::trim).collect();
+        for (at, line) in lines.iter().enumerate() {
+            if *line != "#[test]" {
+                continue;
+            }
+            tests += 1;
+            let first = lines[at + 1..]
+                .iter()
+                .skip_while(|line| !line.starts_with("fn "))
+                .nth(1)
+                .copied();
+            if first != Some(PERMIT_LINE) {
+                without.push(format!("{}:{}", path.display(), at + 1));
+            }
+        }
+    }
+    assert!(tests > 0, "CONTROL: the files hold tests");
+    assert!(
+        without.is_empty(),
+        "tests that run without a program's permit: {without:?}"
     );
-    assert_eq!(RESERVED_FOR.load(Ordering::Relaxed), libtest);
 }
