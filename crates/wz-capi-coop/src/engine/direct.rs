@@ -2129,10 +2129,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         (core.0.link_due_us, held.0.due_us())
     }
 
-    /// The faces a read turns: every row of the session's face table.
+    /// The rows of the session's face table, and the faces of them a read turns: the dial
+    /// role's and each past it whose row holds a face (`DirectFaces::turned`).
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn direct_faces(&self) -> usize {
-        self.direct.iter().count()
+    pub(crate) fn direct_faces(&self) -> (usize, usize) {
+        let rows = self.direct.iter().count();
+        #[cfg(any(feature = "listen", feature = "group"))]
+        let turned = self.direct.turned().count();
+        #[cfg(not(any(feature = "listen", feature = "group")))]
+        let turned = rows;
+        (rows, turned)
     }
 
     /// How many legs a publish's walk of the faces hands out (`Self::on_faces`), and how many

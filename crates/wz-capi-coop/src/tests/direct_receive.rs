@@ -990,17 +990,26 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
     );
 }
 
-/// A read turns every face of the session's table once, after one wait: a session open on the
-/// dial role's face alone turns that face once a read. Turned red by a read that turns the dial
-/// role's face alone, or turns a face twice (`CoopEngine::read_faces`, or `CoopEngine::read_dial`
-/// where the dial role's face is the only face).
+/// A read turns every face of the session's table once, after one wait: the dial role's, and
+/// each past it whose row holds a face, and no row that holds none. A client that took no face
+/// turns its dial role's face alone, whatever rows its table keeps for faces to come. Turned red
+/// by a read that turns a face twice, or a row no face holds (`CoopEngine::read_faces` over
+/// `DirectFaces::turned`, or `CoopEngine::read_dial` where the dial role's face is the only
+/// face).
 #[cfg(not(wz_round))]
 #[test]
 fn a_read_turns_every_face_once() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    let faces = engine.direct_faces();
-    assert!(faces >= 1, "the dial role's face is a face of the table");
+    let (rows, faces) = engine.direct_faces();
+    assert_eq!(
+        faces, 1,
+        "the dial role's face is the one face of the table"
+    );
+    assert!(
+        rows >= faces,
+        "CONTROL: the table keeps a row for each face it turns"
+    );
     let before = engine.takes.face_turns.load(Ordering::SeqCst);
     let _ = SessionDrive::read(&*engine, false);
     assert_eq!(
