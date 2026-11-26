@@ -1,0 +1,25 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Pay the non-default tests gate's reds on main. The gate stopped at its own
+leg shape check before running a leg, so twelve red legs sat unseen; with the
+check fixed every leg ran and each red was paid at its source. A cooperative
+open now takes a session seat when the object pool is built, so a session
+past the held count is refused at its open as the limit states.
+'''
+changes = '''
+- gates: a --test-target leg is admitted only for a declared target; legs point at the tests that exist.
+- capi-pico: local delivery, batch size and object pool tests state the limits they hold; a coop open takes a session seat.
+- capi-coop: a row pinned for a delivery is handed its sample even if undeclared in a callback; test accessors gated as their tests.
+- session-lwip, session-core, zenoh: tests send from their own socket, carry their codec, join groups on the loopback.
+'''
+verification = '''
+- non-default tests gate on this branch: 244 legs pass of 253 before the last fixes; of the 9 red, 6 now pass.
+- re-run legs: coop group (4 and 26), decl_watch (13 and 9), session-core round 1, clippy of coop with transport-stats.
+- still red, carried: app_transport_doors query reply in the multicast-transport builds; tx_pool one-thread droppable publish.
+'''
+carry = '''
+- app_transport_doors: a query over the program's transport gets no reply in builds with multicast-transport.
+- tx_pool: the one-thread droppable publish never reaches the good peer in the coop <14> set.
+- a cooperative build without object-pool does not refuse a session past HELD_SESSIONS.
+- wz-capi-coop tests::round compiles in no host test build (wz_round needs a target without 64-bit atomics).
+'''
