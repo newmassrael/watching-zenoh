@@ -4188,6 +4188,48 @@ fn a_rows_count_is_taken_at_its_address_by_its_generation_and_its_last_hold_by_t
     assert!(tables.keyexprs().is_empty());
 }
 
+/// The close retracts every declaration's count where its row lies: a copy of a hold taken
+/// before the close takes none at the row's address, a hold given back there lets go of nothing,
+/// and the table's own release finds no count left, while the rows stay where they were put.
+///
+/// # Control
+///
+/// A `close_keyexpr_counts` that leaves a count reds the first refusal (the copy is taken); one
+/// that removes the rows reds the length kept.
+#[test]
+fn the_close_retracts_every_declarations_count_where_its_row_lies() {
+    let mut tables = Tables::new();
+    let first = tables.declare_keyexpr("demo/close/a").unwrap();
+    let second = tables.declare_keyexpr("demo/close/b").unwrap();
+    let at: *const _ = tables.keyexprs().get(first.handle).unwrap().head().count();
+    // SAFETY: the close removes no row, so the count stands where it was put to the end.
+    let count = unsafe { &*at };
+    assert_eq!(
+        count.retain(first.handle),
+        Ok(()),
+        "CONTROL: open, a copy holds"
+    );
+    assert_eq!(count.holds(), 2);
+    tables.close_keyexpr_counts();
+    assert_eq!(
+        count.retain(first.handle),
+        Err(RowHoldRefused::Released),
+        "a copy after the close takes no hold"
+    );
+    assert_eq!(count.holds(), 0, "no holder is counted");
+    assert!(
+        !count.release_shared(first.handle),
+        "a hold given back at the row lets go of nothing"
+    );
+    assert!(!tables.retain_keyexpr(second.handle));
+    assert_eq!(
+        tables.undeclare_keyexpr(second.handle),
+        None,
+        "nothing to retract"
+    );
+    assert_eq!(tables.keyexprs().len(), 2, "the rows stay where they lie");
+}
+
 /// A row a declaration was retracted from whatever held it, taken again by the next declaration,
 /// counts the new declaration's holders only: a hold of the first given back at the address lets
 /// go of nothing, and none is taken there for it, as long as the slot was taken again fewer than

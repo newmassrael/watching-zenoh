@@ -10299,6 +10299,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // close finds it closed whatever still holds the engine.
         self.reach.clear();
         let core = &mut guard.0;
+        // A key the program keeps past the close copies and gives back its hold at its row, with
+        // no reach of the session: the row's word is what tells it the session is gone.
+        tables(&core.session.registry).close_keyexpr_counts();
         core.end_links();
         // The rows of the session's own declarations, and the callbacks they hold, go after the
         // lock is let go of, one row at a time (`Self::let_go_of_rows`).

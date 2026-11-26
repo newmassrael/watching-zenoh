@@ -361,18 +361,78 @@ pub(crate) fn record_wire(
 ///
 /// Each holder keeps one hold of the engine's own count of the declaration's holders
 /// ([`KeyHold`]): a copy takes one more and a drop gives its own back, so the count has one owner
-/// and a holder keeps nothing on the heap. The session is held WEAKLY, as pico holds
-/// `_z_session_weak_t`: a key that outlives its session does not keep it alive, and a hold on a
-/// session that is gone gives nothing back. This object of the program's is what names the
-/// session; what the session records holds the declaration in its count itself, by no key.
+/// and a holder keeps nothing on the heap. On the cooperative engine a holder holds the engine its
+/// count lies in, as a key's text in the session's key arena does, so a copy and a drop take and
+/// give back their hold at the row's address, and only the last reaches the session, with no
+/// reach of it through the process's table. That keeps the engine's memory, not the session open:
+/// its close retracts every count where it lies
+/// ([`SessionTables::close_keyexpr_counts`](wz_session_core::session_tables::SessionTables::close_keyexpr_counts)),
+/// so a copy made after it holds no count, and a hold given back after it gives nothing back. On
+/// the tokio engine, whose engine is shared by a count of the heap, the session is held WEAKLY, as
+/// pico holds `_z_session_weak_t`, and reached for each copy and drop. This object of the
+/// program's is what names the session; what the session records holds the declaration in its
+/// count itself, by no key.
 pub(crate) struct WireDeclaration {
-    /// The session the declaration was made on. Let go of only by the drop, so a holder's drop
-    /// glue is the one call to it.
-    session: ManuallyDrop<crate::session::EngineHandle>,
+    /// What the holder keeps of the session the declaration was made on ([`DeclaredOn`]). Let go
+    /// of only by the drop, so a holder's drop glue is the one call to it.
+    session: ManuallyDrop<DeclaredOn>,
     /// Taken only by the drop.
     hold: ManuallyDrop<KeyHold>,
     /// How many bytes of the key the declaration covers — pico's `_prefix_len`.
     prefix_len: usize,
+}
+
+/// What a holder of a declaration keeps of its session on the cooperative engine: the engine,
+/// whose rows lie in the session's arena, which the engine keeps standing.
+#[cfg(not(feature = "engine-tokio"))]
+type DeclaredOn = crate::session::EngineHold;
+
+/// What a holder of a declaration keeps of its session on the tokio engine: a weak reach of it.
+#[cfg(feature = "engine-tokio")]
+type DeclaredOn = crate::session::EngineHandle;
+
+/// What a holder of a declaration on `shared` keeps of it ([`DeclaredOn`]).
+#[cfg(not(feature = "engine-tokio"))]
+fn declared_on(shared: &crate::session::EngineHold) -> DeclaredOn {
+    shared.clone()
+}
+
+/// What a holder of a declaration on `shared` keeps of it ([`DeclaredOn`]).
+#[cfg(feature = "engine-tokio")]
+fn declared_on(shared: &crate::session::EngineHold) -> DeclaredOn {
+    crate::session::EngineHold::downgrade(shared)
+}
+
+/// `then`, handed the engine `on` holds: always called, as the engine stands while it is held.
+#[cfg(not(feature = "engine-tokio"))]
+fn with_engine<R>(
+    on: &DeclaredOn,
+    then: impl FnOnce(&crate::session::EngineHold) -> R,
+) -> Option<R> {
+    Some(then(on))
+}
+
+/// `then`, handed the engine `on` reaches for the call; `None`, calling nothing, once the
+/// session is gone.
+#[cfg(feature = "engine-tokio")]
+fn with_engine<R>(
+    on: &DeclaredOn,
+    then: impl FnOnce(&crate::session::EngineHold) -> R,
+) -> Option<R> {
+    let engine = on.upgrade()?;
+    Some(then(&engine))
+}
+
+/// Where the engine `on` names lies, which it stands at while `on` holds it.
+#[cfg(not(feature = "engine-tokio"))]
+fn engine_at(on: &DeclaredOn) -> *const Engine {
+    crate::session::EngineHold::as_ptr(on)
+}
+
+/// Where the engine `on` names lies, or lay.
+#[cfg(feature = "engine-tokio")]
+fn engine_at(on: &DeclaredOn) -> *const Engine {
+    on.as_ptr()
 }
 
 impl WireDeclaration {
@@ -408,7 +468,7 @@ impl WireDeclaration {
     /// The hold the caller took of `shared`, covering `prefix_len` bytes of the key.
     fn taken(shared: &crate::session::EngineHold, hold: KeyHold, prefix_len: usize) -> Self {
         Self {
-            session: ManuallyDrop::new(crate::session::EngineHold::downgrade(shared)),
+            session: ManuallyDrop::new(declared_on(shared)),
             hold: ManuallyDrop::new(hold),
             prefix_len,
         }
@@ -423,36 +483,28 @@ impl WireDeclaration {
     /// fat pointers to one engine, and their vtable halves are not guaranteed to be one copy, so
     /// comparing them whole could say a session is not itself.
     fn is_on(&self, shared: &Engine) -> bool {
-        #[cfg(feature = "engine-tokio")]
-        {
-            core::ptr::addr_eq(self.session.as_ptr(), shared as *const Engine)
-        }
-        // The cooperative engine's handle names its row, which the engine knows.
-        #[cfg(not(feature = "engine-tokio"))]
-        {
-            self.session.is_of(shared)
-        }
+        core::ptr::addr_eq(engine_at(&self.session), shared as *const Engine)
     }
 }
 
 impl WireDeclaration {
     /// Another holder of the declaration, as pico's `_z_keyexpr_wire_declaration_rc_clone` is: one
-    /// more of the session's count of its holders. Refused with pico's code for a count past its
-    /// bound (`vendor/zenoh-pico/src/collections/refcount.c` @
+    /// more of the session's count of its holders, taken at the row's address. Refused with pico's
+    /// code for a count past its bound (`vendor/zenoh-pico/src/collections/refcount.c` @
     /// `_Z_ERROR_RETURN(_Z_ERR_OVERFLOW);`) when the count holds as many as it can: a copy that held
     /// nothing would name a declaration its last counted holder's going retracts.
     fn share(&self) -> Result<Self, ZResult> {
-        match self.session.upgrade() {
-            Some(engine) => Self::held(&engine, &self.hold, self.prefix_len),
-            // A session that is gone counts nothing: the copy gives nothing back either.
-            None => Ok(Self {
-                // A copy where the session is held by a handle that is `Copy`, a count where by
-                // an `Arc`.
+        with_engine(&self.session, |engine| {
+            Self::held(engine, &self.hold, self.prefix_len)
+        })
+        // A session that is gone counts nothing: the copy gives nothing back either.
+        .unwrap_or_else(|| {
+            Ok(Self {
                 session: Clone::clone(&self.session),
                 hold: ManuallyDrop::new(self.hold.unheld()),
                 prefix_len: self.prefix_len,
-            }),
-        }
+            })
+        })
     }
 }
 
@@ -478,16 +530,18 @@ impl Covering<'_> {
 
 impl Drop for WireDeclaration {
     // Out of line, as `KeyText`'s drop is: every drop of a declared key reaches it, and each copy
-    // inlined would carry the session's upgrade, the release of the hold and the weak count.
+    // inlined would carry the release of the hold and the session's count.
     #[inline(never)]
     fn drop(&mut self) {
         // SAFETY: the hold is taken here, once, and the field is not read again.
         let hold = unsafe { ManuallyDrop::take(&mut self.hold) };
-        match self.session.upgrade() {
-            Some(engine) => hold.release(crate::session::EngineHold::as_ref(&engine)),
-            None => hold.outlived_its_session(),
-        }
-        // SAFETY: the session is let go of here, once, after its last read.
+        // A hold whose session is gone holds a count that went with it: nothing is called, and
+        // the hold goes with the closure.
+        with_engine(&self.session, |engine| {
+            hold.release(crate::session::EngineHold::as_ref(engine))
+        });
+        // SAFETY: the session is let go of here, once, after the hold was given back at the
+        // count it keeps standing.
         unsafe { ManuallyDrop::drop(&mut self.session) };
     }
 }
@@ -4045,6 +4099,51 @@ mod arena_key_tests {
             EngineHold::holders(&engine),
             1,
             "the key let go of the engine its text held"
+        );
+    }
+
+    /// A declared key's declaration holds the engine its count lies in, beside its text's hold,
+    /// so a copy and a drop reach the count at the row's address with no reach of the session; a
+    /// copy made after the close holds no count, though it keeps the engine standing as its text
+    /// does, and the drops after the close give nothing back and let the engine go. Turned red by
+    /// a declaration that keeps its session weakly (one hold of the engine, the text's), by a
+    /// close that leaves the counts (the count still held), or by a drop that keeps the engine.
+    #[test]
+    fn a_declaration_holds_its_engine_and_a_copy_after_the_close_holds_no_count() {
+        use crate::session::EngineHold;
+        use wz_session_core::session_tables::KeyexprCount;
+
+        let (session, engine) = listening();
+        let before = EngineHold::holders(&engine);
+        let key = DeclaredKeyexpr::declare(&engine, "demo/closed/decl", None).expect("declared");
+        assert!(key.literal.is_session());
+        assert_eq!(
+            EngineHold::holders(&engine),
+            before + 2,
+            "the text and the declaration each hold the engine"
+        );
+        // SAFETY: the engine stands while the test holds it, and neither the close nor a hold
+        // given back after it removes the row.
+        let count = unsafe { &*(key.row_address() as *const KeyexprCount) };
+        assert_ne!(count.holds(), 0, "CONTROL: open, the key's hold is counted");
+        close(session);
+        assert_eq!(count.holds(), 0, "the close retracted the count");
+        let held = EngineHold::holders(&engine);
+        let copy = key.share().expect("a copy past the close");
+        assert_eq!(copy.row_address(), 0, "the copy holds no declaration's row");
+        assert_eq!(count.holds(), 0, "and took no count");
+        assert_eq!(
+            EngineHold::holders(&engine),
+            held + 2,
+            "the copy's text and declaration keep the engine standing"
+        );
+        drop(copy);
+        drop(key);
+        assert_eq!(count.holds(), 0, "the key's drop gave nothing back");
+        assert_eq!(
+            EngineHold::holders(&engine),
+            1,
+            "the key let go of the engine its text and declaration held"
         );
     }
 
