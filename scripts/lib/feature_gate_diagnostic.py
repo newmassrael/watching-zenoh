@@ -302,6 +302,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # `LinkKeyexprs::Held` out, and appears in public only as `cfg!` in the constant
             # `declared_keyexprs::SESSION_KEEPS_KEYEXPRS`, which exists in every build.
             "session-keeps-keyexprs",
+            # `sha256-compact` turns on a feature of the `sha2` dependency alone and appears in no
+            # `cfg` of this package: the digest's path and value are the same either way.
+            "sha256-compact",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
             # subscriber lent made the claim false. `pubsub` (a `pub mod`) now

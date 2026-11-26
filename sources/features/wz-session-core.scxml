@@ -122,6 +122,7 @@
   <sce:feature name="session-unicast"/>
   <sce:feature name="session-unicast-accept" requires="interest-answer rx-control rx-push rx-response"/>
   <sce:feature name="session-unicast-open"/>
+  <sce:feature name="sha256-compact"/>
   <sce:feature name="shared-key-ids" requires="alloc"/>
   <sce:feature name="south-subregions" requires="alloc"/>
   <sce:feature name="storage-profile"/>
