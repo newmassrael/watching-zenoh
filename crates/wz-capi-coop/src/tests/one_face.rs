@@ -11,7 +11,7 @@
 use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
-use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
+use wz_capi_port::{Refusal, SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::face::{FaceEventKind, FaceEventSink, FaceSnapshot};
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -52,22 +52,32 @@ fn puts_and_is_heard(
     eventually(what, || into.lock().unwrap().iter().any(|got| got == text));
 }
 
-/// How many faces `session` has been told came up and went down since this call.
-fn counting_faces(session: &Stepped) -> Arc<Mutex<(usize, usize)>> {
+/// How many faces `session` has been told came up and went down since this call. A build without
+/// the connectivity plane tells no face: it refuses the watch by that cause, and `None` is
+/// answered.
+fn counting_faces(session: &Stepped) -> Option<Arc<Mutex<(usize, usize)>>> {
     let counts = Arc::new(Mutex::new((0usize, 0usize)));
     let into = counts.clone();
-    session
-        .watch_faces(FaceEventSink::of_arc(Arc::new(
-            move |kind: FaceEventKind, _: &FaceSnapshot| {
-                let mut counts = into.lock().unwrap();
-                match kind {
-                    FaceEventKind::Up => counts.0 += 1,
-                    FaceEventKind::Down => counts.1 += 1,
-                }
-            },
-        )))
-        .expect("an open session watches its faces");
-    counts
+    let watched = session.watch_faces(FaceEventSink::of_arc(Arc::new(
+        move |kind: FaceEventKind, _: &FaceSnapshot| {
+            let mut counts = into.lock().unwrap();
+            match kind {
+                FaceEventKind::Up => counts.0 += 1,
+                FaceEventKind::Down => counts.1 += 1,
+            }
+        },
+    )));
+    if cfg!(feature = "connectivity") {
+        watched.expect("an open session watches its faces");
+        Some(counts)
+    } else {
+        assert_eq!(
+            watched,
+            Err(Refusal::NotBuilt),
+            "a build without the connectivity plane refuses the watch"
+        );
+        None
+    }
 }
 
 /// Both sessions hold exactly one face, and go on holding it for a while: a pair that closed both
@@ -128,7 +138,7 @@ fn two_nodes_that_dial_each_other_at_once_keep_one_link() {
         // The loser was refused in its handshake, so neither node saw a face come up and go down:
         // a link that is decided after it is up reads (1, 1) at the end that admitted it first.
         // Told only by a build with the connectivity plane.
-        if cfg!(feature = "connectivity") {
+        if let (Some(first_faces), Some(second_faces)) = (&first_faces, &second_faces) {
             assert_eq!(
                 *first_faces.lock().unwrap(),
                 (1, 0),
