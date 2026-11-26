@@ -331,6 +331,7 @@ impl RouterState {
             keyexpr: keyexpr.to_owned(),
             accept: options.effective_accept_replies(),
             timeout_ms: options.effective_timeout_ms(),
+            consolidation: options.resolved_consolidation(),
             ingress,
             on_reply,
             on_final,
