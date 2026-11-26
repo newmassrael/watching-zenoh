@@ -1085,8 +1085,12 @@ pub(crate) type EngineHold = wz_capi_coop::EngineHold<Engine>;
 #[cfg(feature = "engine-tokio")]
 pub(crate) type EngineHandle = alloc::sync::Weak<Engine>;
 /// The cooperative engine is reached through its row of the process's table, which its session's
-/// close vacates: a handle kept past the close reaches nothing.
-#[cfg(not(feature = "engine-tokio"))]
+/// close vacates: a handle kept past the close reaches nothing. Only a queryable's query and a
+/// connectivity watch keep one there (`advanced` and `admin-space` bring `queryable`).
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    any(feature = "queryable", feature = "connectivity")
+))]
 pub(crate) type EngineHandle = wz_capi_coop::EngineHandle<Engine>;
 
 /// The engine behind a session handle as the session holds it, for the length of one call: a door

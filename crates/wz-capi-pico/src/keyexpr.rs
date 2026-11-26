@@ -351,6 +351,7 @@ pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine)
 /// How a key of `len` bytes lent from the session's record of an entity on `session` goes on
 /// `shared`'s wire: the id of `own`, the declaration the record holds, and the rest of the key,
 /// when the entity is `shared`'s; the literal otherwise. Read off the loan: no row, no lock.
+#[cfg(feature = "query")]
 pub(crate) fn record_wire(
     session: &crate::session::EngineHold,
     own: Option<OwnKey>,
