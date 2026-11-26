@@ -863,13 +863,16 @@ files::decl_watch_doors::"
     # The engine's own tests of a group, each in a build a row above makes: the members a
     # connectivity watcher is told of, kept as tombs until their departure is told
     # (`engine::group::told_tests::`, `connectivity`); a member's key, its group above its place
-    # (`engine::member_key_tests::`); the receive buffer each group is lent and the one a record
-    # still reads in kept past its return (`group`); and the aliases of every member a group's face
-    # holds, in the pool and in the face's set (`multicast-declarations`).
+    # (`engine::member_key_tests::`); the receive buffer each group is lent (`group`); and the
+    # aliases of every member a group's face holds, in the pool and in the face's set
+    # (`multicast-declarations`). The one a record still reads in, kept past its return, is the
+    # round's: the engine keeps a round only where its form has no value locks (`wz_round`, its
+    # build script), which no build of its tests on `std` is, so the round's own crate holds that
+    # test and runs it over its default `alloc`, named here so the leg refuses to run nothing.
     "wz-capi-coop|hook|app-transport,group,connectivity|engine::group::told_tests::"
     "wz-capi-coop|hook|app-transport,group|engine::member_key_tests::"
     "wz-capi-coop|hook|app-transport,group|tests::arena::a_session_that_joins_groups_is_lent_a_receive_buffer_for_each"
-    "wz-capi-coop|hook|app-transport,group|tests::round::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
+    "wz-session-core|hook|alloc|round::tests::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
     # The node's message reading (`resource-snapshot`): what a link received, and what a group
