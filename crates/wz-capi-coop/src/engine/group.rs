@@ -31,6 +31,8 @@ use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 #[cfg(wz_round)]
 use wz_runtime_coop::executor::SpawnRefusal;
+#[cfg(not(wz_round))]
+use wz_runtime_coop::group_transport::GroupReceive;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::transport::GroupRecord;
@@ -503,6 +505,128 @@ impl GroupTransport for Watched {
     }
 }
 
+/// The group's transport as its session holds it.
+#[cfg(wz_round)]
+type SessionLink = GroupLink<Watched>;
+
+/// The group's transport as its session holds it.
+#[cfg(not(wz_round))]
+type SessionLink = GroupSide;
+
+/// The group's transport as its session holds it where the read steps the session itself: the
+/// half that sends in the cell the group's face shares (`GroupLink`), which a publish on any
+/// thread writes through, and the half that receives held by the session alone, which a receive
+/// reads without reaching that cell. A transport whose halves are one receives through the cell.
+#[cfg(not(wz_round))]
+pub(super) struct GroupSide {
+    link: GroupLink<Watched>,
+    rx: alloc::boxed::Box<dyn GroupReceive>,
+}
+
+#[cfg(not(wz_round))]
+impl GroupSide {
+    /// The session's side of `link`, receiving through `rx`, the half split out of the
+    /// transport, or through the cell where the transport split none.
+    fn new(link: &GroupLink<Watched>, rx: Option<alloc::boxed::Box<dyn GroupReceive>>) -> Self {
+        let rx = rx.unwrap_or_else(|| alloc::boxed::Box::new(ThroughCell(link.clone())));
+        Self {
+            link: link.clone(),
+            rx,
+        }
+    }
+}
+
+/// The receive of a transport whose halves are one: through the cell the face shares.
+#[cfg(not(wz_round))]
+struct ThroughCell(GroupLink<Watched>);
+
+#[cfg(not(wz_round))]
+impl GroupReceive for ThroughCell {
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        GroupTransport::recv_with(&mut self.0, f)
+    }
+
+    fn keeps_input(&self) -> bool {
+        GroupTransport::keeps_input(&self.0)
+    }
+
+    fn keep(&mut self) {
+        GroupTransport::keep(&mut self.0);
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        GroupTransport::lends_until_next_receive(&self.0)
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        GroupTransport::input_wait(&self.0)
+    }
+
+    // The cell's close closes the transport whole, and its carrier says whether it failed.
+    fn close(&mut self) {}
+}
+
+#[cfg(not(wz_round))]
+impl GroupTransport for GroupSide {
+    fn open(&mut self) -> bool {
+        self.link.open()
+    }
+
+    fn close(&mut self) {
+        self.link.close();
+        self.rx.close();
+    }
+
+    fn service(&self) {
+        self.link.service();
+    }
+
+    fn carrier_up(&self) -> bool {
+        self.link.carrier_up() && !self.rx.failed()
+    }
+
+    fn send_to_group(&mut self, datagram: &[u8]) {
+        self.link.send_to_group(datagram);
+    }
+
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        self.link.try_send_to_group(datagram)
+    }
+
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        self.link.wait_for_room(timeout_us)
+    }
+
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.link.room_wait()
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.rx.input_wait()
+    }
+
+    #[inline]
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        self.rx.recv_with(f)
+    }
+
+    fn keeps_input(&self) -> bool {
+        self.rx.keeps_input()
+    }
+
+    fn keep(&mut self) {
+        self.rx.keep();
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.rx.lends_until_next_receive()
+    }
+
+    fn frame_budget(&self) -> Option<u16> {
+        self.link.frame_budget()
+    }
+}
+
 /// What a message of the session waits with when the group's stage has no room for it: a pass of
 /// the session's tasks, in which the group's own task writes what the group's socket takes, and
 /// the session's clock, which the wait is spent on.
@@ -749,10 +873,7 @@ impl<W: LinkWaits> GroupFace<W> {
     fn made(
         joining: GroupJoining,
         waits: W,
-    ) -> (
-        Self,
-        MulticastSessionSeed<GroupLink<Watched>, GROUP_MEMBERS>,
-    ) {
+    ) -> (Self, MulticastSessionSeed<SessionLink, GROUP_MEMBERS>) {
         let GroupJoining {
             face,
             join,
@@ -798,6 +919,14 @@ impl<W: LinkWaits> GroupFace<W> {
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
+        // The receive half, where the transport has one apart, is the session's alone: a receive
+        // then reaches nothing a publish on another thread reaches.
+        #[cfg(not(wz_round))]
+        let (transport, rx) = {
+            let mut transport = transport;
+            let rx = transport.split_receive();
+            (transport, rx)
+        };
         // Shared by the session, which opens it as its link, and the face, which writes on it
         // what the session pushes.
         let link = GroupLink::new(Watched {
@@ -807,9 +936,13 @@ impl<W: LinkWaits> GroupFace<W> {
             #[cfg(wz_round)]
             lane,
         });
-        let seed = MulticastSessionSeed::<GroupLink<Watched>, GROUP_MEMBERS>::new(
+        #[cfg(not(wz_round))]
+        let session_link = GroupSide::new(&link, rx);
+        #[cfg(wz_round)]
+        let session_link = link.clone();
+        let seed = MulticastSessionSeed::<SessionLink, GROUP_MEMBERS>::new(
             config,
-            link.clone(),
+            session_link,
             params,
             policy,
             u64::from(GROUP_TICK_MS),
@@ -1563,7 +1696,7 @@ struct GroupReads {
 /// the read notes each event against, and what it hands each record out with.
 #[cfg(not(wz_round))]
 pub(super) struct GroupSeat {
-    seed: MulticastSessionSeed<GroupLink<Watched>, GROUP_MEMBERS>,
+    seed: MulticastSessionSeed<SessionLink, GROUP_MEMBERS>,
     reads: GroupReads,
     records: FaceRecords<GroupReplies>,
 }
@@ -1579,7 +1712,7 @@ pub(super) struct GroupSeat {
 /// with the place kept (`Self::let_go`), and each join again builds its session there.
 #[cfg(not(wz_round))]
 pub(super) struct GroupPump<C: ClockSource + 'static> {
-    place: MulticastSessionPlace<C, GroupLink<Watched>, GROUP_MEMBERS>,
+    place: MulticastSessionPlace<C, SessionLink, GROUP_MEMBERS>,
     reads: GroupReads,
     /// What each record is handed out with: the group's face, the sink of its replies, and the
     /// generation a member's query is answered under.
@@ -2042,5 +2175,100 @@ mod told_tests {
         );
         joined.forget(ToldPlane::Links, 2);
         assert_eq!(joined.rows.len(), 0);
+    }
+}
+
+#[cfg(all(test, not(wz_round)))]
+mod side_tests {
+    use super::*;
+
+    /// The address a member's datagrams come from.
+    fn member() -> SocketAddr {
+        SocketAddr::from(([192, 0, 2, 7], 7447))
+    }
+
+    /// A receive half that lends `b"half"` at every receive, and says whether it failed.
+    struct Half {
+        failed: bool,
+    }
+
+    impl GroupReceive for Half {
+        fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            f(b"half", member());
+            true
+        }
+
+        fn failed(&self) -> bool {
+            self.failed
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// A transport whose receive half is `half` until it is taken out, and whose own receive
+    /// lends `b"whole"`.
+    struct Joined {
+        half: Option<alloc::boxed::Box<dyn GroupReceive>>,
+    }
+
+    impl GroupTransport for Joined {
+        fn open(&mut self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+
+        fn service(&self) {}
+
+        fn carrier_up(&self) -> bool {
+            true
+        }
+
+        fn send_to_group(&mut self, _datagram: &[u8]) {}
+
+        fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            f(b"whole", member());
+            true
+        }
+
+        fn split_receive(&mut self) -> Option<alloc::boxed::Box<dyn GroupReceive>> {
+            self.half.take()
+        }
+    }
+
+    /// The session's side of a group over a transport that splits `half` out, as a join makes it.
+    fn side(half: Option<alloc::boxed::Box<dyn GroupReceive>>) -> GroupSide {
+        let mut transport: alloc::boxed::Box<dyn GroupTransport> =
+            alloc::boxed::Box::new(Joined { half });
+        let rx = transport.split_receive();
+        let link = GroupLink::new(Watched { inner: transport });
+        GroupSide::new(&link, rx)
+    }
+
+    /// What one receive of `side` lent.
+    fn received(side: &mut GroupSide) -> alloc::vec::Vec<u8> {
+        let mut seen = alloc::vec::Vec::new();
+        assert!(side.recv_with(&mut |bytes, _| seen = bytes.to_vec()));
+        seen
+    }
+
+    /// The session's side of a group receives on the half split out of its transport, and through
+    /// the cell the group's face shares only where the transport split none; a receive half that
+    /// failed ends the link as a lost carrier does. Turned red by a side that receives through the
+    /// cell whatever the transport split (`GroupSide::new` passing `rx` over), or a carrier that
+    /// does not read the half (`GroupSide::carrier_up`).
+    #[test]
+    fn a_groups_session_receives_on_the_half_split_out_of_its_transport() {
+        let mut split = side(Some(alloc::boxed::Box::new(Half { failed: false })));
+        assert_eq!(received(&mut split), b"half");
+        assert!(split.carrier_up());
+        let mut whole = side(None);
+        assert_eq!(
+            received(&mut whole),
+            b"whole",
+            "CONTROL: a transport whose halves are one"
+        );
+        let failed = side(Some(alloc::boxed::Box::new(Half { failed: true })));
+        assert!(!failed.carrier_up(), "a failed receive half ends the link");
     }
 }

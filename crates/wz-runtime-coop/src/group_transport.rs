@@ -199,6 +199,61 @@ pub trait GroupTransport {
     fn frame_budget(&self) -> Option<u16> {
         None
     }
+
+    /// The half of the transport that receives, taken out of it: from here on this transport
+    /// sends, and receives nothing, and what [`GroupTransport::recv_with`] and the reads beside it
+    /// answered is the half's to answer. A reader that holds the half apart from the transport's
+    /// senders reads the group without reaching anything a send reaches. `None`, the provided
+    /// answer, from a transport whose two halves are one, which goes on receiving as it did.
+    #[cfg(all(
+        feature = "session-unicast",
+        feature = "alloc",
+        not(feature = "session-slot")
+    ))]
+    fn split_receive(&mut self) -> Option<alloc::boxed::Box<dyn GroupReceive>> {
+        None
+    }
+}
+
+/// The half of a group's transport that receives: the socket joined to the group and the buffer
+/// it reads into, apart from the half the group's senders share
+/// ([`GroupTransport::split_receive`]). Each read answers as the transport's own read of the same
+/// name answers.
+#[cfg(all(
+    feature = "session-unicast",
+    feature = "alloc",
+    not(feature = "session-slot")
+))]
+pub trait GroupReceive {
+    /// As [`GroupTransport::recv_with`].
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool;
+
+    /// As [`GroupTransport::keeps_input`].
+    fn keeps_input(&self) -> bool {
+        false
+    }
+
+    /// As [`GroupTransport::keep`].
+    fn keep(&mut self) {}
+
+    /// As [`GroupTransport::lends_until_next_receive`].
+    fn lends_until_next_receive(&self) -> bool {
+        false
+    }
+
+    /// As [`GroupTransport::input_wait`].
+    fn input_wait(&self) -> Option<crate::session_drive::WaitOn> {
+        None
+    }
+
+    /// Whether a receive failed: what a host reports of an interface that went away, which ends
+    /// the group's link as [`GroupTransport::carrier_up`] answering `false` does.
+    fn failed(&self) -> bool {
+        false
+    }
+
+    /// Receive nothing more: this half's part of [`GroupTransport::close`].
+    fn close(&mut self);
 }
 
 /// What a group's socket did with a datagram it was offered ([`GroupTransport::try_send_to_group`]).
@@ -343,6 +398,11 @@ impl<T: GroupTransport + ?Sized> GroupTransport for alloc::boxed::Box<T> {
     fn frame_budget(&self) -> Option<u16> {
         (**self).frame_budget()
     }
+
+    #[cfg(feature = "session-unicast")]
+    fn split_receive(&mut self) -> Option<alloc::boxed::Box<dyn GroupReceive>> {
+        (**self).split_receive()
+    }
 }
 
 /// What joins the multicast groups a stack's links are asked for
@@ -468,6 +528,68 @@ mod tests {
         fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
             false
         }
+    }
+
+    /// A transport whose two halves are one splits nothing; one that splits hands its receive half
+    /// out once, through the box a session holds it in, and the half reads what the transport
+    /// would have read. Turned red by a box that does not pass the split on (`Box`'s
+    /// `split_receive` left to the provided answer).
+    #[cfg(all(
+        feature = "alloc",
+        feature = "session-unicast",
+        not(feature = "session-slot")
+    ))]
+    #[test]
+    fn a_split_receive_half_is_handed_on_through_the_box() {
+        struct Half;
+
+        impl GroupReceive for Half {
+            fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                f(b"member", SocketAddr::from(([192, 0, 2, 7], 7447)));
+                true
+            }
+
+            fn close(&mut self) {}
+        }
+
+        struct Splits(Option<alloc::boxed::Box<dyn GroupReceive>>);
+
+        impl GroupTransport for Splits {
+            fn open(&mut self) -> bool {
+                true
+            }
+
+            fn close(&mut self) {}
+
+            fn service(&self) {}
+
+            fn carrier_up(&self) -> bool {
+                true
+            }
+
+            fn send_to_group(&mut self, _datagram: &[u8]) {}
+
+            fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+                false
+            }
+
+            fn split_receive(&mut self) -> Option<alloc::boxed::Box<dyn GroupReceive>> {
+                self.0.take()
+            }
+        }
+
+        let mut one = Socket::default();
+        assert!(one.split_receive().is_none(), "CONTROL: its halves are one");
+        let mut boxed: alloc::boxed::Box<dyn GroupTransport> =
+            alloc::boxed::Box::new(Splits(Some(alloc::boxed::Box::new(Half))));
+        let mut half = boxed
+            .split_receive()
+            .expect("the receive half, through the box");
+        assert!(boxed.split_receive().is_none(), "handed out once");
+        let mut member = false;
+        assert!(half.recv_with(&mut |bytes, _| member = bytes == b"member"));
+        assert!(member, "the half reads what the transport would have");
+        assert!(!half.failed() && !half.keeps_input() && half.input_wait().is_none());
     }
 
     /// A stack that cannot tell a full socket from a sent datagram sends the datagram and answers

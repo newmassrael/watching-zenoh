@@ -721,15 +721,30 @@ pub fn mark_traffic_class<S: MulticastSocket>(socket: &S, dscp: u32) -> Result<(
 }
 
 /// One group joined on the host's sockets: a session's [`GroupTransport`]. The joined socket is
-/// read, the send socket writes, and a datagram is taken only when one is queued.
+/// read, the send socket writes, and a datagram is taken only when one is queued. The joined socket
+/// and the buffer it reads into are the transport's receive half ([`HostGroupReceive`]), which a
+/// reader of the heap profile takes out of it (`GroupTransport::split_receive`) to hold apart
+/// from the send socket the group's senders share.
 pub struct HostGroupTransport<S: MulticastSocket> {
-    /// The joined socket the group is read on, `None` once the session has released the link.
-    read: Option<S>,
     /// The socket every datagram is sent from, `None` once the session has released the link.
     write: Option<S>,
     /// The group and its port, where every datagram is sent.
     group: SocketAddr,
-    /// What each datagram is read into: a buffer the session lent, or the transport's own.
+    /// The receive half, `None` once taken out of the transport.
+    receive: Option<HostGroupReceive<S>>,
+}
+
+/// The receive half of a group joined on the host's sockets: the joined socket, the buffer each
+/// datagram is read into, and the datagram it lent and was asked to keep.
+pub struct HostGroupReceive<S: MulticastSocket> {
+    /// The joined socket the group is read on, `None` once the session has released the link.
+    read: Option<S>,
+    /// The address the group's own send socket sends from: what it sends comes back on the joined
+    /// socket while the loopback is on, the system's default, and is dropped on receipt.
+    own: Option<SocketAddr>,
+    /// The group and its port, which a failed receive is reported against.
+    group: SocketAddr,
+    /// What each datagram is read into: a buffer the session lent, or the half's own.
     rx: GroupRx<Vec<u8>>,
     /// The length and source of the datagram the last receive lent, which lies in `rx` until the
     /// next receive reads into it.
@@ -748,14 +763,16 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
     /// one of its own that reads a datagram up to the largest UDP payload whole. A datagram longer
     /// than the buffer is cut by the stack, which the session reads as a bad frame.
     pub fn new(read: S, write: S, group: SocketAddr, rx: Option<ByteBuf>) -> Self {
+        let own = Some(write.local());
         Self {
-            read: Some(read),
             write: Some(write),
             group,
-            rx: GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]),
-            lent: None,
-            kept: None,
-            failed: false,
+            receive: Some(HostGroupReceive::of(
+                Some(read),
+                own,
+                group,
+                GroupRx::lent_or_own(rx, || alloc::vec![0; UDP_RX_CAPACITY]),
+            )),
         }
     }
 
@@ -765,38 +782,116 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
     }
 }
 
-impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
-    // The datagram lies in the transport's own receive buffer, which nothing writes until the next
-    // receive: a datagram kept is lent again from where it lies, and costs no copy.
+impl<S: MulticastSocket> HostGroupReceive<S> {
+    /// The half that reads `read`, joined to `group`, into `rx`, dropping what `own` sent.
+    fn of(
+        read: Option<S>,
+        own: Option<SocketAddr>,
+        group: SocketAddr,
+        rx: GroupRx<Vec<u8>>,
+    ) -> Self {
+        Self {
+            read,
+            own,
+            group,
+            rx,
+            lent: None,
+            kept: None,
+            failed: false,
+        }
+    }
+
+    /// Lend the next datagram a member sent to `f`, where it lies in the buffer: the one kept
+    /// first, then one queued on the joined socket, past every datagram the group's own send
+    /// socket sent. `false` when none is queued, the half was released, or the receive failed.
+    fn receive(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        // A datagram kept lies in the receive buffer still: it is lent again from there.
+        if let Some((len, from)) = self.kept.take() {
+            f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
+            self.lent = Some((len, from));
+            return true;
+        }
+        let Some(socket) = &self.read else {
+            return false;
+        };
+        // Dropped here, as zenoh-pico's link drops it too.
+        let own = self.own;
+        loop {
+            match socket.try_recv(self.rx.as_mut_slice()) {
+                Ok(Some((_, from))) if own.is_some_and(|own| sent_by_own(own, from)) => {}
+                Ok(Some((len, from))) => {
+                    f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
+                    self.lent = Some((len, from));
+                    return true;
+                }
+                // Nothing queued, or a signal cut the read short: the next step reads again.
+                Ok(None) => return false,
+                Err(e) => {
+                    wz_session_core::diag_warn!(
+                        "group {}: its socket failed a receive: {e:?}",
+                        AddrText(self.group)
+                    );
+                    self.failed = true;
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// Keep the datagram the last receive lent, for the next receive to lend again.
+    fn keep_lent(&mut self) {
+        self.kept = self.lent.take();
+    }
+
+    /// Receive nothing more. Closing the joined socket is leaving the group: the host drops its
+    /// memberships with it.
+    fn stop(&mut self) {
+        self.read = None;
+        self.lent = None;
+        self.kept = None;
+    }
+}
+
+impl<S: MulticastSocket + 'static> GroupTransport for HostGroupTransport<S> {
+    // The datagram lies in the receive buffer, which nothing writes until the next receive: a
+    // datagram kept is lent again from where it lies, and costs no copy.
     fn keeps_input(&self) -> bool {
-        true
+        self.receive.is_some()
     }
 
     fn keep(&mut self) {
-        self.kept = self.lent.take();
+        if let Some(receive) = &mut self.receive {
+            receive.keep_lent();
+        }
     }
 
     // A lent buffer is the session's, which holds what it reads there until it asks for the next
     // datagram; a buffer of the transport's own is lent for the call, as the trait provides.
     fn lends_until_next_receive(&self) -> bool {
-        self.rx.is_lent()
+        self.receive
+            .as_ref()
+            .is_some_and(|receive| receive.rx.is_lent())
     }
 
-    // Asked once the group is left, when no receive reads into the buffer again.
+    // Asked once the group is left, when no receive reads into the buffer again. A receive half
+    // taken out of the transport keeps its buffer, which goes with it.
     fn give_back_rx(&mut self) -> Option<ByteBuf> {
-        self.rx.give_back()
+        self.receive.as_mut()?.rx.give_back()
     }
 
     fn open(&mut self) -> bool {
-        self.read.is_some() && self.write.is_some()
+        self.write.is_some()
+            && self
+                .receive
+                .as_ref()
+                .is_none_or(|receive| receive.read.is_some())
     }
 
     fn close(&mut self) {
-        // Closing the joined socket is leaving the group: the host drops its memberships with it.
-        self.read = None;
         self.write = None;
-        self.lent = None;
-        self.kept = None;
+        if let Some(receive) = &mut self.receive {
+            receive.stop();
+        }
     }
 
     // The engine waits, on its links and its groups at once, and steps a group at its tick: there
@@ -805,7 +900,7 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
 
     /// A host has no carrier to read here; what ends a group is its joined socket failing.
     fn carrier_up(&self) -> bool {
-        !self.failed
+        !self.receive.as_ref().is_some_and(|receive| receive.failed)
     }
 
     fn send_to_group(&mut self, datagram: &[u8]) {
@@ -845,46 +940,56 @@ impl<S: MulticastSocket> GroupTransport for HostGroupTransport<S> {
             self.write.as_ref()?.room_wait()
         }
 
-        // The joined socket's input, on a platform that names it; a group that was left names
-        // none.
+        // The joined socket's input, on a platform that names it; a group that was left, or whose
+        // receive half was taken out, names none.
+        fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
+            self.receive.as_ref()?.read.as_ref()?.input_wait()
+        }
+
+        fn split_receive(
+            &mut self,
+        ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::group_transport::GroupReceive>> {
+            let receive = self.receive.take()?;
+            Some(alloc::boxed::Box::new(receive))
+        }
+    }
+
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        match &mut self.receive {
+            Some(receive) => receive.receive(f),
+            None => false,
+        }
+    }
+}
+
+wz_runtime_coop::with_heap_link_seams! {
+    impl<S: MulticastSocket> wz_runtime_coop::group_transport::GroupReceive for HostGroupReceive<S> {
+        fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            self.receive(f)
+        }
+
+        fn keeps_input(&self) -> bool {
+            true
+        }
+
+        fn keep(&mut self) {
+            self.keep_lent();
+        }
+
+        fn lends_until_next_receive(&self) -> bool {
+            self.rx.is_lent()
+        }
+
         fn input_wait(&self) -> Option<wz_runtime_coop::session_drive::WaitOn> {
             self.read.as_ref()?.input_wait()
         }
 
-    }
-
-    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        // A datagram kept lies in the receive buffer still: it is lent again from there.
-        if let Some((len, from)) = self.kept.take() {
-            f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
-            self.lent = Some((len, from));
-            return true;
+        fn failed(&self) -> bool {
+            self.failed
         }
-        let Some(socket) = &self.read else {
-            return false;
-        };
-        // What the send socket sends comes back on the joined one while the loopback is on, the
-        // system's default, and is dropped here, as zenoh-pico's link drops it too.
-        let own = self.write.as_ref().map(|write| write.local());
-        loop {
-            match socket.try_recv(self.rx.as_mut_slice()) {
-                Ok(Some((_, from))) if own.is_some_and(|own| sent_by_own(own, from)) => {}
-                Ok(Some((len, from))) => {
-                    f(self.rx.as_slice().get(..len).unwrap_or_default(), from);
-                    self.lent = Some((len, from));
-                    return true;
-                }
-                // Nothing queued, or a signal cut the read short: the next step reads again.
-                Ok(None) => return false,
-                Err(e) => {
-                    wz_session_core::diag_warn!(
-                        "group {}: its socket failed a receive: {e:?}",
-                        AddrText(self.group)
-                    );
-                    self.failed = true;
-                    return false;
-                }
-            }
+
+        fn close(&mut self) {
+            self.stop();
         }
     }
 }
@@ -1323,13 +1428,14 @@ mod tests {
                 .expect("a send socket");
             write.make_nonblocking().expect("non-blocking");
             let mut transport = HostGroupTransport {
-                read: None,
                 write: Some(write),
                 group: peer.local(),
-                rx: GroupRx::lent_or_own(None, Vec::new),
-                lent: None,
-                kept: None,
-                failed: false,
+                receive: Some(HostGroupReceive::of(
+                    None,
+                    None,
+                    peer.local(),
+                    GroupRx::lent_or_own(None, Vec::new),
+                )),
             };
             let outside = transport.room_wait().expect("a wait from outside");
             assert_eq!(transport.try_send_to_group(b"datagram"), GroupSend::Sent);
@@ -1352,6 +1458,54 @@ mod tests {
             );
         }
 
+        /// The receive half taken out of a group reads what the group read: a member's datagram, past
+        /// what the group's own send socket sent, kept and lent again from where it lies; the
+        /// transport left behind opens, sends and receives nothing, and the half closed has left the
+        /// group. Turned red by a split that leaves the joined socket with the transport
+        /// (`HostGroupTransport::split_receive`), or an open that asks for the joined socket the half
+        /// took (`HostGroupTransport::open`).
+        #[test]
+        fn a_groups_receive_half_reads_apart_from_its_send_half() {
+            use wz_runtime_coop::group_transport::GroupReceive;
+
+            let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            let read = PosixUdpSocket::bind(loopback).expect("a reading socket");
+            let write = PosixUdpSocket::bind(loopback).expect("a sending socket");
+            let member = PosixUdpSocket::bind(loopback).expect("a member's socket");
+            let to = read.local();
+            let mut group = HostGroupTransport::new(read, write, to, None);
+            let mut half = group.split_receive().expect("the receive half");
+            assert!(group.split_receive().is_none(), "taken out once");
+            assert!(group.open(), "the send half opens without the joined socket");
+            assert!(
+                group.input_wait().is_none(),
+                "the joined socket went with the half"
+            );
+            assert!(half.input_wait().is_some(), "the half waits on the joined socket");
+            group.send_to_group(b"own");
+            member.send_to(to, b"member").expect("sent");
+            let mut seen = None;
+            for _ in 0..100_000 {
+                if half.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))) {
+                    break;
+                }
+            }
+            assert_eq!(
+                seen,
+                Some((b"member".to_vec(), member.local())),
+                "the member's datagram, past the one the group's own sender sent"
+            );
+            assert!(!group.recv_with(&mut |_, _| panic!("the send half received")));
+            half.keep();
+            let mut again = None;
+            assert!(half.recv_with(&mut |bytes, from| again = Some((bytes.to_vec(), from))));
+            assert_eq!(again, seen, "the kept datagram, lent again");
+            assert!(group.carrier_up() && !half.failed());
+            half.close();
+            assert!(half.input_wait().is_none(), "a closed half has left the group");
+            assert!(!half.recv_with(&mut |_, _| panic!("a closed half received")));
+        }
+
         /// The joined socket's input is waited for from outside the session's loop: the wait is waited
         /// out while nothing is queued and returns long before its time once a datagram is, alone or
         /// beside another socket; the datagram is then taken with its source, and a group that was left
@@ -1369,13 +1523,14 @@ mod tests {
             let other = PosixUdpSocket::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
                 .expect("another link's socket");
             let mut transport = HostGroupTransport {
-                read: Some(read),
                 write: None,
                 group: to,
-                rx: GroupRx::lent_or_own(None, || alloc::vec![0; 64]),
-                lent: None,
-                kept: None,
-                failed: false,
+                receive: Some(HostGroupReceive::of(
+                    Some(read),
+                    None,
+                    to,
+                    GroupRx::lent_or_own(None, || alloc::vec![0; 64]),
+                )),
             };
             let waits = crate::net::PosixWaits;
             let ready = LinkWait::input(transport.input_wait().expect("a wait from outside"));
