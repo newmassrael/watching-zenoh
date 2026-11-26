@@ -501,7 +501,9 @@ pub(crate) struct Answering<T, K = ()> {
 }
 
 impl<T, K> Answering<T, K> {
-    /// `value`, keeping `kept` for its closures, with none counted yet.
+    /// `value`, keeping `kept` for its closures, with none counted yet, made by value: a test's
+    /// place, whose count's lock is the host's and is not taken before the place is filled.
+    #[cfg(test)]
     pub(crate) fn keeping(value: T, kept: K) -> Self {
         Self {
             value: core::mem::ManuallyDrop::new(value),
@@ -510,8 +512,26 @@ impl<T, K> Answering<T, K> {
         }
     }
 
-    /// As [`Self::keeping`], the value and what is kept written by `write` and `write_kept` in
-    /// the places where they stay: what a value holding a lock is made in, its lock made there
+    /// `value` and `kept` written in the place at `at`, beside a count with none held made there
+    /// (`OpenClosures::init_at`): a kernel's lock is made where it stays.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it and holds none, and the place is not
+    /// moved while it holds one.
+    unsafe fn write_parts(at: *mut Self, value: T, kept: K) {
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // `at` is valid.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).value).write(core::mem::ManuallyDrop::new(value));
+            crate::ffi::OpenClosures::init_at(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*at).open
+            )));
+            core::ptr::addr_of_mut!((*at).kept).write(core::mem::ManuallyDrop::new(kept));
+        }
+    }
+
+    /// As `Slot::fill_answering`, the value and what is kept written by `write` and `write_kept`
+    /// in the places where they stay: what a value holding a lock is made in, its lock made there
     /// ([`wz_capi_port::os::mutex_in`]).
     ///
     /// # Safety
@@ -529,11 +549,23 @@ impl<T, K> Answering<T, K> {
             write(NonNull::new_unchecked(
                 core::ptr::addr_of_mut!((*at).value).cast::<T>(),
             ));
-            core::ptr::addr_of_mut!((*at).open).write(crate::ffi::OpenClosures::default());
+            crate::ffi::OpenClosures::init_at(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*at).open
+            )));
             write_kept(NonNull::new_unchecked(
                 core::ptr::addr_of_mut!((*at).kept).cast::<K>(),
             ));
         }
+    }
+}
+
+impl<T, K> Slot<Answering<T, K>> {
+    /// The place filled with `value`, keeping `kept` for its closures, with none counted yet:
+    /// each part written where it stays, the count's lock made there.
+    pub(crate) fn fill_answering(self, value: T, kept: K) -> *mut Answering<T, K> {
+        // SAFETY: the slot's place is sized and aligned for an `Answering<T, K>` and holds none,
+        // and `write_parts` leaves one there.
+        unsafe { self.fill_in_place(|at| Answering::write_parts(at, value, kept)) }
     }
 }
 
@@ -1126,9 +1158,10 @@ mod tests {
         assert!(places > 0, "the session's limit admits queriers");
 
         let drops = core::cell::Cell::new(0);
-        let object = Slot::take_entity(&engine, Kind::Querier)
+        // Filled as a door fills an entity's place, its count made where it stays.
+        let object = Slot::<Answering<Counted<'_>>>::take_entity(&engine, Kind::Querier)
             .expect("a querier's place")
-            .fill(Answering::keeping(Counted(&drops), ()))
+            .fill_answering(Counted(&drops), ())
             .cast::<Counted<'_>>();
         let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
             core::ptr::null_mut(),

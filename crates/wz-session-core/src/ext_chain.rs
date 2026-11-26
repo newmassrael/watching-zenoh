@@ -1320,7 +1320,7 @@ pub(crate) fn received_entry(
 /// with a different capacity reds a test rather than silently disagreeing with
 /// the tests that build a chain one entry past it.
 // Readers, exactly: the `dissect` tests, and this crate's own chain-saturation
-// tests, which live in `network_message` behind `all(test, codec-frame,
+// tests, which live in `network_message` behind `all(test, alloc, codec-frame,
 // codec-push)`.
 //
 // R311y588 — the gate was `any(dissect, test)`, and a full local sweep found
@@ -1337,7 +1337,7 @@ pub(crate) fn received_entry(
     test,
     any(
         feature = "dissect",
-        all(feature = "codec-frame", feature = "codec-push")
+        all(feature = "alloc", feature = "codec-frame", feature = "codec-push")
     )
 ))]
 pub const NETWORK_EXT_CHAIN_DEPTH: usize = 8;

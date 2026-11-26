@@ -167,18 +167,23 @@ pub(crate) fn checked_endpoint(endpoint: &str) -> Result<(), crate::result::ZRes
 /// (`transport-link-ws`). A group is no unicast endpoint and is not judged here.
 #[cfg(not(feature = "engine-tokio"))]
 fn link_built(scheme: &str) -> bool {
-    match scheme {
-        "tcp" => true,
-        "udp" => cfg!(feature = "link-udp"),
-        "tls" => cfg!(feature = "tls-mbedtls"),
-        "serial" => cfg!(feature = "transport-link-serial"),
-        "ws" => cfg!(feature = "transport-link-ws"),
-        "unixpipe" => cfg!(all(
-            feature = "transport-link-unixpipe",
-            any(target_os = "linux", target_os = "android")
-        )),
-        _ => false,
-    }
+    // A table and not a `match` of booleans: in a build with every link the arms read as one
+    // pattern, and in one with fewer they do not, so no single form of a `match` holds for both.
+    const BUILT: [(&str, bool); 6] = [
+        ("tcp", true),
+        ("udp", cfg!(feature = "link-udp")),
+        ("tls", cfg!(feature = "tls-mbedtls")),
+        ("serial", cfg!(feature = "transport-link-serial")),
+        ("ws", cfg!(feature = "transport-link-ws")),
+        (
+            "unixpipe",
+            cfg!(all(
+                feature = "transport-link-unixpipe",
+                any(target_os = "linux", target_os = "android")
+            )),
+        ),
+    ];
+    BUILT.iter().any(|&(name, built)| built && name == scheme)
 }
 
 /// The text a session of the cooperative engine dials or listens on for a unicast `endpoint` the

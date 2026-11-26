@@ -423,7 +423,7 @@ fn wz_router_hat_hlc_stamps_a_bare_put_for_pico_zsub_attachment() {
 /// so the wz router stamped anyway and this witness printed the line.
 ///
 /// It is also the only leg that binds the DEMO's wiring rather than the library's:
-/// the unit tests in `router_forward` / `linkstate_forward` construct the
+/// the unit tests in `router_forward` construct the
 /// forwarder directly, so they would stay green if `run_router_hat_until` dropped
 /// the map on the floor between the flag and the constructor. This one spawns the
 /// shipped binary and reads a FOREIGN decoder's stdout, so every hop from argv to

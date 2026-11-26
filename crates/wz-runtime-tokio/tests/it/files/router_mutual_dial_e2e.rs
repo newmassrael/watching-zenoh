@@ -36,9 +36,9 @@ use tokio::sync::watch;
 use wz_runtime_tokio::accept_loop::{peer_loop, AcceptEvent, FaceSources};
 use wz_runtime_tokio::link_pipeline::bind_tcp;
 use wz_runtime_tokio::link_socket::LinkSocket;
-use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::retry_period::RetryPolicy;
 use wz_runtime_tokio::router_forward::RouterForwarder;
+use wz_runtime_tokio::routing_policy::Zid;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session_glue::SessionInitParams;
 use wz_runtime_tokio::session_open::{

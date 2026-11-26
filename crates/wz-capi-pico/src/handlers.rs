@@ -905,8 +905,13 @@ const _: () = {
 };
 
 // The figures `tests/header_arm_layout.rs` measures on the x86_64 Linux host, which the layouts
-// above reproduce there.
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+// above reproduce there. A Zephyr image's arm lays the kernel's objects out instead, whatever host
+// compiles it, and the assertion above holds it to them.
+#[cfg(all(
+    target_os = "linux",
+    target_arch = "x86_64",
+    not(feature = "os-zephyr")
+))]
 const _: () = {
     use core::mem::size_of;
     #[cfg(feature = "multi-thread")]

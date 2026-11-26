@@ -497,11 +497,25 @@ use wz_session_core::tx_lease::TxLease;
 
 type Sink = Arc<dyn BoxedLinkDriver + Send + Sync>;
 
+/// The batch a session behind the swap seam frames its messages in, and the slot its link lends
+/// for one. The seam pulls what the session stages whichever link is live, so with
+/// `transport-batching` the session batches whatever link it starts on, and a batch's frame is
+/// written only into a slot that holds a whole batch; without it the session sends each message
+/// in a frame of its own.
+#[cfg(feature = "transport-batching")]
+const SEAM_BATCH: Option<u16> = Some(BUDGET);
+#[cfg(feature = "transport-batching")]
+const SEAM_SLOT: usize = BATCH_SLOT;
+#[cfg(not(feature = "transport-batching"))]
+const SEAM_BATCH: Option<u16> = None;
+#[cfg(not(feature = "transport-batching"))]
+const SEAM_SLOT: usize = SLOT_LEN;
+
 #[test]
 fn a_lender_behind_the_swap_seam_still_lends() {
-    let link = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let link = LendingLink::new(true, 1, SEAM_SLOT, HEADROOM);
     let seam: Sink = Arc::new(SwappableLink::<TokioRuntime>::new(link.clone()));
-    let actions = new_session_actions(seam, params_with_sn_7(None), TokioTime::new())
+    let actions = new_session_actions(seam, params_with_sn_7(SEAM_BATCH), TokioTime::new())
         .expect("the heap has room");
     actions.enter_established();
     actions
@@ -593,10 +607,10 @@ fn the_single_task_seam_keeps_two_links_slot_numbers_apart() {
 
 #[test]
 fn a_swap_to_a_link_that_lends_nothing_takes_the_heap_afterwards() {
-    let old = LendingLink::new(true, 1, SLOT_LEN, HEADROOM);
+    let old = LendingLink::new(true, 1, SEAM_SLOT, HEADROOM);
     let plain = LendingLink::new(false, 0, 0, 0);
     let seam = Arc::new(SwappableLink::<TokioRuntime>::new(old.clone()));
-    let actions = new_session_actions(seam.clone(), params_with_sn_7(None), TokioTime::new())
+    let actions = new_session_actions(seam.clone(), params_with_sn_7(SEAM_BATCH), TokioTime::new())
         .expect("the heap has room");
     actions.enter_established();
     actions

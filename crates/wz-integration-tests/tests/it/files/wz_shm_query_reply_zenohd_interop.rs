@@ -65,9 +65,8 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_shm, connect_and_open_session, connect_and_open_session_with_shm,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::{
-    reference_state, PosixShmResolver, ReferenceState, ShmBackedPayload,
-};
+use wz_runtime_tokio::shm_provider::{reference_state, ReferenceState, ShmBackedPayload};
+use wz_runtime_tokio::shm_reader::ShmReaderResolver;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
 use wz_session_core::locator::parse_any_locator;
@@ -182,7 +181,7 @@ async fn ask(
 /// A resolver that counts what it was asked to resolve, so a leg can tell a payload
 /// that crossed as shared memory from one that merely arrived.
 struct CountingResolver {
-    inner: PosixShmResolver,
+    inner: ShmReaderResolver,
     resolved: Arc<AtomicUsize>,
     refused: Arc<AtomicUsize>,
 }
@@ -300,7 +299,7 @@ async fn wz_getter_against_shm_queryable(value: GetterValue) -> Option<GetterRun
     let resolved = Arc::new(AtomicUsize::new(0));
     let refused = Arc::new(AtomicUsize::new(0));
     session.set_shm_resolver(Box::new(CountingResolver {
-        inner: PosixShmResolver,
+        inner: ShmReaderResolver::global(),
         resolved: resolved.clone(),
         refused: refused.clone(),
     }));
@@ -699,7 +698,7 @@ async fn shm_get_to_wz_queryable(offer_shm: bool) -> Option<QueryableRun> {
     let resolved = Arc::new(AtomicUsize::new(0));
     let refused = Arc::new(AtomicUsize::new(0));
     session.set_shm_resolver(Box::new(CountingResolver {
-        inner: PosixShmResolver,
+        inner: ShmReaderResolver::global(),
         resolved: resolved.clone(),
         refused: refused.clone(),
     }));

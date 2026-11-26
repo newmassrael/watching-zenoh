@@ -3095,12 +3095,17 @@ jobs:
   # about 1,110 s of that run's legs in each shard. PREDICTION, for the next run to judge: each
   # shard near 1,260 s with its own setup, 70 percent of the budget. The weights decide the
   # balance only; a leg added later is planned at the median and named in the log.
+  # MEASURED, and the prediction above was wrong: dealt by cost the four shards read 940 to 1,717 s
+  # (runs 45595433755 to 45728104381), and three of those runs had a shard cancelled at the 1800 s
+  # limit. The legs grew to some 5,800 s, so balance alone leaves each of four shards near 80
+  # percent of the budget. Six shards, the weights refreshed from run 45654176488: 995 s of legs
+  # each as the plan deals them (1,492 s with four), with its own setup near 60 percent. PREDICTION, for the next run to judge.
   #
   # DROP-PROOF INVARIANT (the census's, co-located on purpose): `shard` MUST list exactly
   # [0 .. WZ_LEGS_SHARDS-1]. A missing shard is legs no job runs while everything stays green;
   # `scripts/lib/shard_matrix_binding.py` holds the list to the count.
   nondefault-legs:
-    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/4)
+    name: non-default test legs (Layer C1bnl, shard ${{ matrix.shard }}/6)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
@@ -3108,9 +3113,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5]
     env:
-      WZ_LEGS_SHARDS: "4"
+      WZ_LEGS_SHARDS: "6"
       WZ_LEGS_SHARD: ${{ matrix.shard }}
     steps:
       - name: Budget stamp — start this job's own clock

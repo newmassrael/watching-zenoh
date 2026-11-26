@@ -48,10 +48,10 @@
 //!   - It also does NOT prove the y219b joined-secondary DELIVERY fix. B's
 //!     `received mesh data` witness is the `data_seen` counter, incremented UPSTREAM of
 //!     the `faces.get(inbound)=None` drop gate y219b fixed
-//!     (`linkstate_forward::forward_push` / `dispatch_local_subscribers`), so it fires
-//!     whether or not the joined->primary resolution is present. The deterministic y219b
-//!     guard is the library unit test
-//!     `joined_link_inbound_delivers_to_primary_face_local_subscriber_after_register_joined`.
+//!     (the forwarder's inbound face resolution, `router_forward.rs`), so it fires
+//!     whether or not the joined->primary resolution is present. The deterministic
+//!     guard of that resolution is the library unit test
+//!     `a_put_on_a_joined_link_is_routed_as_the_primary_faces` (`joined_link_tests.rs`).
 //!   - This 2-peer topology is single-hop, so it does not exercise TRANSIT band
 //!     preservation. As of R311y221 a mesh/linkstate-peer relay DOES preserve the
 //!     received band on re-forward (`forward_push` threads `FramePayload.priority`

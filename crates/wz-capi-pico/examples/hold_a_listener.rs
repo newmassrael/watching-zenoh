@@ -25,6 +25,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::io::BufRead;
 use std::time::Duration;
 
+use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::liveliness::{
     z_liveliness_declare_subscriber, z_liveliness_declare_token, z_liveliness_token_drop,
     z_liveliness_token_move, z_owned_liveliness_token_t,
@@ -205,6 +206,20 @@ fn main() {
             ),
             Z_OK
         );
+        // A session opens its tables at what one of zenoh-pico's own programs holds, and this node
+        // holds more. The subscriber and the queryable declare the part of their key before its
+        // first wild chunk (`demo`, `demo/listener`), the token and the liveliness subscriber their
+        // whole key (`demo/listener/alive`, `demo/**`), as pico's doors do, and a `token` line
+        // declares a fifth, a token held beside the first. A count past what the build reserves is
+        // refused here.
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                ZEXT_CONFIG_LIMITS_KEY,
+                c"MAX_DECLARED_KEYEXPRS=5,MAX_LOCAL_TOKENS=2".as_ptr()
+            ),
+            Z_OK
+        );
         let mut session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(
             z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
@@ -290,8 +305,13 @@ fn main() {
                     if let Some(key) = line.strip_prefix("get ") {
                         get(&session, key);
                     } else if let Some(key) = line.strip_prefix("token ") {
-                        if let Some(token) = declare_token(&session, key) {
-                            held.insert(key.to_owned(), token);
+                        // A refusal is told on the error stream, which a test inherits, so a
+                        // token that never arrives is read there and not only as a timeout.
+                        match declare_token(&session, key) {
+                            Some(token) => {
+                                held.insert(key.to_owned(), token);
+                            }
+                            None => eprintln!("hold_a_listener: the token on {key} was refused"),
                         }
                     } else if let Some(key) = line.strip_prefix("untoken ") {
                         if let Some(mut token) = held.remove(key) {

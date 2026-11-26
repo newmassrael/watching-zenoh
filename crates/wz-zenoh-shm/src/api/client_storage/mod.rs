@@ -156,6 +156,15 @@ impl ShmClientStorage {
         self.clients.get_clients().keys().copied().collect()
     }
 
+    /// The client this storage reads `protocol` through, if it holds one. Upstream keeps the
+    /// clients to itself; the C ABI of this repository reads a storage it built back through
+    /// this, so it is hidden from the documentation for the reason
+    /// `ShmBufInner::release_reference` is.
+    #[doc(hidden)]
+    pub fn client(&self, protocol: ProtocolID) -> Option<&Arc<dyn ShmClient>> {
+        self.clients.get_clients().get(&protocol)
+    }
+
     fn new(clients: BTreeMap<ProtocolID, Arc<dyn ShmClient>>) -> Self {
         Self {
             clients: ClientStorage::new(clients),

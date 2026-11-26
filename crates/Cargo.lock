@@ -4533,6 +4533,8 @@ dependencies = [
  "wz-tls-pem",
  "wz-volume-abi",
  "x509-parser",
+ "zenoh-result",
+ "zenoh-shm",
  "zeroize",
 ]
 

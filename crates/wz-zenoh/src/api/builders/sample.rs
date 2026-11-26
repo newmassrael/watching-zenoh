@@ -13,9 +13,7 @@
 //
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 // Modified by newmassrael in 2026 for watching-zenoh. Derived from zenoh 1.10.2, file
-// src/api/builders/sample.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2). The two
-// `internal` conversions of a publication builder into a `Sample` are not here: they name the
-// publisher, and join it in slice Z2 of docs/zenoh-api-on-the-engine.md.
+// src/api/builders/sample.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 use std::marker::PhantomData;
 
 use uhlc::Timestamp;
@@ -26,6 +24,11 @@ use zenoh_protocol::core::Reliability;
 
 #[cfg(feature = "unstable")]
 use crate::api::timestamp_stack::{TimestampInstrumentation, TimestampStack};
+#[cfg(feature = "internal")]
+use crate::api::{
+    builders::publisher::{PublicationBuilder, PublicationBuilderDelete, PublicationBuilderPut},
+    publisher::Publisher,
+};
 use crate::api::{
     bytes::{OptionZBytes, ZBytes},
     encoding::Encoding,
@@ -348,5 +351,60 @@ impl TryFrom<Sample> for SampleBuilder<SampleBuilderDelete> {
 impl<T> From<SampleBuilder<T>> for Sample {
     fn from(sample_builder: SampleBuilder<T>) -> Self {
         sample_builder.sample
+    }
+}
+
+#[zenoh_macros::internal]
+impl From<&PublicationBuilder<&Publisher<'_>, PublicationBuilderPut>> for Sample {
+    fn from(builder: &PublicationBuilder<&Publisher<'_>, PublicationBuilderPut>) -> Self {
+        Sample {
+            key_expr: builder.publisher.key_expr.clone().into_owned(),
+            payload: builder.kind.payload.clone(),
+            kind: SampleKind::Put,
+            encoding: builder.kind.encoding.clone(),
+            timestamp: builder.timestamp,
+            qos: QoSBuilder::from(QoS::default())
+                .congestion_control(builder.publisher.congestion_control)
+                .priority(builder.publisher.priority)
+                .express(builder.publisher.is_express)
+                .into(),
+            #[cfg(feature = "unstable")]
+            reliability: builder.publisher.reliability,
+            #[cfg(feature = "unstable")]
+            source_info: builder.source_info.clone(),
+            attachment: builder.attachment.clone(),
+            #[cfg(feature = "unstable")]
+            timestamp_stack: None,
+        }
+    }
+}
+
+/// The sample a delete through a publisher stands for, as upstream makes it: an empty payload of
+/// kind `SampleKind::Put`, as upstream writes it (`src/api/builders/sample.rs` @
+/// `impl From<&PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete>> for Sample {`), so a
+/// cache an ecosystem crate keeps of a publisher's operations holds the same sample over this crate
+/// as over upstream's.
+#[zenoh_macros::internal]
+impl From<&PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete>> for Sample {
+    fn from(builder: &PublicationBuilder<&Publisher<'_>, PublicationBuilderDelete>) -> Self {
+        Sample {
+            key_expr: builder.publisher.key_expr.clone().into_owned(),
+            payload: ZBytes::new(),
+            kind: SampleKind::Put,
+            encoding: Encoding::ZENOH_BYTES,
+            timestamp: builder.timestamp,
+            qos: QoSBuilder::from(QoS::default())
+                .congestion_control(builder.publisher.congestion_control)
+                .priority(builder.publisher.priority)
+                .express(builder.publisher.is_express)
+                .into(),
+            #[cfg(feature = "unstable")]
+            reliability: builder.publisher.reliability,
+            #[cfg(feature = "unstable")]
+            source_info: builder.source_info.clone(),
+            attachment: builder.attachment.clone(),
+            #[cfg(feature = "unstable")]
+            timestamp_stack: None,
+        }
     }
 }

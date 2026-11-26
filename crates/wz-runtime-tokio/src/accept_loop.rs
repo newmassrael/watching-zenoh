@@ -340,7 +340,7 @@ pub struct Face {
 pub enum DialIntentOrigin {
     /// A peer learned off a link-state / gossip flood — zenoh
     /// `zenoh/src/net/protocol/gossip.rs` @ `fn add_node`, wz
-    /// `linkstate_forward`'s discovery emit.
+    /// `RouterForwarder`'s discovery emit (`emit_dial_intents`).
     Gossip,
     /// A node that answered this one's multicast Scout with a Hello — zenoh
     /// `Runtime::autoconnect_all`, wz `scouting_autoconnect`.
@@ -930,8 +930,8 @@ pub trait FaceForwarder {
     /// How often the loop should call [`tick`](Self::tick), or `None` (the
     /// default) to never tick. The extension point for a forwarder with a
     /// time-driven obligation: it returns `Some(period)` and the loop arms a timer.
-    /// The linkstate peer returns `Some` — it COALESCES its spanning-tree
-    /// recomputes on this cadence (D2c, `linkstate_forward.rs`), debouncing a burst
+    /// The router forwarder returns `Some` — it COALESCES its per-net spanning-tree
+    /// recomputes on this cadence (D2c, `router_forward.rs`), debouncing a burst
     /// of topology changes into one compute. The accept-only / hold-only forwarders
     /// have no time-driven work, so they keep the `None` default and the loop arms
     /// no timer. Read ONCE when the loop starts (a fixed cadence, not a per-tick

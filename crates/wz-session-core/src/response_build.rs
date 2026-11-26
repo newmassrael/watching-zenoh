@@ -270,9 +270,8 @@ fn response_naming(
 /// (`net/routing/dispatcher/queries.rs:312-330`). Unlike the literal / aliased
 /// Err builders this carries NO keyexpr (id=0, no suffix, N flag clear): a
 /// timeout reply has no resource to name, only the request_id it closes and the
-/// error payload. The relay's tick sweep
-/// (`linkstate_forward.rs::reap_timed_out_queries`) emits this ahead of the
-/// closing `ResponseFinal`, so the querier sees an explicit timeout error rather
+/// error payload. The relay's tick sweep (`reap_timed_out_queries`, wz-runtime-tokio
+/// `router_forward.rs`) emits this ahead of the closing `ResponseFinal`, so the querier sees an explicit timeout error rather
 /// than a silent empty result.
 ///
 /// FIDELITY (honest): the EMPTY keyexpr matches zenoh's `WireExpr::empty()`

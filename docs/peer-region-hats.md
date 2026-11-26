@@ -11,8 +11,8 @@ A node with a custom `gateway/south` partition holds several hats: the pin
 builds client, peer and router hats per subregion for every node mode
 (`zenoh/src/net/routing/gateway.rs` @ `GatewaySouthConf::Custom(subregions) => {`).
 A router in wz does this today. A peer does not, because wz's peer plane,
-`LinkstateForwarder` (`crates/wz-runtime-tokio/src/linkstate_forward.rs`,
-about 20,000 lines), is one net and one region. `--gateway-south` is therefore
+`LinkstateForwarder` (about 20,000 lines in the runtime crate, retired at
+step 7c-2), is one net and one region. `--gateway-south` is therefore
 refused on every run mode but `--router-hat`, and the config key stays
 unhonoured.
 
@@ -701,18 +701,26 @@ stated delivery counts; every departure the comparison allowed is stated with it
 line in section 14. Nothing outside the test modules changed.
 
 **7c-2, landed: the type is gone.** `LinkstateForwarder` (about 20,000 lines with 238 tests) is
-deleted; `linkstate_forward.rs` keeps the route cores, the graph handle and the deploy-facing
-re-exports and is gated on `routing-router-hat`. What the type did that the region-hat peer did
+deleted; its module keeps the route cores, the graph handle and the deploy-facing re-exports
+and is gated on `routing-router-hat`. What the type did that the region-hat peer did
 not is moved, each with the tests it had: a frame on a joined multilink link is routed as the
 primary face's and its shared-memory slices are acknowledged to the link's own peer
 (`joined_link_tests.rs`); an Interest with no keyexpr is answered with the whole token table;
 the five `WzConfig`-drives-the-forwarder tests; and the interest broker (section 13).
 `routing-peer` alone is no longer a configuration of the runtime crate that stands by itself,
 since the peer node is the router hat's forwarder, so the lanes that built it build
-`routing-router-hat`. The module keeps its name, which was decided afterwards and not only deferred: the
-cores it holds are still forwarding over a link-state net, and
-`wz::runtime_tokio::linkstate_forward::{..}` is the path a deploy builds its policy and
-configuration from, so a rename would move a public path for a word.
+`routing-router-hat`.
+
+**7c-3, landed: the module is split.** 7c-2 left two concerns under the name of the forwarder
+that had gone: the route cores, the graph handle and the helpers the forwarder reads, which
+nothing outside the runtime crate names, and the types a deploy states its routing policy and
+configuration in, which are public. They are now two modules, both gated on
+`routing-router-hat`: `linkstate_routes.rs`, crate-private, whose graph view is public as
+`router_forward::LinkstateNetView`; and `routing_policy.rs`, the deploy's path
+(`wz::runtime_tokio::routing_policy::{AutoConnect, TransportWeight, AclPolicy, ..}`). The public
+path moved with no alias and every user in the workspace moved with it: wz has no consumer
+outside this repository, and a structure that names each half for what it is outweighs the cost
+of moving a path.
 
 **7c: retirement.** `LinkstateForwarder` goes with the tests that only it carries; what
 the router also uses (`NetHandle`, the route cores, `QueryFan`) stays where it is. The

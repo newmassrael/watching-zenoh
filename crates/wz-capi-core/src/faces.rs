@@ -521,6 +521,24 @@ enum Reserved<H> {
     NoRoom,
     /// The face takes no part in this publish: its link is down or it was never told the key.
     Absent,
+    /// The leg refused the publish for a reason every leg would meet (a payload or key its codec
+    /// cannot carry), found while it built the message it reserves for: the publish ends with the
+    /// error, and nothing is sent. Only a group builds its message before it reserves.
+    #[cfg(feature = "multicast-transport")]
+    Refused,
+}
+
+impl<H> Reserved<H> {
+    /// The same answer, with what `f` makes of the reservation when one is held.
+    fn map<K>(self, f: impl FnOnce(H) -> K) -> Reserved<K> {
+        match self {
+            Reserved::Held(reservation) => Reserved::Held(f(reservation)),
+            Reserved::NoRoom => Reserved::NoRoom,
+            Reserved::Absent => Reserved::Absent,
+            #[cfg(feature = "multicast-transport")]
+            Reserved::Refused => Reserved::Refused,
+        }
+    }
 }
 
 impl Reserved<WireReservation> {
@@ -535,6 +553,78 @@ impl Reserved<WireReservation> {
             // per-face; no frame has been built that a codec could refuse.
             Err(_) => Reserved::Absent,
         }
+    }
+}
+
+#[cfg(feature = "multicast-transport")]
+impl Reserved<wz_runtime_tokio::session::GroupReservation> {
+    /// What a group's answer to `Session::reserve_on_group` means to the fan-out: a promise, no
+    /// room, a group that takes no part (it has no link, or its namespace cannot carry the key),
+    /// which is per group as a link that is down is, or a refusal of the message every leg would
+    /// meet, which a group finds before it reserves because it builds the message first.
+    fn of_group(result: Result<wz_runtime_tokio::session::GroupRoom, PublishError>) -> Self {
+        use wz_runtime_tokio::session::GroupRoom;
+        match result {
+            Ok(GroupRoom::Granted(reservation)) => Reserved::Held(reservation),
+            Ok(GroupRoom::NoRoom) => Reserved::NoRoom,
+            Err(PublishError::TransportUnavailable) => Reserved::Absent,
+            Err(_) => Reserved::Refused,
+        }
+    }
+}
+
+/// What one leg of a publish that reaches all of its links or none holds between its two phases:
+/// a face's reservation, or a group's.
+enum AtomicHold {
+    Face(WireReservation),
+    #[cfg(feature = "multicast-transport")]
+    Group(wz_runtime_tokio::session::GroupReservation),
+}
+
+/// The multicast groups of a publish that reaches all of its links or none: each is a leg of its
+/// two phases after the faces, promised the room of every datagram of the publish as a face is,
+/// and sent to under that room.
+#[cfg(feature = "multicast-transport")]
+struct AtomicGroups<'a> {
+    groups: &'a [multicast::McastLeg],
+    /// The literal the publish names its key by on a group.
+    literal: std::borrow::Cow<'a, str>,
+    /// The declaration a group told the session's keyexprs is sent instead of the literal.
+    declared: Option<wz_runtime_tokio::session::GroupKey<'a>>,
+    bytes: &'a [u8],
+}
+
+#[cfg(feature = "multicast-transport")]
+impl AtomicGroups<'_> {
+    fn legs(&self) -> usize {
+        self.groups.len()
+    }
+
+    /// Phase one on group `group`: the room of every datagram of the publish, promised at once.
+    fn reserve(
+        &self,
+        group: usize,
+        remote: &PublishOptions,
+    ) -> Reserved<wz_runtime_tokio::session::GroupReservation> {
+        let group = &self.groups[group];
+        let name = self
+            .declared
+            .filter(|_| group.declarations.declares_keyexprs());
+        Reserved::of_group(
+            group
+                .session
+                .reserve_on_group(&self.literal, name, self.bytes, remote),
+        )
+    }
+
+    /// Phase two on group `group`: the publish pushed under the room phase one promised it.
+    fn send(&self, group: usize, reservation: wz_runtime_tokio::session::GroupReservation) -> Leg {
+        Leg::of_probe(
+            self.groups[group]
+                .session
+                .publish_on_group_reserved(reservation)
+                .map(|()| WireProbe::Queued),
+        )
     }
 }
 
@@ -677,7 +767,8 @@ fn pause_between_passes(delay_ms: u16) {
 
 /// A publish that reaches all of its `faces` faces or none, in two phases. `reserve(face)` asks
 /// one face to promise room for the frame without waiting, `send(face, reservation)` sends the
-/// frame under the promise, and `wait(ms)` waits between passes. The answer is `Some(delivered)`
+/// frame under the promise, and `wait(ms)` waits between passes. A multicast group is a face here
+/// as any other: the caller numbers its groups after its faces. The answer is `Some(delivered)`
 /// when the frame was sent (the total of what `send` reported), and `None` when it was sent to
 /// no face, which is also what the caller must not follow with a delivery of its own.
 ///
@@ -694,7 +785,9 @@ fn pause_between_passes(delay_ms: u16) {
 ///
 /// A face that refuses in phase two for a reason every face would meet ends the publish with the
 /// error. It is the first face in practice, since the faces are sent the same payload, and the
-/// reservations not yet used are given back as it ends.
+/// reservations not yet used are given back as it ends. One that refuses in phase one
+/// (`Reserved::Refused`, a group's) ends it there, before anything is sent, with every reservation taken
+/// given back.
 fn atomic_passes<H>(
     retry: Option<AdmissionRetry>,
     faces: usize,
@@ -717,6 +810,9 @@ fn atomic_passes<H>(
                     asked.push(LegRoom::NoRoom);
                     break;
                 }
+                // Dropping what is held gives its room back as the publish ends.
+                #[cfg(feature = "multicast-transport")]
+                Reserved::Refused => return Err(FanoutError::ExceedsCapacity),
             }
         }
         match decide(&asked) {
@@ -2577,24 +2673,25 @@ pub struct SharedSession {
     next_ticker_id: std::sync::atomic::AtomicU64,
 }
 
-/// R3065 -- the shared-memory reader's clients a session is opened over: a set the node's
-/// storage resolved into, or `None` for the default reader (POSIX alone), which every session
-/// had before the C ABI could be given one. Without the SHM feature there is no reader to
-/// configure and the type is a unit struct that carries nothing.
+/// R3065 -- the shared-memory reader a session is opened over: a client storage of the node's,
+/// or `None` for the reader of the process (its global storage, which holds the default client
+/// set), which every session had before the C ABI could be given one. Without the SHM feature
+/// there is no reader to configure and the type is a unit struct that carries nothing.
 #[cfg(feature = "transport-shm")]
 pub type OpenShmClients = Option<ShmReader>;
 
 /// How a session reads a shared-memory descriptor it was sent, when its host chose.
 ///
-/// The engine's reader maps a chunk through the clients of a set, one for each protocol, and
-/// hands the application a view of the page. A host whose application holds its own types for a
-/// chunk of shared memory (the Rust API's `ZShm`) needs the reader to hand it THOSE, so it
-/// supplies the resolver itself and keeps what a chunk is to itself.
+/// The reader is the process's one (`wz_runtime_tokio::shm_reader`): `zenoh-shm`'s, over a
+/// client storage, which maps a chunk through the client of its protocol and hands the
+/// application a view of the page that is the buffer itself. A host may still make the resolver
+/// of each session itself, when what it hands its sessions is not the storage the session
+/// advertises.
 #[cfg(feature = "transport-shm")]
 #[derive(Clone)]
 pub enum ShmReader {
-    /// The reader is the engine's, over this set of clients.
-    Clients(Arc<wz_runtime_tokio::shm_clients::ShmClientSet>),
+    /// The reader is the process's, over this storage of clients.
+    Clients(Arc<wz_runtime_tokio::shm_reader::ShmClientStorage>),
     /// The reader is the host's: this makes one for each session. The protocols the session
     /// offers are the default (POSIX alone), so a resolver of this kind reads POSIX chunks.
     Host(
@@ -2821,7 +2918,7 @@ impl SessionResources {
 }
 
 /// Give `session` the node's shared-memory reader when it has one of its own; without one the
-/// session keeps the default POSIX reader every session is built with.
+/// session keeps the reader of the process every session is built with.
 #[cfg(feature = "transport-shm")]
 fn install_shm_reader(session: &TokioSession, clients: &OpenShmClients) {
     if let Some(resolver) = shm_resolver_of(clients) {
@@ -2836,8 +2933,8 @@ fn shm_resolver_of(
     clients: &OpenShmClients,
 ) -> Option<Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync>> {
     match clients {
-        Some(ShmReader::Clients(clients)) => Some(Box::new(
-            wz_runtime_tokio::shm_clients::ShmClientResolver::new(Arc::clone(clients)),
+        Some(ShmReader::Clients(storage)) => Some(Box::new(
+            wz_runtime_tokio::shm_reader::ShmReaderResolver::new(Arc::clone(storage)),
         )),
         Some(ShmReader::Host(make)) => Some(make()),
         None => None,
@@ -2849,15 +2946,15 @@ fn shm_resolver_of(
 fn install_shm_reader(_session: &TokioSession, _clients: &OpenShmClients) {}
 
 /// The reader a router node's own session reads a descriptor with: the one it was opened over,
-/// as each session of a registry reads with its own ([`install_shm_reader`]), and the default
-/// POSIX reader a session is built with when it was opened over none. A node holds no session of
+/// as each session of a registry reads with its own ([`install_shm_reader`]), and the reader of
+/// the process a session is built with when it was opened over none. A node holds no session of
 /// its own to keep a default in, so the default is named here.
 #[cfg(all(feature = "transport-shm", feature = "router-node"))]
 pub(crate) fn node_shm_resolver(
     clients: &OpenShmClients,
 ) -> Box<dyn wz_session_core::extshm::ShmResolver + Send + Sync> {
     shm_resolver_of(clients)
-        .unwrap_or_else(|| Box::new(wz_runtime_tokio::shm_provider::PosixShmResolver))
+        .unwrap_or_else(|| Box::new(wz_runtime_tokio::shm_reader::ShmReaderResolver::global()))
 }
 
 impl SharedSession {
@@ -4607,10 +4704,12 @@ impl SharedSession {
     /// the payload themselves, which is why they take none. `None` for a publish that has no such
     /// legs (shared memory), which then sends as `remote_leg` does whatever its options say.
     ///
-    /// A publish that reaches all of its faces or none delivers to the multicast groups and to
-    /// the session's own subscribers only when every face promised room: when one had none the
-    /// publish ends here with nothing delivered anywhere (`Ok(0)`, which is also how a publish
-    /// that no subscriber matched ends).
+    /// A publish that reaches all of its faces or none takes its multicast groups into the same
+    /// two phases as its faces: every group is promised the room of every datagram of the publish
+    /// along with the faces, and the groups and the session's own subscribers are delivered to only
+    /// when every face and every group promised room. When one had none the publish ends here with
+    /// nothing delivered anywhere (`Ok(0)`, which is also how a publish that no subscriber matched
+    /// ends).
     fn fan_out_with<P, R, L>(
         &self,
         opts: &PublishOptions,
@@ -4671,18 +4770,50 @@ impl SharedSession {
             match (opts.atomic_tx, opts.admission_retry, wire) {
                 (true, retry, Some(wire)) => {
                     let selected = selected();
+                    let faces = selected.len();
+                    // The groups are legs of the same two phases, numbered after the faces. A
+                    // multicast group is a link no slot names, so a publish limited to some links
+                    // reaches no group.
+                    #[cfg(feature = "multicast-transport")]
+                    let groups = if WIRE_LEGS_IN_BUILD && !opts.links.is_restricted() {
+                        self.atomic_groups(&targets, key, payload.leg_bytes())
+                    } else {
+                        None
+                    };
+                    #[cfg(feature = "multicast-transport")]
+                    let group_legs = groups.as_ref().map_or(0, AtomicGroups::legs);
+                    #[cfg(not(feature = "multicast-transport"))]
+                    let group_legs = 0;
                     match atomic_passes(
                         retry,
-                        selected.len(),
-                        |face| (wire.reserve)(selected[face], &remote),
-                        |face, reservation| {
-                            (wire.reserved)(selected[face], remote.clone(), reservation)
+                        faces + group_legs,
+                        |leg| {
+                            if leg < faces {
+                                return (wire.reserve)(selected[leg], &remote)
+                                    .map(AtomicHold::Face);
+                            }
+                            #[cfg(feature = "multicast-transport")]
+                            if let Some(groups) = groups.as_ref() {
+                                return groups.reserve(leg - faces, &remote).map(AtomicHold::Group);
+                            }
+                            Reserved::Absent
+                        },
+                        |leg, hold| match hold {
+                            AtomicHold::Face(reservation) => {
+                                (wire.reserved)(selected[leg], remote.clone(), reservation)
+                            }
+                            #[cfg(feature = "multicast-transport")]
+                            AtomicHold::Group(reservation) => {
+                                groups.as_ref().map_or(Leg::Skipped, |groups| {
+                                    groups.send(leg - faces, reservation)
+                                })
+                            }
                         },
                         pause_between_passes,
                     )? {
                         Some(sent) => delivered += sent,
-                        // Nothing was sent to any face, so nothing is delivered to a group or to
-                        // a subscriber of this session either.
+                        // Nothing was sent to any face or group, so nothing is delivered to a
+                        // subscriber of this session either.
                         None => return Ok(0),
                     }
                 }
@@ -4727,8 +4858,10 @@ impl SharedSession {
                     }
                 }
             }
-            // A multicast group is a link no slot names, so a limited publisher skips it.
-            if !opts.links.is_restricted() {
+            // A multicast group is a link no slot names, so a limited publisher skips it. A
+            // publish that reaches all of its links or none was sent to its groups in its own
+            // second phase.
+            if !opts.links.is_restricted() && !opts.atomic_tx {
                 delivered += self.group_fan(&targets, &remote, key, &payload)?;
             }
         }
@@ -4762,6 +4895,63 @@ impl SharedSession {
         self.lock().fan_targets()
     }
 
+    /// What a group leg names a publish's key by: the literal, with an alias resolved to it
+    /// through the local plane, which holds every declaration this session made
+    /// ([`Self::declare_keyexpr`]), and the declaration a group told the session's keyexprs is
+    /// sent instead. `None` for an alias the plane does not know, which no face was told of
+    /// either.
+    #[cfg(feature = "multicast-transport")]
+    fn group_naming<'k>(
+        &self,
+        key: PutKey<'k>,
+    ) -> Option<(
+        std::borrow::Cow<'k, str>,
+        Option<wz_runtime_tokio::session::GroupKey<'k>>,
+    )> {
+        let literal = match key {
+            PutKey::Literal(literal) | PutKey::Declared { literal, .. } => {
+                std::borrow::Cow::Borrowed(literal)
+            }
+            PutKey::Alias { mapping_id, suffix } => {
+                let mut literal = self.local.actions().resolve_outbound_mapping(mapping_id)?;
+                if let Some(suffix) = suffix {
+                    literal.push_str(suffix);
+                }
+                std::borrow::Cow::Owned(literal)
+            }
+        };
+        let declared = match key {
+            PutKey::Alias { mapping_id, suffix }
+            | PutKey::Declared {
+                mapping_id, suffix, ..
+            } => Some(wz_runtime_tokio::session::GroupKey { mapping_id, suffix }),
+            PutKey::Literal(_) => None,
+        };
+        Some((literal, declared))
+    }
+
+    /// The groups of a publish that reaches all of its links or none, as legs of its two phases:
+    /// `None` when there is no group, or when the key is an alias no group can be sent
+    /// ([`Self::group_naming`]), as [`Self::group_fan`] sends such a publish to no group.
+    #[cfg(feature = "multicast-transport")]
+    fn atomic_groups<'a>(
+        &self,
+        targets: &'a FanTargets,
+        key: PutKey<'a>,
+        bytes: &'a [u8],
+    ) -> Option<AtomicGroups<'a>> {
+        if targets.groups.is_empty() {
+            return None;
+        }
+        let (literal, declared) = self.group_naming(key)?;
+        Some(AtomicGroups {
+            groups: targets.groups.as_slice(),
+            literal,
+            declared,
+            bytes,
+        })
+    }
+
     /// The group legs of a publish (open-debt item 913): ONE send per group reaches every
     /// member. A group told the session's keyexprs
     /// ([`crate::drive::GroupDeclarations::declares_keyexprs`]) is sent an alias as the alias,
@@ -4783,27 +4973,8 @@ impl SharedSession {
         if targets.groups.is_empty() {
             return Ok(0);
         }
-        let literal = match key {
-            PutKey::Literal(literal) | PutKey::Declared { literal, .. } => {
-                std::borrow::Cow::Borrowed(literal)
-            }
-            PutKey::Alias { mapping_id, suffix } => {
-                let Some(mut literal) = self.local.actions().resolve_outbound_mapping(mapping_id)
-                else {
-                    return Ok(0);
-                };
-                if let Some(suffix) = suffix {
-                    literal.push_str(suffix);
-                }
-                std::borrow::Cow::Owned(literal)
-            }
-        };
-        let declared = match key {
-            PutKey::Alias { mapping_id, suffix }
-            | PutKey::Declared {
-                mapping_id, suffix, ..
-            } => Some(wz_runtime_tokio::session::GroupKey { mapping_id, suffix }),
-            PutKey::Literal(_) => None,
+        let Some((literal, declared)) = self.group_naming(key) else {
+            return Ok(0);
         };
         let mut delivered = 0usize;
         for group in targets.groups.iter() {
@@ -10351,6 +10522,46 @@ mod face_up_order_tests {
         );
     }
 
+    /// A leg that refuses the publish while it reserves (a group, which builds its message before
+    /// it asks for room) ends the publish with the refusal every leg would meet: nothing is sent
+    /// to any leg, the legs after it are not asked, and every promise taken is given back. Turned
+    /// red by a first phase that reads the refusal as a leg taking no part, which commits and
+    /// sends to the others.
+    #[test]
+    fn an_atomic_publish_with_a_leg_refused_while_it_reserves_sends_to_none() {
+        let lanes = Lanes::new(&[1, 1, 1]);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let sent = std::cell::Cell::new(0usize);
+        let answer = atomic_passes(
+            None,
+            3,
+            |leg| {
+                asked.borrow_mut().push(leg);
+                if leg == 1 {
+                    Reserved::Refused
+                } else {
+                    lanes.reserve(leg)
+                }
+            },
+            |_, reservation| {
+                drop(reservation);
+                sent.set(sent.get() + 1);
+                Leg::Delivered(0)
+            },
+            |_| {},
+        );
+        assert_eq!(answer, Err(FanoutError::ExceedsCapacity));
+        assert_eq!(
+            asked.into_inner(),
+            vec![0, 1],
+            "the leg after the refusal was not asked"
+        );
+        assert_eq!(sent.get(), 0, "nothing was sent");
+        for leg in 0..3 {
+            assert_eq!(lanes.free(leg), 1, "leg {leg}: nothing stays promised");
+        }
+    }
+
     /// A promise that is held cannot be taken by another sender: while the publish holds face 0's
     /// only frame of room, a second ask of that lane finds none, and it is the same lane the send
     /// then uses.
@@ -10715,6 +10926,27 @@ mod face_up_order_tests {
         assert!(matches!(
             Reserved::of_reserve(Err(PublishError::ExceedsCapacity)),
             Reserved::Absent
+        ));
+    }
+
+    /// What a group's answer to a reservation means to the fan-out: no room is its own outcome,
+    /// a group with no link takes no part, and a message its codec refuses, which a group finds
+    /// before it asks for room, ends the publish as it would on every leg.
+    #[cfg(feature = "multicast-transport")]
+    #[test]
+    fn a_group_reservation_without_a_promise_is_classified() {
+        use wz_runtime_tokio::session::GroupRoom;
+        assert!(matches!(
+            Reserved::of_group(Ok(GroupRoom::NoRoom)),
+            Reserved::NoRoom
+        ));
+        assert!(matches!(
+            Reserved::of_group(Err(PublishError::TransportUnavailable)),
+            Reserved::Absent
+        ));
+        assert!(matches!(
+            Reserved::of_group(Err(PublishError::ExceedsCapacity)),
+            Reserved::Refused
         ));
     }
 
@@ -12118,6 +12350,234 @@ mod send_deferral_tests {
             ),
             (1, 1),
             "once the group has room, the group and the face are each told of the subscriber"
+        );
+    }
+
+    /// The parameters of a group of batch `batch_size` whose lane holds sixteen batches and
+    /// whose puts wait a millisecond for room at most: a put that asked a lane held full is a
+    /// congestion drop at once, and does not wait the test out.
+    #[cfg(feature = "multicast-transport")]
+    fn prompt_group(batch_size: u16) -> wz_session_core::multicast_params::MulticastParams {
+        let patient = patient_group();
+        wz_session_core::multicast_params::MulticastParams {
+            batch_size,
+            tx_queue: wz_session_core::session_init_params::TxQueueConf {
+                sizes: [16; Priority::NUM],
+                wait_before_drop_us: 1_000,
+                wait_before_close_us: 1_000,
+                ..patient.tx_queue
+            },
+            ..patient
+        }
+    }
+
+    /// How many Puts the face was sent since `before`.
+    #[cfg(feature = "multicast-transport")]
+    fn pushes_since(pair: &EstablishedPair, before: usize) -> usize {
+        let mut pushes = 0;
+        for (bytes, _) in pair.resp_driver.snapshot().sends.iter().skip(before) {
+            let Ok(InboundFrame::Frame { payload, .. }) = pair.init_actions.handle_inbound(bytes)
+            else {
+                continue;
+            };
+            pushes += parse_frame_payload(&payload)
+                .expect("the frame decodes")
+                .iter()
+                .filter(|message| matches!(message, NetworkMessage::Push(_)))
+                .count();
+        }
+        pushes
+    }
+
+    /// The Puts the group's tap holds, a fragment chain joined and counted once it is whole,
+    /// and how many datagrams carried them.
+    #[cfg(feature = "multicast-transport")]
+    fn pushes_on(tap: &mut wz_runtime_tokio::multicast_glue::MulticastTxTap) -> (usize, usize) {
+        let (mut pushes, mut datagrams) = (0, 0);
+        let mut chain = Vec::new();
+        let count = |messages: &[NetworkMessage]| {
+            messages
+                .iter()
+                .filter(|message| matches!(message, NetworkMessage::Push(_)))
+                .count()
+        };
+        while let Some(datagram) = tap.try_next() {
+            datagrams += 1;
+            match wz_session_core::inbound::parse_inbound(&datagram) {
+                Ok(InboundFrame::Frame { payload, .. }) => {
+                    pushes += count(&parse_frame_payload(&payload).expect("the frame decodes"));
+                }
+                Ok(InboundFrame::Fragment { payload, more, .. }) => {
+                    chain.extend_from_slice(&payload);
+                    if !more {
+                        let joined =
+                            wz_session_core::network_message::parse_reassembled_payload_best_effort(
+                                &chain,
+                            );
+                        pushes += count(&joined.messages);
+                        chain.clear();
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            chain.is_empty(),
+            "no chain was left without its last fragment"
+        );
+        (pushes, datagrams)
+    }
+
+    /// A session with one face and one group over a tap of `params`, the group told nothing, and
+    /// what keeps the group up.
+    #[cfg(feature = "multicast-transport")]
+    struct FaceAndGroup {
+        shared: SharedSession,
+        face: EstablishedPair,
+        tap: wz_runtime_tokio::multicast_glue::MulticastTxTap,
+        _group: wz_runtime_tokio::session::TokioMulticastSession,
+        _membership: wz_runtime_tokio::multicast_glue::McastGroupMembership,
+        _revised: Arc<Notify>,
+        #[cfg(feature = "resource-snapshot")]
+        _messages: Arc<wz_session_core::interval_meter::BuildIntervalMeter>,
+    }
+
+    #[cfg(feature = "multicast-transport")]
+    async fn face_and_group(
+        params: &wz_session_core::multicast_params::MulticastParams,
+    ) -> FaceAndGroup {
+        use wz_runtime_tokio::multicast_glue::{McastGroupMembership, MulticastTxTap};
+        let face = establish_capability_pair_between(0x05, 0x06, false, false, |_| {}).await;
+        let shared = SharedSession::new(
+            TokioTime::new(),
+            [0x11; 16].into(),
+            SessionPolicy::defaults(),
+        )
+        .expect("test host entropy");
+        assert!(shared.face_up(LISTENER_FACE_STRIDE + 1, &face.resp_actions, false));
+        let (producer, tap) = MulticastTxTap::attach(params);
+        let membership = McastGroupMembership::new();
+        let group = shared.new_mcast_face_session(producer.clone(), &membership, false);
+        let revised = Arc::new(Notify::new());
+        #[cfg(feature = "resource-snapshot")]
+        let messages = Arc::new(wz_session_core::interval_meter::BuildIntervalMeter::new());
+        shared.mcast_face_up(
+            LISTENER_FACE_STRIDE + 2,
+            McastFaceParts {
+                session: &group,
+                revised: &revised,
+                membership: &membership,
+                producer: &producer,
+                endpoint: "udp/224.0.0.224:7447",
+                is_shm: false,
+                declarations: crate::drive::GroupDeclarations::None,
+                #[cfg(feature = "resource-snapshot")]
+                messages: &messages,
+            },
+        );
+        FaceAndGroup {
+            shared,
+            face,
+            tap,
+            _group: group,
+            _membership: membership,
+            _revised: revised,
+            #[cfg(feature = "resource-snapshot")]
+            _messages: messages,
+        }
+    }
+
+    /// A publish that reaches all of its links or none, on a group whose lane is held full, is
+    /// sent to no face and to no group: the group is asked for room in the same first phase as
+    /// the face, and its lack of room ends the publish before anything is sent. Once the lane is
+    /// let go the same publish reaches both. Turned red by a first phase that asks only the faces,
+    /// which sends the face its frame and then offers the group one it has no room for.
+    #[cfg(feature = "multicast-transport")]
+    #[tokio::test]
+    async fn an_atomic_publish_that_cannot_reserve_on_a_group_sends_to_no_face_and_no_group() {
+        let mut up = face_and_group(&prompt_group(2_048)).await;
+        let stated = PublishOptions::put().with_atomic_tx();
+        assert_eq!(
+            pushes_on(&mut up.tap),
+            (0, 0),
+            "the group came up told of nothing"
+        );
+
+        let full = up.tap.hold_full(Priority::DEFAULT);
+        let before = up.face.resp_driver.snapshot().sends.len();
+        assert_eq!(
+            up.shared.publish_all("wz/atomic/group", b"x", &stated),
+            Ok(0)
+        );
+        assert_eq!(
+            pushes_since(&up.face, before),
+            0,
+            "the face was sent nothing"
+        );
+        drop(full);
+        assert_eq!(pushes_on(&mut up.tap).0, 0, "and the group nothing");
+
+        let before = up.face.resp_driver.snapshot().sends.len();
+        assert_eq!(
+            up.shared.publish_all("wz/atomic/group", b"x", &stated),
+            Ok(0)
+        );
+        assert_eq!(
+            pushes_since(&up.face, before),
+            1,
+            "with room, the face is sent it"
+        );
+        assert_eq!(pushes_on(&mut up.tap).0, 1, "and the group is sent it");
+    }
+
+    /// A publish that reaches all of its links or none, whose payload is a fragment chain on the
+    /// group, reserves the room of the whole chain on the group along with the face's, and sends
+    /// each of them the whole publish: the face its frame, the group every fragment of the chain,
+    /// which joins into the one Put. A publish limited to the face's link reaches no group, as a
+    /// limited publish never does. Turned red by a group reservation of one datagram for a chain,
+    /// whose later fragments then ask a lane the publish holds no room on.
+    #[cfg(feature = "multicast-transport")]
+    #[tokio::test]
+    async fn an_atomic_publish_that_reserves_everywhere_sends_the_whole_chain_to_each() {
+        let mut up = face_and_group(&prompt_group(128)).await;
+        let stated = PublishOptions::put().with_atomic_tx();
+        let payload = vec![0x5a_u8; 400];
+        assert_eq!(pushes_on(&mut up.tap), (0, 0));
+
+        let before = up.face.resp_driver.snapshot().sends.len();
+        assert_eq!(
+            up.shared.publish_all("wz/atomic/chain", &payload, &stated),
+            Ok(0)
+        );
+        assert_eq!(
+            pushes_since(&up.face, before),
+            1,
+            "the face is sent the Put"
+        );
+        let (pushes, datagrams) = pushes_on(&mut up.tap);
+        assert!(
+            datagrams >= 2,
+            "400 bytes at a batch of 128 is a chain: {datagrams}"
+        );
+        assert_eq!(
+            pushes, 1,
+            "every fragment reached the group, and they join into the Put"
+        );
+
+        let only_face = LinkRestriction::only([2]).expect("one slot");
+        let before = up.face.resp_driver.snapshot().sends.len();
+        up.shared
+            .publish_all(
+                "wz/atomic/chain",
+                &payload,
+                &stated.clone().with_links(only_face),
+            )
+            .expect("an atomic put limited to the face's link");
+        assert_eq!(pushes_since(&up.face, before), 1);
+        assert_eq!(
+            pushes_on(&mut up.tap),
+            (0, 0),
+            "a limited publish reaches no group"
         );
     }
 }
