@@ -1564,7 +1564,7 @@ mod lent_window {
 
     /// An established session over a fresh [`OneSlotLink`] with its window open, and the link.
     fn windowed() -> (
-        SessionLinkActions<PlainRuntime, StillClock>,
+        Arc<SessionLinkActions<PlainRuntime, StillClock>>,
         Arc<OneSlotLink>,
     ) {
         let link = Arc::new(OneSlotLink {
@@ -1951,7 +1951,10 @@ mod staged_replies {
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,
 /// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
 mod facts_lock {
-    use super::{bundle, holds_in};
+    use super::bundle;
+    // Only the Open's admissions count their holds here.
+    #[cfg(feature = "codec-open-body")]
+    use super::holds_in;
 
     #[test]
     fn a_fact_written_through_its_door_is_read_in_the_one_row() {
