@@ -535,6 +535,15 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: C
         self.receive(f)
     }
 
+    // A batch is lent from the link's destuffing buffer, which a receive alone writes
+    // (`Self::next_frame`, for a batch and for a dial's answer), never a service, which waits on
+    // the line and writes what is owed: what a receive lent lies there until the link is next
+    // asked to receive. A session whose round reads its records where they lie needs this; a link
+    // that answered the provided `false` would have every sample with a payload refused there.
+    fn lends_until_next_receive(&self) -> bool {
+        true
+    }
+
     fn lost(&self) -> Option<LostCause> {
         self.lost.get()
     }
@@ -1353,6 +1362,35 @@ mod tests {
             .recv_with(&mut |batch| got.extend_from_slice(batch)));
         assert_eq!(got, b"xyz");
         assert!(!link.pump.recv_with(&mut |_| {}), "nothing more");
+    }
+
+    /// The batch a receive lends lies where it was lent, unwritten, until the link is next asked
+    /// to receive: a service in between, with the peer's next frame waiting on the line, leaves it
+    /// as it was. What a session's round relies on to read a sample where it lies. Turned red by a
+    /// link that answers the provided `false`, or by a service that reads the line into the
+    /// destuffing buffer.
+    #[test]
+    fn a_lent_batch_lies_where_it_was_lent_until_the_next_receive() {
+        let open = TestOpen::new();
+        let link = made(&open);
+        assert!(link.pump.lends_until_next_receive());
+        open.peer_sends(DATA_HEADER, b"xyz");
+        let mut lent: Option<(*const u8, usize)> = None;
+        assert!(link
+            .pump
+            .recv_with(&mut |batch| lent = Some((batch.as_ptr(), batch.len()))));
+        let (at, len) = lent.expect("a batch");
+        open.peer_sends(DATA_HEADER, b"uvw");
+        link.pump.service();
+        // SAFETY: the bytes lie in the link's destuffing buffer, which the link holds and which
+        // nothing writes until the next receive below; this read is before it.
+        let still = unsafe { core::slice::from_raw_parts(at, len) };
+        assert_eq!(still, b"xyz", "a service leaves the lent batch as it was");
+        let mut next = Vec::new();
+        assert!(link
+            .pump
+            .recv_with(&mut |batch| next.extend_from_slice(batch)));
+        assert_eq!(next, b"uvw");
     }
 
     #[test]
