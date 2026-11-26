@@ -102,13 +102,7 @@ lib_only=""
 # `preset-*` features are exactly that -- checked one per preset instead of all
 # at once. That is a different instrument and belongs to its own round.
 #
-# `wz-tls-mbedtls` has no all-features build either, and by its own statement:
-# its two selectors, `alloc` and `session-slot`, are the two exclusive forms of
-# `wz-runtime-coop`'s task pool, and its library refuses the pair by name
-# (`compile_error!` in its src/lib.rs). Its configurations are the two feature
-# sets its manifest declares, which Layer C1bf clippies one by one (the heap set
-# with every target, the slot set its library alone, the manifest says why).
-excluded="wz wz-tls-mbedtls"
+excluded="wz"
 
 # Tier 4: checked once per feature set the crate declares under `[package.metadata.wz-docs]`
 # (`scripts/lib/doc_feature_sets.py`, the sets Layers C1bf and C1bz build), at the targets the set
@@ -118,8 +112,9 @@ excluded="wz wz-tls-mbedtls"
 # library a fixed-memory profile ships is judged here and not only on hosted CI.
 # A crate that refuses a combination of its own features and is in no tier above: `wz-capi-pico`
 # has one engine per library, so its tokio set gives up the cooperative forms and its cooperative
-# set the tokio engine. Derived from the manifests below, so a crate that declares sets later is
-# checked this way without a row here.
+# set the tokio engine; `wz-tls-mbedtls`'s two task-pool forms (`alloc`, `session-slot`) are
+# refused together by name in its src/lib.rs, and its slot set is its library alone. Derived from
+# the manifests below, so a crate that declares sets later is checked this way without a row here.
 
 # The reader of the feature sets a crate declares (`[package.metadata.wz-docs]`), by its path
 # before the directory changes.
