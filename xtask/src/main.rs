@@ -66,20 +66,9 @@ use wz_switchboard_schema::SwitchboardSpec;
 /// Layer B2 regen-diff lane catches drift between it and the committed out/,
 /// and a `wz-codecs/src/lib.rs` include! of a stem absent here is a compile
 /// error — so the two stay consistent.
-/// The codecs a received Push is read through, frame to sample: the ones whose body reads the
-/// receive path takes for every message (docs/adr/0139 of the pinned SCE).
-const HOT_DECODE_CODECS: &[&str] = &[
-    "transport_frame_header",
-    "frame",
-    "push",
-    "msg_put",
-    "ext_entry",
-    "ext_unit",
-    "ext_zint",
-    "ext_zbuf",
-    "timestamp",
-    "encoding",
-];
+/// The roots a received Push is read through: the frame header, the frame and the Push; the
+/// codecs their bodies read are hot by those sites alone (docs/adr/0140 of the pinned SCE).
+const HOT_DECODE_CODECS: &[&str] = &["transport_frame_header", "frame", "push"];
 
 const CODECS: &[&str] = &[
     // Leaf codecs (no imports).
