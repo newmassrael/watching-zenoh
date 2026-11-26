@@ -2024,23 +2024,27 @@ impl<'a> TableLender<'a> {
         }
     }
 
-    /// The span of `rows` rows taking `bytes`, at most `ceiling`, as the arena lends it
+    /// The span of `rows` rows of `stride` bytes, at most `ceiling`, as the arena lends it
     /// (`Arena::lend_rows`). Once a table is refused, this one among them, a span of no rows
     /// where the arena has got to, which takes nothing and starts on [`ARENA_ALIGN`] as every span
     /// does: the table made over it holds no value, as a full one, so its maker needs no path of
     /// its own for a refusal.
     ///
-    /// Out of line: every table of a session's open is lent through it, and each would carry the
-    /// refusal's bookkeeping of its own.
+    /// The rows are `stride` bytes each, counted here: every table of a session's open is lent
+    /// through this one body, out of line, and each would carry the count and the refusal's
+    /// bookkeeping of its own.
     #[inline(never)]
-    pub(crate) fn lend_rows(
+    pub(crate) fn lend_stride(
         &mut self,
         rows: usize,
         ceiling: usize,
-        bytes: Option<usize>,
+        stride: usize,
     ) -> (NonNull<u8>, u32) {
         if self.refused.is_none() {
-            match self.arena.lend_rows(rows, ceiling, bytes) {
+            match self
+                .arena
+                .lend_rows(rows, ceiling, Arena::stride_bytes(rows, stride))
+            {
                 Ok(span) => return span,
                 Err(why) => self.refused = Some(why),
             }
@@ -2072,9 +2076,9 @@ impl<'a> TableLender<'a> {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        let (at, room) = self.lend_rows(rows, N, Arena::table_bytes::<T>(rows));
-        // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before, or a
-        // span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
+        let (at, room) = self.lend_stride(rows, N, core::mem::size_of::<T>());
+        // SAFETY: `lend_stride` handed out a span of `room` rows of `T` lent to nothing before,
+        // or a span of no rows, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
         unsafe { BoundedVec::lent_over(at.cast::<T>(), room) }
     }
@@ -2219,7 +2223,13 @@ impl Arena {
     /// The bytes a table of `rows` rows of `T` takes in an arena. `None` past the address
     /// space.
     pub const fn table_bytes<T>(rows: usize) -> Option<usize> {
-        match rows.checked_mul(core::mem::size_of::<T>()) {
+        Self::stride_bytes(rows, core::mem::size_of::<T>())
+    }
+
+    /// The bytes `rows` rows of `stride` bytes each take in an arena: [`Self::table_bytes`] of
+    /// rows known by their bytes alone. `None` past the address space.
+    pub const fn stride_bytes(rows: usize, stride: usize) -> Option<usize> {
+        match rows.checked_mul(stride) {
             Some(bytes) => Self::span(bytes),
             None => None,
         }
@@ -2238,7 +2248,8 @@ impl Arena {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        let (at, room) = self.lend_rows(rows, N, Self::table_bytes::<T>(rows))?;
+        let (at, room) =
+            self.lend_rows(rows, N, Self::stride_bytes(rows, core::mem::size_of::<T>()))?;
         // SAFETY: `lend_rows` handed out a span of `room` rows of `T` lent to nothing before,
         // inside the arena, starting on `ARENA_ALIGN`, which is at least `T`'s alignment
         // (asserted above).
@@ -3541,6 +3552,43 @@ mod tests {
                 left: 0
             })
         ));
+    }
+
+    /// A lender counts a table's bytes off the stride of its rows: rows of three bytes take the
+    /// span of their bytes rounded up, so the next table finds the arena full, and rows past the
+    /// address space are refused naming no size. Turned red by a lend that counts a row by another
+    /// figure than its own bytes.
+    #[test]
+    fn a_lender_counts_a_tables_bytes_off_the_stride_of_its_rows() {
+        assert_eq!(Arena::stride_bytes(5, 3), Some(16));
+        assert_eq!(Arena::stride_bytes(5, 3), Arena::table_bytes::<[u8; 3]>(5));
+        assert_eq!(Arena::stride_bytes(usize::MAX, 2), None);
+        let mut arena = arena_of(16);
+        let mut lend = TableLender::new(&mut arena);
+        let rows: BoundedVec<[u8; 3], 8, Lent> = lend.table(5);
+        let past: BoundedVec<u8, 1, Lent> = lend.table(1);
+        assert_eq!(
+            lend.finish(),
+            Err(LendRefused::Exhausted {
+                asked: Some(16),
+                left: 0
+            })
+        );
+        assert_eq!((rows.free_slots(), past.free_slots()), (5, 0));
+        assert_eq!(arena.high_water(), 16);
+
+        let mut wide = arena_of(64);
+        let mut lend = TableLender::new(&mut wide);
+        let none: BoundedVec<u16, { usize::MAX }, Lent> = lend.table(usize::MAX);
+        assert_eq!(
+            lend.finish(),
+            Err(LendRefused::Exhausted {
+                asked: None,
+                left: 64
+            })
+        );
+        assert_eq!(none.free_slots(), 0);
+        assert_eq!(wide.high_water(), 0);
     }
 
     /// Each span starts aligned, so an arena laid out for its tables is the sum of their spans,

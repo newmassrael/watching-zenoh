@@ -1417,7 +1417,7 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Lent> {
                 "a row of a lent table asks for more alignment than an arena's spans start on"
             )
         };
-        let columns = lend_columns(lend, rows, N, Arena::table_bytes::<Option<T>>(rows));
+        let columns = lend_columns(lend, rows, N, Self::STRIDE);
         // SAFETY: `lend_columns` lent the rows' column for `room` rows of `Option<T>`, its
         // bytes counted for that type, lent to nothing before and starting on `ARENA_ALIGN`,
         // which is at least the type's alignment (asserted above), or a span of no rows that
@@ -1496,16 +1496,15 @@ impl<K, T, const N: usize> SlotMap<K, T, N, Region> {
 }
 
 /// Lend a table's two columns by `lend`, `rows` rows of each, at most `ceiling`: its metadata
-/// column, then its rows' column of `values` bytes (`None` past the address space). Columns of
-/// no rows, and a core that holds none, when one is refused or a table before them was. Out of
-/// line and untyped but for the bytes of a row, so the tables of every row type are lent by this
-/// one body.
+/// column, then its rows' column of rows of `stride` bytes. Columns of no rows, and a core that
+/// holds none, when one is refused or a table before them was. Out of line and untyped but for
+/// the bytes of a row, so the tables of every row type are lent by this one body.
 #[inline(never)]
 fn lend_columns(
     lend: &mut TableLender<'_>,
     rows: usize,
     ceiling: usize,
-    values: Option<usize>,
+    stride: usize,
 ) -> LentColumns {
     const {
         assert!(
@@ -1513,8 +1512,8 @@ fn lend_columns(
             "a slot's metadata asks for more alignment than an arena's spans start on"
         )
     };
-    let (meta, lent) = lend.lend_rows(rows, ceiling, Arena::table_bytes::<Meta>(rows));
-    let (values, room) = lend.lend_rows(rows, ceiling, values);
+    let (meta, lent) = lend.lend_stride(rows, ceiling, core::mem::size_of::<Meta>());
+    let (values, room) = lend.lend_stride(rows, ceiling, stride);
     // A refusal of the rows' column leaves the metadata's lent: neither holds a row then.
     let room = room.min(lent);
     LentColumns {
