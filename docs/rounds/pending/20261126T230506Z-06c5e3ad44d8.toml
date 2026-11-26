@@ -1,0 +1,21 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Pay four gate reds main carried. Two names the tree now carries lose their
+absent rows; the drop-in header gate takes --check as the hook's call does
+and now judges the header; a dial-only plan reads the policy its creator
+holds; and each public-surface feature the census found undecided is decided
+by a probe, a prose row or a deferral with its reason.
+'''
+changes = '''
+- prose-name: ABSENT rows of GIT_DIR and GIT_INDEX_FILE dropped.
+- drop_in_header_gate: --check accepted.
+- capi-coop: PlanShape::dial_only takes the creator's policy; pico's PRESET is a constructor site.
+- public-surface census: rows for runtime-coop, session-mcu, app-schema, capi-coop, capi-port; an unused tokio accessor removed.
+'''
+verification = '''
+- feature_public_surface_census --check and --selftest, prose_named_identifier_gate, policy_read_gate, drop_in_header_gate pass; python floor lint clean.
+- wz-capi-coop arena and wz-capi-pico lib tests pass; nondefault-features clean for both.
+'''
+carry = '''
+- none for this lane.
+'''
