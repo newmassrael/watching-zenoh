@@ -2773,6 +2773,13 @@ layer_c0_test_discipline() {
     # the fleet as one unit per lane (docs/verdicts-in-the-fleet.md).
     _runci_leg runci_plan.selftest -- python3 scripts/lib/runci_plan.py --selftest
     _runci_leg runci_plan --after runci_plan.selftest -- python3 scripts/lib/runci_plan.py --check
+    # RFC 0001 stage M1 (docs/rfc/0001-a-lane-lands-alone-and-a-verdict-is-keyed-by-what-it-read.md):
+    # a commit's tree read from git's objects, and the cargo package graph a lane's key is computed
+    # from, held both ways on this tree as Layer C0d holds the doc-link expansion: a change to
+    # wz-session-core reaches wz-runtime-tokio, and nothing depends on wz-ap-demo.
+    _runci_leg git_tree.selftest -- python3 scripts/lib/git_tree.py --selftest
+    _runci_leg lane_graph.selftest --after git_tree.selftest -- python3 scripts/lib/lane_graph.py --selftest
+    _runci_leg lane_graph --after lane_graph.selftest -- python3 scripts/lib/lane_graph.py --check
     # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
     # rows. The mutants themselves run nightly; this is what a push can afford of them.
     _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
