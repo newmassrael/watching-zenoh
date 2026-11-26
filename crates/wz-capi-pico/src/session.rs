@@ -405,9 +405,31 @@ pub(crate) fn resolve_open(
 /// is the bound a config raises it to: zenoh-pico grows its lists on the heap, which an open that
 /// takes no memory after it cannot. A config states more, or less, over them. The process pools
 /// are sized by the same (`crate::process_pool`).
+///
+/// A build whose every session opens by the region of its tables laid out when it is compiled
+/// (`OPENS_BY_REGION`) opens each table at that bound instead (`SessionLimits::PICO_PRESET_BOUND`):
+/// no config resizes a region, so a table opened below its bound would never reach it, and a
+/// session of such a build could hold no second querier or liveliness subscriber whatever its
+/// program stated.
 pub(crate) const fn opening_limits() -> SessionLimits {
-    SessionLimits::PICO_PRESET
+    if OPENS_BY_REGION {
+        SessionLimits::PICO_PRESET_BOUND
+    } else {
+        SessionLimits::PICO_PRESET
+    }
 }
+
+/// Whether every session of the build opens by the region of its tables the build lays out when it
+/// is compiled (`PRESET`), its limits the region's and no other: a build of the cooperative engine
+/// that states no policy, listens on nothing and joins no group, whose open walks no plan.
+const OPENS_BY_REGION: bool = cfg!(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+));
 
 #[cfg(test)]
 mod opening_limits_tests {
@@ -416,11 +438,30 @@ mod opening_limits_tests {
     use wz_session_core::limits::SessionLimits;
 
     /// A session of this ABI opens under zenoh-pico's limits: a listener holds the ten peers
-    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten.
-    /// Turned red by an open under the build's defaults.
+    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten. A
+    /// build that opens by its region opens under the preset's bound, any other under the preset.
+    /// Turned red by an open under the build's defaults, or by a region build that opens under
+    /// the open values (`opening_limits` answering `PICO_PRESET` whatever `OPENS_BY_REGION` is).
     #[test]
     fn a_session_opens_under_picos_limits() {
+        #[cfg(not(all(
+            not(feature = "engine-tokio"),
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        )))]
         assert_eq!(opening_limits(), SessionLimits::PICO_PRESET);
+        #[cfg(all(
+            not(feature = "engine-tokio"),
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET_BOUND);
         let mut probe = SessionLimits::defaults();
         if probe.select_max_faces(Quota::at_most(10)).is_ok() {
             assert_eq!(opening_limits().max_faces(), Quota::at_most(10));
@@ -430,7 +471,14 @@ mod opening_limits_tests {
     /// A session's entity tables open at what zenoh-pico's parity programs declare on one session
     /// (`[limit.pico_open]`), where the build's domain holds those counts: one subscriber, two
     /// queryables with the admin space's, one publisher, two declared keys and one get. Turned red
-    /// by a preset that opens them at the bound the Kconfig keeps.
+    /// by a preset that opens them at the bound the Kconfig keeps. A build that opens by its region
+    /// opens at the bound instead (the test below).
+    #[cfg(any(
+        feature = "engine-tokio",
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
     #[test]
     fn a_session_opens_its_entity_tables_at_the_parity_programs_counts() {
         let opening = opening_limits();
@@ -452,6 +500,105 @@ mod opening_limits_tests {
         }
         if probe.select_max_pending_queries(Quota::at_most(1)).is_ok() {
             assert_eq!(opening.max_pending_queries(), Quota::at_most(1));
+        }
+    }
+
+    /// A session of a build that opens by its region opens each entity table at the preset's
+    /// bound, which no config of it can raise past the region: two queriers, two liveliness
+    /// subscribers and tokens, two matching listeners and two pending gets, where the build's
+    /// domain holds two, as a program of such a build that holds two of a kind needs; and never
+    /// below the open values. The CONTROL is the open values themselves, which hold one of each.
+    /// Turned red by a region laid out under `PICO_PRESET`.
+    #[cfg(all(
+        not(feature = "engine-tokio"),
+        not(any(
+            feature = "config-policy",
+            feature = "peer",
+            feature = "multicast-transport"
+        ))
+    ))]
+    #[test]
+    fn a_session_of_a_region_build_opens_each_table_at_the_presets_bound() {
+        let opening = opening_limits();
+        let open = SessionLimits::PICO_PRESET;
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_queriers(Quota::at_most(2)).is_ok() {
+            assert_eq!(
+                open.max_queriers(),
+                Quota::at_most(1),
+                "CONTROL: the open value"
+            );
+            assert_eq!(opening.max_queriers(), Quota::at_most(2));
+        }
+        if probe
+            .select_max_liveliness_subscriptions(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_liveliness_subscriptions(), Quota::at_most(2));
+        }
+        if probe.select_max_local_tokens(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_local_tokens(), Quota::at_most(2));
+        }
+        if probe
+            .select_max_matching_listeners(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_matching_listeners(), Quota::at_most(2));
+        }
+        if probe.select_max_pending_queries(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_pending_queries(), Quota::at_most(2));
+        }
+        let at_least = |bound: Quota, open: Quota| match (bound.most(), open.most()) {
+            (Some(bound), Some(open)) => bound >= open,
+            (bound, _) => bound.is_none(),
+        };
+        for (name, bound, open) in [
+            (
+                "MAX_SUBSCRIPTIONS",
+                opening.max_subscriptions(),
+                open.max_subscriptions(),
+            ),
+            (
+                "MAX_QUERYABLES",
+                opening.max_queryables(),
+                open.max_queryables(),
+            ),
+            (
+                "MAX_PUBLISHERS",
+                opening.max_publishers(),
+                open.max_publishers(),
+            ),
+            ("MAX_QUERIERS", opening.max_queriers(), open.max_queriers()),
+            (
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                opening.max_liveliness_subscriptions(),
+                open.max_liveliness_subscriptions(),
+            ),
+            (
+                "MAX_LOCAL_TOKENS",
+                opening.max_local_tokens(),
+                open.max_local_tokens(),
+            ),
+            (
+                "MAX_MATCHING_LISTENERS",
+                opening.max_matching_listeners(),
+                open.max_matching_listeners(),
+            ),
+            (
+                "MAX_DECLARED_KEYEXPRS",
+                opening.max_declared_keyexprs(),
+                open.max_declared_keyexprs(),
+            ),
+            (
+                "MAX_PENDING_QUERIES",
+                opening.max_pending_queries(),
+                open.max_pending_queries(),
+            ),
+        ] {
+            assert!(
+                at_least(bound, open),
+                "{name}: {bound:?} below the open value {open:?}"
+            );
         }
     }
 }
