@@ -317,9 +317,26 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
     let standing = client(&endpoint, 0xc2);
     eventually("the listener to be full", || full.faces_up() == 2);
     let mut expected = vec![put(&silent, 0x10, 0), put(&standing, 0x20, 0)];
-    eventually("CONTROL: both faces heard", || {
-        heard.lock().unwrap().len() == 2
-    });
+    // Which sample is missing, and whether its client stood on its link, tells a put its client
+    // sent before its link was up from one the listener did not read.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while heard.lock().unwrap().len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for CONTROL: both faces heard: heard the samples tagged {:?}, \
+             the listener holds {} faces up, the silent client {} and the standing one {}",
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|sample| sample.first().copied())
+                .collect::<Vec<_>>(),
+            full.faces_up(),
+            silent.faces_up(),
+            standing.faces_up()
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     // The face goes silent: its socket stays open and nothing of its session is stepped, so the
     // listener learns of it only when the lease it advertised ends.
