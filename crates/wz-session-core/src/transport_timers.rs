@@ -25,8 +25,8 @@
 use wz_runtime_core::TimeSource;
 
 #[cfg(feature = "transport-keepalive")]
-use crate::drive::{judge_keepalive, keepalive_deadlines, KeepaliveDeadlines};
-use crate::drive::{judge_lease, lease_deadlines, LeaseDeadlines, SessionEngine};
+use crate::drive::{judge_keepalive, keepalive_deadlines, keepalive_wake_deadline};
+use crate::drive::{judge_lease, lease_deadlines, lease_wake_deadline, SessionEngine};
 use crate::driver_loop::{EventSink, IterationEvent};
 use crate::link::SessionRuntime;
 use crate::session_actions::SessionLinkActions;
@@ -41,7 +41,7 @@ pub struct TransportTimers {
     /// The first instant at which the lease's or the keep-alive's check can fall due, as the
     /// timers last read the link's deadlines: none runs before it while what they were read under
     /// holds. A deadline that moved later since is found when this instant comes. 0 until the
-    /// first read and after a check, so the step after reads them again.
+    /// first read and after a check that judged one, so the step after reads them again.
     link_due_ms: u64,
     /// What the link's deadlines were last read under; `None` before the first read.
     read_under: Option<ReadUnder>,
@@ -105,10 +105,11 @@ impl TransportTimers {
     /// see for the first time has its handshake deadline armed from the end of the millisecond
     /// `now_ms` names.
     ///
-    /// The lease's and the keep-alive's are the first instant the timers hold for them, read again
-    /// only under what [`Self::fire_due`] reads them again under: a deadline that moved later
-    /// since is answered at the instant held, which wakes a loop early and never late, and the
-    /// check at that instant reads the later one.
+    /// Outside a handshake the lease's and the keep-alive's are the first of them as the timers
+    /// last read it, at a check ([`Self::fire_due`]) or at a wait that found no reading to hold,
+    /// while what it was read under holds: a receipt or a write since moved them only later,
+    /// which the check finds when its instant comes, so a step between reads no stamp and no
+    /// clock for them. A wait that reads them anew keeps that reading for the check.
     pub fn next_due_ms<R: SessionRuntime, T: TimeSource>(
         &mut self,
         engine: &SessionEngine<R, T>,
@@ -119,56 +120,59 @@ impl TransportTimers {
             .handshake
             .poll(engine.get_current_state(), now_ms)
             .map(|(deadline_ms, _event)| deadline_ms);
-        // What falls due by now is the check's to judge; the wait reads the instant held.
-        let _ = self.link_due(actions, handshake.is_some(), now_ms);
-        let link = (self.link_due_ms != u64::MAX).then_some(self.link_due_ms);
+        let link_ms = match self.link_due_held(actions, handshake.is_some()) {
+            Some(held_ms) => held_ms,
+            None => self.read_link_due(actions, handshake.is_some()),
+        };
+        let link = (link_ms != u64::MAX).then_some(link_ms);
         [handshake, link, actions.app_wake_deadline_ms()]
             .into_iter()
             .flatten()
             .min()
     }
 
-    /// The link's lease and keep-alive deadlines that have passed by `now_ms`, for a check to
-    /// judge, with the first instant either falls due held in `link_due_ms` (`u64::MAX` when
-    /// neither duty is armed). They are read again only when the instant held has come or what
-    /// they were read under changed; before that nothing has passed and no stamp, clock or lease
-    /// is read. The lease's is left out while a handshake deadline stands. One body for the wait
-    /// and the check, out of line: it reads the stamps once for both.
-    #[inline(never)]
-    fn link_due<R: SessionRuntime, T: TimeSource>(
+    /// The first instant at which the lease's or the keep-alive's check can fall due, as the
+    /// timers last read it, `u64::MAX` for neither armed, while that reading holds: no handshake
+    /// deadline stands, no check judged one since, and what it was read under is unchanged.
+    /// `None` where they are to be read anew.
+    fn link_due_held<R: SessionRuntime, T: TimeSource>(
+        &self,
+        actions: &SessionLinkActions<R, T>,
+        handshake: bool,
+    ) -> Option<u64> {
+        if handshake || self.link_due_ms == 0 {
+            return None;
+        }
+        self.read_under?
+            .holds_under(ReadUnder::of(actions, false))
+            .then_some(self.link_due_ms)
+    }
+
+    /// The first instant at which the lease's or the keep-alive's check can fall due, read now,
+    /// `u64::MAX` for neither armed. Outside a handshake the reading is held as a check's is, so
+    /// a receipt after it is found by the check at its instant and not by the next wait; under
+    /// one it is not held, since the check there leaves the lease out.
+    fn read_link_due<R: SessionRuntime, T: TimeSource>(
         &mut self,
         actions: &SessionLinkActions<R, T>,
         handshake: bool,
-        now_ms: u64,
-    ) -> LinkDue {
-        let under = ReadUnder::of(actions, handshake);
-        if self.read_under.is_some_and(|read| read.holds_under(under)) && now_ms < self.link_due_ms
-        {
-            return LinkDue::default();
-        }
-        self.read_under = Some(under);
-        let mut due_ms = u64::MAX;
-        let mut passed = LinkDue::default();
-        if !handshake {
-            if let Some(deadlines) = lease_deadlines(actions) {
-                let wake_ms = deadlines.wake();
-                due_ms = wake_ms;
-                if now_ms >= wake_ms {
-                    passed.lease = Some(deadlines);
-                }
-            }
-        }
+    ) -> u64 {
+        // Read before the deadlines, so the reading held sees every write the count names.
+        let under = (!handshake).then(|| ReadUnder::of(actions, false));
         #[cfg(feature = "transport-keepalive")]
-        if let Some(deadlines) = keepalive_deadlines(actions) {
-            if let Some(deadline_ms) = deadlines.earliest() {
-                due_ms = due_ms.min(deadline_ms);
-                if now_ms >= deadline_ms {
-                    passed.keepalive = Some(deadlines);
-                }
-            }
+        let keepalive = keepalive_wake_deadline(actions);
+        #[cfg(not(feature = "transport-keepalive"))]
+        let keepalive: Option<u64> = None;
+        let due_ms = lease_wake_deadline(actions)
+            .into_iter()
+            .chain(keepalive)
+            .min()
+            .unwrap_or(u64::MAX);
+        if let Some(under) = under {
+            self.read_under = Some(under);
+            self.link_due_ms = due_ms;
         }
-        self.link_due_ms = due_ms;
-        passed
+        due_ms
     }
 
     /// Give the session the time `now_ms` and raise what has fallen due by it: the handshake
@@ -202,31 +206,58 @@ impl TransportTimers {
             }
             None => false,
         };
-        // A judge moves what the deadlines are read from (a tick ended, the machine told), so a
-        // step that judged one leaves 0 and the next reads them again. A keep-alive due with a
-        // lease judged waits for that read: a lease that ended the session stopped its worker,
-        // and nothing is sent after its Close.
-        let passed = self.link_due(actions, handshake, now_ms);
-        if let Some(deadlines) = passed.lease {
-            let outcome = judge_lease(actions, engine, now_ms, deadlines);
-            on_event.event(IterationEvent::Lease(outcome));
-            self.link_due_ms = 0;
+        let under = ReadUnder::of(actions, handshake);
+        let holds = self.read_under.is_some_and(|read| read.holds_under(under));
+        if holds && now_ms < self.link_due_ms {
             return;
         }
-        #[cfg(feature = "transport-keepalive")]
-        if let Some(deadlines) = passed.keepalive {
-            let outcome = judge_keepalive(actions, now_ms, deadlines);
-            on_event.event(IterationEvent::KeepAlive(outcome));
-            self.link_due_ms = 0;
-        }
+        self.read_under = Some(under);
+        self.link_due_ms = check_link_deadlines(engine, actions, now_ms, handshake, on_event);
     }
 }
 
-/// The link's deadlines that have passed by the instant `TransportTimers::link_due` was asked
-/// at, each as it was read, so its judge reads the stamps no second time.
-#[derive(Default)]
-struct LinkDue {
-    lease: Option<LeaseDeadlines>,
+/// Read the link's lease and keep-alive deadlines and judge each that has passed by `now_ms`,
+/// each by the deadlines read here, so the stamps are read once: the first instant either can
+/// fall due, `u64::MAX` when neither duty is armed, or 0 when one was judged, since a judge
+/// moves what the deadlines are read from (a tick ended, the machine told). The lease's is left
+/// out while a handshake deadline stands. A session whose keep-alive worker has stopped (in
+/// Closing) arms no deadline and sends nothing after its Close.
+fn check_link_deadlines<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
+    engine: &mut SessionEngine<R, T>,
+    actions: &SessionLinkActions<R, T>,
+    now_ms: u64,
+    handshake: bool,
+    on_event: &mut F,
+) -> u64 {
+    let mut due_ms = u64::MAX;
+    let mut judged = false;
+    if !handshake {
+        if let Some(deadlines) = lease_deadlines(actions) {
+            let wake_ms = deadlines.wake();
+            if now_ms >= wake_ms {
+                let outcome = judge_lease(actions, engine, now_ms, deadlines);
+                on_event.event(IterationEvent::Lease(outcome));
+                judged = true;
+            } else {
+                due_ms = wake_ms;
+            }
+        }
+    }
     #[cfg(feature = "transport-keepalive")]
-    keepalive: Option<KeepaliveDeadlines>,
+    if let Some(deadlines) = keepalive_deadlines(actions) {
+        match deadlines.earliest() {
+            Some(deadline_ms) if now_ms >= deadline_ms => {
+                let outcome = judge_keepalive(actions, now_ms, deadlines);
+                on_event.event(IterationEvent::KeepAlive(outcome));
+                judged = true;
+            }
+            Some(deadline_ms) => due_ms = due_ms.min(deadline_ms),
+            None => {}
+        }
+    }
+    if judged {
+        0
+    } else {
+        due_ms
+    }
 }

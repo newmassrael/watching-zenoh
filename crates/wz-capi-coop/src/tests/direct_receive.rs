@@ -739,6 +739,42 @@ fn a_steady_stream_runs_no_bookkeeping_per_batch() {
     );
 }
 
+/// A session whose lease is short, read while nothing but keep-alives crosses its link: it sends
+/// the keep-alive the router's lease of it needs at each turn of that lease, and runs its
+/// bookkeeping at none of them, since neither its keep-alive's verdict nor a lease it stamps
+/// changes anything the bookkeeping follows. CONTROL: the session is still open after several of
+/// its leases. Turned red by a timer's verdict dispatched to the face's tables (`DirectSink`),
+/// which counts as a write of them and owes the bookkeeping at the next look.
+#[cfg(not(wz_round))]
+#[test]
+fn a_keep_alive_runs_no_bookkeeping() {
+    const LEASE_MS: u64 = 600;
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        lease_ms: LEASE_MS,
+        ..config(&router)
+    });
+    // Whatever the open left owed is served by the reads right after it.
+    let settled = Instant::now() + Duration::from_millis(LEASE_MS / 2);
+    while Instant::now() < settled {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let before = engine.services();
+    let quiet = Instant::now() + Duration::from_millis(4 * LEASE_MS);
+    while Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "CONTROL: the router's lease of the session ran out"
+    );
+    assert_eq!(
+        engine.services() - before,
+        0,
+        "the bookkeeping ran at a keep-alive"
+    );
+}
+
 /// The records of one frame are read in one take of the link's input, each handed out as it is
 /// read, and no pass of a task runs for them: the read steps the link itself. Turned red by a read
 /// that stops the walk of a frame at each record and reads the rest of it again at a later take,

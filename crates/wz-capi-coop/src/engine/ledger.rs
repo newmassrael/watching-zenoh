@@ -77,6 +77,18 @@ impl Ledger {
         }
     }
 
+    /// The earliest instant, in microseconds of the session's clock, at which something of the
+    /// bookkeeping falls due by time: what a quiet read of a face ends by (`direct`).
+    #[cfg(all(
+        not(wz_round),
+        feature = "threads",
+        any(feature = "listen", feature = "group")
+    ))]
+    #[inline]
+    pub(super) fn next_due_us(&self) -> u64 {
+        self.next_due_us
+    }
+
     /// A service ran, leaving the bookkeeping due by `due` and the counts at `seen`.
     pub(super) fn settle(&mut self, due: Due, seen: Seen) {
         #[cfg(feature = "query")]

@@ -8058,6 +8058,25 @@
         "coop engine sends no initial-interest DeclareFinal to a dialling zenoh peer (Layer C1cc leg); lane coop-final.",
         "wz-capi-coop hand_back tests build on no host lane (wz_round needs a target without 64-bit atomics)."
       ]
+    },
+    "Round 4666": {
+      "decision_summary": "Land link-enum: a link that dials holds a zero-sized marker, and the dial lives\nin its face table's place (one face or a row of many), so the link enum no\nlonger carries the largest variant inline and the large-variant allowance is\ngone. It also reads a quiet face alone until its deadline. Measured -46 B on\nthe pico client build.",
+      "changes_bullets": [
+        "runtime-coop: Link::Dialing holds DialRow; a dial lives in OneFace or ManyFaces rows.",
+        "capi-coop: a quiet face is read alone until its look's deadline (read_quiet).",
+        "capi-coop: the test-only accessors carry the std gate their tests module has."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-capi-coop and wz-runtime-coop clippy-clean after merging main.",
+        "wz-capi-coop lib tests: 261 (default), 371 (listen,query,queryable), 320 (group,app-transport) passed.",
+        "size: -46 B against its base on pico-client-coop-nostd."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
