@@ -2042,7 +2042,7 @@ pub trait SessionRuntime: Runtime + Sized {
     /// `unicast_runtime_items` is `1` (`DEP_WZ_SESSION_CORE_UNICAST_RUNTIME_ITEMS`), not under
     /// a feature of its own: Cargo unifies this crate's features across the graph, so a crate
     /// that does not enable the implementor's feature can still turn this item on.
-    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    #[cfg(wz_unicast_runtime_items)]
     type EntropyDraw: crate::entropy::EntropySource;
 
     /// Per-profile shared handle to the [`SessionLinkActions`] bundle one
@@ -2072,7 +2072,7 @@ pub trait SessionRuntime: Runtime + Sized {
     /// [`EntropyDraw`](Self::EntropyDraw).
     ///
     /// [`LinkSink`]: SessionRuntime::LinkSink
-    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    #[cfg(wz_unicast_runtime_items)]
     type ActionsHandle<T: TimeSource>: Clone + Deref<Target = SessionLinkActions<Self, T>>;
 
     /// Wrap an owned [`SessionLinkActions`] bundle in the per-profile shared
@@ -2090,11 +2090,7 @@ pub trait SessionRuntime: Runtime + Sized {
     /// An implementor in another crate binds it where this crate's build-script metadata key
     /// `wrap_actions` is `1` (`DEP_WZ_SESSION_CORE_WRAP_ACTIONS`), not under a feature of its
     /// own.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "session-unicast",
-        not(feature = "session-slot")
-    ))]
+    #[cfg(wz_wrap_actions)]
     fn wrap_actions<T: TimeSource>(
         actions: SessionLinkActions<Self, T>,
     ) -> Result<Self::ActionsHandle<T>, HeapRefused>;

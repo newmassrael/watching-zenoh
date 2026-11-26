@@ -38,14 +38,24 @@ fn main() {
         println!("cargo:rustc-cfg=wz_ext_chains");
     }
 
-    // `SessionRuntime::EntropyDraw` and `SessionRuntime::ActionsHandle`: the same cfg as the
-    // two items carry in `src/link.rs`.
+    // `SessionRuntime::EntropyDraw` and `SessionRuntime::ActionsHandle`, declared in
+    // `src/link.rs` under the cfg this states.
     let session_unicast = on("CARGO_FEATURE_SESSION_UNICAST");
     let unicast_runtime_items = on("CARGO_FEATURE_STORAGE_PROFILE") && session_unicast;
     // `SessionRuntime::wrap_actions`: absent under `session-slot`, where a slot hands the
     // handle out and no runtime makes one of a bundle by value.
     let wrap_actions =
         on("CARGO_FEATURE_ALLOC") && session_unicast && !on("CARGO_FEATURE_SESSION_SLOT");
+    // The one statement of both facts: this crate's own declarations read them as cfgs, and an
+    // implementing crate as metadata, so the two cannot disagree.
+    println!("cargo:rustc-check-cfg=cfg(wz_unicast_runtime_items)");
+    println!("cargo:rustc-check-cfg=cfg(wz_wrap_actions)");
+    if unicast_runtime_items {
+        println!("cargo:rustc-cfg=wz_unicast_runtime_items");
+    }
+    if wrap_actions {
+        println!("cargo:rustc-cfg=wz_wrap_actions");
+    }
     println!(
         "cargo:unicast_runtime_items={}",
         u8::from(unicast_runtime_items)
