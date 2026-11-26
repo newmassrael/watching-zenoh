@@ -78,6 +78,7 @@ normal state once nothing remains.
 | api-compat-rust | conformance/patch-scenario/tests/one_zenoh_result.rs | 6ec323ad91aff120e1b3b597f22f37ec284a2fe7 | R3483 |
 | api-compat-rust | crates/wz-zenoh-keyexpr/src/keyexpr_tree.rs | 30d31322033fe5267ef5d1168813d3ecdda75942 | R3976 |
 | api-compat-rust | crates/wz-zenoh-keyexpr/src/keyexpr_tree/arc_tree.rs | 1c7851666c5c4561bd45b682f27982bb31089135 | R3976 |
+| api-compat-rust | crates/wz-zenoh/src/api/builders/sample.rs | 289193d3b655e2dc78e74783827e879e1111adcc | R4658 |
 | session-close-ingress | crates/wz-integration-tests/tests/wz_router_hat_connect_reconcile.rs | 1fce52d573512d7504a6a90322ee62650ffa38e5 | R4499 |
 | session-close-ingress | crates/wz-routing-graph/src/lib.rs | 360f6c5cfd8ef9d74f44324462008fd5207ec9ca | R4658 |
 | session-close-ingress | crates/wz-runtime-coop/src/session_drive.rs | 89bd47888e7c825d3910c651b9bd7e95b6bc890a | R4654 |
