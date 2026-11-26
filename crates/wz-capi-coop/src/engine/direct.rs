@@ -135,8 +135,12 @@ pub(crate) trait RecordActions {
 }
 
 /// A link's records are answered by its session's actions, to its one peer.
-impl<C: ClockSource + 'static> RecordActions for LinkHandle<C> {
-    type Sink = <LinkHandle<C> as core::ops::Deref>::Target;
+// Written for the handle's own type rather than `LinkHandle<C>`: that alias is a projection of
+// the runtime's handle type, out of which an impl's header cannot read `C`. The two are one type
+// in every build of the engine, its handles counted by `LinkCount` (`form`'s check of the
+// session lock's count).
+impl<C: ClockSource + 'static> RecordActions for CellRc<LinkActions<C>, LinkCount> {
+    type Sink = LinkActions<C>;
 
     #[inline(always)]
     fn sink(&self) -> &Self::Sink {
