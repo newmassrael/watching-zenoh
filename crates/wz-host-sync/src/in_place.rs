@@ -78,7 +78,7 @@ impl<T> Mutex<T> {
 
     /// Wait until the lock is the calling thread's.
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        self.raw.lock();
+        take(&self.raw);
         MutexGuard::taken(self)
     }
 
@@ -175,8 +175,31 @@ impl<T> Drop for MutexGuard<'_, T> {
             }
         }
         // SAFETY: this guard holds the lock it lets go.
-        unsafe { self.mutex.raw.unlock() }
+        unsafe { release(&self.mutex.raw) }
     }
+}
+
+/// Take `raw` for a typed lock's guard. Out of line, as `release` is: a typed lock is taken and
+/// let go of at many places, over values of many types, and a guard dropped on each path out of a
+/// body lets it go again there, so each place inlining the word's exchange and its call to the
+/// wait would carry a copy of them; one body each leaves a call at each place, as zenoh-pico's
+/// lock is a call (`vendor/zenoh-pico/src/system/unix/system.c` @
+/// `z_result_t _z_mutex_lock(_z_mutex_t *m)`). The runtime's section and the locks of what it
+/// lends the session keep the inline exchange of [`RawLock`], each inside a body of its own.
+#[inline(never)]
+fn take(raw: &RawLock) {
+    raw.lock();
+}
+
+/// Let `raw` go for a typed lock's guard, and wake a thread that waits for it, if one may. Out of
+/// line, as `take` is.
+///
+/// # Safety
+/// The calling thread holds `raw`.
+#[inline(never)]
+unsafe fn release(raw: &RawLock) {
+    // SAFETY: the caller's.
+    unsafe { raw.unlock() }
 }
 
 /// A condition variable waited on with a [`Mutex`]'s guard: the shape of `std::sync::Condvar`.
@@ -237,10 +260,12 @@ impl Condvar {
 
     /// Wake a waiting thread (every waiter, which their loops allow).
     pub fn notify_one(&self) {
-        self.raw.notify_one();
+        self.notify_all();
     }
 
-    /// Wake every waiting thread.
+    /// Wake every waiting thread. Out of line, for the reason `take` is: a notification is made
+    /// at many places, each beside a guard's release.
+    #[inline(never)]
     pub fn notify_all(&self) {
         self.raw.notify_all();
     }
