@@ -7979,6 +7979,25 @@
         "lanes to land one at a time after this: mcast-perf, stats-parts, rss-design, link-enum, deliv, gate-ledger, SCE pin.",
         "bx view isolation for this repository waits on the per-machine trial (bx RFC 0035 6)."
       ]
+    },
+    "Round 4662": {
+      "decision_summary": "Land stats-parts: transport statistics without a heap. Payload series and\nper-link message counters are held in fixed storage at their label index,\nso a build with transport-stats allocates nothing after open.",
+      "changes_bullets": [
+        "session-core: payload series and link message counters held at their label index in fixed storage.",
+        "session-core: a get and a reply counted off the parts they are sent; a shared Push's filters matched on its borrowed key.",
+        "config: limits regenerated with the stats key series bound."
+      ],
+      "verification_bullets": [
+        "wz-session-core lib tests with transport-stats: 1773 passed after merging main.",
+        "nondefault-features: wz-admin and wz-session-core clippy-clean in every declared set.",
+        "wz_config --check: the generated limits match."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
