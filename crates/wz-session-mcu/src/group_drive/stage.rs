@@ -114,6 +114,9 @@ struct Inner {
     /// What was pushed while another push held the conduits, encoded, waiting for its sequence
     /// number.
     staged: RefCell<Staged>,
+    /// How many messages `staged` holds: what a push reads before it borrows the conduits again to
+    /// frame them, which outside a nested push is none.
+    kept: Cell<usize>,
     /// How many reply slots are held: by a reply staged, or by the first datagram of a reply
     /// queued on a lane.
     replies: Cell<usize>,
@@ -671,6 +674,7 @@ impl GroupTxStage {
                     },
                     usize::from(params.batch_size),
                 )),
+                kept: Cell::new(0),
                 replies: Cell::new(0),
                 dropped: Cell::new(0),
                 writer: RefCell::new(Writer {
@@ -843,6 +847,7 @@ impl GroupTxStage {
         let inner = &*self.inner;
         let kept = inner.staged.borrow_mut().keep(meta, size, body, reply);
         let Err(unkept) = kept else {
+            inner.kept.set(inner.kept.get().saturating_add(1));
             return PushOutcome::Pushed;
         };
         if reply {
@@ -917,7 +922,7 @@ impl GroupTxStage {
     /// sequence number is minted now.
     fn push_deferred(&self) {
         let inner = &*self.inner;
-        loop {
+        while inner.kept.get() > 0 {
             let Ok(mut conduits) = inner.conduits.try_borrow_mut() else {
                 return;
             };
@@ -942,6 +947,7 @@ impl GroupTxStage {
                 );
             }
             inner.staged.borrow_mut().pop(next.len);
+            inner.kept.set(inner.kept.get().saturating_sub(1));
         }
     }
 
@@ -2513,6 +2519,57 @@ mod tests {
             sns.push(datagram.sn);
         }
         assert_eq!(sns, (0..MAX_MULTICAST_REPLIES as u64).collect::<Vec<_>>());
+    }
+
+    /// The count of kept messages a push reads before it borrows the conduits again follows what
+    /// the staged storage holds: one more for each message kept while the conduits are held, none
+    /// for one it could not keep, and none left once they are framed; with nothing kept nothing is
+    /// framed. Turned red by a count that misses a kept message (`GroupTxStage::stage`), which
+    /// would leave it unframed, or by one not lowered as each is framed (`push_deferred`).
+    #[test]
+    fn the_kept_count_follows_what_the_staged_storage_holds() {
+        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
+        let mut params = one_batch_lanes();
+        params.tx_queue.sizes = [MAX_MULTICAST_REPLIES + 1; Priority::NUM];
+        let stage = GroupTxStage::new(&params);
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        assert_eq!(stage.inner.kept.get(), 0);
+        stage.push_deferred();
+        assert!(stage.take().is_none(), "nothing kept, nothing framed");
+        {
+            let _held = stage.inner.conduits.borrow_mut();
+            for kept in 1..=MAX_MULTICAST_REPLIES {
+                assert_eq!(
+                    push_put(&stage, Put::of("first"), &host),
+                    PushOutcome::Pushed
+                );
+                assert_eq!(stage.inner.kept.get(), kept);
+            }
+            assert_eq!(
+                push_put(&stage, Put::of("second"), &host),
+                PushOutcome::Congested
+            );
+            assert_eq!(
+                stage.inner.kept.get(),
+                MAX_MULTICAST_REPLIES,
+                "a message not kept is not counted"
+            );
+            stage.push_deferred();
+            assert_eq!(
+                stage.inner.kept.get(),
+                MAX_MULTICAST_REPLIES,
+                "nothing is framed while the conduits are held"
+            );
+        }
+        stage.push_deferred();
+        assert_eq!(stage.inner.kept.get(), 0, "each kept message was framed");
+        assert!(stage.inner.staged.borrow().held.is_empty());
+        let mut framed = 0usize;
+        while stage.take().is_some() {
+            framed += 1;
+        }
+        assert_eq!(framed, MAX_MULTICAST_REPLIES);
     }
 
     /// A reply lent for the call is framed as its owned copy is, at once and when it is kept while
