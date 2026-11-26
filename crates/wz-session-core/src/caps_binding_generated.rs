@@ -574,6 +574,18 @@ pub const MAX_SHARED_KEY_IDS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::STATS_KEY_SERIES`] is bound.
+pub const STATS_KEY_SERIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: None,
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_REMOTE_DECLS`] is bound.
 pub const MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

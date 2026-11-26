@@ -514,6 +514,18 @@ config WZ_LIMIT_MAX_SHARED_KEY_IDS
 	  (shared-key-ids) that one session may be given. A dictionary of more is
 	  refused when it is handed over, and no session holds it.
 
+config WZ_LIMIT_STATS_KEY_SERIES
+	int "STATS_KEY_SERIES"
+	default 8
+	help
+	  The per-key payload series one stats/filters key of a session holds in each
+	  direction: the label sets (space, priority, message kind, shared memory) of
+	  the payloads counted under it. The rows of every key of the list are
+	  reserved when the list is set. A payload of a label set past its key's
+	  rows, or one counted under a key the list does not hold, is counted under
+	  no key and is counted as refused; its other series are counted as ever.
+	  The payload family itself is not bounded by it: it holds every label set.
+
 config WZ_LIMIT_MAX_REMOTE_DECLS
 	int "MAX_REMOTE_DECLS"
 	default 16
