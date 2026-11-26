@@ -50,15 +50,37 @@ the group arm is read as the unicast one is:
 
 | cell | wz (W) | zenoh-pico (P) | source |
 |---|---:|---:|---|
-| M1 receive, Ir per message, net | *to measure* | *to measure* | subprofile, callgrind |
-| M2 receive, system calls per message by kind | *to measure* | *to measure* | subprofile, strace |
-| M3 send, Ir per put, net | *to measure* | *to measure* | opprofile put |
+| M1 receive, Ir per message, net | 8,227.9 | 3,531.0 | subprofile, callgrind |
+| M2 send, Ir per put, net | 6,373 | 2,555 | opprofile put |
+| M3 receive, system calls per message by kind | *to measure* | *to measure* | subprofile, strace |
 | M4 send, top 20 functions per put | *to measure* | *to measure* | opprofile put |
 | M5 receive, top 25 functions per message, net | *to measure* | *to measure* | subprofile, callgrind |
 
 A group of the pico preset carries no declarations and sends every put, so the publisher of the
 arm needs no match before its span (`perf_matrix.py` says the same of its cells); a member is
 admitted by its first JOIN, which the three seconds before the span cover.
+
+### 1.2 The first reading
+
+The main session's first run of the arm (2026-11-26, the lane's tip `688549240`, the shipped
+form) reads M1 at 2.33 of zenoh-pico's and M2 at 2.49. The receiver's top functions by `perf
+record` share (each at most 2.1 %) are the executor and the round, not the group's own stages:
+`poll_erased` of the group's session task, `CoopEngine` and `Core` bodies, `run_among`, the
+group's `on_event` chain (`answering_asks` around `noting_members` around `dispatch`),
+`MulticastPump`, `dispatch_iteration_event`, `RoundDelivery`, `read_chain`, `SlotObserverOf` and
+`MulticastDispatcher::active_peers`. A group's read is still a task of the executor whose records
+reach the subscriber through the round: section 8's direct read of the C ABI covers the unicast
+faces of the shipped preset, and a group's datagram pays an executor turn, the event chain and,
+in the step's fixed part (R2), a walk of the member table, which `next_due_us` read on every step
+to know whether a sweep is due (C7).
+
+Rows taken on this lane since that reading, each to be read again on the arm: R4 (the member count
+kept) and T3 (write through). The rows that reach the receive path's executor turn and system
+calls (R1, R2, R3) and T4 rest on the round-5a lane's rewrite of `engine/group.rs`,
+`group_drive.rs` and the engine's read, which does not merge onto this lane as it stands: the
+engine's get issuing, declarations and query answers were rewritten on both sides (round-5a's
+link place taken before the session, main's one hold per operation and replies held to their
+Final), a conflict whose resolution is a choice of lock order that belongs to those lanes.
 
 ## 2. The send path
 
@@ -139,7 +161,7 @@ group holds input, up to `GROUP_READS_PER_MOVE` steps (`CoopEngine::step`,
 | R6 | delivery | the session's delivery to the subscriber, shared with unicast | [ir-receive.md](ir-receive.md) stages 4 to 7 |
 
 System calls per received datagram where the receiver keeps up (each burst one datagram long): a
-wait, one `recvfrom` and the `recvfrom` that answers `EAGAIN`, three against pico's one (M2
+wait, one `recvfrom` and the `recvfrom` that answers `EAGAIN`, three against pico's one (M3
 reads it). The step's fixed part R2 is paid per datagram, not per wake, since one step reads one
 datagram.
 
@@ -147,12 +169,13 @@ datagram.
 
 | # | cause | side | cells it explains | how it is read |
 |---|---|---|---|---|
-| C1 | two system calls past pico's per received datagram (R1, R3) | receive | thr msgs/s and CPU, rtt p50 | M2 |
+| C1 | two system calls past pico's per received datagram (R1, R3) | receive | thr msgs/s and CPU, rtt p50 | M3 |
 | C2 | the step's fixed part per datagram (R2) | receive | thr CPU | M5, the functions of `MulticastPump::step` |
-| C3 | a frame put on a lane and taken off it when nothing is queued (S2, S3) | send | thr CPU, thr msgs/s off | M3, M4 |
+| C3 | a frame put on a lane and taken off it when nothing is queued (S2, S3) | send | thr CPU, thr msgs/s off | M2, M4 |
 | C4 | records decoded two or three times per datagram written, lanes walked once more than written (S3); the same walk in every receive step (R2) | both | thr CPU | M4, M5: `next_out`, `Record::read` |
 | C5 | the event chain of R5: a `dyn` sink and three closures per record | receive | thr CPU at 8 and 64 B on | M5 |
 | C6 | indirection of the transport (`Watched`'s `Box<dyn>`, `GroupLink`'s `RefCell`) per send and per receive | both | small; read with C2 | M4, M5 |
+| C7 | the member table walked on every step to count its members (`next_due_us`, `active_peers` of a table that keeps no index) | receive | thr CPU | M5: `active_peers` |
 
 ## 5. Rows: the structural changes
 
@@ -165,6 +188,7 @@ datagram.
 | R1 | the read of a threads build blocks in the group's receive on its read task, as pico's does, so a received datagram costs one system call | C1 | `engine/group.rs`, `engine/direct.rs`, `group_drive.rs` | round-5a (`9578dc50d` reads a threads build's groups on its read task) |
 | R2 | the step's fixed part once per burst: the step reads every datagram the socket holds, up to the deploy bound, and runs the stop, the carrier, the clock, the JOIN and the writer once around them | C2 | `group_drive.rs` | round-5a (`82c085fb1` reads a group's burst in one read) |
 | R3 | a group's record handed to the registry by a direct call, not through `dyn EventSink` and three closures: the face's member notes and asks read off the event once, the registry's dispatch called with it | C5 | `multicast_rx.rs`, `engine/group.rs` | after round-5a |
+| R4 | the dispatcher keeps its member count as a member is admitted and as one leaves, so a step and a Join read it with no walk | C7 | `wz-session-core/src/multicast_dispatch.rs` | mcast-perf |
 | G1 | a datagram socket's gathered send (`sendmsg` of the frame head and the payload), the `DatagramSocket` twin of the stream's write gather, for a frame whose payload need not be copied into the lane | C3 at 1024 B | `wz-runtime-coop/src/udp_link.rs`, `wz-runtime-posix/src/net.rs` | gather-low, as a row of its own |
 
 T3 keeps every property the lane gives: a datagram the socket refuses is held and offered first at
@@ -180,8 +204,9 @@ red.
 |---|---|---|---|---|
 | 0 | - | the harness arm (section 1.1) | - | M1 to M5 measurable |
 | 1 | T1, T2 | the writer reads a front record once and stops on a count | `stage.rs` `next_out_answers_the_front_record_it_chose`, `an_empty_stage_has_nothing_out_without_a_lane_read` | M4: `Record::read` and `next_out` per put down by at least half |
-| 2 | T3 | write through on an empty stage | *to write* with the step | M3: the lane's queue and take off the put's functions |
-| 3 | R1, R2 | round-5a's group read | round-5a's | M2: one system call per received datagram with threads |
+| 2 | T3 | write through on an empty stage | `stage.rs` `a_push_onto_empty_lanes_leaves_from_where_it_was_written` | M2: the lane's queue and take off the put's functions |
+| 2b | R4 | the member count kept | `multicast_dispatch.rs` `the_member_count_follows_every_admission_and_departure` | M5: `active_peers` off the top functions |
+| 3 | R1, R2 | round-5a's group read | round-5a's | M3: one system call per received datagram with threads |
 | 4 | R3 | records to the registry directly | *to write* | M5: the event chain off the top functions |
 | 5 | T4 | the concrete transport | *to write* | M4, M5: the `dyn` calls gone |
 | 6 | G1 | gathered datagram send | gather-low's | thr/1024 |
