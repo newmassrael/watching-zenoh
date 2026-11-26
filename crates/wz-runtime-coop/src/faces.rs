@@ -1350,6 +1350,17 @@ impl<W, D> Link<W, D> {
             _ => None,
         }
     }
+
+    /// No link in place of a dial: whether the link was one. The dial lies in its place's row
+    /// and is let go of there (`Dial::let_go_in`), so the link lets go of nothing; any other
+    /// link is left as it is.
+    fn end_dialing(&mut self) -> bool {
+        let Link::Dialing(_) = self else {
+            return false;
+        };
+        *self = Link::Idle;
+        true
+    }
 }
 
 /// That a face's dial under way lies in the row of the dials its place of the faces' table holds
@@ -1537,14 +1548,29 @@ impl<D> Dial<D> {
         &self.endpoint
     }
 
+    /// The endpoint dialled, moved out of a dial that is over and is let go of next. Only the
+    /// endpoint is moved out, and the dial is let go of where it lies: a dial moved out whole
+    /// would be copied to the caller's frame.
+    #[inline]
+    fn take_endpoint(&mut self) -> DialEndpoint {
+        core::mem::replace(&mut self.endpoint, DialEndpoint::Listed(0))
+    }
+
     /// Let go of the dial in `row`, which is over: the endpoint it dialled; `None` for a row
-    /// that holds no dial. Only the endpoint is moved out, and the dial it leaves is let go of
-    /// where it lies: a dial moved out whole would be copied to the caller's frame.
+    /// that holds no dial.
     #[inline]
     fn end_in(row: &mut Option<Self>) -> Option<DialEndpoint> {
-        let endpoint = core::mem::replace(&mut row.as_mut()?.endpoint, DialEndpoint::Listed(0));
-        *row = None;
+        let endpoint = row.as_mut()?.take_endpoint();
+        Self::let_go_in(row);
         Some(endpoint)
+    }
+
+    /// Let go of the dial `row` holds, where it lies, the row empty after.
+    // Out of line: every place a dial is let go of (its end, a link put over it, the session's
+    // end, its face's place freed) keeps a call here, and the dial's drop is this body alone.
+    #[inline(never)]
+    fn let_go_in(row: &mut Option<Self>) {
+        *row = None;
     }
 
     /// Ask the dial whether its link is made: the link, the refusal, or `None` while it is still
@@ -1876,7 +1902,7 @@ impl<F, D> TablePlace<F, D> {
     /// Drop the face the place holds, where it lies, and its dial: whether a face was there.
     fn clear(&mut self) -> bool {
         // The next face at the place holds no dial.
-        self.row = None;
+        Dial::let_go_in(&mut self.row);
         if !core::mem::take(&mut self.held) {
             return false;
         }
@@ -2439,35 +2465,40 @@ impl<
     /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of
     /// with the dial its place's row held. A dial is given with [`Self::put_dial`].
     pub fn put_link(&mut self, at: usize, link: Link<F::Wire, L::Dial>) {
-        self.put(at, link, None);
+        if let Some(row) = self.relink(at, link) {
+            Dial::let_go_in(row);
+        }
     }
 
     /// Give the face at `at` the dial `dial`, under way, in place of the link it holds, which is
     /// let go of: the dial is written into the face's place's row of the dials, where its link
     /// says it lies. A dial for a face past the table is let go of.
     pub fn put_dial(&mut self, at: usize, dial: Dial<L::Dial>) {
-        self.put(
-            at,
-            Link::Dialing(DialRow(core::marker::PhantomData)),
-            Some(dial),
-        );
+        if let Some(row) = self.relink(at, Link::Dialing(DialRow(core::marker::PhantomData))) {
+            *row = Some(dial);
+        }
     }
 
-    /// Give the face at `at` `link`, and its place's row `row`, in place of what they held.
-    // Always inlined: each caller writes its own link and row, and a dial moved through a call
-    // would be copied once more.
+    /// Give the face at `at` `link`, in place of the one it held, which is let go of: the
+    /// place's row of the dials, for the caller to write; `None` past the table.
+    // Always inlined: it has few callers, each writing a link it knows (no link, often), and out
+    // of line its body is larger than the calls would save. The dial is written by the caller,
+    // from its own frame, so it is moved through no call.
     #[inline(always)]
-    fn put(&mut self, at: usize, link: Link<F::Wire, L::Dial>, row: DialPlace<L::Dial>) {
+    fn relink(
+        &mut self,
+        at: usize,
+        link: Link<F::Wire, L::Dial>,
+    ) -> Option<&mut DialPlace<L::Dial>> {
         self.regenerated();
         self.moved();
-        if let Some((face, place)) = self.faces.face_and_row_mut(at) {
-            #[cfg(feature = "resource-snapshot")]
-            if let Some(gone) = counted(face.link()) {
-                self.receive_ledger.retire(&gone);
-            }
-            *face.link_mut() = link;
-            *place = row;
+        let (face, row) = self.faces.face_and_row_mut(at)?;
+        #[cfg(feature = "resource-snapshot")]
+        if let Some(gone) = counted(face.link()) {
+            self.receive_ledger.retire(&gone);
         }
+        *face.link_mut() = link;
+        Some(row)
     }
 
     /// The dial under way of the face at `at`, in its place's row of the dials: `None` for a
@@ -2484,11 +2515,9 @@ impl<
     pub fn end_dial(&mut self, at: usize) -> Option<DialEndpoint> {
         self.moved();
         let (face, row) = self.faces.face_and_row_mut(at)?;
-        let link = face.link_mut();
-        let Link::Dialing(_) = link else {
+        if !face.link_mut().end_dialing() {
             return None;
-        };
-        *link = Link::Idle;
+        }
         Dial::end_in(row)
     }
 
@@ -2530,13 +2559,15 @@ impl<
         // the links while its face is held.
         let links = &self.links;
         let (face, row) = self.faces.face_and_row_mut(at)?;
-        let link = face.link_mut();
-        let Link::Dialing(_) = link else {
-            return None;
-        };
-        let answer = row.as_mut()?.answer_on::<N, L>(links)?;
-        *link = Link::Idle;
-        Some((answer, Dial::end_in(row)?))
+        // A place's row holds a dial only while its face's link is that dial (`Self::put_dial`).
+        let dial = row.as_mut()?;
+        let answer = dial.answer_on::<N, L>(links)?;
+        // Taken from the dial in hand, not looked up in the row again: a second look would keep
+        // a path, never taken, that lets go of the answer.
+        let endpoint = dial.take_endpoint();
+        Dial::let_go_in(row);
+        face.link_mut().end_dialing();
+        Some((answer, endpoint))
     }
 
     /// The face at `at`, whose handshake completed, holds its link up: the link it holds is the
@@ -2607,17 +2638,22 @@ impl<
             };
         };
         let phase = face.life().phase();
-        // A place's row holds a dial only while its face's link is that dial (`Self::put`).
-        let asked = row.as_mut().and_then(|dial| dial.answer_on::<N, L>(links));
-        if let Some(answered) = asked {
+        // A place's row holds a dial only while its face's link is that dial (`Self::put_dial`).
+        // The endpoint is taken from the dial in hand, as `Self::answer_face_dial` takes it.
+        let asked = row.as_mut().and_then(|dial| {
+            let answered = dial.answer_on::<N, L>(links)?;
+            Some((answered, dial.take_endpoint()))
+        });
+        if let Some((answered, endpoint)) = asked {
             let input = if answered.is_ok() {
                 LinkInput::DialMade
             } else {
                 LinkInput::DialRefused
             };
             *answer = Some(answered);
-            *face.link_mut() = Link::Idle;
-            *dialled = Dial::end_in(row);
+            *dialled = Some(endpoint);
+            Dial::let_go_in(row);
+            face.link_mut().end_dialing();
             return FaceRead { role, input };
         }
         // An established link and one in its handshake read their wire's end by one look; only
@@ -2989,10 +3025,8 @@ impl<
     pub fn end_dials_and_ports(&mut self) {
         self.moved();
         for (face, row) in self.faces.faces_and_rows_mut() {
-            let link = face.link_mut();
-            if let Link::Dialing(_) = link {
-                *link = Link::Idle;
-                *row = None;
+            if face.link_mut().end_dialing() {
+                Dial::let_go_in(row);
             }
         }
         #[cfg(feature = "listen")]
@@ -3018,7 +3052,7 @@ impl<
                     wire.close();
                     wire.abort();
                 }
-                Link::Dialing(_) => *row = None,
+                Link::Dialing(_) => Dial::let_go_in(row),
                 Link::Idle => {}
             }
         }
@@ -5140,7 +5174,7 @@ mod tests {
     /// as well; a dial given to a face past the table is let go of at once. CONTROL: the dial
     /// role's row holds no dial of the other face. Turned red by a dropped face whose dial stays in
     /// its place's row (`TablePlace::clear`), or a link put over a dial that leaves the dial there
-    /// (`LinkSupervisor::put`).
+    /// (`LinkSupervisor::put_link`).
     #[test]
     fn a_faces_dial_row_is_emptied_when_the_face_goes() {
         let held = Rc::new(Cell::new(0));
@@ -6354,5 +6388,20 @@ mod tests {
             core::mem::size_of::<Link<u64, [u8; 512]>>(),
             core::mem::size_of::<Link<u64, ()>>()
         );
+    }
+
+    /// A link ends its dialing only where it is a dial: a dial's link turns to no link, and a
+    /// wire and no link are left as they are. Turned red by an `end_dialing` that idles every
+    /// link, or that reads no link as a dial.
+    #[test]
+    fn only_a_dials_link_ends_its_dialing() {
+        let mut link: Link<u8, ()> = Link::Dialing(DialRow(core::marker::PhantomData));
+        assert!(link.end_dialing(), "a dial's link");
+        assert!(matches!(link, Link::Idle));
+        assert!(!link.end_dialing(), "no link is no dial");
+        assert!(matches!(link, Link::Idle));
+        let mut wire: Link<u8, ()> = Link::Wire(7);
+        assert!(!wire.end_dialing(), "a wire is no dial");
+        assert!(matches!(wire, Link::Wire(7)), "and is left as it is");
     }
 }
