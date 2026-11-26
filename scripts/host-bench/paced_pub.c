@@ -9,7 +9,7 @@
 // It uses only the zenoh-pico C API the upstream examples use, so the SAME source is built once against
 // zenoh-pico and once against libwz_capi_pico (scripts/pico-compare.sh nodrop).
 //
-//   paced_pub -m peer -e tcp/127.0.0.1:PORT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-u]
+//   paced_pub -m peer -e tcp/127.0.0.1:PORT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-u] [-a START]
 //
 // With -b the puts of one slot are one batch (`zp_batch_start` before them and `zp_batch_stop` after, which
 // flushes it), as the upstream throughput example does for its whole run: it is how zenoh-pico reaches its
@@ -24,7 +24,13 @@
 // offered rate was not offered, and the trial does not stand for it. The last line is
 //
 //   paced_pub sent=<puts that returned 0> failed=<puts that returned an error> elapsed_s=<seconds from the
-//   first slot to the end of the last put> late_slots=<n>
+//   first slot to the end of the last put> late_slots=<n> [open_lead_ms=<n>]
+//
+// With -a START (an instant on CLOCK_MONOTONIC, in nanoseconds; scripts/host-bench/bench_window.h) the
+// first slot is at START rather than as soon as the publisher is ready, so that a subscriber given the
+// same instant counts a window around the run; open_lead_ms= says how long before START the session was
+// open, and a publisher not ready by START says so and exits 1. -g then keeps the session open past the
+// subscriber's window. A RATE of 0 puts nothing for SECONDS: the idle run.
 //
 // Two switches exist to tell where a loss at the end of a run comes from, and are off in a measurement:
 // -g MS waits that long after the last put before anything is closed, and -n leaves the publisher to the
@@ -47,18 +53,13 @@
 #include <unistd.h>
 
 #include "bench_api.h"
+#include "bench_window.h"
 
 #if Z_FEATURE_PUBLICATION == 1
 
 static void free_with_context(void *ptr, void *context) {
     (void)context;
     z_free(ptr);
-}
-
-static uint64_t now_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 int main(int argc, char **argv) {
@@ -72,14 +73,22 @@ int main(int argc, char **argv) {
     unsigned grace_ms = 0;
     int keep_publisher = 0;
     int best_effort = 0;
+    uint64_t start_ns = 0;
 
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
-    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:g:bdwnu")) != -1) {
+    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:g:a:bdwnu")) != -1) {
         switch (opt) {
             case 'u':
                 best_effort = 1;
+                break;
+            case 'a':
+                start_ns = bench_parse_instant(optarg);
+                if (start_ns == 0) {
+                    fprintf(stderr, "paced_pub: -a takes an instant on CLOCK_MONOTONIC in nanoseconds\n");
+                    return 2;
+                }
                 break;
             case 'n':
                 keep_publisher = 1;
@@ -115,7 +124,7 @@ int main(int argc, char **argv) {
                 seconds = (unsigned)strtoul(optarg, NULL, 10);
                 break;
             default:
-                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n] [-u]\n");
+                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n] [-u] [-a START]\n");
                 return 2;
         }
     }
@@ -125,6 +134,7 @@ int main(int argc, char **argv) {
         printf("paced_pub: unable to open the session\n");
         return 1;
     }
+    const uint64_t opened_ns = bench_now_ns();
     // The subscriber's declaration reaches this side a moment after the connection.
     sleep(1);
 
@@ -163,13 +173,22 @@ int main(int argc, char **argv) {
     double owed = 0.0;
     unsigned long sent = 0, failed = 0, late = 0;
     uint64_t slot = 0;
-    const uint64_t t0 = now_ns();
+    if (start_ns != 0) {
+        const uint64_t ready = bench_now_ns();
+        if (ready >= start_ns) {
+            printf("paced_pub: ready %llu ms after the start instant\n",
+                   (unsigned long long)((ready - start_ns) / 1000000ULL));
+            return 1;
+        }
+        bench_sleep_until_ns(start_ns);
+    }
+    const uint64_t t0 = start_ns != 0 ? start_ns : bench_now_ns();
     uint64_t end = t0;
     for (;;) {
         uint64_t target = t0 + slot * slot_ns;
         if (target >= t0 + run_ns) break;
         uint64_t now;
-        while ((now = now_ns()) < target) {
+        while ((now = bench_now_ns()) < target) {
             // With -w the wait sleeps until 50 microseconds before the slot and spins only for those,
             // so the CPU the process is charged is the library's and not the pacer's.
             if (sleep_wait && target - now > 100000ULL) {
@@ -196,14 +215,17 @@ int main(int argc, char **argv) {
 #if Z_FEATURE_BATCHING == 1
         if (batching && n > 1) zp_batch_stop(z_loan(s));
 #endif
-        end = now_ns();
+        end = bench_now_ns();
         slot++;
     }
-    printf("paced_pub sent=%lu failed=%lu elapsed_s=%.3f late_slots=%lu\n", sent, failed,
-           (double)(end - t0) / 1e9, late);
+    printf("paced_pub sent=%lu failed=%lu elapsed_s=%.3f late_slots=%lu", sent, failed, (double)(end - t0) / 1e9,
+           late);
+    if (start_ns != 0) printf(" open_lead_ms=%llu", (unsigned long long)((start_ns - opened_ns) / 1000000ULL));
+    printf("\n");
     fflush(stdout);
 
-    if (grace_ms > 0) usleep((useconds_t)grace_ms * 1000U);
+    // A sleep to an instant: a grace that outlasts a subscriber's window runs to seconds, past usleep's range.
+    if (grace_ms > 0) bench_sleep_until_ns(bench_now_ns() + (uint64_t)grace_ms * 1000000ULL);
     if (!keep_publisher) z_drop(z_move(pub));
     z_drop(z_move(s));
     z_drop(z_move(payload));

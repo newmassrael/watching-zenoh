@@ -9,9 +9,14 @@
 // It uses only the zenoh-pico C API the upstream examples use, so the SAME source is built once against
 // zenoh-pico and once against libwz_capi_pico (scripts/pico-compare.sh nodrop).
 //
-//   count_sub -m peer -l tcp/127.0.0.1:PORT -d SECONDS [-k KEY]
+//   count_sub -m peer -l tcp/127.0.0.1:PORT -d SECONDS [-k KEY] [-a START -t SECONDS -g MS]
 //
-// It listens for SECONDS and prints one line: `count_sub received=<n>`.
+// It listens for -d SECONDS and prints one line: `count_sub received=<n>`.
+//
+// With -a START (an instant on CLOCK_MONOTONIC, in nanoseconds) it counts a window for
+// scripts/pico-compare.sh subprofile (scripts/host-bench/bench_window.h): it calls bench_window_open() at
+// START less -g MS and bench_window_close() at START + -t SECONDS plus -g MS, listens until the later of
+// that and the end of -d SECONDS, and the line adds ` in_window=<n>`, what it received between the two.
 //
 // Against a library of one thread (Z_FEATURE_MULTI_THREAD 0, the form a deployment of one task ships) no
 // task reads for the program, so the subscriber spins its session for the SECONDS itself, with no sleep
@@ -25,6 +30,7 @@
 #include <unistd.h>
 
 #include "bench_api.h"
+#include "bench_window.h"
 
 #if Z_FEATURE_SUBSCRIPTION == 1
 
@@ -41,11 +47,14 @@ static void drop_context(void *context) { (void)context; }
 int main(int argc, char **argv) {
     const char *keyexpr = "thr";
     unsigned seconds = 8;
+    uint64_t start_ns = 0;
+    unsigned window_s = 0;
+    unsigned guard_ms = 0;
 
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
-    while ((opt = getopt(argc, argv, "k:l:m:d:")) != -1) {
+    while ((opt = getopt(argc, argv, "k:l:m:d:a:t:g:")) != -1) {
         switch (opt) {
             case 'k':
                 keyexpr = optarg;
@@ -59,8 +68,21 @@ int main(int argc, char **argv) {
             case 'd':
                 seconds = (unsigned)strtoul(optarg, NULL, 10);
                 break;
+            case 'a':
+                start_ns = bench_parse_instant(optarg);
+                if (start_ns == 0) {
+                    fprintf(stderr, "count_sub: -a takes an instant on CLOCK_MONOTONIC in nanoseconds\n");
+                    return 2;
+                }
+                break;
+            case 't':
+                window_s = (unsigned)strtoul(optarg, NULL, 10);
+                break;
+            case 'g':
+                guard_ms = (unsigned)strtoul(optarg, NULL, 10);
+                break;
             default:
-                fprintf(stderr, "usage: count_sub -m peer -l ENDPOINT -d SECONDS [-k KEY]\n");
+                fprintf(stderr, "usage: count_sub -m peer -l ENDPOINT -d SECONDS [-k KEY] [-a START -t SECONDS -g MS]\n");
                 return 2;
         }
     }
@@ -82,18 +104,50 @@ int main(int argc, char **argv) {
         printf("count_sub: unable to declare the subscriber\n");
         return 1;
     }
+
+    uint64_t end = bench_now_ns() + (uint64_t)seconds * 1000000000ULL;
+    uint64_t open_ns = 0, close_ns = 0;
+    if (start_ns != 0) {
+        const uint64_t guard_ns = (uint64_t)guard_ms * 1000000ULL;
+        open_ns = start_ns - guard_ns;
+        close_ns = start_ns + (uint64_t)window_s * 1000000000ULL + guard_ns;
+        if (bench_now_ns() >= open_ns) {
+            printf("count_sub: the subscriber was declared after its window opened\n");
+            return 1;
+        }
+        if (close_ns > end) end = close_ns;
+    }
+    unsigned long before = 0, in_window = 0;
 #if Z_FEATURE_MULTI_THREAD == 1
-    sleep(seconds);
+    if (start_ns != 0) {
+        bench_sleep_until_ns(open_ns);
+        before = atomic_load_explicit(&received, memory_order_relaxed);
+        bench_window_open();
+        bench_sleep_until_ns(close_ns);
+        bench_window_close();
+        in_window = atomic_load_explicit(&received, memory_order_relaxed) - before;
+    }
+    bench_sleep_until_ns(end);
 #else
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    const time_t end = now.tv_sec + (time_t)seconds;
-    while (now.tv_sec < end) {
+    // The window's edges are read between two spins: the spin in progress at an edge is the only one
+    // that may fall on either side of it.
+    int window = start_ns != 0 ? 0 : 2;
+    for (uint64_t now = bench_now_ns(); now < end; now = bench_now_ns()) {
+        if (window == 0 && now >= open_ns) {
+            before = atomic_load_explicit(&received, memory_order_relaxed);
+            bench_window_open();
+            window = 1;
+        } else if (window == 1 && now >= close_ns) {
+            bench_window_close();
+            in_window = atomic_load_explicit(&received, memory_order_relaxed) - before;
+            window = 2;
+        }
         (void)zp_spin_once(z_loan(s));
-        clock_gettime(CLOCK_MONOTONIC, &now);
     }
 #endif
-    printf("count_sub received=%lu\n", atomic_load_explicit(&received, memory_order_relaxed));
+    printf("count_sub received=%lu", atomic_load_explicit(&received, memory_order_relaxed));
+    if (start_ns != 0) printf(" in_window=%lu", in_window);
+    printf("\n");
     fflush(stdout);
     z_drop(z_move(s));
     return 0;
