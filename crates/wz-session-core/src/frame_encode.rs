@@ -36,7 +36,6 @@ use alloc::vec::Vec;
     ),
     all(feature = "codec-fragment", feature = "reassembly")
 ))]
-#[cfg(test)]
 use sce_forge_runtime::codec::CodecError;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
