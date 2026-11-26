@@ -1010,12 +1010,12 @@ fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
 }
 
 /// A read turns every face of the session's table once, after one wait: the dial role's (unless
-/// it rests beside another, `DirectSlot::rests`), and each past it whose row holds a face, and no
-/// row that holds none. A client that took no face
-/// turns its dial role's face alone, whatever rows its table keeps for faces to come. Turned red
-/// by a read that turns a face twice, or a row no face holds (`CoopEngine::read_faces` over
-/// `DirectFaces::turned`, or `CoopEngine::read_dial` where the dial role's face is the only
-/// face).
+/// it rests beside another, `DirectFace::rests`), and each past it whose row holds a face, and no
+/// row that holds none. A client that took no face turns its dial role's face alone, whatever rows
+/// its table keeps for faces to come. Turned red by a read that turns a face twice, a row no face
+/// holds, or no face at all, as a walk that reads the dial role's row by the marks of the rows
+/// past it would (`CoopEngine::read_faces` over `DirectFaces::turned`, or
+/// `CoopEngine::read_dial` where the dial role's face is the only face).
 #[cfg(not(wz_round))]
 #[test]
 fn a_read_turns_every_face_once() {

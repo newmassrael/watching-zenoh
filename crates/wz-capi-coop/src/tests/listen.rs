@@ -672,7 +672,7 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
 /// face, which dials nothing and holds no link: a look at it would move nothing, and the client's
 /// face's look serves the session's own bookkeeping. With no client, the dial role's face is the
 /// one a read turns all the same. Turned red by a read that turns a face at rest beside another
-/// (`DirectSlot::rests` in `CoopEngine::read_faces`, or a dial role that dials nothing not
+/// (`DirectFace::rests` in `CoopEngine::read_faces`, or a dial role that dials nothing not
 /// noted at rest by the open), or one that turns no face when every face rests.
 #[cfg(not(wz_round))]
 #[test]
@@ -753,6 +753,35 @@ fn a_listeners_walk_ends_at_its_last_held_row() {
     eventually("the first client's face to go", || {
         listener.walked_rows() == 1
     });
+}
+
+/// A row a face left is noted at rest by that face's last look, and the face an attach gives it
+/// next wakes it: the attached dial lies in the face's record until the face's own look takes it
+/// into the slot, so a read that passed the row over would never dial. CONTROL: the row's first
+/// face, taken off the port, comes up and goes. Turned red by a row given a face and left at rest
+/// (`DirectFaces::hold_face` not ending `DirectFace::rests`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_row_a_face_left_wakes_for_the_face_an_attach_gives_it() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 1);
+    let first = client(&endpoint, 0xc1);
+    eventually("CONTROL: the taken face", || listener.faces_up() == 1);
+    drop(first);
+    eventually("the taken face to go", || {
+        listener.faces_up() == 0 && listener.walked_rows() == 1
+    });
+    let (other, other_endpoint) = listening(|config| config.zid = config_zid(0xa3));
+    listener
+        .attach_face(&other_endpoint)
+        .expect("the attach takes the row the taken face left");
+    eventually("the attached face, in the row the taken face left", || {
+        listener.faces_up() == 1 && other.faces_up() == 1
+    });
+    assert_eq!(
+        listener.walked_rows(),
+        2,
+        "the attached face holds the one row past the dial role's"
+    );
 }
 
 /// A session whose one link is a stream waits on that link's input with nothing of the session

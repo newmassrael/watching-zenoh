@@ -641,7 +641,8 @@ measurement:
    look would move: its read passes it over while another face is turned, whose look serves the
    session's own bookkeeping (the ledger, the gets, the jobs, the ports), and turns it all the same
    when no face is. The rest is noted by the open of a dial role that dials nothing and by the
-   face's own look, under the session's lock, and ends when the slot is given a link; a life
+   face's own look, under the session's lock, and ends when the slot is given a link or the row a
+   face (an attach's dial lies in the face's record until the face's look takes it); a life
    standing by for a node another face holds is not at rest, as only a look reads that the node
    is free. The dial role's face of a listening peer is such a face. Expected:
    about half of the 1,110 of the looks, and one of the two readings of the clock (about 500).

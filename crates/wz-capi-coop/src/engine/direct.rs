@@ -814,12 +814,6 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// change of it is written there.
     #[cfg(any(feature = "listen", feature = "group"))]
     noted_us: u64,
-    /// Whether the face has nothing a look would move: no pump, no dial and no opened link, a
-    /// life idle or closed with no wake, and no chain in its Router. Noted by the face's own look
-    /// under the session's lock and ended where the slot is given a link, so a read passes the
-    /// face over while it turns another (`CoopEngine::read_faces`).
-    #[cfg(any(feature = "listen", feature = "group"))]
-    rests: bool,
     /// The change of the face's send place a look at the life made under the session's lock and
     /// found held by another thread: the place emptied (`Some(None)`) or given these parts, the
     /// ones it holds let go of. Carried out once the lock is let go of (`Self::pay_site`).
@@ -985,7 +979,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
         self.last = None;
         self.brought_up = false;
         self.life_due_us = u64::MAX;
-        self.rests = false;
     }
 }
 
@@ -1183,6 +1176,15 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// holds costs it neither a take of the session nor a reading of the clock.
     #[cfg(feature = "listen")]
     holds_face: AtomicBool,
+    /// Whether the face has nothing a look would move: no pump, no dial and no opened link, a
+    /// life idle or closed with no wake, and no chain in its Router, so a read passes it over
+    /// while it turns another (`CoopEngine::read_faces`). Written under the session's lock: set
+    /// by the face's own look and by the open of a dial role that dials nothing, and ended where
+    /// the slot is given a link and where the row is given a face (`DirectFaces::hold_face`),
+    /// whose attached dial only the face's look takes into its slot. Outside the slot, as an
+    /// attach holds the session's lock and not the face's slot.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    rests: AtomicBool,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
@@ -1219,8 +1221,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         brought_up: false,
                         #[cfg(any(feature = "listen", feature = "group"))]
                         noted_us: u64::MAX,
-                        #[cfg(any(feature = "listen", feature = "group"))]
-                        rests: false,
                         #[cfg(feature = "threads")]
                         site_owed: None,
                     }))
@@ -1229,7 +1229,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             addr_of_mut!((*at).site).write(FaceSite::empty());
             addr_of_mut!((*at).end).write(EndFlags::default());
             #[cfg(any(feature = "listen", feature = "group"))]
-            addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
+            {
+                addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
+                addr_of_mut!((*at).rests).write(AtomicBool::new(false));
+            }
             #[cfg(feature = "listen")]
             addr_of_mut!((*at).holds_face).write(AtomicBool::new(false));
         }
@@ -1366,8 +1369,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     pub(super) fn turned(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         #[cfg(feature = "listen")]
         {
-            self.walked()
-                .filter(|face| face.holds_face.load(Ordering::Acquire))
+            core::iter::once(&self.dial).chain(
+                self.taken_walked()
+                    .filter(|face| face.holds_face.load(Ordering::Acquire)),
+            )
         }
         // Every face that may hold a link is the dial role's alone (`Self::iter`).
         #[cfg(not(feature = "listen"))]
@@ -1383,16 +1388,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     pub(super) fn walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         #[cfg(feature = "listen")]
         {
-            core::iter::once(&self.dial).chain(
-                self.taken
-                    .iter()
-                    .take(self.held_rows.load(Ordering::Acquire)),
-            )
+            core::iter::once(&self.dial).chain(self.taken_walked())
         }
         #[cfg(not(feature = "listen"))]
         {
             self.iter()
         }
+    }
+
+    /// The rows past the dial role's up to the last that holds a face, held or not: the dial
+    /// role's row holds no mark (`DirectFace::holds_face`), so each walk names it apart.
+    #[cfg(feature = "listen")]
+    #[inline(always)]
+    fn taken_walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
+        self.taken
+            .iter()
+            .take(self.held_rows.load(Ordering::Acquire))
     }
 
     /// Mark whether the face table's row `at`, past the dial role's, holds a face, and move the
@@ -1404,6 +1415,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         let Some(face) = at.checked_sub(1).and_then(|row| self.taken.get(row)) else {
             return;
         };
+        // Ended before the mark is shown: a read that sees the row held sees it awake.
+        if holds {
+            face.rests.store(false, Ordering::Release);
+        }
         face.holds_face.store(holds, Ordering::Release);
         let rows = if holds {
             self.held_rows.load(Ordering::Relaxed).max(at)
@@ -1495,9 +1510,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 // A dial role that dials nothing has no link to look at and no time of its own:
                 // its face rests from the open on.
                 #[cfg(any(feature = "listen", feature = "group"))]
-                {
-                    slot.rests = true;
-                }
+                self.direct.dial.rests.store(true, Ordering::Release);
                 return Ok(());
             }
             let now_us = core.now_us();
@@ -1659,21 +1672,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             true
         };
-        // A face at rest (`DirectSlot::rests`) is passed over while another face is turned, whose
+        // A face at rest (`DirectFace::rests`) is passed over while another face is turned, whose
         // look serves the session's own bookkeeping (the ledger, the gets, the jobs, the ports);
         // with no face turned the first at rest is turned all the same, for that bookkeeping.
         let mut rested = None;
         let mut turned = false;
         for face in faces() {
-            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
-                continue;
-            };
-            if held.0.rests {
+            if face.rests.load(Ordering::Acquire) {
                 if rested.is_none() {
                     rested = Some(face);
                 }
                 continue;
             }
+            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+                continue;
+            };
             turned = true;
             if !turn_face(face, &mut held.0) {
                 break;
@@ -2091,16 +2104,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // A life standing by is not at rest: it dials again once no other face holds its
             // node, which only a look at it reads.
             #[cfg(any(feature = "listen", feature = "group"))]
-            {
-                slot.rests = slot.life_due_us == u64::MAX
+            face.rests.store(
+                slot.life_due_us == u64::MAX
                     && slot.records.is_none()
                     && slot.dial.is_none()
                     && slot.opened.is_none()
                     && slot.router.due_ms() == u64::MAX
                     && life.is_none_or(|life| {
                         matches!(life.phase(), LinkPhase::Idle | LinkPhase::Closed)
-                    });
-            }
+                    }),
+                Ordering::Release,
+            );
             // Noted outside the slot for the other faces' reads; the one face's due is the read's
             // own, noted as its turn ends.
             #[cfg(any(feature = "listen", feature = "group"))]
@@ -2453,9 +2467,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         } = placed;
         slot.records = Some(dispatch);
         #[cfg(any(feature = "listen", feature = "group"))]
-        {
-            slot.rests = false;
-        }
+        face.rests.store(false, Ordering::Release);
         // The face's record holds the wire's waits, read once here, and no handle.
         let (input, room) = (wire.input_wait(), wire.room_wait());
         #[cfg(feature = "resource-snapshot")]
@@ -2956,7 +2968,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// The rows a read walks (`DirectFaces::walked`): the dial role's, and each past it up to the
     /// last that holds a face.
-    #[cfg(all(test, feature = "std", feature = "listen"))]
+    #[cfg(all(
+        test,
+        feature = "listen",
+        feature = "query",
+        feature = "queryable",
+        feature = "threads"
+    ))]
     pub(crate) fn walked_rows(&self) -> usize {
         self.direct.walked().count()
     }
