@@ -1549,7 +1549,8 @@ impl<D> Dial<D> {
     /// `links` while one is left: the dial is then under way again, `None` is answered, and the
     /// next address is asked at the next step, as a dial just begun is. The refusal of the last
     /// address tried is the dial's. A link made is answered as it comes. Out of line: a face's
-    /// read, a dial asked once as it begins and a dial held apart from the faces share it.
+    /// read, a dial asked once as it begins and a face's dial asked by its own slot
+    /// ([`LinkSupervisor::answer_face_dial`]) share it.
     #[inline(never)]
     pub fn answer_on<N: CountKind, L>(&mut self, links: &L) -> DialAnswer<L::Pump, N>
     where
@@ -2378,10 +2379,28 @@ impl<
         None
     }
 
-    /// Ask `dial`, held apart from the faces, once over these links
-    /// ([`Dial::answer_on`]): a refused address passes it to its host's next.
-    pub fn answer_dial(&self, dial: &mut Dial<L::Dial>) -> DialAnswer<L::Pump, N> {
-        dial.answer_on::<N, L>(&self.links)
+    /// Ask the dial under way in the face at `at` once over these links ([`Dial::answer_on`]),
+    /// where it lies: a refused address passes it to its host's next. Once the network answered,
+    /// the dial is let go of, the face holds no link, and the answer is handed back with the
+    /// endpoint it dialled. `None` while the network has not answered, and for a face that holds
+    /// no dial or lies past the table.
+    pub fn answer_face_dial(
+        &mut self,
+        at: usize,
+    ) -> Option<(Result<OpenedLink<L::Pump, N>, LinkOpenError>, DialEndpoint)> {
+        self.moved();
+        // The faces apart from the links, so that a refused address can begin its host's next on
+        // the links while its face is held.
+        let links = &self.links;
+        let link = self.faces.get_mut(at)?.link_mut();
+        let Link::Dialing(dial) = link else {
+            return None;
+        };
+        let answer = dial.answer_on::<N, L>(links)?;
+        // Only the endpoint is moved out, as `Self::end_dial` moves it.
+        let endpoint = core::mem::replace(&mut dial.endpoint, DialEndpoint::Listed(0));
+        *link = Link::Idle;
+        Some((answer, endpoint))
     }
 
     /// The face at `at`, whose handshake completed, holds its link up: the link it holds is the
@@ -4892,6 +4911,53 @@ mod tests {
             ),
             "an answered dial is not put in the face"
         );
+    }
+
+    /// A dial under way is asked where it lies in its face: unanswered, it stays there; answered,
+    /// it is let go of, the face holds no link, and the answer is handed back with the endpoint it
+    /// dialled. A face that holds no dial and one past the table answer nothing, and nothing is
+    /// asked of them. Turned red by an answered dial left in its face, or by one taken out of it
+    /// while the network has not answered (`LinkSupervisor::answer_face_dial`).
+    #[test]
+    fn a_dial_is_answered_where_it_lies_in_its_face() {
+        let asks = Rc::new(Cell::new(0));
+        let under_way = Answer(None, Some(asks.clone()));
+        let mut faces = supervisor(
+            Link::Dialing(Dial::new(DialEndpoint::Listed(1), under_way)),
+            1,
+        );
+        assert!(
+            faces.answer_face_dial(0).is_none(),
+            "the network has not answered"
+        );
+        assert_eq!(asks.get(), 1, "asked once");
+        assert!(
+            matches!(
+                &dial(&faces).link,
+                Link::Dialing(dial) if dial.endpoint() == &DialEndpoint::Listed(1)
+            ),
+            "a dial under way stays in its face"
+        );
+
+        let refused = Answer(Some(Err(LinkOpenError::Refused)), Some(asks.clone()));
+        faces.put_link(
+            0,
+            Link::Dialing(Dial::new(DialEndpoint::Listed(2), refused)),
+        );
+        let Some((answer, endpoint)) = faces.answer_face_dial(0) else {
+            panic!("the network answered");
+        };
+        assert!(matches!(answer, Err(LinkOpenError::Refused)));
+        assert_eq!(endpoint, DialEndpoint::Listed(2), "the endpoint it dialled");
+        assert_eq!(asks.get(), 2, "asked once more");
+        assert!(
+            matches!(dial(&faces).link, Link::Idle),
+            "an answered dial is let go of"
+        );
+
+        assert!(faces.answer_face_dial(0).is_none(), "no dial, no answer");
+        assert!(faces.answer_face_dial(5).is_none(), "past the table");
+        assert_eq!(asks.get(), 2, "nothing asked of a face that holds no dial");
     }
 
     /// The node a face's handshake reached is the one it stands by for only while another face

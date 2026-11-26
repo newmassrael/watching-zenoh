@@ -773,8 +773,8 @@ fn a_listeners_walk_ends_at_its_last_held_row() {
 }
 
 /// A row a face left is noted at rest by that face's last look, and the face an attach gives it
-/// next wakes it: the attached dial lies in the face's record until the face's own look takes it
-/// into the slot, so a read that passed the row over would never dial. CONTROL: the row's first
+/// next wakes it: the attached dial lies in the face's record, asked only by the face's own look,
+/// so a read that passed the row over would never dial. CONTROL: the row's first
 /// face, taken off the port, comes up and goes. Turned red by a row given a face and left at rest
 /// (`DirectFaces::hold_face` not ending `DirectFace::rests`).
 #[cfg(not(wz_round))]
