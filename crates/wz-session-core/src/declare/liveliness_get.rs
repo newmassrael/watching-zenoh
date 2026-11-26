@@ -666,7 +666,7 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         &mut self,
         declare: &DeclareOwned,
         peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
-        room: &mut crate::wireexpr_resolve::KeyexprBuf,
+        room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
         let interest_id = declare.interest_id.filter(|&id| self.has_pending(id))?;
         let DeclareOwnedVariant::CodecZenohDeclToken(decl) = &declare.body else {
@@ -687,14 +687,15 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         &mut self,
         declare: &wz_codecs::lent::Declare<'f>,
         peer_keyexpr_table: impl Into<MappingSpaces<'a, PS, OS>>,
-        room: &mut crate::wireexpr_resolve::KeyexprBuf,
+        room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
         use wz_codecs::lent::DeclareVariant;
         let interest_id = declare.interest_id.filter(|&id| self.has_pending(id))?;
         let DeclareVariant::CodecZenohDeclToken(decl) = &declare.body else {
             return None;
         };
-        let mut composed = crate::wireexpr_resolve::KeyexprBuf::new();
+        // Composed in the frame on every profile: a token read where it lies takes no heap.
+        let mut composed = crate::wireexpr_resolve::KeyexprRow::new_static();
         let resolved = match crate::wireexpr_resolve::resolve_wireexpr_view(
             &decl.keyexpr.body,
             peer_keyexpr_table.into(),
@@ -711,7 +712,8 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
 
     /// `keyexpr`, the key of an alive token answering the pending get `interest_id`, written
     /// into `room`, where the caller reads it while the frame it was read off is let go of;
-    /// `None`, counted, for a key past `room`.
+    /// `None`, counted, for a key past `room`. The caller picks the room's policy: one of the
+    /// static policy (`KeyexprRow`) takes no heap whatever the build's profile.
     #[cfg(any(
         feature = "alloc",
         all(
@@ -724,10 +726,10 @@ impl<C: ReplySink, P: Storage> LivelinessGetRegistry<C, P> {
         &mut self,
         interest_id: u64,
         keyexpr: &str,
-        room: &mut crate::wireexpr_resolve::KeyexprBuf,
+        room: &mut dyn crate::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
-        crate::wireexpr_resolve::KeyexprOut::clear(room);
-        if crate::wireexpr_resolve::KeyexprOut::push_str(room, keyexpr).is_err() {
+        room.clear();
+        if room.push_str(keyexpr).is_err() {
             self.oversize = self.oversize.saturating_add(1);
             return None;
         }

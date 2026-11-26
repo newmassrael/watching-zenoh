@@ -1733,7 +1733,7 @@ impl<H: Holders> RegistryOf<H> {
         &mut self,
         face: HeldFace,
         declare: &wz_session_core::transport_profile::owned::DeclareOwned,
-        room: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+        room: &mut dyn wz_session_core::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
         let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
         let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
@@ -1748,7 +1748,7 @@ impl<H: Holders> RegistryOf<H> {
         &mut self,
         face: HeldFace,
         record: &InPlaceRecord<'_, '_>,
-        room: &mut wz_session_core::wireexpr_resolve::KeyexprBuf,
+        room: &mut dyn wz_session_core::wireexpr_resolve::KeyexprOut,
     ) -> Option<u64> {
         let declare = record.declare()?;
         let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
