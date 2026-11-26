@@ -2680,6 +2680,74 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
     SessionDrive::close(&*engine);
 }
 
+/// A record the read task hands out reaches its callback with nothing of the session held but the
+/// face's read slot: a put another thread makes while the callback runs, and that the callback
+/// waits for, is sent and returns, and the callback returns after it. Turned red by a read that
+/// holds the session's lock or the face's send place across a record's callbacks (the put would
+/// wait for the callback, which waits for the put), and, as it does not build, by `threads` kept
+/// among the features that keep the round where each value has a lock of its own (`build.rs`):
+/// the face count read below is the direct read's.
+#[cfg(all(
+    feature = "threads",
+    any(feature = "std", feature = "host-sys"),
+    target_has_atomic = "8",
+    target_has_atomic = "64",
+    not(feature = "group")
+))]
+#[test]
+fn a_put_another_thread_makes_inside_a_read_tasks_callback_is_sent_and_both_return() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    assert!(
+        engine.direct_faces() >= 1,
+        "the read steps the faces itself"
+    );
+    let (entered, inside) = channel::<()>();
+    let (put_done, put_seen) = channel::<bool>();
+    let put_seen = Mutex::new(put_seen);
+    let returned = Arc::new(AtomicUsize::new(0));
+    let after = returned.clone();
+    engine
+        .declare_subscriber_on_wire(
+            "demo/in/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _ = entered.send(());
+                let sent = put_seen
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+                if sent == Ok(true) {
+                    after.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .expect("the session declares the subscriber");
+    SessionDrive::start_read_task(&*engine).expect("a read task");
+    router.send(Command::Push("demo/in/a", b"in"));
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the read task calls the callback");
+    let sent = engine.publish_on_wire_all(
+        "demo/out",
+        &WireKey::literal(),
+        b"out",
+        &PublishOptions::put().with_locality(Locality::Remote),
+    );
+    put_done
+        .send(sent.is_ok())
+        .expect("the callback waits for the put");
+    until(&engine, "the callback to return after the put", || {
+        returned.load(Ordering::SeqCst) == 1
+    });
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/out"))
+    });
+    SessionDrive::close(&*engine);
+}
+
 /// A system that gives no thread for the read task is answered, not panicked on: the start answers
 /// `NoThread`, the task is not running, the session is still open, and a start once the system
 /// gives a thread starts it. zenoh-pico answers its task creation's error the same way.

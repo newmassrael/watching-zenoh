@@ -246,8 +246,8 @@ pub use reach::RowClaim;
 mod ledger;
 use ledger::{Due, Ledger, Seen};
 
-// A build with no read task beside the program's calls and no group: the read steps each face's
-// link session itself (`direct`).
+// A build that joins no group, and whose read task, with `threads`, reaches each value under a lock
+// of its own (`build.rs`): the read steps each face's link session itself (`direct`).
 #[cfg(not(wz_round))]
 mod direct;
 // The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).
@@ -1285,7 +1285,7 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     input_held: AtomicBool,
     /// Where a read waits for another read to hand back the session's buffer of waits. Only a
     /// build with a read task beside the program's calls has two reads at once.
-    #[cfg(feature = "threads")]
+    #[cfg(all(feature = "threads", wz_round))]
     hand_back: HandBack,
     /// How many handed legs of each priority are held at most: as many as the session's queue
     /// holds batches of that priority (`TxQueueConf::sizes`), which is as many as a face whose
@@ -1484,7 +1484,7 @@ impl Takes {
 /// ([`IdleWait::Behind`]) waits for the buffer to be handed back: woken then, it steps and its
 /// next wait is on the links, so a read task behind a program's read does not sleep out its bound
 /// while what arrives after that read waits for it.
-#[cfg(feature = "threads")]
+#[cfg(all(feature = "threads", wz_round))]
 struct HandBack {
     /// The reads waiting here now: a hand-back with none takes no lock.
     behind: core::sync::atomic::AtomicUsize,
@@ -1494,7 +1494,7 @@ struct HandBack {
     back: os::Condvar,
 }
 
-#[cfg(feature = "threads")]
+#[cfg(all(feature = "threads", wz_round))]
 impl HandBack {
     fn new() -> Self {
         Self {
@@ -2455,7 +2455,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> ReaderBody<L, C> 
         // Each step blocks in the read of the session's links, so the loop waits there and spins
         // nowhere; it ends once the engine starts another run or the session's read fails.
         while self.engine.reader_run.load(Ordering::Acquire) == self.run {
-            if self.engine.read(false).is_err() {
+            #[cfg(wz_round)]
+            let read = self.engine.read(false);
+            // A read task's read is no callback's: a face another thread's read holds is waited
+            // behind, not read as nothing (`direct`).
+            #[cfg(not(wz_round))]
+            let read = self.engine.read_on_task();
+            if read.is_err() {
                 break;
             }
         }
@@ -6399,7 +6405,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 addr_of_mut!((*at).owed).write(AtomicBool::new(false));
                 #[cfg(wz_round)]
                 addr_of_mut!((*at).input_held).write(AtomicBool::new(false));
-                #[cfg(feature = "threads")]
+                #[cfg(all(feature = "threads", wz_round))]
                 addr_of_mut!((*at).hand_back).write(HandBack::new());
                 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 addr_of_mut!((*at).handed_limits).write(handed_limits);
@@ -6462,7 +6468,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     owed: _,
                 #[cfg(wz_round)]
                     input_held: _,
-                #[cfg(feature = "threads")]
+                #[cfg(all(feature = "threads", wz_round))]
                     hand_back: _,
                 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                     handed_limits: _,
@@ -11652,7 +11658,7 @@ mod member_key_tests {
     }
 }
 
-#[cfg(all(test, feature = "std", feature = "threads"))]
+#[cfg(all(test, feature = "std", feature = "threads", wz_round))]
 mod hand_back_tests {
     use super::{lock, HandBack};
     use std::sync::Arc;
