@@ -1572,6 +1572,12 @@ impl SeqPlace {
             room: room as u32,
         }
     }
+
+    /// [`Self::of`] for a table whose rows are `ROOM`, the length of the array the region's type
+    /// keeps them in: a const of the caller's, as the length of any storage is.
+    pub const fn of_room<T, const ROOM: usize>(seq: usize, rows: usize) -> Self {
+        Self::of::<T>(seq, rows, ROOM)
+    }
 }
 
 /// Tell each table `places` names where its rows lie in the region at `region`, and how many: the
@@ -3811,6 +3817,19 @@ mod tests {
             3,
         ),
     ];
+
+    /// A place whose room is a const of the caller's is the place `SeqPlace::of` makes of that
+    /// room. Turned red by `of_room` placing a room other than `ROOM`.
+    #[test]
+    fn a_place_of_a_const_room_is_the_place_of_that_room() {
+        assert_eq!(
+            SeqPlace::of_room::<u64, 3>(
+                core::mem::offset_of!(TwoTables, words),
+                core::mem::offset_of!(TwoTables, word_rows),
+            ),
+            TWO_TABLES[1]
+        );
+    }
 
     /// A region zeroed by the allocator in one block is every table empty; placed by its
     /// description, each table of the lent shape takes as many values as it has rows and refuses

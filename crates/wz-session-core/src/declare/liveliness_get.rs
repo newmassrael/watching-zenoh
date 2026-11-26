@@ -253,15 +253,19 @@ impl<C: ReplySink> LivelinessGetRegistry<C, crate::bounded::Region> {
         rows: usize,
     ) -> crate::bounded::RegionLines<LIVELINESS_GET_LINES> {
         crate::bounded::RegionLines::EMPTY
-            .seq(crate::bounded::SeqPlace::of::<PendingGet<C>>(
+            .seq(crate::bounded::SeqPlace::of_room::<
+                PendingGet<C>,
+                { caps::MAX_PENDING_LIVELINESS_GETS },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, pending)),
                 rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, pending)),
-                caps::MAX_PENDING_LIVELINESS_GETS,
             ))
-            .seq(crate::bounded::SeqPlace::of::<u64>(
+            .seq(crate::bounded::SeqPlace::of_room::<
+                u64,
+                { caps::MAX_PENDING_LIVELINESS_GETS },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, finalized)),
                 rows.wrapping_add(core::mem::offset_of!(LivelinessGetRows<C>, finalized)),
-                caps::MAX_PENDING_LIVELINESS_GETS,
             ))
     }
 }

@@ -788,10 +788,12 @@ impl ReplyStage<crate::bounded::Region> {
     /// [`ReplyStageRows`] at `rows`.
     pub const fn places(at: usize, rows: usize) -> [crate::bounded::SeqPlace; 2] {
         [
-            crate::bounded::SeqPlace::of::<Row<crate::bounded::Region>>(
+            crate::bounded::SeqPlace::of_room::<
+                Row<crate::bounded::Region>,
+                { caps::MAX_PENDING_REPLIES },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, rows)),
                 rows.wrapping_add(core::mem::offset_of!(ReplyStageRows, rows)),
-                caps::MAX_PENDING_REPLIES,
             ),
             crate::bounded::SeqPlace::of::<u8>(
                 at.wrapping_add(core::mem::offset_of!(Self, arena)),
@@ -1121,10 +1123,12 @@ impl FinalStage<crate::bounded::Region> {
     /// places this stage's rows, the stage at `at` in the region and its [`FinalStageRows`] at
     /// `rows`.
     pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
-        crate::bounded::SeqPlace::of::<(crate::wire_id::RequestId, QosLevel)>(
+        crate::bounded::SeqPlace::of_room::<
+            (crate::wire_id::RequestId, QosLevel),
+            { caps::MAX_PENDING_FINALS },
+        >(
             at.wrapping_add(core::mem::offset_of!(Self, rows)),
             rows.wrapping_add(core::mem::offset_of!(FinalStageRows, rows)),
-            caps::MAX_PENDING_FINALS,
         )
     }
 }

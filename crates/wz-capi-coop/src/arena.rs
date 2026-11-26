@@ -1779,10 +1779,9 @@ impl ArenaPlan {
                 ),
             };
         }
-        self.session.key_bytes = self.lent(
+        self.session.key_bytes = self.lent_to::<{ caps::KEY_ARENA_BYTES }>(
             ArenaLimit::KeyArenaBytes,
             Quota::at_most(limits.key_arena_bytes()),
-            caps::KEY_ARENA_BYTES,
         );
         let faces = self.sized(shape.faces());
         // The texts of the endpoints the session dials and listens on, a text a row of one table
@@ -1840,10 +1839,9 @@ impl ArenaPlan {
         // session that listens on no `udp/` endpoint binds no port and holds none.
         #[cfg(feature = "listen")]
         {
-            let slots = self.lent(
+            let slots = self.lent_to::<{ caps::UDP_PORT_SLOTS }>(
                 ArenaLimit::UdpPortSlots,
                 Quota::at_most(limits.udp_port_slots()),
-                caps::UDP_PORT_SLOTS,
             );
             // A plan of a session with no udp port lays none of the ports' rows out, as one that
             // names no group lays out no group's: their tables are lent no rows and take no byte
@@ -1922,10 +1920,9 @@ impl ArenaPlan {
         // held is dropped on every face, and the session reserves no place for one.
         #[cfg(any(feature = "listen", feature = "group"))]
         {
-            let bytes = self.lent(
+            let bytes = self.lent_to::<{ caps::HANDED_LEG_BYTES }>(
                 ArenaLimit::HandedLegBytes,
                 Quota::at_most(limits.handed_leg_bytes()),
-                caps::HANDED_LEG_BYTES,
             );
             let legs = match (shape.keeps_handed, bytes.checked_div(link_bytes)) {
                 (true, Some(legs)) => legs,
@@ -1951,10 +1948,9 @@ impl ArenaPlan {
         };
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
-        let watchers = self.lent(
+        let watchers = self.lent_to::<{ caps::MAX_DECL_OBSERVERS }>(
             ArenaLimit::MaxDeclObservers,
             limits.max_decl_observers(),
-            caps::MAX_DECL_OBSERVERS,
         );
         // A build of the region's form lays the lists out in its region, at the build's bound; the
         // limit is still held, so a config over the build's is refused under its name either way.
@@ -1969,19 +1965,17 @@ impl ArenaPlan {
         let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_QUERIES }>(
                 ArenaLimit::MaxPendingQueries,
                 limits.max_pending_queries(),
-                caps::MAX_PENDING_QUERIES,
             )
         } else {
             0
         };
         let liveliness_gets = if cfg!(feature = "liveliness-get") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                 ArenaLimit::MaxPendingLivelinessGets,
                 limits.max_pending_liveliness_gets(),
-                caps::MAX_PENDING_LIVELINESS_GETS,
             )
         } else {
             0
@@ -2030,10 +2024,9 @@ impl ArenaPlan {
         // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
-            self.session.held_replies = self.lent(
+            self.session.held_replies = self.lent_to::<{ caps::MAX_PENDING_REPLIES }>(
                 ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
-                caps::MAX_PENDING_REPLIES,
             );
             #[cfg(feature = "runtime-plan")]
             self.put(
@@ -2126,10 +2119,9 @@ impl ArenaPlan {
             );
         }
         self.session.held_queries = if cfg!(feature = "queryable") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_FINALS }>(
                 ArenaLimit::MaxPendingFinals,
                 limits.max_pending_finals(),
-                caps::MAX_PENDING_FINALS,
             )
         } else {
             0

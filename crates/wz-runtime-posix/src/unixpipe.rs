@@ -29,12 +29,11 @@ wz_runtime_coop::with_heap_link_seams! {
 use wz_runtime_coop::session_drive::LinkOpenError;
 use wz_runtime_coop::unixpipe_link::{Fifo, FifoOpen};
 use wz_runtime_coop::ClockSource;
-use wz_session_core::caps::MAX_LOCATOR_LEN;
 
 use crate::net::{errno, poll_writable};
 
 /// The longest path a FIFO of a link is named by, with its NUL: no longer than a row's locator.
-const PATH_BUF: usize = MAX_LOCATOR_LEN + 1;
+const PATH_BUF: usize = wz_session_core::caps::MAX_LOCATOR_LEN + 1;
 
 /// A path as the C calls take it: its bytes and a NUL, in a buffer of the longest a row names.
 struct CPath {
