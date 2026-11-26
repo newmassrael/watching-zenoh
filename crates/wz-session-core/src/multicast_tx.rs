@@ -1246,7 +1246,13 @@ pub fn multicast_tx_publication<R>(
     let body = |sink: &mut crate::tx_buf::TxSink<'_>| {
         crate::lent_push::write_publication(sink, mapping_id, suffix, kind, value, meta)
     };
-    let size = encoded_size(&body).ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
+    // A publication with no body field has its length worked out from its parts, so its writer
+    // runs once, into the frame; one a field rides is counted by a run of the writer.
+    let size = match crate::lent_push::publication_len(mapping_id, suffix, kind, value, meta) {
+        Some(len) => (len > 0).then_some(len),
+        None => encoded_size(&body),
+    }
+    .ok_or(sce_forge_runtime::codec::CodecError::LengthOutOfRange)?;
     // The attachment is counted as far as the build writes it.
     #[cfg(all(feature = "transport-stats", feature = "pubsub-attachment"))]
     let attachment = meta.attachment.map_or(0, <[u8]>::len);
@@ -2243,15 +2249,30 @@ impl MulticastBatch {
     /// slot takes a copy of the frame and the batch keeps its storage; otherwise the frame is
     /// handed over: as a copy of exactly the frame when the storage is the batch the window
     /// writes into, which the batch keeps, and as the storage itself when that is the frame.
+    ///
+    /// Inline, so a push outside a window, which finds no frame open, reads the open mark where it
+    /// stands and calls nothing.
+    #[inline]
     pub fn flush<Q: MulticastTxQueue + ?Sized>(
         &mut self,
         priority: Priority,
         params: &crate::multicast_params::MulticastParams,
         queue: &mut Q,
     ) {
-        let Some(open) = self.open.take() else {
-            return;
-        };
+        if let Some(open) = self.open.take() {
+            self.flush_open(open, priority, params, queue);
+        }
+    }
+
+    /// [`Self::flush`] of `open`, the frame taken out of the batch.
+    #[inline(never)]
+    fn flush_open<Q: MulticastTxQueue + ?Sized>(
+        &mut self,
+        open: OpenFrame,
+        priority: Priority,
+        params: &crate::multicast_params::MulticastParams,
+        queue: &mut Q,
+    ) {
         // A compressing group's frame is compressed on its way to the queue, which only the
         // datagram handed over is.
         if !params.compression {
@@ -4024,6 +4045,38 @@ mod lend_tests {
         );
     }
 
+    /// A window with no frame open puts nothing on the queue when it is flushed, and one with a
+    /// frame open puts that frame on it once and holds none after. Turned red by a flush that reads
+    /// the open frame without taking it (`MulticastBatch::flush`), which would put it on twice.
+    #[test]
+    fn a_window_flushes_its_open_frame_once_and_an_empty_one_nothing() {
+        use sce_forge_runtime::codec::SceSink;
+        let budget = 64;
+        let params = params(64, false);
+        let mut queue = Lending::new(1_472, 65_600);
+        let mut window = MulticastBatch::with_budget(budget);
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(
+            (queue.offers, queue.lent.len(), queue.heap.len()),
+            (0, 0, 0),
+            "no frame open, nothing offered"
+        );
+        assert!(window.open_with(true, 3, budget, |buf| {
+            crate::tx_buf::TxSink::new(buf)
+                .write_bytes(&[9u8; 10])
+                .is_ok()
+        }));
+        assert!(!window.is_empty());
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert!(window.is_empty());
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(
+            queue.lent.len() + queue.heap.len(),
+            1,
+            "the frame went on the queue once"
+        );
+    }
+
     /// A window's frame is held to the batch in the window's own storage: a message that would
     /// carry it past the batch is refused before it is written, the storage does not grow, and a
     /// frame handed to a queue that lends nothing is a copy of exactly the frame, the storage
@@ -4542,14 +4595,22 @@ mod group_publications_written_from_parts {
             meta,
             true,
             Priority::DEFAULT,
-            |message| written(message.body),
+            |message| {
+                let bytes = written(message.body);
+                // Worked out from the parts where no body field rides, counted by the writer
+                // where one does: either way the bytes the frame carries.
+                assert_eq!(message.size, bytes.len(), "the size the push is asked with");
+                bytes
+            },
         )
         .expect("written from its parts")
     }
 
     /// A literal key, named `(0, Some(keyexpr))` as the group's publish names it, and an aliased
-    /// one, each a Put and a Del, plain and with metadata, are the owned builders' bytes. Turned
-    /// red by a literal named another way than the owned literal Push names it.
+    /// one, each a Put and a Del, plain and with metadata, are the owned builders' bytes, and the
+    /// size each is pushed with is its length. Turned red by a literal named another way than the
+    /// owned literal Push names it, or by a size worked out from the parts that is not the bytes
+    /// written (`lent_push::publication_len`).
     #[test]
     fn a_group_publication_written_from_its_parts_is_its_builders_bytes() {
         #[cfg_attr(not(feature = "pubsub-qos"), allow(unused_mut))]

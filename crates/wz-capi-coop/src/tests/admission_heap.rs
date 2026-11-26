@@ -7,7 +7,11 @@
 //! taken off a port and admitted, two links to one node that cross, and a link past the rows take
 //! no memory of the heap. The allocations counted are the calling thread's.
 
+// What a test of the session's link tasks holds: a session whose read steps each face where it
+// lies runs none.
+#[cfg(wz_round)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(wz_round)]
 use std::sync::Arc;
 
 use wz_session_core::link_admission::{LinkAdmission, LinkLease};
@@ -16,7 +20,9 @@ use wz_session_core::WhatAmI;
 
 use super::redial_heap::counted;
 use super::{client_config, config_zid, open_with};
-use crate::{CoopConfig, EngineHold};
+use crate::CoopConfig;
+#[cfg(wz_round)]
+use crate::EngineHold;
 
 /// A node whose zid is lower than the session's (`0xa1` four times) in either `link-tie-order`.
 const LOWER: [u8; 1] = [0x01];
@@ -113,8 +119,10 @@ fn a_listening_sessions_admission_lies_in_its_own_arena() {
 }
 
 /// Marks its drop in the flag it names.
+#[cfg(wz_round)]
 struct Dropped(Arc<AtomicBool>);
 
+#[cfg(wz_round)]
 impl Drop for Dropped {
     fn drop(&mut self) {
         self.0.store(true, Ordering::Relaxed);
@@ -125,7 +133,9 @@ impl Drop for Dropped {
 /// it: a task that holds the set, a lease of the session's admission and a flag is dropped by the
 /// engine's drop, its lease giving its token back to the admission the engine still holds. Turned
 /// red by an engine whose drop leaves its tasks to the set's last handle, which a handle kept by
-/// a task, or by the program, never is.
+/// a task, or by the program, never is. A session whose read steps each face where it lies runs
+/// no link as a task, and its runtime reserves no cell for one.
+#[cfg(wz_round)]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_sessions_tasks_go_with_its_engine_though_a_handle_of_its_set_is_kept() {

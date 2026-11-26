@@ -45,6 +45,8 @@
 
 use super::CoopLinks;
 use super::LinkActions;
+#[cfg(wz_round)]
+use wz_runtime_coop::faces::LendsSession;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::ClockSource;
 use wz_session_core::extbound::INITIAL_INTEREST_ID;
@@ -54,7 +56,7 @@ use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
 use wz_session_core::response_sink::DeclareReplySink;
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
-use wz_session_core::wire_id::EntityId;
+use wz_session_core::wire_id::{EntityId, ExprId};
 
 use super::{Core, Face};
 
@@ -106,19 +108,6 @@ impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>) -> bool> SendTo<C> for F {
     }
 }
 
-/// What a retraction or an undoing tells a link, handed by reference as [`SendTo`] is: a send
-/// whose refusal changes nothing.
-pub(super) trait TellTo<C: ClockSource + 'static> {
-    /// Tell it over `actions`.
-    fn tell_to(&self, actions: &LinkActions<C>);
-}
-
-impl<C: ClockSource + 'static, F: Fn(&LinkActions<C>)> TellTo<C> for F {
-    fn tell_to(&self, actions: &LinkActions<C>) {
-        self(actions);
-    }
-}
-
 /// Where the replay of the current link stands; its pace is the session's
 /// (`SessionState::replay_pacing`).
 pub(super) struct Replay {
@@ -130,6 +119,11 @@ pub(super) struct Replay {
     /// When the replay last told the peer a declaration, or began, in milliseconds on the
     /// session's clock: what a pace's no-progress bound on retrying refused turns counts from.
     last_progress_ms: u64,
+    /// Whether the link that came up is still owed the one lap of a build that reaches no pace
+    /// (`Core::tell_in_one_lap`): a declaration or a retraction made meanwhile is not told to
+    /// it, as the lap reads the tables as they stand when it runs. A build that reaches a pace
+    /// keeps the same in its cursor and never sets it.
+    lap_owed: bool,
     /// Whether the peer is owed the `DeclareFinal` of the initial interest once it has been told
     /// everything: set when the link comes up, taken by the turn that finishes the replay, and
     /// gone with the link. A replay begun again over the same link (a redeclaration) keeps it.
@@ -143,6 +137,7 @@ impl Replay {
             cursor: ReplayCursor::idle(),
             next_turn_ms: 0,
             last_progress_ms: 0,
+            lap_owed: false,
             initial_final: false,
         }
     }
@@ -218,9 +213,10 @@ impl Replay {
         TurnEnd::Kept
     }
 
-    /// The link is gone: what the peer was told, and what it was owed, went with it.
+    /// The link is gone: what the peer was told went with it.
     pub(super) fn discard(&mut self) {
         self.cursor = ReplayCursor::idle();
+        self.lap_owed = false;
         self.initial_final = false;
     }
 
@@ -266,119 +262,155 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         held_before(super::tables(&self.session.registry), None)
     }
 
-    /// Tell the peer of the declaration at `place`: whether the link took it.
-    fn emit(&self, actions: &LinkActions<C>, place: usize) -> bool {
+    /// Tell the peer of the face at `at` of the declaration at `place` through the link's wire
+    /// `tx` ([`super::send_through`]), read off its row as it is sent ([`tell`]): whether the
+    /// link took it, a place with nothing to send counting as taken. `None` while the face holds
+    /// no link, or `tx` no wire.
+    fn emit(&self, at: usize, place: usize, tx: super::LinkTx<'_, C>) -> Option<bool> {
+        let wire = self.transport.links.face(at)?.link.wire()?;
         let tables = super::tables(&self.session.registry);
-        let mut left = place;
-        for &table in ORDER {
-            let slots = tables.slots_of(table);
-            let Some(rest) = left.checked_sub(slots.len()) else {
-                return slots
-                    .nth_live(left)
-                    .is_none_or(|row| tell(tables, actions, DeclaredRow { table, row }));
-            };
-            left = rest;
-        }
-        // A place past the sequence is a defect of the cursor and has nothing to send.
-        true
-    }
-
-    /// The link of the face at `at` has just come up: begin its replay ([`Self::begin_replay`]),
-    /// owing its peer the `DeclareFinal` of the initial interest once the replay has told it
-    /// everything when the session's config ends a push so and the two meet as the peer hat's
-    /// two north-bound peers (`SessionLinkActions::meets_remote_as_peer_hat`); a client, a router
-    /// and a remote whose role never arrived are owed none. What the first turn leaves of the
-    /// link.
-    pub(super) fn begin_link_replay(
-        &mut self,
-        at: usize,
-        actions: &LinkActions<C>,
-        now_ms: u64,
-    ) -> TurnEnd {
-        let owed = self.config.initial_interest && actions.meets_remote_as_peer_hat() == Some(true);
-        if let Some(face) = self.transport.links.face_mut(at) {
-            face.replay.owe_initial_final(owed);
-        }
-        self.begin_replay(at, actions, now_ms)
+        let declared = declared_at(tables, place);
+        super::send_through(wire, tx, &|actions: &LinkActions<C>| {
+            declared.is_none_or(|declared| tell(tables, actions, declared))
+        })
     }
 
     /// The link of the face at `at` has been established: begin to tell its peer what the session
-    /// holds, and send the first turn of it; what that turn leaves of the link. In a build that
-    /// reaches no pace the first turn is the whole of it ([`Self::tell_in_one_lap`]).
+    /// holds, and send the first turn of it through the link's wire `tx`; what that turn leaves of
+    /// the link. In a build that reaches no pace the first turn is the whole of it
+    /// ([`Self::tell_in_one_lap`]).
     /// Out of line: a link brought up and a redeclare each begin a replay.
     #[inline(never)]
     pub(super) fn begin_replay(
         &mut self,
         at: usize,
-        actions: &LinkActions<C>,
         now_ms: u64,
+        tx: super::LinkTx<'_, C>,
     ) -> TurnEnd {
         if !ReplayPacing::REACHABLE {
-            let end = self.tell_in_one_lap(actions);
-            return self.end_initial_interest(at, actions, end);
+            return self.tell_in_one_lap(at, tx);
+        }
+        self.start_replay(at, now_ms);
+        self.replay_turn(at, now_ms, tx)
+    }
+
+    /// Set the replay of the face at `at` to tell its peer, from `now_ms` on, everything the
+    /// session holds, its first turn due at once. A build that reaches no pace, whose replay is
+    /// one lap and keeps no cursor, marks the lap owed: what is declared or retracted before it
+    /// runs is the lap's to tell, not the operation's.
+    pub(super) fn start_replay(&mut self, at: usize, now_ms: u64) {
+        if !ReplayPacing::REACHABLE {
+            if let Some(face) = self.transport.links.face_mut(at) {
+                face.replay.lap_owed = true;
+            }
+            return;
         }
         let owed = self.sequence_len();
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.begin(owed, now_ms);
         }
-        self.replay_turn(at, actions, now_ms)
     }
 
-    /// Send the face at `at` the `DeclareFinal` of the initial interest when the turn that ended
-    /// as `end` told its peer the last of what it was owed and the Final is owed
-    /// ([`Replay::take_initial_final`]), after every declaration of the replay, as upstream's peer
-    /// ends what it propagates to a new face with it. What the turn leaves of the link, as it
-    /// left it. The Final is written as an answer to an interest is, from its parts into the slot
-    /// the link lends where the build lends one, so a session with no heap frame sends it too.
+    /// Tell the peer of the face at `at` every declaration the session holds, in the replay's
+    /// order, in one lap through the link's wire `tx`, as upstream's reopen sends its whole cache
+    /// of declarations (see the module's note): what the lap leaves of the link,
+    /// [`TurnEnd::EndsLink`] at the first send the link refuses, as the reopen clears a transport
+    /// it could not send one over. The replay of a build that reaches no pace, which keeps no
+    /// cursor: the lap ends before the session does anything else, so nothing is owed past it. A
+    /// lap with no wire to tell it through stops at its first place.
+    /// The lap is ended by the `DeclareFinal` of the initial interest when its link owes one
+    /// ([`Self::end_initial_interest`]).
+    pub(super) fn tell_in_one_lap(&mut self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
+        if let Some(face) = self.transport.links.face_mut(at) {
+            face.replay.lap_owed = false;
+        }
+        let end = self.tell_lap(at, tx);
+        self.end_initial_interest(at, end, tx)
+    }
+
+    /// [`Self::tell_in_one_lap`] without the Final: the declarations of the lap.
+    fn tell_lap(&self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
+        for place in 0..self.sequence_len() {
+            match self.emit(at, place, tx) {
+                Some(true) => {}
+                Some(false) => return TurnEnd::EndsLink,
+                None => break,
+            }
+        }
+        TurnEnd::Kept
+    }
+
+    /// The link of the face at `at` has just come up, its peer met as `peer_hat` says
+    /// (`SessionLinkActions::meets_remote_as_peer_hat`, read off the link as it came up): owe
+    /// its peer the `DeclareFinal` of the initial interest once the replay has told it
+    /// everything when the session's config ends a push so and the two meet as the peer hat's
+    /// two north-bound peers. A client, a router and a remote whose role never arrived are owed
+    /// none.
+    pub(super) fn owe_link_initial_final(&mut self, at: usize, peer_hat: Option<bool>) {
+        let owed = self.config.initial_interest && peer_hat == Some(true);
+        if let Some(face) = self.transport.links.face_mut(at) {
+            face.replay.owe_initial_final(owed);
+        }
+    }
+
+    /// Send the face at `at` the `DeclareFinal` of the initial interest through the link's wire
+    /// `tx` when the turn that ended as `end` told its peer the last of what it was owed and the
+    /// Final is owed ([`Replay::take_initial_final`]), after every declaration of the replay, as
+    /// upstream's peer ends what it propagates to a new face with it. What the turn leaves of the
+    /// link, as it left it. The Final is written as an answer to an interest is, from its parts
+    /// into the slot the link lends where the build lends one, so a session with no heap frame
+    /// sends it too. A Final with no wire to go through stays owed.
     fn end_initial_interest(
         &mut self,
         at: usize,
-        actions: &LinkActions<C>,
         end: TurnEnd,
+        tx: super::LinkTx<'_, C>,
     ) -> TurnEnd {
         let due = self
             .transport
             .links
             .face_mut(at)
             .is_some_and(|face| face.replay.take_initial_final(end));
-        if due {
-            actions.send_declare_final_reply(INITIAL_INTEREST_ID);
+        if !due {
+            return end;
+        }
+        let sent = self
+            .transport
+            .links
+            .face(at)
+            .and_then(|face| face.link.wire())
+            .and_then(|wire| {
+                super::send_through(wire, tx, &|actions: &LinkActions<C>| {
+                    actions.send_declare_final_reply(INITIAL_INTEREST_ID);
+                    true
+                })
+            });
+        if sent.is_none() {
+            if let Some(face) = self.transport.links.face_mut(at) {
+                face.replay.owe_initial_final(true);
+            }
         }
         end
     }
 
-    /// Tell the peer over `actions` every declaration the session holds, in the replay's order,
-    /// in one lap, as upstream's reopen sends its whole cache of declarations (see the module's
-    /// note): what the lap leaves of the link, [`TurnEnd::EndsLink`] at the first send the link
-    /// refuses, as the reopen clears a transport it could not send one over. The replay of a
-    /// build that reaches no pace, which keeps no cursor: the lap ends before the session does
-    /// anything else, so nothing is owed past it.
-    fn tell_in_one_lap(&self, actions: &LinkActions<C>) -> TurnEnd {
-        if (0..self.sequence_len()).all(|place| self.emit(actions, place)) {
-            TurnEnd::Kept
-        } else {
-            TurnEnd::EndsLink
-        }
-    }
-
-    /// One turn of the replay of the face at `at`, if one is owed and due: the burst of the pace,
-    /// or everything when the session is not paced, from the entry the last turn stopped at,
-    /// ended by the `DeclareFinal` of the initial interest when it is the turn that finishes a
-    /// replay that owes one ([`Self::end_initial_interest`]). What the turn leaves of the link:
-    /// [`TurnEnd::EndsLink`] when the replay was given up on a refused send, which the caller
-    /// answers by ending the link.
+    /// One turn of the replay of the face at `at` through the link's wire `tx`, if one is owed
+    /// and due: the burst of the pace, or everything when the session is not paced, from the
+    /// entry the last turn stopped at, ended by the `DeclareFinal` of the initial interest when
+    /// it is the turn that finishes a replay that owes one ([`Self::end_initial_interest`]).
+    /// What the turn leaves of the link: [`TurnEnd::EndsLink`] when the replay was given up on a
+    /// refused send, which the caller answers by ending the link.
     pub(super) fn replay_turn(
         &mut self,
         at: usize,
-        actions: &LinkActions<C>,
         now_ms: u64,
+        tx: super::LinkTx<'_, C>,
     ) -> TurnEnd {
-        let end = self.tell_turn(at, actions, now_ms);
-        self.end_initial_interest(at, actions, end)
+        let end = self.tell_turn(at, now_ms, tx);
+        self.end_initial_interest(at, end, tx)
     }
 
     /// [`Self::replay_turn`] without the Final: the declarations of one turn.
-    fn tell_turn(&mut self, at: usize, actions: &LinkActions<C>, now_ms: u64) -> TurnEnd {
+    fn tell_turn(&mut self, at: usize, now_ms: u64, tx: super::LinkTx<'_, C>) -> TurnEnd {
         // A place with no face has no replay to send.
         let Some(Face { replay, .. }) = self.transport.links.face(at) else {
             return TurnEnd::Kept;
@@ -392,12 +424,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let mut told = false;
         let mut refused = false;
         for place in cursor.turn(burst) {
-            if !self.emit(actions, place) {
-                cursor.refused(place);
-                refused = true;
-                break;
+            match self.emit(at, place, tx) {
+                Some(true) => told = true,
+                Some(false) => {
+                    cursor.refused(place);
+                    refused = true;
+                    break;
+                }
+                // No wire to tell it through: the turn stops at the declaration, which is no
+                // refusal, and the next turn tells the rest.
+                None => {
+                    cursor.refused(place);
+                    break;
+                }
             }
-            told = true;
         }
         self.transport
             .links
@@ -422,7 +462,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         &mut self,
         declared: DeclaredRow,
         on_refusal: OnRefusal,
-        undo: &dyn TellTo<C>,
+        undo: Option<Retract<'_>>,
+        tx: super::LinkTx<'_, C>,
     ) -> bool {
         let place = self.place_of(declared);
         let registry = &self.session.registry;
@@ -432,29 +473,42 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             on_refusal,
             &|actions: &LinkActions<C>| tell(super::tables(registry), actions, declared),
             undo,
+            tx,
         )
     }
 
-    /// Tell each face that is up of the declaration `declared` names ([`Self::announce_row`]):
-    /// a refusal leaves it stored.
+    /// Tell each face that is up of the declaration `declared` names ([`Self::announce_row`]),
+    /// through `tx`, which the caller took with the one link's place before the session's lock
+    /// (`CoopEngine::live_on_link`): a refusal leaves it stored.
     // Out of line: one body for every caller of a declaration that is not undone.
     #[inline(never)]
-    pub(super) fn announce(&mut self, declared: DeclaredRow) {
-        self.announce_row(declared, OnRefusal::Forget, &undo_nothing::<C>);
+    pub(super) fn announce(&mut self, declared: DeclaredRow, tx: super::LinkTx<'_, C>) {
+        self.announce_row(declared, OnRefusal::Forget, None, tx);
     }
 
     /// [`Self::announce_row`] for a declaration that is not made when a link refuses it, `undo`
     /// taking it back from the links that took it: whether it was made.
-    pub(super) fn announce_or_undo(&mut self, declared: DeclaredRow, undo: &dyn TellTo<C>) -> bool {
-        self.announce_row(declared, OnRefusal::Undo, undo)
+    pub(super) fn announce_or_undo(
+        &mut self,
+        declared: DeclaredRow,
+        undo: Retract<'_>,
+        tx: super::LinkTx<'_, C>,
+    ) -> bool {
+        self.announce_row(declared, OnRefusal::Undo, Some(undo), tx)
     }
 
-    /// The declaration at `index` of `table`'s slot order was removed: retract it with `send`
+    /// The declaration at `index` of `table`'s slot order was removed: tell `retract`
     /// ([`Self::retract_at`]). `index` is where it lay, and the tables before it in the replay's
     /// order are as they were.
-    pub(super) fn retract(&mut self, table: DeclaredTable, index: usize, send: &dyn TellTo<C>) {
+    pub(super) fn retract(
+        &mut self,
+        table: DeclaredTable,
+        index: usize,
+        retract: Retract<'_>,
+        tx: super::LinkTx<'_, C>,
+    ) {
         let place = self.place(table, index);
-        self.retract_at(place, send);
+        self.retract_at(place, Some(retract), tx);
     }
 
     /// The Interest `interest`, which a write filter or a matching listener held last, ended:
@@ -462,22 +516,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// it stood ([`Self::retract`]). Nothing when either is `None`.
     // Out of line: the filter's and the listener's undeclarations end their Interest alike.
     #[inline(never)]
-    pub(super) fn end_interest(&mut self, interest: Option<EntityId>, rank: Option<usize>) {
+    pub(super) fn end_interest(
+        &mut self,
+        interest: Option<EntityId>,
+        rank: Option<usize>,
+        tx: super::LinkTx<'_, C>,
+    ) {
         if let (Some(interest), Some(at)) = (interest, rank) {
             self.retract(
                 DeclaredTable::Interests,
                 at,
-                &super::interest_final::<C>(u64::from(interest)),
+                Retract::Interest(u64::from(interest)),
+                tx,
             );
         }
     }
 
-    /// The declaration that lay at `place` in the replay's order was removed: tell, with `send`,
-    /// each face that is up and whose peer was told of it, and move every face's replay past it.
-    /// Call it once, after the row went, with the place read while it stood: a send then finds
-    /// none of the session's tables borrowed, and nothing is kept to send later.
+    /// The declaration that lay at `place` in the replay's order was removed: tell `retract`,
+    /// when there is one, to each face that is up and whose peer was told of it, through `tx`
+    /// ([`tell_on`]), and move every face's replay past it. Call it once, after the row went,
+    /// with the place read while it stood: a send then finds none of the session's tables
+    /// borrowed, and nothing is kept to send later.
     #[inline(never)]
-    pub(super) fn retract_at(&mut self, place: usize, send: &dyn TellTo<C>) {
+    pub(super) fn retract_at(
+        &mut self,
+        place: usize,
+        retract: Option<Retract<'_>>,
+        tx: super::LinkTx<'_, C>,
+    ) {
         for face in self.transport.links.faces_mut() {
             // The wire and the replay are fields apart: the replay's cursor moves while the wire
             // is held.
@@ -487,19 +553,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             let Some(wire) = face.link.wire() else {
                 continue;
             };
-            // A build that reaches no pace told the peer everything when its link came up.
-            if !ReplayPacing::REACHABLE
-                || matches!(face.replay.cursor.removed(place), Removal::Retract)
-            {
-                send.tell_to(&wire.actions);
+            // A build that reaches no pace told the peer everything with the lap its link came up
+            // with, once that lap ran.
+            let told = if ReplayPacing::REACHABLE {
+                matches!(face.replay.cursor.removed(place), Removal::Retract)
+            } else {
+                !face.replay.lap_owed
+            };
+            if let Some(retract) = retract.filter(|_| told) {
+                tell_on(wire, tx, retract);
             }
         }
     }
 }
 
-/// The undoing of a declaration that is kept whatever a link makes of it: nothing. One function
-/// for every such caller, so its call through `&dyn TellTo` is made once.
-fn undo_nothing<C: ClockSource + 'static>(_actions: &LinkActions<C>) {}
+/// The declaration at `place` in the replay's order of `tables`; `None` for a place with nothing
+/// to send.
+fn declared_at(tables: &super::CoopTables, place: usize) -> Option<DeclaredRow> {
+    let mut left = place;
+    for &table in ORDER {
+        let slots = tables.slots_of(table);
+        let Some(rest) = left.checked_sub(slots.len()) else {
+            return slots.nth_live(left).map(|row| DeclaredRow { table, row });
+        };
+        left = rest;
+    }
+    // A place past the sequence is a defect of the cursor and has nothing to send.
+    None
+}
 
 /// How many declarations the session holds in the tables before `end` in the replay's order, or
 /// in every table when `end` is `None`: the place of `end`'s first declaration, or the length
@@ -526,7 +607,7 @@ fn tell<C: ClockSource + 'static>(
     told(tables, actions, declared).unwrap_or(true)
 }
 
-/// [`tell`], `None` when `declared` names no row.
+/// [`tell`], `None` when `declared` names no row. A key the tables name no more is refused.
 fn told<C: ClockSource + 'static>(
     tables: &super::CoopTables,
     actions: &LinkActions<C>,
@@ -546,7 +627,7 @@ fn told<C: ClockSource + 'static>(
         }
         DeclaredTable::Interests => {
             let row = tables.interests().get(Handle::from_bits(bits)?)?;
-            super::send_interest(row, actions)
+            super::send_interest(super::InterestTell::of(row), actions)
         }
         #[cfg(feature = "queryable")]
         DeclaredTable::Queryables => {
@@ -583,6 +664,89 @@ fn told<C: ClockSource + 'static>(
     })
 }
 
+/// A retraction as a link is told it: the id of what went and, for an entity whose declaration
+/// asked to be retracted by its key, the declaration and the rest of the key it names, read before
+/// its row went. It borrows nothing of the session's tables, so it is told once the rows went,
+/// over a link lent apart from the session's state ([`tell_on`]).
+#[derive(Clone, Copy)]
+pub(super) enum Retract<'a> {
+    /// The key expression declaration of this mapping id.
+    Keyexpr(ExprId),
+    /// The Interest of this id ends.
+    Interest(u64),
+    Subscriber {
+        id: super::SubId,
+        names: Option<(ExprId, &'a str)>,
+    },
+    #[cfg(feature = "queryable")]
+    Queryable {
+        id: super::QblId,
+        names: Option<(ExprId, &'a str)>,
+    },
+    #[cfg(feature = "liveliness")]
+    Token {
+        id: super::TokenId,
+        names: Option<(ExprId, &'a str)>,
+    },
+}
+
+impl Retract<'_> {
+    /// Tell it over `actions`.
+    // Out of line: a retraction and an announce undone each tell one, and each kind's message is
+    // built in this one body.
+    #[inline(never)]
+    fn tell<C: ClockSource + 'static>(self, actions: &LinkActions<C>) {
+        match self {
+            Self::Keyexpr(id) => actions.send_undeclare_kexpr(id),
+            Self::Interest(id) => actions.send_interest_final(id),
+            Self::Subscriber { id, names } => super::SubscriberRow::retract(id, names, actions),
+            #[cfg(feature = "queryable")]
+            Self::Queryable { id, names } => super::QueryableRow::retract(id, names, actions),
+            #[cfg(feature = "liveliness")]
+            Self::Token { id, names } => super::liveliness::retract_token(actions, id, names),
+        }
+    }
+}
+
+/// Tell `retract` to the peer of the face whose record holds `wire`: through the held face's
+/// wire in `tx` where `wire` lies in the face whose place the caller holds, taken before the
+/// session's lock (`CoopEngine::live_on_link`), and by a try of the face's place otherwise
+/// ([`super::send_on`]). It leaves the face owed nothing, as a replay tells only declarations
+/// that stand. Nothing while the face's place holds no wire.
+#[cfg(not(wz_round))]
+fn tell_on<L: CoopLinks + 'static, C: ClockSource + 'static>(
+    wire: &super::direct::DirectWire<L, C>,
+    tx: super::LinkTx<'_, C>,
+    retract: Retract<'_>,
+) {
+    if let Some(held) = tx.held_wire(wire) {
+        if let Some(held) = held {
+            retract.tell(&held.actions);
+        }
+    } else {
+        let _ = super::send_on(wire, &|actions: &LinkActions<C>| {
+            retract.tell(actions);
+            true
+        });
+    }
+}
+
+/// Tell `retract` over the link `wire` holds, through the face's record, which the session's
+/// lock alone reaches where each record holds its link, as every send of the session on a face
+/// is made there ([`super::send_on`]). It leaves the face owed nothing: a replay tells only
+/// declarations that stand, so a retraction is told as it is made or not at all.
+#[cfg(wz_round)]
+fn tell_on<C: ClockSource + 'static>(
+    wire: &impl LendsSession<Session = super::LinkSession<C>>,
+    _tx: super::LinkTx<'_, C>,
+    retract: Retract<'_>,
+) {
+    let _ = super::send_on(wire, &|actions: &LinkActions<C>| {
+        retract.tell(actions);
+        true
+    });
+}
+
 /// [`Core::announce_row`] over `faces` alone, so a caller can read another part of the session
 /// (a row of the session core's tables) in `send` while the faces are written. One body for every
 /// kind of declaration: `send` and `undo` are handed by reference, not as types of their own.
@@ -597,13 +761,14 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
     place: usize,
     on_refusal: OnRefusal,
     send: &dyn SendTo<C>,
-    undo: &dyn TellTo<C>,
+    undo: Option<Retract<'_>>,
+    tx: super::LinkTx<'_, C>,
 ) -> bool {
-    // Whether the replay of `face` is past the declaration, so its link is told it now: always,
-    // in a build that reaches no pace, whose replay ended with the lap its link came up with.
+    // Whether the replay of `face` is past the declaration, so its link is told it now: in a
+    // build that reaches no pace, once the lap its link came up with ran.
     let emits_now = |face: &Face<C, L>| {
         if !ReplayPacing::REACHABLE {
-            return true;
+            return !face.replay.lap_owed;
         }
         let mut cursor = face.replay.cursor;
         cursor.inserted(place) == Insertion::EmitNow
@@ -613,16 +778,19 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
         let Some(wire) = face.up() else {
             continue;
         };
-        if emits_now(face) && !send.send_to(&wire.actions) && on_refusal == OnRefusal::Undo {
+        if emits_now(face)
+            && super::send_through(wire, tx, send) == Some(false)
+            && on_refusal == OnRefusal::Undo
+        {
             refused_at = Some(at);
             break;
         }
     }
     if let Some(refused) = refused_at {
         for (_, face) in faces.placed().take_while(|(at, _)| *at < refused) {
-            if let Some(wire) = face.up() {
+            if let (Some(wire), Some(undo)) = (face.up(), undo) {
                 if emits_now(face) {
-                    undo.tell_to(&wire.actions);
+                    tell_on(wire, tx, undo);
                 }
             }
         }

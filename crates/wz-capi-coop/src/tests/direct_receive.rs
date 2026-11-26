@@ -28,10 +28,7 @@ const COUNT: u8 = 3;
 /// nothing of it held in the round. The get consolidates nothing, so the reply is handed as it
 /// comes and not with what its leg held to its end. Turned red by a reply offered to the round
 /// (the read counts none) or handed out while the read holds the session.
-#[cfg(all(
-    feature = "query",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "query", not(wz_round)))]
 #[test]
 fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
     use wz_capi_port::ReplyCallback;
@@ -85,10 +82,7 @@ fn a_reply_is_handed_to_its_get_by_the_read_with_the_session_free() {
 /// the table's order with the session free, nothing of it held in the round, and its Final follows
 /// the replies. Turned red by a query offered to the round (the read counts none), handed while the
 /// read holds the session, or a Final sent before a reply.
-#[cfg(all(
-    feature = "queryable",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "queryable", not(wz_round)))]
 #[test]
 fn a_query_is_handed_to_its_queryables_by_the_read_with_the_session_free() {
     use wz_capi_port::QueryableSink;
@@ -448,10 +442,7 @@ fn a_callback_that_closes_its_session_reads_its_key_until_it_returns() {
 /// session: a record it read would be handed to a callback inside another. The CONTROL is the
 /// put, which reaches the subscriber. Turned red by a read that steps the link from inside a
 /// delivery other than a read's.
-#[cfg(all(
-    feature = "local-subscriber",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "local-subscriber", not(wz_round)))]
 #[test]
 fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
     let router = Router::start(CatchAll::None);
@@ -489,10 +480,7 @@ fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
 /// nothing, and the put counts the first alone. The CONTROL is the first subscriber, handed the
 /// sample. Turned red by a put that begins a call on every row it reaches under one lock before
 /// the first callback runs.
-#[cfg(all(
-    feature = "local-subscriber",
-    not(any(feature = "threads", feature = "listen", feature = "group"))
-))]
+#[cfg(all(feature = "local-subscriber", not(wz_round)))]
 #[test]
 fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
     let router = Router::start(CatchAll::None);
@@ -580,6 +568,101 @@ fn a_stream_of_batches_still_sends_the_keep_alive_on_time() {
     });
 }
 
+/// A session whose every read finds its link holding input, so that no read waits or works out a
+/// wait, read without a pause for several of its short leases with a get nobody answers pending:
+/// the get still ends at its deadline while the reads go on, and the router's lease of the
+/// session is still kept, since the look at the life after each read serves what fell due whether
+/// or not the read waited. Each such read reads the clock once, for that look, and none for a
+/// wait. The CONTROL is the leg halfway to its deadline: still open. Turned red by a read on held
+/// input that leaves the look at the life or the pump's due work to the next read that waits
+/// (`CoopEngine::link_turn`), or that still reads the clock for its wait (`link_wait`).
+#[cfg(all(feature = "query", not(wz_round)))]
+#[test]
+fn reads_on_held_input_still_serve_what_falls_due() {
+    use wz_session_core::reply_sink::ReplyKind;
+
+    const LEASE_MS: u64 = 500;
+    const READS: usize = 10;
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        lease_ms: LEASE_MS,
+        ..config(&router)
+    });
+    let received = Arc::new(AtomicUsize::new(0));
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let received = received.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    super::get::settle(&router, &engine, Command::Silence);
+    engine.takes.input_held.store(true, Ordering::SeqCst);
+    let (clock_before, held_before) = (
+        engine.clock_reads(),
+        engine.takes.held_input_reads.load(Ordering::SeqCst),
+    );
+    for _ in 0..READS {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        engine.takes.held_input_reads.load(Ordering::SeqCst) - held_before,
+        READS,
+        "a read that found the link's input held worked out a wait"
+    );
+    assert_eq!(
+        engine.clock_reads() - clock_before,
+        READS,
+        "one reading of the clock for each look at the life, none for a wait"
+    );
+    let mut opts = super::get::remote_get();
+    opts.timeout_ms = 300;
+    let asked = Instant::now();
+    let (issued, leg) = super::get::ask(&engine, "demo/g/a", &opts, None, None, None);
+    assert_eq!(issued, Ok(1));
+    let mut ended_at = None;
+    let mut open_halfway = None;
+    while asked.elapsed() < Duration::from_millis(4 * LEASE_MS) {
+        let _ = SessionDrive::read(&*engine, false);
+        let ended = leg.lock().unwrap().ended;
+        if open_halfway.is_none() && asked.elapsed() >= Duration::from_millis(150) {
+            open_halfway = Some(!ended);
+        }
+        if ended && ended_at.is_none() {
+            ended_at = Some(asked.elapsed());
+        }
+    }
+    engine.takes.input_held.store(false, Ordering::SeqCst);
+    assert_eq!(
+        open_halfway,
+        Some(true),
+        "CONTROL: open before its deadline"
+    );
+    let ended_at = ended_at.expect("the get outlived its deadline while every read held input");
+    assert!(
+        ended_at >= Duration::from_millis(300),
+        "ended early: {ended_at:?}"
+    );
+    let replies = leg.lock().unwrap().replies.clone();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0].0, ReplyKind::Err);
+    assert_eq!(replies[0].2, b"Timeout");
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "the router's lease of the session ran out while every read held input"
+    );
+    let before = received.load(Ordering::SeqCst);
+    router.send(Command::Push("demo/in", b"last"));
+    until(&engine, "the sample after the reads", || {
+        received.load(Ordering::SeqCst) > before
+    });
+}
+
 /// A declaration, a Push naming what it declared, a KeepAlive and a second Push naming it again,
 /// sent in one batch window: both samples reach the subscriber, in order, each resolved through the
 /// declaration that came before it. Turned red by a read that hands a Push out before the
@@ -660,7 +743,7 @@ fn a_steady_stream_runs_no_bookkeeping_per_batch() {
 /// read, and no pass of a task runs for them: the read steps the link itself. Turned red by a read
 /// that stops the walk of a frame at each record and reads the rest of it again at a later take,
 /// or that runs the session's tasks to read it.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn a_frame_of_n_records_is_read_in_one_take() {
     let router = Router::start(CatchAll::None);
@@ -700,5 +783,364 @@ fn a_frame_of_n_records_is_read_in_one_take() {
         engine.task_clock_reads(),
         passes,
         "a pass of the session's tasks ran for the frame"
+    );
+}
+
+/// A callback that undeclares its own subscriber from inside the read's step tells the router the
+/// retraction once: the session's record of the link holds the link's send place, which the step
+/// does not hold. Turned red by a step that holds the send place (the retraction's hold finds it
+/// held: a debug build fails, a release build owes it and sends no retraction), or by a retraction
+/// told twice.
+#[cfg(not(wz_round))]
+#[test]
+fn an_undeclaration_inside_the_reads_step_is_told_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
+    let session = EngineHold::downgrade(&engine);
+    let declares_before = router.seen(|s| s.declares);
+    let id = engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let own = own.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let id = own.lock().unwrap().take();
+                if let (Some(id), Some(engine)) = (id, session.upgrade()) {
+                    engine.undeclare_subscriber(id);
+                }
+            })
+        })
+        .expect("the session declares the subscriber")
+        .id;
+    *own.lock().unwrap() = Some(id);
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let declared = router
+        .seen(|s| s.subscribers.last().copied())
+        .expect("the router was told the subscriber's id");
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "the retraction", || {
+        router.seen(|s| !s.undeclared_subscribers.is_empty())
+    });
+    for _ in 0..10 {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        router.seen(|s| s.undeclared_subscribers.clone()),
+        [declared],
+        "the retraction made inside the read's step was told once"
+    );
+}
+
+/// A redeclare a callback asks for from inside the read's step tells the router the subscriber
+/// again: the replay's lap holds the link's send place, which the step does not hold, and nothing
+/// is left owed for a later read. Turned red by a lap handed no wire inside the step
+/// (`CoopEngine::live_on_link`), which tells nothing, or by a redeclare that counts no face.
+#[cfg(not(wz_round))]
+#[test]
+fn a_redeclare_inside_the_reads_step_is_told() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let session = EngineHold::downgrade(&engine);
+    let handed = Arc::new(AtomicUsize::new(0));
+    let told: Arc<Mutex<Option<Result<usize, wz_capi_port::RedeclareRefusal>>>> = Arc::default();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let (handed, told) = (handed.clone(), told.clone());
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let first = handed.fetch_add(1, Ordering::SeqCst) == 0;
+                if let (true, Some(engine)) = (first, session.upgrade()) {
+                    *told.lock().unwrap() = Some(SessionEngine::redeclare(&*engine));
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    let declared = router.seen(|s| s.subscribers.clone());
+    assert_eq!(declared.len(), 1, "CONTROL: the subscriber was told once");
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "the subscriber told again", || {
+        router.seen(|s| s.subscribers.len()) > declared.len()
+    });
+    assert_eq!(
+        *told.lock().unwrap(),
+        Some(Ok(1)),
+        "the redeclare inside the step counted the one face"
+    );
+    assert_eq!(
+        router.seen(|s| s.subscribers.last().copied()),
+        declared.last().copied(),
+        "the replay told the same subscriber again"
+    );
+}
+
+/// An operation reaches each face that is up through the wire its hold of that face's place
+/// holds, and none by a try: each face's record names its face by the flags its link's end shares
+/// with the read. Turned red by a hold that names another face's flags (`HeldSend::face`), a
+/// `FaceTx::held_of` that compares anything but those flags, a walk that holds no place
+/// (`CoopEngine::hold_faces_from`), or, where the dial role's face is the only face, a hold
+/// that hands the operation no wire (`DialHeld::parts`).
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_reaches_each_face_through_the_wire_it_holds() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.faces_reached_by_an_operation(),
+        (1, 0),
+        "the one face that is up is the dial role's, reached through the held wire"
+    );
+}
+
+/// Inside an operation, the place of every face that holds a link is held, so a send to any
+/// face under the session's lock is made through a held wire and never finds a place another
+/// holder has. Turned red by a walk that takes the session's lock before the faces' places, or
+/// that skips a face whose place holds a link (`CoopEngine::hold_faces_from`), or by a hold of
+/// the dial role's face alone that takes no place (`CoopEngine::hold_dial`) or keeps it past
+/// the operation (`DialHeld`'s drop).
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_holds_the_place_of_every_face_with_a_link() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.places_held_by_an_operation(),
+        (1, 0),
+        "the dial role's place, which holds the link, is held by the operation"
+    );
+    assert!(
+        engine.send_place_is_free(),
+        "the operation let go of the place it held"
+    );
+}
+
+/// An operation on a closed session runs nothing, and leaves the dial role's send place free:
+/// the hold of the place taken before the session is found closed is let go of with it. Turned
+/// red by a hold that runs the operation on a closed session (`CoopEngine::hold_dial` without
+/// `CoopEngine::live`), or that keeps the place it took.
+#[cfg(not(wz_round))]
+#[test]
+fn an_operation_on_a_closed_session_runs_nothing_and_holds_nothing() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert!(
+        engine.an_operation_runs(),
+        "CONTROL: an open session runs it"
+    );
+    SessionDrive::close(&*engine);
+    assert!(!engine.an_operation_runs(), "the closed session ran it");
+    assert!(
+        engine.send_place_is_free(),
+        "the place taken before the session was found closed is let go of"
+    );
+}
+
+/// A publish's walk of the faces hands one leg to each face whose place holds a link, each leg
+/// reaching its own face alone: the session open on the dial role's face, and joined to no group,
+/// is handed one leg, which reaches that face, in every build. Turned red by a walk that skips the
+/// dial role's row (`DirectFaces::iter`), a leg that reaches no face (`FaceTx::reaches`), or a
+/// groups' leg handed to a session that joined none (`CoopEngine::on_faces`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_publish_hands_each_face_a_leg_of_its_own() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    #[cfg(any(feature = "listen", feature = "group"))]
+    let tried = engine.takes.place_tries.load(Ordering::Relaxed);
+    assert_eq!(
+        engine.legs_of_a_publish(),
+        (1, 1),
+        "one leg, for the dial role's face, which reaches that face"
+    );
+    // The face that is up is not at rest, and its place is tried for its leg.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    assert_eq!(engine.takes.place_tries.load(Ordering::Relaxed), tried + 1);
+}
+
+/// A session that joined no group is handed no groups' leg by a publish, which would take the
+/// session for nothing: its dial role's leg reaches its face and no group. The member that joined
+/// one is handed one leg for it
+/// (`one_thread::group::a_publish_of_a_member_of_one_thread_reaches_the_group_by_one_leg`).
+/// Turned red by a groups' leg handed whatever the session joined (`CoopEngine::on_faces`), or a
+/// face's leg that reaches the groups (`FaceTx::reaches_groups`).
+#[cfg(all(feature = "group", not(wz_round)))]
+#[test]
+fn a_session_that_joined_no_group_hands_the_groups_no_leg() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.group_legs_of_a_publish(),
+        0,
+        "no leg reaches a group, the session having joined none"
+    );
+}
+
+/// A callback of a record the read's step hands out finds the link's send place free: the step
+/// holds the link's receive part alone, so a send made there, or by another thread meanwhile,
+/// waits for no step and no callback. Turned red by a step that holds the send place while it
+/// hands records out (`CoopEngine::pump_turn` lending the place): the try finds it held.
+#[cfg(not(wz_round))]
+#[test]
+fn a_callback_inside_the_reads_step_finds_the_send_place_free() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let session = EngineHold::downgrade(&engine);
+    let found: Arc<Mutex<Vec<bool>>> = Arc::default();
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let found = found.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                if let Some(engine) = session.upgrade() {
+                    found.lock().unwrap().push(engine.send_place_is_free());
+                }
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    router.send(Command::PushBatch("demo/in", COUNT));
+    until(&engine, "a sample handed out", || {
+        !found.lock().unwrap().is_empty()
+    });
+    let found = found.lock().unwrap().clone();
+    assert!(
+        found.iter().all(|free| *free),
+        "every callback found the send place free: {found:?}"
+    );
+}
+
+/// A read turns every face of the session's table once, after one wait: the dial role's (unless
+/// it rests beside another, `DirectFace::rests`), and each past it whose row holds a face, and no
+/// row that holds none. A client that took no face turns its dial role's face alone, whatever rows
+/// its table keeps for faces to come. Turned red by a read that turns a face twice, a row no face
+/// holds, or no face at all, as a walk that reads the dial role's row by the marks of the rows
+/// past it would (`CoopEngine::read_faces` over `DirectFaces::turned`, or
+/// `CoopEngine::read_dial` where the dial role's face is the only face).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_turns_every_face_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let (rows, faces) = engine.direct_faces();
+    assert_eq!(
+        faces, 1,
+        "the dial role's face is the one face of the table"
+    );
+    assert!(
+        rows >= faces,
+        "CONTROL: the table keeps a row for each face it turns"
+    );
+    let before = engine.takes.face_turns.load(Ordering::SeqCst);
+    let _ = SessionDrive::read(&*engine, false);
+    assert_eq!(
+        engine.takes.face_turns.load(Ordering::SeqCst) - before,
+        faces,
+        "one turn of each face"
+    );
+}
+
+/// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a
+/// face shows its due outside its slot, so a read of several faces need not hold them to wait,
+/// and the read of the one face, which holds its slot across the wait, reads the due there. The
+/// session's link is up, so its pump is due at its keep-alive, never at no time. Turned red by a
+/// turn that leaves a moved due unnoted (`DirectFace::note_due` in `CoopEngine::face_turn`), or a
+/// wait that hands the session another due than the one it read (`CoopEngine::wait_due`,
+/// `CoopEngine::link_wait`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_waits_for_the_due_its_faces_hold() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    for _ in 0..3 {
+        let _ = SessionDrive::read(&*engine, false);
+        let (waited, held) = engine.faces_due_waited_and_held();
+        assert_eq!(waited, held, "the due waited for is the due the slots hold");
+        assert_ne!(held, u64::MAX, "a link that is up is due at its keep-alive");
+    }
+}
+
+/// A read hands out what its records left to hand out once, after every face it turned and every
+/// group it stepped: a batch of Pushes enters the deliveries once for the read, not once for the
+/// face's turn and again for the drain of the batch's run. Turned red by a drain of a run of
+/// Pushes that delivers itself (`DirectSink::drain_pushes`), or a read that delivers after each
+/// face it turns (`CoopEngine::read_faces`). The CONTROL is the subscriber's count of the batch.
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_enters_the_deliveries_once() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let received = Arc::new(AtomicUsize::new(0));
+    let declares_before = router.seen(|s| s.declares);
+    engine
+        .declare_subscriber_on_wire("demo/in", WireKey::literal(), Locality::Any, None, {
+            let received = received.clone();
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                received.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .expect("the session declares the subscriber");
+    until(&engine, "the router to see the subscriber", || {
+        router.seen(|s| s.declares) > declares_before
+    });
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let delivers = engine.takes.delivers.load(Ordering::SeqCst);
+    router.send(Command::PushBatch("demo/in", COUNT));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut reads = 0usize;
+    while received.load(Ordering::SeqCst) < usize::from(COUNT) {
+        assert!(Instant::now() < deadline, "the batch did not arrive");
+        let _ = SessionDrive::read(&*engine, false);
+        reads += 1;
+    }
+    assert_eq!(
+        received.load(Ordering::SeqCst),
+        usize::from(COUNT),
+        "CONTROL: the batch reached the subscriber"
+    );
+    assert_eq!(
+        engine.takes.delivers.load(Ordering::SeqCst) - delivers,
+        reads,
+        "one delivery a read"
+    );
+}
+
+/// A read that finds a face's link holding input it already took from its stack waits for
+/// nothing and takes nothing of the session for that wait: the session is taken once, for the
+/// look at the face's life, where a read that waits takes it for the wait too. The CONTROL is the
+/// count of the reads that found input held. Turned red by a wait that takes the session's lock
+/// before it reads the faces' facts (`CoopEngine::link_wait`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_read_on_held_input_takes_nothing_of_the_session_for_its_wait() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let _ = SessionDrive::read(&*engine, false);
+    let waiting = takes() - before;
+    engine.takes.input_held.store(true, Ordering::SeqCst);
+    let (before, held_before) = (
+        takes(),
+        engine.takes.held_input_reads.load(Ordering::SeqCst),
+    );
+    let _ = SessionDrive::read(&*engine, false);
+    let on_held = takes() - before;
+    let held = engine.takes.held_input_reads.load(Ordering::SeqCst) - held_before;
+    engine.takes.input_held.store(false, Ordering::SeqCst);
+    assert_eq!(held, 1, "CONTROL: the read found the input held");
+    assert_eq!(
+        on_held + 1,
+        waiting,
+        "the read on held input took the session for its wait"
     );
 }

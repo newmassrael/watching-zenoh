@@ -74,7 +74,6 @@ impl Network {
 
     /// `member`'s stack loses its group link, as an interface that goes down loses it: the stack
     /// tells the session the link is closed.
-    #[cfg(feature = "threads")]
     pub(super) fn cut(&self, member: u8) {
         let lost: Vec<Joined> = {
             let mut joined = self.joined.lock().unwrap();

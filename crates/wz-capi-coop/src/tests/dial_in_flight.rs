@@ -246,3 +246,68 @@ fn a_dial_under_way_holds_no_read_of_one_thread() {
     );
     assert!(SessionDrive::is_closed(&*engine));
 }
+
+/// A face an attach dials with a dial that is never answered is given up once the open's time is
+/// over, though nothing its dial brings moves its life: the read looks at that life by the time
+/// the attach left it, and the face is dialled once. CONTROL: the dial role's link, up over the
+/// router, stands. Turned red by a read that keeps no time for a dial it did not begin, whose
+/// face then dials for good (`DirectSlot::wake_for_record_dial`).
+#[cfg(all(feature = "listen", not(wz_round)))]
+#[test]
+fn an_attached_dial_never_answered_is_given_up_in_its_time() {
+    let router = Router::start(CatchAll::None);
+    let slow = Arc::new(AtomicBool::new(false));
+    let dials = Arc::new(AtomicUsize::new(0));
+    let engine = CoopEngine::open(
+        SlowDials {
+            inner: host_links(LOOPBACK, PosixTcpDial).waited_by_owner(),
+            slow: slow.clone(),
+            dials: dials.clone(),
+        },
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            open_timeout_ms: 300,
+            ..config(&router)
+        },
+    )
+    .expect("the session opens over a dial begun without waiting");
+    #[cfg(feature = "threads")]
+    assert!(
+        SessionDrive::start_read_task(&*engine).is_ok(),
+        "a host gives the read task a thread"
+    );
+
+    slow.store(true, Ordering::SeqCst);
+    engine
+        .attach_face("tcp/127.0.0.1:7")
+        .expect("the attach begins its dial");
+    assert_eq!(dials.load(Ordering::SeqCst), 1, "the attach began one dial");
+    assert!(
+        matches!(engine.face_phase(1), Some(LinkPhase::Dialing { .. })),
+        "the attached face dials"
+    );
+
+    let until = Instant::now() + Duration::from_secs(5);
+    while matches!(engine.face_phase(1), Some(LinkPhase::Dialing { .. })) {
+        assert!(
+            Instant::now() < until,
+            "the attached dial was never given up"
+        );
+        #[cfg(feature = "threads")]
+        std::thread::sleep(Duration::from_millis(5));
+        #[cfg(not(feature = "threads"))]
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert_eq!(
+        dials.load(Ordering::SeqCst),
+        1,
+        "an attached face is dialled once"
+    );
+    assert_eq!(
+        engine.dial_phase(),
+        Some(LinkPhase::Up),
+        "CONTROL: the dial role's link stands"
+    );
+    SessionDrive::close(&*engine);
+}

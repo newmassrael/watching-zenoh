@@ -406,6 +406,23 @@ read slot  ->  send place  ->  session (Core)  ->  a row's latch
   a try, which nothing else holds in a build of one thread. With `threads` the walk holds a place
   whether or not it holds a link (step 4), so a link seated after the walk is held too.
 - A callback is called with no lock held but the read slot of the face its record came from.
+- **Why this order, and not the session first.** The two orders that could be global are the
+  places before the session (this one) and the session before every place, a session hold an
+  operation reuses across its legs. Both are free of deadlock taken alone; what decides is what each
+  costs the direct read and what it lets a holder wait for. Under this order a read holds its own
+  slot and takes the session once a record, never a send place, so no read waits for a send and
+  a send that waits for room on a full link holds no session lock while it waits: every other face
+  is read and every other operation that does not reach that face goes on. With the session first,
+  a send that waits for room would wait under the session, and every read would wait behind it for
+  its next dispatch; the read would also have to let go of the session before any send it makes
+  from a dispatch (a reply, an answer to an Interest), which this order lets it make through a place
+  it does not hold. So an operation that holds the session across several legs (a get's legs, the
+  answer of a query, a declaration and its undeclaration) holds it inside one hold of the places
+  (`CoopEngine::live_on_link`): what it reads of the session before its first leg is read under
+  that leg's hold, the hold of its first face, not under a session hold taken before the places.
+  A reply holds its link's replies (`hold_replies`) through the place it is sent by, and the Final
+  lets them go (`release_replies`) through the same place, so the replies and the Final leave in
+  one send whichever thread answers.
 
 ### 8.5 A callback that calls the session
 
@@ -462,9 +479,10 @@ leases.
 ### 8.9 What the read costs
 
 Per message, a read pays the decode, one take of the session's lock for the dispatch, and the
-callbacks. Per datagram it pays one wait, one reading of the clock (the lease's last-heard time,
-written by the read, read by the lease timer) and nothing else of the timers: no gathering of
-deadlines, no division of a 64-bit number, no executor pass. Shipped nostd adds no runtime symbol.
+callbacks. Per receive (every batch the link took from its stack in one read, 8.13) it pays one
+wait, one reading of the clock (the lease's last-heard time, written by the read, read by the lease
+timer) and one gathering of the pump's deadlines; no division of a 64-bit number, no executor pass.
+Shipped nostd adds no runtime symbol.
 
 ### 8.10 Tests
 
@@ -496,21 +514,6 @@ Each lands on its own, builds and passes its tests:
 Judged by the shipped form's instructions per message (the executor's and the round's 1.2 K gone),
 its heap after open (none) and its text.
 
-**Status (2026-11-26).** Only step 1 is under way, on the `direct-all` lane, and for the dial face:
-a build without `threads`, `listen` and `group` reads its one dial face where it lies and builds
-no round, since any of the three sets `wz_round`
-(`crates/wz-capi-coop/build.rs @ const KEEP_THE_ROUND: &[&str] = &[`). The size ledger's case,
-`pico-client-coop-nostd`, builds `os-posix,link-udp` alone
-(`scripts/lib/capability_cost_gate.py @ Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-posix,link-udp",`),
-so its text holds no round already, and the text budget gains nothing more from steps 2 to 5. The
-shipped preset's form, the one the instruction cells measure, builds `peer` (`listen`),
-`multicast-transport` (`group`) and `multi-thread` (`threads`) (the wz arm of
-`target/pico-compare/opprofile-runs/host-20261125T224055/report.txt`), so `wz_round` is set there
-and both instruction losses read through the round: the received message's executor pass and round
-(8.1, about 1,170) and the queryable peer's 2,106 of 13,221
-([ir-send-query](win-budget/ir-send-query.md) 4.2b, row 2: `RoundGate`, `RoundDelivery`,
-`hand_out`, `step_after`). Those losses close with steps 2 to 5, not with step 1.
-
 ### 8.12 Rejected alternatives
 
 - **A read path chosen at run time by configuration** (direct for one face, the round for more):
@@ -519,6 +522,161 @@ and both instruction losses read through the round: the received message's execu
   the one-face path would not be the one measured.
 - **Keeping the executor and polling the link tasks less often**: the pass per message is what is
   measured; its count, not its rate, is the cost.
+
+### 8.13 The 5a reading
+
+Step 5a (the shipped preset, `group` and `threads`, reading every face directly with no round)
+raised the shipped form's receive from 4,840.8 instructions a message (the round, at its last
+commit) to 5,663.5, where 8.1 expected about 1,170 fewer. Both are callgrind's exclusive costs of
+the subscriber of `pico-compare subprofile` (8 B, 10,000 messages past the first 2,000, at 10,000
+messages a second, a listening peer read over TCP); zenoh-pico's is 3,755.1.
+
+Each function's own cost a message, the round against 5a, gathered by what the function does
+(the rows of 8 or more either way; the rest of each part is in its sum):
+
+| part | round | 5a | change |
+|---|---|---|---|
+| driving the read: the wait, the look at the life, the step, the deadlines, the locks | 1,410 | 2,404 | +994 |
+| handing the sample out: dispatch, the subscribers' rows, the callbacks' bookkeeping | 1,184 | 989 | -194 |
+| decoding and the link (`walk_records`, `read_push`, `recv_with`, ...), the callback | 2,247 | 2,271 | +23 |
+| total | 4,841 | 5,664 | +823 |
+
+| driving, function | round | 5a | change |
+|---|---|---|---|
+| `CoopEngine::face_turn` (the look at the life, the step, `pump_turn` inlined) | 0 | 797 | +797 |
+| `CoopEngine::wait_on_faces` (`link_wait`: the session's lock, every face's held input) | 0 | 412 | +412 |
+| `run_body` (`read_faces` inlined: each face's slot tried, the faces' due, the groups) | 61 | 357 | +295 |
+| `UnicastTransport::due_ms` (the pump's deadlines, gathered after each step) | 0 | 169 | +169 |
+| `keepalive_deadlines`, `max_stamp`, `KeepaliveDeadlines::earliest` (the same) | 0 | 152 | +152 |
+| `PosixClock::now_us`, `clock_gettime` | 58 | 145 | +87 |
+| `CoopEngine::live`, `RawLock` lock, unlock, try | 82 | 210 | +128 |
+| `DirectSlot::pay_site`, `LinkSupervisor::read_node`, `EndFlags::over` | 0 | 71 | +71 |
+| `LinkSupervisor::waited` | 97 | 66 | -31 |
+| `Core::idle_wait` | 255 | 0 | -255 |
+| `CoopEngine::step_after` | 239 | 0 | -239 |
+| `ExecutorState::run_among`, `classify`, `settle` | 272 | 0 | -272 |
+| `poll_erased` (the session's task) | 142 | 0 | -142 |
+| `Core::run_tasks_at` | 29 | 0 | -29 |
+| `RoundGate` (`recv_with`, `takes_input`, `holds_input`, `lend`, `service`) | 128 | 0 | -128 |
+| `StreamDriver::service`, `holds_input` | 31 | 3 | -28 |
+
+| handing out, function | round | 5a | change |
+|---|---|---|---|
+| `CoopEngine::hand_lent_push` | 0 | 245 | +245 |
+| `SessionTables::pin_subscribers`, `PinnedFanOut::new`, its `memset` | 0 | 240 | +240 |
+| `keyexpr_intersects_asked`, `row_reaches`, `memcmp` (each row's key, each message) | 0 | 73 | +73 |
+| `Deliveries::within`, `delivers`, `CoopEngine::deliver` | 48 | 222 | +174 |
+| `CoopEngine::hand_row_by_row`, `SubscriberRow::hand`, `Core::next_in` | 0 | 107 | +107 |
+| `DirectSink::event`, `drain_pushes` | 0 | 91 | +91 |
+| `SubscriberPeer::dispatch_iteration_event` | 284 | 0 | -284 |
+| `RoundDelivery::deliver_ref` | 226 | 0 | -226 |
+| `CoopEngine::hand_out`, `send_handed_now`, `let_go_of_released` | 236 | 0 | -236 |
+| `Round::writable`, `Table::place`, `Table::end_calls` | 194 | 0 | -194 |
+| `FaceDispatch` (`event`, `end_records`) | 112 | 0 | -112 |
+
+What it reads:
+
+- **The handing out is cheaper**, by 194: the round's queue and its pass went, as 8.1 counted.
+- **The driving is dearer, by 994, and it is paid once a batch.** A step of a face's pump took one
+  unit of the link's input (`take_input_now`), so every batch the subscriber received paid a whole
+  read: the wait worked out under the session's lock (`link_wait`, a walk of every face's held
+  input, which answers at once while the link holds the next batch), the look at the face's life
+  under the lock again (the clock, the life's input, the ledger, the periodic jobs), the change of
+  the face's place owed, the step, the gathering of every deadline of the pump after it
+  (`due_ms`, `keepalive_deadlines`), the facts told, the faces' due noted, and the groups'
+  read. The round's executor pass, which 8.1 counted against it, was once a batch too, and lighter.
+  8.9 had the read pay one wait and one reading of the clock for what one receive brings; it paid
+  them once a batch. One receive brings about ten batches here: `strace` counts 0.1 `recvfrom`
+  and 0.1 `poll` a message on both sides.
+- **The subscriber snapshot did not move it** because the locks of the handing out were not where
+  the cost was: the driving is.
+- `walk_records_in_place`'s monomorph differs (the sink is `DirectSink` behind `LinkSink` over
+  `CellRc<dyn SessionDatagramLink>`) but its own cost is 58 against the round's 56, the dynamic
+  link's own calls add 5 to 8 a message, and the decoding's part is 23 apart: neither the walk's
+  shape nor the dynamic link is the cause.
+
+The cause is fixed where it lies: a step takes the batches its link already holds, one after
+another, before the read ends (`CoopEngine::take_held_input`), as zenoh-pico's read of a peer's
+socket processes what the read left behind its first batch before it waits again
+(`vendor/zenoh-pico/src/transport/unicast/read.c` @
+`_Z_RETURN_IF_ERR(_z_unicast_handle_remaining_data(ztu, curr_peer, extra_data, &to_read,`).
+What the link holds bounds the run: the next batch read from the stack is the next read's, after
+the wait and the look at the life, so what falls due is served as before. The driving is then paid
+once a receive. Expected, at about ten batches a receive: the driving's 2,404 falls to about 240 a
+message and the receive to about 3,500, under the round's 4,841 and zenoh-pico's 3,755; the
+measurement is the main session's.
+
+What remains of the driving once a receive, and the handing out's own costs (each row's key matched
+for each message where the round read the cached match set, the fan-out zeroed for each sample, the
+drain and its lock once a frame), are the next steps of the lane, each judged by the same
+measurement.
+
+#### After the fix of the step
+
+Measured with the fix (the main session's `r5a-5`, the same subprofile): 5,687.1 a message, where
+the run before it read 5,663.5, and zenoh-pico in the same run 2,723.2. The fix did not move it,
+so in this harness a receive brings about one batch under callgrind (the `strace` run, whose
+subscriber is slowed by every system call, is where ten came together). Each read is then paid
+once a message, and the driving is what must fall below zenoh-pico's own, not be spread over a
+burst.
+
+Where a message's 5,687 go, from the inclusive costs of the frames of the read (each row the frame
+less the one inside it):
+
+| part | a message | what it is |
+|---|---|---|
+| the records: decode, dispatch, hand out, callback (`take_input`) | 2,512 | the work itself |
+| the receive outside the records (`recv_with`, the framing's front) | 268 | once a receive |
+| the step outside the receive (`face_turn` of the pump: lend, service checks, deadlines, facts) | 461 | once a step |
+| the looks at the faces' lives (`CoopEngine::face_turn` less the step) | 1,110 | two faces turned |
+| the wait (`wait_on_faces`: the session's lock, the faces' held input, `idle_wait`, `poll_on`) | 782 | once a read |
+| the read's own lines and the task's loop (the rest of `run_body` and `entry`) | 554 | once a read |
+| total | 5,687 | |
+
+The records alone (2,512) are under zenoh-pico's whole message (2,723) by 211; everything else is
+the driving, 3,175 a message, which zenoh-pico pays as a `select` and its read task's loop (its own
+costs: `_zp_unicast_read_task_fn` 129, `_z_socket_wait_readable` 127, `select` 91,
+`_z_unicast_wait_iter_next` 52). wz at or under zenoh-pico needs the driving cut to a few hundred and the
+records trimmed by as much again. The driving's own costs a message, and the structure that pays
+each:
+
+| function (own cost) | a message | paid because |
+|---|---|---|
+| `CoopEngine::face_turn` and the slice walk, `NonNull`, `Option` lines inlined in it | 521 | each read turns the dial role's face too, which holds no link in a listening peer: a whole look (the lock, the clock, `next_input`, the ledger, the jobs) for nothing |
+| `PosixClock::now_us`, `clock_gettime` | 145 | once a face turned: twice a read |
+| `wait_on_faces` and its slice walk | 135 | the session's lock and a walk of every face's held input before each wait |
+| `poll_on` | 84 | the `pollfd` set written for the link, the port and the wake, each wait |
+| `CoopEngine::live` | 75 | the session's lock taken by the wait, each look, the push's dispatch and the drain: about five a message |
+| `run_body` (`read_faces` inlined): the slice walk, its own lines, the atomics | 174 | three walks of every row of the face table a read (the slots tried, the turned faces, the faces' due), ten rows where one face holds a link |
+| `Deliveries::within`, `deliver`'s closure | 141 | the deliveries entered after each face's turn and after each drain |
+
+The structure that removes them, largest first, each a step of the lane judged by the same
+measurement:
+
+1. **A face at rest is not turned.** A face whose slot holds no pump, no dial and no opened link,
+   whose life stands idle or closed with no wake, and whose Router holds no chain, has nothing a
+   look would move: its read passes it over while another face is turned, whose look serves the
+   session's own bookkeeping (the ledger, the gets, the jobs, the ports), and turns it all the same
+   when no face is. The rest is noted by the open of a dial role that dials nothing and by the
+   face's own look, under the session's lock, and ends when the slot is given a link or the row a
+   face (an attach's dial lies in the face's record until the face's look takes it); a life
+   standing by for a node another face holds is not at rest, as only a look reads that the node
+   is free. The dial role's face of a listening peer is such a face. Expected:
+   about half of the 1,110 of the looks, and one of the two readings of the clock (about 500).
+2. **The walks of the face table stop at the last row that holds a face.** The rows past it hold
+   none, and a read walks the table three times; the bound is kept where the rows are held and let
+   go of, under the session's lock (`DirectFaces::hold_face`), and read once a walk. Expected: most of the 174 of the walks in `run_body`.
+3. **The wait taken without the session where a link holds input**, and the deliveries entered
+   once a read rather than once a face and once a drain. A face's read tells outside the session
+   whether its link holds input (`SiteFacts`), the facts the faces' records read under it, so the
+   read's wait reads them first and takes the session only to work out a wait that is one
+   (`CoopEngine::link_wait`); a group's datagram taken is still read under the session. The drain
+   of a run of Pushes enters no delivery: the read enters one, after every face and group it
+   stepped, where a callback's read reads nothing (`CoopEngine::read_direct`).
+
+This is not the fast path of one face 8.12 rejects: every face is in the one walk, and a face is
+passed over by what its own slot says, whatever the session's preset.
+
 
 ## 9. The win budget: heap, RSS, text and instructions per message under zenoh-pico
 

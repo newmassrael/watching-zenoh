@@ -151,13 +151,15 @@ impl Default for MemoryBasis {
 
 impl MemoryBasis {
     /// The basis of a session opened under `limits` that holds `links` links at most
-    /// (`links_of`), advertises `batch` and opens each link with `tx_queue` and `rx`. On the
-    /// tokio engine each link holds every priority's queue of batches, a receive buffer of
-    /// `rx`'s size and a reassembly for each of the two reliabilities it rejoins apart.
+    /// (`links_of`), one of them its dial's where it `dials`, advertises `batch` and opens each
+    /// link with `tx_queue` and `rx`. On the tokio engine each link holds every priority's queue
+    /// of batches, a receive buffer of `rx`'s size and a reassembly for each of the two
+    /// reliabilities it rejoins apart.
     #[cfg(feature = "engine-tokio")]
     pub(crate) fn of(
         limits: &SessionLimits,
         links: Option<usize>,
+        _dials: bool,
         batch: u16,
         tx_queue: &TxQueueConf,
         rx: &LinkRxConf,
@@ -178,18 +180,23 @@ impl MemoryBasis {
     /// reserves its links' buffers in its arena: the receive buffers and the slots its plan lends
     /// them, each of the advertised batch, which no batch the two sides of a link agree on is
     /// larger than, and the reassembly buffers of the session's one table
-    /// (`wz_capi_coop::arena::link_buffers`, the plan's own reckoning). The engine queues no
-    /// batch and reads no stream into a buffer of `rx`'s size, so neither is read.
+    /// (`wz_capi_coop::arena::link_buffers`, the plan's own reckoning), a share of it for each
+    /// face. The engine queues no batch and reads no stream into a buffer of `rx`'s size, so
+    /// neither is read.
     #[cfg(not(feature = "engine-tokio"))]
     pub(crate) fn of(
         limits: &SessionLimits,
         links: Option<usize>,
+        dials: bool,
         batch: u16,
         _tx_queue: &TxQueueConf,
         _rx: &LinkRxConf,
     ) -> Self {
-        let buffers =
-            links.and_then(|links| wz_capi_coop::arena::link_buffers(links, batch, limits).ok());
+        // The links `links_of` counts are faces, the dial's among them where the session dials.
+        let buffers = links.and_then(|links| {
+            let beside = links.saturating_sub(usize::from(dials));
+            wz_capi_coop::arena::link_buffers(links, beside, batch, limits).ok()
+        });
         let bytes = buffers.map_or(usize::from(batch), |buffers| buffers.bytes);
         Self {
             limits: *limits,
@@ -719,7 +726,7 @@ mod tests {
         let rx = LinkRxConf::default();
         let batch = advertised(&limits);
         let links = 11;
-        let memory = MemoryBasis::of(&limits, Some(links), batch, &queue, &rx).report();
+        let memory = MemoryBasis::of(&limits, Some(links), true, batch, &queue, &rx).report();
         let row = |part: &CStr| {
             *memory
                 .rows()
@@ -750,7 +757,7 @@ mod tests {
         }
         #[cfg(not(feature = "engine-tokio"))]
         {
-            let buffers = wz_capi_coop::arena::link_buffers(links, batch, &limits)
+            let buffers = wz_capi_coop::arena::link_buffers(links, links - 1, batch, &limits)
                 .expect("the build's batch and pools");
             assert_eq!(
                 (transmit.count, transmit.entry_bytes),
@@ -788,6 +795,7 @@ mod tests {
         let basis = MemoryBasis::of(
             &limits,
             None,
+            false,
             advertised(&limits),
             &queue,
             &LinkRxConf::default(),
