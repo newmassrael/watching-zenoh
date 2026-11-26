@@ -74,7 +74,7 @@ impl ExtUnit {
     /// dispatches to this one reads it through this one function, out of line
     /// where the set reads it from two sites or more so that no site holds a
     /// copy (docs/adr/0136, docs/adr/0137).
-    #[inline(never)]
+    #[inline(always)]
     pub fn read(cursor: &mut SceReader<'_>) -> Self {
         // RFC §synth-5-B empty body — nothing to read; the surrounding
         // header byte (and the wire-protocol layer that demuxes it)
