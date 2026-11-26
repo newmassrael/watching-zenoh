@@ -76,14 +76,18 @@ impl<T> Mutex<T> {
         }
     }
 
-    /// Wait until the lock is the calling thread's.
+    /// Wait until the lock is the calling thread's. A take that finds the lock free is the word's
+    /// one exchange, in line at the caller; one that has to wait goes to [`RawLock`]'s one
+    /// out-of-line body, so a typed lock carries no copy of the wait.
+    #[inline]
     pub fn lock(&self) -> MutexGuard<'_, T> {
-        take(&self.raw);
+        self.raw.lock();
         MutexGuard::taken(self)
     }
 
     /// The lock, when no thread holds it: `None` without waiting when one does (this one
     /// included: the lock is not reentrant).
+    #[inline]
     pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
         if self.raw.try_lock() {
             Some(MutexGuard::taken(self))
@@ -141,6 +145,7 @@ pub struct MutexGuard<'a, T> {
 
 impl<'a, T> MutexGuard<'a, T> {
     /// The guard of `mutex`, which the calling thread has just taken.
+    #[inline]
     fn taken(mutex: &'a Mutex<T>) -> Self {
         Self {
             mutex,
@@ -167,6 +172,9 @@ impl<T> DerefMut for MutexGuard<'_, T> {
 }
 
 impl<T> Drop for MutexGuard<'_, T> {
+    /// Let the lock go: the word's one exchange in line, and the wake of a thread that waits for
+    /// it out of line, in [`RawLock`]'s one body.
+    #[inline]
     fn drop(&mut self) {
         #[cfg(feature = "std")]
         {
@@ -175,31 +183,8 @@ impl<T> Drop for MutexGuard<'_, T> {
             }
         }
         // SAFETY: this guard holds the lock it lets go.
-        unsafe { release(&self.mutex.raw) }
+        unsafe { self.mutex.raw.unlock() }
     }
-}
-
-/// Take `raw` for a typed lock's guard. Out of line, as `release` is: a typed lock is taken and
-/// let go of at many places, over values of many types, and a guard dropped on each path out of a
-/// body lets it go again there, so each place inlining the word's exchange and its call to the
-/// wait would carry a copy of them; one body each leaves a call at each place, as zenoh-pico's
-/// lock is a call (`vendor/zenoh-pico/src/system/unix/system.c` @
-/// `z_result_t _z_mutex_lock(_z_mutex_t *m)`). The runtime's section and the locks of what it
-/// lends the session keep the inline exchange of [`RawLock`], each inside a body of its own.
-#[inline(never)]
-fn take(raw: &RawLock) {
-    raw.lock();
-}
-
-/// Let `raw` go for a typed lock's guard, and wake a thread that waits for it, if one may. Out of
-/// line, as `take` is.
-///
-/// # Safety
-/// The calling thread holds `raw`.
-#[inline(never)]
-unsafe fn release(raw: &RawLock) {
-    // SAFETY: the caller's.
-    unsafe { raw.unlock() }
 }
 
 /// A condition variable waited on with a [`Mutex`]'s guard: the shape of `std::sync::Condvar`.
@@ -259,13 +244,15 @@ impl Condvar {
     }
 
     /// Wake a waiting thread (every waiter, which their loops allow).
+    #[inline]
     pub fn notify_one(&self) {
-        self.notify_all();
+        self.raw.notify_one();
     }
 
-    /// Wake every waiting thread. Out of line, for the reason `take` is: a notification is made
-    /// at many places, each beside a guard's release.
-    #[inline(never)]
+    /// Wake every waiting thread. A notification no thread waits for reads the word and ends, in
+    /// line at the caller; one that finds a waiter wakes it in [`RawCondvar`]'s one out-of-line
+    /// body.
+    #[inline]
     pub fn notify_all(&self) {
         self.raw.notify_all();
     }
@@ -715,6 +702,53 @@ mod tests {
         assert_eq!(small.raw.state.load(Ordering::SeqCst), 0);
         assert_eq!(large.raw.state.load(Ordering::SeqCst), 0);
         assert_eq!(large.read()[0], 9, "the write is read after it");
+    }
+
+    /// A typed lock taken and let go with nobody waiting leaves its word unmarked; a thread that
+    /// waits for its guard marks the word contended, and the guard's drop that finds the mark
+    /// wakes it, and it takes the lock. Turned red by a guard's drop that does not wake on the mark
+    /// (the waiter never ends) or a take that leaves the word other than held (the control).
+    #[test]
+    fn a_waiter_on_a_typed_lock_marks_it_and_the_guard_wakes_it() {
+        let mutex = Arc::new(Mutex::new(0_u32));
+        let guard = mutex.lock();
+        assert_eq!(
+            mutex.raw.state.load(Ordering::SeqCst),
+            crate::LOCKED,
+            "CONTROL: taken with no waiter"
+        );
+        drop(guard);
+        assert_eq!(mutex.raw.state.load(Ordering::SeqCst), crate::UNLOCKED);
+
+        let guard = mutex.lock();
+        let waiter = {
+            let mutex = Arc::clone(&mutex);
+            std::thread::spawn(move || *mutex.lock() += 1)
+        };
+        let started = Instant::now();
+        while mutex.raw.state.load(Ordering::SeqCst) != crate::CONTENDED {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the waiter never marked the lock"
+            );
+            std::thread::yield_now();
+        }
+        drop(guard);
+        let started = Instant::now();
+        while !waiter.is_finished() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "the guard's drop never woke the waiter"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        waiter.join().expect("the waiter ran");
+        assert_eq!(*mutex.lock(), 1, "the waiter took the lock");
+        assert_eq!(
+            mutex.raw.state.load(Ordering::SeqCst),
+            crate::UNLOCKED,
+            "nothing holds it"
+        );
     }
 
     /// A lock whose holder panicked reads as poisoned and still hands out the value as the holder

@@ -170,7 +170,9 @@ impl RawLock {
         }
     }
 
-    /// Wait until the lock is the calling thread's.
+    /// Wait until the lock is the calling thread's. In line, as every take of a free lock is one
+    /// exchange; the wait of a held one is out of line.
+    #[inline]
     pub fn lock(&self) {
         if !self.try_lock() {
             self.lock_contended();
@@ -220,6 +222,7 @@ impl RawLock {
     }
 
     /// Take the lock if no thread holds it, without waiting: whether it was taken.
+    #[inline]
     pub fn try_lock(&self) -> bool {
         self.state
             .compare_exchange(UNLOCKED, LOCKED, Ordering::Acquire, Ordering::Relaxed)
@@ -230,6 +233,7 @@ impl RawLock {
     ///
     /// # Safety
     /// The calling thread holds the lock.
+    #[inline]
     pub unsafe fn unlock(&self) {
         if self.state.swap(UNLOCKED, Ordering::Release) == CONTENDED {
             self.wake_waiter();
@@ -382,25 +386,37 @@ impl RawCondvar {
 
     /// Wake a waiting thread. Every waiter is woken, which the waiters' loops allow: the word
     /// keeps no count of its waiters, only whether there are any.
+    #[inline]
     pub fn notify_one(&self) {
         self.notify_all();
     }
 
-    /// Wake every waiting thread. Nothing is called when none waits.
+    /// Wake every waiting thread. Nothing is called when none waits: a notification reads the
+    /// word in line, and only one that finds the mark goes to the body that wakes.
+    #[inline]
     pub fn notify_all(&self) {
         let seen = self.epoch.load(Ordering::Relaxed);
+        if seen & WAITERS != 0 {
+            self.notify_marked(seen);
+        }
+    }
+
+    /// Move the count of a word read as `seen`, marked by a waiter, and wake every waiter. Out of
+    /// line, as the wait of a held lock is, so a notification carries no copy of the exchange.
+    #[cold]
+    #[inline(never)]
+    fn notify_marked(&self, seen: u32) {
         // A word that moved under the exchange was moved by another notification, which woke
         // every waiter marked in it.
-        if seen & WAITERS != 0
-            && self
-                .epoch
-                .compare_exchange(
-                    seen,
-                    seen.wrapping_add(1),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                )
-                .is_ok()
+        if self
+            .epoch
+            .compare_exchange(
+                seen,
+                seen.wrapping_add(1),
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
         {
             sys::wake_all(&self.epoch);
         }
