@@ -1297,6 +1297,73 @@ mod tests {
         );
     }
 
+    /// Every kind of entity the build has, whose door it exports, is laid at least one place in
+    /// the arena of a session that opens under the opening limits and states nothing, a client of
+    /// as many endpoints as the build dials; and in a build that opens by its region, whose tables
+    /// no config resizes, a querier and a liveliness subscriber are laid two, where the build's
+    /// domain holds two, so a program holds a second of each. Turned red by a kind left out of the
+    /// rows (`entity_rows` in `wz-capi-coop`) or a region laid out under the open values.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn every_built_kind_is_laid_a_place_by_the_open_of_a_session_that_states_nothing() {
+        use crate::session::{opening_limits, pico_unicast_batch};
+        use wz_capi_coop::arena::{ArenaPlan, PlanShape};
+        let limits = opening_limits();
+        let shape = PlanShape::dial_only(
+            wz_session_core::caps::MAX_STATIC_CONNECT,
+            pico_unicast_batch(&limits),
+        );
+        let rows = ArenaPlan::planned(shape, &limits)
+            .expect("a client of the opening limits lays out")
+            .entities();
+        let built: Vec<(Kind, wz_capi_port::EntityKind)> = BUILT_KINDS
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| Some((kind, entity_place(kind)?.0)))
+            .collect();
+        assert!(
+            built.iter().any(|(kind, _)| *kind == Kind::Publisher),
+            "CONTROL: every build has publishers"
+        );
+        for (kind, entity) in &built {
+            assert!(
+                rows.of_kind(*entity) >= 1,
+                "{kind:?} is a kind the build has, and its session is laid no place for one"
+            );
+        }
+        #[cfg(all(
+            feature = "query",
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        if wz_session_core::limits::SessionLimits::defaults()
+            .select_max_queriers(wz_session_core::limit_binding::Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(rows.of_kind(wz_capi_port::EntityKind::Querier), 2);
+        }
+        #[cfg(all(
+            feature = "liveliness",
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        if wz_session_core::limits::SessionLimits::defaults()
+            .select_max_liveliness_subscriptions(wz_session_core::limit_binding::Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(
+                rows.of_kind(wz_capi_port::EntityKind::LivelinessSubscriber),
+                2
+            );
+        }
+    }
+
     /// What one entity of each kind takes of its session's arena for the ABI's object, printed for
     /// reading beside the engine's own rows of the kind: the place, the object and the session that
     /// lent it, and the flag that says it is lent. Run with `cargo test -p wz-capi-pico --lib

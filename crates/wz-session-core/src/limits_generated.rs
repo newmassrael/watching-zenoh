@@ -2023,6 +2023,114 @@ impl SessionLimits {
         limits
     };
 
+    /// The bound of the pico preset: each limit `[limit.pico_preset]` states at the preset's
+    /// value, where the build's domain holds it, and the rest at the build's, no open value of
+    /// `[limit.pico_open]` among them. What a config raises an open value to, and what a
+    /// session opens under where its tables are a region the build laid out when it was
+    /// compiled, which no config resizes; laid out from the declaration and not from the
+    /// build's environment.
+    pub const PICO_PRESET_BOUND: Self = {
+        let mut limits = Self::BUILD;
+        limits.keep(&KeyArenaBytesHeld::preset_or_build(
+            4320,
+            LimitValue::Integer(4320),
+        ));
+        limits.keep(&DeliveryLaneBytesHeld::preset_or_build(
+            4768,
+            LimitValue::Integer(4768),
+        ));
+        limits.keep(&DeliveryLaneCallbacksHeld::preset_or_build(
+            Quota::at_most(64),
+            LimitValue::Integer(64),
+        ));
+        limits.keep(&MaxPendingQueriesHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxLivelinessSubscriptionsHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxLocalTokensHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxQueriersHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxMatchingListenersHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxTransportEventsListenersHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxLinkEventsListenersHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxDeclaredKeyexprsHeld::preset_or_build(
+            Quota::at_most(306),
+            LimitValue::Integer(306),
+        ));
+        limits.keep(&MaxPendingLivelinessGetsHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxPendingRepliesHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxPendingFinalsHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&MaxAdvancedPublishersHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxAdvancedSubscribersHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&MaxFacesHeld::preset_or_build(
+            Quota::at_most(10),
+            LimitValue::Integer(10),
+        ));
+        limits.keep(&MaxAcceptPendingHeld::preset_or_build(
+            Quota::at_most(1),
+            LimitValue::Integer(1),
+        ));
+        limits.keep(&RxPoolBuffersHeld::preset_or_build(
+            2,
+            LimitValue::Integer(2),
+        ));
+        limits.keep(&TxPoolSlotsHeld::preset_or_build(2, LimitValue::Integer(2)));
+        limits.keep(&SessionMaxPeerKeyexprAliasesHeld::preset_or_build(
+            Quota::at_most(32),
+            LimitValue::Integer(32),
+        ));
+        limits.keep(&SessionMaxRemoteDeclsHeld::preset_or_build(
+            Quota::at_most(32),
+            LimitValue::Integer(32),
+        ));
+        limits.keep(&SessionMaxInboundSubInterestsHeld::preset_or_build(
+            Quota::at_most(16),
+            LimitValue::Integer(16),
+        ));
+        limits.keep(&AppLinkQueueBytesHeld::preset_or_build(
+            Quota::at_most(2050),
+            LimitValue::Integer(2050),
+        ));
+        limits.keep(&UdpPortSlotsHeld::preset_or_build(
+            10,
+            LimitValue::Integer(10),
+        ));
+        limits
+    };
+
     /// The limit `L` as the snapshot's words keep it ([`LimitField::WORD`]).
     const fn limit<L: LimitField<Self>, const HELD: usize>(&self) -> Limited<L, HELD> {
         Limited::in_words(&self.words, L::WORD)
