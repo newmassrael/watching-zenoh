@@ -46,6 +46,18 @@
 //! guess would be one statement checked against itself.
 //!
 //! [`CARGO_PKG_NAME`]: https://doc.rust-lang.org/cargo/reference/environment-variables.html
+//!
+//! # The link of a Windows DLL without an SDK
+//!
+//! [`emit_link_without_sdk`] writes the import libraries of the system DLLs a crate of the
+//! library's graph names by `#[link(name = ...)]`, where the link is the toolchain's own linker and
+//! no Windows SDK is there to give them (`import_library`).
+
+mod import_library;
+
+pub use import_library::{
+    emit_link_without_sdk, import_library, links_without_sdk, Import, Machine, SystemLibrary,
+};
 
 /// The target operating systems whose linker takes `-Wl,-soname` — i.e. the
 /// ones whose shared objects are ELF.
