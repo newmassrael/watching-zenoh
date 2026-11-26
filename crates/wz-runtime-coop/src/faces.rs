@@ -1576,6 +1576,11 @@ impl<D> Dial<D> {
 /// still being made.
 pub type DialAnswer<P, N = OneTask> = Option<Result<OpenedLink<P, N>, LinkOpenError>>;
 
+/// What a face's dial asked where it lies in the face answered
+/// ([`LinkSupervisor::answer_face_dial`]): the link it made or the refusal, with the endpoint it
+/// dialled.
+pub type FaceDialAnswer<P, N = OneTask> = (Result<OpenedLink<P, N>, LinkOpenError>, DialEndpoint);
+
 /// What a session reads of a face at a step ([`LinkSupervisor::read_face`]): its role, where its
 /// link stands, and what it did since. The answer of its dial, kept for the link it made, is
 /// written where the reader asked for it, so a step that reads an established face moves no
@@ -2384,10 +2389,7 @@ impl<
     /// the dial is let go of, the face holds no link, and the answer is handed back with the
     /// endpoint it dialled. `None` while the network has not answered, and for a face that holds
     /// no dial or lies past the table.
-    pub fn answer_face_dial(
-        &mut self,
-        at: usize,
-    ) -> Option<(Result<OpenedLink<L::Pump, N>, LinkOpenError>, DialEndpoint)> {
+    pub fn answer_face_dial(&mut self, at: usize) -> Option<FaceDialAnswer<L::Pump, N>> {
         self.moved();
         // The faces apart from the links, so that a refused address can begin its host's next on
         // the links while its face is held.
