@@ -1630,12 +1630,14 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
 }
 
 /// A Push and, after it in the same batch, the retraction of the router's subscriber that opened a
-/// write filter. In a build of one thread the retraction is applied after the Push's callback
-/// returned, so the callback sees the filter still open, as zenoh-pico calls each callback while
-/// it reads the batch (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
-/// `_z_handle_network_message`); a build of threads reads the batch whole before its callbacks,
+/// write filter. A read that hands each record out where it lies, a read task's among them, and a
+/// round of one thread apply the retraction after the Push's callback returned, so the callback
+/// sees the filter still open, as zenoh-pico calls each callback while it reads the batch
+/// (`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `_z_handle_network_message`); only a round
+/// beside other threads (`wz_round` with a read task) reads the batch whole before its callbacks,
 /// which see the filter shut. Turned red by a round of one thread that takes the next record while
-/// it has room (`Round::has_room`).
+/// it has room (`Round::has_room`), or a direct read that applies a record before the callbacks
+/// of the one before it returned.
 #[test]
 fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() {
     use wz_session_core::row_callback::ThreadForm;
@@ -1686,10 +1688,10 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     until(&engine, "the push and the retraction after it", || {
         !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
     });
-    let threads = <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
+    let read_whole_first = cfg!(wz_round) && <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
     assert_eq!(
         *seen.lock().unwrap(),
-        [threads],
+        [read_whole_first],
         "the callback saw the filter shut only where the batch is read whole before it"
     );
 }
