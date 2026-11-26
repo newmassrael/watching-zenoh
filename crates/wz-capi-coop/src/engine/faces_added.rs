@@ -179,11 +179,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let at = held.at();
         // Its life dials its one endpoint once: the dial begun above is that dial, under way, and
         // its answer is asked at the steps that follow.
-        if core.push_face(
-            held,
-            Link::Dialing(Dial::begun(DialEndpoint::Named(named), begun)),
-            1,
-        ) {
+        if core.push_face(held, Link::Idle, 1) {
+            core.transport
+                .links
+                .put_dial(at, Dial::begun(DialEndpoint::Named(named), begun));
             // The read turns the face from its next turn on, which asks the dial where it lies.
             #[cfg(not(wz_round))]
             self.direct.hold_face(at, true);

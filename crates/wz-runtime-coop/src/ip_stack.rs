@@ -907,7 +907,7 @@ where
     T: StreamSocket + 'static;
 
 /// Where an [`IpDial`] stands: its link made, or a stream of either protocol being made.
-// A dial is held by value in its face's link, a place the session's face table reserved, so a
+// A dial is held by value in its face's row of the dials, a place the session reserved, so a
 // stream being made is not boxed to bring the made link's variant to its size: that would be an
 // allocation for each dial.
 #[allow(clippy::large_enum_variant)]

@@ -1329,19 +1329,15 @@ where
 
 /// What a face holds for its link: nothing, a dial under way, or the link a dial made or a port
 /// gave. Where the link stands (dialled, in its handshake, up, waiting, standing by) is the face's
-/// life's alone ([`FaceRecord::life`]); this is the I/O that life asks for. A dial under way is
-/// held in its face's link, so a face has one dial at most and the faces' table is the dials'
-/// table too.
-// A dial (its endpoint's text and the addresses its host resolved to) is far larger than a
-// handle on a link's place, so every row is as large as a dial whatever it holds now. That room
-// is the row's in any form: a session that takes no heap cannot box the dial, and a table of
-// dials apart from the faces would hold one row for each face all the same.
-#[allow(clippy::large_enum_variant)]
+/// life's alone ([`FaceRecord::life`]); this is the I/O that life asks for. A dial under way lies
+/// apart from the face, in the one row of the faces' dials its place has, which the link names
+/// ([`DialRow`]): a face has one dial at most, and its link is no larger than a handle on a
+/// link's place whatever it holds.
 pub enum Link<W, D> {
     /// No link: not dialled yet, between two dials, waiting to dial again, or standing by.
     Idle,
-    /// A dial under way, asked at each move of the face ([`Dial::answer`]).
-    Dialing(Dial<D>),
+    /// A dial under way, in the row it names, asked at each move of the face ([`Dial::answer`]).
+    Dialing(DialRow<D>),
     /// A link in its handshake or established: the session's sends go through it once it is up.
     Wire(W),
 }
@@ -1352,6 +1348,85 @@ impl<W, D> Link<W, D> {
         match self {
             Link::Wire(wire) => Some(wire),
             _ => None,
+        }
+    }
+}
+
+/// Where a face's dial under way lies ([`Link::Dialing`]): the row of the faces' dials at the
+/// face's place, which its supervisor keeps beside the faces' table, one row for each place. Only
+/// the supervisor makes one, as it writes a dial into the row ([`LinkSupervisor::put_dial`]), so
+/// a link that names a row has a dial there; the dial's type is the row's.
+pub struct DialRow<D> {
+    at: usize,
+    dial: core::marker::PhantomData<fn() -> D>,
+}
+
+/// The dials under way of a session's faces: a row for each place of the faces' table, reserved
+/// with it and never grown, each holding the dial of the face at that place while that face dials.
+/// A dial (its endpoint's text and the addresses its host resolved to) is far larger than a handle
+/// on a link's place, so it lies here and not in the face's link, and the room is the same: one
+/// dial for each place either way.
+struct DialPlaces<D> {
+    rows: Vec<Option<Dial<D>>>,
+}
+
+impl<D> DialPlaces<D> {
+    /// A row for each of `places` places, none holding a dial; `None` when the heap refuses the
+    /// room.
+    fn reserved(places: usize) -> Option<Self> {
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(places).ok()?;
+        rows.resize_with(places, || None);
+        Some(Self { rows })
+    }
+
+    /// Write `dial` into the row of the place `at`, in place of the one it held, which is let go
+    /// of: the row, which the face's link names from then. `None` past the table, the dial let go
+    /// of.
+    #[inline]
+    fn put(&mut self, at: usize, dial: Dial<D>) -> Option<DialRow<D>> {
+        *self.rows.get_mut(at)? = Some(dial);
+        Some(DialRow {
+            at,
+            dial: core::marker::PhantomData,
+        })
+    }
+
+    /// The dial in `row`.
+    #[inline]
+    fn get(&self, row: &DialRow<D>) -> Option<&Dial<D>> {
+        self.rows.get(row.at)?.as_ref()
+    }
+
+    /// The dial in `row`, to ask.
+    #[inline]
+    fn get_mut(&mut self, row: &DialRow<D>) -> Option<&mut Dial<D>> {
+        self.rows.get_mut(row.at)?.as_mut()
+    }
+
+    /// Let go of the dial in `row`, which is over: the endpoint it dialled. Only the endpoint is
+    /// moved out, and the dial it leaves is let go of where it lies: a dial moved out whole would
+    /// be copied to the caller's frame.
+    #[inline]
+    fn end(&mut self, row: &DialRow<D>) -> Option<DialEndpoint> {
+        let place = self.rows.get_mut(row.at)?;
+        let endpoint = core::mem::replace(&mut place.as_mut()?.endpoint, DialEndpoint::Listed(0));
+        *place = None;
+        Some(endpoint)
+    }
+
+    /// Let go of the dial in the row of the place `at`, if it holds one.
+    #[inline]
+    fn let_go(&mut self, at: usize) {
+        if let Some(place) = self.rows.get_mut(at) {
+            *place = None;
+        }
+    }
+
+    /// Let go of every dial.
+    fn let_go_all(&mut self) {
+        for place in &mut self.rows {
+            *place = None;
         }
     }
 }
@@ -1526,11 +1601,6 @@ impl<D> Dial<D> {
     /// The endpoint dialled.
     pub fn endpoint(&self) -> &DialEndpoint {
         &self.endpoint
-    }
-
-    /// Let go of the dial, with what it held for its link, keeping the endpoint it dialled.
-    pub fn into_endpoint(self) -> DialEndpoint {
-        self.endpoint
     }
 
     /// Ask the dial whether its link is made: the link, the refusal, or `None` while it is still
@@ -2043,6 +2113,9 @@ pub struct LinkSupervisor<L: SessionLinks<N>, F, P = ManyFaces<F>, N: CountKind 
     /// taken out, so its place names it for that whole time, and the session names the face's
     /// other tables by the same place. A place no face holds is free for the next.
     faces: P,
+    /// The dials under way of the faces, a row at each place of `faces`, named by the link of
+    /// the face that dials (`DialPlaces`).
+    dials: DialPlaces<L::Dial>,
     #[cfg(feature = "listen")]
     listeners: Vec<Listening<L::Pump, N>>,
     /// The one buffer a read's waits are gathered in, reserved at the open for every link, port
@@ -2084,16 +2157,20 @@ impl<
     > LinkSupervisor<L, F, P, N>
 {
     /// The faces of a session over `links`, `dial` the dial role's at the first place: `places`
-    /// places in all (one at least, the dial role's), each face with a dial under way at most, and
-    /// `waits` waits a read makes at once, reserved now; `None` when the heap refuses that room,
-    /// which an open answers as it answers an arena that cannot be reserved. The ports are the
-    /// open's, taken as it listens (`listen`). Faces taken after are numbered from 1.
+    /// places in all (one at least, the dial role's), each with a row for the dial under way of
+    /// the face at it, and `waits` waits a read makes at once, reserved now; `None` when the heap
+    /// refuses that room, which an open answers as it answers an arena that cannot be reserved.
+    /// The ports are the open's, taken as it listens (`listen`). Faces taken after are numbered
+    /// from 1.
     pub fn new(links: L, dial: F, places: usize, waits: usize) -> Option<Self> {
         let mut room = Vec::new();
         room.try_reserve_exact(waits).ok()?;
+        let faces = P::with_dial(dial, places);
+        let dials = DialPlaces::reserved(faces.places())?;
         Some(Self {
             links,
-            faces: P::with_dial(dial, places),
+            faces,
+            dials,
             #[cfg(feature = "listen")]
             listeners: Vec::new(),
             waits: Some(room),
@@ -2255,6 +2332,10 @@ impl<
         #[cfg(feature = "resource-snapshot")]
         let gone = self.faces.get(at).and_then(|face| counted(face.link()));
         let freed = self.faces.free(at);
+        // The face's dial, if it dialled, goes with it: the next face at the place has none.
+        if freed {
+            self.dials.let_go(at);
+        }
         #[cfg(feature = "resource-snapshot")]
         if let Some(gone) = gone.filter(|_| freed) {
             self.receive_ledger.retire(&gone);
@@ -2333,7 +2414,8 @@ impl<
         })
     }
 
-    /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of.
+    /// Give the face at `at` the link `link`, in place of the one it holds, which is let go of:
+    /// a dial it held is let go of in its row.
     pub fn put_link(&mut self, at: usize, link: Link<F::Wire, L::Dial>) {
         self.regenerated();
         self.moved();
@@ -2342,7 +2424,31 @@ impl<
             if let Some(gone) = counted(face.link()) {
                 self.receive_ledger.retire(&gone);
             }
-            *face.link_mut() = link;
+            if let Link::Dialing(row) = core::mem::replace(face.link_mut(), link) {
+                self.dials.let_go(row.at);
+            }
+        }
+    }
+
+    /// Give the face at `at` the dial `dial`, under way, in place of the link it holds, which is
+    /// let go of: the dial is written into the face's row of the dials, which its link names from
+    /// then. A dial for a face past the table is let go of.
+    pub fn put_dial(&mut self, at: usize, dial: Dial<L::Dial>) {
+        self.put_link(at, Link::Idle);
+        let Some(face) = self.faces.get_mut(at) else {
+            return;
+        };
+        if let Some(row) = self.dials.put(at, dial) {
+            *face.link_mut() = Link::Dialing(row);
+        }
+    }
+
+    /// The dial under way of the face at `at`, in its row of the dials: `None` for a face that
+    /// holds no dial and for one past the table.
+    pub fn face_dial(&self, at: usize) -> Option<&Dial<L::Dial>> {
+        match self.faces.get(at)?.link() {
+            Link::Dialing(row) => self.dials.get(row),
+            _ => None,
         }
     }
 
@@ -2352,24 +2458,23 @@ impl<
     /// answered and one that failed are each ended here.
     #[inline(never)]
     pub fn end_dial(&mut self, at: usize) -> Option<DialEndpoint> {
-        let link = self.face_mut(at)?.link_mut();
-        // Only the endpoint is moved out, and the dial it leaves is let go of where it lies: a
-        // link moved out whole is copied to the caller's frame, and its dial again, at each place
-        // this is inlined.
-        let Link::Dialing(dial) = link else {
+        self.moved();
+        let link = self.faces.get_mut(at)?.link_mut();
+        let Link::Dialing(row) = link else {
             return None;
         };
-        let endpoint = core::mem::replace(&mut dial.endpoint, DialEndpoint::Listed(0));
+        let endpoint = self.dials.end(row);
         *link = Link::Idle;
-        Some(endpoint)
+        endpoint
     }
 
     /// Ask the dial `pending` of `endpoint`, begun for the face at `at`, once. A dial the network
-    /// has not answered yet is put in the face where it lies, and `None` is handed back; one
-    /// answered at once is let go of, before its link is opened, and its answer is handed back,
-    /// the face keeping what it held. A dial for a face past the table is let go of. The time the
-    /// dial is given up at is its face's life's, read once the ask returned, so a host whose ask
-    /// blocks (a refused loopback connect on Windows) does not spend the dial's time on it.
+    /// has not answered yet is put in the face's row of the dials ([`Self::put_dial`]), and
+    /// `None` is handed back; one answered at once is let go of, before its link is opened, and
+    /// its answer is handed back, the face keeping what it held. A dial for a face past the table
+    /// is let go of. The time the dial is given up at is its face's life's, read once the ask
+    /// returned, so a host whose ask blocks (a refused loopback connect on Windows) does not spend
+    /// the dial's time on it.
     pub fn ask_dial(
         &mut self,
         at: usize,
@@ -2384,9 +2489,9 @@ impl<
         if let Some(answer) = dial.answer_on::<N, L>(&self.links) {
             return Some(answer);
         }
-        // Written into the face from the dial this frame holds, and not handed back through the
-        // transport and the session's dial, each of which would move it once more.
-        self.put_link(at, Link::Dialing(dial));
+        // Written into the face's row from the dial this frame holds, and not handed back through
+        // the transport and the session's dial, each of which would move it once more.
+        self.put_dial(at, dial);
         None
     }
 
@@ -2401,12 +2506,11 @@ impl<
         // the links while its face is held.
         let links = &self.links;
         let link = self.faces.get_mut(at)?.link_mut();
-        let Link::Dialing(dial) = link else {
+        let Link::Dialing(row) = link else {
             return None;
         };
-        let answer = dial.answer_on::<N, L>(links)?;
-        // Only the endpoint is moved out, as `Self::end_dial` moves it.
-        let endpoint = core::mem::replace(&mut dial.endpoint, DialEndpoint::Listed(0));
+        let answer = self.dials.get_mut(row)?.answer_on::<N, L>(links)?;
+        let endpoint = self.dials.end(row)?;
         *link = Link::Idle;
         Some((answer, endpoint))
     }
@@ -2479,8 +2583,11 @@ impl<
             };
         };
         let phase = face.life().phase();
-        let asked = match face.link_mut() {
-            Link::Dialing(dial) => dial.answer_on::<N, L>(links),
+        let asked = match face.link() {
+            Link::Dialing(row) => self
+                .dials
+                .get_mut(row)
+                .and_then(|dial| dial.answer_on::<N, L>(links)),
             _ => None,
         };
         if let Some(answered) = asked {
@@ -2490,8 +2597,8 @@ impl<
                 LinkInput::DialRefused
             };
             *answer = Some(answered);
-            if let Link::Dialing(dial) = core::mem::replace(face.link_mut(), Link::Idle) {
-                *dialled = Some(dial.into_endpoint());
+            if let Link::Dialing(row) = core::mem::replace(face.link_mut(), Link::Idle) {
+                *dialled = self.dials.end(&row);
             }
             return FaceRead { role, input };
         }
@@ -2868,6 +2975,7 @@ impl<
                 *link = Link::Idle;
             }
         }
+        self.dials.let_go_all();
         #[cfg(feature = "listen")]
         self.listeners.clear();
     }
@@ -2892,6 +3000,7 @@ impl<
             }
         }
         self.faces.keep_dial_only();
+        self.dials.let_go_all();
     }
 }
 
@@ -3421,12 +3530,13 @@ mod tests {
         );
     }
 
-    /// A face dialling `endpoint` with a dial that answers `answer`.
+    /// A dial of `endpoint` that answers `answer`, for a face to be given
+    /// ([`LinkSupervisor::put_dial`]).
     fn dialing(
         endpoint: DialEndpoint,
         answer: Option<Result<OpenedLink<Rc<Quiet>>, LinkOpenError>>,
-    ) -> TestLink {
-        Link::Dialing(Dial::new(endpoint, Answer(answer, None)))
+    ) -> Dial<Answer> {
+        Dial::new(endpoint, Answer(answer, None))
     }
 
     fn session(established: bool, node: Option<&[u8]>) -> Session {
@@ -4764,9 +4874,10 @@ mod tests {
     fn a_face_is_read_as_the_input_its_life_takes() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
         let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
-        let mut faces = supervisor(
+        let mut faces = supervisor(Link::Idle, 2);
+        faces.put_dial(
+            0,
             dialing(DialEndpoint::Listed(0), Some(Err(LinkOpenError::Refused))),
-            2,
         );
         let (mut answer, mut dialled) = (None, None);
         let read = faces.read_face(0, 100, 0, &mut answer, &mut dialled);
@@ -4777,6 +4888,7 @@ mod tests {
             matches!(dial(&faces).link, Link::Idle),
             "the dial is let go of"
         );
+        assert!(faces.face_dial(0).is_none(), "and its row with it");
         let again = faces.read_face(0, 100, 0, &mut None, &mut None);
         assert_eq!(again.input, LinkInput::Tick, "answered once");
 
@@ -4903,9 +5015,11 @@ mod tests {
         let named = DialEndpoint::Named(LocatorText::try_from("tcp/1.2.3.4:1").expect("a row"));
         #[cfg(not(feature = "listen"))]
         let named = DialEndpoint::Listed(3);
-        let mut faces = supervisor(dialing(named.clone(), None), 2);
+        let mut faces = supervisor(Link::Idle, 2);
+        faces.put_dial(0, dialing(named.clone(), None));
         assert_eq!(faces.end_dial(0), Some(named));
         assert!(matches!(dial(&faces).link, Link::Idle));
+        assert!(faces.face_dial(0).is_none(), "the row is let go of");
 
         faces.put_link(0, Link::Idle);
         assert_eq!(faces.end_dial(0), None, "no dial, no endpoint");
@@ -4929,10 +5043,12 @@ mod tests {
         );
         assert!(answered.is_none(), "the dial is under way");
         assert_eq!(asks.get(), 1, "asked once");
-        match &dial(&faces).link {
-            Link::Dialing(dial) => assert_eq!(dial.endpoint(), &DialEndpoint::Listed(2)),
-            _ => panic!("the face holds the dial under way"),
-        }
+        assert!(matches!(dial(&faces).link, Link::Dialing(_)));
+        assert_eq!(
+            faces.face_dial(0).map(Dial::endpoint),
+            Some(&DialEndpoint::Listed(2)),
+            "the face holds the dial under way"
+        );
 
         let answered = faces.ask_dial(
             0,
@@ -4944,11 +5060,9 @@ mod tests {
         );
         assert!(matches!(answered, Some(Err(LinkOpenError::Refused))));
         assert_eq!(asks.get(), 2, "asked once more");
-        assert!(
-            matches!(
-                &dial(&faces).link,
-                Link::Dialing(dial) if dial.endpoint() == &DialEndpoint::Listed(2)
-            ),
+        assert_eq!(
+            faces.face_dial(0).map(Dial::endpoint),
+            Some(&DialEndpoint::Listed(2)),
             "an answered dial is not put in the face"
         );
     }
@@ -4962,28 +5076,21 @@ mod tests {
     fn a_dial_is_answered_where_it_lies_in_its_face() {
         let asks = Rc::new(Cell::new(0));
         let under_way = Answer(None, Some(asks.clone()));
-        let mut faces = supervisor(
-            Link::Dialing(Dial::new(DialEndpoint::Listed(1), under_way)),
-            1,
-        );
+        let mut faces = supervisor(Link::Idle, 1);
+        faces.put_dial(0, Dial::new(DialEndpoint::Listed(1), under_way));
         assert!(
             faces.answer_face_dial(0).is_none(),
             "the network has not answered"
         );
         assert_eq!(asks.get(), 1, "asked once");
-        assert!(
-            matches!(
-                &dial(&faces).link,
-                Link::Dialing(dial) if dial.endpoint() == &DialEndpoint::Listed(1)
-            ),
+        assert_eq!(
+            faces.face_dial(0).map(Dial::endpoint),
+            Some(&DialEndpoint::Listed(1)),
             "a dial under way stays in its face"
         );
 
         let refused = Answer(Some(Err(LinkOpenError::Refused)), Some(asks.clone()));
-        faces.put_link(
-            0,
-            Link::Dialing(Dial::new(DialEndpoint::Listed(2), refused)),
-        );
+        faces.put_dial(0, Dial::new(DialEndpoint::Listed(2), refused));
         let Some((answer, endpoint)) = faces.answer_face_dial(0) else {
             panic!("the network answered");
         };
@@ -4994,10 +5101,62 @@ mod tests {
             matches!(dial(&faces).link, Link::Idle),
             "an answered dial is let go of"
         );
+        assert!(faces.face_dial(0).is_none(), "with its row");
 
         assert!(faces.answer_face_dial(0).is_none(), "no dial, no answer");
         assert!(faces.answer_face_dial(5).is_none(), "past the table");
         assert_eq!(asks.get(), 2, "nothing asked of a face that holds no dial");
+    }
+
+    /// A face's dial lies in its place's row of the dials, and the row is emptied when the face
+    /// goes: the stack's dial is let go of with the face, and a link put in over a dial lets it go
+    /// as well; a dial given to a face past the table is let go of at once. CONTROL: the dial
+    /// role's row holds no dial of the other face. Turned red by a dropped face whose dial stays in
+    /// its row (`LinkSupervisor::drop_face`), or a link put over a dial that leaves the dial there
+    /// (`LinkSupervisor::put_link`).
+    #[test]
+    fn a_faces_dial_row_is_emptied_when_the_face_goes() {
+        let held = Rc::new(Cell::new(0));
+        let under_way = || Answer(None, Some(held.clone()));
+        let mut faces = supervisor(Link::Idle, 2);
+        let other = TestFace {
+            life: idle_life(),
+            id: 1,
+            link: Link::Idle,
+        };
+        assert!(faces.place_face(1, other).is_ok());
+        faces.put_dial(1, Dial::new(DialEndpoint::Listed(1), under_way()));
+        assert_eq!(
+            faces.face_dial(1).map(Dial::endpoint),
+            Some(&DialEndpoint::Listed(1)),
+            "the dial lies in the face's row"
+        );
+        assert!(faces.face_dial(0).is_none(), "CONTROL: the dial role's row");
+        assert_eq!(Rc::strong_count(&held), 2, "the row holds the stack's dial");
+
+        assert_eq!(faces.drop_face(1), Some(1));
+        assert_eq!(
+            Rc::strong_count(&held),
+            1,
+            "the stack's dial is let go of with its face"
+        );
+        let next = TestFace {
+            life: idle_life(),
+            id: 2,
+            link: Link::Idle,
+        };
+        assert!(faces.place_face(1, next).is_ok());
+        assert!(faces.face_dial(1).is_none(), "the next face holds no dial");
+
+        faces.put_dial(0, Dial::new(DialEndpoint::Listed(0), under_way()));
+        assert_eq!(Rc::strong_count(&held), 2);
+        faces.put_link(0, Link::Idle);
+        assert_eq!(Rc::strong_count(&held), 1, "a link put in lets the dial go");
+        assert!(faces.face_dial(0).is_none());
+
+        faces.put_dial(5, Dial::new(DialEndpoint::Listed(0), under_way()));
+        assert_eq!(Rc::strong_count(&held), 1, "no row past the table");
+        assert_eq!(held.get(), 0, "no dial was asked");
     }
 
     /// The node a face's handshake reached is the one it stands by for only while another face
@@ -5391,7 +5550,7 @@ mod tests {
             matches!(read(&mut faces), (IdleWait::Sleep(4), 1)),
             "a face waiting to dial again"
         );
-        faces.put_link(0, dialing(DialEndpoint::Listed(0), None));
+        faces.put_dial(0, dialing(DialEndpoint::Listed(0), None));
         set_life(
             &mut faces,
             life_in(&[LinkInput::Open, LinkInput::DialPending]),
@@ -5862,12 +6021,14 @@ mod tests {
     fn ending_lets_dials_go_first_then_tells_established_peers_and_keeps_the_dial_role() {
         let runtime = CoopRuntime::try_new(Still).expect("the heap has room");
         let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
-        let mut faces = supervisor(dialing(DialEndpoint::Listed(0), None), 3);
+        let mut faces = supervisor(Link::Idle, 3);
+        faces.put_dial(0, dialing(DialEndpoint::Listed(0), None));
         faces.end_dials_and_ports();
         assert!(
             matches!(dial(&faces).link, Link::Idle),
             "a dial under way is let go of"
         );
+        assert!(faces.face_dial(0).is_none(), "with its row");
         let up = session(true, None);
         let up_ended = up.ended.clone();
         let opening = session(false, None);
