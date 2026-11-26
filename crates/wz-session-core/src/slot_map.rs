@@ -23,8 +23,10 @@
 //!
 //! The free list, the generations, the pins and the bound are kept in a column of metadata and
 //! decided by one core that knows nothing of the rows' type, compiled once for every table
-//! (P5). What is typed is a column of `Option<T>` beside it and the few lines that move a value in
-//! and out of it. Both columns are `BoundedVec`s of the storage policy `P`: lent from the
+//! (P5). Beside it lies a column of `Option<T>`, whose rows the core finds by place and stride
+//! alone ([`RawSlots`]): taking a slot, finding a row and removing one are bodies of no type, which
+//! a caller that names a table by a value and not by a type reaches every table through, and what
+//! is typed is the cast of a place to its row and the growing of the columns. Both columns are `BoundedVec`s of the storage policy `P`: lent from the
 //! session's arena at its open on the lent policy ([`SlotMap::lent`]), fixed on the static one,
 //! growable on the heap one, where `N` is advisory as it is for every table of that policy and
 //! the bound is the one [`SlotMap::limit_to`] sets, or [`MAX_SLOTS`]. A table at its bound
@@ -36,6 +38,7 @@
 //! [`SlotMap::lent`]: crate::slot_map::SlotMap::lent
 //! [`SlotMap::limit_to`]: crate::slot_map::SlotMap::limit_to
 //! [`MAX_SLOTS`]: crate::slot_map::MAX_SLOTS
+//! [`RawSlots`]: crate::slot_map::RawSlots
 
 use core::fmt;
 use core::marker::PhantomData;
@@ -107,7 +110,26 @@ impl<K> Handle<K> {
             kind: PhantomData,
         })
     }
+
+    /// The handle apart from its table's kind: what the bodies every table shares name a row by
+    /// ([`RawSlots`]).
+    pub fn erase(self) -> RawHandle {
+        self.tag()
+    }
+
+    /// The same row named as a row of the table whose kind is `J`: for a table's own typed face,
+    /// which hands back as its own the handle its untyped core answered.
+    pub(crate) fn tag<J>(self) -> Handle<J> {
+        Handle {
+            index: self.index,
+            generation: self.generation,
+            kind: PhantomData,
+        }
+    }
 }
+
+/// A handle apart from its table's kind ([`Handle::erase`]).
+pub type RawHandle = Handle<()>;
 
 impl<K> Clone for Handle<K> {
     fn clone(&self) -> Self {
@@ -233,21 +255,14 @@ struct Meta {
 }
 
 impl Meta {
-    /// A slot added after every slot there was, holding a row.
-    const ADDED: Self = Self {
+    /// A slot added after every slot there was, holding no row until it is taken from the free
+    /// list it is put on ([`Core::adopt`]).
+    const FREED: Self = Self {
         generation: 0,
         next: NIL,
         pins: 0,
-        state: State::Live,
+        state: State::Free,
     };
-}
-
-/// The slot the core took for a row: its place and generation, and whether it is one to add after
-/// every slot there is, so both columns take one more place for it.
-struct Taken {
-    at: usize,
-    generation: u16,
-    grown: bool,
 }
 
 /// What retiring a row did.
@@ -304,41 +319,35 @@ impl Core {
         !self.unlimit
     }
 
-    /// A live slot for a row: a free one, or else the one after every slot there is, counted
-    /// here and pushed by the caller, when both columns have a place for it (`room`). `None`,
-    /// nothing taken, when the table is at its bound or has neither.
+    /// A free slot, made live for a row: its place and generation. `None`, nothing taken, when the
+    /// table is at its bound or no slot is free; a slot is added free by the table's typed face,
+    /// which alone knows its columns ([`SlotMap::raw_for_insert`]).
     ///
     /// Untyped and over the column as a slice, so it is one body for every table of every policy
     /// and bound, where each insert inlined the slot's bookkeeping of its own.
     #[inline(never)]
-    fn take_slot(&mut self, meta: &mut [Meta], room: bool) -> Option<Taken> {
+    fn take_free(&mut self, meta: &mut [Meta]) -> Option<(usize, u16)> {
         if self.held >= self.limit() {
             return None;
         }
-        if let Some(at) = linked(self.free) {
-            let slot = meta.get_mut(at)?;
-            self.free = slot.next;
-            slot.next = NIL;
-            slot.pins = 0;
-            slot.state = State::Live;
-            self.held = self.held.saturating_add(1);
-            return Some(Taken {
-                at,
-                generation: slot.generation,
-                grown: false,
-            });
-        }
-        let at = meta.len();
-        // A slot's index is a `u16` counted from one: the place past the last has none.
-        if at >= MAX_SLOTS || !room {
-            return None;
-        }
+        let at = linked(self.free)?;
+        let slot = meta.get_mut(at)?;
+        self.free = slot.next;
+        slot.next = NIL;
+        slot.pins = 0;
+        slot.state = State::Live;
         self.held = self.held.saturating_add(1);
-        Some(Taken {
-            at,
-            generation: 0,
-            grown: true,
-        })
+        Some((at, slot.generation))
+    }
+
+    /// Put the slot at `at`, just added after every slot there was, on the free list, at the
+    /// generation it was added at.
+    fn adopt(&mut self, meta: &mut [Meta], at: usize) {
+        if let Some(slot) = meta.get_mut(at) {
+            slot.state = State::Free;
+            slot.next = self.free;
+            self.free = link(at);
+        }
     }
 
     /// `place`, when its slot holds a live row taken at `generation`, or with `retired_too` a
@@ -454,6 +463,179 @@ impl Core {
     }
 }
 
+/// Where a column's rows lie, apart from their type: the first of rows that follow one another,
+/// or the list of the places of a column's chunks (`Chunked`), which hold `CHUNK_ROWS` rows
+/// each. What the bodies every table shares ([`RawSlots`]) find a row by, with the bytes of one.
+#[derive(Clone, Copy, Debug)]
+pub struct RowsAt {
+    /// The first row, or the first of the chunks' places.
+    at: NonNull<u8>,
+    /// Whether `at` is the list of the chunks' places.
+    #[cfg(feature = "alloc")]
+    chunked: bool,
+}
+
+impl RowsAt {
+    /// The rows of a column whose rows follow one another from `first`.
+    fn flat(first: NonNull<u8>) -> Self {
+        Self {
+            at: first,
+            #[cfg(feature = "alloc")]
+            chunked: false,
+        }
+    }
+
+    /// The rows of a column kept in chunks, the place of each listed at `chunks`.
+    #[cfg(feature = "alloc")]
+    fn chunks(chunks: NonNull<NonNull<u8>>) -> Self {
+        Self {
+            at: chunks.cast(),
+            chunked: true,
+        }
+    }
+
+    /// The first row of the rows that the row at `at` follows one another with, and its place
+    /// among them.
+    ///
+    /// # Safety
+    /// `at` is a place the column has made.
+    #[cfg(feature = "alloc")]
+    unsafe fn run_of(self, at: usize) -> (NonNull<u8>, usize) {
+        if !self.chunked {
+            return (self.at, at);
+        }
+        // SAFETY: the caller's: the chunk of a place made was made, and its place is listed.
+        let chunk = unsafe {
+            self.at
+                .cast::<NonNull<u8>>()
+                .as_ptr()
+                .add(at / CHUNK_ROWS)
+                .read()
+        };
+        (chunk, at % CHUNK_ROWS)
+    }
+
+    /// [`Self::run_of`] of a column whose rows all follow one another.
+    ///
+    /// # Safety
+    /// As the other form's.
+    #[cfg(not(feature = "alloc"))]
+    unsafe fn run_of(self, at: usize) -> (NonNull<u8>, usize) {
+        (self.at, at)
+    }
+
+    /// The place of the row at `at`, the column's rows `stride` bytes each.
+    ///
+    /// # Safety
+    /// `at` is a place the column has made, and `stride` the bytes of one of its rows.
+    unsafe fn row(self, at: usize, stride: usize) -> NonNull<u8> {
+        // SAFETY: the caller's.
+        let (first, at) = unsafe { self.run_of(at) };
+        // SAFETY: the caller's: the place lies among the rows that follow `first`, so it is in
+        // the same allocation and not null.
+        unsafe { NonNull::new_unchecked(first.as_ptr().add(at.wrapping_mul(stride))) }
+    }
+}
+
+/// The place of the row at `place` taken at `generation` while its slot holds it live, or with
+/// `retired_too` retired. One body for every table, which reads the slot and finds the row in one
+/// call, as a lookup did when it found the slot alone.
+#[inline(never)]
+fn find_row(
+    meta: &[Meta],
+    rows: RowsAt,
+    stride: usize,
+    place: usize,
+    generation: u16,
+    retired_too: bool,
+) -> Option<NonNull<u8>> {
+    let slot = meta.get(place)?;
+    let named = slot.generation == generation
+        && (slot.state == State::Live || (retired_too && slot.state == State::Retired));
+    // SAFETY: `place` is a slot of the metadata column, whose length is the rows column's.
+    named.then(|| unsafe { rows.row(place, stride) })
+}
+
+/// A table's slots and the places of its rows, apart from its rows' type: the bodies every table
+/// of every row type and bound shares, which a caller that names a table by a value and not by a
+/// type reaches it through. Made by [`SlotMap::raw`] and [`SlotMap::raw_for_insert`]. A row is
+/// named by a [`RawHandle`] and found as the place of the table's `Option` of its row type, which
+/// holds `Some` while the row stands and `None` in a free slot.
+pub struct RawSlots<'a> {
+    meta: &'a mut [Meta],
+    core: &'a mut Core,
+    rows: RowsAt,
+    stride: usize,
+}
+
+/// What removing a row through [`RawSlots`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RawRemoval {
+    /// The row's slot is free again; the row still lies at this place, for the caller to take
+    /// out, leaving `None`, before the slot is taken again.
+    Freed(NonNull<u8>),
+    /// The row is pinned: it is retired, gone from every lookup, and its last unpin hands it back.
+    AfterCalls,
+}
+
+impl RawSlots<'_> {
+    /// The bytes of one row's place.
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// How many slots hold a row, retired rows among them.
+    pub fn len(&self) -> usize {
+        usize::from(self.core.held)
+    }
+
+    /// Whether no slot holds a row.
+    pub fn is_empty(&self) -> bool {
+        self.core.held == 0
+    }
+
+    /// Take a free slot for a row: its handle and the place of its row, which holds `None` until
+    /// the caller writes the row's `Some` there, once. `None`, nothing taken, when the table is
+    /// at its bound or no slot is free.
+    #[inline(never)]
+    pub fn take(&mut self) -> Option<(RawHandle, NonNull<u8>)> {
+        let (at, generation) = self.core.take_free(self.meta)?;
+        let Some(handle) = RawHandle::at(at, generation) else {
+            self.core.free(self.meta, at);
+            return None;
+        };
+        // SAFETY: `at` is a slot of the metadata column, whose length is the rows column's, and
+        // `stride` is the bytes of one row.
+        Some((handle, unsafe { self.rows.row(at, self.stride) }))
+    }
+
+    /// The place of the live row `handle` names.
+    pub fn get(&self, handle: RawHandle) -> Option<NonNull<u8>> {
+        find_row(
+            &*self.meta,
+            self.rows,
+            self.stride,
+            handle.place(),
+            handle.generation,
+            false,
+        )
+    }
+
+    /// Remove the live row `handle` names: its slot freed now with the row left at its place, or,
+    /// when it is pinned, retired. `None` when it names no live row.
+    #[inline(never)]
+    pub fn remove(&mut self, handle: RawHandle) -> Option<RawRemoval> {
+        match self
+            .core
+            .retire(self.meta, handle.place(), handle.generation)?
+        {
+            // SAFETY: `at` is a slot of the metadata column, as in `take`.
+            Retired::Now(at) => Some(RawRemoval::Freed(unsafe { self.rows.row(at, self.stride) })),
+            Retired::Deferred => Some(RawRemoval::AfterCalls),
+        }
+    }
+}
+
 /// The column a [`SlotMap`] keeps its rows in ([`Storage::Rows`]): read and changed by a row's
 /// place, grown by one row at its end, and walked in place order. A row stays where it was put
 /// while it stands, so a holder may reach it by its address.
@@ -495,6 +677,12 @@ pub trait RowColumn<T> {
 
     /// The rows, in place order, to change.
     fn iter_mut(&mut self) -> Self::IterMut<'_>;
+
+    /// Where the rows lie, to read through.
+    fn rows_at(&self) -> RowsAt;
+
+    /// Where the rows lie, to read and change through.
+    fn rows_at_mut(&mut self) -> RowsAt;
 }
 
 // A sequence of a policy that never moves an element to make room: a fixed buffer, or what it was
@@ -543,6 +731,14 @@ impl<T, const N: usize, P: Storage> RowColumn<T> for BoundedVec<T, N, P> {
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
         <[T]>::iter_mut(self)
     }
+
+    fn rows_at(&self) -> RowsAt {
+        RowsAt::flat(NonNull::from(&**self).cast())
+    }
+
+    fn rows_at_mut(&mut self) -> RowsAt {
+        RowsAt::flat(NonNull::from(&mut **self).cast())
+    }
 }
 
 /// How many rows a chunk of a [`Chunked`] column holds.
@@ -554,23 +750,114 @@ pub const CHUNK_ROWS: usize = 32;
 /// many rows come after it, and the column has no bound but the allocator's. A holder that keeps a
 /// row's address (a key's declaration, [`KeyexprHead`](crate::session_tables::KeyexprHead)) reads
 /// it there for as long as the row stands, as it does on a policy of a fixed table.
+///
+/// The chunks are kept as their places alone, so the list of them is what [`RowsAt`] finds a row
+/// by apart from its type, and every row is reached through the place its chunk was made at.
 #[cfg(feature = "alloc")]
 pub struct Chunked<T> {
-    /// Each made with room for `CHUNK_ROWS` rows and filled to no more, so a push into it does not
-    /// move it; growing this list moves the chunks' handles and none of their rows.
-    chunks: alloc::vec::Vec<alloc::vec::Vec<T>>,
+    /// The place of each chunk, made for `CHUNK_ROWS` rows; growing this list moves the places and
+    /// none of the rows.
+    chunks: alloc::vec::Vec<NonNull<T>>,
+    /// The rows written, in place order: every chunk before the last is full.
+    len: usize,
+}
+
+// SAFETY: the column owns its rows, as a `Vec<T>` does; the places are of its own chunks.
+#[cfg(feature = "alloc")]
+unsafe impl<T: Send> Send for Chunked<T> {}
+// SAFETY: a shared column hands out only `&T`, as a `Vec<T>` does.
+#[cfg(feature = "alloc")]
+unsafe impl<T: Sync> Sync for Chunked<T> {}
+
+#[cfg(feature = "alloc")]
+impl<T> Chunked<T> {
+    /// The memory of one chunk.
+    fn chunk_layout() -> Option<core::alloc::Layout> {
+        core::alloc::Layout::array::<T>(CHUNK_ROWS).ok()
+    }
+
+    /// The place of the row at `at`, when it was written.
+    fn place(&self, at: usize) -> Option<NonNull<T>> {
+        if at >= self.len {
+            return None;
+        }
+        let chunk = self.chunks.get(at / CHUNK_ROWS)?;
+        // SAFETY: the chunk was made for `CHUNK_ROWS` rows, so the place lies in it.
+        Some(unsafe { chunk.add(at % CHUNK_ROWS) })
+    }
+}
+
+#[cfg(feature = "alloc")]
+impl<T> Drop for Chunked<T> {
+    fn drop(&mut self) {
+        for at in 0..self.len {
+            if let Some(row) = self.place(at) {
+                // SAFETY: each written row is dropped once, here, and read by nothing after.
+                unsafe { core::ptr::drop_in_place(row.as_ptr()) };
+            }
+        }
+        let Some(layout) = Self::chunk_layout() else {
+            return;
+        };
+        if layout.size() == 0 {
+            return;
+        }
+        for chunk in &self.chunks {
+            // SAFETY: the chunk was allocated with this layout and is given back once.
+            unsafe { alloc::alloc::dealloc(chunk.as_ptr().cast(), layout) };
+        }
+    }
+}
+
+/// The rows of a [`Chunked`] column, in place order.
+#[cfg(feature = "alloc")]
+pub struct ChunkedIter<'a, T> {
+    column: &'a Chunked<T>,
+    at: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl<'a, T> Iterator for ChunkedIter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<&'a T> {
+        let row = self.column.place(self.at)?;
+        self.at = self.at.saturating_add(1);
+        // SAFETY: a written row, borrowed for as long as the column is.
+        Some(unsafe { row.as_ref() })
+    }
+}
+
+/// The rows of a [`Chunked`] column, in place order, to change.
+#[cfg(feature = "alloc")]
+pub struct ChunkedIterMut<'a, T> {
+    column: &'a mut Chunked<T>,
+    at: usize,
+}
+
+#[cfg(feature = "alloc")]
+impl<'a, T> Iterator for ChunkedIterMut<'a, T> {
+    type Item = &'a mut T;
+
+    fn next(&mut self) -> Option<&'a mut T> {
+        let mut row = self.column.place(self.at)?;
+        self.at = self.at.saturating_add(1);
+        // SAFETY: a written row, handed out once by this walk, which borrows the column for as long
+        // as each row it hands out.
+        Some(unsafe { row.as_mut() })
+    }
 }
 
 #[cfg(feature = "alloc")]
 impl<T> RowColumn<T> for Chunked<T> {
     type Iter<'a>
-        = core::iter::Flatten<core::slice::Iter<'a, alloc::vec::Vec<T>>>
+        = ChunkedIter<'a, T>
     where
         Self: 'a,
         T: 'a;
 
     type IterMut<'a>
-        = core::iter::Flatten<core::slice::IterMut<'a, alloc::vec::Vec<T>>>
+        = ChunkedIterMut<'a, T>
     where
         Self: 'a,
         T: 'a;
@@ -578,17 +865,18 @@ impl<T> RowColumn<T> for Chunked<T> {
     fn empty() -> Self {
         Self {
             chunks: alloc::vec::Vec::new(),
+            len: 0,
         }
     }
 
     fn get(&self, at: usize) -> Option<&T> {
-        self.chunks.get(at / CHUNK_ROWS)?.get(at % CHUNK_ROWS)
+        // SAFETY: a written row, borrowed for as long as the column is.
+        self.place(at).map(|row| unsafe { row.as_ref() })
     }
 
     fn get_mut(&mut self, at: usize) -> Option<&mut T> {
-        self.chunks
-            .get_mut(at / CHUNK_ROWS)?
-            .get_mut(at % CHUNK_ROWS)
+        // SAFETY: a written row, borrowed mutably for as long as the column is.
+        self.place(at).map(|mut row| unsafe { row.as_mut() })
     }
 
     fn has_room(&self) -> bool {
@@ -596,38 +884,59 @@ impl<T> RowColumn<T> for Chunked<T> {
     }
 
     fn room_for_one(&mut self) -> bool {
-        if self
-            .chunks
-            .last()
-            .is_some_and(|chunk| chunk.len() < CHUNK_ROWS)
-        {
+        if self.len < self.chunks.len().saturating_mul(CHUNK_ROWS) {
             return true;
         }
-        let mut chunk = alloc::vec::Vec::new();
-        if chunk.try_reserve_exact(CHUNK_ROWS).is_err() || self.chunks.try_reserve(1).is_err() {
+        let Some(layout) = Self::chunk_layout() else {
+            return false;
+        };
+        if self.chunks.try_reserve(1).is_err() {
             return false;
         }
+        let chunk = if layout.size() == 0 {
+            NonNull::dangling()
+        } else {
+            // SAFETY: the layout's size is not zero.
+            let Some(chunk) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }) else {
+                return false;
+            };
+            chunk.cast()
+        };
         self.chunks.push(chunk);
         true
     }
 
     fn push(&mut self, value: T) -> Result<(), CapacityFull<T>> {
-        match self.chunks.last_mut() {
-            // Filled to no more than the room it was made with, so the chunk does not move.
-            Some(chunk) if chunk.len() < CHUNK_ROWS => {
-                chunk.push(value);
-                Ok(())
-            }
-            _ => Err(CapacityFull(value)),
-        }
+        let at = self.len;
+        let Some(chunk) = self.chunks.get(at / CHUNK_ROWS) else {
+            return Err(CapacityFull(value));
+        };
+        // SAFETY: the chunk was made for `CHUNK_ROWS` rows and its place at `at` holds none yet.
+        unsafe { chunk.add(at % CHUNK_ROWS).as_ptr().write(value) };
+        self.len = at.saturating_add(1);
+        Ok(())
     }
 
     fn iter(&self) -> Self::Iter<'_> {
-        self.chunks.iter().flatten()
+        ChunkedIter {
+            column: self,
+            at: 0,
+        }
     }
 
     fn iter_mut(&mut self) -> Self::IterMut<'_> {
-        self.chunks.iter_mut().flatten()
+        ChunkedIterMut {
+            column: self,
+            at: 0,
+        }
+    }
+
+    fn rows_at(&self) -> RowsAt {
+        RowsAt::chunks(NonNull::from(self.chunks.as_slice()).cast())
+    }
+
+    fn rows_at_mut(&mut self) -> RowsAt {
+        self.rows_at()
     }
 }
 
@@ -745,42 +1054,89 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
         parts: A,
         make: impl FnOnce(A) -> T,
     ) -> Result<(Handle<K>, &T), A> {
-        // The slot is found first and the row written once, whichever way it was found: a row
-        // written in each way would be written twice in every caller of every row type.
-        let room = self.meta.free_slots() != 0 && self.rows.room_for_one();
-        let Some(taken) = self.core.take_slot(&mut self.meta, room) else {
+        let Some((handle, place)) = self.raw_for_insert().take() else {
             return Err(parts);
         };
-        if taken.grown {
-            // Both columns were found to have a place, so neither push is refused; the row's is
-            // empty until the value is written once below.
-            let _ = self.meta.push(Meta::ADDED);
-            let _ = self.rows.push(None);
+        let row = place.cast::<Option<T>>().as_ptr();
+        // SAFETY: `take` answered the place of a row of this table's column, which holds `None`
+        // in a slot just taken, so the row is written once and nothing is dropped under it.
+        unsafe { row.write(Some(make(parts))) };
+        // SAFETY: the row was written `Some` just above, and the answer borrows the table.
+        let kept = unsafe { (*row).as_ref().unwrap_unchecked() };
+        Ok((handle.tag(), kept))
+    }
+
+    /// The bytes of one row's place in the rows column.
+    const STRIDE: usize = core::mem::size_of::<Option<T>>();
+
+    /// The table's slots and the places of its rows, apart from its rows' type ([`RawSlots`]).
+    pub fn raw(&mut self) -> RawSlots<'_> {
+        RawSlots {
+            meta: &mut self.meta,
+            core: &mut self.core,
+            rows: self.rows.rows_at_mut(),
+            stride: Self::STRIDE,
         }
-        match (
-            Handle::at(taken.at, taken.generation),
-            self.rows.get_mut(taken.at),
-        ) {
-            (Some(handle), Some(row)) => Ok((handle, &*row.insert(make(parts)))),
-            // A place under `MAX_SLOTS` names a handle and the two columns are the same length,
-            // so this is not reached; the slot goes back, free, and the parts with the refusal.
-            _ => {
-                self.core.free(&mut self.meta, taken.at);
-                Err(parts)
-            }
+    }
+
+    /// [`Self::raw`], with a slot added first, free, when none is free and the table may still
+    /// take a row: what [`RawSlots::take`] takes a row's slot from.
+    pub fn raw_for_insert(&mut self) -> RawSlots<'_> {
+        if self.core.free == NIL {
+            self.add_free_slot();
         }
+        self.raw()
+    }
+
+    /// Add a slot after every slot there is, on the free list, when the table is under its bound
+    /// and both columns have a place for it. Typed, as it grows the columns, which only the
+    /// table's own type knows; out of line, so an insert reaches it by one call.
+    #[inline(never)]
+    fn add_free_slot(&mut self) {
+        let at = self.meta.len();
+        // A slot's index is a `u16` counted from one: the place past the last has none.
+        if self.core.held >= self.core.limit()
+            || at >= MAX_SLOTS
+            || self.meta.free_slots() == 0
+            || !self.rows.room_for_one()
+        {
+            return;
+        }
+        // The rows' column first: a slot of the metadata column is a place of the rows' column
+        // too, so the metadata column never grows past it.
+        if self.rows.push(None).is_err() || self.meta.push(Meta::FREED).is_err() {
+            return;
+        }
+        self.core.adopt(&mut self.meta, at);
     }
 
     /// The live row `handle` names.
     pub fn get(&self, handle: Handle<K>) -> Option<&T> {
-        let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
-        self.rows.get(at)?.as_ref()
+        let row = find_row(
+            &self.meta,
+            self.rows.rows_at(),
+            Self::STRIDE,
+            handle.place(),
+            handle.generation,
+            false,
+        )?;
+        // SAFETY: the place of a row of this table's column, read while the table is borrowed.
+        unsafe { row.cast::<Option<T>>().as_ref() }.as_ref()
     }
 
     /// The live row `handle` names, to change.
     pub fn get_mut(&mut self, handle: Handle<K>) -> Option<&mut T> {
-        let at = Core::find(&self.meta, handle.place(), handle.generation, false)?;
-        self.rows.get_mut(at)?.as_mut()
+        let row = find_row(
+            &self.meta,
+            self.rows.rows_at_mut(),
+            Self::STRIDE,
+            handle.place(),
+            handle.generation,
+            false,
+        )?;
+        // SAFETY: the place of a row of this table's column, changed while the table is borrowed
+        // mutably.
+        unsafe { row.cast::<Option<T>>().as_mut() }.as_mut()
     }
 
     /// The live row `handle` names, found once for what the caller does with it next: read it,
@@ -807,12 +1163,13 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// Remove the row `handle` names: handed back now, or, when it is pinned, by its last unpin.
     /// `None` when it names no live row.
     pub fn remove(&mut self, handle: Handle<K>) -> Option<Removal<T>> {
-        match self
-            .core
-            .retire(&mut self.meta, handle.place(), handle.generation)?
-        {
-            Retired::Now(at) => self.rows.get_mut(at)?.take().map(Removal::Taken),
-            Retired::Deferred => Some(Removal::AfterCalls),
+        match self.raw().remove(handle.erase())? {
+            // SAFETY: the place of the row whose slot was just freed, which no take reached since;
+            // the row is taken out once, leaving the `None` a free slot's row holds.
+            RawRemoval::Freed(row) => {
+                unsafe { row.cast::<Option<T>>().as_ptr().replace(None) }.map(Removal::Taken)
+            }
+            RawRemoval::AfterCalls => Some(Removal::AfterCalls),
         }
     }
 
@@ -824,8 +1181,16 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// The row `pinned` holds in its slot, live or retired.
     pub fn pinned(&self, pinned: &Pinned<K>) -> Option<&T> {
         let handle = pinned.handle;
-        let at = Core::find(&self.meta, handle.place(), handle.generation, true)?;
-        self.rows.get(at)?.as_ref()
+        let row = find_row(
+            &self.meta,
+            self.rows.rows_at(),
+            Self::STRIDE,
+            handle.place(),
+            handle.generation,
+            true,
+        )?;
+        // SAFETY: the place of a row of this table's column, read while the table is borrowed.
+        unsafe { row.cast::<Option<T>>().as_ref() }.as_ref()
     }
 
     /// Give back a pin: the row when it was removed while pinned and this was its last pin, for
