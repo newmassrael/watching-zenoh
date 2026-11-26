@@ -1076,8 +1076,10 @@ fn window_may_hold_open(windows: u64) -> bool {
 }
 
 /// Open (`open`) or close the window `bit` of `word`, leaving the others as they are: whether
-/// this call changed it, so of two that open it at once one is told it did.
+/// this call changed it, so of two that open it at once one is told it did. Out of line, as
+/// [`begin_drain`] is.
 #[cfg(feature = "transport-batching")]
+#[inline(never)]
 fn set_window<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, open: bool) -> bool {
     let mut seen = word.load(core::sync::atomic::Ordering::SeqCst);
     loop {
@@ -1097,11 +1099,13 @@ fn set_window<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, open: bool) 
     }
 }
 
-/// Close the window `bit` of `word` and run `drain`, which sends what it left open. The close
-/// and the count of a drain under way are one write, so a message that reads the window closed
-/// reads the drain too, and sends a frame the drain has not reached before itself.
+/// Close the window `bit` of `word` and count a drain under way, in one write, so a message
+/// that reads the window closed reads the drain too, and sends a frame the drain has not reached
+/// before itself. The drain's end is [`end_drain`]. Out of line: every closer of a window calls
+/// it, and a copy of its loop in each cost more than the call.
 #[cfg(feature = "transport-batching")]
-fn close_and_drain<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, drain: impl FnOnce()) {
+#[inline(never)]
+fn begin_drain<W: crate::runtime_cell::WordCell>(word: &W, bit: u64) {
     let mut seen = word.load(core::sync::atomic::Ordering::SeqCst);
     loop {
         let next = (seen & !bit).wrapping_add(WINDOW_DRAINING);
@@ -1111,12 +1115,25 @@ fn close_and_drain<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, drain: 
             core::sync::atomic::Ordering::SeqCst,
             core::sync::atomic::Ordering::SeqCst,
         ) {
-            Ok(_) => break,
+            Ok(_) => return,
             Err(now) => seen = now,
         }
     }
-    drain();
+}
+
+/// End a drain [`begin_drain`] counted.
+#[cfg(feature = "transport-batching")]
+fn end_drain<W: crate::runtime_cell::WordCell>(word: &W) {
     word.fetch_sub(WINDOW_DRAINING, core::sync::atomic::Ordering::SeqCst);
+}
+
+/// Close the window `bit` of `word` and run `drain`, which sends what it left open, counted as
+/// a drain under way from the close to the drain's end.
+#[cfg(feature = "transport-batching")]
+fn close_and_drain<W: crate::runtime_cell::WordCell>(word: &W, bit: u64, drain: impl FnOnce()) {
+    begin_drain(word, bit);
+    drain();
+    end_drain(word);
 }
 
 /// R2920 — the session's TX conduits: one [`BatchTx`] behind its own lock
@@ -14684,8 +14701,11 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     }
 
     /// Send the frame open in one conduit, under that conduit's lock (`batch`): the body of
-    /// the walks of [`Self::flush_open_batch`] and [`Self::try_flush_open_batch`].
+    /// the walks of [`Self::flush_open_batch`] and [`Self::try_flush_open_batch`], and of a send
+    /// that finds a frame open it does not join. Out of line: that send is every message's, and
+    /// the frame is open there only while replies are held or a window is drained.
     #[cfg(feature = "transport-batching")]
+    #[inline(never)]
     fn flush_conduit(&self, idx: usize, priority: Priority, batch: &mut BatchTx) {
         // Lowered before the frame is taken, under the lock that keeps a control message from
         // being staged in between: whatever control message the mark stood for leaves here.
