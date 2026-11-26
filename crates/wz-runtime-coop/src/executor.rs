@@ -26,6 +26,9 @@
 //!   session holds one link at a time: its passes, spawns and sweeps look at that cell alone
 //!   (`Walks`), and only the making of such a table names them, as only the making of a table of
 //!   many names theirs, so a build whose runtimes are all of one cell links no walk of many.
+//! - No cell at all (`RuntimeForm::Taskless`), for an engine whose read steps its one link itself
+//!   and spawns nothing: a spawn is refused, counted, and a pass walks nothing, so such a build
+//!   links no pass, spawn or sweep over a cell.
 //!
 //! The first two refuse a task too large for their cells, or with an alignment past
 //! [`CELL_ALIGN`], as [`SpawnRefusal::TooLarge`] with the future handed back; the third gives
@@ -1037,8 +1040,9 @@ fn fit_cell(cell: &TaskCell, need: usize, align: usize) -> Result<*mut u8, Spawn
 }
 
 /// How an executor's passes, spawns and sweeps walk its cells: over any count of them
-/// (`MANY_CELLS`), or over one at most (`ONE_CELL`). Each is named only by the making of a table
-/// it walks, so a build that makes no table of many links none of the walks over many.
+/// (`MANY_CELLS`), over one at most (`ONE_CELL`), or over none (`NO_CELLS`). Each is named only
+/// by the making of a table it walks, so a build that makes no table of many links none of the
+/// walks over many, and one whose runtimes hold no cell links no walk over a cell.
 struct Walks {
     /// Take a free cell for a task ([`ExecutorState::claim_bytes`]).
     claim: fn(&ExecutorState, u32, usize, usize) -> CellClaim,
@@ -1061,6 +1065,15 @@ static ONE_CELL: Walks = Walks {
     claim: ExecutorState::claim_one,
     run: ExecutorState::run_one,
     drop_live: ExecutorState::drop_one,
+};
+
+/// The walks of a table of no cell: a spawn is refused, counted, and a pass and a sweep have no
+/// cell to look at, so nothing that polls, settles or drops a task is linked through them.
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+static NO_CELLS: Walks = Walks {
+    claim: ExecutorState::claim_none,
+    run: ExecutorState::run_none,
+    drop_live: ExecutorState::drop_none,
 };
 
 impl ExecutorState {
@@ -1210,6 +1223,15 @@ impl ExecutorState {
     pub(crate) fn reserved_one_in(store: Shared<TaskStore>) -> Self {
         let cell_bytes = store.cell_bytes;
         Self::over(Cells::Store(store), cell_bytes, &ONE_CELL)
+    }
+
+    /// A table of no cell over `store`, which holds none, for a runtime that hosts no task: its
+    /// owner steps its links itself (`RuntimeForm::Taskless`). A spawn is refused, counted, as a
+    /// table of one cell that holds none refuses it, and a pass or a sweep walks nothing.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    pub(crate) fn taskless_in(store: Shared<TaskStore>) -> Self {
+        let cell_bytes = store.cell_bytes;
+        Self::over(Cells::Store(store), cell_bytes, &NO_CELLS)
     }
 
     /// A number for a new local set, which its tasks are marked with: never 0, which marks a task
@@ -1379,6 +1401,22 @@ impl ExecutorState {
         if let Some(taken) = found {
             return Ok(taken);
         }
+        self.refuse_unplaced(fits)
+    }
+
+    /// [`Self::claim_bytes`] over a table of no cell: refused, counted, with the answer a table of
+    /// one cell gives where it holds none, so the two forms of a table with no cell tell a spawn
+    /// apart alike.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn claim_none(&self, _set: u32, need: usize, align: usize) -> CellClaim {
+        let fits = self.cell_bytes.is_some_and(|cap| need <= cap) && align <= CELL_ALIGN;
+        self.refuse_unplaced(fits)
+    }
+
+    /// The refusal, counted, of a task a table of one cell at most found no free cell for: the
+    /// want of a cell when the task `fits` the table's cells, too large otherwise.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn refuse_unplaced(&self, fits: bool) -> CellClaim {
         let why = if fits {
             SpawnRefusal::NoTaskCell
         } else {
@@ -1557,6 +1595,10 @@ impl ExecutorState {
         (self.walks.run)(self)
     }
 
+    /// [`Self::run_until_idle`] over a table of no cell: nothing to poll or sweep.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn run_none(&self) {}
+
     /// [`Self::run_until_idle`] over a table of one cell at most: the look at the cell and its
     /// settling, each in a section of its own, as a pass over many takes for each cell.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -1731,6 +1773,10 @@ impl ExecutorState {
             Self::drop_cell(cell, set);
         }
     }
+
+    /// [`Self::drop_live`] over a table of no cell: no task to drop.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    fn drop_none(&self, _set: Option<u32>) {}
 
     /// Drop, where it lies, the task `cell` holds when it has not ended and was spawned on local
     /// set `set` (on any set, and on none, for `None`).
@@ -2345,6 +2391,42 @@ mod tests {
             "the task is polled where it was written"
         );
         assert!(cell.with_meta(|meta| meta.state == State::Live));
+    }
+
+    /// A table of no cell answers every claim as a table of one cell that holds none does, each
+    /// counted alike, and its pass and its sweep find nothing: the table of a runtime that hosts no
+    /// task (`RuntimeForm::Taskless`), whose walks link nothing that polls or drops one.
+    ///
+    /// # Control
+    ///
+    /// A claim of no cell that answered other than `claim_one` where it finds none, or counted no
+    /// refusal, reds the comparison of the answers or of the counts.
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    #[test]
+    fn a_table_of_no_cell_refuses_every_claim_as_one_cell_of_none_does() {
+        let store = TaskStore::try_new::<true>(0, Some(64), None).expect("the heap has room");
+        let state = ExecutorState::taskless_in(store);
+        let none = ExecutorState::reserved_one(0, 64);
+        assert_eq!(state.capacity(), 0);
+        for (need, align) in [(8, 8), (65, 8), (8, CELL_ALIGN * 2)] {
+            assert_eq!(
+                state.claim_bytes(0, need, align).map(|_| ()),
+                none.claim_bytes(0, need, align).map(|_| ()),
+                "a claim of {need} bytes at {align}"
+            );
+        }
+        assert_eq!(
+            state.refusals(),
+            Refusals {
+                no_task_cell: 1,
+                too_large: 2,
+                heap_refused: 0,
+            }
+        );
+        assert_eq!(state.refusals(), none.refusals());
+        state.run_until_idle();
+        state.drop_tasks_of(1);
+        assert_eq!(state.live_task_count(), 0, "no task was ever placed");
     }
 
     /// A table of one task at most holds one cell whatever the count it is told, and none for a

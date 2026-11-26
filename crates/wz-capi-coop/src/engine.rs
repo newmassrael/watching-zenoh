@@ -3621,7 +3621,8 @@ impl RuntimeTables {
     /// that names a group is refused by name there, so the groups' cells are none. A build that
     /// neither joins groups nor listens takes no face beside its dial role's, so its runtime hosts
     /// that one link's task and is made for one (`CoopRuntime::try_reserved_for_one`), which links no
-    /// walk of a table of many cells.
+    /// walk of a table of many cells; one whose read steps that link itself spawns no task, and its
+    /// runtime holds no cell (`RuntimeForm::Taskless`), which links no pass over a cell at all.
     ///
     /// The runtime is placed in `place`, the span of the session's arena the open lent it
     /// ([`Self::placed_bytes`]), with the session's local set: nothing of them is of the heap.
@@ -3659,15 +3660,18 @@ impl RuntimeTables {
     }
 
     /// The table of the build's runtime, a constant of the build: cells added while the open lasts
-    /// for the `groups` it joins (`group`), every cell reserved (`listen`), or the one cell of
-    /// the dial role's link.
-    const fn form(groups: usize) -> RuntimeForm {
+    /// for the `groups` it joins (`group`), every cell reserved (`listen`), the one cell of the
+    /// dial role's link (`threads`), or no cell, for a read that steps its one link itself and
+    /// spawns no task (`direct`).
+    pub(crate) const fn form(groups: usize) -> RuntimeForm {
         if cfg!(feature = "group") {
             RuntimeForm::Opening { added: groups }
         } else if cfg!(feature = "listen") {
             RuntimeForm::Reserved
-        } else {
+        } else if cfg!(feature = "threads") {
             RuntimeForm::ForOne
+        } else {
+            RuntimeForm::Taskless
         }
     }
 }

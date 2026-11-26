@@ -3739,6 +3739,9 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
+// The runtime of a build whose read steps its one link itself, which runs no task.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+mod direct_runtime;
 mod entity_tables;
 #[cfg(all(
     feature = "listen",
