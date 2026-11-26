@@ -187,15 +187,29 @@ fn judge_canon(text: &str, bounded: bool) -> Result<CanonKey<'_>, ZResult> {
     }
 }
 
-/// What slot 3 of a loan names.
-enum LentKey<'a> {
-    /// Nothing: a view of the caller's text.
-    View,
-    /// A key this crate keeps, with the declaration that covers a prefix of it.
-    Kept(&'a DeclaredKeyexpr),
-    /// An entity's key as the session's record of it keeps it ([`record_loan`]): the session the
-    /// entity is on, and the declaration the record holds that the key begins with.
-    Record(&'a crate::session::EngineHold, Option<OwnKey>),
+/// What a loan lends a key made of it, or named on the wire ([`lent_of`]), read the same
+/// whatever lent it: a view lends its text alone; a key this crate keeps lends itself, its session
+/// and its declaration; a key lent from the session's record of an entity lends its session and
+/// the declaration the record holds.
+struct Lent<'a> {
+    /// The key this crate keeps, for a loan of one.
+    kept: Option<&'a DeclaredKeyexpr>,
+    /// The session a key made of the loan keeps its text for, `None` for a copy of its own.
+    engine: Option<&'a crate::session::EngineHold>,
+    /// The loan's text, which the declaration's prefix is read against.
+    named: &'a [u8],
+    /// The declaration the loan's key begins with.
+    covering: Option<Covering<'a>>,
+}
+
+impl Lent<'_> {
+    /// A view of the caller's text: nothing kept, nothing declared.
+    const VIEW: Self = Self {
+        kept: None,
+        engine: None,
+        named: &[],
+        covering: None,
+    };
 }
 
 /// What a key lent from the session's record of an entity names besides its text, in slot 3 of
@@ -244,18 +258,19 @@ const _: () = assert!(
         && core::mem::align_of::<RecordKey>() > RECORD_TAG
 );
 
-/// What slot 3 of `ke` names.
+/// What `ke` lends ([`Lent`]): the one reading of slot 3 every door that copies, extends or
+/// names a caller's key goes through.
 ///
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
-unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> LentKey<'a> {
+unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> Lent<'a> {
     if ke.is_null() || (*ke)._state.is_null() {
-        return LentKey::View;
+        return Lent::VIEW;
     }
     let state = (*ke)._state;
     if (state as usize) & RECORD_TAG == 0 {
         // SAFETY: an untagged slot 3 is a kept key, live while the loan is (the caller's).
-        return LentKey::Kept(unsafe { &*(state as *const DeclaredKeyexpr) });
+        return unsafe { &*(state as *const DeclaredKeyexpr) }.lent();
     }
     // SAFETY: a tagged slot 3 is the record's key the tag was added to (`record_loan`), which
     // stands in its entity's state while the loan does (the caller's).
@@ -267,7 +282,13 @@ unsafe fn lent_of<'a>(ke: *const z_loaned_keyexpr_t) -> LentKey<'a> {
     };
     // SAFETY: a lent record names the session handle beside it in the same state
     // ([`RecordKey::lent`]), which stands as long.
-    LentKey::Record(unsafe { &*record.session }, record.own)
+    let session = unsafe { &*record.session };
+    Lent {
+        kept: None,
+        engine: Some(session),
+        named: view_bytes((*ke)._start, (*ke)._len).unwrap_or_default(),
+        covering: record.own.map(|own| Covering::record(session, own)),
+    }
 }
 
 /// The loan of `view`, the key the session's record of an entity keeps: its text where the record
@@ -297,10 +318,7 @@ pub(crate) fn record_loan(view: KeyView, record: &RecordKey) -> z_loaned_keyexpr
 /// # Safety
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'a DeclaredKeyexpr> {
-    match lent_of(ke) {
-        LentKey::Kept(declared) => Some(declared),
-        LentKey::View | LentKey::Record(..) => None,
-    }
+    lent_of(ke).kept
 }
 
 /// How `ke` goes on `shared`'s wire: its own declaration's id and the rest of
@@ -324,10 +342,9 @@ pub(crate) unsafe fn declared_of<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
 /// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
 #[inline(never)]
 pub(crate) unsafe fn wire_key_of(ke: *const z_loaned_keyexpr_t, shared: &Engine) -> WireKey {
-    match lent_of(ke) {
-        LentKey::Kept(declared) => declared.wire(shared),
-        LentKey::Record(session, own) => record_wire(session, own, (*ke)._len, shared),
-        LentKey::View => WireKey::literal(),
+    match lent_of(ke).covering {
+        Some(covering) => covering.wire((*ke)._len, shared),
+        None => WireKey::literal(),
     }
 }
 
@@ -340,15 +357,8 @@ pub(crate) fn record_wire(
     len: usize,
     shared: &Engine,
 ) -> WireKey {
-    let on = core::ptr::addr_eq(
-        crate::session::EngineHold::as_ref(session) as *const Engine,
-        shared as *const Engine,
-    );
-    match own
-        .filter(|_| on)
-        .and_then(|own| Some((own, len.checked_sub(own.prefix_len)?)))
-    {
-        Some((own, rest)) => WireKey::aliased_tail(own.mapping, rest).at_row(Some(own.row)),
+    match own {
+        Some(own) => Covering::record(session, own).wire(len, shared),
         None => WireKey::literal(),
     }
 }
@@ -508,22 +518,81 @@ impl WireDeclaration {
     }
 }
 
-/// The declaration a key made of another holds one more hold of, when the new key still begins with
-/// the bytes it covers ([`DeclaredKeyexpr::kept_with`]).
-enum Covering<'a> {
-    /// A kept key's declaration ([`WireDeclaration::share`]).
-    Kept(&'a WireDeclaration),
-    /// The declaration the session's record of an entity on `shared` holds
-    /// ([`WireDeclaration::lent`]).
-    Lent(&'a crate::session::EngineHold, OwnKey),
+/// The declaration a loan's key begins with ([`Lent`]), read the same whatever lent the key:
+/// the engine it was made on, its id, its row and how many bytes it covers, which name the key on
+/// the wire, and the holder a key made of the loan takes one more hold of, when the new key still
+/// begins with the bytes it covers ([`DeclaredKeyexpr::kept_with`]).
+#[derive(Clone, Copy)]
+struct Covering<'a> {
+    /// Where the engine the declaration was made on lies.
+    on: *const Engine,
+    /// The declaration's id.
+    mapping: wz_session_core::wire_id::ExprId,
+    /// The row the declaration lies in, `None` for a hold that holds nothing.
+    row: Option<wz_session_core::session_tables::KeyexprHandle>,
+    /// How many bytes of the key the declaration covers.
+    prefix_len: usize,
+    /// Who holds it.
+    held: HeldBy<'a>,
 }
 
-impl Covering<'_> {
-    /// How many bytes of the key the declaration covers.
-    fn prefix_len(&self) -> usize {
-        match self {
-            Self::Kept(declaration) => declaration.prefix_len,
-            Self::Lent(_, own) => own.prefix_len,
+/// Who holds the declaration a loan's key begins with.
+#[derive(Clone, Copy)]
+enum HeldBy<'a> {
+    /// A kept key ([`WireDeclaration::share`]).
+    Kept(&'a WireDeclaration),
+    /// The session's record of an entity on the session it names ([`WireDeclaration::lent`]).
+    Record(&'a crate::session::EngineHold, OwnKey),
+}
+
+impl<'a> Covering<'a> {
+    /// The declaration a kept key holds.
+    fn kept(declaration: &'a WireDeclaration) -> Self {
+        Self {
+            on: engine_at(&declaration.session),
+            mapping: declaration.mapping_id(),
+            row: declaration.hold.row(),
+            prefix_len: declaration.prefix_len,
+            held: HeldBy::Kept(declaration),
+        }
+    }
+
+    /// `own`, the declaration the session's record of an entity on `session` holds.
+    fn record(session: &'a crate::session::EngineHold, own: OwnKey) -> Self {
+        Self {
+            on: crate::session::EngineHold::as_ref(session) as *const Engine,
+            mapping: own.mapping,
+            row: Some(own.row),
+            prefix_len: own.prefix_len,
+            held: HeldBy::Record(session, own),
+        }
+    }
+
+    /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the remainder of a key
+    /// of `len` bytes that begins with it, when the declaration is `shared`'s, by ADDRESS (on the
+    /// tokio engine both are fat pointers to one engine, whose vtable halves are not guaranteed to
+    /// be one copy); the literal otherwise.
+    ///
+    /// It holds nothing, and reads no row, takes no lock of the session and reads the text for no
+    /// boundary: the id and the length are the declaration's own, which no retraction changes, and
+    /// the remainder is named by its length, read against the key's text that goes with it
+    /// ([`WireKey::names_in`]).
+    fn wire(&self, len: usize, shared: &Engine) -> WireKey {
+        match len
+            .checked_sub(self.prefix_len)
+            .filter(|_| core::ptr::addr_eq(self.on, shared as *const Engine))
+        {
+            Some(rest) => WireKey::aliased_tail(self.mapping, rest).at_row(self.row),
+            None => WireKey::literal(),
+        }
+    }
+
+    /// One more hold of the declaration, for a key made of the loan: refused as
+    /// [`WireDeclaration::share`] and [`WireDeclaration::lent`] are.
+    fn take(self) -> Result<WireDeclaration, ZResult> {
+        match self.held {
+            HeldBy::Kept(declaration) => declaration.share(),
+            HeldBy::Record(session, own) => WireDeclaration::lent(session, own),
         }
     }
 }
@@ -751,40 +820,54 @@ impl DeclaredKeyexpr {
         literal: &str,
     ) -> Result<Self, ZResult> {
         Self::kept_with(
-            Some(shared),
-            named,
+            Lent {
+                kept: None,
+                engine: Some(shared),
+                named: named.as_bytes(),
+                covering: own.map(|own| Covering::record(shared, own)),
+            },
             literal,
-            own.map(|own| Covering::Lent(shared, own)),
         )
     }
 
-    /// `literal` kept for an object of `engine`'s session, or as a copy of its own for none
-    /// ([`KeyText::kept_for`]), holding the declaration `covering` names while `literal` still
-    /// begins with the bytes of `named` it covers: one more holder of a kept key's declaration
-    /// ([`WireDeclaration::share`]) or of the one the session's record of an entity holds
-    /// ([`WireDeclaration::lent`]). Refused as the text and the hold are.
+    /// What this key lends a key made of it ([`Lent`]).
+    fn lent(&self) -> Lent<'_> {
+        Lent {
+            kept: Some(self),
+            engine: self.literal.engine(),
+            named: self.literal().as_bytes(),
+            covering: self.declaration.as_ref().map(Covering::kept),
+        }
+    }
+
+    /// `literal` kept with what `lent` lends: one more holder of the lent key's text when
+    /// `literal` is that text where this crate keeps it ([`KeyText::share`]), else the text kept
+    /// for an object of the lent key's session, or as a copy of its own for none
+    /// ([`KeyText::kept_for`]); and one more hold of the declaration the lent key begins with
+    /// while `literal` still begins with the bytes it covers ([`Covering::take`]). Refused as the
+    /// text and the hold are.
     ///
-    /// Out of line: a copy and a concatenation of every kind of loan, and an advanced entity's
-    /// keys, end here, and each carried its own copy of the text's keeping and the hold's share.
+    /// Out of line: the one body of a copy and an extension of every kind of loan, of a share of
+    /// a kept key and of an advanced entity's keys, so the text's keeping and the hold's share
+    /// are reached from one place.
     #[inline(never)]
-    fn kept_with(
-        engine: Option<&crate::session::EngineHold>,
-        named: &str,
-        literal: &str,
-        covering: Option<Covering<'_>>,
-    ) -> Result<Self, ZResult> {
+    fn kept_with(lent: Lent<'_>, literal: &str) -> Result<Self, ZResult> {
         // The text is kept first: a refusal then has no hold of the declaration to let go of.
-        let text = KeyText::kept_for(engine, literal)?;
-        let declaration = covering
+        let text = match lent
+            .kept
+            .filter(|kept| core::ptr::eq(kept.literal(), literal))
+        {
+            Some(kept) => kept.literal.share()?,
+            None => KeyText::kept_for(lent.engine, literal)?,
+        };
+        let named = lent.named;
+        let declaration = lent
+            .covering
             .filter(|covering| {
-                let prefix_len = covering.prefix_len();
-                literal.get(..prefix_len).is_some()
-                    && literal.get(..prefix_len) == named.get(..prefix_len)
+                let head = literal.as_bytes().get(..covering.prefix_len);
+                head.is_some() && head == named.get(..covering.prefix_len)
             })
-            .map(|covering| match covering {
-                Covering::Kept(declaration) => declaration.share(),
-                Covering::Lent(shared, own) => WireDeclaration::lent(shared, own),
-            })
+            .map(Covering::take)
             .transpose()?;
         Ok(Self {
             literal: text,
@@ -808,21 +891,9 @@ impl DeclaredKeyexpr {
     /// Another key sharing this one's literal and declaration — pico
     /// `_z_declared_keyexpr_copy`, which clones the refcount; refused, making nothing, as the
     /// literal's share is, or when the declaration's count holds as many holders as it can
-    /// ([`WireDeclaration::share`]). Out of line: the clone door and a declaration asked again
-    /// each carried its own copy of the two shares and their refusal.
-    #[inline(never)]
+    /// ([`WireDeclaration::share`]): this key extended by nothing ([`Self::kept_with`]).
     pub(crate) fn share(&self) -> Result<Self, ZResult> {
-        // The text is kept first: a refusal then has no hold of the declaration to let go of.
-        let literal = self.literal.share()?;
-        let declaration = self
-            .declaration
-            .as_ref()
-            .map(WireDeclaration::share)
-            .transpose()?;
-        Ok(Self {
-            literal,
-            declaration,
-        })
+        Self::kept_with(self.lent(), self.literal())
     }
 
     /// A new literal that keeps this key's declaration — pico's
@@ -836,42 +907,25 @@ impl DeclaredKeyexpr {
     /// starts with would put the wrong key on the wire.
     ///
     /// The new literal is kept where this key's is ([`KeyText::kept_for`]), and refused as that
-    /// refuses it.
+    /// refuses it; the key's own text, as a copy names it, is one more holder of it.
+    #[cfg(any(
+        feature = "advanced",
+        all(test, not(feature = "engine-tokio"), feature = "peer")
+    ))]
     pub(crate) fn extended(&self, literal: &str) -> Result<Self, ZResult> {
-        // The key's own text, as a copy names it (`z_keyexpr_clone`): one more holder of the
-        // text and of the declaration, which a share is.
-        if core::ptr::eq(literal, self.literal()) {
-            return self.share();
-        }
-        Self::kept_with(
-            self.literal.engine(),
-            self.literal(),
-            literal,
-            self.declaration.as_ref().map(Covering::Kept),
-        )
+        Self::kept_with(self.lent(), literal)
     }
 
     fn declared_on(&self, shared: &Engine) -> Option<&WireDeclaration> {
         self.declaration.as_ref().filter(|d| d.is_on(shared))
     }
 
-    /// pico `_z_declared_keyexpr_alias_to_wire`: the declaration's id and the
-    /// remainder of the key when the declaration is `shared`'s, the literal
-    /// otherwise.
-    ///
-    /// It holds nothing: for a message sent once, or a record that keeps this key itself. The
-    /// remainder is named by its length, read against this key's literal, which every engine
-    /// call takes beside the wire key ([`WireKey::names_in`]), so naming it copies nothing.
-    ///
-    /// The id and the length of the declared key are the hold's own, which no retraction
-    /// changes, so naming the key reads no row, takes no lock of the session and reads the text
-    /// for no boundary.
+    /// How this key goes on `shared`'s wire ([`Covering::wire`]): what [`wire_key_of`] names
+    /// for its loan.
+    #[cfg(test)]
     pub(crate) fn wire(&self, shared: &Engine) -> WireKey {
-        let rest = self
-            .declared_on(shared)
-            .and_then(|d| Some((d, self.literal().len().checked_sub(d.prefix_len)?)));
-        match rest {
-            Some((d, rest)) => WireKey::aliased_tail(d.mapping_id(), rest).at_row(d.hold.row()),
+        match &self.declaration {
+            Some(d) => Covering::kept(d).wire(self.literal().len(), shared),
             None => WireKey::literal(),
         }
     }
@@ -1957,10 +2011,10 @@ unsafe fn key_compose(
 
 /// The result of extending `left` to `literal`: `left`'s declaration kept when
 /// `left` is a declared key (pico `_z_declared_keyexpr_concat` / `_join`), a
-/// plain literal otherwise. Refused as [`DeclaredKeyexpr::extended`] refuses.
+/// plain literal otherwise. Refused as [`DeclaredKeyexpr::kept_with`] refuses.
 ///
-/// Out of line: the clone door and the canonizing body both end here, and each carried its own
-/// read of the kinds of a loan, so each kind is one call of [`DeclaredKeyexpr::kept_with`].
+/// Out of line: the clone door and the canonizing store both end here, and each would carry its
+/// own copy of the loan's reading.
 ///
 /// # Safety
 /// `left` must be null or a live loaned keyexpr.
@@ -1969,16 +2023,7 @@ unsafe fn extended_from(
     left: *const z_loaned_keyexpr_t,
     literal: &str,
 ) -> Result<DeclaredKeyexpr, ZResult> {
-    match lent_of(left) {
-        LentKey::Kept(declared) => declared.extended(literal),
-        LentKey::Record(session, own) => DeclaredKeyexpr::kept_with(
-            Some(session),
-            keyexpr_str(left).unwrap_or_default(),
-            literal,
-            own.map(|own| Covering::Lent(session, own)),
-        ),
-        LentKey::View => DeclaredKeyexpr::kept_with(None, "", literal, None),
-    }
+    DeclaredKeyexpr::kept_with(lent_of(left), literal)
 }
 
 /// The store [`key_compose`] and the owned canonizing constructor share, out of line so no
@@ -4132,6 +4177,121 @@ mod arena_key_tests {
             "the last holder retracts it and its key's block goes back"
         );
         give_back(&engine, held);
+        close(session);
+    }
+
+    /// Every kind of loan is copied through one body and named on the wire through one reading: a
+    /// copy of a kept key's loan keeps its text's block and takes one count of its declaration at
+    /// the one row; a copy of a loan lent from the session's record takes one count of the
+    /// declaration the record holds and is named by it; a copy of a view holds no declaration.
+    /// Turned red by a copy that declares again (another row), by a record's loan copied without
+    /// its declaration, or by a kept key's copy whose text is a copy of its own.
+    #[test]
+    fn every_kind_of_loan_is_copied_through_one_body() {
+        use crate::session::EngineHold;
+        use wz_session_core::session_tables::KeyexprCount;
+
+        let (session, engine) = listening();
+        let text = "demo/lent/kinds";
+        let declared = DeclaredKeyexpr::declare(&engine, text, None).expect("declared");
+        let row = declared.row_address();
+        assert_ne!(row, 0, "a declared key names its row");
+        // SAFETY: the session's table keeps the row in place while a holder holds it, and the
+        // test reads the count only while one does.
+        let count = unsafe { &*(row as *const KeyexprCount) };
+        let held = count.holds();
+        let mut key = z_owned_keyexpr_t::null_value();
+        // SAFETY: `key` is a live owned key the store writes over.
+        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared, 0) }, Z_OK);
+
+        let mut copy = z_owned_keyexpr_t::null_value();
+        // SAFETY: `copy` is writable and `key` a live owned key, loaned for the call.
+        assert_eq!(
+            unsafe { z_keyexpr_clone(&mut copy, z_keyexpr_loan(&key)) },
+            Z_OK
+        );
+        // SAFETY: both are live owned keys, whose slot 3 is the key each keeps.
+        let (kept, copied) = unsafe {
+            (
+                &*((*z_keyexpr_loan(&key))._state as *const DeclaredKeyexpr),
+                &*((*z_keyexpr_loan(&copy))._state as *const DeclaredKeyexpr),
+            )
+        };
+        assert_eq!(copied.row_address(), row, "the copy declared nothing new");
+        assert_eq!(count.holds(), held + 1, "and took one count at the row");
+        assert!(
+            core::ptr::eq(kept.literal().as_ptr(), copied.literal().as_ptr()),
+            "the copy keeps the text's block"
+        );
+
+        let declaration = kept.declaration.as_ref().expect("declared whole");
+        // SAFETY: the count is the head of the declaration's row, which stands while the key
+        // holds it, and the record below is read while the key does.
+        let own = unsafe {
+            KeyView::holding(
+                text,
+                declaration.hold.row().expect("a held row"),
+                text,
+                declaration.mapping_id(),
+                count,
+            )
+        }
+        .own;
+        assert!(own.is_some(), "CONTROL: the record holds the declaration");
+        let record = RecordKey::lent(&engine, own);
+        let loan = record_loan(KeyView::literal(text), &record);
+        let mut from_record = z_owned_keyexpr_t::null_value();
+        // SAFETY: `from_record` is writable, and the loan's record and text stand for the call.
+        assert_eq!(unsafe { z_keyexpr_clone(&mut from_record, &loan) }, Z_OK);
+        assert_eq!(
+            count.holds(),
+            held + 2,
+            "the record's declaration, one count more"
+        );
+        // SAFETY: the loans are live for the calls, on the session they name.
+        let (lent_wire, copied_wire) = unsafe {
+            (
+                wire_key_of(&loan, EngineHold::as_ref(&engine)),
+                wire_key_of(z_keyexpr_loan(&from_record), EngineHold::as_ref(&engine)),
+            )
+        };
+        assert_eq!(
+            (lent_wire.mapping_id, copied_wire.mapping_id),
+            (declaration.mapping_id(), declaration.mapping_id()),
+            "the loan and its copy are named by the record's declaration"
+        );
+        drop((lent_wire, copied_wire));
+
+        let mut view = z_view_keyexpr_t {
+            _start: core::ptr::null(),
+            _len: 0,
+            _pad: [0; 4],
+        };
+        let mut from_view = z_owned_keyexpr_t::null_value();
+        // SAFETY: `view` and `from_view` are writable, and the text outlives the view.
+        unsafe {
+            assert_eq!(
+                z_view_keyexpr_from_substr(&mut view, text.as_ptr().cast(), text.len()),
+                Z_OK
+            );
+            assert_eq!(
+                z_keyexpr_clone(&mut from_view, z_view_keyexpr_loan(&view)),
+                Z_OK
+            );
+        }
+        assert_eq!(
+            count.holds(),
+            held + 2,
+            "a view's copy holds no declaration"
+        );
+        // SAFETY: `from_view` is a live owned key, whose slot 3 is the key it keeps.
+        let viewed = unsafe { &*((*z_keyexpr_loan(&from_view))._state as *const DeclaredKeyexpr) };
+        assert_eq!(viewed.row_address(), 0);
+
+        for owned in [&mut from_view, &mut from_record, &mut copy, &mut key] {
+            // SAFETY: each is a live owned key, moved out once here.
+            unsafe { z_keyexpr_drop(z_keyexpr_move(owned)) };
+        }
         close(session);
     }
 
