@@ -74,6 +74,7 @@ fn config() -> CoopConfig {
         groups: Vec::new(),
         clock_moves: None,
         limits,
+        initial_interest: false,
     }
 }
 

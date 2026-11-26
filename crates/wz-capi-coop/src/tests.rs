@@ -1131,6 +1131,7 @@ fn client_config() -> CoopConfig {
         groups: Vec::new(),
         clock_moves: None,
         limits: wz_session_core::limits::SessionLimits::defaults(),
+        initial_interest: false,
     }
 }
 

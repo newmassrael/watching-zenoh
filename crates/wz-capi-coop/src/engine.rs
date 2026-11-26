@@ -473,6 +473,13 @@ pub struct CoopConfig<E = Vec<String>> {
     /// The session limits the ABI resolved for the session, which its tables are held to:
     /// `SessionLimits::defaults()` for an ABI that states none.
     pub limits: SessionLimits,
+    /// Whether a link that comes up to a remote this session meets as the peer hat's two
+    /// north-bound peers is ended, once the replay of the session's declarations has told it
+    /// everything, with the `DeclareFinal` of the initial interest
+    /// (`wz_session_core::extbound::sends_initial_interest_final`): what a zenoh peer's open
+    /// waits for before it returns. The tokio engine's `OpenStance::initial_interest`, chosen by
+    /// the calling ABI for both engines alike; any other pair is sent none either way.
+    pub initial_interest: bool,
 }
 
 impl CoopConfig {
@@ -498,6 +505,7 @@ impl CoopConfig {
             groups,
             clock_moves,
             limits,
+            initial_interest,
         } = self;
         let config = CoopConfig {
             endpoints: Counted::of(endpoints.iter().map(String::as_str)),
@@ -519,6 +527,7 @@ impl CoopConfig {
             groups,
             clock_moves,
             limits,
+            initial_interest,
         };
         (config, endpoints, listen)
     }
