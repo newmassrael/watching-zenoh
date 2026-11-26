@@ -7318,7 +7318,8 @@ layer_c1bb_cargo_test_qos() {
     #
     # 39 -> 40, READ off the command, which printed 40: the lane-size test
     # in `link::tests` (`a_lane_is_bounded_in_units_and_a_session_without_qos_has_one`).
-    _runci_guarded_test C1bb 40 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
+    # 40 -> 44 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1bb 44 cargo test -p wz-session-core --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --lib qos --quiet \
         || return 1
     (cd crates \
         && cargo clippy -p wz-session-core --all-targets --features transport-qos,transport-fragmentation,transport-batching,reassembly,session-multicast --quiet -- -D warnings \
@@ -7559,7 +7560,8 @@ layer_c1bd_locator_iface() {
 # (`every_batch_written_here_is_the_batch_the_document_reads`); the hosted run of 3148fdfc84
 # printed 7.
 layer_c1ae_cargo_test_compression() {
-    _runci_guarded_test C1ae 7 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
+    # 7 -> 8 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1ae 8 cargo test -p wz-session-core --features session-extcompression --lib compression --quiet \
         || return 1
     wz_test_args wz-runtime-tokio compression_e2e
     _runci_guarded_test C1ae 3 cargo test -p wz-runtime-tokio --features session-extcompression,transport-unicast,transport-link-tcp "${WZ_TEST_ARGS[@]}" --quiet \
@@ -8040,14 +8042,16 @@ layer_c1ay_cargo_test_router_hat() {
     # clock snapshot test among them), the number each command printed on a build host.
     # 340 -> 341 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 341 -> 356 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward 356" 356 \
+    # 356 -> 360 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward 360" 360 \
         cargo test -p wz-runtime-tokio --features routing-router-hat --lib router_forward --quiet || return 1
     # The c2 integration: 315 -> 329. MEASURED on pc2 on this exact command.
     # 2026-11-18 -- 329 -> 335, printed on pc2 (the six of the first guard's note).
     # 335 -> 343: the five and the three of the first guard's note.
     # 345 -> 346 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 346 -> 361 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward qos 361" 361 \
+    # 361 -> 365 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward qos 365" 365 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-qos --lib router_forward --quiet || return 1
     # The router's counts (`counter`): four UNGATED witnesses of the atomic count (it rises by one,
     # by n and to a peak; many threads lose none; a peak taken from many threads is the greatest
@@ -8089,7 +8093,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 359 -> 367: the five and the three of the first guard's note.
     # 369 -> 370 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 370 -> 385 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward mcast-faces 385" 385 \
+    # 385 -> 389 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward mcast-faces 389" 389 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,router-multicast-faces --lib router_forward --quiet || return 1
     # R2346 — 140 -> 141, and ONLY this arm moves: the added test is
     # `#[cfg(feature = "access-acl")]`, so the five sibling resolutions that do
@@ -8119,7 +8124,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 338 -> 346: the five and the three of the first guard's note.
     # 348 -> 349 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 349 -> 364 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward 364" 364 \
+    # 364 -> 368 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward 368" 368 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,access-acl --lib router_forward --quiet || return 1
     # R2348 — a NEW arm, and it exists because without it this round's central
     # tests would have been compiled out while the lane stayed green. The router
@@ -8144,7 +8150,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 341 -> 349: the five and the three of the first guard's note.
     # 351 -> 352 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 352 -> 367 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward hotreload 367" 367 \
+    # 367 -> 371 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward hotreload 371" 371 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interceptor-hotreload,access-acl --lib router_forward --quiet || return 1
     # R311y464 — 171 -> 173: y463 added token_current_future_interest_replies_with_a
     # _client_token and token_current_future_interest_matches_a_wildcard_target, both
@@ -8171,7 +8178,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 401 -> 402, printed on the build host: a peer node's liveliness subscriber asks its routers.
     # 402 -> 403 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 403 -> 418 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward 418" 418 \
+    # 418 -> 422 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward 422" 422 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables --lib router_forward --quiet || return 1
     # R2415 — 146 -> 140. NOT this round's tests: `d7cd078f` re-gated the mcast
     # egress plane from `transport-multicast` onto `router-multicast-faces`, so six
@@ -8183,7 +8191,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 330 -> 338: the five and the three of the first guard's note.
     # 340 -> 341 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 341 -> 356 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward multicast 356" 356 \
+    # 356 -> 360 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward multicast 360" 360 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,transport-multicast --lib router_forward --quiet || return 1
     # R2636 — 143 -> 144, and ONLY this arm of the seven moves. The added test
     # renders the router's `sessions[]` table and is `#[cfg(feature =
@@ -8204,7 +8213,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 335 -> 343: the five and the three of the first guard's note.
     # 345 -> 346 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 346 -> 361 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward linkstate 361" 361 \
+    # 361 -> 365 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward linkstate 365" 365 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,adminspace-router-linkstate --lib router_forward --quiet || return 1
     # Item 751 step 7c — the peer node's FROZEN scenes (`router_forward/peer_scenes/*.txt`,
     # `peer_differential_tests::frozen`). A transcript names the lines of every plane the
@@ -8231,7 +8241,8 @@ layer_c1ay_cargo_test_router_hat() {
     # 344 -> 352: the five and the three of the first guard's note.
     # 354 -> 355 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
     # 355 -> 370 (2026-11-22, measured by guarded_count_gate.py on a build host): the router fan-out changes of this day added fifteen tests this filter selects and left the count.
-    _runci_guarded_test "C1AY router_forward interest broker 370" 370 \
+    # 370 -> 374 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1AY router_forward interest broker 374" 374 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-interest-pending-gc --lib router_forward --quiet || return 1
     _runci_guarded_test "C1AY peer scenes frozen 2" 2 \
         cargo test -p wz-runtime-tokio --features routing-router-hat,routing-token-tables,pubsub-delete,adminspace-introspection-handlers,adminspace-router-linkstate --lib router_forward::peer_differential_tests::frozen --quiet || return 1
@@ -8826,7 +8837,8 @@ layer_c1af_cargo_test_shm() {
     # Open messages as the leg above, which `session-extshm` brings here too.
     # R3111 -- 52 -> 54, MEASURED by running this exact command: the two tests of what the Open
     # messages declare on a link that is not reliable, as the leg above counts them.
-    _runci_guarded_test C1af 56 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
+    # 56 -> 57 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1af 57 cargo test -p wz-session-core --features session-extshm,dissect --lib shm --quiet \
         || return 1
     # Round 2037, open-debt item 330 — THE TRANSPORT-OAM BATCH WALK, which no
     # lane in this file was running.
@@ -9164,7 +9176,8 @@ layer_c1ah_cargo_test_time_hlc() {
     # 41 -> 42 (2026-11-22): the clock bound read from the open's runtime limits (ead799c27,
     # 535375cf3, 8efc53f7b) added a case this filter selects; hosted run 44965297393 read 42, and
     # guarded_count_gate.py printed 42 at 4ec20e655.
-    _runci_guarded_test "C1ah node_clock" 42 \
+    # 42 -> 43 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1ah node_clock" 43 \
         cargo test -p wz-node-time --features time-hlc,codec-push,pubsub-timestamp \
         --lib node_clock:: --quiet || return 1
     # R311y818 — the PUBLISH-side auto-stamp (zenoh `resolve_put`'s head,
@@ -9363,7 +9376,8 @@ layer_c1ak_cargo_test_transport_stats() {
     # named rather than inherited from a default that does not have them.
     # 4 -> 5: `a_plain_put_classifies_as_its_owned_message_does`, the class a plain Put sent or
     # read from borrowed parts is counted by, held equal to its owned message's.
-    _runci_guarded_test C1ak 5 cargo test -p wz-session-core \
+    # 5 -> 6 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1ak 6 cargo test -p wz-session-core \
         --features transport-stats,codec-push,codec-request --lib payload_size_tests --quiet \
         || return 1
     # R2825 — 2 -> 3: `a_publish_is_recorded_in_the_registry_on_its_link`.
@@ -11936,7 +11950,8 @@ layer_c1d_cargo_test_pubsub() {
     # it), and the second states both builds' scan count, so only this arm sees the other half.
     # 3 -> 4: a key whose positions pass 16 bits is scanned each time, which the filter reaches.
     # 4 -> 7 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1d match cache out" 7 \
+    # 7 -> 9 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1d match cache out" 9 \
         env WZ_LIMIT_MATCH_MEMO_SLOTS=0 \
         cargo test -p wz-session-core --features codec-push,codec-declare,codec-response-final,pubsub-put,pubsub-delete,pubsub-attachment,pubsub-timestamp \
         --lib --quiet -- match_mem repeated_key || return 1
@@ -12416,7 +12431,8 @@ layer_c1g_cargo_test_observer() {
     # registries the slot profile carries, which is why they are not part of the leg above.
     _runci_guarded_test C1g 7 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,declare-final,codec-response-final,session-slot --quiet -- record_walk_tests::control || return 1
-    _runci_guarded_test C1g 41 \
+    # 41 -> 42 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1g 42 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,codec-request,codec-response,codec-response-final,declare-subscriber,declare-queryable,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- lent_tests || return 1
     # S9d -- the control messages WRITTEN from the caller's own text
     # (`lent_control`): every writer byte-equal to the owned builder it mirrors across
@@ -13705,14 +13721,17 @@ layer_c1o_keyexpr_gating_behavior() {
     # pair of over-depth and literal tests that asked the same thing of the two old entry points),
     # and the comparison with that descent over 819 by 819 key pairs and the 63-chunk bound of the
     # prefix table came in. The OFF arms still run `*_off_degrades_to_literal` in the alloc arm.
-    _runci_guarded_test "C1o keyexpr alloc" 11 \
+    # 11 -> 13 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1o keyexpr alloc" 13 \
         cargo test -p wz-session-core --no-default-features --features alloc \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr alloc+wildcards" 23 \
+    # 23 -> 26 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1o keyexpr alloc+wildcards" 26 \
         cargo test -p wz-session-core --no-default-features \
         --features alloc,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
-    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 22 \
+    # 22 -> 24 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1o keyexpr wildcards-no-alloc" 24 \
         cargo test -p wz-session-core --no-default-features \
         --features keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-dollar-star,keyexpr-includes \
         --lib keyexpr_match --quiet || return 1
@@ -13814,7 +13833,8 @@ layer_c1l_reassembly() {
     # pool-overflow policy (8075950284).
     # 2026-11-24 -- 61 -> 67, printed by the guarded-count gate's run: the bytes one chain may
     # join became a caller-set cap, and its tests joined the module.
-    _runci_guarded_test C1l 67 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
+    # 67 -> 81 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1l 81 cargo test -p wz-session-core --features reassembly --lib reassembly --quiet \
         || return 1
     wz_test_args wz-runtime-tokio layer3_reassembly_rx
     _runci_guarded_test C1l 4 cargo test -p wz-runtime-tokio --features reassembly "${WZ_TEST_ARGS[@]}" --quiet \
@@ -13826,7 +13846,8 @@ layer_c1l_reassembly() {
     # ungated as well (MEASURED: `47 passed`).
     # 2026-11-18 -- 47 -> 61, the fourteen of the guard above, ungated, printed.
     # 2026-11-24 -- 61 -> 67, the six of the guard above, printed.
-    _runci_guarded_test C1l 67 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
+    # 67 -> 81 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1l 81 cargo test -p wz-session-core --features transport-fragmentation --lib reassembly --quiet \
         || return 1
     # R2238 (open-debt item 580) — 1 -> 2: the finite-fragment-budget abandon
     # e2e joined this file. MEASURED under THIS feature set (which is not the
@@ -13960,7 +13981,8 @@ layer_c1p_multicast() {
     # compressed batches (b56c4fc48f), the address index (824cd35015) and the Join and chain cases
     # beside them; C1p was not reached on hosted since.
     # 65 -> 67 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test C1p 67 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
+    # 67 -> 64 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): 67 was never what this ran; a5a22d875 and 913bfef90 list 63, and 69aa400a9 added one.
+    _runci_guarded_test C1p 64 cargo test -p wz-session-core --features session-multicast --lib multicast --quiet \
         || return 1
     # R2928 — 63 -> 64, the printed number: of the four `multicast_tx::push_tests`
     # only the no-room case compiles here; the rest need `codec-response-final`
@@ -13991,7 +14013,8 @@ layer_c1p_multicast() {
     # printed 101 at 4050dd889, 44412368690 printed 102 at 458774b1f; the build host
     # printed 102 at 5f5342ae1).
     # 102 -> 109 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test C1p 109 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
+    # 109 -> 111 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1p 111 cargo test -p wz-session-core --features session-multicast,reassembly,codec-push,codec-join --lib multicast --quiet \
         || return 1
     # R311y633 (§17.6 / §11.2) — the arm that BUILDS `multicast_rx` and RUNS it.
     # The two arms above omit `codec-close`, and `pub mod multicast_rx` is gated
@@ -14010,7 +14033,8 @@ layer_c1p_multicast() {
     # after a real departure -- that last one is the anti-vacuity arm, since a
     # producer firing only on the first JOIN this node ever saw would pass the
     # refresh case and be wrong. The number is what the command PRINTED.
-    _runci_guarded_test C1p 6 cargo test -p wz-session-core \
+    # 6 -> 10 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1p 10 cargo test -p wz-session-core \
         --features session-multicast,codec-join,codec-frame,codec-close,reassembly \
         --lib multicast_rx --quiet \
         || return 1
@@ -14127,7 +14151,8 @@ layer_c1q_multicast_glue() {
     # 15 -> 16: Round 4521's `the_socket_builder_reads_the_snapshot_the_config_was_made_from`,
     # which landed while C1p, the step before this one, was red, so no hosted run reached this
     # guard; the build host printed `16 passed` at 5f5342ae1.
-    _runci_guarded_test C1q 16 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
+    # 16 -> 18 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test C1q 18 cargo test -p wz-runtime-tokio --features transport-multicast,transport-link-udp,locator-iface --lib udp_multicast_config --quiet \
         || return 1
     # Debt 873 side finding -- a scouting socket goes on past a refused IPv4 membership and
     # a multicast link does not. Its own leg because the one above builds no scouting
@@ -14265,12 +14290,14 @@ layer_c1m_session_lwip() {
     # lends its outbound slots (`7ec73acff`), and its test of them
     # (`memory::tests::a_frame_written_into_a_lent_slot_reaches_the_peer_and_the_slots_are_bounded`)
     # runs in every leg without `session-slot`; it landed without moving this guard.
-    _runci_guarded_test "C1m mcu default" 23 \
+    # 23 -> 24 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m mcu default" 24 \
         cargo test -p wz-session-mcu --quiet || return 1
     # 23 -> 24, printed: the merge of main at `0e24b2486` (Round 4581) into the limits rounds
     # prints one more here, which neither tree printed before it.
     # 24 -> 25, printed: the in-memory link's lent-slot test (`7ec73acff`), as in the default leg.
-    _runci_guarded_test "C1m mcu unicast app layer" 25 \
+    # 25 -> 26 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m mcu unicast app layer" 26 \
         cargo test -p wz-session-mcu \
         --features query-queryable,codec-response,codec-response-final,pubsub-put \
         --quiet || return 1
@@ -14290,7 +14317,8 @@ layer_c1m_session_lwip() {
     # 61 -> 62, counted from the source: the dial reader's IPv6 form held to `SocketAddrV6`'s
     # (`dial::parse_tests::the_ipv6_reader_reads_what_core_reads`, which `dial` compiles).
     # 62 -> 58, printed on 20ee0c0a1: the five dial reader tests moved to the runtime (322866c0f), one more lib test since.
-    _runci_guarded_test "C1m mcu adminspace-write" 58 \
+    # 58 -> 60 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m mcu adminspace-write" 60 \
         cargo test -p wz-session-mcu --features adminspace-write --quiet || return 1
     # 27 -> 29, printed: hosted run 44895098050 on `c72460b30` printed 29 (the +2 above was counted
     # from the source and missed two).
@@ -14312,7 +14340,8 @@ layer_c1m_session_lwip() {
         --features adminspace-write,lifecycle-close,lifecycle-reset,lifecycle-status --lib \
         connect_manager --quiet || return 1
     # 26 -> 27, counted on 20ee0c0a1: 24 passed beside the three admin_status tests the int-fix lane repays.
-    _runci_guarded_test "C1m mcu adminspace-core" 27 \
+    # 27 -> 28 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m mcu adminspace-core" 28 \
         cargo test -p wz-session-mcu --features adminspace-core --quiet || return 1
     # 57 -> 58: one more test in the lib (hosted C1m ran 59 and one is ignored); re-derived on
     # the build host.
@@ -14325,7 +14354,8 @@ layer_c1m_session_lwip() {
     # 72 -> 73, printed: one more with main at `0e24b2486` (Round 4581) merged in.
     # 73 -> 74, counted from the source: the same IPv6 reader test as the adminspace-write leg.
     # 74 -> 70, counted on 20ee0c0a1: 67 passed beside the same three admin_status tests.
-    _runci_guarded_test "C1m mcu adminspace read+write" 70 \
+    # 70 -> 73 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m mcu adminspace read+write" 73 \
         cargo test -p wz-session-mcu --features adminspace-core,adminspace-write --quiet || return 1
     # The fixed-memory client node's shared mechanism (`slot_node`, compiled only on the slot profile
     # with the client core): no leg above selects both, so its tests ran in none until this one. 28 =
@@ -14509,29 +14539,36 @@ layer_c1m_session_lwip() {
     # The lwIP links' IPv6 refusal moved the same seven, and the two-session leg below, by ONE,
     # as it moved the legs above. Counted from the source.
     # 21 -> 24, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast" 24 \
+    # 24 -> 25 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast" 25 \
         cargo test -p wz-session-lwip --features transport-multicast --quiet || return 1
     # 24 -> 27, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast+push" 27 \
+    # 27 -> 28 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast+push" 28 \
         cargo test -p wz-session-lwip --features transport-multicast,codec-push --quiet || return 1
     # 23 -> 26, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast+liveliness" 26 \
+    # 26 -> 27 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast+liveliness" 27 \
         cargo test -p wz-session-lwip --features transport-multicast,liveliness-token --quiet || return 1
     # 23 -> 26, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast+queryable" 26 \
+    # 26 -> 27 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast+queryable" 27 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,query-queryable,codec-response,codec-response-final \
         --quiet || return 1
     # 28 -> 31, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast maximal" 31 \
+    # 31 -> 32 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast maximal" 32 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,codec-push,codec-response,codec-response-final,liveliness-token,query-queryable \
         --quiet || return 1
     # 21 -> 24, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast+reassembly" 24 \
+    # 24 -> 25 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast+reassembly" 25 \
         cargo test -p wz-session-lwip --features transport-multicast,reassembly --quiet || return 1
     # 25 -> 28, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m multicast+fragmentation" 28 \
+    # 28 -> 29 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m multicast+fragmentation" 29 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,transport-fragmentation,codec-push --quiet || return 1
     # Open-debt item 900 — ONE program, TWO sessions: a client session to a
@@ -14544,7 +14581,8 @@ layer_c1m_session_lwip() {
     # (`a_seeded_group_session_runs_beside_the_client_session`), the number this PRINTED.
     # 28 with the lwIP links' IPv6 refusal (the +1 above), counted from the source.
     # 29 -> 32, printed on 20ee0c0a1: the same three driver tests.
-    _runci_guarded_test "C1m two sessions" 32 \
+    # 32 -> 33 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m two sessions" 33 \
         cargo test -p wz-session-lwip \
         --features transport-multicast,session-unicast-open,session-unicast-accept,codec-push \
         --quiet || return 1
@@ -14943,7 +14981,8 @@ layer_c1m_session_lwip() {
     # 7, counted from the source: an IPv6 group's sockets are of its family with the hop limit asked
     # for, a group that states no hop limit leaves the kernel's, and an interface of the other family
     # is refused before any socket.
-    _runci_guarded_test "C1m posix group seam" 7 \
+    # 7 -> 9 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1m posix group seam" 9 \
         cargo test -p wz-runtime-posix --lib group:: --quiet || return 1
     # The host's control channel (`wz_runtime_posix::control`, decision D7 step 7d): the lines a test
     # agent writes to a node's standard input, taken without blocking: an idle channel gives none,
@@ -15251,7 +15290,8 @@ layer_c1n_mcu_session_acceptor() {
     # hosted lane that owns them measures these"). A green count-guard pre-run
     # does not cover this leg, and the honest local check is running the
     # command in the guard verbatim, which reports 5.
-    _runci_guarded_test "C1n coop cookie-nonce draw" 5 \
+    # 5 -> 8 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1n coop cookie-nonce draw" 8 \
         cargo test -p wz-runtime-coop --features alloc,wz-session-core/alloc,session-unicast \
         --lib cookie_nonce_draw_tests:: --quiet || return 1
     # The faces of a session that listens: the ports its supervisor holds, the waits a read makes
@@ -15259,7 +15299,8 @@ layer_c1n_mcu_session_acceptor() {
     # `cfg(feature = "listen")` in `faces`, and no other leg names the runtime's `listen`, so
     # without this they ran nowhere. Counted from the source, not printed: 35 in `faces::` (28
     # without `listen`).
-    _runci_guarded_test "C1n coop listening faces" 35 \
+    # 35 -> 38 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1n coop listening faces" 38 \
         cargo test -p wz-runtime-coop --features alloc,wz-session-core/alloc,session-unicast,listen \
         --lib faces:: --quiet || return 1
     _runci_guarded_test "C1n entropy port" 3 \
@@ -15388,7 +15429,8 @@ layer_c1ns_nostd_members_isolated() {
         (cd crates && cargo test -p "$member" --quiet) || return 1
     done
     # 37 -> 38 (2026-11-22, measured by guarded_count_gate.py): the cases this filter selects grew and the count stayed; the hosted lane stopped at an earlier guard, so it went unseen.
-    _runci_guarded_test "C1ns zephyr lib" 38 \
+    # 38 -> 40 (2026-11-26, printed by guarded_count_gate.py --range 913bfef90..3fccf599e): the cases this filter selects grew while the hosted lane stopped at an earlier red.
+    _runci_guarded_test "C1ns zephyr lib" 40 \
         cargo test -p wz-runtime-zephyr --lib --quiet || return 1
 }
 
