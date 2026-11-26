@@ -261,9 +261,15 @@ and no other path of the library reaches the generic walk (`count`, `lay_out`, `
 `SessionArena::reserve`) with the other `ROWS`: `ArenaPlan::planned` of the listed plan is reached by
 `ArenaRegion::of`, a constant evaluated when a build without `runtime-plan` is compiled, and the region
 path of an open with `runtime-plan` takes a region's plan on (`take_on::<0, ARENA_ROWS>`) and walks none.
-The +422 of `sessions` against int206 is then not a second walk; read it on the merged build with
-`nm -S -C` of the library, counting each of `ArenaPlan<_>::lay_out` and `::count` (two entries of one name
-are two copies).
+The +422 of `sessions` against int206, read by the size ledger on its case (`pico-client-coop-nostd`, a
+client with no `runtime-plan`), is A2 and nothing else: `ArenaPlan<30>::blank` +234, a body int206 did not
+keep, and `lend_session` +188; the renamed `put`, `put_table`, `settled` and `refuse` net to 0. A1 moved no
+symbol of that build (its sets are a listener's), and no base difference shows: int206 is the base this
+lane merged. In that build the open's plan is the listed one, which lists no rows there, so A2 gained it
+nothing: `take_on` stored the region's plan field by field, the blank plan the open made stayed live and
+its making was kept, where int206's `clone_from` stored the plan whole and the making was dropped.
+`take_on` now builds the plan apart and stores it whole, so the open of that build is int206's again; the
+ledger reads whether it is.
 
 ### 5.2 The acceptor's cookie MAC: a smaller one that keeps its guarantee (design; the owner's decision)
 
@@ -323,8 +329,13 @@ and `[profile.capi-nostd.package.sha2]` build the crate at `opt-level = "s"` (`c
 profiles the C libraries are built with, and every other profile keeps its level. The proof is unchanged: the
 same HMAC-SHA256 truncated to 128 bits, the same key, the same checks, so the same cookie bytes; the RFC 4231
 vectors of `signing_key`'s tests are what says so on a build with the feature (`cargo test -p
-wz-session-core --features sha256-compact signing_key::`). Expected in the size ledger, on the preset's
-library: `sha2::sha256::compress256` (11,596, unrolled) and the SHA-NI `digest_blocks` (947) leave with the
+wz-session-core --features sha256-compact signing_key::`). The size ledger cannot read it: its case,
+`pico-client-coop-nostd`, is a client: its session machine has no accepting role, so the open holds no cookie
+key (`link_params` in `wz-capi-coop`'s `engine.rs`), the MAC is not linked, and 0 there is the expected
+reading. What has the acceptor is a build with `peer` (`listen`):
+the size gate's `pico-peer-coop` and `pico-peer` (`capi-nostd`, `os-host`), whose totals read it, and arm W
+of the perf matrix, built as the preset on `pico-client-coop-nostd`'s profile. Expected there:
+`sha2::sha256::compress256` (11,596, unrolled) and the SHA-NI `digest_blocks` (947) leave with the
 run-time detection that picks between them, and one rolled compression of the order of 0.5 to 1 KB takes their
 place beside the 256 bytes of round constants in `.rodata`: about 11 to 12 KB of text less, the HMAC's 1,108
 unchanged. A mint and a check each run four or five compressions, rolled; the handshake's time is not the
