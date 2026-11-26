@@ -2921,9 +2921,13 @@ for leg in "${LEGS[@]}"; do
     # not carry it, and the leg reported `-> 8 test(s)` over a file of 9. The
     # test was executed by nothing.
     #
-    # Three spellings carry their coverage by construction and are the only
+    # Four spellings carry their coverage by construction and are the only
     # ones admitted:
     #   * `--test=<target>`  -- the whole integration-test binary;
+    #   * `--test-target=<target>` -- a whole test target by its Cargo name,
+    #     every file of a merged one; admitted only when the package declares
+    #     that target (a `[[test]]` of that name, or `tests/<target>.rs`), so a
+    #     misspelled target is refused here rather than run as nothing;
     #   * a path containing `::` -- a module path, and every test under a
     #     module has it as a prefix by construction;
     #   * a bare name that IS a module of the package, for the same reason
@@ -2931,7 +2935,17 @@ for leg in "${LEGS[@]}"; do
     #     it has `multicast_glue::` in its path).
     # A bare name that is NOT a module is a name prefix, and that is the one
     # this refuses -- by shape, so the next row cannot reintroduce it.
-    if [[ -n "$filter" && "$filter" != --test=* && "$filter" != *"::"* ]]; then
+    if [[ "$filter" == --test-target=* ]]; then
+        leg_target="${filter#--test-target=}"
+        if [[ ! -f "$repo/crates/$pkg/tests/$leg_target.rs" ]] \
+            && ! grep -A4 -F '[[test]]' "$repo/crates/$pkg/Cargo.toml" \
+                | grep -qE "^name *= *\"$leg_target\""; then
+            echo "nondefault-tests: FAIL -- leg '$pkg' filters on '$filter', but" >&2
+            echo "  '$pkg' declares no test target '$leg_target' (no [[test]] of that" >&2
+            echo "  name and no tests/$leg_target.rs): the leg would run nothing." >&2
+            exit 1
+        fi
+    elif [[ -n "$filter" && "$filter" != --test=* && "$filter" != *"::"* ]]; then
         if [[ ! -f "$repo/crates/$pkg/src/$filter.rs" \
               && ! -f "$repo/crates/$pkg/src/$filter/mod.rs" ]]; then
             echo "nondefault-tests: FAIL -- leg '$pkg' filters on '$filter', which is" >&2
