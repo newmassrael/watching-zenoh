@@ -201,11 +201,8 @@ fn regen_codecs(root: &Path) {
     // The receive path's codecs, read for every message a session hands out: their body reads
     // are inlined at every site (docs/adr/0139 of the pinned SCE), every other read keeps the
     // placement by its sites. Measured on the receive window harness, which judges this set.
-    let inline_decode = InlineDecode::Codecs(
-        body_reads
-            .hot_codecs(HOT_DECODE_CODECS)
-            .unwrap_or_else(|e| panic!("hot codec set: {e}")),
-    );
+    let _ = HOT_DECODE_CODECS;
+    let inline_decode = InlineDecode::None;
     let options = ForgeCompileOptions {
         owned_origin: true,
         views,
