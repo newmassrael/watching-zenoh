@@ -425,7 +425,7 @@ OFF_AXIS: dict[str, tuple[str, frozenset[str]]] = {
         "count, which the pico crate's `snapshot_doors` test reads through the doors; "
         "`shared-key-ids` gates `faces::KeyIdPlan`, the key ids and each face's key-wire form "
         "the registry hands its face sessions, and `SharedSession::names_keys_by_link`, which "
-        "the pico crate's `key_ids_tokio` test drives through the doors",
+        "the pico crate's `key_ids` test drives through the doors in its tokio build",
         frozenset({"resource-snapshot", "shared-key-ids", "transport-shm"}),
     ),
     "wz-capi-coop": (

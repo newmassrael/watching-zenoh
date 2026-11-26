@@ -24,7 +24,7 @@ mod fragmentation_roundtrip;
 mod get_roundtrip;
 mod get_to_peer_door;
 mod instance_key_doors;
-mod key_ids_tokio;
+mod key_ids;
 mod listen_and_connect;
 mod listener_multipeer;
 mod liveliness_face_death;

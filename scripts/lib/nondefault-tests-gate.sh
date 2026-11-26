@@ -406,7 +406,7 @@ multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,mul
 unstable-api,connectivity,time-base,object-pool|files::get_roundtrip::c_get_on_a_time_base"
     "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
 multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
-unstable-api,connectivity,shared-key-ids,object-pool|files::key_ids_tokio::"
+unstable-api,connectivity,shared-key-ids,object-pool|files::key_ids::"
     "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
 multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
 unstable-api,connectivity,replay-cache,object-pool|files::replay_cache_doors::"
@@ -520,9 +520,13 @@ object-pool|files::ext_handles_across_threads::"
     "wz-capi-pico|hook|shared-key-ids|key_ids::"
     # The same doors driven from C-shaped calls over loopback: sessions joined by the program's
     # transport (`app_transport_doors`), behind its feature on top of the default peer, query and
-    # queryable. The puts and gets by a shared id (`key_ids_tokio`) are the tokio engine's alone, so
-    # their leg is the lane's, over that engine's list (`files::key_ids_tokio::`, above).
+    # queryable.
     "wz-capi-pico|hook|app-transport,object-pool|--test=app_transport_doors"
+    # The puts and gets by a shared id through the C doors (`files::key_ids::`), whose file names no
+    # engine: here on the cooperative engine of the default build, the one the library ships, with
+    # the dictionary and the pools' door its target requires; the tokio engine's leg of the same
+    # file is the lane's, over that engine's list (above). Loopback only.
+    "wz-capi-pico|hook|shared-key-ids,object-pool|files::key_ids::"
     # The same transport on the cooperative engine, with no tokio engine in the build: the
     # library's unit tests of the door and the file of sessions over the pipe, whose datagram pair
     # and two-member group (`multicast-transport`) this engine carries too. `multi-thread` gives
