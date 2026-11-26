@@ -7,6 +7,7 @@
 //! with nothing of the session held, woken by the slow link's room and not by a clock, and is
 //! sent, not lost, once the slow stream takes the rest.
 
+#[cfg(feature = "threads")]
 use crate::EngineHold;
 #[cfg(feature = "threads")]
 use std::sync::atomic::Ordering;
