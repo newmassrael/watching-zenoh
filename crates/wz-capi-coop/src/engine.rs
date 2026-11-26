@@ -1404,6 +1404,9 @@ pub(crate) struct Takes {
     pub(crate) polls: core::sync::atomic::AtomicUsize,
     /// The sends on a face marked as the session's holder's while they were made (`SendingOn`).
     pub(crate) face_marks: core::sync::atomic::AtomicUsize,
+    /// The faces' send places a publish's walk of the faces tried or held for a leg (`direct`).
+    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+    pub(crate) place_tries: core::sync::atomic::AtomicUsize,
     /// The sends on a face of a plain put written from the head its publisher's plain way made.
     pub(crate) planned: core::sync::atomic::AtomicUsize,
     /// The plain puts of a write filter's own way written from its plan, with nothing asked again.
@@ -7891,9 +7894,73 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // may be dropped is not held behind another holder of a face's place (`direct`).
         let congestion = opts.qos.unwrap_or(QosLevel::DEFAULT).congestion();
         let droppable = face_send::droppable(opts.reliable_bool(), congestion);
-        self.on_faces(droppable, |tx| {
-            self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx)
-        })
+        // Where each face's leg is sent apart, the groups' leg is a body of its own, which reads
+        // none of what a face's leg reads to send on a face's link.
+        #[cfg(all(not(wz_round), feature = "group"))]
+        {
+            self.on_publish_legs(
+                droppable,
+                |tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx),
+                |tx| self.publish_to_groups_on(keyexpr, wire, payload, opts, tx),
+            )
+        }
+        #[cfg(not(all(not(wz_round), feature = "group")))]
+        {
+            self.on_faces(droppable, |tx| {
+                self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx)
+            })
+        }
+    }
+
+    /// The groups' leg of a publish where each face's leg is sent apart
+    /// ([`Self::publish_to_link`]): the session taken as a face's leg takes it, and the put sent to
+    /// each group as the groups' part of a face's leg sends it ([`Self::publish_to_groups`]),
+    /// with none of that leg's work for the faces: no key looked up in the session's tables, no
+    /// plan of its publisher read, and no walk of the faces' links. A key a face's leg refuses
+    /// (`Self::leg_of`, an empty key, which names nothing whatever declaration it is named by) is
+    /// refused here too, as zenoh refuses a key that is not one on every transport alike.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    #[inline(never)]
+    fn publish_to_groups_on(
+        &self,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        opts: &PublishOptions,
+        tx: LinkTx<'_, C>,
+    ) -> Result<usize, FanoutError> {
+        let meta = opts.push_metadata();
+        let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
+        let droppable = face_send::droppable(opts.reliable_bool(), congestion);
+        let mut core = match self.live_to_publish(droppable, tx.leg_place()) {
+            ToPublish::Live(core) => core,
+            ToPublish::Closed => return Ok(0),
+            ToPublish::DroppedOn { told } => {
+                return if told {
+                    Err(FanoutError::HeldConduit)
+                } else {
+                    Ok(0)
+                };
+            }
+        };
+        if NamedKey::literal(keyexpr).is_none() {
+            return Err(FanoutError::ExceedsCapacity);
+        }
+        let send = wz_session_core::session_actions::SendAs {
+            reliable: opts.reliable_bool(),
+            express: meta.is_express(),
+            priority: opts.priority_band(),
+        };
+        let put = Publication {
+            keyexpr,
+            wire,
+            payload,
+            opts,
+            meta: &meta,
+            plan: None,
+        };
+        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+        self.publish_to_groups(&mut core.0, &put, send, None, tx)
     }
 
     /// [`Self::publish_to_link`] through `tx`, what the caller holds of the one link.

@@ -483,6 +483,48 @@ fn a_member_whose_group_link_is_lost_joins_the_group_again() {
     SessionDrive::close(&*first);
 }
 
+/// A put on an empty key is refused on the groups' leg as a face's leg refuses it, whatever face
+/// the session has up: here none. The CONTROL is the put on a key, which the group takes. Turned
+/// red by a groups' leg that sends a key the session's tables name nothing by
+/// (`CoopEngine::publish_to_groups_on` without its refusal).
+#[test]
+fn a_put_on_an_empty_key_is_refused_on_the_groups_leg() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let remote = PublishOptions::put().with_locality(Locality::Remote);
+    assert!(
+        member
+            .publish_on_wire_all("demo/group/a", &WireKey::literal(), b"keyed", &remote)
+            .is_ok(),
+        "CONTROL: a key the group takes"
+    );
+    assert_eq!(
+        member.publish_on_wire_all("", &WireKey::literal(), b"no-key", &remote),
+        Err(wz_capi_port::FanoutError::ExceedsCapacity),
+        "an empty key is refused on the groups' leg"
+    );
+    SessionDrive::close(&*member);
+}
+
+/// A put of a member that dials nothing, whose dial role's face rests from the open, tries no
+/// face's send place: the face holds no link that is up, and the put goes to the group by the
+/// groups' leg alone. Turned red by a walk of the faces that tries a face at rest
+/// (`CoopEngine::on_face_legs` without its look at `DirectFace::rests`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_members_put_tries_no_send_place_of_a_face_at_rest() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let tried = member.takes.place_tries.load(Ordering::Relaxed);
+    put(&member, "demo/group/a", b"to-the-group");
+    assert_eq!(
+        member.takes.place_tries.load(Ordering::Relaxed),
+        tried,
+        "no face's send place was tried"
+    );
+    SessionDrive::close(&*member);
+}
+
 /// What a member's group received is in the session's message reading, and stays there when the
 /// group's join is replaced by a join again and when the session closes. Turned red by a reading of
 /// the links alone, or by a join replaced or let go of at the close with its count not retired

@@ -948,11 +948,16 @@ fn an_operation_on_a_closed_session_runs_nothing_and_holds_nothing() {
 fn a_publish_hands_each_face_a_leg_of_its_own() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
+    #[cfg(any(feature = "listen", feature = "group"))]
+    let tried = engine.takes.place_tries.load(Ordering::Relaxed);
     assert_eq!(
         engine.legs_of_a_publish(),
         (1, 1),
         "one leg, for the dial role's face, which reaches that face"
     );
+    // The face that is up is not at rest, and its place is tried for its leg.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    assert_eq!(engine.takes.place_tries.load(Ordering::Relaxed), tried + 1);
 }
 
 /// A session that joined no group is handed no groups' leg by a publish, which would take the

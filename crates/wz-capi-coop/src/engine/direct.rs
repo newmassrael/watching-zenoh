@@ -2890,32 +2890,86 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         droppable: bool,
         mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
+        #[cfg(feature = "group")]
+        {
+            let outcome = self.on_face_legs(droppable, &mut leg);
+            self.on_groups_leg(outcome, leg)
+        }
+        #[cfg(not(feature = "group"))]
+        {
+            self.on_face_legs(droppable, &mut leg)
+        }
+    }
+
+    /// [`Self::on_faces`] for a publish whose groups' leg is a body of its own, `groups`: one
+    /// that reads only what a group is sent, and none of what a face's leg reads to send on a
+    /// face's link.
+    #[cfg(feature = "group")]
+    #[inline(always)]
+    pub(super) fn on_publish_legs(
+        &self,
+        droppable: bool,
+        mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+        groups: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
+        let outcome = self.on_face_legs(droppable, &mut leg);
+        self.on_groups_leg(outcome, groups)
+    }
+
+    /// The faces' legs of [`Self::on_faces`]: `leg` on each face that may hold a link. A face at
+    /// rest (`DirectFace::rests`) holds no link that is up, so a leg would send it nothing, and
+    /// its place is not tried; nor is a row past the last that holds a face
+    /// (`DirectFaces::walked`).
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[inline(always)]
+    fn on_face_legs(
+        &self,
+        droppable: bool,
+        leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
         let mut outcome = Ok(0);
-        for (at, face) in self.direct.iter().enumerate() {
+        for (at, face) in self.direct.walked().enumerate() {
+            if face.rests.load(Ordering::Acquire) {
+                continue;
+            }
+            #[cfg(test)]
+            self.takes.place_tries.fetch_add(1, Ordering::Relaxed);
             // A place another thread holds is held only where there are other threads.
             let sent = if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
-                self.try_leg(face, at, &mut leg)
+                self.try_leg(face, at, leg)
             } else {
-                Self::wait_leg(face, at, &mut leg)
+                Self::wait_leg(face, at, leg)
             };
             if let Some(Err(error)) = sent {
                 outcome = Err(error);
             }
         }
-        // The groups' leg, after the faces': a group is written on through its own stage, under the
-        // session's lock, so its leg holds no face's place and reaches no face's link. A session
-        // that joined no group is handed none, which would take the session for nothing.
-        #[cfg(feature = "group")]
-        if self.joins_groups {
-            let sent = leg(FaceTx {
-                held: None,
-                alone: Some(GROUPS_LEG),
-            });
-            if sent.is_err() {
-                outcome = sent;
-            }
-        }
         outcome
+    }
+
+    /// The groups' leg, after the faces' legs came to `outcome`: a group is written on through its
+    /// own stage, under the session's lock, so its leg holds no face's place and reaches no face's
+    /// link. A session that joined no group is handed none, which would take the session for
+    /// nothing.
+    #[cfg(feature = "group")]
+    #[inline(always)]
+    fn on_groups_leg(
+        &self,
+        outcome: Result<usize, FanoutError>,
+        leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Result<usize, FanoutError> {
+        if !self.joins_groups {
+            return outcome;
+        }
+        let sent = leg(FaceTx {
+            held: None,
+            alone: Some(GROUPS_LEG),
+        });
+        if sent.is_err() {
+            sent
+        } else {
+            outcome
+        }
     }
 
     /// `leg` on `face`, the face at place `at`, under a hold of its send place, which waits for
