@@ -599,7 +599,7 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
     pub fn pay(&self, held: &mut FaceHeld<P>) {
         let owed = self.take_owed();
         if owed != 0 {
-            pay_held(held, owed);
+            pay_held(held, owed, &self.facts);
         }
     }
 
@@ -722,8 +722,15 @@ impl<K: HoldKind, P: SendParts> Drop for SiteSend<'_, K, P> {
 /// shares this one body and keeps inline only its look at the debt word.
 #[cold]
 #[inline(never)]
-fn pay_held<P: WireParts>(held: &mut FaceHeld<P>, owed: u32) {
-    held.lend(move |parts| pay_parts(parts, owed));
+// A debt paid may write the link (a close tells its peer), so what it left owed is told to the
+// site's facts as a send's is (`FaceSite::tell_written`).
+fn pay_held<P: WireParts>(held: &mut FaceHeld<P>, owed: u32, facts: &SiteFacts) {
+    let mark = facts.write_mark();
+    let owes = held.lend(move |parts| {
+        pay_parts(parts, owed);
+        parts.wire().is_some_and(FaceWire::owes_write)
+    });
+    facts.wrote(mark, owes);
 }
 
 /// Pay `owed` to `parts`: their own debts, then the close, through their wire when they hold one
@@ -3953,6 +3960,36 @@ mod tests {
         assert!(
             !site.facts().owes_write(),
             "a send that left nothing owed drained what was owed as it began"
+        );
+    }
+
+    /// A debt paid to the parts tells the place's facts what the payment left owed on the link,
+    /// as a send does, since a close it tells writes the link. Turned red by a payment that tells
+    /// nothing (`pay_held`).
+    #[test]
+    fn a_debt_paid_tells_its_place_what_it_left_owed() {
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        let parts = ApartParts(
+            Some(ApartWire {
+                holds: false,
+                owes: true,
+                finished: false,
+                aborted: Rc::new(Cell::new(0)),
+                ended: Ended::default(),
+            }),
+            Ended::default(),
+        );
+        // SAFETY: no handle on a cell of the parts lives outside them.
+        assert!(site.hold(unsafe { FaceHeld::gathered(parts) }).is_none());
+        assert!(site.lend(|_| ()).is_some());
+        assert!(
+            !site.facts().owes_write(),
+            "CONTROL: a lend that pays nothing tells nothing"
+        );
+        site.owe(1);
+        assert!(
+            site.facts().owes_write(),
+            "the debt paid at once left the link owing"
         );
     }
 
