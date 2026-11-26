@@ -471,6 +471,13 @@ pub struct CoopConfig<E = Vec<String>> {
     /// The session limits the ABI resolved for the session, which its tables are held to:
     /// `SessionLimits::defaults()` for an ABI that states none.
     pub limits: SessionLimits,
+    /// Whether a link that comes up to a remote this session meets as the peer hat's two
+    /// north-bound peers is ended, once the replay of the session's declarations has told it
+    /// everything, with the `DeclareFinal` of the initial interest
+    /// (`wz_session_core::extbound::sends_initial_interest_final`): what a zenoh peer's open
+    /// waits for before it returns. The tokio engine's `OpenStance::initial_interest`, chosen by
+    /// the calling ABI for both engines alike; any other pair is sent none either way.
+    pub initial_interest: bool,
 }
 
 impl CoopConfig {
@@ -496,6 +503,7 @@ impl CoopConfig {
             groups,
             clock_moves,
             limits,
+            initial_interest,
         } = self;
         let config = CoopConfig {
             endpoints: Counted::of(endpoints.iter().map(String::as_str)),
@@ -517,6 +525,7 @@ impl CoopConfig {
             groups,
             clock_moves,
             limits,
+            initial_interest,
         };
         (config, endpoints, listen)
     }
@@ -2813,6 +2822,11 @@ struct UpFacts {
     peer: Option<SessionZid>,
     /// The role the link's peer announced, as the wire numbers it.
     whatami: Option<u8>,
+    /// Whether the link's peer and this session meet as the peer hat's two north-bound peers
+    /// (`SessionLinkActions::meets_remote_as_peer_hat`), `None` for a peer whose role never
+    /// arrived: what decides whether the link's replay is ended with the `DeclareFinal` of the
+    /// initial interest.
+    peer_hat: Option<bool>,
     /// The link's generation, which the queries it carries are answered under: how an answer
     /// finds its link without a lend of it.
     #[cfg(feature = "queryable")]
@@ -2858,6 +2872,7 @@ impl UpFacts {
         Self {
             peer: actions.peer_session_zid(),
             whatami: actions.peer_whatami_wire(),
+            peer_hat: actions.meets_remote_as_peer_hat(),
             #[cfg(feature = "queryable")]
             generation: 0,
             ended: false,
@@ -5430,12 +5445,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
         #[cfg(feature = "connectivity")]
         let told = facts.row.clone().filter(|_| self.session.faces_watched());
+        let peer_hat = facts.peer_hat;
         if let Some(face) = self.transport.links.face_mut(at) {
             face.facts = Some(facts);
         }
         // The link is now one the session's sends go through: what was planned over the links
         // before it no longer holds (`LinkSupervisor::generation`).
         self.transport.links.establish(at);
+        self.owe_link_initial_final(at, peer_hat);
         #[cfg(wz_round)]
         if self.begin_replay(at, now_us / 1000, core::marker::PhantomData) == TurnEnd::EndsLink {
             self.transport.links.abort_link(at);
@@ -12743,6 +12760,7 @@ mod up_facts_tests {
         UpFacts {
             peer: None,
             whatami: None,
+            peer_hat: None,
             #[cfg(feature = "queryable")]
             generation: 0,
             ended: false,

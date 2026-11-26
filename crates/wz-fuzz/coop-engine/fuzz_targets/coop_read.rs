@@ -175,6 +175,7 @@ fn config() -> CoopConfig {
         groups: Vec::new(),
         clock_moves: None,
         limits: SessionLimits::defaults(),
+        initial_interest: false,
     }
 }
 

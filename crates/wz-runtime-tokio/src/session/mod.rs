@@ -4448,15 +4448,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// remote's role has not arrived, which is not the same as a remote that is not a peer.
     #[cfg(any(feature = "liveliness-token", feature = "declare-subscriber"))]
     fn peer_hat_link(&self) -> Option<bool> {
-        let actions = self.actions();
-        let remote = actions
-            .peer_whatami_wire()
-            .and_then(wz_codecs::whatami::WhatAmI::from_wire)?;
-        Some(wz_session_core::extbound::sends_initial_interest_final(
-            actions.params.whatami,
-            remote,
-            actions.peer_remote_bound(),
-        ))
+        self.actions().meets_remote_as_peer_hat()
     }
 
     /// Whether a put on `keyexpr` need not be written to this session's link, because the

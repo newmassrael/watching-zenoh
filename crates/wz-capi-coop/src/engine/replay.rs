@@ -34,6 +34,14 @@
 //! host does: it tries again from the entry the link refused after the pace's own retry wait, or,
 //! with no retry wait or after the no-progress bound, gives the replay up and the link with it
 //! ([`TurnEnd::EndsLink`]).
+//!
+//! The replay a link comes up with ends, when the session and the remote meet as the peer hat's
+//! two north-bound peers and the session's config says so (`CoopConfig::initial_interest`), with
+//! the `DeclareFinal` of the initial interest: upstream's peer sends it to a new face right after
+//! it has propagated what it holds to it
+//! (`zenoh/src/net/routing/hat/peer/mod.rs` @ `let do_initial_interest =`), and a zenoh peer's
+//! open waits for it. It goes out once, in the turn that tells the last owed declaration, so a
+//! paced replay sends it only after its last turn and a replay given up on sends none.
 
 use super::CoopLinks;
 use super::LinkActions;
@@ -41,9 +49,11 @@ use super::LinkActions;
 use wz_runtime_coop::faces::LendsSession;
 use wz_runtime_coop::faces::{FacePlaces, FaceRecord};
 use wz_runtime_coop::ClockSource;
+use wz_session_core::extbound::INITIAL_INTEREST_ID;
 use wz_session_core::link_life::LinkPhase;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
+use wz_session_core::response_sink::DeclareReplySink;
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
 use wz_session_core::wire_id::{EntityId, ExprId};
@@ -114,6 +124,10 @@ pub(super) struct Replay {
     /// it, as the lap reads the tables as they stand when it runs. A build that reaches a pace
     /// keeps the same in its cursor and never sets it.
     lap_owed: bool,
+    /// Whether the peer is owed the `DeclareFinal` of the initial interest once it has been told
+    /// everything: set when the link comes up, taken by the turn that finishes the replay, and
+    /// gone with the link. A replay begun again over the same link (a redeclaration) keeps it.
+    initial_final: bool,
 }
 
 impl Replay {
@@ -124,7 +138,28 @@ impl Replay {
             next_turn_ms: 0,
             last_progress_ms: 0,
             lap_owed: false,
+            initial_final: false,
         }
+    }
+
+    /// The link has just come up: whether its peer is owed the `DeclareFinal` of the initial
+    /// interest after its replay.
+    fn owe_initial_final(&mut self, owed: bool) {
+        self.initial_final = owed;
+    }
+
+    /// Whether a turn that ended as `end` is the one to send the owed `DeclareFinal` of the
+    /// initial interest: one that kept the link and left nothing more owed. Taken once; a turn
+    /// that ends the link drops it, the next link being owed its own.
+    fn take_initial_final(&mut self, end: TurnEnd) -> bool {
+        let due = match end {
+            TurnEnd::Kept => self.initial_final && self.finished(),
+            TurnEnd::EndsLink => false,
+        };
+        if due || end == TurnEnd::EndsLink {
+            self.initial_final = false;
+        }
+        due
     }
 
     /// Begin, at `now_ms`, to tell a peer that holds nothing the `owed` declarations the session
@@ -182,6 +217,7 @@ impl Replay {
     pub(super) fn discard(&mut self) {
         self.cursor = ReplayCursor::idle();
         self.lap_owed = false;
+        self.initial_final = false;
     }
 
     /// Whether the peer has been told everything the session owes it: always, in a build that
@@ -290,10 +326,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     /// it could not send one over. The replay of a build that reaches no pace, which keeps no
     /// cursor: the lap ends before the session does anything else, so nothing is owed past it. A
     /// lap with no wire to tell it through stops at its first place.
+    /// The lap is ended by the `DeclareFinal` of the initial interest when its link owes one
+    /// ([`Self::end_initial_interest`]).
     pub(super) fn tell_in_one_lap(&mut self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
         if let Some(face) = self.transport.links.face_mut(at) {
             face.replay.lap_owed = false;
         }
+        let end = self.tell_lap(at, tx);
+        self.end_initial_interest(at, end, tx)
+    }
+
+    /// [`Self::tell_in_one_lap`] without the Final: the declarations of the lap.
+    fn tell_lap(&self, at: usize, tx: super::LinkTx<'_, C>) -> TurnEnd {
         for place in 0..self.sequence_len() {
             match self.emit(at, place, tx) {
                 Some(true) => {}
@@ -304,17 +348,77 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         TurnEnd::Kept
     }
 
+    /// The link of the face at `at` has just come up, its peer met as `peer_hat` says
+    /// (`SessionLinkActions::meets_remote_as_peer_hat`, read off the link as it came up): owe
+    /// its peer the `DeclareFinal` of the initial interest once the replay has told it
+    /// everything when the session's config ends a push so and the two meet as the peer hat's
+    /// two north-bound peers. A client, a router and a remote whose role never arrived are owed
+    /// none.
+    pub(super) fn owe_link_initial_final(&mut self, at: usize, peer_hat: Option<bool>) {
+        let owed = self.config.initial_interest && peer_hat == Some(true);
+        if let Some(face) = self.transport.links.face_mut(at) {
+            face.replay.owe_initial_final(owed);
+        }
+    }
+
+    /// Send the face at `at` the `DeclareFinal` of the initial interest through the link's wire
+    /// `tx` when the turn that ended as `end` told its peer the last of what it was owed and the
+    /// Final is owed ([`Replay::take_initial_final`]), after every declaration of the replay, as
+    /// upstream's peer ends what it propagates to a new face with it. What the turn leaves of the
+    /// link, as it left it. The Final is written as an answer to an interest is, from its parts
+    /// into the slot the link lends where the build lends one, so a session with no heap frame
+    /// sends it too. A Final with no wire to go through stays owed.
+    fn end_initial_interest(
+        &mut self,
+        at: usize,
+        end: TurnEnd,
+        tx: super::LinkTx<'_, C>,
+    ) -> TurnEnd {
+        let due = self
+            .transport
+            .links
+            .face_mut(at)
+            .is_some_and(|face| face.replay.take_initial_final(end));
+        if !due {
+            return end;
+        }
+        let sent = self
+            .transport
+            .links
+            .face(at)
+            .and_then(|face| face.link.wire())
+            .and_then(|wire| {
+                super::send_through(wire, tx, &|actions: &LinkActions<C>| {
+                    actions.send_declare_final_reply(INITIAL_INTEREST_ID);
+                    true
+                })
+            });
+        if sent.is_none() {
+            if let Some(face) = self.transport.links.face_mut(at) {
+                face.replay.owe_initial_final(true);
+            }
+        }
+        end
+    }
+
     /// One turn of the replay of the face at `at` through the link's wire `tx`, if one is owed
     /// and due: the burst of the pace, or everything when the session is not paced, from the
-    /// entry the last turn stopped at. What the turn leaves of the link: [`TurnEnd::EndsLink`]
-    /// when the replay was given up on a refused send, which the caller answers by ending the
-    /// link.
+    /// entry the last turn stopped at, ended by the `DeclareFinal` of the initial interest when
+    /// it is the turn that finishes a replay that owes one ([`Self::end_initial_interest`]).
+    /// What the turn leaves of the link: [`TurnEnd::EndsLink`] when the replay was given up on a
+    /// refused send, which the caller answers by ending the link.
     pub(super) fn replay_turn(
         &mut self,
         at: usize,
         now_ms: u64,
         tx: super::LinkTx<'_, C>,
     ) -> TurnEnd {
+        let end = self.tell_turn(at, now_ms, tx);
+        self.end_initial_interest(at, end, tx)
+    }
+
+    /// [`Self::replay_turn`] without the Final: the declarations of one turn.
+    fn tell_turn(&mut self, at: usize, now_ms: u64, tx: super::LinkTx<'_, C>) -> TurnEnd {
         // A place with no face has no replay to send.
         let Some(Face { replay, .. }) = self.transport.links.face(at) else {
             return TurnEnd::Kept;
@@ -836,6 +940,69 @@ mod tests {
         let _ = cursor.turn(usize::MAX);
         assert_eq!(paced.settle(cursor, true, false, 110, pace), TurnEnd::Kept);
         assert!(paced.finished());
+    }
+
+    /// The Final of the initial interest is taken by the turn that finishes the replay and by no
+    /// other: not while a declaration is still owed, once when none is, and not again by a replay
+    /// begun anew over the same link. Turned red by a Final taken before the last turn, or twice.
+    #[test]
+    fn the_initial_final_is_taken_once_by_the_turn_that_finishes_the_replay() {
+        let mut replay = Replay::idle();
+        replay.owe_initial_final(true);
+        replay.begin(3, 0);
+        // A build that reaches no pace tells the whole sequence in the lap its link comes up with.
+        if ReplayPacing::REACHABLE {
+            let pace = ReplayPacing::new(2, 10);
+            let mut cursor = replay.cursor;
+            let _ = cursor.turn(2);
+            assert_eq!(replay.settle(cursor, true, false, 0, pace), TurnEnd::Kept);
+            assert!(
+                !replay.take_initial_final(TurnEnd::Kept),
+                "one declaration is still owed"
+            );
+            let mut cursor = replay.cursor;
+            let _ = cursor.turn(2);
+            assert_eq!(replay.settle(cursor, true, false, 10, pace), TurnEnd::Kept);
+        }
+        assert!(
+            replay.take_initial_final(TurnEnd::Kept),
+            "the turn that tells the last declaration takes it"
+        );
+        assert!(!replay.take_initial_final(TurnEnd::Kept), "and only once");
+        replay.begin(0, 20);
+        assert!(
+            !replay.take_initial_final(TurnEnd::Kept),
+            "a redeclaration over the same link owes no second Final"
+        );
+    }
+
+    /// A turn that ends the link drops the owed Final, as a link that goes does: the next link is
+    /// owed its own, from its own coming up. The CONTROL is a link that comes up owing none, which
+    /// is sent none, beside one that owes it. Turned red by a Final sent over a link whose replay
+    /// was given up on, or carried to the next link.
+    #[test]
+    fn a_link_that_ends_drops_the_owed_initial_final() {
+        let mut replay = Replay::idle();
+        replay.owe_initial_final(true);
+        replay.begin(0, 0);
+        assert!(!replay.take_initial_final(TurnEnd::EndsLink));
+        assert!(
+            !replay.take_initial_final(TurnEnd::Kept),
+            "given up with the link"
+        );
+
+        replay.owe_initial_final(true);
+        replay.discard();
+        assert!(
+            !replay.take_initial_final(TurnEnd::Kept),
+            "gone with the link"
+        );
+
+        replay.owe_initial_final(false);
+        replay.begin(0, 0);
+        assert!(!replay.take_initial_final(TurnEnd::Kept), "none was owed");
+        replay.owe_initial_final(true);
+        assert!(replay.take_initial_final(TurnEnd::Kept), "one was owed");
     }
 
     /// A turn is due only while the replay owes one and its time has come: never for a replay

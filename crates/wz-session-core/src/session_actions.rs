@@ -10005,6 +10005,26 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.fact_peer_remote_bound(|s| *s)
     }
 
+    /// Whether this node and the remote of this link meet as the peer hat's two north-bound
+    /// peers, which push what they declare to each other and end it with the `DeclareFinal` of
+    /// the initial interest ([`crate::extbound::sends_initial_interest_final`]): read off the
+    /// link, from this node's role, the role the handshake told it the remote has and the bound
+    /// the remote announced on its Open. `None` while the remote's role has not arrived, which
+    /// is not the same as a remote that is not a peer.
+    ///
+    /// The one reading of that rule over a link, so every engine that ends a new face's replay
+    /// with the Final decides it alike.
+    pub fn meets_remote_as_peer_hat(&self) -> Option<bool> {
+        let remote = self
+            .peer_whatami_wire()
+            .and_then(crate::WhatAmI::from_wire)?;
+        Some(crate::extbound::sends_initial_interest_final(
+            self.params.whatami,
+            remote,
+            self.peer_remote_bound(),
+        ))
+    }
+
     /// Item 751 — set how this node's south is partitioned. Every handshake this
     /// session runs after it announces, on its Open, the bound the partition
     /// gives the peer ([`Self::decide_local_remote_bound`]). The default is the

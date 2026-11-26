@@ -1905,6 +1905,16 @@ struct OpenRequest {
     time_base: Option<wz_node_time::time_base::TimeBaseHold>,
 }
 
+/// Whether a session of this ABI ends the declarations it tells a new face with the
+/// `DeclareFinal` of the initial interest when the two meet as the peer hat's two north-bound
+/// peers, which a zenoh peer's open waits for: zenoh-pico ends its push to every peer link it adds
+/// as a peer, accepted or opened, with that Final
+/// (`vendor/zenoh-pico/src/session/interest.c` @
+/// `_Z_RETURN_IF_ERR(_z_interest_send_declare_final(zn, 0, peer));`), and sends none in client
+/// mode, which the rule the flag turns on does not either. One value for both engines, so a
+/// session answers a peer alike whichever engine the build opens it on.
+const ENDS_PEER_PUSH_WITH_INITIAL_FINAL: bool = true;
+
 /// Open `request` on the tokio engine and install the session in `zs`.
 ///
 /// # Safety
@@ -2053,7 +2063,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             // client mode; the rule the flag turns on only sends from a peer to a peer, which
             // is the pair a zenoh peer's open waits on. R3093 -- it was `false`, and a zenoh
             // peer that dialled this ABI's listener waited out `scouting/delay`.
-            initial_interest: true,
+            initial_interest: ENDS_PEER_PUSH_WITH_INITIAL_FINAL,
             // zenoh-pico has no gossip: its peers are introduced by scouting alone.
             gossip: None,
             // Its one listener's bind failing has always failed the open, at the first attempt.
@@ -2596,6 +2606,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         clock_moves,
         // The session limits the config states, which the engine's tables are held to.
         limits,
+        // A peer this session meets as a peer is told the Final of the initial interest after
+        // its replay, as on the tokio engine.
+        initial_interest: ENDS_PEER_PUSH_WITH_INITIAL_FINAL,
     };
     // A config that carries the program's transport opens the engine over its links, and over no
     // socket of the host's; `z_open` has refused a locator the transport does not carry. Either

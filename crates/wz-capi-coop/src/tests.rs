@@ -16,6 +16,8 @@ use crate::EngineHold;
 use wz_capi_port::{
     FilterPlane, FilteredPut, PeerLists, SessionDrive, SessionEngine, SubscriberSink, WireKey,
 };
+#[cfg(feature = "listen")]
+use wz_runtime_coop::session_drive::Locator;
 use wz_runtime_coop::session_drive::{
     spawn_session, OpenedLink, SessionDriveConfig, SessionLinks, SessionRole,
 };
@@ -264,6 +266,9 @@ struct Seen {
     declares: usize,
     /// The id of each subscriber the router was declared, in the order the declarations arrived.
     subscribers: Vec<u64>,
+    /// The place among the declarations of each `DeclareFinal` of the initial interest the router
+    /// was told: the count of declarations that had arrived with it, itself included.
+    initial_finals: Vec<usize>,
     /// The id of each subscriber the router was told went, in the order the retractions arrived
     /// (the direct read's tests read it).
     #[cfg(not(wz_round))]
@@ -370,12 +375,35 @@ impl Router {
     /// A stand-in that announces itself as `whatami`: a peer is told what a router is not (the
     /// key form of the shared key ids, whose rule sends a router the declared form).
     fn start_announcing(port: u16, zid: u8, whatami: WhatAmI, catch_all: CatchAll) -> Self {
+        Self::start_at(StandInEnd::Accepts(port), port, (zid, whatami), catch_all)
+    }
+
+    /// A stand-in that announces itself as `whatami` and dials, over TCP, the session that
+    /// listens at `to`: what that session tells a face it took off its port is what it reports.
+    #[cfg(feature = "listen")]
+    fn dial_announcing(to: std::net::SocketAddr, whatami: WhatAmI) -> Self {
+        Self::start_at(
+            StandInEnd::Dials(to),
+            to.port(),
+            (ROUTER_ZID, whatami),
+            CatchAll::None,
+        )
+    }
+
+    /// A stand-in at `end` of its link, the node `zid` announcing itself as `whatami`, whose
+    /// port, the one it accepts on or the one it dials, is `port`.
+    fn start_at(
+        end: StandInEnd,
+        port: u16,
+        (zid, whatami): (u8, WhatAmI),
+        catch_all: CatchAll,
+    ) -> Self {
         let (commands, inbox) = channel();
         let (ready, bound) = channel();
         let seen = Arc::new(Mutex::new(Seen::default()));
         let reported = seen.clone();
         let thread = std::thread::spawn(move || {
-            run_router(port, (zid, whatami), catch_all, inbox, reported, ready)
+            run_router(end, (zid, whatami), catch_all, inbox, reported, ready)
         });
         bound.recv().expect("the router bound its port");
         Self {
@@ -484,8 +512,18 @@ fn router_links(batch_size: u16) -> RouterLinks {
         .with_tx_buffers(ROUTER_TX_SLOTS, usize::from(batch_size))
 }
 
+/// Which end of its link the stand-in's session is.
+#[derive(Clone, Copy)]
+enum StandInEnd {
+    /// It accepts on this port, which the session under test dials.
+    Accepts(u16),
+    /// It dials the session under test, which listens at this address, over TCP.
+    #[cfg(feature = "listen")]
+    Dials(std::net::SocketAddr),
+}
+
 fn run_router(
-    port: u16,
+    end: StandInEnd,
     (zid, whatami): (u8, WhatAmI),
     catch_all: CatchAll,
     inbox: Receiver<Command>,
@@ -494,7 +532,19 @@ fn run_router(
 ) {
     let init = params(whatami, zid);
     let links = router_links(init.batch_size);
-    let OpenedLink { sink, pump } = links.open_acceptor(port).expect("bind the router's end");
+    let (OpenedLink { sink, pump }, role) = match end {
+        StandInEnd::Accepts(port) => (
+            links.open_acceptor(port).expect("bind the router's end"),
+            SessionRole::Acceptor,
+        ),
+        #[cfg(feature = "listen")]
+        StandInEnd::Dials(to) => (
+            links
+                .open_initiator(Locator::tcp(to))
+                .expect("dial the session that listens"),
+            SessionRole::Initiator,
+        ),
+    };
     let _ = ready.send(());
     let runtime = CoopRuntime::try_new(PosixClock).expect("the heap has room");
     let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
@@ -570,7 +620,7 @@ fn run_router(
         CoopTime::new(&runtime),
         SessionDriveConfig {
             timeouts: SessionTimeouts::spec_defaults(),
-            role: SessionRole::Acceptor,
+            role,
             max_iters: None,
         },
         move |event| {
@@ -589,6 +639,16 @@ fn run_router(
                                     gone,
                                 ) => seen.undeclared_subscribers.push(gone.id),
                                 _ => {}
+                            }
+                            if declare.interest_id
+                                == Some(wz_session_core::extbound::INITIAL_INTEREST_ID)
+                                && matches!(
+                                    &declare.body,
+                                    wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(_)
+                                )
+                            {
+                                let at = seen.declares;
+                                seen.initial_finals.push(at);
                             }
                             #[cfg(feature = "interest-answer")]
                             if let Some(interest) = declare.interest_id {
@@ -669,6 +729,15 @@ fn run_router(
                             seen.undeclared_subscribers.push(gone.id);
                         }
                         _ => {}
+                    }
+                    if declare.interest_id == Some(wz_session_core::extbound::INITIAL_INTEREST_ID)
+                        && matches!(
+                            &declare.body,
+                            wz_codecs::lent::DeclareVariant::CodecZenohDeclFinal(_)
+                        )
+                    {
+                        let at = seen.declares;
+                        seen.initial_finals.push(at);
                     }
                     #[cfg(feature = "interest-answer")]
                     if let Some(interest) = declare.interest_id {
@@ -1144,6 +1213,7 @@ fn client_config() -> CoopConfig {
         groups: Vec::new(),
         clock_moves: None,
         limits: wz_session_core::limits::SessionLimits::defaults(),
+        initial_interest: false,
     }
 }
 
