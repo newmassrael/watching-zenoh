@@ -23,7 +23,7 @@
 use alloc::string::String;
 
 use wz_codecs::encoding_ids::{
-    lookup_id, ENCODING_ID_DEFAULT, ENCODING_ID_TO_STR, ENCODING_ID_UNKNOWN, SCHEMA_SEPARATOR,
+    id_of_name, lookup_id, name_of, ENCODING_ID_DEFAULT, ENCODING_ID_UNKNOWN, SCHEMA_SEPARATOR,
 };
 
 use crate::sample::{EncodingHint, EncodingRef};
@@ -145,8 +145,8 @@ pub fn hint_from_str_in(s: &str, dialect: EncodingDialect) -> EncodingHint {
             Some((prefix, schema)) => (prefix, schema),
             None => (s, ""),
         };
-        return match ENCODING_ID_TO_STR.iter().position(|e| *e == prefix) {
-            Some(id) => hint_from_parts(id as u16, schema),
+        return match id_of_name(prefix.as_bytes()) {
+            Some(id) => hint_from_parts(id, schema),
             // The whole input, separator and all — that is what makes
             // `wz/unknown;x` render back as `wz/unknown;x`.
             None => hint_from_parts(ENCODING_ID_UNKNOWN, s),
@@ -250,8 +250,8 @@ fn render_parts<E>(
     let id = (packed_id >> 1) as usize;
     let unknown = dialect == EncodingDialect::ZenohC && id == usize::from(ENCODING_ID_UNKNOWN);
     if !unknown {
-        if let Some(prefix) = ENCODING_ID_TO_STR.get(id) {
-            put(prefix.as_bytes())?;
+        if let Some(prefix) = name_of(id) {
+            put(prefix)?;
         }
     }
     if let Some(schema) = schema {

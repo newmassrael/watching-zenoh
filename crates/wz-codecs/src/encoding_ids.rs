@@ -107,6 +107,88 @@ pub const ENCODING_ID_DEFAULT: u16 = 0;
 /// against `id=4` for `text/plain`.
 pub const ENCODING_ID_UNKNOWN: u16 = 65535;
 
+/// The names of [`ENCODING_ID_TO_STR`] one after another, built from it when the crate is
+/// compiled: what a library reads at run time. An array of `&str` holds a pointer for each name,
+/// which the loader of a shared library relocates, so the 53 of them would be words a process
+/// writes and keeps resident; these bytes and their ends hold no pointer.
+static NAMES: [u8; NAMES_LEN] = joined(&ENCODING_ID_TO_STR);
+
+/// The bytes of every name together.
+const NAMES_LEN: usize = joined_len(&ENCODING_ID_TO_STR);
+
+/// Where each name ends in [`NAMES`], after the first name's start: name `id` is
+/// `NAME_ENDS[id]..NAME_ENDS[id + 1]`.
+static NAME_ENDS: [u16; ENCODING_ID_TO_STR.len() + 1] = name_ends(&ENCODING_ID_TO_STR);
+
+/// The bytes of every name of `names`.
+const fn joined_len(names: &[&str]) -> usize {
+    let mut len = 0;
+    let mut i = 0;
+    while i < names.len() {
+        len += names[i].len();
+        i += 1;
+    }
+    len
+}
+
+/// The names of `names` one after another, `N` bytes of them.
+const fn joined<const N: usize>(names: &[&str]) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut at = 0;
+    let mut i = 0;
+    while i < names.len() {
+        let name = names[i].as_bytes();
+        let mut j = 0;
+        while j < name.len() {
+            out[at] = name[j];
+            at += 1;
+            j += 1;
+        }
+        i += 1;
+    }
+    assert!(at == N, "the names fill the bytes they are joined into");
+    out
+}
+
+/// Where each name of `names` ends when they are joined, after a first end of zero; the ends fit
+/// a `u16`, or the table does not compile.
+const fn name_ends<const M: usize>(names: &[&str]) -> [u16; M] {
+    assert!(M == names.len() + 1, "one end for each name and the start");
+    let mut ends = [0u16; M];
+    let mut at: usize = 0;
+    let mut i = 0;
+    while i < names.len() {
+        at += names[i].len();
+        assert!(at <= u16::MAX as usize, "the names fit ends of 16 bits");
+        ends[i + 1] = at as u16;
+        i += 1;
+    }
+    ends
+}
+
+/// The names, in id order, read out of [`NAMES`].
+fn names() -> impl Iterator<Item = &'static [u8]> {
+    NAME_ENDS.windows(2).map(|ends| match *ends {
+        [start, end] => NAMES
+            .get(usize::from(start)..usize::from(end))
+            .unwrap_or_default(),
+        _ => &[],
+    })
+}
+
+/// The name of encoding `id`, [`ENCODING_ID_TO_STR`]`[id]`'s bytes, or `None` for an id past
+/// the table.
+pub fn name_of(id: usize) -> Option<&'static [u8]> {
+    let start = usize::from(*NAME_ENDS.get(id)?);
+    let end = usize::from(*NAME_ENDS.get(id.checked_add(1)?)?);
+    NAMES.get(start..end)
+}
+
+/// The id whose name is `name`, the whole of it, or `None`.
+pub fn id_of_name(name: &[u8]) -> Option<u16> {
+    names().position(|entry| entry == name).map(|i| i as u16)
+}
+
 /// The table index for `prefix`, or `None`.
 ///
 /// zenoh-pico compares with `strncmp(schema, TABLE[i], len)` — a PREFIX compare
@@ -116,8 +198,44 @@ pub const ENCODING_ID_UNKNOWN: u16 = 65535;
 /// about which id a string means would put a different byte on the wire, which
 /// is the one thing this module exists to prevent.
 pub fn lookup_id(candidate: &str) -> Option<u16> {
-    ENCODING_ID_TO_STR
-        .iter()
-        .position(|entry| entry.as_bytes().starts_with(candidate.as_bytes()))
+    names()
+        .position(|entry| entry.starts_with(candidate.as_bytes()))
         .map(|i| i as u16)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The joined names read back as the table, entry for entry, and nothing past it. Turned red
+    /// by an end one off, or a name joined out of its id's place.
+    #[test]
+    fn every_name_reads_back_as_its_table_entry() {
+        for (id, entry) in ENCODING_ID_TO_STR.iter().enumerate() {
+            assert_eq!(name_of(id), Some(entry.as_bytes()), "id {id}");
+            assert_eq!(id_of_name(entry.as_bytes()), Some(id as u16), "id {id}");
+        }
+        assert_eq!(name_of(ENCODING_ID_TO_STR.len()), None);
+        assert_eq!(name_of(usize::MAX), None);
+        assert_eq!(names().count(), ENCODING_ID_TO_STR.len());
+        assert_eq!(
+            NAMES.len(),
+            ENCODING_ID_TO_STR.iter().map(|e| e.len()).sum::<usize>()
+        );
+    }
+
+    /// A whole name is one id and a part of one is none; the prefix lookup keeps zenoh-pico's
+    /// compare, the first entry the candidate begins, the empty candidate included. Turned red by a
+    /// lookup that walks the ends as whole names, or one that stops past the first match.
+    #[test]
+    fn a_name_is_whole_and_a_lookup_is_a_prefix() {
+        assert_eq!(id_of_name(b"text/plain"), Some(4));
+        assert_eq!(id_of_name(b"text/pla"), None);
+        assert_eq!(id_of_name(b"text/plainx"), None);
+        assert_eq!(id_of_name(b""), None);
+        assert_eq!(lookup_id("text/j"), Some(6));
+        assert_eq!(lookup_id("text/plain"), Some(4));
+        assert_eq!(lookup_id(""), Some(0));
+        assert_eq!(lookup_id("wz/unknown"), None);
+    }
 }
