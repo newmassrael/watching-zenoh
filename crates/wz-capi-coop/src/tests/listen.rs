@@ -563,10 +563,13 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 }
 
 /// A read whose step left a link holding input goes on with it at once, with no wait worked out
-/// for it: here a second batch lies whole in the stream link's buffer behind the first, and the
-/// one read hands both out, the session taken once for its wait and once a batch, and moves the
-/// links once at most, after the second. Turned red by a read that ends after the first batch
-/// while the link holds the second, or one that moves the links after each batch.
+/// for it: here a second batch lies whole in the stream link's buffer behind the first. Where the
+/// session keeps a round, the one read hands both out, the session taken once for its wait and
+/// once a batch, and moves the links once at most, after the second. Where the read steps the
+/// link itself (`direct`), a step reads one batch and the next read the one held behind it, with
+/// no wait, as `direct_receive` counts. Turned red by a read that ends after the first batch while
+/// the link holds the second, or one that moves the links after each batch; with `direct`, by a
+/// read that leaves the held batch to a later receive.
 #[test]
 fn a_read_goes_on_with_the_input_its_step_left_held() {
     let engine = open_with(CoopConfig {
@@ -626,18 +629,36 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
         "the second batch is written"
     );
     std::thread::sleep(Duration::from_millis(100));
-    let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
-    let (before, polls) = (takes(&engine), engine.link_polls());
-    let _ = SessionDrive::read(&*engine, false);
-    assert_eq!(
-        (takes(&engine) - before, received.load(Ordering::SeqCst)),
-        (3, 2 * PUTS),
-        "the read works out its wait, steps once a batch and hands both batches out"
-    );
-    assert!(
-        engine.link_polls() - polls <= 1,
-        "one move of the links at most, after the second batch"
-    );
+    #[cfg(wz_round)]
+    {
+        let takes = |engine: &Engine| engine.takes.core.load(Ordering::SeqCst);
+        let (before, polls) = (takes(&engine), engine.link_polls());
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            (takes(&engine) - before, received.load(Ordering::SeqCst)),
+            (3, 2 * PUTS),
+            "the read works out its wait, steps once a batch and hands both batches out"
+        );
+        assert!(
+            engine.link_polls() - polls <= 1,
+            "one move of the links at most, after the second batch"
+        );
+    }
+    #[cfg(not(wz_round))]
+    {
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            PUTS,
+            "CONTROL: the read steps the first batch"
+        );
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            received.load(Ordering::SeqCst),
+            2 * PUTS,
+            "the next read steps the batch the link held behind it"
+        );
+    }
 }
 
 /// A session whose one link is a stream waits on that link's input with nothing of the session
