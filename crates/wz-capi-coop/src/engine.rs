@@ -152,7 +152,7 @@ use wz_runtime_coop::{
 #[cfg(any(
     all(test, feature = "std"),
     feature = "advanced-cache",
-    all(not(wz_round), any(feature = "listen", feature = "group"))
+    all(not(wz_round), feature = "listen")
 ))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;

@@ -14,9 +14,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-#[cfg(feature = "threads")]
-use wz_capi_port::SessionDrive;
-use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
+use wz_capi_port::{SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -310,37 +308,55 @@ fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot
     eventually("the good peer's face", || faces_up() == 1);
     let slow = peer(0xc2);
     eventually("the slow peer's face", || faces_up() == 2);
-    let (resume, held) = std::sync::mpsc::channel::<()>();
-    let paused = slow.hand(move |_| {
-        let _ = held.recv();
+    // The slow peer's thread is held in one call, which reads one message of its session each
+    // time it is asked (`true`) and nothing else, and ends when told (`false`), after which the
+    // thread reads on its own again.
+    let (step, steps) = std::sync::mpsc::channel::<bool>();
+    let paused = slow.hand(move |engine| {
+        while let Ok(true) = steps.recv() {
+            let _ = SessionDrive::read(engine, true);
+        }
     });
 
-    // Filled as the twin of `threads` fills it, on the publisher's own thread.
-    let filled = publisher.call(|engine| {
-        let payload = vec![0x5a; PAYLOAD];
-        let mut owing_since: Option<Instant> = None;
-        for _ in 0..FILL_AT_MOST {
-            let _ = engine.publish_on_wire_all(
-                "demo/pool/fill",
-                &WireKey::literal(),
-                &payload,
-                &publish(CongestionControl::Drop),
-            );
-            if engine.links_owing() == 0 {
-                owing_since = None;
-                continue;
+    // Filled as the twin of `threads` fills it: two publishes a round on the publisher's thread,
+    // whose reads between the rounds write the rest of a frame owed as the twin's read task does.
+    // A stream can fill at a frame's end with nothing owed, every droppable publish after it
+    // refused before a byte of it is written for as long as its peer reads nothing; so each round
+    // that leaves nothing owed has the slow peer read one message, which gives the stream room
+    // again, and the stream fills by at least one publish a round.
+    let payload = Arc::new(vec![0x5a; PAYLOAD]);
+    let mut owing_since: Option<Instant> = None;
+    for _ in 0..FILL_AT_MOST {
+        let round = Arc::clone(&payload);
+        let owing = publisher.call(move |engine| {
+            for _ in 0..2 {
+                let _ = engine.publish_on_wire_all(
+                    "demo/pool/fill",
+                    &WireKey::literal(),
+                    &round,
+                    &publish(CongestionControl::Drop),
+                );
             }
-            let since = *owing_since.get_or_insert_with(Instant::now);
-            if since.elapsed() >= STILL {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(20));
+            engine.links_owing()
+        });
+        if owing == 0 {
+            owing_since = None;
+            step.send(true)
+                .expect("the slow peer's thread waits to read a message");
+            continue;
         }
-        owing_since.is_some_and(|since| since.elapsed() >= STILL)
-    });
+        let since = *owing_since.get_or_insert_with(Instant::now);
+        if since.elapsed() >= STILL {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
-        filled,
-        "the slow peer's link never held a frame its stream had not finished for {STILL:?}"
+        owing_since.is_some_and(|since| since.elapsed() >= STILL),
+        "the slow peer's link never held a frame its stream had not finished for {STILL:?}: \
+         {} faces up, {} links owing",
+        publisher.call(|engine| engine.faces_up()),
+        publisher.call(|engine| engine.links_owing())
     );
 
     let dropped_in = publisher.call(|engine| {
@@ -358,8 +374,7 @@ fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot
         "a droppable publish waited {dropped_in:?} for a slot"
     );
 
-    resume
-        .send(())
+    step.send(false)
         .expect("the slow peer's thread waits to read again");
     paused.recv().expect("the slow peer's thread reads again");
     eventually("the slow link to finish its frame", || {
