@@ -2329,12 +2329,13 @@ mod unicast_endpoint_tests {
     }
 }
 
-/// The rows of the tables of every session a build that states no policy, listens on nothing and
-/// joins no group opens, laid out when it is compiled: such a build opens each session under the
-/// pico preset (`opening_limits`) as a client that dials at most the endpoints the build admits
-/// (`MAX_STATIC_CONNECT`), advertising the preset's batch and admitting no face besides its dial,
-/// under the build's policies, the only ones a build that states none opens under, so its open
-/// walks no plan of its own.
+/// The rows of every session a build that states no policy, listens on nothing and joins no group
+/// opens over the links of `S`, laid out when it is compiled: such a build opens each session
+/// under the pico preset (`opening_limits`) as a client that dials at most the endpoints the build
+/// admits (`MAX_STATIC_CONNECT`), advertising the preset's batch and admitting no face besides its
+/// dial, under the build's policies, the only ones a build that states none opens under; after its
+/// tables, the places its engine keeps beside them and the places of this ABI's handle and objects
+/// (`crate::object_slot::held_places`), so its open lays out no row.
 #[cfg(all(
     not(feature = "engine-tokio"),
     not(any(
@@ -2343,15 +2344,50 @@ mod unicast_endpoint_tests {
         feature = "multicast-transport"
     ))
 ))]
-const PRESET: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::ArenaRefused> =
-    wz_capi_coop::arena::ArenaRegion::of(
+const fn preset_over<S: wz_capi_coop::CoopLinks>(
+) -> Result<wz_capi_coop::arena::OpenRegion, wz_capi_coop::arena::ArenaRefused> {
+    let limits = opening_limits();
+    match wz_capi_coop::arena::ArenaRegion::of(
         wz_capi_coop::arena::PlanShape::dial_only(
             wz_session_core::caps::MAX_STATIC_CONNECT,
-            pico_unicast_batch(&opening_limits()),
+            pico_unicast_batch(&limits),
             &SessionPolicy::defaults(),
         ),
-        opening_limits(),
-    );
+        limits,
+    ) {
+        Ok(rows) => Engine::open_region_over::<S>(
+            rows,
+            crate::object_slot::held_places(SessionPlace::LAYOUT),
+        ),
+        Err(refused) => Err(refused),
+    }
+}
+
+/// The region of every session of such a build over the host's links.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+const PRESET: Result<wz_capi_coop::arena::OpenRegion, wz_capi_coop::arena::ArenaRefused> =
+    preset_over::<HostLinks>();
+
+/// The region of every session of such a build over the program's transport, whose links' cells
+/// are its own and not the host's (`app-transport`).
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    feature = "app-transport",
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+const PRESET_APP: Result<wz_capi_coop::arena::OpenRegion, wz_capi_coop::arena::ArenaRefused> =
+    preset_over::<wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>>();
 
 // A build whose limits lay the preset out no arena is refused when it is compiled, not at every
 // open.
@@ -2367,6 +2403,19 @@ const _: () = assert!(
     PRESET.is_ok(),
     "the pico preset lays out no arena under this build's limits"
 );
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    feature = "app-transport",
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+const _: () = assert!(
+    PRESET_APP.is_ok(),
+    "the pico preset lays out no arena over the program's transport under this build's limits"
+);
 
 /// The preset's rows where an open refers to them.
 #[cfg(all(
@@ -2377,8 +2426,23 @@ const _: () = assert!(
         feature = "multicast-transport"
     ))
 ))]
-static PRESET_REGION: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::ArenaRefused> =
+static PRESET_REGION: Result<wz_capi_coop::arena::OpenRegion, wz_capi_coop::arena::ArenaRefused> =
     PRESET;
+
+/// The preset's rows over the program's transport where an open refers to them.
+#[cfg(all(
+    not(feature = "engine-tokio"),
+    feature = "app-transport",
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+))]
+static PRESET_APP_REGION: Result<
+    wz_capi_coop::arena::OpenRegion,
+    wz_capi_coop::arena::ArenaRefused,
+> = PRESET_APP;
 
 /// Open `request` on the cooperative engine and install the session in `zs`: a session dialled
 /// over the sockets of the system the build runs on (`crate::coop_host`), and with `peer` one that listens on the `tcp/` endpoint of its
@@ -2630,16 +2694,28 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         feature = "peer",
         feature = "multicast-transport"
     )))]
-    let plan = match &PRESET_REGION {
-        Ok(region) => wz_capi_coop::arena::PlanFrom::Region(region),
-        Err(refused) => return coop_open_refusal(&wz_capi_coop::OpenError::Arena(*refused)),
+    let plan = {
+        // The region whose links' cells are those of the stack the config chose.
+        #[cfg(feature = "app-transport")]
+        let preset = match &links {
+            PicoLinks::Left(_) => &PRESET_REGION,
+            PicoLinks::Right(_) => &PRESET_APP_REGION,
+        };
+        #[cfg(not(feature = "app-transport"))]
+        let preset = &PRESET_REGION;
+        match preset {
+            Ok(region) => wz_capi_coop::arena::PlanFrom::Region(region),
+            Err(refused) => return coop_open_refusal(&wz_capi_coop::OpenError::Arena(*refused)),
+        }
     };
     #[cfg(any(
         feature = "config-policy",
         feature = "peer",
         feature = "multicast-transport"
     ))]
-    let plan = wz_capi_coop::arena::PlanFrom::Config;
+    let plan = wz_capi_coop::arena::PlanFrom::Config(
+        const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
+    );
     // A host's session arena is the system's fresh pages, zero as handed, so the open writes no
     // row it does not use and a page no row uses is never resident; an image's is its heap's,
     // written where a row must read empty.
@@ -2665,7 +2741,6 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         request.key_ids,
         wz_capi_coop::arena::OpenStorage {
             memory: arena_memory,
-            held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
             plan,
         },
     );

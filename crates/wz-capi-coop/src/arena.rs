@@ -696,30 +696,31 @@ impl Default for HeldPlaces {
     }
 }
 
-/// Where an open's arena comes from and which places of the ABI's it holds beside the session's
-/// tables ([`CoopEngine::open_made_in`](crate::CoopEngine::open_made_in)).
+/// Where an open's arena comes from and where its rows come from
+/// ([`CoopEngine::open_made_in`](crate::CoopEngine::open_made_in)).
 pub struct OpenStorage {
     /// The memory the session's arena is reserved from.
     pub memory: &'static dyn ArenaMemory,
-    /// The ABI's places the arena holds after every table.
-    pub held: HeldPlaces,
-    /// Where the rows of the session's tables come from.
+    /// Where the rows of the session's tables, and those of the places held after them, come
+    /// from.
     pub plan: PlanFrom,
 }
 
-/// Where the rows of an open's arena come from ([`OpenStorage::plan`]). The links' cells and the
-/// ABI's places are laid out after them at the open either way ([`ArenaPlan::holding_cells`],
-/// [`ArenaPlan::holding`]).
+/// Where the rows of an open's arena come from ([`OpenStorage::plan`]): the rows of the session's
+/// tables and after them the links' cells, the faces' rooms, the ABI's places, the runtime's span
+/// and the engine's place ([`ArenaPlan::holding_cells`], [`ArenaPlan::holding`]).
 #[derive(Clone, Copy, Debug)]
 pub enum PlanFrom {
-    /// The region the build laid out when it was compiled: an open of a config that dials more
-    /// endpoints than it holds rows for, or whose other numbers or limits are not the region's,
-    /// is refused under the limit that differs.
-    Region(&'static ArenaRegion),
-    /// The config the open is handed, laid out at the open ([`ArenaPlan::count`]): a build
-    /// with `runtime-plan`, whose image carries the walk of the rows.
+    /// The region the build laid out when it was compiled, its places with it ([`OpenRegion`]):
+    /// the open lays out no row. An open of a config that dials more endpoints than it holds rows
+    /// for, or whose other numbers or limits are not the region's, is refused under the limit that
+    /// differs.
+    Region(&'static OpenRegion),
+    /// The config the open is handed, its rows laid out at the open ([`ArenaPlan::count`]) and
+    /// after them the engine's places and the ABI's places named here: a build with
+    /// `runtime-plan`, whose image carries the walk of the rows.
     #[cfg(any(feature = "runtime-plan", test))]
-    Config,
+    Config(HeldPlaces),
 }
 
 /// The rows of a session's tables a build knows when it is compiled: the plan of a session of
@@ -734,7 +735,8 @@ pub struct ArenaRegion {
 
 impl ArenaRegion {
     /// The region of a session of `shape` under `limits`, refused as [`ArenaPlan::planned`]
-    /// refuses it.
+    /// refuses it: the rows of its tables, which an open by it takes once the engine's places are
+    /// laid out after them ([`OpenRegion`]).
     pub const fn of(shape: PlanShape, limits: SessionLimits) -> Result<Self, ArenaRefused> {
         match ArenaPlan::planned(shape, &limits) {
             Ok(plan) => Ok(Self {
@@ -754,6 +756,12 @@ impl ArenaRegion {
     /// The limits a session of the region opens under, and no other.
     pub const fn limits(&self) -> &SessionLimits {
         &self.limits
+    }
+
+    /// The numbers of the config the region was laid out for; a config that dials fewer
+    /// endpoints opens in it too ([`Self::admit`]).
+    pub const fn shape(&self) -> &PlanShape {
+        &self.shape
     }
 
     /// Lay out on `plan`, an open's blank plan or [`ArenaPlan::vacant`] as made, this region's
@@ -823,6 +831,85 @@ impl ArenaRegion {
     }
 }
 
+/// The region an open by it lays out nothing for: the rows of a session's tables
+/// ([`ArenaRegion`]) and after them every place the session's engine keeps beside those tables
+/// (its links' cells, its faces' rooms, the ABI's places, its runtime's span, its own place and its
+/// planes'), laid out as an open over a config lays them out ([`ArenaPlan::holding_cells`],
+/// [`ArenaPlan::holding`]). Each is the size of a type of the engine or a constant of the ABI, so
+/// a build that states its region as a constant has every row laid out when it is compiled. Made
+/// by the engine that opens by it ([`CoopEngine::open_region`](crate::CoopEngine::open_region));
+/// an open by it compares the config with the region ([`Self::admit`]) and takes the plan whole.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OpenRegion {
+    rows: ArenaRegion,
+    places: OpenPlaces,
+}
+
+/// The bytes of the two places an open lends by their size after its tables: the span its
+/// runtime is placed in and the place its engine lies in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct OpenPlaces {
+    pub(crate) runtime: usize,
+    pub(crate) engine: usize,
+}
+
+impl OpenRegion {
+    /// `rows` with the places `holds` names laid out after its tables, as an open over a config
+    /// lays them out (`crate::engine::lay_out_open`), and refused as that refuses them.
+    pub(crate) const fn laid(
+        mut rows: ArenaRegion,
+        holds: &crate::engine::OpenHolds<'_>,
+    ) -> Result<Self, ArenaRefused> {
+        match crate::engine::lay_out_open(&mut rows.plan, holds) {
+            Ok(()) => Ok(Self {
+                rows,
+                places: OpenPlaces {
+                    runtime: holds.runtime,
+                    engine: holds.engine,
+                },
+            }),
+            Err(refused) => Err(refused),
+        }
+    }
+
+    /// The rows of the session's tables the region lays out ([`ArenaPlan::tables`]).
+    pub const fn tables(&self) -> TableRows {
+        self.rows.tables()
+    }
+
+    /// The limits a session of the region opens under, and no other.
+    pub const fn limits(&self) -> &SessionLimits {
+        self.rows.limits()
+    }
+
+    /// The bytes the arena of an open by the region reserves: its tables' rows and its places'.
+    /// `None` past the address space.
+    pub const fn reserved_bytes(&self) -> Option<usize> {
+        self.rows.plan.reserved_bytes()
+    }
+
+    /// Whether a session of `config` opens in this region ([`ArenaRegion::admit`]).
+    pub fn admit<E: EndpointList>(&self, config: &CoopConfig<E>) -> Result<(), ArenaRefused> {
+        self.rows.admit(config)
+    }
+
+    /// The region's rows, its places among them, as an open takes them
+    /// (`ArenaRegion::lay_out_on`).
+    pub(crate) const fn rows(&self) -> &ArenaRegion {
+        &self.rows
+    }
+
+    /// The bytes of the runtime's span and of the engine's place the region laid out.
+    pub(crate) const fn places(&self) -> OpenPlaces {
+        self.places
+    }
+
+    /// The bytes of each link's cells the region laid out, `0` for a table it holds none of.
+    pub(crate) const fn cell_bytes(&self) -> LinkCells<usize> {
+        self.rows.plan.transport.cell_bytes
+    }
+}
+
 /// The table of lodgings of no place: none, its places laid out for the watchers of the faces'
 /// snapshots the engine lodges itself in a build that has them, so an open counts those places and
 /// lays none out ([`ArenaPlan::holding`]).
@@ -876,12 +963,15 @@ impl HeldPlaces {
 
     /// The first kind at or after the place `from` in [`EntityKind::ALL`] these places name a
     /// layout for: its place there and the layout. A walk by it ends on the places named.
-    fn next_entity(&self, from: usize) -> Option<(usize, Layout)> {
-        self.entities
-            .iter()
-            .enumerate()
-            .skip(from)
-            .find_map(|(at, place)| Some((at, (*place)?)))
+    const fn next_entity(&self, from: usize) -> Option<(usize, Layout)> {
+        let mut at = from;
+        while let Some((_, [place, ..])) = self.entities.split_at_checked(at) {
+            if let Some(layout) = *place {
+                return Some((at, layout));
+            }
+            at = at.saturating_add(1);
+        }
+        None
     }
 }
 
@@ -1598,11 +1688,17 @@ const _: () = assert!(
 
 impl HeldBits {
     /// These places and `at`; a place past the mask's bits adds none.
-    fn with(self, at: usize) -> Self {
-        let bit = u32::try_from(at)
-            .ok()
-            .and_then(|at| 1u32.checked_shl(at))
-            .unwrap_or(0);
+    const fn with(self, at: usize) -> Self {
+        // A place past the bits shifts by the width itself, which `checked_shl` refuses.
+        let shift = if at < u32::BITS as usize {
+            at as u32
+        } else {
+            u32::BITS
+        };
+        let bit = match 1u32.checked_shl(shift) {
+            Some(bit) => bit,
+            None => 0,
+        };
         Self(self.0 | bit)
     }
 
@@ -2508,7 +2604,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
 
     /// The places of `Self::holding`, the plan not settled: refused here only for a place that
     /// asks for more alignment than a span starts on, and otherwise as the plan keeps it.
-    pub(crate) fn lay_held(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
+    pub(crate) const fn lay_held(&mut self, held: &HeldPlaces) -> Result<(), ArenaRefused> {
         if let Some(handle) = held.handle {
             if handle.align() > ARENA_ALIGN {
                 return Err(ArenaRefused::TooLarge);
@@ -2530,7 +2626,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             if place.align() > ARENA_ALIGN {
                 return Err(ArenaRefused::TooLarge);
             }
-            let Some(&kind) = EntityKind::ALL.get(at) else {
+            let Some((_, &[kind, ..])) = EntityKind::ALL.split_at_checked(at) else {
                 break;
             };
             let count = self.session.entities.of_kind(kind);
@@ -2538,7 +2634,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
                 continue;
             }
             self.put_table(place_parts(kind), count, place.size());
-            if let Some(bytes) = self.places.entity_bytes.get_mut(at) {
+            if let Some((_, [bytes, ..])) = self.places.entity_bytes.split_at_mut_checked(at) {
                 *bytes = place.size();
                 self.places.held = self.places.held.with(at);
             }
@@ -2576,24 +2672,35 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         self.settled()
     }
 
-    /// The tables of `Self::holding_cells`, the plan not settled.
-    pub(crate) fn lay_cells(&mut self, bytes: LinkCells<usize>) {
-        let mut laid = self.transport.cell_bytes.into_array();
-        let mut held = self.transport.cells_held;
-        for (at, ((laid, asked), parts)) in laid
-            .iter_mut()
-            .zip(bytes.into_array())
-            .zip(CELL_PARTS)
-            .enumerate()
-        {
-            if *laid == 0 && asked != 0 {
-                *laid = asked;
-                held = held.with(at);
-                self.put_table(parts, self.transport.links, asked);
-            }
+    /// The tables of `Self::holding_cells`, the plan not settled, in [`LinkCells::into_array`]'s
+    /// order.
+    pub(crate) const fn lay_cells(&mut self, bytes: LinkCells<usize>) {
+        let laid = self.transport.cell_bytes;
+        let [driver, gate, actions, halves] = CELL_PARTS;
+        self.transport.cell_bytes = LinkCells {
+            driver: self.lay_cell_table(0, driver, laid.driver, bytes.driver),
+            gate: self.lay_cell_table(1, gate, laid.gate, bytes.gate),
+            actions: self.lay_cell_table(2, actions, laid.actions, bytes.actions),
+            halves: self.lay_cell_table(3, halves, laid.halves, bytes.halves),
+        };
+    }
+
+    /// The bytes of the table of cells at `at` of [`LinkCells::into_array`]'s order, of the parts
+    /// `parts`: `laid` where the plan holds the table already, and otherwise `asked`, laid out as a
+    /// cell of that many bytes for each link; a size of `0` adds no table.
+    const fn lay_cell_table(
+        &mut self,
+        at: usize,
+        parts: [ArenaPart; 2],
+        laid: usize,
+        asked: usize,
+    ) -> usize {
+        if laid != 0 || asked == 0 {
+            return laid;
         }
-        self.transport.cell_bytes = LinkCells::from_array(laid);
-        self.transport.cells_held = held;
+        self.transport.cells_held = self.transport.cells_held.with(at);
+        self.put_table(parts, self.transport.links, asked);
+        asked
     }
 
     /// Lay out the place of the faces' rooms, `bytes` large: what each face that is up names for a
@@ -2607,7 +2714,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// The place of `Self::holding_rooms`, the plan not settled.
-    pub(crate) fn lay_rooms(&mut self, bytes: usize) {
+    pub(crate) const fn lay_rooms(&mut self, bytes: usize) {
         self.put(ArenaPart::LinkRooms, 1, bytes);
     }
 
@@ -2623,7 +2730,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// The span and the count of `Self::holding_runtime`, the plan not settled.
-    pub(crate) fn lay_runtime(&mut self, bytes: usize) {
+    pub(crate) const fn lay_runtime(&mut self, bytes: usize) {
         if bytes != 0 && self.runtime_bytes == 0 {
             self.runtime_bytes = bytes;
             self.put(ArenaPart::ArenaKeep, 1, core::mem::size_of::<ArenaKept>());
@@ -2641,7 +2748,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// The place of `Self::holding_engine`, the plan not settled.
-    pub(crate) fn lay_engine(&mut self, bytes: usize) {
+    pub(crate) const fn lay_engine(&mut self, bytes: usize) {
         self.put(ArenaPart::EngineState, 1, bytes);
     }
 
@@ -2649,7 +2756,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// reach by handles that count nothing (`crate::engine::SessionPlanes`): the queryables',
     /// the gets' and the watchers' of the faces, each where its feature is. Laid out once, at the
     /// open, the plan not settled: a refusal is kept for `Self::settled`.
-    pub(crate) fn lay_planes(&mut self, planes: crate::engine::SessionPlanes) {
+    pub(crate) const fn lay_planes(&mut self, planes: crate::engine::SessionPlanes) {
         // Where the build fixes the session's shape these lie in its region
         // (`crate::engine::StatePlaces`).
         #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
@@ -2665,7 +2772,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// for each face read where it lies after the first (`read_faces`): the dial role's lies in
     /// the engine's place. Laid out once, at the open, the plan not settled.
     #[cfg(not(wz_round))]
-    pub(crate) fn lay_direct_faces(&mut self, bytes: usize) {
+    pub(crate) const fn lay_direct_faces(&mut self, bytes: usize) {
         let rows = read_faces(self.session.peers.sets()).saturating_sub(1);
         if rows != 0 {
             self.put(ArenaPart::DirectFaces, rows, bytes);
@@ -2676,7 +2783,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// session's state owns and its links' leases reach by handles that count nothing. Laid out
     /// once, at the open, the plan not settled: a refusal is kept for `Self::settled`.
     #[cfg(feature = "listen")]
-    pub(crate) fn lay_admission(&mut self, bytes: usize) {
+    pub(crate) const fn lay_admission(&mut self, bytes: usize) {
         self.put(ArenaPart::LinkAdmissionState, 1, bytes);
     }
 
@@ -2686,12 +2793,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// The bytes of each place the plan holds for an entity of `kind`, `0` for none.
-    pub fn entity_bytes(&self, kind: EntityKind) -> usize {
-        self.places
-            .entity_bytes
-            .get(kind as usize)
-            .copied()
-            .unwrap_or(0)
+    pub const fn entity_bytes(&self, kind: EntityKind) -> usize {
+        match self.places.entity_bytes.split_at_checked(kind as usize) {
+            Some((_, [bytes, ..])) => *bytes,
+            _ => 0,
+        }
     }
 
     /// The rows, in the order the plan laid them out.

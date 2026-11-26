@@ -51,9 +51,9 @@ use crate::arena::HandedTable;
 #[cfg(feature = "runtime-plan")]
 use crate::arena::OpenPlan;
 use crate::arena::{
-    ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EnginePlace, EntityKind,
-    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
-    PlanFrom, SessionArena, SessionRows, TransportTables,
+    ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, ClaimedPlaces, DroppedOn, EnginePlace,
+    EntityKind, EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlaces,
+    OpenRegion, OpenStorage, PlaceTables, PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{CoopForm, Latch};
 use crate::form::{
@@ -878,10 +878,10 @@ impl SessionRows {
     }
 }
 
-/// Lay out the plan of the session opened with `config` under `policy`, its tables' rows from
-/// `from` and after them the rows `holds` names (`lay_out_open`), reserve its arena in
-/// `memory` and lend from it every table of the session. One lender lends each layer its plain
-/// tables from the rows the plan counts for it: the transport's links, cells, reassembly and
+/// Lay out the plan of the session opened with `config` under `policy` from `from`: a region's
+/// rows taken whole, or the config's rows and after them those its holds name (`lay_out_open`);
+/// then reserve its arena in `memory` and lend from it every table of the session. One lender
+/// lends each layer its plain tables from the rows the plan counts for it: the transport's links, cells, reassembly and
 /// endpoints, the state's lane, declarations, keys and legs, and the ABI's places; it gives the
 /// tables after a refusal no rows and is asked once, after them all. The round's tables and the application's, which their makers lend, ask their own. What
 /// was lent before a refusal goes back with the arena. Out of line and generic over nothing: one
@@ -889,8 +889,7 @@ impl SessionRows {
 /// open's frame never holds or moves it: what the state is sized by is handed back with the tables.
 #[inline(never)]
 fn lend_session(
-    holds: &OpenHolds<'_>,
-    from: PlanFrom,
+    from: &OpenFrom<'_>,
     memory: &'static dyn ArenaMemory,
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
@@ -900,11 +899,14 @@ fn lend_session(
     #[cfg(not(feature = "runtime-plan"))]
     let mut plan = ArenaPlan::vacant();
     match from {
-        PlanFrom::Region(region) => region.lay_out_on(&mut plan, config)?,
+        OpenFrom::Region(region) => region.rows().lay_out_on(&mut plan, config)?,
         #[cfg(any(feature = "runtime-plan", test))]
-        PlanFrom::Config => plan.count(config, resolve_limits(config))?,
+        OpenFrom::Config(holds) => {
+            plan.count(config, resolve_limits(config))?;
+            lay_out_open(&mut plan, holds)?;
+        }
     }
-    lay_out_open(&mut plan, holds)?;
+    let places = from.places();
     #[cfg(feature = "runtime-plan")]
     let mut arena = SessionArena::reserve(&plan, memory)?;
     // The registry and the key arena lie in the region the build lays out, the head of the one
@@ -1120,10 +1122,10 @@ fn lend_session(
     }
     .map_err(ArenaRefused::Lend)?;
     let runtime = arena
-        .runtime_place(holds.runtime)
+        .runtime_place(places.runtime)
         .map_err(ArenaRefused::Lend)?;
     let engine = arena
-        .engine_place(holds.engine)
+        .engine_place(places.engine)
         .map_err(ArenaRefused::Lend)?;
     // SAFETY: the span was lent above to the lodging places alone, and `engine.memory` is the count
     // of the memory it lies in, held by the session's engine for as long as the engine lends from
@@ -1731,9 +1733,9 @@ pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
 #[cfg(feature = "runtime-plan")]
 pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
 
-/// The bytes of the rooms of a session over `links`, which the open places in the session's
+/// The bytes of the rooms of a session over links of `L`, which the open places in the session's
 /// arena (`ArenaPlan::holding_rooms`): how large they are is the stack's waits'.
-pub(crate) const fn link_rooms_bytes<L: CoopLinks>(_links: &L) -> usize {
+pub(crate) const fn link_rooms_bytes<L: CoopLinks>() -> usize {
     core::mem::size_of::<LinkRooms<L::Waits>>()
 }
 
@@ -4285,8 +4287,15 @@ type LinkHalves<C> = (
 /// each link's driver as large as the largest the links open, one for its gates, one for its
 /// actions and one for the two halves they hold.
 pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl CoopLinks) -> LinkCells<usize> {
+    cells_of::<C>(links.link_cell_bytes())
+}
+
+/// The bytes of each link's cells a session on the clock `C` lays out, a cell of `driver` bytes
+/// for each link's driver among them: a `const fn`, as a region laid out when the build is
+/// compiled reads them off the links' type (`SessionLinks::LINK_CELL_BYTES`).
+pub(crate) const fn cells_of<C: ClockSource + 'static>(driver: usize) -> LinkCells<usize> {
     LinkCells {
-        driver: links.link_cell_bytes(),
+        driver,
         gate: CellRc::<LinkGate<C>>::cell_bytes(),
         actions: CellRc::<LinkActions<C>>::cell_bytes(),
         halves: CellRc::<LinkHalves<C>>::cell_bytes(),
@@ -4314,6 +4323,29 @@ pub(crate) struct OpenHolds<'h> {
     /// The read slot and send place of one face past the dial role's (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) direct_face: usize,
+}
+
+/// What an open lays its plan out from (`lend_session`): a region whose every row was laid out
+/// with it, which the open takes whole, or (`runtime-plan`) the config's rows and after them the
+/// places the open's holds name.
+enum OpenFrom<'h> {
+    Region(&'h OpenRegion),
+    #[cfg(any(feature = "runtime-plan", test))]
+    Config(OpenHolds<'h>),
+}
+
+impl OpenFrom<'_> {
+    /// The bytes of the runtime's span and of the engine's place the plan lays out.
+    fn places(&self) -> OpenPlaces {
+        match self {
+            Self::Region(region) => region.places(),
+            #[cfg(any(feature = "runtime-plan", test))]
+            Self::Config(holds) => OpenPlaces {
+                runtime: holds.runtime,
+                engine: holds.engine,
+            },
+        }
+    }
 }
 
 /// The admission the links of a session over the clock `C` ask while their handshakes run: owned
@@ -4362,14 +4394,18 @@ impl SessionPlanes {
 /// session's runtime is placed in, the place its engine lies in and the places of its planes,
 /// after every other row: the one plan an open reserves by. Laid
 /// out where the plan lies, which `lend_session` reads in its own frame: a plan handed back by
-/// value would be moved again, twice, by the open that reads it.
-pub(crate) fn lay_out_open<const ROWS: usize>(
+/// value would be moved again, twice, by the open that reads it. A `const fn`, so a region laid
+/// out when the build is compiled holds these rows too (`OpenRegion`), and an open by it lays out
+/// none of them.
+pub(crate) const fn lay_out_open<const ROWS: usize>(
     plan: &mut ArenaPlan<ROWS>,
     holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
     plan.lay_cells(holds.cells);
     plan.lay_rooms(holds.rooms);
-    plan.lay_held(holds.held)?;
+    if let Err(refused) = plan.lay_held(holds.held) {
+        return Err(refused);
+    }
     plan.lay_runtime(holds.runtime);
     plan.lay_engine(holds.engine);
     plan.lay_planes(holds.planes);
@@ -4443,10 +4479,44 @@ impl RuntimeTables {
     /// not open, then the links', so a face past them is refused as one past `max_faces` is.
     #[cfg(wz_round)]
     pub(crate) fn of<C: ClockSource + 'static>(config: &CoopConfig<impl EndpointList>) -> Self {
-        let groups = config.groups.len().min(caps::MAX_TASKS);
-        let links = usize::from(crate::arena::dials(config))
-            .saturating_add(config.max_faces)
-            .min(caps::MAX_TASKS.saturating_sub(groups));
+        Self::of_counts::<C>(
+            config.groups.len(),
+            crate::arena::dials(config),
+            config.max_faces,
+        )
+    }
+
+    /// [`Self::of`] for a config of `shape`, the numbers a region was laid out for
+    /// (`ArenaRegion::shape`): a `const fn`, so a region laid out when the build is compiled holds
+    /// the runtime's span. A config the region admits that dials no endpoint where the shape dials
+    /// some, while it listens or joins a group, takes no cell for a dial the region holds one for.
+    #[cfg(wz_round)]
+    pub(crate) const fn of_shape<C: ClockSource + 'static>(
+        shape: &crate::arena::PlanShape,
+    ) -> Self {
+        Self::of_counts::<C>(
+            shape.groups,
+            crate::arena::dials_of(shape.dials, shape.listens, shape.groups),
+            shape.max_faces,
+        )
+    }
+
+    /// The tables of a session that joins `groups` groups, dials when `dials` and admits
+    /// `max_faces` faces besides: the groups' cells first, then the links'.
+    #[cfg(wz_round)]
+    const fn of_counts<C: ClockSource + 'static>(
+        groups: usize,
+        dials: bool,
+        max_faces: usize,
+    ) -> Self {
+        let groups = if groups < caps::MAX_TASKS {
+            groups
+        } else {
+            caps::MAX_TASKS
+        };
+        let links = (dials as usize).saturating_add(max_faces);
+        let room = caps::MAX_TASKS.saturating_sub(groups);
+        let links = if links < room { links } else { room };
         Self::holding(groups, links, link_task_bytes::<C>())
     }
 
@@ -4455,11 +4525,30 @@ impl RuntimeTables {
     /// and the clock's type sizes nothing here.
     #[cfg(not(wz_round))]
     pub(crate) fn of(config: &CoopConfig<impl EndpointList>) -> Self {
-        Self::holding(config.groups.len().min(caps::MAX_TASKS), 0, 0)
+        Self::of_groups(config.groups.len())
+    }
+
+    /// [`Self::of`] for a config of `shape`, the numbers a region was laid out for
+    /// (`ArenaRegion::shape`): a `const fn`, so a region laid out when the build is compiled holds
+    /// the runtime's span.
+    #[cfg(not(wz_round))]
+    pub(crate) const fn of_shape(shape: &crate::arena::PlanShape) -> Self {
+        Self::of_groups(shape.groups)
+    }
+
+    /// The tables of a session that joins `groups` groups, whose one link runs as no task.
+    #[cfg(not(wz_round))]
+    const fn of_groups(groups: usize) -> Self {
+        let groups = if groups < caps::MAX_TASKS {
+            groups
+        } else {
+            caps::MAX_TASKS
+        };
+        Self::holding(groups, 0, 0)
     }
 
     /// The tables of `groups` groups' cells and `links` links' cells of `task_bytes` each.
-    fn holding(groups: usize, links: usize, task_bytes: usize) -> Self {
+    const fn holding(groups: usize, links: usize, task_bytes: usize) -> Self {
         Self {
             rows: RuntimeRows {
                 tasks: links,
@@ -4493,16 +4582,18 @@ impl RuntimeTables {
 
     /// The bytes of the span of the session's arena [`Self::runtime`] places the runtime in;
     /// `None` past the address space.
-    pub(crate) fn placed_bytes<C: ClockSource>(self) -> Option<usize> {
-        CoopRuntime::<C>::placed_layout(self.rows(), Self::form(self.groups))
-            .map(|span| span.size())
+    pub(crate) const fn placed_bytes<C: ClockSource>(self) -> Option<usize> {
+        match CoopRuntime::<C>::placed_layout(self.rows(), Self::form(self.groups)) {
+            Some(span) => Some(span.size()),
+            None => None,
+        }
     }
 
     /// The rows the runtime is made with. The timers are stated as the constant they are, so the
     /// making of the timer table is that of the build's count alone; a build that joins no group
     /// adds no cell while its open lasts, and reserves the groups' with the links' (none, as a
     /// config that names a group is refused by name there).
-    fn rows(self) -> RuntimeRows {
+    const fn rows(self) -> RuntimeRows {
         let tasks = if cfg!(feature = "group") {
             self.rows.tasks
         } else {
@@ -6313,10 +6404,58 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             key_ids,
             OpenStorage {
                 memory,
-                held: HeldPlaces::NONE,
-                plan: PlanFrom::Config,
+                plan: PlanFrom::Config(HeldPlaces::NONE),
             },
         )
+    }
+
+    /// The region an open of this engine by `rows` lays out no row for ([`OpenRegion`]): the rows
+    /// of the session's tables, and after them the places this engine keeps beside its tables and
+    /// those `held` names for the ABI, every one a size of a type of the engine or a constant of
+    /// the ABI. A `const fn`, so a build that states its region as a constant has it laid out when
+    /// it is compiled; refused as an open over a config refuses those places
+    /// ([`ArenaPlan::holding`]).
+    pub const fn open_region(
+        rows: ArenaRegion,
+        held: HeldPlaces,
+    ) -> Result<OpenRegion, ArenaRefused> {
+        Self::open_region_over::<L>(rows, held)
+    }
+
+    /// [`Self::open_region`], the links' cells laid out for the links of `S`: for an engine over a
+    /// choice of two stacks (`either_links::EitherLinks`), the region of an open whose config
+    /// chose the stack `S`, whose cells hold its links and no larger.
+    pub const fn open_region_over<S: CoopLinks>(
+        rows: ArenaRegion,
+        held: HeldPlaces,
+    ) -> Result<OpenRegion, ArenaRefused> {
+        #[cfg(wz_round)]
+        let tables = RuntimeTables::of_shape::<C>(rows.shape());
+        #[cfg(not(wz_round))]
+        let tables = RuntimeTables::of_shape(rows.shape());
+        let Some(runtime) = tables.placed_bytes::<C>() else {
+            return Err(ArenaRefused::TooLarge);
+        };
+        let driver = <S as SessionLinks<LinkCount>>::LINK_CELL_BYTES;
+        OpenRegion::laid(rows, &Self::open_holds(driver, &held, runtime))
+    }
+
+    /// What an open of this engine lays out after the rows its limits size (`lay_out_open`): the
+    /// cells of its links, a driver's `driver` bytes, its faces' rooms, the ABI's places `held`,
+    /// the runtime's span of `runtime` bytes, the engine's own place and its planes'.
+    const fn open_holds(driver: usize, held: &HeldPlaces, runtime: usize) -> OpenHolds<'_> {
+        OpenHolds {
+            cells: cells_of::<C>(driver),
+            rooms: link_rooms_bytes::<L>(),
+            held,
+            runtime,
+            engine: Shared::<Self>::layout().size(),
+            planes: SessionPlanes::OF_BUILD,
+            #[cfg(feature = "listen")]
+            admission: core::mem::size_of::<Admission<C>>(),
+            #[cfg(not(wz_round))]
+            direct_face: Self::DIRECT_FACE_BYTES,
+        }
     }
 
     /// `Self::open_in` (a build with `runtime-plan`), its config read from `source` inside the
@@ -6333,7 +6472,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// ends what it began as a dropped session does (`end_links`): the ports it bound are let
     /// go of and a group it joined is told it leaves.
     ///
-    /// The arena also holds the places `storage.held` names, lent after every table
+    /// The arena also holds the places `storage.plan` names for the ABI, lent after every table
     /// ([`ArenaPlan::holding`]): a place for the ABI's own handle of the session
     /// ([`CoopDrive::handle_place`]) and places for its objects of the session's entities
     /// ([`PlaceLender::claim_place`]). They are reserved with the session, and an open whose arena cannot
@@ -6399,11 +6538,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         key_ids: OpenKeyIds,
         storage: OpenStorage,
     ) -> Result<EngineHold<Self>, OpenError> {
-        let OpenStorage {
-            memory,
-            held,
-            plan: from,
-        } = storage;
+        let OpenStorage { memory, plan } = storage;
         let OpenInput { config, endpoints } = input;
         admit_sn_widths(&config)?;
         #[cfg(feature = "shared-key-ids")]
@@ -6418,23 +6553,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let tables = RuntimeTables::of::<C>(&config);
         #[cfg(not(wz_round))]
         let tables = RuntimeTables::of(&config);
-        let runtime_bytes = tables
-            .placed_bytes::<C>()
-            .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?;
-        let holds = OpenHolds {
-            cells: link_cells::<C>(&links),
-            rooms: link_rooms_bytes(&links),
-            held: &held,
-            runtime: runtime_bytes,
-            engine: Shared::<Self>::layout().size(),
-            planes: SessionPlanes::OF_BUILD,
-            #[cfg(feature = "listen")]
-            admission: core::mem::size_of::<Admission<C>>(),
-            #[cfg(not(wz_round))]
-            direct_face: Self::DIRECT_FACE_BYTES,
+        let from = match &plan {
+            PlanFrom::Region(region) => {
+                // Laid out with the places of this engine over the links its maker named
+                // (`Self::open_region_over`): those this open is handed.
+                debug_assert_eq!(region.cell_bytes(), link_cells::<C>(&links));
+                debug_assert_eq!(region.places().engine, Shared::<Self>::layout().size());
+                OpenFrom::Region(*region)
+            }
+            #[cfg(any(feature = "runtime-plan", test))]
+            PlanFrom::Config(held) => OpenFrom::Config(Self::open_holds(
+                links.link_cell_bytes(),
+                held,
+                tables
+                    .placed_bytes::<C>()
+                    .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
+            )),
         };
-        let mut lent =
-            lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
+        let runtime_bytes = from.places().runtime;
+        let mut lent = lend_session(&from, memory, &config, &policy).map_err(OpenError::Arena)?;
         // The texts of the endpoints, each read and written once into the row the plan laid out
         // for it: the session names an endpoint by its row from here, and a text that has no row
         // is refused here, before anything is bound or dialled.
