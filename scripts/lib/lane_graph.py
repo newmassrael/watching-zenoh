@@ -48,6 +48,10 @@ directory is the tracked manifest of that name the workspace's members, its path
                                                    of those in submodules, the lock entry of each
                                                    package, and the workspace's own files
                                                    (`workspace_files`)
+    manifest_inputs(tree) -> (paths, gitlinks)     what a call that reads the graph and builds
+                                                   nothing (`cargo metadata`) reads: every
+                                                   manifest, lock, pin and cargo config, and the
+                                                   paths that decide each package's targets
     resolve(spaces, spec) -> [(ws_root, key)]      a `lanes.toml` package spec or a cargo `-p`
 
   python3 scripts/lib/lane_graph.py --selftest
@@ -439,6 +443,38 @@ def workspace_files(tree, ws: Workspace) -> list[str]:
     return sorted(out)
 
 
+#: Below a package's directory, what decides the targets cargo discovers there, which `cargo
+#: metadata` lists: their presence, so the files themselves are the over-approximation.
+_DISCOVERED = ("build.rs", "src/lib.rs", "src/main.rs", "src/bin", "examples", "tests", "benches")
+
+
+def manifest_inputs(tree) -> tuple[set[str], dict[str, str]]:
+    """What a cargo call that reads the package graph and builds nothing (`cargo metadata`,
+    `cargo tree`) reads when the caller cannot tell which workspace it asks: every tracked
+    manifest, lock, toolchain pin and cargo configuration, the paths below each manifest's
+    directory that decide the targets cargo discovers, and every submodule gitlink (a path
+    dependency can load a manifest inside one). (tracked paths, {gitlink: commit})."""
+    links = tree.gitlinks()
+    paths: set[str] = set()
+    discovered: set[str] = set()
+    for p in tree.entries:
+        base = posixpath.basename(p)
+        if p in links:
+            continue
+        if base in ("Cargo.toml", "Cargo.lock", "rust-toolchain", "rust-toolchain.toml") or "/.cargo/" in f"/{p}":
+            paths.add(p)
+        if base == "Cargo.toml":
+            d = _dir_of(p)
+            discovered.update(f"{d}/{rel}" if d else rel for rel in _DISCOVERED)
+    for p in tree.entries:
+        if p in links:
+            continue
+        parts = p.split("/")
+        if any("/".join(parts[:i]) in discovered for i in range(1, len(parts) + 1)):
+            paths.add(p)
+    return paths, dict(links)
+
+
 def inputs(tree, ws: Workspace, keys) -> tuple[set[str], dict[str, str], list[str]]:
     """What the closure of `keys` reads (see the module docstring): (tracked paths, {gitlink:
     commit}, lock entries as `name version source checksum` lines)."""
@@ -587,6 +623,15 @@ def selftest() -> int:
         expect("a package spec resolves where it is a member", resolve(spaces, "core") == [("crates", ws.find("core")[0])], resolve(spaces, "core"))
         expect("<ws>:* is every member", sorted(ws.packages[k].name for _, k in resolve(spaces, "crates:*")) == ["app", "core", "leaf", "support"])
         expect("no fixture workspace is broken", broken(tree) == {}, broken(tree))
+        graph_paths, graph_links = manifest_inputs(tree)
+        # Red if `manifest_inputs` drops a workspace's manifest or lock, the pins, or the files
+        # that decide a target.
+        expect("a graph read reads every manifest, lock, pin and config, and what decides a target",
+               {"crates/Cargo.toml", "crates/Cargo.lock", "crates/core/Cargo.toml", "tool/Cargo.toml",
+                "tool/Cargo.lock", "rust-toolchain.toml", ".cargo/config.toml", "crates/app/src/main.rs",
+                "crates/core/src/lib.rs", "tool/src/main.rs"} <= graph_paths
+               and graph_links == {"vendor/sub": "1" * 40}, sorted(graph_paths))
+        expect("and no other file", "README.md" not in graph_paths, sorted(graph_paths))
         bad_rev = fx.commit({"tool/Cargo.lock": FIXTURE["tool/Cargo.lock"] + '\n[[package]]\nname = "ghost"\nversion = "0.1.0"\ndependencies = [\n "nowhere",\n]\n'})
         bad_tree = GitTree(fx.root, bad_rev)
         # Red if a workspace that does not read is dropped silently or fails the others.

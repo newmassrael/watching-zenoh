@@ -57,18 +57,23 @@ to HEAD and are anything `git rev-parse` reads.
 * **inputs** -- M(L, t): (path, mode, blob) of every tracked file in inputs(L, t), (path, commit)
   of every submodule gitlink in it, and the lock entries of the packages it builds.
   inputs(L, t) is the union of: the cargo closure (`lane_graph.py`) of every package the lane's
-  cargo calls name (`-p`, `--manifest-path`, `--workspace` after a `cd` to a workspace) and of
-  its declared `packages` and `legs`; every tracked file and directory its executed lines name;
-  and its declared `decl` globs.
+  cargo calls name (`-p`, `--manifest-path`, `--workspace` after a `cd` to a workspace, or a
+  script's argv list of constants) and of its declared `packages` and `legs`; every tracked file
+  and directory its executed lines name; its declared `decl` globs; and, when it reads the
+  package graph without building (`cargo metadata`, `cargo tree`), `lane_graph.manifest_inputs`.
 
 The time, the machine (for D and S lanes), the commit id and the branch are not in the key.
 
 ## Opaque lanes (RFC 0001 5.4)
 
 A lane is opaque when its inputs cannot be read off its commands: a cargo call whose package set is
-computed (`-p "$pkg"`) or depends on a directory the reader cannot see, a script that spawns cargo
-itself, or a lane that runs another lane (`run-ci.sh --layer`); unless its entry declares the
-`packages` or `legs` it builds. An opaque lane's inputs are the WHOLE tree, so its digest is still
+computed (`-p "$pkg"`) or depends on a directory the reader cannot see, a script that spawns a
+cargo build itself, or a lane that runs another lane (`run-ci.sh --layer`); unless its entry
+declares the `packages` or `legs` it builds. A `-p "$x"` whose `x` is the variable of a `for`
+over literal words names those words. A cargo call that reads the package graph and builds nothing
+(`cargo metadata`, `cargo tree`, from the shell or from a script's argv list) is not opaque: it
+reads what `lane_graph.manifest_inputs` lists, the manifests and locks of the tree and what
+decides the targets cargo discovers. An opaque lane's inputs are the WHOLE tree, so its digest is still
 sound (an equal digest is an equal tree) and moves on every change: it is always selected. The record
 names why (`"opaque": [reasons]`); RFC 0001 counts each as a debt of its entry.
 
@@ -216,10 +221,42 @@ class PyRefs(NamedTuple):
     imports: list[str]
     #: (a path-like string of its code, whether the line it is on starts a program)
     found: list[tuple[str, bool]]
-    #: an argv list that starts with "cargo"
-    spawns_cargo: bool
+    #: each argv list that starts with "cargo": (its subcommand, "?" when that is no constant;
+    #: every word after "cargo" when each is a constant, else None)
+    cargo: list[tuple[str, tuple[str, ...] | None]]
     #: an argv list naming run-ci.sh and --layer
     runs_lane: bool
+
+
+#: Cargo subcommands that read the package graph and build nothing: their inputs are
+#: `lane_graph.manifest_inputs`, not the closure of a package.
+CARGO_READS = frozenset({"metadata", "tree", "locate-project", "pkgid", "verify-project", "read-manifest"})
+#: Cargo words that ask cargo about itself and read nothing of the tree (env holds `cargo -V`).
+CARGO_ASKS = frozenset({"-V", "--version", "version", "-vV", "--list"})
+
+
+def _cargo_argv(elts: list[ast.expr]) -> tuple[str, tuple[str, ...] | None] | None:
+    """(the subcommand, the words after "cargo" when all are constants) of an argv list whose
+    first constant word is "cargo", or None for any other list. The subcommand is "?" when the
+    word that holds it is not a constant; a toolchain word (`"+stable"`, `f"+{channel}"`) before
+    it is skipped, as cargo skips it."""
+    first = next((i for i, e in enumerate(elts) if isinstance(e, ast.Constant) and isinstance(e.value, str)), None)
+    if first is None or elts[first].value != "cargo":
+        return None
+    rest = elts[first + 1:]
+    words = tuple(e.value for e in rest if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    constant = first == 0 and len(words) == len(rest)
+    sub = "?"
+    for e in rest:
+        if isinstance(e, ast.Constant) and isinstance(e.value, str):
+            if e.value.startswith("+"):
+                continue
+            sub = e.value
+        elif (isinstance(e, ast.JoinedStr) and e.values and isinstance(e.values[0], ast.Constant)
+                and str(e.values[0].value).startswith("+")):
+            continue
+        break
+    return sub, (words if constant else None)
 
 
 def python_refs(text: str) -> PyRefs | None:
@@ -234,7 +271,7 @@ def python_refs(text: str) -> PyRefs | None:
     consumed: set[int] = set()
     imports: list[str] = []
     found: list[tuple[str, bool]] = []
-    spawns_cargo = False
+    cargo: list[tuple[str, tuple[str, ...] | None]] = []
     runs_lane = False
     for node in ast.walk(module):
         if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
@@ -247,7 +284,9 @@ def python_refs(text: str) -> PyRefs | None:
     for node in ast.walk(module):
         if isinstance(node, (ast.List, ast.Tuple)):
             words = [e.value for e in node.elts if isinstance(e, ast.Constant) and isinstance(e.value, str)]
-            spawns_cargo = spawns_cargo or words[:1] == ["cargo"]
+            argv = _cargo_argv(node.elts)
+            if argv is not None:
+                cargo.append(argv)
             runs_lane = runs_lane or (any(w.endswith("run-ci.sh") for w in words) and "--layer" in words)
         if isinstance(node, ast.Import):
             imports.extend(alias.name.split(".")[0] for alias in node.names)
@@ -268,7 +307,7 @@ def python_refs(text: str) -> PyRefs | None:
                 found.append((tok, runs(node)))
             for name in _SIBLING.findall(node.value):
                 found.append((name, runs(node)))
-    return PyRefs(imports, found, spawns_cargo, runs_lane)
+    return PyRefs(imports, found, cargo, runs_lane)
 
 
 def names_in(text: str, base: str, tree, dirs: set[str], kind: str) -> Named:
@@ -356,20 +395,43 @@ def _expand(value: str, assigned: dict[str, str]) -> str:
     return value
 
 
+#: A word of a python argv list that reads as one shell word.
+_PLAIN_WORD = re.compile(r"[^\s\"'`$;&|()<>\\]+")
+_FOR = re.compile(r"^\s*for\s+([A-Za-z_]\w*)\s+in\s+(.*?)\s*(?:;\s*do\b.*)?$")
+_LITERAL_WORD = re.compile(r"([\"']?)([A-Za-z0-9_.+-]+)\1")
+_REBINDS = re.compile(r"\b(?:read|local|declare|typeset|mapfile|readarray)\b")
+
+
 def cargo_calls(text: str) -> list[Call]:
-    """Every cargo call of an executed shell text (see `Call`). A call whose selector holds a
-    variable is unresolved and says why; a call inside a quoted string is read only when it names
+    """Every cargo call of an executed shell text (see `Call`). A selector that is the variable
+    of a `for` over literal words (`for crate in a b; do ... -p "$crate"`) names every word of
+    every such `for` since the variable was last bound another way (a `read`, a `local`, an
+    assignment, a `for` over anything else), a superset of what it holds. A call whose selector
+    holds any other variable is unresolved and says why; a call inside a quoted string is read only when it names
     its packages, since an `echo` mentions cargo far more often than a `bash -c` runs it. The directory
     is a `cd` earlier on the call's line, or else the last line that is a `cd` alone (one inside a
     subshell starts with its parenthesis and is not read), with the text's plain assignments
     substituted."""
     out: list[Call] = []
     assigned: dict[str, str] = {}
+    looped: dict[str, list[str]] = {}
     last_cd: str | None = None
     for line in executed(text).splitlines():
         a = _ASSIGN.match(line)
         if a:
             assigned[a.group(1)] = _expand(a.group(3), assigned)
+        loop = _FOR.match(line)
+        if loop:
+            words = [_LITERAL_WORD.fullmatch(w) for w in loop.group(2).split()]
+            if words and all(words):
+                looped.setdefault(loop.group(1), []).extend(w.group(2) for w in words if w)
+            else:
+                looped.pop(loop.group(1), None)
+        else:
+            for name in list(looped):
+                if re.match(rf"^\s*(?:local\s+|export\s+|readonly\s+)?{name}=", line) or (
+                        _REBINDS.search(line) and re.search(rf"(?<![\w${{]){name}(?![\w}}])", line)):
+                    looped.pop(name)
         bare = re.match(r"^\s*cd\s+[\"']?([^\s\"';&|)]+)[\"']?\s*$", line)
         if bare:
             last_cd = _expand(bare.group(1), assigned)
@@ -387,13 +449,10 @@ def cargo_calls(text: str) -> list[Call]:
                 if tok in ("-p", "--package") and i + 1 < len(toks):
                     value = toks[i + 1]
                     i += 1
-                    packages.append(value)
                 elif tok.startswith("--package="):
                     value = tok.split("=", 1)[1]
-                    packages.append(value)
                 elif tok.startswith("-p") and len(tok) > 2 and not tok.startswith("--"):
                     value = tok[2:]
-                    packages.append(value)
                 elif tok == "--manifest-path" and i + 1 < len(toks):
                     manifest = _expand(toks[i + 1], assigned)
                     i += 1
@@ -401,8 +460,14 @@ def cargo_calls(text: str) -> list[Call]:
                     manifest = _expand(tok.split("=", 1)[1], assigned)
                 elif tok in ("--workspace", "--all"):
                     whole = True
-                if value is not None and ("$" in value or "`" in value or not value):
-                    bad = f"cargo {m.group(1)} names its packages through a variable ({value or 'nothing'})"
+                if value is not None:
+                    var = re.fullmatch(r"\$\{?([A-Za-z_]\w*)\}?", value)
+                    if var and var.group(1) in looped:
+                        packages.extend(looped[var.group(1)])
+                    else:
+                        packages.append(value)
+                        if "$" in value or "`" in value or not value:
+                            bad = f"cargo {m.group(1)} names its packages through a variable ({value or 'nothing'})"
                 i += 1
             cds = _CD.findall(line[: m.start()])
             cwd = _expand(cds[-1], assigned) if cds else last_cd
@@ -526,7 +591,10 @@ def _resolve_call(ctx: Ctx, call: Call) -> tuple[list[tuple[str, str]], list[str
         if link is not None:
             return [], [link], ""
         cwd = _clean_path(call.cwd) if call.cwd else None
-        tried = ([posixpath.normpath(posixpath.join(cwd, manifest))] if cwd else []) + [manifest, f"crates/{manifest}"]
+        # A call with no `cd` this reader sees runs at the root or, through a helper that enters it
+        # (`_runci_guarded_test`), in crates/; a manifest given relative to crates/ climbs out of it.
+        tried = [posixpath.normpath(m) for m in
+                 ([posixpath.join(cwd, manifest)] if cwd else []) + [manifest, f"crates/{manifest}"]]
         found = next((m for m in tried if m in ctx.tree.entries), None)
         if found is None:
             return [], [], f"cargo {call.sub} --manifest-path {call.manifest} names no tracked manifest"
@@ -605,10 +673,11 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
     links: dict[str, str] = {}
     named_dirs: set[str] = set()
     builds: dict[str, set[str]] = {}
-    # (text, the directory of its file, its kind for `names_in`); the dispatch script is in
-    # scripts/ and runs from the root, so a name in it is tried against both.
-    queue: list[tuple[str, str, str]] = [(ctx.preamble, "scripts", "shell")] + [
-        (ctx.funcs[n], "scripts", "shell") for n in functions]
+    # (text, the directory of its file, its kind for `names_in`, its path); the dispatch script is
+    # in scripts/ and runs from the root, so a name in it is tried against both.
+    queue: list[tuple[str, str, str, str]] = [(ctx.preamble, "scripts", "shell", RUNCI)] + [
+        (ctx.funcs[n], "scripts", "shell", RUNCI) for n in functions]
+    reads_graph = False
     # Every unit runs through the planner; a tree without one (a selftest's) has nothing to add.
     for path in ([PLANNER] if PLANNER in tree.entries else []) + ([entry.legs] if entry.legs else []):
         if path not in tree.entries:
@@ -616,22 +685,48 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
             continue
         scripts[path] = tree.entries[path].oid
         kind = "code" if path == PLANNER else ("python" if path.endswith(".py") else "shell")
-        queue.append(((tree.text(path) or ""), posixpath.dirname(path), kind))
+        queue.append(((tree.text(path) or ""), posixpath.dirname(path), kind, path))
     while queue:
-        text, base, kind = queue.pop()
+        text, base, kind, where = queue.pop()
         body = executed(text)
         if kind == "python":
             refs = python_refs(text)
-            if refs is None or refs.spawns_cargo:
-                unresolved.append("a python script it runs spawns cargo, or cannot be parsed to tell")
+            if refs is None:
+                unresolved.append(f"{where} does not parse as python, so what it spawns is unknown")
+            else:
+                spawned: set[str] = set()
+                for sub, words in refs.cargo:
+                    if sub in CARGO_READS:
+                        reads_graph = True
+                    elif sub in CARGO_ASKS:
+                        continue
+                    else:
+                        # A list of constants is the shell call it spells; its cwd is unknown.
+                        plain = sub != "?" and words is not None and all(_PLAIN_WORD.fullmatch(w) for w in words)
+                        calls = cargo_calls("cargo " + " ".join(words or ())) if plain else []
+                        if not calls:
+                            spawned.add(sub)
+                        for call in calls:
+                            got, call_links, why = _resolve_call(ctx, call)
+                            for root, key in got:
+                                builds.setdefault(root, set()).add(key)
+                            for link in call_links:
+                                links[link] = gitlinks[link]
+                            if why:
+                                spawned.add(sub)
+                if spawned:
+                    unresolved.append(f"{where} spawns cargo {', '.join(sorted(spawned))} from an argv list")
             if refs is not None and refs.runs_lane:
-                unresolved.append("a python script it runs runs another lane of run-ci.sh")
+                unresolved.append(f"{where} runs another lane of run-ci.sh")
         elif kind == "shell":
             if re.search(r"run-ci\.sh\s+--layer", body):
                 unresolved.append("it runs another lane of run-ci.sh")
             if _SPAWNS_CARGO.search(body):
                 unresolved.append("a text it runs spawns cargo from an argv list")
             for call in cargo_calls(text):
+                if call.sub in CARGO_READS:
+                    reads_graph = True
+                    continue
                 got, call_links, why = _resolve_call(ctx, call)
                 for root, key in got:
                     builds.setdefault(root, set()).add(key)
@@ -655,7 +750,7 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
             scripts[path] = tree.entries[path].oid
             is_python = path.endswith(".py") or data.startswith(b"#!/usr/bin/env python")
             queue.append((data.decode("utf-8", "replace"), posixpath.dirname(path),
-                          "code" if kind == "code" else ("python" if is_python else "shell")))
+                          "code" if kind == "code" else ("python" if is_python else "shell"), path))
     for d in named_dirs:
         for path in tree.under(d):
             if path in gitlinks:
@@ -684,6 +779,10 @@ def _analyse(ctx: Ctx, lane: str) -> Analysis:
                     builds.setdefault(root, set()).add(key)
         except ValueError as err:
             opaque.append(f"{entry.legs}: {err}")
+    if reads_graph:
+        graph_paths, graph_links = lane_graph.manifest_inputs(tree)
+        files |= graph_paths
+        links.update(graph_links)
     # A declaration of what the lane builds stands for the calls this reader cannot read.
     if unresolved and not (entry.packages or entry.legs):
         opaque.extend(unresolved)
@@ -939,10 +1038,22 @@ layer_o_opaque() {
 layer_w_workspace() {
     (cd crates && cargo test --workspace) || return 1
 }
+layer_b_build() {
+    python3 scripts/lib/build.py || return 1
+}
+layer_p_computed() {
+    python3 scripts/lib/computed.py || return 1
+}
+layer_r_graph() {
+    python3 scripts/lib/graph.py || return 1
+}
 run_layer C layer_c_app || overall=1
 run_layer G layer_g_gate || overall=1
 run_layer O layer_o_opaque || overall=1
 run_layer W layer_w_workspace || overall=1
+run_layer B layer_b_build || overall=1
+run_layer P layer_p_computed || overall=1
+run_layer R layer_r_graph || overall=1
 exit "$overall"
 """
 
@@ -969,6 +1080,21 @@ id = "W"
 fn = "layer_w_workspace"
 class = "E"
 reason = "the fixture's machine"
+
+[[lane]]
+id = "B"
+fn = "layer_b_build"
+class = "D"
+
+[[lane]]
+id = "P"
+fn = "layer_p_computed"
+class = "D"
+
+[[lane]]
+id = "R"
+fn = "layer_r_graph"
+class = "D"
 """
 
 _CI_FIXTURE = """on: push
@@ -980,6 +1106,9 @@ jobs:
       - run: bash scripts/run-ci.sh --layer G
       - run: bash scripts/run-ci.sh --layer O
       - run: bash scripts/run-ci.sh --layer W
+      - run: bash scripts/run-ci.sh --layer B
+      - run: bash scripts/run-ci.sh --layer P
+      - run: bash scripts/run-ci.sh --layer R
 """
 
 FIXTURE: dict[str, str] = {
@@ -989,6 +1118,10 @@ FIXTURE: dict[str, str] = {
     WORKFLOWS[0]: _CI_FIXTURE,
     "scripts/lib/gate.py": 'import helper\n\nTABLE = "deploy/table.json"\n',
     "scripts/lib/helper.py": "X = 1\n",
+    "scripts/lib/build.py": 'import subprocess\n\nsubprocess.run(["cargo", "build", "-p", "core"], check=True)\n',
+    "scripts/lib/computed.py": 'import subprocess\nimport sys\n\nsubprocess.run(["cargo", "build", "-p", sys.argv[1]], check=True)\n',
+    "scripts/lib/graph.py": 'import subprocess\n\nsubprocess.run(["cargo", "metadata", "--no-deps", "--format-version", "1"], check=True)\n',
+    "crates/core/src/inner.rs": "pub fn i() {}\n",
     "deploy/table.json": "{}\n",
     "docs/notes/a.md": "a\n",
     "docs/other.md": "other\n",
@@ -1029,8 +1162,16 @@ def selftest() -> int:
         got = lanes(root, first, tables=tables)
         expect("G(t) is the dispatch table's lanes, each unit named by its id",
                [(u["id"], u["class"], u["unit"]["name"]) for u in got]
-               == [("C", "D", "C"), ("G", "D", "G"), ("O", "D", "O"), ("W", "E", "W")], got)
-        expect("only the lane whose package is a variable is opaque", [u["id"] for u in got if u["opaque"]] == ["O"], got)
+               == [("C", "D", "C"), ("G", "D", "G"), ("O", "D", "O"), ("W", "E", "W"), ("B", "D", "B"),
+                   ("P", "D", "P"), ("R", "D", "R")], got)
+        # Red if a python argv list of constants, or one that reads the graph, is called opaque, or
+        # one whose package is computed is not.
+        expect("only the lanes whose packages are computed are opaque", [u["id"] for u in got if u["opaque"]] == ["O", "P"], got)
+        # Red if `_resolve_call` stops normalising the crates/-relative manifest it tries.
+        ctx = context(root, first)
+        pairs, _links, why = _resolve_call(ctx, Call("test", (), "../tool/Cargo.toml", False, None, ""))
+        expect("a manifest given relative to crates/ is found above it",
+               why == "" and [ctx.spaces[r].packages[k].name for r, k in pairs] == ["tool"], (pairs, why))
         rec = record(root, first, "C", env_reader=reader)
         expect("a record recomputes its own digest", digest_of(rec) == d(first, "C"))
         expect("the digest is 64 hex digits", re.fullmatch(r"[0-9a-f]{64}", d(first, "C")) is not None)
@@ -1043,7 +1184,7 @@ def selftest() -> int:
         outside = step({"README.md": "changed\n", "docs/other.md": "changed\n"})
         # Red if `inputs` hashes the whole tree for a lane that is not opaque.
         expect("a file outside every input set moves no transparent lane",
-               not moved(outside, "C") and not moved(outside, "G") and not moved(outside, "W"))
+               not any(moved(outside, lane) for lane in ("C", "G", "W", "B", "R")))
         # Red if an opaque lane's inputs stop being the whole tree.
         expect("an opaque lane moves on any change", moved(outside, "O"))
         dep = step({"crates/core/src/lib.rs": "pub fn f() { }\n"})
@@ -1077,6 +1218,15 @@ def selftest() -> int:
         imported = step({"scripts/lib/helper.py": "X = 2\n"})
         # Red if python imports leave the script closure.
         expect("a module a lane's script imports moves it", moved(imported, "G") and not moved(imported, "C"))
+        inner = step({"crates/core/src/inner.rs": "pub fn i() { }\n"})
+        # Red if a python argv list of constants is not read as the cargo call it spells.
+        expect("a package a script's constant argv builds moves its lane", moved(inner, "B") and moved(inner, "C"))
+        # Red if a graph read hashes the packages' sources instead of their manifests.
+        expect("a source that decides no target does not move a lane that reads the graph", not moved(inner, "R"))
+        manifest = step({"tool/Cargo.toml": FIXTURE["tool/Cargo.toml"] + "\n[features]\nx = []\n"})
+        # Red if `lane_graph.manifest_inputs` leaves out a workspace the call may ask.
+        expect("any workspace's manifest moves a lane that reads the graph", moved(manifest, "R"))
+        expect("and no lane that builds in another workspace", not moved(manifest, "C") and not moved(manifest, "B"))
         body = step({RUNCI: _RUNCI_FIXTURE.replace("cargo test -p app)", "cargo test -p app --quiet)")})
         # Red if the spec holds run-ci.sh whole instead of the lane's own text.
         expect("a lane's own function moves it and no other lane", moved(body, "C") and not moved(body, "G"))
@@ -1100,7 +1250,7 @@ def selftest() -> int:
         text = explain(root, outside[0], outside[1], "C", env_reader=reader)
         expect("explain says when a lane is not selected", text.startswith("C: not selected"), text)
         sel = select(root, data[0], data[1], env_reader=reader, tables=tables)
-        expect("select is digest inequality", sel == ["G", "O"], sel)
+        expect("select is digest inequality", sel == ["G", "O", "P"], sel)
         undeclared = step({RUNCI: _RUNCI_FIXTURE + "run_layer X layer_c_app || overall=1\n",
                            WORKFLOWS[0]: _CI_FIXTURE + "      - run: bash scripts/run-ci.sh --layer X\n"})
         try:
@@ -1118,6 +1268,20 @@ def selftest() -> int:
     calls = cargo_calls('cd crates && cargo test -p a --features x\necho "cargo test failed"\ncargo build --manifest-path "$ROOT/deploy/x/Cargo.toml"\n# cargo test -p commented\n')
     expect("cargo calls are read from executed lines", [(c.sub, c.packages, c.manifest, c.cwd) for c in calls]
            == [("test", ("a",), None, "crates"), ("build", (), "$ROOT/deploy/x/Cargo.toml", None)], calls)
+    looped = cargo_calls('for crate in a "b"; do\n    (cd crates && cargo build -p "$crate")\ndone\n'
+                         'read -r crate\ncargo build -p "${crate}"\n')
+    # Red if a `for` over literal words is not expanded, or a `read` does not unbind it.
+    expect("a for over literal words names each, and a read unbinds its variable",
+           [(c.packages, bool(c.unresolved)) for c in looped] == [(("a", "b"), False), (("${crate}",), True)], looped)
+    over = cargo_calls('for m in $list; do cargo test -p "$m"; done\n')
+    expect("a for over anything else leaves its variable unread", len(over) == 1 and bool(over[0].unresolved), over)
+    refs = python_refs('import subprocess\nsubprocess.run(["cargo", "metadata", "--no-deps"])\n'
+                       'subprocess.run(["cargo", f"+{tc}", "rustdoc", "-p", name])\nsubprocess.run(["cargo"] + rest)\n')
+    # Red if `_cargo_argv` misreads the subcommand past a toolchain word, or calls a list with a
+    # computed word constant.
+    expect("an argv list says its cargo subcommand, and its words when all are constants",
+           refs is not None and set(refs.cargo) == {("metadata", ("metadata", "--no-deps")), ("rustdoc", None), ("?", ())},
+           refs and refs.cargo)
     print(f"lane_digest selftest: {cases} cases pass")
     return 0
 
