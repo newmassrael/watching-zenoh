@@ -91,6 +91,52 @@ pub(crate) unsafe fn outbound_keyexpr<'a>(
     Ok(key)
 }
 
+/// The bit slot 2 of a key's loan carries when the checked constructor that made the key found its
+/// text admitted by [`canon_key`]: in canon form and within the build's bound.
+const PROVEN_CANON: usize = 0b01;
+
+/// The bit slot 2 of a key's loan carries besides when the outbound gate for a zenoh-pico peer
+/// admitted the text too, so [`outbound_key`] would admit it whole.
+const PROVEN_PICO_SAFE: usize = 0b10;
+
+/// Both marks: a key the checked constructors proved all that [`outbound_key`] judges.
+const PROVEN: usize = PROVEN_CANON | PROVEN_PICO_SAFE;
+
+// Slot 2 of an owned key and of a record's loan is the address of a declaration's count, whose
+// alignment leaves the bits of the mark clear; a view's slot 2 holds the mark alone.
+const _: () =
+    assert!(core::mem::align_of::<wz_session_core::session_tables::KeyexprCount>() > PROVEN);
+
+/// What a checked constructor proves of `text`, a text it found in canon form, as slot 2 of the
+/// key's loan keeps it: nothing for a text past the build's bound, which [`canon_key`] refuses;
+/// [`PROVEN_CANON`] otherwise, with [`PROVEN_PICO_SAFE`] when the pico-safe gate admits it.
+/// Judged where the key is made, as zenoh-pico judges its checked view once where it is made, so
+/// an operation on the key does not walk it again. Out of line: every checked constructor marks
+/// its key through it.
+#[inline(never)]
+fn proof_of_canon(text: &str) -> usize {
+    if !fits(text) {
+        return 0;
+    }
+    match wz_session_core::keyexpr_canon::check_outbound_keyexpr_pico_safe(text) {
+        Ok(()) => PROVEN,
+        Err(_) => PROVEN_CANON,
+    }
+}
+
+/// What slot 2 of `ke`'s loan says the constructor proved of its key ([`proof_of_canon`]); no
+/// mark for null, a view made unchecked, a zeroed one and a key lent from a record.
+///
+/// # Safety
+/// `ke` must be a live `z_loaned_keyexpr_t` pointer (or null).
+unsafe fn proof_of(ke: *const z_loaned_keyexpr_t) -> usize {
+    if ke.is_null() {
+        0
+    } else {
+        (*ke)._handle & PROVEN
+    }
+}
+
 /// The judgement of a key a declaration or a get names: refused as [`canon_key`] refuses it, and
 /// then `Z_ERR_INVALID` for a key in canon form that a zenoh-pico peer's canonizer aborts on, the
 /// outbound gate wz's own session applies per face.
@@ -1137,7 +1183,7 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr(
         *keyexpr = z_view_keyexpr_t {
             _start: bytes.as_ptr(),
             _len: len,
-            _pad: [0usize; 4],
+            _pad: [proof_of_canon(text), 0, 0, 0],
         };
         Z_OK
     })
@@ -1286,7 +1332,8 @@ pub unsafe extern "C" fn z_declare_keyexpr(
         };
         match DeclaredKeyexpr::declare(engine_held(state), literal, declared_of(keyexpr)) {
             Ok(key) => {
-                owned_keyexpr_at(declared, slot.fill(key));
+                // The literal passed the whole outbound gate above.
+                owned_keyexpr_at(declared, slot.fill(key), PROVEN);
                 Z_OK
             }
             Err(rc) => rc,
@@ -1455,10 +1502,14 @@ pub const Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS: z_keyexpr_intersection_level_t = 
 /// Out of line: the clone, the owned constructor and the canonizing body each carried their own
 /// copy of the box, its move into place and the drop of a key the heap refused.
 #[inline(never)]
-unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr) -> ZResult {
+unsafe fn store_owned_keyexpr(
+    dst: *mut z_owned_keyexpr_t,
+    key: DeclaredKeyexpr,
+    proof: usize,
+) -> ZResult {
     match crate::bytes::try_box(key) {
         Ok(key) => {
-            owned_keyexpr_at(dst, Box::into_raw(key));
+            owned_keyexpr_at(dst, Box::into_raw(key), proof);
             Z_OK
         }
         Err(no_room) => no_room.code(),
@@ -1466,17 +1517,18 @@ unsafe fn store_owned_keyexpr(dst: *mut z_owned_keyexpr_t, key: DeclaredKeyexpr)
 }
 
 /// Write into `dst` the owned keyexpr whose key lies at `key`, a place of its own: a pool's slot
-/// for a key the program declared (`z_declare_keyexpr`), the heap's for the rest.
+/// for a key the program declared (`z_declare_keyexpr`), the heap's for the rest; `proof` is
+/// what its constructor proved of the text ([`proof_of_canon`]), `0` for nothing.
 ///
 /// # Safety
 /// `dst` is valid and writable; `key` is a live key a [`crate::object_slot::Slot`] was filled
 /// with or a `Box` made, which `dst` then owns.
-unsafe fn owned_keyexpr_at(dst: *mut z_owned_keyexpr_t, key: *mut DeclaredKeyexpr) {
+unsafe fn owned_keyexpr_at(dst: *mut z_owned_keyexpr_t, key: *mut DeclaredKeyexpr, proof: usize) {
     let literal = (*key).literal();
     *dst = z_owned_keyexpr_t {
         _start: literal.as_ptr(),
         _len: literal.len(),
-        _handle: (*key).row_address(),
+        _handle: (*key).row_address() | proof,
         _state: key as *mut c_void,
         _pad: [0usize; 2],
     };
@@ -1529,7 +1581,7 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
             return code;
         }
         match DeclaredKeyexpr::literal_only(text) {
-            Ok(key) => store_owned_keyexpr(keyexpr, key),
+            Ok(key) => store_owned_keyexpr(keyexpr, key, proof_of_canon(text)),
             Err(code) => code,
         }
     })
@@ -1654,8 +1706,9 @@ pub unsafe extern "C" fn z_keyexpr_clone(
         };
         // A copy is the key extended by nothing. One its declaration's count or the heap has no
         // room for is refused, and `dst` stays null.
+        // The copy's text is the source's, so it keeps what was proven of it.
         match extended_from(src, text) {
-            Ok(key) => store_owned_keyexpr(dst, key),
+            Ok(key) => store_owned_keyexpr(dst, key, proof_of(src)),
             Err(code) => code,
         }
     })
@@ -1805,7 +1858,7 @@ unsafe fn store_canonized(
             _ => Z_EINVAL,
         },
     )?;
-    match store_owned_keyexpr(key, extended_from(left, canon)?) {
+    match store_owned_keyexpr(key, extended_from(left, canon)?, proof_of_canon(canon)) {
         Z_OK => Ok(canon.len()),
         code => Err(code),
     }
@@ -2225,6 +2278,67 @@ mod door_reading_tests {
         }
     }
 
+    /// A checked constructor marks its key with what it proved: a canon key the pico-safe gate
+    /// admits carries both marks, a canon key the gate refuses carries the canon mark alone, and
+    /// a view made unchecked or emptied carries none; an owned key made checked, joined or copied
+    /// carries the marks of its text, and a copy of an unchecked view none. Turned red by a
+    /// constructor that leaves the mark out, or by [`proof_of_canon`] setting the pico-safe mark
+    /// without its check.
+    #[test]
+    fn a_checked_constructor_marks_what_it_proved() {
+        // SAFETY: views and owned keys of this frame, each owned key let go of once, and C strings
+        // that outlive them.
+        unsafe {
+            let mut view = unchecked(c"x");
+            assert_eq!(proof_of(z_view_keyexpr_loan(&view)), 0, "unchecked");
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut view, c"demo/a/**".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(proof_of(z_view_keyexpr_loan(&view)), PROVEN);
+            assert_eq!(z_view_keyexpr_from_str(&mut view, c"**/c/*".as_ptr()), Z_OK);
+            assert_eq!(
+                proof_of(z_view_keyexpr_loan(&view)),
+                PROVEN_CANON,
+                "canon, and refused by the pico-safe gate"
+            );
+            z_view_keyexpr_empty(&mut view);
+            assert_eq!(proof_of(z_view_keyexpr_loan(&view)), 0, "emptied");
+            let plain = unchecked(c"demo/a");
+            assert_eq!(proof_of(z_view_keyexpr_loan(&plain)), 0, "unchecked");
+
+            let mut key = z_owned_keyexpr_t::null_value();
+            assert_eq!(z_keyexpr_from_str(&mut key, c"demo/a".as_ptr()), Z_OK);
+            assert_eq!(proof_of(z_keyexpr_loan(&key)), PROVEN);
+            let mut copy = z_owned_keyexpr_t::null_value();
+            assert_eq!(z_keyexpr_clone(&mut copy, z_keyexpr_loan(&key)), Z_OK);
+            assert_eq!(proof_of(z_keyexpr_loan(&copy)), PROVEN, "a copy keeps them");
+            let mut joined = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_join(
+                    &mut joined,
+                    z_keyexpr_loan(&key),
+                    z_view_keyexpr_loan(&plain)
+                ),
+                Z_OK
+            );
+            assert_eq!(proof_of(z_keyexpr_loan(&joined)), PROVEN);
+            let mut unproven = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_clone(&mut unproven, z_view_keyexpr_loan(&plain)),
+                Z_OK
+            );
+            assert_eq!(
+                proof_of(z_keyexpr_loan(&unproven)),
+                0,
+                "a copy of an unchecked view"
+            );
+            for mut owned in [key, copy, joined, unproven] {
+                z_keyexpr_drop(z_keyexpr_move(&mut owned));
+            }
+        }
+    }
+
     /// Two keys are compared through one reading of both: equal, including, intersecting and
     /// disjoint keys each have their relation, and a key that is absent relates to nothing.
     #[test]
@@ -2377,7 +2491,7 @@ mod tests {
         let old = shared.keyexpr_declarations()[0].0;
         let mut key = z_owned_keyexpr_t::null_value();
         // SAFETY: `key` is a live owned key the store writes over.
-        unsafe { store_owned_keyexpr(&mut key, declared) };
+        unsafe { store_owned_keyexpr(&mut key, declared, 0) };
         // Retracted whatever holds it, as the other ABI's undeclaration of its key does.
         shared.undeclare_keyexpr(old);
         assert!(
@@ -2422,7 +2536,7 @@ mod tests {
         let declared = DeclaredKeyexpr::declare(&engine, "demo/kd/full", None).expect("declared");
         let mut key = z_owned_keyexpr_t::null_value();
         // SAFETY: `key` is a live owned key the store writes over.
-        unsafe { store_owned_keyexpr(&mut key, declared) };
+        unsafe { store_owned_keyexpr(&mut key, declared, 0) };
         // The count is filled: the program's key holds one, and each acquire one more until the
         // count refuses.
         let mut holds = Vec::new();
@@ -2475,7 +2589,7 @@ mod tests {
         assert_ne!(row, 0, "the session's table names where the row lies");
         let mut key = z_owned_keyexpr_t::null_value();
         // SAFETY: `key` is a live owned key the store writes over.
-        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared) }, Z_OK);
+        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared, 0) }, Z_OK);
         let mut copy = z_owned_keyexpr_t::null_value();
         // SAFETY: `copy` is writable and `key` a live owned key, loaned for the call.
         assert_eq!(
@@ -3328,7 +3442,7 @@ mod arena_key_tests {
         assert_ne!(row, 0, "a declared key names its row");
         let mut key = z_owned_keyexpr_t::null_value();
         // SAFETY: `key` is a live owned key the store writes over.
-        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared) }, Z_OK);
+        assert_eq!(unsafe { store_owned_keyexpr(&mut key, declared, 0) }, Z_OK);
         let mut copy = z_owned_keyexpr_t::null_value();
         // SAFETY: `copy` is writable and `key` a live owned key, loaned for the call.
         assert_eq!(
