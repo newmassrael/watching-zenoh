@@ -343,9 +343,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
         }
         match event {
             // Handed to its subscribers one at a time (`pinned`), none of it into the round.
+            // What its callbacks left to hand out is handed out with the drains of its run
+            // (`Self::drain_pushes`), once for the run rather than once a Push.
             IterationEvent::InPlace(ref record) if push => {
                 self.engine.hand_lent_push(self.records.face, record);
                 self.records.after_pushes = true;
+                return;
             }
             // Handed to the get it answers with the session let go of (`replies`), none of it
             // into the round.
@@ -401,6 +404,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
                         .hand_plain_puts(self.records.face, payload, puts, *reliable);
                 }
                 self.records.after_pushes = true;
+                return;
             }
             event => {
                 let Some(mut held) = self.engine.live() else {
