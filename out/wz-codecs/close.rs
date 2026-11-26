@@ -75,6 +75,7 @@ impl Close {
     /// dispatches to this one reads it through this one function, out of line
     /// where the set reads it from two sites or more so that no site holds a
     /// copy (docs/adr/0136, docs/adr/0137).
+    #[inline(never)]
     pub fn read(cursor: &mut SceReader<'_>) -> Self {
         let raw = cursor.take_array::<1>();
         let reason = raw[0];

@@ -139,6 +139,7 @@ impl<S: JoinStorage> JoinIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self, s: u8) where S: JoinFrom<'f> {
         // Declared-but-unconsumed flag inputs: defensive suppress per declared
         // `<sce:flag-input>` so codecs that haven't (yet) consumed an

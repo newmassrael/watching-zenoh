@@ -839,6 +839,7 @@ impl<'a> LinkstateView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    #[inline(never)]
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
         // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
