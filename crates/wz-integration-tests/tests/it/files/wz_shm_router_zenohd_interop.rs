@@ -50,7 +50,7 @@ use wz_runtime_tokio::session_glue::{drive_session_until_terminal, WhatAmI};
 use wz_runtime_tokio::session_open::{
     connect_and_open_session, connect_and_open_session_with_shm, DialConfig, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+use wz_runtime_tokio::shm_buffer::IssuedBuffer;
 use wz_runtime_tokio::shm_reader::ShmReaderResolver;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
@@ -219,13 +219,13 @@ async fn wz_publishes_through_router(key: &str, text: &str) -> Option<(bool, Str
     let key = key.to_string();
     let bytes = text.as_bytes().to_vec();
     let mut probe = sub_log.try_clone().expect("dup");
-    let held: Arc<StdMutex<Vec<ShmBackedPayload>>> = Arc::default();
+    let held: Arc<StdMutex<Vec<IssuedBuffer>>> = Arc::default();
     let scenario = async {
         // The subscriber's declaration has to reach the router before a put is
         // routed to it, so publish again until the subscriber prints one.
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
+            let mut payload = IssuedBuffer::alloc(bytes.len()).expect("alloc a payload");
             payload.write(&bytes);
             session
                 .publish_shm(&key, &payload, PublishOptions::put())
@@ -574,7 +574,7 @@ async fn wz_getter_through_router() -> Option<GetterRun> {
         // routed to it, so ask again until a reply arrives.
         for _ in 0..80 {
             tokio::time::sleep(Duration::from_millis(250)).await;
-            let mut held = ShmBackedPayload::alloc(WZ_QUERY_VALUE.len()).expect("alloc a value");
+            let mut held = IssuedBuffer::alloc(WZ_QUERY_VALUE.len()).expect("alloc a value");
             held.write(WZ_QUERY_VALUE.as_bytes());
             let held = std::sync::Arc::new(held);
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();

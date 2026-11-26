@@ -32053,8 +32053,7 @@ mod tests {
             let fwd = RouterForwarder::new(zid(0x01));
             let (tx, mut rx) = group_tap();
             fwd.attach_mcast_group(tx, reads_shm);
-            let mut chunk =
-                crate::shm_provider::ShmBackedPayload::alloc(5).expect("a POSIX segment");
+            let mut chunk = crate::shm_buffer::IssuedBuffer::alloc(5).expect("a POSIX segment");
             chunk.write(b"group");
             let chunk = Arc::new(chunk);
             fwd.publish_shm_with(
@@ -32097,7 +32096,7 @@ mod tests {
         target_os = "linux"
     ))]
     fn a_put_naming_a_chunk() -> PushOwned {
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("a POSIX segment");
+        let payload = crate::shm_buffer::IssuedBuffer::alloc(5).expect("a POSIX segment");
         let wire = payload.wire_reference();
         let descriptor = wire.descriptor();
         wire.commit();

@@ -25,7 +25,7 @@
 //!      carried a descriptor (proven deterministically by the push_build unit
 //!      test `build_push_shm_literal_carries_descriptor_and_marker`); here the
 //!      byte-exact delivery proves the resolve closes the loop. The publisher
-//!      holds the `ShmBackedPayload` alive until delivery (the scoped lifecycle).
+//!      holds the `IssuedBuffer` alive until delivery (the scoped lifecycle).
 //!   2. `shm_negotiation_and_merge` — the deterministic `&=`: both offer -> both
 //!      `is_shm()` true; a one-sided offer -> BOTH false (the peer never
 //!      reflects), so the data path stays inert.
@@ -48,7 +48,7 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_shm, connect_and_open_session_with_shm, DialConfig, DialedLink,
     DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+use wz_runtime_tokio::shm_buffer::IssuedBuffer;
 use wz_runtime_tokio::shm_reader::ShmReaderResolver;
 use wz_runtime_tokio_test_support::{establish_capability_pair, fixture_params_with_zid};
 use wz_session_core::locator::parse_any_locator;
@@ -128,7 +128,7 @@ async fn shm_negotiates_and_delivers_put_zero_copy_over_real_tcp() {
 
     // The publisher writes the payload into a /dev/shm segment; it MUST outlive
     // the round-trip (the scoped lifecycle — Drop unlinks).
-    let mut shm_payload = ShmBackedPayload::alloc(data.len()).expect("alloc /dev/shm segment");
+    let mut shm_payload = IssuedBuffer::alloc(data.len()).expect("alloc /dev/shm segment");
     shm_payload.write(&data);
 
     let publisher = TokioSession::new(
@@ -340,7 +340,7 @@ async fn a_unit_only_acceptor_does_not_half_complete_the_challenge() {
 #[test]
 fn an_unnegotiated_peer_cannot_make_this_node_map_its_segment() {
     let data = b"the-payload-a-stranger-must-not-reach".to_vec();
-    let mut payload = ShmBackedPayload::alloc(data.len()).expect("alloc /dev/shm segment");
+    let mut payload = IssuedBuffer::alloc(data.len()).expect("alloc /dev/shm segment");
     payload.write(&data);
     let descriptor = payload.descriptor();
 

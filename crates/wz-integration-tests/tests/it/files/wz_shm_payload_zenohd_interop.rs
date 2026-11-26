@@ -83,10 +83,9 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session, accept_and_open_session_with_shm, connect_and_open_session_with_shm,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
-use wz_runtime_tokio::shm_provider::{
-    chunk_position, confirmed_chunks, is_invalidated, reference_state, AllocPolicy, ReferenceState,
-    ShmBackedPayload, ShmProvider,
+use wz_runtime_tokio::shm_auth_segment::tx_handoff_holds;
+use wz_runtime_tokio::shm_buffer::{
+    chunk_position, is_invalidated, posix_pool, reference_state, IssuedBuffer, ReferenceState,
 };
 use wz_runtime_tokio::shm_reader::{
     PosixShmClient, ProtocolID, SegmentID, ShmBufInner, ShmClient, ShmClientStorage,
@@ -984,7 +983,7 @@ async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -
         Box::pin(async move {
             // Let the session settle, then publish through shared memory.
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
+            let mut payload = IssuedBuffer::alloc(bytes.len()).expect("alloc a payload");
             payload.write(&bytes);
             let descriptor = payload.descriptor();
             session
@@ -1013,7 +1012,7 @@ async fn wz_publishes_to_zenoh_subscriber(owner: Owner, key: &str, text: &str) -
             // or the wait ends.
             let mut came_home = false;
             for _ in 0..60 {
-                let _collect = ShmBackedPayload::alloc(1);
+                let _collect = IssuedBuffer::alloc(1);
                 if reference_state(&descriptor) == Some(ReferenceState::Reclaimed) {
                     came_home = true;
                     break;
@@ -1157,9 +1156,9 @@ async fn wz_shm_payload_sent_to_a_zenohd_subscriber_that_reads_late_is_still_del
         against_z_sub_shm(|session, probe_log, subscriber| {
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                let confirmed_before = confirmed_chunks();
+                let confirmed_before = tx_handoff_holds();
                 signal(subscriber, "STOP");
-                let mut payload = ShmBackedPayload::alloc(bytes.len()).expect("alloc a payload");
+                let mut payload = IssuedBuffer::alloc(bytes.len()).expect("alloc a payload");
                 payload.write(&bytes);
                 let descriptor = payload.descriptor();
                 session
@@ -1185,7 +1184,7 @@ async fn wz_shm_payload_sent_to_a_zenohd_subscriber_that_reads_late_is_still_del
                 // to what it was before the send.
                 let mut released = false;
                 for _ in 0..80 {
-                    if confirmed_chunks() <= confirmed_before {
+                    if tx_handoff_holds() <= confirmed_before {
                         released = true;
                         break;
                     }
@@ -1351,20 +1350,17 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
         "pool-chunk-0002!".repeat(CHUNK / 16),
     ];
     assert!(texts.iter().all(|text| text.len() == CHUNK));
-    let eight = AllocAlignment::ALIGN_8_BYTES;
+    // Eight-byte alignment, as the power of two.
+    let eight = 3;
     let sent_texts = texts.clone();
     let (printed, run) = against_z_sub_shm(|session, probe_log, _subscriber| {
         Box::pin(async move {
             tokio::time::sleep(Duration::from_millis(500)).await;
-            let provider =
-                ShmProvider::pool(&MemoryLayout::new(4096, eight).expect("a pool layout"))
-                    .expect("a pool");
-            let chunk_layout = MemoryLayout::new(CHUNK, eight).expect("a chunk layout");
+            let provider = posix_pool(4096, eight).expect("a pool");
             let mut descriptors = Vec::new();
             for (i, text) in sent_texts.iter().enumerate() {
-                let mut payload = provider
-                    .alloc(chunk_layout, &AllocPolicy::JustAlloc)
-                    .expect("a chunk of the pool");
+                let mut payload =
+                    IssuedBuffer::alloc_from(&provider, CHUNK, eight).expect("a chunk of the pool");
                 payload.write(text.as_bytes());
                 descriptors.push(payload.descriptor());
                 session
@@ -1403,9 +1399,8 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             // Released and not collected: the pool must still be full.
-            let full_after_release_before_collect = provider
-                .alloc(chunk_layout, &AllocPolicy::JustAlloc)
-                .is_err();
+            let full_after_release_before_collect =
+                IssuedBuffer::alloc_from(&provider, CHUNK, eight).is_err();
             // Collect until both chunks are home.
             let mut largest_collected = 0;
             let mut descriptors_stale = false;
@@ -1420,7 +1415,7 @@ async fn wz_shm_pool_chunks_at_two_offsets_reach_a_zenohd_shm_subscriber_and_the
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
             let again: Vec<_> = (0..2)
-                .map(|_| provider.alloc(chunk_layout, &AllocPolicy::JustAlloc))
+                .map(|_| IssuedBuffer::alloc_from(&provider, CHUNK, eight))
                 .collect();
             let pool_reusable = again.iter().all(Result::is_ok);
             PoolRun {

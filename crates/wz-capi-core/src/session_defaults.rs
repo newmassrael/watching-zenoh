@@ -189,7 +189,7 @@ pub enum ShmInit {
 pub fn init_shared_memory(mode: ShmInit) {
     #[cfg(feature = "transport-shm")]
     if mode == ShmInit::Init {
-        wz_runtime_tokio::shm_provider::init();
+        wz_runtime_tokio::shm_buffer::init();
     }
     #[cfg(not(feature = "transport-shm"))]
     let _ = mode;
@@ -282,66 +282,6 @@ impl ShmPromotion {
     /// more than this does.
     pub fn admits(&self, message: PromotedMessage, len: usize) -> bool {
         self.messages.contains(message) && len > 0 && len >= self.threshold
-    }
-}
-
-/// A copy of `bytes` in a chunk of `provider`, as the transport's and not the application's: a
-/// link that negotiated shared memory is sent its descriptor and any other its bytes, and a
-/// receiver of the sending session itself is handed the bytes, as upstream's, which copies at the
-/// link, hands them. `None` when the provider has no room for it, after the collection and the
-/// defragmentation upstream's copy allows itself (`io/zenoh-transport/src/common/shm/interop.rs` @
-/// `.with_unsafe_policy::<Defragment<GarbageCollect<JustAlloc, JustAlloc, ConstBool<false>>>>()`);
-/// the message is then sent as it is.
-#[cfg(feature = "transport-shm")]
-pub fn transport_copy(
-    provider: &wz_runtime_tokio::shm_provider::ShmProvider,
-    bytes: &[u8],
-) -> Option<wz_session_core::extshm::ShmSendHandle> {
-    use std::sync::Arc;
-    use wz_runtime_tokio::shm_backend::MemoryLayout;
-    use wz_runtime_tokio::shm_provider::AllocPolicy;
-
-    let layout = MemoryLayout::of_size(bytes.len()).ok()?;
-    let policy = AllocPolicy::defragment(
-        AllocPolicy::GarbageCollect {
-            inner: Box::new(AllocPolicy::JustAlloc),
-            alt: Box::new(AllocPolicy::JustAlloc),
-            safe: false,
-        },
-        AllocPolicy::JustAlloc,
-    );
-    let mut chunk = provider.alloc(layout, &policy).ok()?;
-    chunk.write(bytes);
-    Some(wz_session_core::extshm::ShmSendHandle::new(Arc::new(
-        TransportCopy(Arc::new(chunk)),
-    )))
-}
-
-/// A chunk the transport copied a payload into ([`transport_copy`]).
-#[cfg(feature = "transport-shm")]
-struct TransportCopy(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>);
-
-#[cfg(feature = "transport-shm")]
-impl wz_session_core::extshm::ShmSendBuffer for TransportCopy {
-    fn bytes(&self) -> &[u8] {
-        self.0.bytes()
-    }
-
-    fn protocol(&self) -> u32 {
-        self.0.protocol()
-    }
-
-    fn receiver_view(&self) -> Option<wz_session_core::link::RxBytes> {
-        // `None` is what the engine hands a receiver of the session the bytes for.
-        None
-    }
-
-    fn reserve_for_receiver(
-        self: std::sync::Arc<Self>,
-    ) -> Box<dyn wz_session_core::extshm::ShmReservation> {
-        // Named by its trait: a build that brings the trait into scope another way would find
-        // this file's own `use` unused, and a build that does not would not find the method.
-        wz_session_core::extshm::ShmSendBuffer::reserve_for_receiver(std::sync::Arc::clone(&self.0))
     }
 }
 
@@ -552,32 +492,5 @@ mod tests {
         assert_eq!(ShmPromotion::default().threshold, 3072);
         assert!(ShmPromotion::default().messages.all());
         assert!(!PromotedMessages::NONE.any());
-    }
-
-    /// The copy is the transport's: its bytes are the payload's, and a receiver of the session
-    /// itself is handed no view of the chunk, so that it is given the bytes.
-    #[cfg(all(feature = "transport-shm", target_os = "linux"))]
-    #[test]
-    fn a_transport_copy_holds_the_bytes_and_offers_the_session_no_view() {
-        let layout =
-            wz_runtime_tokio::shm_backend::MemoryLayout::of_size(1 << 16).expect("a layout");
-        let provider =
-            wz_runtime_tokio::shm_provider::ShmProvider::pool(&layout).expect("a provider");
-        let bytes = [7u8; 4096];
-        let copy = transport_copy(&provider, &bytes).expect("room for the copy");
-        assert_eq!(copy.bytes(), &bytes[..]);
-        assert!(copy.receiver_view().is_none());
-        // CONTROL: a chunk the application allocated is handed to the session as itself.
-        let mut own = provider
-            .alloc(
-                wz_runtime_tokio::shm_backend::MemoryLayout::of_size(16).expect("a layout"),
-                &wz_runtime_tokio::shm_provider::AllocPolicy::JustAlloc,
-            )
-            .expect("a chunk");
-        own.write(&[1u8; 16]);
-        assert!(std::sync::Arc::new(own)
-            .send_handle()
-            .receiver_view()
-            .is_some());
     }
 }

@@ -900,7 +900,7 @@ trait LegBytes {
         not(feature = "multicast-transport"),
         expect(dead_code, reason = "only a group leg sends the chunk of a payload")
     )]
-    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
+    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_buffer::ShmPublishable> {
         None
     }
 }
@@ -912,12 +912,12 @@ impl LegBytes for &[u8] {
 }
 
 #[cfg(feature = "transport-shm")]
-impl LegBytes for Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload> {
+impl LegBytes for Arc<wz_runtime_tokio::shm_buffer::IssuedBuffer> {
     fn leg_bytes(&self) -> &[u8] {
         self.bytes()
     }
 
-    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
+    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_buffer::ShmPublishable> {
         Some(self)
     }
 }
@@ -928,7 +928,7 @@ impl LegBytes for wz_session_core::extshm::ShmSendHandle {
         self.bytes()
     }
 
-    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_provider::ShmPublishable> {
+    fn shm_chunk(&self) -> Option<&dyn wz_runtime_tokio::shm_buffer::ShmPublishable> {
         Some(self)
     }
 }
@@ -4592,7 +4592,7 @@ impl SharedSession {
     pub fn publish_shm_all(
         &self,
         keyexpr: &str,
-        payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
+        payload: Arc<wz_runtime_tokio::shm_buffer::IssuedBuffer>,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
         self.fan_out_with(
@@ -4615,7 +4615,7 @@ impl SharedSession {
         &self,
         mapping_id: ExprId,
         suffix: Option<&str>,
-        payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
+        payload: Arc<wz_runtime_tokio::shm_buffer::IssuedBuffer>,
         opts: &PublishOptions,
     ) -> Result<usize, FanoutError> {
         self.fan_out_with(

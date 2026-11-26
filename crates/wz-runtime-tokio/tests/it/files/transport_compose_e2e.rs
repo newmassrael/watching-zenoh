@@ -44,7 +44,7 @@ use wz_runtime_tokio::observer::ApplicationLayerObserver;
 use wz_runtime_tokio::runtime_impl::TokioTime;
 use wz_runtime_tokio::session::{PublishOptions, TokioSession};
 use wz_runtime_tokio::session_glue::SessionLinkActions;
-use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+use wz_runtime_tokio::shm_buffer::IssuedBuffer;
 use wz_runtime_tokio_test_support::{establish_capability_pair, LifecycleRecordingDriver};
 use wz_session_core::compression::{decompress_batch, BATCH_HEADER_COMPRESSION};
 
@@ -61,7 +61,7 @@ fn publish_shm_and_capture(
     actions: &Arc<SessionLinkActions>,
     driver: &LifecycleRecordingDriver,
 ) -> Vec<u8> {
-    let mut payload = ShmBackedPayload::alloc(64).expect("alloc /dev/shm segment");
+    let mut payload = IssuedBuffer::alloc(64).expect("alloc /dev/shm segment");
     payload.write(&[0xCDu8; 64]);
     let session = TokioSession::new(
         actions.clone(),

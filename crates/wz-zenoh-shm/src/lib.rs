@@ -53,12 +53,13 @@ use api::{
         zshm::{zshm, ZShm},
         zshmmut::{zshmmut, ZShmMut},
     },
-    common::types::ProtocolID,
+    common::types::{ChunkID, ProtocolID, SegmentID},
     provider::memory_layout::MemoryLayout,
 };
-use metadata::descriptor::MetadataDescriptor;
-use watchdog::confirmator::ConfirmedDescriptor;
+use metadata::{descriptor::MetadataDescriptor, subscription::GLOBAL_METADATA_SUBSCRIPTION};
+use watchdog::confirmator::{ConfirmedDescriptor, GLOBAL_CONFIRMATOR};
 use zenoh_buffers::ZSliceBuffer;
+use zenoh_result::{bail, ZResult};
 
 use crate::api::common::types::PtrInSegment;
 
@@ -107,6 +108,59 @@ impl ShmBufInfo {
 #[derive(Debug, Clone)]
 #[allow(unused)]
 pub struct ShmBufHardRef(ConfirmedDescriptor);
+
+impl ShmBufHardRef {
+    /// The hard reference of the buffer `info` names, for the transport of the crates of this
+    /// repository, which keeps a chunk it sent confirmed until its receiver acknowledges it and
+    /// knows the chunk by the descriptor it put on the wire, not by a buffer. Refused when the
+    /// header is of another generation: the slot then holds another buffer, whose watchdog is not
+    /// this sender's to keep up. Hidden from the documentation for the reason
+    /// `ShmBufInner::release_reference` is.
+    #[doc(hidden)]
+    pub fn of_info(info: &ShmBufInfo) -> ZResult<Self> {
+        let metadata = GLOBAL_METADATA_SUBSCRIPTION.read().link(&info.metadata)?;
+        if metadata.header().generation.load(Ordering::SeqCst) != info.generation {
+            bail!("Buffer is invalidated");
+        }
+        Ok(Self(GLOBAL_CONFIRMATOR.read().add(metadata)))
+    }
+}
+
+/// What the header of a metadata slot says, read without holding the slot: how many references
+/// are outstanding, which buffer the slot holds now, and whether its watchdog gave up on it.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HeaderState {
+    /// The references outstanding: the owner's and one per receiver not yet let go.
+    pub refcount: u32,
+    /// The generation of the buffer the slot holds now; it moves on when the slot is reclaimed.
+    pub generation: u32,
+    /// Whether the validator found the slot unconfirmed for a whole window.
+    pub invalidated: bool,
+    /// The data segment the slot's chunk lies in.
+    pub segment: SegmentID,
+    /// The chunk's offset in that segment.
+    pub chunk: ChunkID,
+}
+
+/// The header of the slot `descriptor` names, read through the subscription of the process and
+/// confirming nothing, so that reading it changes nothing the protocol counts. For the crates of
+/// this repository, which keep a provider until the last receiver of its buffers has let go and
+/// read another process's bookkeeping in their tests; hidden from the documentation for the
+/// reason `ShmBufInner::release_reference` is.
+#[doc(hidden)]
+pub fn header_state(descriptor: &MetadataDescriptor) -> ZResult<HeaderState> {
+    let metadata = GLOBAL_METADATA_SUBSCRIPTION.read().link(descriptor)?;
+    let header = metadata.header();
+    let data = header.data_descriptor();
+    Ok(HeaderState {
+        refcount: header.refcount.load(Ordering::SeqCst),
+        generation: header.generation.load(Ordering::SeqCst),
+        invalidated: header.watchdog_invalidated.load(Ordering::SeqCst),
+        segment: data.segment,
+        chunk: data.chunk,
+    })
+}
 
 impl From<&ShmBufInner> for ShmBufHardRef {
     fn from(value: &ShmBufInner) -> Self {

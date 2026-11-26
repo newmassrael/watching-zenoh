@@ -247,7 +247,7 @@ impl AdvancedPublisherPlane for CPlane {
         // memory; any other chunk goes as its bytes.
         match Arc::clone(payload)
             .into_any()
-            .downcast::<wz_runtime_tokio::shm_provider::ShmBackedPayload>()
+            .downcast::<wz_runtime_tokio::shm_buffer::IssuedBuffer>()
         {
             Ok(chunk) => self
                 .shared
@@ -415,7 +415,7 @@ impl AdvancedPublisherPlane for NodePlane {
     ) -> Result<usize, PublishError> {
         match Arc::clone(payload)
             .into_any()
-            .downcast::<wz_runtime_tokio::shm_provider::ShmBackedPayload>()
+            .downcast::<wz_runtime_tokio::shm_buffer::IssuedBuffer>()
         {
             Ok(chunk) => self
                 .node

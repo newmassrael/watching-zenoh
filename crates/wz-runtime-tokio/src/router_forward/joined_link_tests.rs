@@ -116,7 +116,7 @@ fn a_put_on_a_joined_link_is_routed_as_the_primary_faces() {
 #[cfg(feature = "session-extshm")]
 mod shared_memory {
     use super::*;
-    use crate::shm_provider::ShmBackedPayload;
+    use crate::shm_buffer::IssuedBuffer;
     use std::sync::Mutex;
     use wz_session_core::extshm::{
         encode_shm_init_syn_body, encode_shm_open_syn_body, encode_shm_zbuf_ext, ShmAuthenticator,
@@ -198,7 +198,7 @@ mod shared_memory {
 
     /// A Put whose payload is a chunk of shared memory, sent the way a publisher sends one.
     fn a_put_in_shared_memory() -> PushOwned {
-        let payload = ShmBackedPayload::alloc(64).expect("alloc");
+        let payload = IssuedBuffer::alloc(64).expect("alloc");
         let wire = payload.wire_reference();
         let descriptor = wire.descriptor();
         wire.commit();

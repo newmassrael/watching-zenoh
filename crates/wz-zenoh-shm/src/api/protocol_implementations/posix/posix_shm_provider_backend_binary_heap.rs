@@ -310,4 +310,8 @@ impl ShmProviderBackend for PosixShmProviderBackendBinaryHeap {
     fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, ZLayoutError> {
         layout.extend(self.alignment)
     }
+
+    fn accepts(&self, chunk: &AllocatedChunk) -> bool {
+        self.segment.owns(chunk)
+    }
 }

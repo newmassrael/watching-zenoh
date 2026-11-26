@@ -831,14 +831,14 @@ pub enum GroupRoom {
 /// first push). A type that exists only where it is read cannot be left unread.
 #[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
 enum ShmHand<'a> {
-    Borrowed(&'a dyn crate::shm_provider::ShmPublishable),
-    Handed(std::sync::Arc<crate::shm_provider::ShmBackedPayload>),
+    Borrowed(&'a dyn crate::shm_buffer::ShmPublishable),
+    Handed(std::sync::Arc<crate::shm_buffer::IssuedBuffer>),
 }
 
 #[cfg(all(feature = "transport-shm", feature = "pubsub-allow-loop"))]
 impl ShmHand<'_> {
     /// The payload, whichever way it is held.
-    fn payload(&self) -> &dyn crate::shm_provider::ShmPublishable {
+    fn payload(&self) -> &dyn crate::shm_buffer::ShmPublishable {
         match self {
             ShmHand::Borrowed(payload) => *payload,
             ShmHand::Handed(payload) => &**payload,
@@ -2373,7 +2373,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     #[cfg(all(feature = "transport-shm", feature = "codec-push"))]
     fn send_shm_descriptor<B, E>(
         &self,
-        payload: &dyn crate::shm_provider::ShmPublishable,
+        payload: &dyn crate::shm_buffer::ShmPublishable,
         opts: &PublishOptions,
         build: B,
     ) -> Result<(), PublishError>
@@ -3802,7 +3802,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
         &self,
         keyexpr: &str,
         key: Option<GroupKey<'_>>,
-        payload: &dyn crate::shm_provider::ShmPublishable,
+        payload: &dyn crate::shm_buffer::ShmPublishable,
         mut opts: PublishOptions,
     ) -> Result<(), PublishError> {
         self.resolve_publish_timestamp(&mut opts);
@@ -4596,7 +4596,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn publish_shm(
         &self,
         keyexpr: &str,
-        payload: &dyn crate::shm_provider::ShmPublishable,
+        payload: &dyn crate::shm_buffer::ShmPublishable,
         mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
         // R311y818 — the third publish body, and the same `resolve_put` head.
@@ -4626,7 +4626,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     fn publish_shm_legs<B, E, I>(
         &self,
         loopback_keyexpr: &str,
-        payload: &dyn crate::shm_provider::ShmPublishable,
+        payload: &dyn crate::shm_buffer::ShmPublishable,
         opts: PublishOptions,
         build: B,
         inline: I,
@@ -4682,7 +4682,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
         loopback_keyexpr: &str,
-        payload: &dyn crate::shm_provider::ShmPublishable,
+        payload: &dyn crate::shm_buffer::ShmPublishable,
         mut opts: PublishOptions,
     ) -> Result<usize, PublishError> {
         // The same `resolve_put` head as the two bodies around it; idempotent, so the
@@ -4720,7 +4720,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
-        payload: &dyn crate::shm_provider::ShmPublishable,
+        payload: &dyn crate::shm_buffer::ShmPublishable,
         opts: PublishOptions,
     ) -> Result<usize, PublishAliasError> {
         let mut loopback_keyexpr = self
@@ -4736,7 +4736,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     /// transport-shm -- the LOCAL leg of an SHM publish: any subscriber of this session that
     /// the options' locality reaches is handed the CHUNK, the page it lies on and not a copy
     /// of its bytes, with a reference of its own that goes back when it lets go
-    /// ([`ShmBackedPayload::receiver_view`](crate::shm_provider::ShmBackedPayload::receiver_view)).
+    /// ([`IssuedBuffer::receiver_view`](crate::shm_buffer::IssuedBuffer::receiver_view)).
     /// Upstream hands a local subscriber the buffer (MEASURED against the real library), and
     /// the view is built only when a subscriber matches, so a publish nobody here listens to
     /// maps nothing. Returns the number of subscriber callbacks that fired.
@@ -4792,7 +4792,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
     pub fn deliver_shm_local_owned(
         &self,
         keyexpr: &str,
-        payload: std::sync::Arc<crate::shm_provider::ShmBackedPayload>,
+        payload: std::sync::Arc<crate::shm_buffer::IssuedBuffer>,
         opts: PublishOptions,
     ) -> usize {
         #[cfg(feature = "pubsub-allow-loop")]
@@ -4819,7 +4819,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         &self,
         mapping_id: wz_session_core::wire_id::ExprId,
         inline_suffix: Option<&str>,
-        payload: std::sync::Arc<crate::shm_provider::ShmBackedPayload>,
+        payload: std::sync::Arc<crate::shm_buffer::IssuedBuffer>,
         opts: PublishOptions,
     ) -> Result<usize, PublishAliasError> {
         let mut loopback_keyexpr = self

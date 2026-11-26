@@ -170,7 +170,7 @@ fn an_advanced_put_of_a_chunk_goes_as_the_descriptor_to_a_face_that_negotiated()
     use crate::observer::ApplicationLayerObserver;
     use crate::runtime_impl::TokioTime;
     use crate::session::TokioSession;
-    use crate::shm_provider::{reference_state, ReferenceState, ShmBackedPayload};
+    use crate::shm_buffer::{reference_state, IssuedBuffer, ReferenceState};
     use wz_session_core::extshm::encode_shm_descriptor;
 
     const VALUE: &[u8] = b"an advanced sample in shared memory";
@@ -190,7 +190,7 @@ fn an_advanced_put_of_a_chunk_goes_as_the_descriptor_to_a_face_that_negotiated()
         };
         let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
             .expect("advanced publisher declares against the test link");
-        let mut held = ShmBackedPayload::alloc(VALUE.len()).expect("alloc a sample buffer");
+        let mut held = IssuedBuffer::alloc(VALUE.len()).expect("alloc a sample buffer");
         held.write(VALUE);
         let chunk = Arc::new(held);
         let descriptor = chunk.descriptor();
@@ -241,7 +241,7 @@ fn a_chunk_put_is_cached_as_the_chunk_and_recovered_as_shared_memory() {
     use crate::reply_sink::ReplyView;
     use crate::runtime_impl::TokioTime;
     use crate::session::TokioSession;
-    use crate::shm_provider::ShmBackedPayload;
+    use crate::shm_buffer::IssuedBuffer;
 
     let (actions, _driver) = crate::test_fixtures::recording_actions();
     let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
@@ -256,7 +256,7 @@ fn a_chunk_put_is_cached_as_the_chunk_and_recovered_as_shared_memory() {
     };
     let publisher = AdvancedPublisher::declare(&session, "demo/data", options)
         .expect("advanced publisher declares against the test link");
-    let mut held = ShmBackedPayload::alloc(5).expect("alloc a sample buffer");
+    let mut held = IssuedBuffer::alloc(5).expect("alloc a sample buffer");
     held.write(b"chunk");
     let chunk = Arc::new(held);
     assert_eq!(Arc::strong_count(&chunk), 1);

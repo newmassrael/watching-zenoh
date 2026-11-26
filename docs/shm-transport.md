@@ -105,12 +105,12 @@ and it is the one `Session::get_shm_provider` hands out.
 | descriptor, body marker, establishment codecs, `ShmAuthDispatch` | `wz_session_core::extshm` | the no_std half: the wire and the state machine of section 3, and the seams `ShmSendBuffer`, `ShmReservation`, `ShmResolver`, `ShmHandoff` |
 | receive state of a registry | `wz_session_core::extshm::ShmReceiveState` | the negotiated flag, the resolver, the handoff, the drop counters, the un-swap of a Put, a value and a reply |
 | auth segment and handoff counters | `wz_runtime_tokio::shm_auth_segment`, `shm_watchdog` | the transport's own segment, the counters, and their poll |
-| the engine's POSIX provider | `wz_runtime_tokio::shm_provider`, `shm_backend`, `shm_posix_backend`, `posix_shm` | what the C ABI allocates from |
+| the engine's buffers | `wz_runtime_tokio::shm_buffer` | the one send buffer over `zenoh-shm`'s `ShmBufInner` (`ShmBuffer`), the owner of a buffer a provider of the process issued (`IssuedBuffer`), which keeps that provider while a receiver still holds the buffer, and the transport's copy (`transport_copy`) |
 | the reader of the process | `wz_runtime_tokio::shm_reader` (`ShmReaderResolver`) | `zenoh-shm`'s `ShmReader` over a `ShmClientStorage`, as the engine's `ShmResolver`: what every session reads a descriptor with, the engine's, the C ABI's (whose client storages are `ShmClientStorage`s of `ShmClient`s, as zenoh-c's are) and the top crate's |
 | the router's relay pass | `wz_runtime_tokio::shm_relay` | holds the chunks of a message while it is routed and re-expresses them per face |
-| `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the Rust API's provider and buffers, and the reader and client storage of the process |
+| `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the segments, metadata, watchdog, providers (the Rust API's and the C ABI's `z_shm_provider_*`), buffers, and the reader and client storage of the process |
 | the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, and `Promoter`, the implicit optimisation of a put, a query value and a reply, copying into the family crate's provider; its sessions read with the reader of the process, and a received buffer is handed to the application as the `ZShm` it is |
-| what a session applies itself | `wz_capi_core::session_defaults` | `ShmInit` (the subsystem made at the end of every open, a node's as well, `init_shared_memory`), `ShmPromotion` (which payloads are copied, the one decision the top crate and the C ABI take), and `transport_copy`, the transport's copy into an engine provider, which the C ABI's session provider makes for a large put |
+| what a session applies itself | `wz_capi_core::session_defaults` | `ShmInit` (the subsystem made at the end of every open, a node's as well, `init_shared_memory`) and `ShmPromotion` (which payloads are copied, the one decision the top crate and the C ABI take) |
 
 What crosses a link without a copy, by path (registry = the registry of faces, node = a router node):
 
@@ -225,8 +225,8 @@ its own build's fact, asked with `key_state(path, SessionReach)`:
 | zenoh-c ABI, shared-memory arm with the unstable API | acted on | acted on, for a put, a query value and a reply | acted on |
 | a build without shared memory | inert, as upstream's built so | inert | inert |
 
-The C ABI's copy goes into the session's own provider (`z_obtain_shm_provider`'s), which the first
-large message asks for and so starts making; that message and every one while it is made go as
+The C ABI's copy goes, through the engine's `shm_buffer::transport_copy`, into the session's own
+provider (`z_obtain_shm_provider`'s), which the first large message asks for and so starts making; that message and every one while it is made go as
 bytes, as upstream's do. A put, a get, a querier's get, a publisher's put and a queryable's Put
 reply each decide through `SessionShm::promote` (`crate::shm::Promotion` for the entities, which
 are used without the session handle). Neither API copies an error reply: upstream's transport
@@ -280,6 +280,22 @@ The order, each step landing whole with its tests:
    storage, as upstream's does, where the engine's let go of the segment of a provider that was gone.
 3. The provider: the C ABI allocates from `ShmProvider`; `shm_provider`'s allocator, `shm_backend`,
    `shm_posix_backend` and `posix_shm` go.
+   Landed: a `z_shm_provider_*` is `zenoh-shm`'s `ShmProvider` over the POSIX backend or over a C
+   program's callbacks (`ForeignBackend` implements `zenoh-shm`'s backend trait), as zenoh-c's
+   `CSHMProvider` is, and its policies are zenoh-c's compositions of upstream's. The engine keeps
+   `shm_buffer`: `IssuedBuffer`, the owner of a buffer a provider issued (what the C ABI's chunks,
+   the engine's sessions and their tests publish), and `ShmBuffer`, the one send buffer over a
+   `ShmBufInner`, which the relay pass now holds a received chunk with as well. The auth segment
+   is `zenoh-shm`'s `StructInSHM`, as upstream's transport makes it, and the transmit handoff
+   keeps a sent chunk confirmed with `zenoh-shm`'s `ShmBufHardRef` until its receiver
+   acknowledges it. The engine's segment watchdog lost every user with the engine's segments, and
+   went in this step; its thread is left with the poll of the handoff counters (step 4).
+   Three behaviours of the engine's provider that upstream's lacks are kept, two of them as
+   repairs of `zenoh-shm`: a blocking policy fails where nothing is outstanding (the original
+   waits for ever), a pool refuses to map a chunk it did not issue (the original's later
+   collection would corrupt its allocator), and a provider stays with the process while a
+   receiver holds one of its buffers (`IssuedBuffer`; upstream's provider reclaims every slot it
+   issued when it drops, which turns a descriptor in flight stale).
 4. The watchdog: the segment watchdog of `shm_watchdog` goes in favour of `zenoh-shm`'s confirmator
    and validator; the poll of the handoff counters stays, it is the transport's.
 5. The adapter of the top crate folds into the engine's implementation.

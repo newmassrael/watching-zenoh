@@ -16,7 +16,7 @@ use super::tests::{make_request_query, query_frame_outcome};
 use super::*;
 use crate::observer::ApplicationLayerObserver;
 use crate::runtime_impl::TokioTime;
-use crate::shm_provider::{reference_state, ReferenceState, ShmBackedPayload};
+use crate::shm_buffer::{reference_state, IssuedBuffer, ReferenceState};
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use wz_session_core::extshm::encode_shm_descriptor;
 use wz_session_core::query_sink::ReplyMeta;
@@ -37,14 +37,14 @@ fn session(peer_offered: bool) -> (TokioSession, Arc<RecordingLinkDriver>) {
     (session, driver)
 }
 
-fn chunk() -> Arc<ShmBackedPayload> {
-    let mut held = ShmBackedPayload::alloc(VALUE.len()).expect("alloc a reply buffer");
+fn chunk() -> Arc<IssuedBuffer> {
+    let mut held = IssuedBuffer::alloc(VALUE.len()).expect("alloc a reply buffer");
     held.write(VALUE);
     Arc::new(held)
 }
 
 /// Declare a queryable on `home/**` that answers every query with `chunk` as its payload.
-fn answer_with(session: &TokioSession, chunk: &Arc<ShmBackedPayload>) -> Queryable {
+fn answer_with(session: &TokioSession, chunk: &Arc<IssuedBuffer>) -> Queryable {
     let shared = chunk.send_handle();
     session
         .declare_queryable(

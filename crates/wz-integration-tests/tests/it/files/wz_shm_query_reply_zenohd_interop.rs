@@ -65,7 +65,7 @@ use wz_runtime_tokio::session_open::{
     accept_and_open_session_with_shm, connect_and_open_session, connect_and_open_session_with_shm,
     DialConfig, DialedLink, DEFAULT_OPEN_TICK_MS,
 };
-use wz_runtime_tokio::shm_provider::{reference_state, ReferenceState, ShmBackedPayload};
+use wz_runtime_tokio::shm_buffer::{reference_state, IssuedBuffer, ReferenceState};
 use wz_runtime_tokio::shm_reader::ShmReaderResolver;
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
@@ -135,14 +135,14 @@ async fn ask(
         let _ = tx.send(reply.payload().to_vec());
     };
     let key = QUERYABLE_KEY;
-    let mut buffer: Option<std::sync::Arc<ShmBackedPayload>> = None;
+    let mut buffer: Option<std::sync::Arc<IssuedBuffer>> = None;
     let options = QueryOptions::default();
     match value {
         GetterValue::None => session.query(key, options, on_reply, |_| {}),
         GetterValue::Shm(text)
         | GetterValue::QuerierShm(text)
         | GetterValue::AliasedQuerierShm(text) => {
-            let mut held = ShmBackedPayload::alloc(text.len()).expect("alloc a value buffer");
+            let mut held = IssuedBuffer::alloc(text.len()).expect("alloc a value buffer");
             held.write(text.as_bytes());
             let held = std::sync::Arc::new(held);
             let value_handle = held.send_handle();

@@ -364,14 +364,14 @@ impl Drop for RelayPass<'_> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-    use crate::shm_provider::{reference_state, ReferenceState, ShmBackedPayload};
+    use crate::shm_buffer::{reference_state, IssuedBuffer, ReferenceState};
     use wz_session_core::metadata::PushMetadata;
     use wz_session_core::push_build::build_push_shm_literal;
 
     /// A descriptor sent the way a publisher sends one: the reference is taken for the receiver and
     /// the owner then lets go of its own, so the one reference left is the receiver's.
     fn sent_by_a_publisher(len: usize) -> (ShmDescriptor, PushOwned) {
-        let payload = ShmBackedPayload::alloc(len).expect("alloc");
+        let payload = IssuedBuffer::alloc(len).expect("alloc");
         let wire = payload.wire_reference();
         let descriptor = wire.descriptor();
         wire.commit();
@@ -523,7 +523,7 @@ mod tests {
     /// reference for it.
     #[test]
     fn a_push_for_a_receiver_that_cannot_read_chunks_carries_the_chunks_bytes() {
-        let mut payload = ShmBackedPayload::alloc(11).expect("alloc");
+        let mut payload = IssuedBuffer::alloc(11).expect("alloc");
         payload.write(b"hello relay");
         let wire = payload.wire_reference();
         let descriptor = wire.descriptor();
@@ -660,7 +660,7 @@ mod tests {
     /// A chunk sent the way a getter sends one: a reference taken for the receiver, the owner then
     /// letting go of its own, so the one reference left is the receiver's.
     fn a_chunk_in_flight(len: usize) -> ShmDescriptor {
-        let payload = ShmBackedPayload::alloc(len).expect("alloc");
+        let payload = IssuedBuffer::alloc(len).expect("alloc");
         let wire = payload.wire_reference();
         let descriptor = wire.descriptor();
         wire.commit();

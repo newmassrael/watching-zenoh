@@ -65,7 +65,7 @@
 //! `zenoh_c_shm_and_advanced_on_wz_capi_c`, measured red before the change). See
 //! `crate::session`'s `session_offer`.
 //!
-//! ## The provider is the runtime's, because upstream's lifecycle is observable
+//! ## The provider is `zenoh-shm`'s, because upstream's lifecycle is observable
 //!
 //! `z_pub_shm.c` creates a 4096-byte provider and allocates a 1024-byte chunk
 //! once per second, forever. What makes that loop run is not that a dropped chunk
@@ -76,8 +76,8 @@
 //! carved by the allocator upstream's default backend uses, so which pools can be
 //! made (1000 bytes or fewer cannot), how many chunks of each size a pool holds
 //! and which aligned requests it refuses are upstream's answers rather than
-//! this crate's. All of that lives in `wz_runtime_tokio::shm_provider`, and the
-//! differential `zenoh_c_shm_provider_allocation_twice_and_diff` measures it on
+//! this crate's. All of that is `zenoh-shm`'s `ShmProvider`, the provider of the process's one
+//! shared-memory system (`docs/shm-transport.md`, section 6), and the differential `zenoh_c_shm_provider_allocation_twice_and_diff` measures it on
 //! this ABI and on the real library from one C program.
 //! (`z_shm_provider_available` does NOT report what is left, on purpose: R2957
 //! measured upstream's default POSIX backend answering `0` there, and the built-in
@@ -89,11 +89,12 @@
 //! program could observe, and `z_get_shm.c` shows the second: it ran on this ABI and
 //! aborts on upstream's (`zenoh_c_shm_and_advanced_on_wz_capi_c` leg 5).
 //!
-//! The segment is a real POSIX `/dev/shm` mapping now, which is what lets the
-//! runtime put one of its chunks on the wire as a descriptor. A C program's own
-//! allocator (`z_shm_provider_new` over callbacks) is a [`ForeignBackend`] that
-//! implements the runtime's backend trait, so the two kinds of provider share one
-//! set of allocation semantics and differ only in where the memory comes from.
+//! The segment is a real POSIX `/dev/shm` mapping, which is what lets the runtime put one
+//! of its chunks on the wire as a descriptor. A C program's own allocator
+//! (`z_shm_provider_new` over callbacks) is a [`ForeignBackend`] that implements
+//! `zenoh-shm`'s backend trait, as zenoh-c's `DynamicShmProviderBackend` does, so the two
+//! kinds of provider share one set of allocation semantics and differ only in where the
+//! memory comes from.
 //!
 //! ## Gating
 //!
@@ -110,10 +111,23 @@ use crate::abi::{z_loaned_bytes_t, z_owned_bytes_t, Handle};
 use crate::bytes::BytesState;
 use crate::ffi::{guard_val, guarded};
 use crate::result::{ZResult, Z_EINVAL, Z_ENULL, Z_EUNAVAILABLE, Z_OK};
+use wz_runtime_tokio::shm_buffer::IssuedBuffer;
 use wz_runtime_tokio::shm_reader::{
     global_client_storage, ChunkID, PosixShmClient, ProtocolID, SegmentID, ShmClient,
     ShmClientStorage, ShmSegment, WithProtocolID, ZResult as ClientResult,
 };
+use zenoh_core::Wait;
+use zenoh_shm::api::protocol_implementations::posix::posix_shm_provider_backend::PosixShmProviderBackend;
+use zenoh_shm::api::provider::memory_layout::MemoryLayout;
+use zenoh_shm::api::provider::shm_provider::{
+    BlockOn, ConstBool, ConstUsize, Deallocate, Defragment, GarbageCollect, JustAlloc, ShmProvider,
+    ShmProviderBuilder,
+};
+use zenoh_shm::api::provider::shm_provider_backend::ShmProviderBackend;
+use zenoh_shm::api::provider::types::{
+    AllocAlignment, ZAllocError, ZLayoutAllocError, ZLayoutError,
+};
+use zenoh_shm::ShmBufInner;
 
 /// `z_owned_shm_t` / `z_loaned_shm_t` / `z_owned_shm_mut_t` /
 /// `z_loaned_shm_mut_t` — 80 bytes at align 8, measured by upstream's own
@@ -177,14 +191,12 @@ pub const Z_LAYOUT_ERROR_PROVIDER_INCOMPATIBLE_LAYOUT: z_layout_error_t = 1;
 
 /// Where one chunk's bytes live, and who gives them back.
 ///
-/// R3058 -- TWO arms, and the allocator is no longer one of them. A chunk a provider
-/// of this process issued is the runtime's
-/// [`ShmBackedPayload`](wz_runtime_tokio::shm_provider::ShmBackedPayload) whichever
-/// backend made it (the built-in pool, or a C program's callbacks), so the lifecycle
-/// is the runtime's: the chunk is on its provider's busy list, a descriptor of it can
-/// go on the wire, and its memory goes back to the backend when every holder has let
-/// go and the provider is asked to collect. What used to stand here was an arm per
-/// allocator, each returning memory in its own `Drop`, which could not do any of those.
+/// TWO arms, and the allocator is not one of them. A chunk a provider of this process
+/// issued is `zenoh-shm`'s buffer, held as the runtime's
+/// [`IssuedBuffer`](wz_runtime_tokio::shm_buffer::IssuedBuffer) whichever backend made it
+/// (the built-in pool, or a C program's callbacks), so the lifecycle is upstream's: the chunk
+/// is on its provider's busy list, a descriptor of it can go on the wire, and its memory goes
+/// back to the backend when every holder has let go and the provider is asked to collect.
 enum ChunkBacking {
     /// A chunk of a provider of this process. The `Arc` is what makes a
     /// `z_shm_t` copy a SHARED buffer, as upstream's is: the buffer is writable again
@@ -195,7 +207,7 @@ enum ChunkBacking {
     /// (R3059), where the payload keeps the chunk alive so that a put can send it. The
     /// buffers are the holders left over, and the chunk is writable when exactly one is.
     Issued {
-        payload: Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>,
+        payload: Arc<IssuedBuffer>,
         outside: usize,
     },
     /// R3052 -- the bytes of a payload a peer sent as a chunk of shared memory, which
@@ -223,7 +235,7 @@ struct ShmChunk {
 
 impl ShmChunk {
     /// A chunk a provider issued.
-    fn issued(payload: wz_runtime_tokio::shm_provider::ShmBackedPayload) -> Box<Self> {
+    fn issued(payload: IssuedBuffer) -> Box<Self> {
         let len = payload.len();
         Box::new(Self {
             backing: ChunkBacking::Issued {
@@ -586,25 +598,128 @@ fn provider_handle(provider: Provider) -> Handle {
     Box::into_raw(Box::new(provider)) as Handle
 }
 
-/// A provider handle: the runtime's [`ShmProvider`], and whether its callbacks may run
-/// concurrently.
-///
-/// R3058 -- until this round a provider was an ALLOCATOR of this crate's own, in two
-/// arms (a process-memory free list, and an adapter over a C program's callbacks), and a
-/// chunk of either was ordinary memory returned in its own `Drop`. Upstream's provider
-/// is the thing that owns the lifecycle of what it issues, and the runtime now has it:
-/// the built-in pool is the runtime's POSIX backend (a real `/dev/shm` segment, which is
-/// what lets a chunk go on the wire as a descriptor) and a C program's allocator is a
-/// [`ForeignBackend`] implementing the same backend trait. There is one provider type
-/// and one set of allocation semantics, which is why the difference between the two is
-/// only where the memory comes from.
+/// The provider a handle names: `zenoh-shm`'s `ShmProvider` over the built-in POSIX pool or over
+/// a C program's callbacks, as zenoh-c's `CSHMProvider` is
+/// (`zenoh-c/src/shm/provider/shm_provider.rs` @ `pub enum CSHMProvider {`). The provider of
+/// the process's one shared-memory system, so a chunk of either is issued, watched, held and
+/// collected as upstream's is, and a buffer's descriptor is one any reader of zenoh's maps
+/// (`docs/shm-transport.md`, section 6).
+#[derive(Clone)]
+enum Backing {
+    /// The built-in pool: a POSIX segment carved by upstream's default allocator.
+    Posix(Arc<ShmProvider<PosixShmProviderBackend>>),
+    /// A C program's allocator ([`ForeignBackend`]).
+    Foreign(Arc<ShmProvider<ForeignBackend>>),
+}
+
+impl Backing {
+    /// `buffer`, which this provider issued, held with the provider.
+    fn issued(&self, buffer: ShmBufInner) -> IssuedBuffer {
+        match self {
+            Backing::Posix(provider) => IssuedBuffer::new(buffer, Arc::clone(provider)),
+            Backing::Foreign(provider) => IssuedBuffer::new(buffer, Arc::clone(provider)),
+        }
+    }
+
+    fn alloc(
+        &self,
+        layout: MemoryLayout,
+        policy: Policy,
+    ) -> Result<ShmBufInner, ZLayoutAllocError> {
+        match self {
+            Backing::Posix(provider) => alloc_from(provider, layout, policy),
+            Backing::Foreign(provider) => alloc_from(provider, layout, policy),
+        }
+    }
+
+    /// Whether this provider can serve `layout`: upstream computes the layout it will
+    /// allocate by when it builds a precomputed one
+    /// (`commons/zenoh-shm/src/api/provider/shm_provider.rs` @
+    /// `.map_err(|_| ZLayoutError::ProviderIncompatibleLayout)?;`).
+    fn serves(&self, layout: MemoryLayout) -> bool {
+        match self {
+            Backing::Posix(provider) => provider.alloc_layout(layout).is_ok(),
+            Backing::Foreign(provider) => provider.alloc_layout(layout).is_ok(),
+        }
+    }
+
+    fn map(
+        &self,
+        chunk: zenoh_shm::api::provider::chunk::AllocatedChunk,
+        len: usize,
+    ) -> Result<ShmBufInner, ZAllocError> {
+        let mapped = match self {
+            Backing::Posix(provider) => provider.map(chunk, len),
+            Backing::Foreign(provider) => provider.map(chunk, len),
+        };
+        mapped.map(|buffer| buffer.into_inner())
+    }
+
+    fn available(&self) -> usize {
+        match self {
+            Backing::Posix(provider) => provider.available(),
+            Backing::Foreign(provider) => provider.available(),
+        }
+    }
+
+    fn defragment(&self) -> usize {
+        match self {
+            Backing::Posix(provider) => provider.defragment(),
+            Backing::Foreign(provider) => provider.defragment(),
+        }
+    }
+
+    /// # Safety
+    /// As upstream's `garbage_collect_unsafe`: no holder may be reading a chunk the watchdog
+    /// invalidated.
+    unsafe fn garbage_collect_unsafe(&self) -> usize {
+        // SAFETY: the caller's contract.
+        unsafe {
+            match self {
+                Backing::Posix(provider) => provider.garbage_collect_unsafe(),
+                Backing::Foreign(provider) => provider.garbage_collect_unsafe(),
+            }
+        }
+    }
+}
+
+/// Allocate `layout` from `provider` under `policy`.
+fn alloc_from<B: ShmProviderBackend>(
+    provider: &ShmProvider<B>,
+    layout: MemoryLayout,
+    policy: Policy,
+) -> Result<ShmBufInner, ZLayoutAllocError> {
+    type UnsafeGarbageCollect = GarbageCollect<JustAlloc, JustAlloc, ConstBool<false>>;
+    let builder = provider.alloc(layout);
+    // SAFETY: the policies are zenoh-c's for these spellings, and so is their contract, which is
+    // the C caller's: a chunk the collection takes back may have been invalidated under a reader,
+    // and the dealloc spelling may take back a chunk that is still held.
+    let allocated = unsafe {
+        match policy {
+            Policy::Just => builder.wait(),
+            Policy::Collect => builder.with_unsafe_policy::<UnsafeGarbageCollect>().wait(),
+            Policy::CollectDefragment => builder
+                .with_unsafe_policy::<Defragment<UnsafeGarbageCollect>>()
+                .wait(),
+            Policy::CollectDefragmentDeallocate => builder
+                .with_unsafe_policy::<Deallocate<ConstUsize<100>, Defragment<UnsafeGarbageCollect>>>()
+                .wait(),
+            Policy::CollectDefragmentBlock => builder
+                .with_unsafe_policy::<BlockOn<Defragment<UnsafeGarbageCollect>>>()
+                .wait(),
+        }
+    };
+    allocated.map(|buffer| buffer.into_inner())
+}
+
+/// A provider handle: the provider, and whether its callbacks may run concurrently.
 ///
 /// The `threadsafe` flag changes what the callbacks are allowed to do, not where the
 /// memory is: the `_async` spellings refuse a provider whose caller did not promise it,
 /// as upstream's non-threadsafe provider is `!Sync`.
 #[derive(Clone)]
 struct Provider {
-    shm: wz_runtime_tokio::shm_provider::ShmProvider,
+    shm: Backing,
     threadsafe: bool,
 }
 
@@ -619,46 +734,57 @@ enum AllocFailure {
 
 /// The allocation policies zenoh-c composes, by the name of the function that
 /// selects them (`zenoh-c/src/shm/provider/shm_provider.rs` @
-/// `alloc::<Defragment<UnsafeGarbageCollect>>(`).
-///
-/// `UnsafeGarbageCollect` -- upstream's collecting spellings use the UNSAFE collection,
-/// which also takes a chunk the watchdog invalidated (`shm_provider_impl.rs` @
+/// `alloc::<Defragment<UnsafeGarbageCollect>>(`). Each collecting one uses the UNSAFE
+/// collection, which also takes a chunk the watchdog invalidated
+/// (`shm_provider_impl.rs` @
 /// `pub(crate) type UnsafeGarbageCollect = GarbageCollect<JustAlloc, JustAlloc, ConstBool<false>>;`).
-mod policy {
-    use wz_runtime_tokio::shm_provider::AllocPolicy;
-
-    pub(super) fn just_alloc() -> AllocPolicy {
-        AllocPolicy::JustAlloc
-    }
-
-    pub(super) fn gc() -> AllocPolicy {
-        AllocPolicy::GarbageCollect {
-            inner: Box::new(AllocPolicy::JustAlloc),
-            alt: Box::new(AllocPolicy::JustAlloc),
-            safe: false,
-        }
-    }
-
-    pub(super) fn gc_defrag() -> AllocPolicy {
-        AllocPolicy::defragment(gc(), AllocPolicy::JustAlloc)
-    }
-
+#[derive(Clone, Copy)]
+enum Policy {
+    /// `JustAlloc`.
+    Just,
+    /// `UnsafeGarbageCollect`.
+    Collect,
+    /// `Defragment<UnsafeGarbageCollect>`.
+    CollectDefragment,
     /// `Deallocate<ConstUsize<100>, Defragment<UnsafeGarbageCollect>>`: the alternative
     /// defaults to the inner policy.
-    pub(super) fn gc_defrag_dealloc() -> AllocPolicy {
-        AllocPolicy::deallocate(100, gc_defrag(), gc_defrag())
+    CollectDefragmentDeallocate,
+    /// `BlockOn<Defragment<UnsafeGarbageCollect>>`.
+    CollectDefragmentBlock,
+}
+
+/// The policies by the spelling that selects them.
+mod policy {
+    use super::Policy;
+
+    pub(super) fn just_alloc() -> Policy {
+        Policy::Just
     }
 
-    pub(super) fn gc_defrag_blocking() -> AllocPolicy {
-        AllocPolicy::block_on(gc_defrag())
+    pub(super) fn gc() -> Policy {
+        Policy::Collect
+    }
+
+    pub(super) fn gc_defrag() -> Policy {
+        Policy::CollectDefragment
+    }
+
+    pub(super) fn gc_defrag_dealloc() -> Policy {
+        Policy::CollectDefragmentDeallocate
+    }
+
+    pub(super) fn gc_defrag_blocking() -> Policy {
+        Policy::CollectDefragmentBlock
     }
 }
 
 impl Provider {
-    /// A provider over the built-in POSIX pool of `layout`, or why none could be made.
-    fn pool(layout: &wz_runtime_tokio::shm_backend::MemoryLayout) -> std::io::Result<Self> {
-        Ok(Self {
-            shm: wz_runtime_tokio::shm_provider::ShmProvider::pool(layout)?,
+    /// A provider over the built-in POSIX pool of `layout`, or `None` when none can be made: a
+    /// pool too small for its allocator to claim, or no shared memory to make it in.
+    fn pool(layout: MemoryLayout) -> Option<Self> {
+        let provider = ShmProviderBuilder::default_backend(layout).wait().ok()?;
+        Some(Self {
+            shm: Backing::Posix(Arc::new(provider)),
             threadsafe: true,
         })
     }
@@ -668,26 +794,23 @@ impl Provider {
         &self,
         size: usize,
         alignment: z_alloc_alignment_t,
-        policy: &wz_runtime_tokio::shm_provider::AllocPolicy,
+        policy: &Policy,
     ) -> Result<Box<ShmChunk>, AllocFailure> {
-        use wz_runtime_tokio::shm_backend::{
-            AllocAlignment, AllocError, LayoutAllocError, LayoutError, MemoryLayout,
-        };
         // A layout that cannot be made is a LAYOUT error, not an allocation one: upstream
         // splits the two statuses for exactly this.
         let layout = AllocAlignment::new(alignment.pow)
             .and_then(|alignment| MemoryLayout::new(size, alignment))
             .map_err(|_| AllocFailure::Layout(Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS))?;
-        match self.shm.alloc(layout, policy) {
-            Ok(payload) => Ok(ShmChunk::issued(payload)),
-            Err(LayoutAllocError::Alloc(e)) => Err(AllocFailure::Alloc(match e {
-                AllocError::NeedDefragment => Z_ALLOC_ERROR_NEED_DEFRAGMENT,
-                AllocError::OutOfMemory => Z_ALLOC_ERROR_OUT_OF_MEMORY,
-                AllocError::Other => Z_ALLOC_ERROR_OTHER,
+        match self.shm.alloc(layout, *policy) {
+            Ok(buffer) => Ok(ShmChunk::issued(self.shm.issued(buffer))),
+            Err(ZLayoutAllocError::Alloc(e)) => Err(AllocFailure::Alloc(match e {
+                ZAllocError::NeedDefragment => Z_ALLOC_ERROR_NEED_DEFRAGMENT,
+                ZAllocError::OutOfMemory => Z_ALLOC_ERROR_OUT_OF_MEMORY,
+                ZAllocError::Other => Z_ALLOC_ERROR_OTHER,
             })),
-            Err(LayoutAllocError::Layout(e)) => Err(AllocFailure::Layout(match e {
-                LayoutError::IncorrectLayoutArgs => Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
-                LayoutError::ProviderIncompatibleLayout => {
+            Err(ZLayoutAllocError::Layout(e)) => Err(AllocFailure::Layout(match e {
+                ZLayoutError::IncorrectLayoutArgs => Z_LAYOUT_ERROR_INCORRECT_LAYOUT_ARGS,
+                ZLayoutError::ProviderIncompatibleLayout => {
                     Z_LAYOUT_ERROR_PROVIDER_INCOMPATIBLE_LAYOUT
                 }
             })),
@@ -764,10 +887,7 @@ pub unsafe extern "C" fn z_shm_provider_default_new(
         // `Z_EINVAL` whatever goes wrong: a size of zero is no layout, and a pool too small
         // for its allocator to claim is no pool (1000 bytes or fewer, MEASURED on the real
         // library).
-        let built = wz_runtime_tokio::shm_backend::MemoryLayout::of_size(size)
-            .map_err(|e| std::io::Error::other(e.to_string()))
-            .and_then(|layout| Provider::pool(&layout));
-        let Ok(provider) = built else {
+        let Some(provider) = MemoryLayout::try_from(size).ok().and_then(Provider::pool) else {
             return Z_EINVAL;
         };
         let handle = provider_handle(provider);
@@ -795,7 +915,7 @@ unsafe fn provider_alloc(
     provider: *const z_loaned_shm_provider_t,
     size: usize,
     alignment: z_alloc_alignment_t,
-    policy: &wz_runtime_tokio::shm_provider::AllocPolicy,
+    policy: &Policy,
 ) {
     if out.is_null() {
         return;
@@ -1045,15 +1165,11 @@ unsafe fn precomputed_new(
     // provider cannot serve fails HERE with `Z_EINVAL`
     // (`zenoh-c/src/shm/provider/precomputed_layout_impl.rs` @ `provider.alloc_layout(mem_layout)`)
     // and not as an allocation failure later.
-    {
-        use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
-        let served = AllocAlignment::new(alignment.pow)
-            .and_then(|alignment| MemoryLayout::new(size, alignment))
-            .map_err(|_| ())
-            .and_then(|layout| backend.shm.layout_for(layout).map_err(|_| ()));
-        if served.is_err() {
-            return Z_EINVAL;
-        }
+    let served = AllocAlignment::new(alignment.pow)
+        .and_then(|alignment| MemoryLayout::new(size, alignment))
+        .is_ok_and(|layout| backend.shm.serves(layout));
+    if !served {
+        return Z_EINVAL;
     }
     let state = PrecomputedLayoutState {
         provider: backend.clone(),
@@ -1073,7 +1189,7 @@ unsafe fn precomputed_new(
 unsafe fn precomputed_alloc(
     out_result: *mut z_buf_alloc_result_t,
     layout: *const z_loaned_precomputed_layout_t,
-    policy: &wz_runtime_tokio::shm_provider::AllocPolicy,
+    policy: &Policy,
 ) {
     if out_result.is_null() {
         return;
@@ -1741,13 +1857,13 @@ impl SessionShm {
                 let spawned = std::thread::Builder::new()
                     .name("wz-shm-provider-init".into())
                     .spawn(move || {
-                        let built = wz_runtime_tokio::shm_backend::MemoryLayout::of_size(pool_size)
-                            .map_err(|e| std::io::Error::other(e.to_string()))
-                            .and_then(|layout| Provider::pool(&layout));
+                        let built = MemoryLayout::try_from(pool_size)
+                            .ok()
+                            .and_then(Provider::pool);
                         if let Ok(mut state) = this.state.lock() {
                             *state = match built {
-                                Ok(provider) => SessionProviderInit::Ready(provider),
-                                Err(_) => SessionProviderInit::Failed,
+                                Some(provider) => SessionProviderInit::Ready(provider),
+                                None => SessionProviderInit::Failed,
                             };
                         }
                         this.ready.notify_all();
@@ -1771,9 +1887,9 @@ impl SessionShm {
     ///
     /// The first large message asks for the provider and starts it being made, and is sent as
     /// its bytes, as upstream's is; so is every message while it is being made, and every one
-    /// for a session whose configuration gives it none. The copy is the transport's
-    /// (`wz_capi_core::session_defaults::transport_copy`): a receiver of the session itself is
-    /// handed the bytes.
+    /// for a session whose configuration gives it none. The copy is the transport's, the one the
+    /// top crate makes too (`wz_runtime_tokio::shm_buffer::transport_copy`): a receiver of the
+    /// session itself is handed the bytes.
     pub(crate) fn promote(
         self: &Arc<Self>,
         promotion: &wz_capi_core::session_defaults::ShmPromotion,
@@ -1787,7 +1903,14 @@ impl SessionShm {
         let (_, Some(provider)) = self.try_get() else {
             return None;
         };
-        wz_capi_core::session_defaults::transport_copy(&provider.shm, bytes)
+        match &provider.shm {
+            Backing::Posix(provider) => {
+                wz_runtime_tokio::shm_buffer::transport_copy(provider, bytes)
+            }
+            Backing::Foreign(provider) => {
+                wz_runtime_tokio::shm_buffer::transport_copy(provider, bytes)
+            }
+        }
     }
 
     /// Wait for a build that has started: upstream's blocking `recv` on the
@@ -2267,8 +2390,8 @@ pub unsafe extern "C" fn z_internal_shared_shm_provider_check(
 /// Remove the POSIX shm segments no process holds any more (zenoh-c
 /// `zc_cleanup_orphaned_shm_segments`).
 ///
-/// R2954 — the segment protocol's own cleanup,
-/// [`wz_runtime_tokio::posix_shm::cleanup_orphaned_segments`]: upstream's rule
+/// The segment protocol's own cleanup,
+/// [`zenoh_shm::api::cleanup::cleanup_orphaned_shm_segments`]: upstream's rule
 /// over every `/dev/shm/{id}.zenoh`, whoever made it, and a no-op off Linux as
 /// upstream's is. It acts on the SYSTEM's segments: a crashed zenoh process —
 /// this workspace's or upstream's — leaves its segments in `/dev/shm`, and
@@ -2277,7 +2400,7 @@ pub unsafe extern "C" fn z_internal_shared_shm_provider_check(
 #[no_mangle]
 pub extern "C" fn zc_cleanup_orphaned_shm_segments() {
     let _ = guarded(|| {
-        wz_runtime_tokio::posix_shm::cleanup_orphaned_segments();
+        zenoh_shm::api::cleanup::cleanup_orphaned_shm_segments();
         Z_OK
     });
 }
@@ -3127,8 +3250,8 @@ pub unsafe extern "C" fn z_bytes_as_mut_loaned_shm(
 //   2. A BLOCKING allocation against a provider that has NOTHING outstanding
 //      fails instead of waiting. Upstream's `BlockOn` waits for a buffer release
 //      that, with no live buffer, can never come — a deadlock rather than a
-//      wait. The provider keeps the busy list that makes the difference sayable,
-//      and the runtime documents this as the only place its `BlockOn` differs.
+//      wait. `zenoh-shm`'s provider keeps the busy list that makes the difference
+//      sayable, and its `BlockOn` is the one place the policy differs.
 //   3. The `_async` spellings CLONE the provider (an `Arc` bump) rather than
 //      requiring the `&'static` upstream's signature demands, so a caller that
 //      drops the provider handle while the allocation is in flight is not a
@@ -3323,13 +3446,9 @@ enum ChunkAllocResult {
     Err(z_alloc_error_t),
 }
 
-/// A backend the C caller supplied, as a backend of the runtime's provider.
-///
-/// R3058 -- this used to be a second allocator of this crate's own, with its own
-/// blocking loop, its own count of live chunks and its own condition variable, beside the
-/// built-in one. It is the runtime's backend trait now, so a C program's chunks are
-/// issued, watched, held and collected by the same provider as the built-in pool's, and
-/// what a callback has to do is the six things upstream's `DynamicShmProviderBackend`
+/// A backend the C caller supplied, as a backend of `zenoh-shm`'s provider: a C program's
+/// chunks are issued, watched, held and collected by the same provider as the built-in
+/// pool's, and what a callback has to do is the six things upstream's `DynamicShmProviderBackend`
 /// does (`zenoh-c/src/shm/provider/shm_provider_backend.rs` @
 /// `pub struct DynamicShmProviderBackend<TContext>`): allocate, free, defragment, report
 /// what is available, adapt a layout, and name its protocol.
@@ -3361,40 +3480,33 @@ impl ForeignBackend {
     }
 }
 
-impl wz_runtime_tokio::shm_backend::ShmProviderBackend for ForeignBackend {
+impl WithProtocolID for ForeignBackend {
     /// `id_fn`, the protocol every chunk of this backend carries in its header and so the
     /// client a receiver reads it through. A backend with no `id_fn` cannot be a valid C
     /// struct (upstream's field is not optional), and answers `0` -- which is the POSIX
     /// protocol, so it is also refused at allocation (see `alloc`).
-    fn id(&self) -> wz_runtime_tokio::shm_backend::ProtocolId {
+    fn id(&self) -> ProtocolID {
         match self.callbacks.id_fn {
             // SAFETY: `ctx` is the caller's own pointer.
             Some(f) => self.with_context(|ctx| unsafe { f(ctx) }),
             None => 0,
         }
     }
+}
 
+impl ShmProviderBackend for ForeignBackend {
     /// One call into `alloc_fn`, with the result decoded.
-    fn alloc(
-        &self,
-        layout: &wz_runtime_tokio::shm_backend::MemoryLayout,
-    ) -> Result<
-        wz_runtime_tokio::shm_backend::AllocatedChunk,
-        wz_runtime_tokio::shm_backend::AllocError,
-    > {
-        use wz_runtime_tokio::shm_backend::{
-            AllocError, AllocatedChunk, ChunkDescriptor, PtrInSegment as RuntimePtr,
-        };
+    fn alloc(&self, layout: &MemoryLayout) -> zenoh_shm::api::provider::types::ChunkAllocResult {
+        use zenoh_shm::api::common::types::PtrInSegment as ShmPtr;
+        use zenoh_shm::api::provider::chunk::{AllocatedChunk, ChunkDescriptor};
         let (Some(alloc_fn), Some(_)) = (self.callbacks.alloc_fn, self.callbacks.id_fn) else {
-            return Err(AllocError::Other);
+            return Err(ZAllocError::Other);
         };
         let size = layout.size().get();
         let layout_handle =
             z_owned_memory_layout_t::from_handle(Box::into_raw(Box::new(MemoryLayoutState {
                 size,
-                alignment: z_alloc_alignment_t {
-                    pow: layout.alignment().pow(),
-                },
+                alignment: alignment_of(layout),
             })) as Handle);
         // Divergence 1: a GRAVESTONE, not `MaybeUninit`. A callback that writes
         // nothing then leaves a readable "no result" rather than whatever was on
@@ -3423,7 +3535,7 @@ impl wz_runtime_tokio::shm_backend::ShmProviderBackend for ForeignBackend {
         out = z_owned_chunk_alloc_result_t::null_value();
         let _ = out;
         if handle.is_null() {
-            return Err(AllocError::Other);
+            return Err(ZAllocError::Other);
         }
         // SAFETY: a live `Box<ChunkAllocResult>` minted by this module's own
         // constructors, which are the only way a callback can fill this out.
@@ -3432,9 +3544,9 @@ impl wz_runtime_tokio::shm_backend::ShmProviderBackend for ForeignBackend {
             ChunkAllocResult::Ok { descriptor, ptr } => (descriptor, ptr),
             ChunkAllocResult::Err(reason) => {
                 return Err(match reason {
-                    Z_ALLOC_ERROR_NEED_DEFRAGMENT => AllocError::NeedDefragment,
-                    Z_ALLOC_ERROR_OUT_OF_MEMORY => AllocError::OutOfMemory,
-                    _ => AllocError::Other,
+                    Z_ALLOC_ERROR_NEED_DEFRAGMENT => ZAllocError::NeedDefragment,
+                    Z_ALLOC_ERROR_OUT_OF_MEMORY => ZAllocError::OutOfMemory,
+                    _ => ZAllocError::Other,
                 })
             }
         };
@@ -3444,20 +3556,16 @@ impl wz_runtime_tokio::shm_backend::ShmProviderBackend for ForeignBackend {
             // nothing. Reported rather than trusted: the buffer plane hands this
             // pointer and length straight to the caller.
             self.free_descriptor(&descriptor);
-            return Err(AllocError::Other);
+            return Err(ZAllocError::Other);
         };
-        Ok(AllocatedChunk {
-            descriptor: ChunkDescriptor {
-                segment: descriptor.segment,
-                chunk: descriptor.chunk,
-                len,
-            },
-            data: RuntimePtr::new(ptr.ptr, ptr._segment),
-        })
+        Ok(AllocatedChunk::new(
+            ChunkDescriptor::new(descriptor.segment, descriptor.chunk, len),
+            ShmPtr::new(ptr.ptr, ptr._segment),
+        ))
     }
 
     /// Hand a chunk back to the backend that issued it.
-    fn free(&self, chunk: &wz_runtime_tokio::shm_backend::ChunkDescriptor) {
+    fn free(&self, chunk: &zenoh_shm::api::provider::chunk::ChunkDescriptor) {
         self.free_descriptor(&z_chunk_descriptor_t {
             segment: chunk.segment,
             chunk: chunk.chunk,
@@ -3487,37 +3595,39 @@ impl wz_runtime_tokio::shm_backend::ShmProviderBackend for ForeignBackend {
     /// (`zenoh-c/src/shm/provider/shm_provider_backend.rs` @
     /// `layout.ok_or(ZLayoutError::ProviderIncompatibleLayout)`). A backend without one
     /// serves the layout as it is.
-    fn layout_for(
-        &self,
-        layout: wz_runtime_tokio::shm_backend::MemoryLayout,
-    ) -> Result<
-        wz_runtime_tokio::shm_backend::MemoryLayout,
-        wz_runtime_tokio::shm_backend::LayoutError,
-    > {
-        use wz_runtime_tokio::shm_backend::{AllocAlignment, LayoutError, MemoryLayout};
+    fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, ZLayoutError> {
         let Some(layout_for_fn) = self.callbacks.layout_for_fn else {
             return Ok(layout);
         };
         let mut owned =
             z_owned_memory_layout_t::from_handle(Box::into_raw(Box::new(MemoryLayoutState {
                 size: layout.size().get(),
-                alignment: z_alloc_alignment_t {
-                    pow: layout.alignment().pow(),
-                },
+                alignment: alignment_of(&layout),
             })) as Handle);
         // SAFETY: `owned` is a live local this frame owns and `ctx` is the caller's own
         // pointer.
         self.with_context(|ctx| unsafe { layout_for_fn(&mut owned, ctx) });
         if owned.handle.is_null() {
             // The callback dropped the layout: it will not serve this one.
-            return Err(LayoutError::ProviderIncompatibleLayout);
+            return Err(ZLayoutError::ProviderIncompatibleLayout);
         }
         // SAFETY: a live `Box<MemoryLayoutState>` this module minted, taken back exactly
         // once.
         let state = unsafe { Box::from_raw(owned.handle as *mut MemoryLayoutState) };
         AllocAlignment::new(state.alignment.pow)
             .and_then(|alignment| MemoryLayout::new(state.size, alignment))
-            .map_err(|_| LayoutError::ProviderIncompatibleLayout)
+            .map_err(|_| ZLayoutError::ProviderIncompatibleLayout)
+    }
+}
+
+/// The alignment of `layout` as zenoh-c spells it: the power of two.
+fn alignment_of(layout: &MemoryLayout) -> z_alloc_alignment_t {
+    z_alloc_alignment_t {
+        pow: layout
+            .alignment()
+            .get_alignment_value()
+            .get()
+            .trailing_zeros() as u8,
     }
 }
 
@@ -3874,7 +3984,7 @@ unsafe fn foreign_provider_new(
     callbacks: zc_shm_provider_backend_callbacks_t,
     threadsafe: bool,
 ) {
-    let backend = Arc::new(ForeignBackend {
+    let backend = ForeignBackend {
         context: Arc::new(DroppableContext {
             ptr: context,
             delete_fn,
@@ -3882,7 +3992,7 @@ unsafe fn foreign_provider_new(
         callbacks,
         threadsafe,
         serialise: Mutex::new(()),
-    });
+    };
     guard_val((), || {
         if this_.is_null() {
             // The context is consumed either way — `backend` drops here and its
@@ -3891,7 +4001,7 @@ unsafe fn foreign_provider_new(
             return;
         }
         let provider = Provider {
-            shm: wz_runtime_tokio::shm_provider::ShmProvider::new(backend),
+            shm: Backing::Foreign(Arc::new(ShmProviderBuilder::backend(backend).wait())),
             threadsafe,
         };
         // SAFETY: `this_` was checked non-null above.
@@ -3943,15 +4053,14 @@ pub unsafe extern "C" fn z_posix_shm_provider_with_layout_new(
         let Some(state) = (unsafe { memory_layout_state(layout) }) else {
             return Z_ENULL;
         };
-        use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
         // The layout is the pool's size AND the alignment every chunk of it is freed at
         // and every request is extended to, which is what makes a provider built here
         // serve an aligned request a default provider refuses.
         let built = AllocAlignment::new(state.alignment.pow)
             .and_then(|alignment| MemoryLayout::new(state.size, alignment))
-            .map_err(|e| std::io::Error::other(e.to_string()))
-            .and_then(|layout| Provider::pool(&layout));
-        let Ok(provider) = built else {
+            .ok()
+            .and_then(Provider::pool);
+        let Some(provider) = built else {
             return Z_EINVAL;
         };
         // SAFETY: `this_` was checked non-null above.
@@ -4006,17 +4115,17 @@ pub unsafe extern "C" fn z_shm_provider_map(
         if ptr.ptr.is_null() || len == 0 || len > descriptor.len {
             return Z_EINVAL;
         }
-        let chunk = wz_runtime_tokio::shm_backend::AllocatedChunk {
-            descriptor: wz_runtime_tokio::shm_backend::ChunkDescriptor {
-                segment: descriptor.segment,
-                chunk: descriptor.chunk,
-                len: described,
-            },
-            data: wz_runtime_tokio::shm_backend::PtrInSegment::new(ptr.ptr, ptr._segment),
-        };
+        let chunk = zenoh_shm::api::provider::chunk::AllocatedChunk::new(
+            zenoh_shm::api::provider::chunk::ChunkDescriptor::new(
+                descriptor.segment,
+                descriptor.chunk,
+                described,
+            ),
+            zenoh_shm::api::common::types::PtrInSegment::new(ptr.ptr, ptr._segment),
+        );
         match backend.shm.map(chunk, len) {
-            Ok(payload) => {
-                let chunk = ShmChunk::issued(payload);
+            Ok(buffer) => {
+                let chunk = ShmChunk::issued(backend.shm.issued(buffer));
                 // SAFETY: `out_result` was checked non-null above.
                 unsafe {
                     *out_result = z_owned_shm_mut_t::from_handle(Box::into_raw(chunk) as Handle)
@@ -4928,8 +5037,8 @@ mod immutability_recovery_tests {
     /// A 4096-byte provider and an OWNED immutable buffer of 8 bytes out of it, frozen by
     /// `z_shm_from_mut` as a C program freezes one.
     fn owned_shm() -> (Provider, z_owned_shm_t) {
-        let layout = wz_runtime_tokio::shm_backend::MemoryLayout::of_size(4096).expect("a layout");
-        let provider = Provider::pool(&layout).expect("a pool");
+        let layout = MemoryLayout::try_from(4096usize).expect("a layout");
+        let provider = Provider::pool(layout).expect("a pool");
         let chunk = provider
             .alloc(8, ALIGN_BYTE, &policy::just_alloc())
             .unwrap_or_else(|_| panic!("8 bytes fit in a fresh pool"));
@@ -6751,11 +6860,13 @@ mod foreign_backend_tests {
         // bytes become one aligned unit. A constructor that ignored the layout would leave
         // the request as it was.
         let served = backend
-            .shm
-            .layout_for(wz_runtime_tokio::shm_backend::MemoryLayout::of_size(100).expect("layout"))
-            .expect("a pool serves a small layout");
-        assert_eq!(served.alignment().pow(), POW);
-        assert_eq!(served.size().get(), 1usize << POW);
+            .alloc(100, ALIGN_BYTE, &policy::just_alloc())
+            .unwrap_or_else(|_| panic!("a pool serves a small layout"));
+        let ChunkBacking::Issued { payload, .. } = &served.backing else {
+            panic!("a chunk of the pool");
+        };
+        assert_eq!(payload.buffer().capacity().get(), 1usize << POW);
+        drop(served);
 
         // And an allocation at that alignment reaches an aligned ADDRESS, with a
         // skew first so the answer is not the base's by accident.
@@ -6923,10 +7034,10 @@ mod foreign_backend_tests {
 // `z_posix_shm_client_new` is the POSIX member of the default client set, and
 // it is `zenoh-shm`'s POSIX client, the one the process's reader attaches by
 // (`wz_runtime_tokio::shm_reader`): it opens a segment by upstream's name
-// (`{id}.zenoh`), which is the name `wz-runtime-tokio`'s `posix_shm` makes a
-// segment under, so a segment one half of this workspace publishes is one the
-// other half can read. The test proves that with a segment the runtime made
-// rather than a file written by hand. A storage is `zenoh-shm`'s
+// (`{id}.zenoh`), which is the name `zenoh-shm`'s providers make a segment under,
+// so a segment one half of this workspace publishes is one the other half can read.
+// The test proves that with a segment `zenoh-shm` made rather than a file written by
+// hand. A storage is `zenoh-shm`'s
 // `ShmClientStorage` and a C client one of its `ShmClient`s, as zenoh-c's are.
 //
 // ⚠ The item 607 premise this round REFUTED, recorded where the next reader of
@@ -7726,27 +7837,32 @@ pub unsafe extern "C" fn z_internal_shm_client_storage_null(
 mod client_registry_tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use wz_runtime_tokio::posix_shm::{next_candidate_id, OwnedSegment};
+    use zenoh_shm::posix_shm::array::ArrayInSHM;
+
+    /// The data segment of a POSIX provider, as `zenoh-shm` makes one.
+    type DataSegment = ArrayInSHM<z_segment_id_t, u8, z_chunk_id_t>;
 
     /// The protocol of the default client set's POSIX client.
     const POSIX_PROTOCOL_ID: z_protocol_id_t = 0;
 
-    /// A segment the RUNTIME makes, with `bytes` written into it, and the id a peer
+    /// A segment `zenoh-shm` makes, with `bytes` written into it, and the id a peer
     /// is told. It is gone when the returned segment drops.
     ///
-    /// The fixture makes the segment with the runtime's own `posix_shm` rather than
-    /// borrowing one a session made, which is the shape R2289 and R2294 both had to
+    /// The fixture makes the segment with the data segment `zenoh-shm`'s POSIX providers make
+    /// rather than borrowing one a session made, which is the shape R2289 and R2294 both had to
     /// reach for: the producing half is not reachable from this crate's build
     /// (`session-extshm` is not among the features `wz-capi-c` enables), so a test
     /// that waited for one would be measuring nothing. It does NOT write a file of
     /// its own: a path spelled in this test would be one more place the segment's
     /// name is decided, which is how the attacher once came to look for a name the
     /// runtime no longer published.
-    fn publish(bytes: &[u8]) -> (OwnedSegment, z_segment_id_t) {
-        let mut seg = OwnedSegment::create(bytes.len(), || u64::from(next_candidate_id()))
-            .expect("make a segment through the runtime");
-        seg.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
-        let id = z_segment_id_t::try_from(seg.id()).expect("candidate ids are 32 bits");
+    fn publish(bytes: &[u8]) -> (DataSegment, z_segment_id_t) {
+        let len = std::num::NonZeroUsize::new(bytes.len()).expect("a segment of some bytes");
+        let seg = DataSegment::create(len).expect("make a segment through zenoh-shm");
+        // SAFETY: the segment is `bytes.len()` bytes long, freshly made by this process and not
+        // yet named to anyone, and `bytes` is a Rust slice that cannot overlap it.
+        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), seg.elem_mut(0), bytes.len()) };
+        let id = seg.id();
         (seg, id)
     }
 

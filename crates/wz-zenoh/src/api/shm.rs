@@ -399,7 +399,7 @@ pub(crate) mod transport {
             let ours = reservation.descriptor();
             reservation.commit();
             // The engine's provider, as the C ABI sends its buffer.
-            let mut engine = wz_runtime_tokio::shm_provider::ShmBackedPayload::alloc(64)
+            let mut engine = wz_runtime_tokio::shm_buffer::IssuedBuffer::alloc(64)
                 .expect("a chunk of the engine's provider");
             engine.write(&[9u8; 64]);
             let wire = engine.wire_reference();

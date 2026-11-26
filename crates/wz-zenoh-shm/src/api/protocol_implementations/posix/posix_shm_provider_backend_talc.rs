@@ -31,7 +31,7 @@ use crate::api::{
     common::{types::ProtocolID, with_id::WithProtocolID},
     protocol_implementations::posix::protocol_id::POSIX_PROTOCOL_ID,
     provider::{
-        chunk::ChunkDescriptor,
+        chunk::{AllocatedChunk, ChunkDescriptor},
         memory_layout::MemoryLayout,
         shm_provider_backend::ShmProviderBackend,
         types::{AllocAlignment, ChunkAllocResult, ZAllocError, ZLayoutError},
@@ -184,5 +184,9 @@ impl ShmProviderBackend for PosixShmProviderBackendTalc {
 
     fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, ZLayoutError> {
         layout.extend(self.alignment)
+    }
+
+    fn accepts(&self, chunk: &AllocatedChunk) -> bool {
+        self.segment.owns(chunk)
     }
 }
