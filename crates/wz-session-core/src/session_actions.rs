@@ -17324,7 +17324,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_get_resource_by_id` on the publish path.
     #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
-        self.with_outbound_mapping(mapping_id, str::to_owned)
+        self.with_outbound_mapping(mapping_id, String::from)
     }
 
     /// `read` of the literal [`Self::resolve_outbound_mapping`] answers for `mapping_id`, read
