@@ -1914,17 +1914,25 @@ impl<H: Holders> RegistryOf<H> {
         true
     }
 
-    /// Whether the face whose link was lost still owes the liveliness subscribers a token's
-    /// retraction (`Self::take_lost_token`).
+    /// Whether a face whose link was lost still owes the liveliness subscribers a token's
+    /// retraction (`Self::take_lost_token`): one the session holds, or one that went before its
+    /// tokens were all handed, whose tokens wait apart (`Self::owe_tokens_of`).
     #[cfg(all(feature = "liveliness", not(wz_round)))]
     pub(super) fn retracting(&self) -> bool {
+        #[cfg(any(feature = "listen", feature = "group"))]
+        if !self.owed.is_empty() {
+            return true;
+        }
         self.sets.iter().any(|set| set.retracting)
     }
 
-    /// The next token the face whose link was lost owes the liveliness subscribers, its row
-    /// unbound and its `Delete` written into `news`, in ascending id, for a read that hands it to
-    /// them one row at a time with the session let go of: whether there was one. A face left
-    /// owing none retracts no more.
+    /// The next token a face whose link was lost owes the liveliness subscribers, its row
+    /// unbound and its `Delete` written into `news`, for a read that hands it to them one row at
+    /// a time with the session let go of: whether there was one. They go in the order
+    /// `Self::retract_owed` hands them where the round does: those of the faces held first, then
+    /// those of the faces that went, in the order they went, each face's in ascending id. A face
+    /// left owing none retracts no more, and the tokens a face that went owed are let go of, their
+    /// rows back in the session's pool, once the last is taken.
     #[cfg(all(feature = "liveliness", not(wz_round)))]
     pub(super) fn take_lost_token(
         &mut self,
@@ -1937,6 +1945,16 @@ impl<H: Holders> RegistryOf<H> {
                 break;
             }
             set.retracting = false;
+        }
+        #[cfg(any(feature = "listen", feature = "group"))]
+        while !taken {
+            let Some(tokens) = self.owed.first_mut() else {
+                break;
+            };
+            taken = tokens.take_lost(news);
+            if !taken {
+                self.owed.remove(0);
+            }
         }
         if taken {
             self.writing();
@@ -2660,8 +2678,11 @@ mod tests {
 
     /// A face that goes owing retractions gives its set back at once, and the next face takes it,
     /// its token table empty; the tokens owed wait apart, their rows kept in the session's pool,
-    /// and are retracted in the order the faces went, each face's in ascending id. The CONTROL is
-    /// a retraction refused for room, which hands nothing and keeps every token owed.
+    /// and are retracted in the order the faces went, each face's in ascending id. Where the round
+    /// is kept they are handed through it, and the CONTROL is a retraction refused for room, which
+    /// hands nothing and keeps every token owed. Where the read hands each token itself it takes
+    /// them one at a time (`Registry::take_lost_token`), and the CONTROL is that the session still
+    /// owes them once both faces went, so the read is told to take them.
     #[cfg(all(
         feature = "std",
         feature = "liveliness",
@@ -2731,9 +2752,12 @@ mod tests {
             assert_eq!(peer.tokens.count(), 2, "face {id} holds its peer's tokens");
         }
         // The appearances are handed out, so the round has room for the retractions.
-        // SAFETY: this thread is the round's one writer.
-        unsafe { held.registry.delivery.round.seal() };
-        assert!(held.registry.delivery.round.deliver(), "the appearances");
+        #[cfg(wz_round)]
+        {
+            // SAFETY: this thread is the round's one writer.
+            unsafe { held.registry.delivery.round.seal() };
+            assert!(held.registry.delivery.round.deliver(), "the appearances");
+        }
         let lies_at: *const FaceTables = face(&mut held.registry, 5);
         held.registry.lose_tokens(5);
         held.registry.lose_tokens(6);
@@ -2746,9 +2770,15 @@ mod tests {
             Some(4),
             "their rows kept in the session's pool"
         );
+        #[cfg(wz_round)]
         assert!(
             !held.registry.retract_owed(&mut || false),
             "CONTROL: no room, so still owed"
+        );
+        #[cfg(not(wz_round))]
+        assert!(
+            held.registry.retracting(),
+            "CONTROL: the faces that went still owe their tokens"
         );
         assert!(heard.lock().unwrap().is_empty(), "CONTROL: nothing handed");
         held.registry
@@ -2764,13 +2794,34 @@ mod tests {
             0,
             "its token table empty"
         );
-        assert!(
-            held.registry.retract_owed(&mut || true),
-            "every token retracted"
-        );
-        // SAFETY: this thread is the round's one writer.
-        unsafe { held.registry.delivery.round.seal() };
-        assert!(held.registry.delivery.round.deliver(), "the retractions");
+        #[cfg(wz_round)]
+        {
+            assert!(
+                held.registry.retract_owed(&mut || true),
+                "every token retracted"
+            );
+            // SAFETY: this thread is the round's one writer.
+            unsafe { held.registry.delivery.round.seal() };
+            assert!(held.registry.delivery.round.deliver(), "the retractions");
+        }
+        // The read hands each token it takes to the subscribers itself (`hand_lost_tokens`); here
+        // the test is that read, and the subscriber's sink is told nothing.
+        #[cfg(not(wz_round))]
+        {
+            let mut news = wz_session_core::declare::liveliness_subscriber::TokenNews::default();
+            while held.registry.take_lost_token(&mut news) {
+                let sample = news.sample();
+                assert!(
+                    sample.kind == LivelinessSampleKind::Delete,
+                    "a lost token is retracted"
+                );
+                heard
+                    .lock()
+                    .unwrap()
+                    .push((sample.keyexpr.to_owned(), sample.token_id));
+            }
+            assert!(!held.registry.retracting(), "every token retracted");
+        }
         assert_eq!(
             *heard.lock().unwrap(),
             [
