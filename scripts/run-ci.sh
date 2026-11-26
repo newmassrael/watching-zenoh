@@ -2790,6 +2790,9 @@ layer_c0_test_discipline() {
     # counted.
     _runci_leg lane_digest.selftest --after lanes_gate.selftest -- python3 scripts/lib/lane_digest.py --selftest
     _runci_leg lane_digest --after lane_digest.selftest,lanes_gate -- python3 scripts/lib/lane_digest.py --check
+    # The traced audit (RFC 0001 4.4): its reading of a trace and its judgment on fixtures. A traced
+    # run is the audited lane's own (`lane_input_closure.py --lane <id> --run`), not this lane's.
+    _runci_leg lane_input_closure.selftest --after lane_digest.selftest -- python3 scripts/lib/lane_input_closure.py --selftest
     # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
     # rows. The mutants themselves run nightly; this is what a push can afford of them.
     _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest
