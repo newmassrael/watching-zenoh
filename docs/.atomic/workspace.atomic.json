@@ -8510,6 +8510,11 @@
       "source": "open-debt register",
       "reason": "OPEN, UNREPRODUCED: Layer E6h test wz_storage_host_plugins_section_from_a_config_file_serves_via_pico read an empty answer once on a hosted run (the key boot/a was not served) and passed on the next head. Commits between the passing and the failing head touched none of the runtime, session-core, demo and storage crates, so the cause is a race inside the host: the storage host applies the config file's plugins section on the FIRST client session and serves ONE client session at a time, so either the put reached the first session before the storage started on it, or the second session was bound after the query was answered. Round 4444 made the final assertion print the host's whole log; the item closes when a failing run's log names which order occurred and the order is fixed in the host (not in the test), or when a stress run on the build machine shows it cannot happen."
     },
+    "debt-ext-fields-read-from-bounded-body": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: where upstream zenoh 1.10.2 reads the timestamp, responder, source info and timestamp stack extension fields from the message reader, wz (wz-session-core ext_admit.rs body rules, 4f0757c07) reads them from the extension's length-bounded body. The two agree for every sender whose extension length agrees with its fields; for a sender whose length disagrees, upstream reads across the body boundary and wz refuses the message or reads inside the body. Carry of 4f0757c07. Closed by a differential test against the pinned upstream codec on length-disagreeing bodies and a recorded decision on which reading is the preset's contract."
+    },
     "debt-face-loop-debug-frames": {
       "status": "active",
       "source": "open-debt register",
@@ -8631,15 +8636,30 @@
       "status": "active",
       "reason": "Round 1994's open item 468, the half `scripts/lib/sce-codegen-oracle.sh` answers for: an untracked build oracle must record WHAT it was built from, not merely that it exists (Layers B/B2 SKIP-green) or when it was built (R114's mtime, which a backwards pin defeats). The sce-codegen instance is closed and gated; the item stays open for the oracles that still carry no provenance record at all -- `target/zenohd`, `target/zenoh-pico-cli`, the capture fixtures, and `binary_freshness_lint.py`, which grades the sibling class by mtime."
     },
+    "debt-sce-pin-with-policy-overlapping-borrows": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN: Layer Vmiri reports a Stacked Borrows violation inside the pinned SCE runtime: the engine's with_policy hands a policy hook a &mut that overlaps the engine state it borrows. SCE fixed it at b9140288 (SCE ADR 0131: hooks take &mut EngineState<Self>); the wz pin is older. Moving the pin changes the two hand-written StatePolicy impls (crates/wz-statechart-bridge/src/lib.rs, crates/wz-integration-tests/tests/it/files/hal_timer_routing.rs) to the new hook signature, and goes with the SCE pin chain the int-fix lane carries (asked of that lane 2026-11-25). Closed when main pins b9140288 or later and Vmiri reads green."
+    },
     "debt-swappable-link-batching-forwarding": {
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN: wz-session-core reconnect.rs SwappableLink and LocalSwappableLink do not forward BoxedLinkDriver::set_idle_flush or tx_staged to the live link, so a session opened with reconnect (wz-runtime-tokio reconnect.rs open_session_with_reconnect) never turns batching on and writes one message a frame. Forwarding needs a decision first: a link a swap installs that refuses the hook would leave the session batching with no writer that pulls its frames, so the seam must keep the hook, install it on every swap, and say what a refusing link does to the session. link_subject and link_endpoints return references a lock cannot lend and stay unforwarded by shape. Found reading the C1cc batching red of Round 4616. Closed by a forward with that decision and a test that a swapped session still batches."
     },
+    "debt-undeclared-network-exts-forwarded": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, UNDECIDED: upstream zenoh 1.10.2 skips an extension it does not declare on a network envelope (Push, Request, Response, Declare, Interest) and on a declaration, so a zenoh router forwards none of them; the wz router (wz-runtime-tokio router_forward.rs) forwards them as received (since 4f0757c07 a repeated declared extension is forwarded once). Which extensions a wz node carries is a policy decision: drop them as the preset does, carry them as a wz extension beyond the preset, or a switch. Carry of 4f0757c07. Closed by that decision, held as one rule, with a test that a forwarded message carries exactly what the rule says."
+    },
     "debt-windows-capic-largest-chain-never-arrives": {
       "status": "active",
       "source": "open-debt register",
       "reason": "OPEN: the Platform workflow job C ABI (windows-latest) fails the same test at f1dc5fa4f, 1eb3817e7 and dc898a1e1 (runs 45184042866, 45312531140, 45329750154): files::fragmentation_roundtrip::a_chain_up_to_the_largest_message_sent_arrives_whole panics at crates/wz-capi-c/tests/it/files/fragmentation_roundtrip.rs:345 with 4000000 bytes never arrived whole at the subscriber; 126 other tests pass. The four pico library package jobs of the same workflow are red on the same heads and were not read. Nothing registers either, and the Platform runs are not part of the land queue's verdict. Closes when the 4 MB chain arrives whole on Windows (read on pc3-win, the Windows verification host) and the package jobs are read and attributed."
+    },
+    "debt-windows-x86-pico-ratchet-loss": {
+      "status": "active",
+      "source": "open-debt register",
+      "reason": "OPEN, UNATTRIBUTED: Platform run 45710597332 at cf6ca0963 (job pico library package x86 single nostd, windows-latest) fails pico-size-ceiling on all seven pico-api-windows-x86 rows: the library text grew from 993151 to 1018647 bytes against zenoh-pico 317739 (ratio 3.2059 over the ratchet's 3.2038 with tolerance), and every door row by 25 to 28 KB alike. The rows were set at e084726a4; 186 commits touching wz-session-core or wz-codecs lie between it and cf6ca0963. A ratchet only moves down (docs/upstream-parity.md D9): the bytes are to be found by a symbol diff of the two builds on one Windows machine and taken back. Part of debt-pico-host-size-ceiling. Closed when every pico-api-windows-x86 row reads under its ratchet on a hosted run."
     },
     "debt-writer-queue-permit-in-link-driver-trait": {
       "status": "active",
