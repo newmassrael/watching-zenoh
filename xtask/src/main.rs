@@ -42,7 +42,9 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use sce_build::{
-    compile_forge_with_imports, forge::body_reads::BodyReadSites, generator::Language,
+    compile_forge_with_imports,
+    forge::body_reads::{BodyReadSites, InlineDecode},
+    generator::Language,
     DocumentLabel, ForgeCompileOptions,
 };
 #[cfg(feature = "switchboards")]
@@ -64,6 +66,21 @@ use wz_switchboard_schema::SwitchboardSpec;
 /// Layer B2 regen-diff lane catches drift between it and the committed out/,
 /// and a `wz-codecs/src/lib.rs` include! of a stem absent here is a compile
 /// error — so the two stay consistent.
+/// The codecs a received Push is read through, frame to sample: the ones whose body reads the
+/// receive path takes for every message (docs/adr/0139 of the pinned SCE).
+const HOT_DECODE_CODECS: &[&str] = &[
+    "codec_zenoh_transport_frame_header",
+    "codec_zenoh_frame",
+    "codec_zenoh_push",
+    "codec_zenoh_msg_put",
+    "codec_zenoh_ext_entry",
+    "codec_zenoh_ext_unit",
+    "codec_zenoh_ext_zint",
+    "codec_zenoh_ext_zbuf",
+    "codec_zenoh_timestamp",
+    "codec_zenoh_encoding",
+];
+
 const CODECS: &[&str] = &[
     // Leaf codecs (no imports).
     "timestamp",
@@ -191,10 +208,20 @@ fn regen_codecs(root: &Path) {
                 .into_owned()
         })
         .collect();
+    let body_reads = BodyReadSites::of_documents(&documents, &[], |_| views);
+    // The receive path's codecs, read for every message a session hands out: their body reads
+    // are inlined at every site (docs/adr/0139 of the pinned SCE), every other read keeps the
+    // placement by its sites. Measured on the receive window harness, which judges this set.
+    let inline_decode = InlineDecode::Codecs(
+        body_reads
+            .hot_codecs(HOT_DECODE_CODECS)
+            .unwrap_or_else(|e| panic!("hot codec set: {e}")),
+    );
     let options = ForgeCompileOptions {
         owned_origin: true,
         views,
-        body_reads: BodyReadSites::of_documents(&documents, &[], |_| views),
+        body_reads,
+        inline_decode,
         ..ForgeCompileOptions::default()
     };
     // Two phases, so that a refused generation leaves `out/` as it was: every codec is generated
