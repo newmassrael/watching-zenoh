@@ -1334,6 +1334,11 @@ where
 /// life's alone ([`FaceRecord::life`]); this is the I/O that life asks for. A dial under way is
 /// held in its face's link, so a face has one dial at most and the faces' table is the dials'
 /// table too.
+// A dial (its endpoint's text and the addresses its host resolved to) is far larger than a
+// handle on a link's place, so every row is as large as a dial whatever it holds now. That room
+// is the row's in any form: a session that takes no heap cannot box the dial, and a table of
+// dials apart from the faces would hold one row for each face all the same.
+#[allow(clippy::large_enum_variant)]
 pub enum Link<W, D> {
     /// No link: not dialled yet, between two dials, waiting to dial again, or standing by.
     Idle,
