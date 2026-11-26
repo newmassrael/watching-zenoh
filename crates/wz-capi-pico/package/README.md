@@ -160,6 +160,7 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 | conformance-digest | `zext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
 | config-policy | `zext_config_policy`, `zext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
 | device-requires | `zext_config_device_requires` | what an open of a config would ask of the operating system |
+| time-base | `zext_time_base_*`, `zext_config_time_base` | a time the program supplies in place of the system's clock, which the timers of a session opened from a config naming it run on, for a session run in a simulation |
 | (every build) | `zext_redeclare`, `zext_get_to_peer` | declarations re-sent; a get addressed to one node |
 | (multi-threaded arm) | `zext_session_step` | one step of a session opened without its read task, made on the program's own cycle |
 

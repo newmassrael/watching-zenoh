@@ -365,6 +365,10 @@
         "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64"
       }
     },
+    "pico-api-windows-x64-with-time-base": {
+      "ratio_at_most": null,
+      "debt": "debt-pico-host-size-ceiling"
+    },
     "pico-api-windows-x86-with-app-transport": {
       "ratio_at_most": 3.3057,
       "debt": "debt-pico-host-size-ceiling",
@@ -529,6 +533,10 @@
         "pico_pin": "6a881c21dad1",
         "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32"
       }
+    },
+    "pico-api-windows-x86-with-time-base": {
+      "ratio_at_most": null,
+      "debt": "debt-pico-host-size-ceiling"
     }
   }
 }
