@@ -13,8 +13,8 @@
 //! the face is taken out, which a session of its dial face alone never does, a close from a
 //! callback included. The first queryable it reaches is pinned there: a
 //! hold taken on its Final and a call begun on its row. The lock is let go of, the query is handed
-//! to the callback, whose replies go out on the query's link as it makes them, and the call is
-//! ended with no lock held; the next row is pinned under the lock again, from the place after the
+//! to the callback, whose replies are held on the query's link until its Final leaves with them,
+//! and the call is ended with no lock held; the next row is pinned under the lock again, from the place after the
 //! last, so a callback finds the session free and what the queryables before its own did. With no
 //! row left the query owes its Final, which waits for any hold a callback kept. Nothing of the
 //! query is held in the round.
@@ -119,9 +119,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
     }
 
     /// Hand `query`, read under `held` for the face `records` reads, to each queryable it
-    /// reaches, one call at a time with the session let go of: each callback's replies go out as
-    /// it makes them and its hold on the Final is let go of after it (`run_queryable`). Then the
-    /// query owes its Final, sent at once unless a callback keeps the query.
+    /// reaches, one call at a time with the session let go of: each callback's replies are held
+    /// in the face's open frame and its hold on the Final is let go of after it (`run_queryable`).
+    /// Then the query owes its Final, sent at once unless a callback keeps the query, and what
+    /// was held leaves with it.
     fn hand_query(
         &self,
         held: LiveCore<'_, L, C>,
@@ -131,6 +132,10 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         let generation = records.generation;
         let mut next = self.pin_queryable(&held, query, generation);
         drop(held);
+        // The callbacks' replies wait in the face's open frame for the Final, and the two leave
+        // in one send once it is owed. No window is open meanwhile: what else is sent, on this
+        // thread or another, goes at once.
+        let replies = records.actions.hold_replies();
         // A read a callback makes reads nothing, so no record is handed out inside another's call.
         self.deliveries.within(|_| {
             while let Some(call) = next.take() {
@@ -153,6 +158,7 @@ impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, 
         if let Some(_held) = self.live() {
             records.owe_final(query.rid(), query.qos());
         }
+        records.actions.release_replies(replies);
     }
 
     /// The next queryable `query` reaches under `held`, with a hold taken on the query's Final
