@@ -228,7 +228,7 @@ share.
 |---|---:|---|---|
 | A1 arena pages the listener's open writes | 112 + 48 | the rows the open constructs (link cells, rooms, runtime and engine places, the planes) laid together at the head of the arena and the face sets after them, so the sets of faces not yet accepted stay unwritten; which rows those pages are is read first, by the arena's own page map (R5) against its row report | R5 first |
 | A2 the open's stack | 28 | `assemble` and `lend_session` build `SessionLent` and the plan in their frames and return them by value: the plan laid out in the arena's head and the lent tables written where they will live, so neither frame holds them | count, R5 |
-| A3 `.bss` | 16 | the words every critical section writes kept off the page the thread records lie on, so a process that spawns one thread dirties one page | count |
+| A3 `.bss` | 16 | the words every critical section writes laid beside the first thread record, the one the read thread's spawn takes: `wz_host_sync::process_section`, a reentrant lock in one 128-byte-aligned static with the records (`ProcessWords`), which `wz_runtime_coop::cs::host_sys` enters, so the two writes lie on one page; the scout window's buffer and the callback table stay where the linker puts them, and R0 reads whether either is written | **landed in this lane**, R0 reads it |
 | A4 the read thread's malloc arena | -12 | none | a win |
 
 ## 6. Measurement cells
