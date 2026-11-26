@@ -640,12 +640,14 @@ measurement:
    whose life stands idle or closed with no wake, and whose Router holds no chain, has nothing a
    look would move: its read passes it over while another face is turned, whose look serves the
    session's own bookkeeping (the ledger, the gets, the jobs, the ports), and turns it all the same
-   when no face is. The rest is noted by the face's own look, under the session's lock, and ends
-   when the slot is given a link. The dial role's face of a listening peer is such a face. Expected:
+   when no face is. The rest is noted by the open of a dial role that dials nothing and by the
+   face's own look, under the session's lock, and ends when the slot is given a link; a life
+   standing by for a node another face holds is not at rest, as only a look reads that the node
+   is free. The dial role's face of a listening peer is such a face. Expected:
    about half of the 1,110 of the looks, and one of the two readings of the clock (about 500).
 2. **The walks of the face table stop at the last row that holds a face.** The rows past it hold
    none, and a read walks the table three times; the bound is kept where the rows are held and let
-   go of, under the session's lock. Expected: most of the 174 of the walks in `run_body`.
+   go of, under the session's lock (`DirectFaces::hold_face`), and read once a walk. Expected: most of the 174 of the walks in `run_body`.
 3. **The wait taken without the session where a link holds input**, and the deliveries entered
    once a read rather than once a face and once a drain, after the two above are measured.
 
