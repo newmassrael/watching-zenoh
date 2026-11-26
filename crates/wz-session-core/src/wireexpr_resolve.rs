@@ -479,15 +479,22 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
         Self::of(PeerSpaceRepr::Aliases(table))
     }
 
-    /// The key the peer declared for `id`, when its table keeps it in the session's key arena (the
-    /// lent policy's): the row's own key, whose block a holder may keep. `None` on any other table.
-    fn held(&self, id: crate::wire_id::ExprId) -> Option<&'a crate::key_arena::KeyRef> {
+    /// The key the peer declared for `id`, found once: its text, and, when its table keeps it in
+    /// the session's key arena (the lent policy's), the row's own key, whose block a holder may
+    /// keep. `None` for an id the peer did not declare.
+    fn declared(
+        &self,
+        id: crate::wire_id::ExprId,
+    ) -> Option<(&'a str, Option<&'a crate::key_arena::KeyRef>)> {
+        let key = crate::wire_id::sender_peer_key(self.sender, id);
         match self.repr {
-            PeerSpaceRepr::Aliases(table) => table
-                .find(crate::wire_id::sender_peer_key(self.sender, id))
-                .and_then(KeyBacking::held),
             #[cfg(feature = "alloc")]
-            _ => None,
+            PeerSpaceRepr::Map(map) => map.get(&key).map(|text| (text.as_str(), None)),
+            #[cfg(feature = "alloc")]
+            PeerSpaceRepr::Ours(table) => table.literal(id).map(|text| (text, None)),
+            PeerSpaceRepr::Aliases(table) => table
+                .find(key)
+                .map(|row| (KeyBacking::as_str(row), KeyBacking::held(row))),
         }
     }
 
@@ -1033,8 +1040,8 @@ pub fn resolve_wireexpr_view_held_over<
     if let WireexprVariantIn::WireexprLocal(_) = body {
         let (id, suffix) = id_and_suffix_view(body);
         if id != 0 && suffix.is_none() {
-            if let Some(held) = spaces.peer.held(id) {
-                return Ok(Some((held.as_str(), Some(held))));
+            if let Some(found) = spaces.peer.declared(id) {
+                return Ok(Some(found));
             }
         }
     }
@@ -1103,12 +1110,82 @@ pub fn resolve_wireexpr_viewed_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: 
     own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
-    use wz_codecs::wireexpr::WireexprViewVariant as V;
-    let body = match body {
-        V::WireexprLocal(arm) => WireexprVariantIn::WireexprLocal(arm.clone()),
-        V::WireexprNonlocal(arm) => WireexprVariantIn::WireexprNonlocal(arm.clone()),
+    resolve_viewed_parts_held_over(ViewedParts::of(body), spaces, own, out)
+}
+
+/// What a wireexpr read as its view carries, read off it once: its id, its suffix, and whether
+/// the id names the sender's space (`M=1`). A receive that both resolves a key and asks what the
+/// key's id names reads the wireexpr once for both.
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-push"
+))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewedParts<'f> {
+    /// The id, `0` for none.
+    pub id: crate::wire_id::ExprId,
+    /// The suffix, when the wireexpr carries one.
+    pub suffix: Option<&'f str>,
+    /// Whether the id is one the sender declared (`M=1`).
+    pub senders: bool,
+}
+
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-push"
+))]
+impl<'f> ViewedParts<'f> {
+    /// The parts of `body`.
+    #[inline]
+    pub fn of(body: &wz_codecs::wireexpr::WireexprViewVariant<'f>) -> Self {
+        let (id, suffix, senders) = id_suffix_and_space_viewed(body);
+        Self {
+            id,
+            suffix,
+            senders,
+        }
+    }
+
+    /// The key a sender's declaration is kept under ([`crate::wire_id::sender_peer_key`]) when
+    /// these parts name one by its id alone: an id `sender` declared, in its own space, with no
+    /// suffix, which names one key for as long as the sender's aliases do not change. `None` for
+    /// a suffix, our own space, or the literal of id 0.
+    #[inline]
+    pub fn declared_by(&self, sender: u64) -> Option<u64> {
+        (self.senders && self.id != 0 && self.suffix.is_none())
+            .then(|| crate::wire_id::sender_peer_key(sender, self.id))
+    }
+}
+
+/// [`resolve_wireexpr_viewed_held_over`] over the parts already read off the wireexpr: an id the
+/// sender declared, with no suffix, is its row's text, found by one lookup of the sender's table
+/// with nothing composed, and the row's key of the session's key arena when the table keeps it
+/// there; every other form is resolved by the one rule ([`resolve_wireexpr_view_over`]).
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-push"
+))]
+pub fn resolve_viewed_parts_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: Storage>(
+    parts: ViewedParts<'f>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
+    out: &'k mut dyn KeyexprOut,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    if parts.senders && parts.id != 0 && parts.suffix.is_none() {
+        if let Some(found) = spaces.peer.declared(parts.id) {
+            return Ok(Some(found));
+        }
+    }
+    let arm = if parts.senders {
+        Space::Peer
+    } else {
+        Space::Own
     };
-    resolve_wireexpr_view_held_over(&body, spaces, own, out)
+    resolve_parts(arm, parts.id, parts.suffix, spaces, own, out)
+        .map(|text| text.map(|text| (text, None)))
 }
 
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an
@@ -1589,6 +1666,113 @@ mod bounded_space_tests {
             resolve_wireexpr_into(&receiver_mapped(7, Some("/in")), spaces, &mut out),
             Ok(Some("ours/space/temp/in"))
         );
+    }
+
+    /// The parts of a resolution read once, with whether the text was found at all, and whether it
+    /// is a key of the session's key arena.
+    #[cfg(any(
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-push"
+    ))]
+    fn resolved_parts<'k>(
+        parts: ViewedParts<'k>,
+        spaces: MappingSpaces<'k, Static>,
+        out: &'k mut KeyexprBuf,
+    ) -> Result<Option<(&'k str, bool)>, KeyexprPastBound> {
+        resolve_viewed_parts_held_over(parts, spaces, None::<OwnSpace<'_, Static>>, out)
+            .map(|found| found.map(|(text, held)| (text, held.is_some())))
+    }
+
+    /// An id the sender declared, named with no suffix, is its row's own text, found in the
+    /// sender's table and composed nowhere; with a suffix it is composed, an `M=0` id with no own
+    /// space is refused, an id never declared is nothing, and id 0 is the suffix as it came. The
+    /// parts name the sender's declaration only for the first form. Turned red by a resolution
+    /// that composes a declared id into the room, or reads the receiver's space for `M=1`.
+    #[cfg(any(
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-push"
+    ))]
+    #[test]
+    fn a_declared_id_with_no_suffix_is_its_rows_text_with_nothing_composed() {
+        let peer = table_of("peers/space/temp");
+        let spaces = MappingSpaces::from(&peer);
+        let declared = ViewedParts {
+            id: 7,
+            suffix: None,
+            senders: true,
+        };
+        let row = KeyBacking::as_str(peer.find(crate::wire_id::peer_key(7)).expect("bound"));
+        let mut out = KeyexprBuf::new();
+        let found = resolved_parts(declared, spaces, &mut out);
+        assert_eq!(found, Ok(Some(("peers/space/temp", false))));
+        let Ok(Some((text, _))) = found else {
+            unreachable!("asserted above");
+        };
+        assert!(core::ptr::eq(text, row), "lent from the row, not composed");
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolved_parts(
+                ViewedParts {
+                    suffix: Some("/in"),
+                    ..declared
+                },
+                spaces,
+                &mut out
+            ),
+            Ok(Some(("peers/space/temp/in", false)))
+        );
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolved_parts(
+                ViewedParts {
+                    senders: false,
+                    ..declared
+                },
+                spaces,
+                &mut out
+            ),
+            Ok(None),
+            "M=0 with no own space"
+        );
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolved_parts(ViewedParts { id: 9, ..declared }, spaces, &mut out),
+            Ok(None),
+            "an id the sender never declared"
+        );
+        let literal = ViewedParts {
+            id: 0,
+            suffix: Some("home/temp"),
+            senders: true,
+        };
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolved_parts(literal, spaces, &mut out),
+            Ok(Some(("home/temp", false)))
+        );
+        assert_eq!(
+            declared.declared_by(3),
+            Some(crate::wire_id::sender_peer_key(3, 7))
+        );
+        assert_eq!(
+            ViewedParts {
+                suffix: Some("/in"),
+                ..declared
+            }
+            .declared_by(3),
+            None
+        );
+        assert_eq!(
+            ViewedParts {
+                senders: false,
+                ..declared
+            }
+            .declared_by(3),
+            None
+        );
+        assert_eq!(literal.declared_by(3), None);
     }
 
     #[test]
