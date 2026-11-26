@@ -828,7 +828,7 @@ impl ReadFacts {
             word |= READ_WAITS_FOR_BUFFER;
         }
         if let Some(reason) = self.close_reason {
-            word |= (close_code(reason) + 1) << READ_CLOSE_SHIFT;
+            word |= close_code(reason).saturating_add(1) << READ_CLOSE_SHIFT;
         }
         word
     }
@@ -1011,10 +1011,9 @@ impl SiteFacts {
         // the count moved, and reads none.
         fence(Ordering::Release);
         for (word, chunk) in self.node_bytes.iter().zip(bytes.chunks_exact(4)) {
-            word.store(
-                u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
-                Ordering::Relaxed,
-            );
+            if let Ok(four) = <[u8; 4]>::try_from(chunk) {
+                word.store(u32::from_ne_bytes(four), Ordering::Relaxed);
+            }
         }
         self.node_len.store(len as u32, Ordering::Relaxed);
         self.node_seq.store(seq.wrapping_add(2), Ordering::Release);
