@@ -133,6 +133,20 @@ pub(crate) struct FaceRecords<C: ClockSource + 'static> {
 }
 
 impl<C: ClockSource + 'static> FaceRecords<C> {
+    /// What the link whose records these are says of its peer once its handshake completed
+    /// (`UpFacts`), read off the records' own handle on the link's actions.
+    fn up_facts(&self) -> UpFacts {
+        let facts = UpFacts::of_actions(&*self.actions);
+        #[cfg(feature = "queryable")]
+        {
+            facts.under(self.generation)
+        }
+        #[cfg(not(feature = "queryable"))]
+        {
+            facts
+        }
+    }
+
     /// Dispatch `event`, a record that is not a Push lent where its frame lies, to the planes
     /// `planes` names of the face's tables in `registry`, the held session's, and send what it
     /// staged.
@@ -1596,8 +1610,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let mut held = self.live()?;
         let core = &mut held.0;
         // The read's last step of the link, made with nothing of the session held, may have ended
-        // its session: the face no longer stands from here on.
-        core.end_closed_facts();
+        // its session: the face no longer stands from here on. Read off the read's own handle on
+        // the link's actions, so the look lends nothing of the face's send place.
+        let established = slot
+            .records
+            .as_ref()
+            .is_some_and(|records| records.actions.is_established());
+        core.end_closed_facts(slot.at(), established);
         if let Some(wait) = wait {
             core.transport.links.waited(wait);
         }
@@ -1818,7 +1837,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
             }
             if effects.bring_up() {
-                core.bring_up(slot.at(), now_us);
+                // What the link says of its peer is read off the read's own handle on its actions,
+                // with nothing of the face's send place lent.
+                if let Some(facts) = slot.records.as_ref().map(FaceRecords::up_facts) {
+                    core.bring_up_with(slot.at(), now_us, facts);
+                }
                 slot.brought_up = true;
             }
             // The dial under way, if any, was taken above.

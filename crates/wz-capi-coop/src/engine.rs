@@ -2758,12 +2758,29 @@ struct UpFacts {
 }
 
 impl UpFacts {
-    /// What `session`, whose handshake completed, says of its peer.
+    /// What `session`, whose handshake completed, says of its peer, read in place: the record
+    /// holds the session itself where each link runs as a task.
+    #[cfg(wz_round)]
     fn of<C: ClockSource + 'static>(session: &LinkSession<C>) -> Self {
+        let facts = Self::of_actions(&*session.actions);
+        #[cfg(feature = "queryable")]
+        {
+            facts.under(session.generation)
+        }
+        #[cfg(not(feature = "queryable"))]
+        {
+            facts
+        }
+    }
+
+    /// What `actions`, a link's whose handshake completed, say of its peer, through whichever
+    /// handle on them the caller holds; the link's generation is the caller's to add
+    /// (`Self::under`).
+    fn of_actions<C: ClockSource + 'static>(actions: &LinkActions<C>) -> Self {
         #[cfg(feature = "connectivity")]
         let row = {
             let mut first = None;
-            FaceLinkRow::each_of_actions(&*session.actions, |row| {
+            FaceLinkRow::each_of_actions(actions, |row| {
                 if first.is_none() {
                     first = Some(row);
                 }
@@ -2771,14 +2788,20 @@ impl UpFacts {
             first
         };
         Self {
-            peer: session.actions.peer_session_zid(),
-            whatami: session.actions.peer_whatami_wire(),
+            peer: actions.peer_session_zid(),
+            whatami: actions.peer_whatami_wire(),
             #[cfg(feature = "queryable")]
-            generation: session.generation,
+            generation: 0,
             ended: false,
             #[cfg(feature = "connectivity")]
             row,
         }
+    }
+
+    /// These facts, of a link whose queries are answered under `generation`.
+    #[cfg(feature = "queryable")]
+    fn under(self, generation: u64) -> Self {
+        Self { generation, ..self }
     }
 
     /// These facts, while the session they were read off stands.
@@ -3861,17 +3884,12 @@ fn kinds(kind: InterestKind) -> InterestKinds {
     }
 }
 
-/// Whether a face's link session stands, as a look at the face's place found it: a session the
-/// place lends stands while it is established, and a place that holds no link holds none. A place
-/// another holder has now stands: that holder (a blocking send waiting for its link's room, among
-/// them) is no sign the session ended, and the next look reads it again.
+/// Whether a face that `stands` ends as its link's session is read `established` or not: a face
+/// that stands no longer does once its session is not established, and one that does not stand
+/// has nothing to end.
 #[cfg(not(wz_round))]
-fn session_stands(looked: Lend<bool>) -> bool {
-    match looked {
-        Lend::Lent(established) => established,
-        Lend::Held => true,
-        Lend::Empty => false,
-    }
+fn face_ended(stands: bool, established: bool) -> bool {
+    stands && !established
 }
 
 /// What one send's failure means for a publish: a link that is down skips it, anything else is
@@ -5089,32 +5107,31 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.lose_link(id);
     }
 
-    /// Read each face whose link's session a step of it ended as a face that no longer stands
-    /// (`UpFacts`): called by the read that stepped the one link, under the session's lock and
-    /// before it lets go of it, so a face stands for a reader of the session exactly while its
-    /// link's session does. Its facts stay until the loss is taken, which is told by them.
+    /// Read the face at `at` as one that no longer stands (`UpFacts`) once its link's session is
+    /// no longer `established`, as the face's own read, which steps the link, reads it off its
+    /// own handle on the link's actions: called by that read under the session's lock and before
+    /// it lets go of it, so a face stands for a reader of the session exactly while its link's
+    /// session does, and the look lends nothing of the face's send place, which a send may hold.
+    /// Its facts stay until the loss is taken, which is told by them.
     #[cfg(not(wz_round))]
-    fn end_closed_facts(&mut self) {
+    fn end_closed_facts(&mut self, at: usize, established: bool) {
         // Looked at in place first: a face reached to be written counts as a move of the links,
-        // which a pass that ended no session must not make.
-        for at in 0..self.transport.links.places() {
-            let ended = self.transport.links.face(at).is_some_and(|face| {
-                face.facts().is_some()
-                    && !face.link.wire().is_some_and(|wire| {
-                        session_stands(wire.try_session(|session| session.established()))
-                    })
-            });
-            if !ended {
-                continue;
-            }
-            if let Some(facts) = self
-                .transport
-                .links
-                .face_mut(at)
-                .and_then(|face| face.facts.as_mut())
-            {
-                facts.ended = true;
-            }
+        // which a look that ended no session must not make.
+        let stands = self
+            .transport
+            .links
+            .face(at)
+            .is_some_and(|face| face.facts().is_some());
+        if !face_ended(stands, established) {
+            return;
+        }
+        if let Some(facts) = self
+            .transport
+            .links
+            .face_mut(at)
+            .and_then(|face| face.facts.as_mut())
+        {
+            facts.ended = true;
         }
     }
 
@@ -5205,24 +5222,37 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
-    /// The face at `at`, whose handshake completed, holds its link up: what the session holds is
+    /// [`Self::bring_up_with`] where the face's record holds its link's session itself: what the
+    /// link says of its peer is read off it in place.
+    #[cfg(wz_round)]
+    fn bring_up(&mut self, at: usize, now_us: u64) {
+        let facts = match self
+            .transport
+            .links
+            .face(at)
+            .and_then(|face| face.link.wire())
+            .map(|wire| wire.try_session(|session| UpFacts::of(session)))
+        {
+            Some(Lend::Lent(facts)) => facts,
+            _ => return,
+        };
+        self.bring_up_with(at, now_us, facts);
+    }
+
+    /// The face at `at`, whose handshake completed, holds its link up, its peer as `facts` says:
+    /// what the session holds is
     /// declared over it from here on, and the watchers of the faces are told it came up. The link
     /// was admitted in its handshake (`install_link_admission`), so a link that got this far is
     /// the session's link to its node, and no other link to the node is kept beside it. A first
     /// turn the replay is given up on ends the link at once, and the next pass over the faces
-    /// takes it as lost (`poll_face`).
-    fn bring_up(&mut self, at: usize, now_us: u64) {
+    /// takes it as lost (`poll_face`). Where the read steps the link itself, it reads `facts`
+    /// off its own handle on the link's actions, so nothing of the face's send place is lent.
+    fn bring_up_with(&mut self, at: usize, now_us: u64, facts: UpFacts) {
         let Some(face) = self.transport.links.face(at) else {
             return;
         };
         let Some(wire) = face.link.wire() else {
             return;
-        };
-        // The life brings the link up with nothing of it lent: the read that steps it itself does
-        // so between its steps, and a task's link is the face's own.
-        let facts = match wire.try_session(|session| UpFacts::of(session)) {
-            Lend::Lent(facts) => facts,
-            Lend::Held | Lend::Empty => return,
         };
         // The work form's task reads nothing of an accepted link before its admission is granted;
         // a read that steps each face where it lies is given the face once it is admitted.
@@ -12124,21 +12154,30 @@ mod up_facts_tests {
 }
 
 #[cfg(all(test, not(wz_round)))]
-mod session_stands_tests {
-    use super::{session_stands, Lend};
+mod face_ended_tests {
+    use super::face_ended;
 
-    /// A face whose place another holder has stands, as one whose session the place lends
-    /// established does; a session no longer established, or a place with no link, does not.
-    /// Turned red by a `Lend::Held` arm that reads the held place as an ended session, which
-    /// ends a face for good while a blocking publish waits for its room under its place.
+    /// A face that stands ends once its session is read no longer established, and only then: an
+    /// established session keeps it standing, and a face that does not stand is not ended again.
+    /// Turned red by a `face_ended` that ends a face whose session is established, or reads an
+    /// established session as ended.
     #[test]
-    fn a_held_place_is_no_ended_session() {
-        assert!(session_stands(Lend::Lent(true)), "CONTROL: established");
-        assert!(!session_stands(Lend::Lent(false)), "no longer established");
-        assert!(!session_stands(Lend::Empty), "no link in the place");
+    fn a_standing_face_ends_once_its_session_is_no_longer_established() {
         assert!(
-            session_stands(Lend::Held),
-            "a place another holder has now is no end of its session"
+            !face_ended(true, true),
+            "CONTROL: an established session stands"
+        );
+        assert!(
+            face_ended(true, false),
+            "a session no longer established ends its face"
+        );
+        assert!(
+            !face_ended(false, false),
+            "a face that does not stand has nothing to end"
+        );
+        assert!(
+            !face_ended(false, true),
+            "nor one whose session is not yet read up"
         );
     }
 }
