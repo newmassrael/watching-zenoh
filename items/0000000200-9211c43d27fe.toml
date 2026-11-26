@@ -6,3 +6,9 @@ commit = "a6ef6cf84c0e629bca08da9e8adae9f6470d78ac"
 base = "3d117fc9596a546a5e19b0d30776ef732ca60ee9"
 machine = "mf977c53d872e"
 at = 1795706061
+
+[return]
+reason = "conflict"
+detail = "crates/wz-capi-coop/src/engine.rs crates/wz-capi-coop/src/engine/group.rs"
+report = "m6a944ec3ba29:0000000200-9211c43d27fe/attempt-1.log"
+at = 1795706083
