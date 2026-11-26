@@ -4029,6 +4029,7 @@ version = "0.1.0"
 dependencies = [
  "wz-capi-pico",
  "wz-cdylib-build",
+ "wz-msvc-runtime",
 ]
 
 [[package]]
