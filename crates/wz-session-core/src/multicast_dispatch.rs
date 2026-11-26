@@ -933,6 +933,10 @@ pub struct MulticastDispatcher<const MAX_PEERS: usize, Grow: TableGrowth = Fixed
     /// attributed through [`Self::find_by_src`], so a grown table answers it without walking a
     /// thousand rows.
     by_src: Grow::Index<SocketAddr>,
+    /// How many rows hold a member, kept as a member is admitted and as one leaves: a group's step
+    /// asks it to know whether a sweep is due, and every Join asks it against the cap, so neither
+    /// walks the rows.
+    members: usize,
     config: MulticastConfig,
     /// Set by the session machine's `enter_running` duty and cleared by its
     /// `release_multicast_link`: whether peers, frames and fragments are
@@ -1014,6 +1018,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                 session: _,
                 peers: _,
                 by_src: _,
+                members: _,
                 config: _,
                 running: _,
                 join_refusals: _,
@@ -1049,6 +1054,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             });
             addr_of_mut!((*at).by_src)
                 .write(<Grow::Index<SocketAddr> as RowIndex<SocketAddr>>::empty());
+            addr_of_mut!((*at).members).write(0);
             addr_of_mut!((*at).config).write(config);
             addr_of_mut!((*at).running).write(false);
             addr_of_mut!((*at).join_refusals).write(0);
@@ -1559,12 +1565,17 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
     /// Number of pool slots currently holding a live peer (the
     /// `multicast_peer_table` occupancy gauge).
     pub fn active_peers(&self) -> usize {
-        // A table that grows counts its members in its index: every Join asks this against the
-        // cap, and a scan of a thousand rows per beacon is the cost the index is there to remove.
-        if let Some(members) = self.by_src.members() {
-            return members;
-        }
-        self.peers.iter().filter(|p| !p.is_free()).count()
+        // The count is the rows a walk finds, and the members an index that counts holds.
+        debug_assert_eq!(
+            self.members,
+            self.by_src.members().unwrap_or_else(|| self
+                .peers
+                .iter()
+                .filter(|p| !p.is_free())
+                .count()),
+            "the member count drifted from the rows"
+        );
+        self.members
     }
 
     /// The per-peer FSM state for the peer with `zid`, or `None` if no slot
@@ -1712,6 +1723,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             // before the rest are made free.
             self.peers.shed_grown();
             self.by_src.cleared();
+            self.members = 0;
             for peer in self.peers.iter_mut() {
                 peer.reset_in_place();
             }
@@ -1825,6 +1837,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
             peer.member = Some(tags.admit());
         }
         self.by_src.admitted(src, idx);
+        self.members = self.members.saturating_add(1);
         JoinOutcome::Admitted
     }
 
@@ -2222,6 +2235,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                     peer.evict(reason, on_lost);
                 }
                 self.by_src.left(&src);
+                self.members = self.members.saturating_sub(1);
                 true
             }
             None => false,
@@ -2291,6 +2305,7 @@ impl<const MAX_PEERS: usize, Grow: TableGrowth> MulticastDispatcher<MAX_PEERS, G
                 self.by_src.left(&src);
             }
             slot.evict(MulticastPeerLostReason::LeaseExpired, &mut on_lost);
+            self.members = self.members.saturating_sub(1);
             expired = expired.saturating_add(1);
         }
         expired
@@ -3221,6 +3236,41 @@ mod tests {
         assert_eq!(d.notify_link_lost(), RELEASE_LINK);
         assert_eq!(d.session_state(), SessionFsmMulticastState::Stopped);
         assert_eq!(d.active_peers(), 0);
+    }
+
+    /// The member count a group's step reads with no walk follows every way a member comes and
+    /// goes: a Join admits one, a refresh adds none, a Close and a lease's end each take one, a
+    /// freed row is taken again, and a stop takes all; each reading is the rows a walk finds.
+    /// Turned red by a departure that leaves the count (`drop_by_src_evicting`, `sweep_with`), an
+    /// admission that does not raise it (`ingest_join_qos`) or a stop that does not clear it.
+    #[test]
+    fn the_member_count_follows_every_admission_and_departure() {
+        let walked = |d: &MulticastDispatcher<4>| d.members().count();
+        let mut d = running_dispatcher::<4>(5_000);
+        d.ingest_join(ZID_A, SRC_A, sn0(), 0);
+        d.ingest_join(ZID_B, SRC_B, sn0(), 0);
+        d.ingest_join(ZID_C, SRC_C, sn0(), 0);
+        assert_eq!((d.active_peers(), walked(&d)), (3, 3));
+        assert_eq!(
+            d.ingest_join(ZID_A, SRC_A, sn0(), 1_000),
+            JoinOutcome::Refreshed
+        );
+        assert_eq!(d.active_peers(), 3, "a refresh is no new member");
+
+        assert!(d.close_by_src(SRC_B));
+        assert_eq!((d.active_peers(), walked(&d)), (2, 2), "a Close");
+        // `c` was last heard at 0 and `a` at 1_000: the sweep is past `c`'s lease only.
+        assert_eq!(d.sweep(5_500), 1);
+        assert_eq!((d.active_peers(), walked(&d)), (1, 1), "a lease's end");
+
+        assert_eq!(
+            d.ingest_join(ZID_B, SRC_B, sn0(), 5_500),
+            JoinOutcome::Admitted
+        );
+        assert_eq!((d.active_peers(), walked(&d)), (2, 2), "a freed row taken");
+
+        assert_eq!(d.stop(), RELEASE_LINK);
+        assert_eq!((d.active_peers(), walked(&d)), (0, 0), "a stop");
     }
 
     /// A validated first Join admits the peer to Active (§3.2). The peer is
