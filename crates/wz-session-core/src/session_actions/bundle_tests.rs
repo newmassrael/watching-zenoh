@@ -2686,6 +2686,55 @@ mod link_stamps {
         assert_eq!(step(100 + 1 + lease), [LeaseCheckOutcome::Expired]);
     }
 
+    /// The wait the timers answer is the deadline their check holds: a stamp changed through its
+    /// door is answered at once, and a receipt, which moves the lease only later, leaves the held
+    /// deadline answered, early and never late, until the check at it reads the later one.
+    /// Turned red by a wait that keeps its deadline across a door's move (the earlier expiry
+    /// missed), or by one that reads the stamps at every call (the receipt's expiry answered
+    /// before the check).
+    #[test]
+    fn the_wait_answers_the_deadline_the_check_holds() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(900));
+        let lease = actions.adopted_lease_ms();
+        assert!(900 < 10 + 1 + lease, "CONTROL: 900 is before either expiry");
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            timers.next_due_ms(&engine, &actions, 900),
+            Some(900 + 1 + lease),
+            "the expiry read"
+        );
+        actions.link.fact_established_at(|slot| *slot = Some(10));
+        assert_eq!(
+            timers.next_due_ms(&engine, &actions, 900),
+            Some(10 + 1 + lease),
+            "a door's move is read at once"
+        );
+        actions.link.note_received_at(950);
+        assert_eq!(
+            timers.next_due_ms(&engine, &actions, 901),
+            Some(10 + 1 + lease),
+            "a receipt leaves the held expiry"
+        );
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 10 + 1 + lease).is_empty(),
+            "the check at it reads the later one and judges nothing"
+        );
+        assert_eq!(
+            timers.next_due_ms(&engine, &actions, 10 + 1 + lease),
+            Some(950 + 1 + lease),
+            "and the wait answers the later one"
+        );
+    }
+
     /// The first event of the peer's declarations begins their watch, which gives the lease a
     /// deadline it did not have, and counts a move; a later one moves the watch only later and
     /// counts nothing. Turned red by a first event that counts no move, or a later one that does.
