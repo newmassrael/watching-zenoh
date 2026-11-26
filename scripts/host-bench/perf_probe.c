@@ -123,8 +123,13 @@
 //   perf_probe smaps region start=<hex> perms=<rwxp> size_kib=<..> rss_kib=<..> pss_kib=<..>
 //     private_dirty_kib=<..> anonymous_kib=<..> name=<the mapping's path or [heap], [stack], ..., empty>
 //
-// the name last, as the rest of its line. Every line comes before the last one. Unset, it costs one look at
-// the environment; on Windows it prints nothing.
+// the name last, as the rest of its line, and after each executable mapping of a file the pages of it the
+// process holds (/proc/self/pagemap),
+//
+//   perf_probe smaps pages start=<hex> pages=<n> map=<a hex digit for four pages, lowest first> present=<n>
+//
+// Every line comes before the last one. Unset, it costs one look at the environment; on Windows it prints
+// nothing.
 //
 // Exit status: 0 when the role ran, 1 when the session or an entity could not be made, 2 for a usage error or
 // an option the build does not have.
@@ -140,6 +145,7 @@
 #include <string.h>
 #include <time.h>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -377,12 +383,37 @@ static int smaps_line(FILE *in, char *line, size_t size) {
     return 1;
 }
 
-static void print_region(unsigned long long start, const char *perms, const struct smaps_fields *f,
-                         const char *name) {
+// Which pages of an executable mapping are in the process's page table, from /proc/self/pagemap (bit 63 of
+// each page's entry, which needs no privilege), as one hex digit for four pages, the lowest page in the
+// lowest bit of the first digit: the pages of a library's code its run holds (docs/win-budget/rss.md, R3).
+static void print_pages(int pagemap, unsigned long long start, unsigned long long end) {
+    const long page = sysconf(_SC_PAGESIZE);
+    if (pagemap < 0 || page <= 0 || end <= start) return;
+    const unsigned long long pages = (end - start) / (unsigned long long)page;
+    unsigned long long present = 0;
+    printf("perf_probe smaps pages start=%llx pages=%llu map=", start, pages);
+    for (unsigned long long at = 0; at < pages; at += 4) {
+        unsigned digit = 0;
+        for (unsigned bit = 0; bit < 4 && at + bit < pages; bit++) {
+            uint64_t entry = 0;
+            const off_t offset = (off_t)((start / (unsigned long long)page + at + bit) * sizeof entry);
+            if (pread(pagemap, &entry, sizeof entry, offset) == (ssize_t)sizeof entry && (entry >> 63) != 0) {
+                digit |= 1U << bit;
+                present++;
+            }
+        }
+        putchar("0123456789abcdef"[digit]);
+    }
+    printf(" present=%llu\n", present);
+}
+
+static void print_region(int pagemap, unsigned long long start, unsigned long long end, const char *perms,
+                         const struct smaps_fields *f, const char *name) {
     if (f->rss == 0) return;
     printf("perf_probe smaps region start=%llx perms=%s size_kib=%llu rss_kib=%llu pss_kib=%llu "
            "private_dirty_kib=%llu anonymous_kib=%llu name=%s\n",
            start, perms, f->size, f->rss, f->pss, f->private_dirty, f->anonymous, name);
+    if (perms[2] == 'x' && name[0] == '/') print_pages(pagemap, start, end);
 }
 
 // What the resident set is made of, when PERF_SMAPS=1 asks (the header of this file).
@@ -402,11 +433,12 @@ static void print_smaps(void) {
     }
     FILE *maps = fopen("/proc/self/smaps", "r");
     if (maps != NULL) {
+        const int pagemap = open("/proc/self/pagemap", O_RDONLY);
         struct smaps_fields f;
         memset(&f, 0, sizeof f);
         char name[sizeof line] = "";
         char perms[8] = "";
-        unsigned long long start = 0;
+        unsigned long long start = 0, end = 0;
         int open_region = 0;
         while (smaps_line(maps, line, sizeof line)) {
             unsigned long long from = 0, to = 0;
@@ -414,9 +446,10 @@ static void print_smaps(void) {
             int consumed = 0;
             // A mapping's header: "<from>-<to> <perms> <offset> <dev> <inode> [<name>]".
             if (sscanf(line, "%llx-%llx %7s %*s %*s %*s %n", &from, &to, mode, &consumed) == 3 && consumed > 0) {
-                if (open_region) print_region(start, perms, &f, name);
+                if (open_region) print_region(pagemap, start, end, perms, &f, name);
                 memset(&f, 0, sizeof f);
                 start = from;
+                end = to;
                 snprintf(perms, sizeof perms, "%s", mode);
                 snprintf(name, sizeof name, "%s", line + consumed);
                 open_region = 1;
@@ -424,7 +457,8 @@ static void print_smaps(void) {
                 smaps_field(line, &f);
             }
         }
-        if (open_region) print_region(start, perms, &f, name);
+        if (open_region) print_region(pagemap, start, end, perms, &f, name);
+        if (pagemap >= 0) close(pagemap);
         fclose(maps);
     }
     fflush(stdout);

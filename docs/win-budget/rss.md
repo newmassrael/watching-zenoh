@@ -150,14 +150,18 @@ a run's resident text is what the layout changes, and only the run's own page ma
   `lib-P`, with `nm -S` by crate, after the text lanes land.
 - **R2, R4 landed.** `readelf -d` of `perf_probe_W` lists no `libgcc_s`, and R0's
   `smaps_libgcc_s_kib` of arm W reads 0.
-- **R3, the run's resident text.** Which pages of the library's text a run holds:
-  `/proc/self/pagemap` over the library's text mapping at the same point as R0, each present
-  page named by the symbols it holds. It says how much of R1 is pages a run executes and how much
-  fault-around brought in, and so how much (b) can take; it is the next probe change of this lane.
+- **R3, the run's resident text.** Which pages of the library's text a run holds: with
+  `PERF_SMAPS=1` the probe also prints, for each executable mapping of a file, the pages of it
+  present in its page table (`/proc/self/pagemap`, `perf_probe smaps pages ... map=`), which the
+  runner keeps on the region (`page_map`, `present_pages`). Each present page named by the
+  symbols it holds (`nm -S` of the run's `lib-W`) says how much of R1 is pages a run executes
+  and how much fault-around brought in, and so how much (b) can take; that naming is the next step
+  of this lane.
 
 ## 7. What this lane landed
 
 - This design.
-- R0's probe and runner (`PERF_SMAPS`; `perf_probe.c`, `perf_matrix.py` with its selftest).
+- R0's probe and runner (`PERF_SMAPS`; `perf_probe.c`, `perf_matrix.py` with its selftest), and
+  R3's page map of each executable mapping.
 - R4: `_Unwind_Resume` defined in the library, `libgcc_s` no longer mapped by its programs,
   held by the size gate's `pico-client-coop-nostd` case (`forbid_undefined`).

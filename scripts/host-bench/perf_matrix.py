@@ -380,9 +380,11 @@ def smaps_class(name: str) -> str:
 def smaps_of(text: str) -> dict | None:
     """What a program printed of its resident set (perf_probe.c, PERF_SMAPS=1): its rollup's figures, the
     resident KiB of each part (SMAPS_CLASSES, every part present, 0 for none) and each mapping as it printed
-    it; None when it printed no rollup (the run did not ask, or /proc gave nothing)."""
+    it, an executable mapping of a file with the pages of it the process held (`page_map`, a hex digit for
+    four pages, lowest first); None when it printed no rollup (the run did not ask, or /proc gave nothing)."""
     rollup = None
     regions = []
+    pages: dict[str, dict] = {}
     for line in text.splitlines():
         if line.startswith(SMAPS_PREFIX + "rollup "):
             words = dict(w.split("=", 1) for w in line[len(SMAPS_PREFIX + "rollup "):].split() if "=" in w)
@@ -392,9 +394,17 @@ def smaps_of(text: str) -> dict | None:
             words = dict(w.split("=", 1) for w in head.split() if "=" in w)
             regions.append({"name": name.strip(), "perms": words.get("perms", ""),
                             "size_kib": int(words.get("size_kib", 0)), "rss_kib": int(words.get("rss_kib", 0)),
-                            "private_dirty_kib": int(words.get("private_dirty_kib", 0))})
+                            "private_dirty_kib": int(words.get("private_dirty_kib", 0)),
+                            "start": words.get("start", "")})
+        elif line.startswith(SMAPS_PREFIX + "pages "):
+            words = dict(w.split("=", 1) for w in line[len(SMAPS_PREFIX + "pages "):].split() if "=" in w)
+            pages[words.get("start", "")] = {"pages": int(words.get("pages", 0)),
+                                             "present_pages": int(words.get("present", 0)),
+                                             "page_map": words.get("map", "")}
     if rollup is None:
         return None
+    for region in regions:
+        region.update(pages.get(region["start"], {}))
     parts = dict.fromkeys(SMAPS_CLASSES, 0)
     for region in regions:
         parts[smaps_class(region["name"])] += region["rss_kib"]
@@ -2102,6 +2112,7 @@ def cmd_selftest() -> int:
                   "private_clean_kib=10 shared_clean_kib=2000 shared_dirty_kib=0\n"
                   "perf_probe smaps region start=7f00 perms=r-xp size_kib=1116 rss_kib=1000 pss_kib=500 "
                   "private_dirty_kib=0 anonymous_kib=0 name=/run/lib-W/libwz_capi_pico.so\n"
+                  "perf_probe smaps pages start=7f00 pages=6 map=f2 present=5\n"
                   "perf_probe smaps region start=7f40 perms=rw-p size_kib=64 rss_kib=56 pss_kib=56 "
                   "private_dirty_kib=56 anonymous_kib=56 name=/run/lib-W/libwz_capi_pico.so\n"
                   "perf_probe smaps region start=7e00 perms=rw-p size_kib=288 rss_kib=40 pss_kib=40 "
@@ -2118,6 +2129,10 @@ def cmd_selftest() -> int:
            and read_smaps["parts"]["heap"] == 8 and read_smaps["parts"]["libgcc_s"] == 60
            and read_smaps["parts"]["libc"] == 0 and len(read_smaps["regions"]) == 5
            and read_smaps["regions"][2]["size_kib"] == 288)
+    expect("an executable mapping carries the pages of it the process held, and another mapping none",
+           read_smaps is not None and read_smaps["regions"][0]["page_map"] == "f2"
+           and read_smaps["regions"][0]["present_pages"] == 5 and read_smaps["regions"][0]["pages"] == 6
+           and "page_map" not in read_smaps["regions"][1])
     expect("a mapping is counted as the part its name says",
            [smaps_class(n) for n in ("", "[heap]", "[stack]", "[vdso]", "/usr/lib/libc.so.6",
                                      "/usr/lib/ld-linux-x86-64.so.2", "/x/lib-P/libzenohpico.so",
