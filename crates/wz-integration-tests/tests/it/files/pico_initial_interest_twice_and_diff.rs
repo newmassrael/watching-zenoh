@@ -31,10 +31,18 @@
 //! Layer E, where the row first stood, runs in a job that provisions no zenoh-c: an absence that
 //! FAILED the row there graded the job and not the listener. Layer E's `--ignored` sweep still
 //! reaches the row, and where the oracle is absent it skips with a note, as the `zenoh_c_*` rows do.
+//!
+//! ## Reading a red
+//!
+//! A failure shows the wz arm's dialler log and its listener's standard error beside the lines.
+//! The dialler logs at `warn`, which is the level its verdict is read at; `WZ_DIALLER_RUST_LOG`
+//! replaces that filter for a run that has to see the runtime's start conditions and the
+//! routing of the Final, for instance
+//! `warn,zenoh::net::runtime::orchestrator=debug,zenoh::net::routing=debug`.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::{Duration, Instant};
 
 use wz_integration_tests::bounded::BoundedOutput as _;
@@ -146,17 +154,50 @@ fn wait_for_line(capture: &mut File, needle: &str, budget: Duration, what: &str)
     );
 }
 
-/// One arm: the listener built as `listener`, dialled by the real zenoh-c peer `dialler`. Returns
-/// the three lines the row compares.
-fn run_arm(listener: &Path, dialler: &Path, dialler_libdir: &Path, arm: &str) -> String {
+/// What one arm came to: the three lines the row compares, and what its two programs logged,
+/// which only a failure shows.
+struct Arm {
+    lines: String,
+    dialler_log: String,
+    listener_log: String,
+}
+
+impl Arm {
+    /// The arm's lines, then the dialler's log under the `RUST_LOG` it ran with and the
+    /// listener's standard error, for a failure's message.
+    fn evidence(&self, rust_log: &str) -> String {
+        format!(
+            "{}--- dialler log (RUST_LOG={rust_log}) ---\n{}\n--- listener stderr ---\n{}",
+            self.lines, self.dialler_log, self.listener_log
+        )
+    }
+}
+
+/// The dialler's `RUST_LOG`: `WZ_DIALLER_RUST_LOG` when it is set, `warn` otherwise. The verdict is
+/// a warning of the dialler's, so a value that raises the level of some targets still grades the
+/// row, and one that hides the runtime's warnings grades nothing.
+fn dialler_rust_log() -> String {
+    std::env::var("WZ_DIALLER_RUST_LOG").unwrap_or_else(|_| "warn".to_owned())
+}
+
+/// One arm: the listener built as `listener`, dialled by the real zenoh-c peer `dialler` logging
+/// under `rust_log`.
+fn run_arm(
+    listener: &Path,
+    dialler: &Path,
+    dialler_libdir: &Path,
+    rust_log: &str,
+    arm: &str,
+) -> Arm {
     let port = wz_runtime_tokio_test_support::free_port();
     let mut listener_capture = tempfile::tempfile().expect("the listener's capture");
+    let mut listener_errors = tempfile::tempfile().expect("the listener's error capture");
     let listener_child = ChildGuard::wrap(
         format!("{arm} listener"),
         Command::new(listener)
             .arg(format!("tcp/127.0.0.1:{port}"))
             .stdout(listener_capture.try_clone().expect("dup stdout handle"))
-            .stderr(Stdio::null())
+            .stderr(listener_errors.try_clone().expect("dup stderr handle"))
             .spawn()
             .unwrap_or_else(|e| panic!("{arm}: failed to run the listener: {e}")),
     );
@@ -175,7 +216,7 @@ fn run_arm(listener: &Path, dialler: &Path, dialler_libdir: &Path, arm: &str) ->
     let out = Command::new(dialler)
         .arg(format!("tcp/127.0.0.1:{port}"))
         .env("LD_LIBRARY_PATH", dialler_libdir)
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", rust_log)
         .output_bounded()
         .unwrap_or_else(|e| panic!("{arm}: failed to run the dialler: {e}"));
     drop(listener_child);
@@ -186,12 +227,17 @@ fn run_arm(listener: &Path, dialler: &Path, dialler_libdir: &Path, arm: &str) ->
         .find(|l| l.starts_with("dialler open rc="))
         .unwrap_or("dialler open rc=<none>")
         .to_owned();
-    let waited_it_out = format!("{stdout}{stderr}")
-        .contains("Scouting delay elapsed before start conditions are met");
-    format!(
-        "{listener_line}\n{dialler_line}\nscouting-delay-elapsed={}\n",
-        if waited_it_out { "yes" } else { "no" }
-    )
+    let dialler_log = format!("{stdout}{stderr}");
+    let waited_it_out =
+        dialler_log.contains("Scouting delay elapsed before start conditions are met");
+    Arm {
+        lines: format!(
+            "{listener_line}\n{dialler_line}\nscouting-delay-elapsed={}\n",
+            if waited_it_out { "yes" } else { "no" }
+        ),
+        dialler_log,
+        listener_log: read_captured(&mut listener_errors),
+    }
 }
 
 /// A zenoh-c peer that dials a pico listener is not left to wait out `scouting/delay`: the
@@ -242,23 +288,34 @@ fn a_zenoh_peer_that_dials_a_pico_listener_is_not_left_waiting_on_wz_and_zenoh_p
     );
     let wz_listener = compile_listener(dir.path(), &wz_libdir, "wz_capi_pico", "wz");
 
-    let reference = run_arm(&reference_listener, &dialler, &zc_libdir, "reference");
-    let wz = run_arm(&wz_listener, &dialler, &zc_libdir, "wz");
+    let rust_log = dialler_rust_log();
+    let reference = run_arm(
+        &reference_listener,
+        &dialler,
+        &zc_libdir,
+        &rust_log,
+        "reference",
+    );
+    let wz = run_arm(&wz_listener, &dialler, &zc_libdir, &rust_log, "wz");
     for needle in [
         "listener open rc=0",
         "dialler open rc=0",
         "scouting-delay-elapsed=no",
     ] {
         assert!(
-            reference.lines().any(|l| l == needle),
+            reference.lines.lines().any(|l| l == needle),
             "the REFERENCE arm has no `{needle}` line, so this row is measuring the harness \
-             rather than wz:\n{reference}"
+             rather than wz:\n{}",
+            reference.evidence(&rust_log)
         );
     }
     assert_eq!(
-        wz, reference,
+        wz.lines,
+        reference.lines,
         "§5.27 api-compat-pico: a zenoh peer that dials wz's pico listener is not told, as it is \
-         by the real zenoh-pico, that the listener has sent everything it holds.\n--- wz ---\n{wz}\n\
-         --- reference ---\n{reference}"
+         by the real zenoh-pico, that the listener has sent everything it holds.\n--- wz ---\n{}\n\
+         --- reference ---\n{}",
+        wz.evidence(&rust_log),
+        reference.lines
     );
 }
