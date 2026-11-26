@@ -3499,8 +3499,13 @@ mod unicast_transport {
     /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read
     /// to its end has nothing left, and finding so takes no lock. Turned red by a receive that
     /// reads a kept datagram from its start again, that does not say the link is to keep it, or
-    /// that notes where it stopped under a lock.
-    #[cfg(all(feature = "rx-in-place", feature = "alloc"))]
+    /// that notes where it stopped under a lock. A build that decodes no KeepAlive takes one for a
+    /// framing error and keeps no datagram, so the test needs the codec.
+    #[cfg(all(
+        feature = "rx-in-place",
+        feature = "alloc",
+        feature = "codec-keep-alive"
+    ))]
     #[test]
     fn a_kept_datagram_is_read_on_from_where_its_receive_noted_it_stopped() {
         use super::holds_in;
