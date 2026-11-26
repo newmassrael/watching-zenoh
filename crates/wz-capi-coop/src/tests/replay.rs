@@ -4,7 +4,9 @@
 //! replay is not resumed on another link, and an unpaced one is a single turn. Both forms tell a
 //! new peer the same declarations in the same order, in a build of either domain of the policy.
 //! A replay to a peer the session meets as the peer hat's two north-bound peers ends, when the
-//! config says so, with the `DeclareFinal` of the initial interest, once and after the last turn.
+//! config says so, with the `DeclareFinal` of the initial interest, once and after the last turn,
+//! in a build that answers Interests (`interest-answer`); a build that answers none sends it to
+//! no face.
 
 use crate::EngineHold;
 use std::time::{Duration, Instant};
@@ -413,6 +415,7 @@ fn peer_config(router: &Router, initial_interest: bool) -> CoopConfig {
 /// to a peer is lost and dialled again with the declarations paced as `pacing` says: the new
 /// peer and the session, as soon as the new link's first turn is sent. The CONTROL is that the
 /// first peer was told every subscriber and one Final.
+#[cfg(feature = "interest-answer")]
 fn reconnected_peer(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, EngineHold<Engine>) {
     let first = peer_on(router_port());
     let port = first.port;
@@ -454,6 +457,7 @@ fn reconnected_peer(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, Eng
 /// later is followed by no second Final. Turned red by a Final sent before the replay
 /// (`end_initial_interest` called before the turn), not sent at all, or sent again by a later
 /// declaration.
+#[cfg(feature = "interest-answer")]
 #[test]
 fn a_peer_face_is_sent_the_initial_final_once_after_its_replay() {
     let (router, engine) = reconnected_peer(&["g/1", "g/2"], None);
@@ -478,6 +482,7 @@ fn a_peer_face_is_sent_the_initial_final_once_after_its_replay() {
 /// A paced replay sends the Final only in the turn that tells its last declaration: none while
 /// turns are owed, and one after the last. Turned red by a Final sent by the first turn of a
 /// paced replay.
+#[cfg(feature = "interest-answer")]
 #[test]
 fn a_paced_replay_sends_the_initial_final_after_its_last_turn() {
     // A build that reaches no pace replays in one lap whatever is stated.
@@ -508,6 +513,7 @@ fn a_paced_replay_sends_the_initial_final_after_its_last_turn() {
 /// the switch on, told the Final beside it. Turned red by a Final sent without reading the switch
 /// (`config.initial_interest` in `owe_link_initial_final`) or the roles
 /// (`meets_remote_as_peer_hat`).
+#[cfg(feature = "interest-answer")]
 #[test]
 fn no_initial_final_goes_to_a_face_that_is_not_a_peer_or_when_the_switch_is_off() {
     let cases = [
@@ -559,6 +565,32 @@ fn no_initial_final_goes_to_a_face_that_is_not_a_peer_or_when_the_switch_is_off(
         );
         SessionDrive::close(&*engine);
     }
+}
+
+/// A build that answers no Interest owes no face the Final of the initial interest: a peer meeting
+/// a peer with the switch on is told its subscriber and nothing after it. The CONTROL is the
+/// subscriber, which shows the replay ran over the link the Final would have ended. Turned red by
+/// a Final sent from a build without `interest-answer` (`owe_link_initial_final` or
+/// `end_initial_interest` compiled into it).
+#[cfg(not(feature = "interest-answer"))]
+#[test]
+fn a_build_that_answers_no_interest_sends_no_initial_final() {
+    let router = peer_on(router_port());
+    let engine = open_with(peer_config(&router, true));
+    subscribe(&engine, "k/1");
+    until(&engine, "the subscriber", || told(&router) >= 1);
+    step_for(&engine, Duration::from_millis(100));
+    assert_eq!(
+        told_subscribers(&router).len(),
+        1,
+        "CONTROL: the replay told the subscriber"
+    );
+    assert!(
+        initial_finals(&router).is_empty(),
+        "no Final from a build that answers no Interest"
+    );
+    assert_eq!(told(&router), 1, "the subscriber alone");
+    SessionDrive::close(&*engine);
 }
 
 /// A session that listens tells a face it took off its port, whose peer dialled it as a peer,
