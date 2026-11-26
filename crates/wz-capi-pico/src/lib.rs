@@ -127,8 +127,9 @@ pub mod c_runtime {
 /// host's heap (the one `z_malloc` hands a program on a POSIX host, the process heap on Windows),
 /// a panic handler that aborts the process, as a failed assertion in zenoh-pico does, and on a POSIX
 /// host the personality routine the toolchain's prebuilt `core` names in its unwind tables, which
-/// nothing calls because nothing unwinds (`src/os/no_std_host.rs`). Expanded once, by the C
-/// library's artifact `wz-capi-pico-lib` in a build that does not unwind, never in this rlib, so
+/// nothing calls because nothing unwinds (`src/os/no_std_host.rs`), and on Linux with the GNU C
+/// library the unwinder's `_Unwind_Resume` its cleanup paths name, for the same reason. Expanded
+/// once, by the C library's artifact `wz-capi-pico-lib` in a build that does not unwind, never in this rlib, so
 /// a Rust program or test that links this crate keeps `std`'s own. Empty in a build without `os-host`: the tokio engine's library
 /// links `std`, and a Zephyr image's C seams and board define them.
 #[cfg(feature = "os-host")]
@@ -148,6 +149,22 @@ macro_rules! c_library_runtime {
         extern "C" fn rust_eh_personality() -> ! {
             $crate::c_runtime::abort()
         }
+
+        // The prebuilt `core`'s and `alloc`'s cleanup paths call the unwinder's resume, which
+        // left undefined makes every program of the library map `libgcc_s` for that one name
+        // (docs/win-budget/rss.md, R4). No cleanup path is entered: an unwind reaches one only
+        // through a personality routine, and the one above aborts. The name is local to the
+        // library's object, so it is not exported and never stands for the unwinder of a program
+        // that links the static form.
+        // Named only by the assembly below, a use the dead-code pass need not see.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[allow(dead_code)]
+        extern "C" fn unwind_resume_unreached() -> ! {
+            $crate::c_runtime::abort()
+        }
+
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ::core::arch::global_asm!(".set _Unwind_Resume, {}", sym unwind_resume_unreached);
     };
 }
 /// The items a program without `std` needs from its last Rust crate: none in a build without

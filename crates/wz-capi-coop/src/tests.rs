@@ -264,6 +264,10 @@ struct Seen {
     declares: usize,
     /// The id of each subscriber the router was declared, in the order the declarations arrived.
     subscribers: Vec<u64>,
+    /// The id of each subscriber the router was told went, in the order the retractions arrived
+    /// (the direct read's tests read it).
+    #[cfg(not(wz_round))]
+    undeclared_subscribers: Vec<u64>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
     #[cfg(feature = "interest-answer")]
@@ -576,11 +580,15 @@ fn run_router(
                     match m {
                         NetworkMessage::Declare(declare) => {
                             seen.declares += 1;
-                            if let wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
-                                subscriber,
-                            ) = &declare.body
-                            {
-                                seen.subscribers.push(subscriber.id);
+                            match &declare.body {
+                                wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclSubscriber(
+                                    subscriber,
+                                ) => seen.subscribers.push(subscriber.id),
+                                #[cfg(not(wz_round))]
+                                wz_codecs::declare::DeclareOwnedVariant::CodecZenohUndeclSubscriber(
+                                    gone,
+                                ) => seen.undeclared_subscribers.push(gone.id),
+                                _ => {}
                             }
                             #[cfg(feature = "interest-answer")]
                             if let Some(interest) = declare.interest_id {
@@ -652,10 +660,15 @@ fn run_router(
                 let mut seen = counted.lock().unwrap();
                 if let Some(declare) = record.declare() {
                     seen.declares += 1;
-                    if let wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) =
-                        &declare.body
-                    {
-                        seen.subscribers.push(subscriber.id);
+                    match &declare.body {
+                        wz_codecs::lent::DeclareVariant::CodecZenohDeclSubscriber(subscriber) => {
+                            seen.subscribers.push(subscriber.id);
+                        }
+                        #[cfg(not(wz_round))]
+                        wz_codecs::lent::DeclareVariant::CodecZenohUndeclSubscriber(gone) => {
+                            seen.undeclared_subscribers.push(gone.id);
+                        }
+                        _ => {}
                     }
                     #[cfg(feature = "interest-answer")]
                     if let Some(interest) = declare.interest_id {
@@ -1323,8 +1336,8 @@ fn a_subscriber_declared_after_a_peers_interest_is_answered_by_the_declaration()
 /// A publish that finds nothing handed to the session takes the session's lock once and the queue
 /// of handed legs not at all, so a stream of puts pays no lock for what no other publish left
 /// behind. The CONTROL is a read step, which looks at the queue under its lock every time. A
-/// build of the dial face alone keeps no queue.
-#[cfg(any(feature = "listen", feature = "group"))]
+/// build of the dial face alone keeps no queue, nor does one that sends each face its own leg.
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 #[test]
 fn a_publish_with_nothing_handed_takes_the_session_once_and_not_the_handed_queue() {
     let router = Router::start(CatchAll::None);
@@ -1420,10 +1433,12 @@ fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
 /// at all. A read that steps its one link itself keeps that link's deadlines (its keep-alive, its
 /// lease) with the session's, which a build whose links are tasks leaves to the tasks' timers: its
 /// wait has that deadline to work out, and reads the clock once for it. The session's lock is
-/// taken twice: for the wait and for the step. The counts are otherwise the same in every build:
-/// the sweep of the gets, each face and the look for a due job share the step's reading and its
-/// take. Turned red by a step that reads the clock again for its link, or a wait that reads it
-/// with nothing to bound.
+/// taken twice: for the wait and for the step. The counts are otherwise the same in every build,
+/// one with groups among them, the session having joined none: the sweep of the gets, each face
+/// and the look for a due job share the step's reading and its take. Turned red by a step that
+/// reads the clock again for its link, a wait that reads it with nothing to bound, or a read that
+/// takes the session to step and poll the groups of a session that joined none
+/// (`CoopEngine::read_groups`).
 #[test]
 fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step() {
     let router = Router::start(CatchAll::None);
@@ -1437,11 +1452,7 @@ fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_s
         engine.takes.core.load(Ordering::SeqCst),
     );
     let _ = SessionDrive::read(&*engine, false);
-    let wait_reads = usize::from(cfg!(not(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
-    ))));
+    let wait_reads = usize::from(cfg!(not(wz_round)));
     assert_eq!(
         engine.clock_reads() - reads,
         1 + wait_reads,
@@ -1672,12 +1683,14 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
 }
 
 /// A Push and, after it in the same batch, the retraction of the router's subscriber that opened a
-/// write filter. In a build of one thread the retraction is applied after the Push's callback
-/// returned, so the callback sees the filter still open, as zenoh-pico calls each callback while
-/// it reads the batch (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
-/// `_z_handle_network_message`); a build of threads reads the batch whole before its callbacks,
+/// write filter. A read that hands each record out where it lies, a read task's among them, and a
+/// round of one thread apply the retraction after the Push's callback returned, so the callback
+/// sees the filter still open, as zenoh-pico calls each callback while it reads the batch
+/// (`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `_z_handle_network_message`); only a round
+/// beside other threads (`wz_round` with a read task) reads the batch whole before its callbacks,
 /// which see the filter shut. Turned red by a round of one thread that takes the next record while
-/// it has room (`Round::has_room`).
+/// it has room (`Round::has_room`), or a direct read that applies a record before the callbacks
+/// of the one before it returned.
 #[test]
 fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() {
     use wz_session_core::row_callback::ThreadForm;
@@ -1728,10 +1741,10 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     until(&engine, "the push and the retraction after it", || {
         !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
     });
-    let threads = <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
+    let read_whole_first = cfg!(wz_round) && <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
     assert_eq!(
         *seen.lock().unwrap(),
-        [threads],
+        [read_whole_first],
         "the callback saw the filter shut only where the batch is read whole before it"
     );
 }
@@ -1879,7 +1892,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
     let samples = engine.samples_handed();
     let polls = engine.link_polls();
     let task_clock_reads = engine.task_clock_reads();
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     let handed = engine.takes.handed.load(Ordering::SeqCst);
     let _ = SessionDrive::read(&*engine, false);
     let sent: Vec<Vec<u8>> = (0..SAMPLES).map(|index| vec![index]).collect();
@@ -1902,7 +1915,7 @@ fn the_read_that_hands_what_one_receive_took_moves_the_links_once() {
         0,
         "the tasks' timers are woken by the steps' own readings, with none of their own"
     );
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     assert_eq!(
         engine.takes.handed.load(Ordering::SeqCst) - handed,
         1,
@@ -2719,6 +2732,72 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
         took < Duration::from_millis(60),
         "a waiting read task wakes for the push, not at the end of its wait: {took:?}"
     );
+    SessionDrive::close(&*engine);
+}
+
+/// A record the read task hands out reaches its callback with nothing of the session held but the
+/// face's read slot: a put another thread makes while the callback runs, and that the callback
+/// waits for, is sent and returns, and the callback returns after it. Turned red by a read that
+/// holds the session's lock or the face's send place across a record's callbacks (the put would
+/// wait for the callback, which waits for the put), and, as it does not build, by `threads` kept
+/// among the features that keep the round where each value has a lock of its own (`build.rs`):
+/// the face count read below is the direct read's.
+#[cfg(all(
+    feature = "threads",
+    any(feature = "std", feature = "host-sys"),
+    target_has_atomic = "8",
+    target_has_atomic = "64",
+    not(feature = "group")
+))]
+#[test]
+fn a_put_another_thread_makes_inside_a_read_tasks_callback_is_sent_and_both_return() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let (_, turned) = engine.direct_faces();
+    assert!(turned >= 1, "the read steps the faces itself");
+    let (entered, inside) = channel::<()>();
+    let (put_done, put_seen) = channel::<bool>();
+    let put_seen = Mutex::new(put_seen);
+    let returned = Arc::new(AtomicUsize::new(0));
+    let after = returned.clone();
+    engine
+        .declare_subscriber_on_wire(
+            "demo/in/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _ = entered.send(());
+                let sent = put_seen
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+                if sent == Ok(true) {
+                    after.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .expect("the session declares the subscriber");
+    SessionDrive::start_read_task(&*engine).expect("a read task");
+    router.send(Command::Push("demo/in/a", b"in"));
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the read task calls the callback");
+    let sent = engine.publish_on_wire_all(
+        "demo/out",
+        &WireKey::literal(),
+        b"out",
+        &PublishOptions::put().with_locality(Locality::Remote),
+    );
+    put_done
+        .send(sent.is_ok())
+        .expect("the callback waits for the put");
+    until(&engine, "the callback to return after the put", || {
+        returned.load(Ordering::SeqCst) == 1
+    });
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/out"))
+    });
     SessionDrive::close(&*engine);
 }
 
@@ -3794,6 +3873,10 @@ mod direct_receive;
 #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
 mod direct_runtime;
 mod entity_tables;
+// The mark the session's lock makes against a wait on a face is kept in a debug build on `std`'s
+// thread-locals.
+#[cfg(all(feature = "std", not(feature = "host-sys"), debug_assertions))]
+mod face_order;
 #[cfg(all(
     feature = "listen",
     feature = "query",
@@ -3808,6 +3891,9 @@ mod get;
 // Each member is stepped by its read task.
 #[cfg(all(feature = "group", feature = "app-transport", feature = "threads"))]
 mod group;
+// A full group's stage, in both forms of the engine's calls.
+#[cfg(all(feature = "group", feature = "app-transport"))]
+mod group_congested;
 #[cfg(all(feature = "group", feature = "app-transport"))]
 mod group_stack;
 mod held_keys;
@@ -3859,7 +3945,7 @@ mod replay;
 #[cfg(wz_round)]
 mod round;
 // The cells a link's task takes: a build whose read steps its one link itself runs none.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 mod runtime_tables;
 #[cfg(all(
     feature = "shared-key-ids",
@@ -3879,16 +3965,21 @@ mod timestamps;
 mod tx_pool;
 
 /// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
-/// build script): a build whose read runs beside the program's calls. The read that hands each
-/// record out as it is read queues none, a get's reply included. A build that keeps none compiles
-/// no `crate::round`, so this is read here, where every build reads it. A feature added to one
-/// list and not the other turns this red.
+/// build script): a build whose read task runs beside the program's calls with no lock of each
+/// value's own (`wz_value_locks`: a host lock on a target with 8- and 64-bit atomics). A group's
+/// read is no reason to keep it: the read task steps a group's session under the session's lock
+/// and hands its records out with that lock let go of. The read that hands each record out as it
+/// is read queues none, a get's reply included. A build that keeps none compiles no
+/// `crate::round`, so this is read here, where every build reads it. Turned red by `group` put
+/// back in the script's predicate: the shipped host preset (`threads` and `group`) would read
+/// through the round again.
 #[test]
 fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
-    let queues = cfg!(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
+    let value_locks = cfg!(all(
+        any(feature = "std", feature = "host-sys"),
+        target_has_atomic = "8",
+        target_has_atomic = "64"
     ));
-    assert_eq!(cfg!(wz_round), queues);
+    assert_eq!(cfg!(wz_value_locks), value_locks);
+    assert_eq!(cfg!(wz_round), cfg!(feature = "threads") && !value_locks);
 }

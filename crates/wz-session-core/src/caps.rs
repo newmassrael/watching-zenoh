@@ -496,6 +496,13 @@ pub const MAX_PEER_KEYEXPR_ALIASES: usize = generated::MAX_PEER_KEYEXPR_ALIASES;
 /// link of the session, so this bounds what an open may be handed rather than sizing a table.
 pub const MAX_SHARED_KEY_IDS: usize = generated::MAX_SHARED_KEY_IDS;
 
+/// The per-key payload series ONE `stats/filters` key of a session holds in each direction
+/// (`transport-stats`): the label sets its payloads are counted under. The rows of every key
+/// are reserved when the filter list is set; a payload of a label set past its key's rows is
+/// counted under no key and counted as refused
+/// (`stats_registry::TransportMetrics::per_key_refused`).
+pub const STATS_KEY_SERIES: usize = generated::STATS_KEY_SERIES;
+
 /// Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
 /// tokens) a peer may hold open to this session at a time (the deploy `limits`
 /// key `remote_decls`). Bounds each of [`crate::id_map::DeclaredKeys`] and

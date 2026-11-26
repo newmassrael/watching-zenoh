@@ -7979,6 +7979,85 @@
         "lanes to land one at a time after this: mcast-perf, stats-parts, rss-design, link-enum, deliv, gate-ledger, SCE pin.",
         "bx view isolation for this repository waits on the per-machine trial (bx RFC 0035 6)."
       ]
+    },
+    "Round 4662": {
+      "decision_summary": "Land stats-parts: transport statistics without a heap. Payload series and\nper-link message counters are held in fixed storage at their label index,\nso a build with transport-stats allocates nothing after open.",
+      "changes_bullets": [
+        "session-core: payload series and link message counters held at their label index in fixed storage.",
+        "session-core: a get and a reply counted off the parts they are sent; a shared Push's filters matched on its borrowed key.",
+        "config: limits regenerated with the stats key series bound."
+      ],
+      "verification_bullets": [
+        "wz-session-core lib tests with transport-stats: 1773 passed after merging main.",
+        "nondefault-features: wz-admin and wz-session-core clippy-clean in every declared set.",
+        "wz_config --check: the generated limits match."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
+    },
+    "Round 4663": {
+      "decision_summary": "Land rss-design: cut the resident memory of the pico preset build. A\nlistener lends its face tables on accept instead of reserving them up front,\nand SHA-256 is built compact; rows that grew text more than they saved were\nreverted. The preset's RSS ratio against zenoh-pico moved from 1.31 to 1.15.",
+      "changes_bullets": [
+        "capi-coop/runtime-coop: face tables lent on accept rather than reserved for every slot.",
+        "crates: SHA-256 built compact for the preset.",
+        "reverted the rows that grew text more than they saved."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-capi-coop, wz-capi-pico, wz-host-sync, wz-runtime-coop, wz-runtime-posix, wz-session-core clippy-clean in every declared set after merging main.",
+        "lib tests: wz-capi-coop, wz-runtime-coop, wz-runtime-posix, wz-host-sync pass.",
+        "measured RSS ratio against zenoh-pico on the preset build: 1.15 (was 1.31)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "RSS still loses at 1.15: the resident library text is the remaining source."
+      ]
+    },
+    "Round 4664": {
+      "decision_summary": "Land the lane verdict ledger (RFC 0001 M1-M3). A lane's verdict is keyed by\nthe digest of what it reads, so a lane that a change did not move is not run\nagain. The input of a lane is the run-ci.sh definitions it runs, its helpers\nand the top-level code, not the whole file. Landing runs no lane before it\nsubmits: lanes the landing moved run once after it lands (verify-once), and a\nred re-runs alone (--only-red), as TAP and the Chromium CQ split pre- and\npost-submit.",
+      "changes_bullets": [
+        "scripts: lanes.toml declares 194 lanes; lane_digest keys each by its inputs, run-ci.sh read per definition.",
+        "scripts: verify-once.sh plans, runs and keeps receipts (--plan, --changed, --only-red, --all with a reason).",
+        "land.sh unchanged in what it runs; CLAUDE.md and RFC 0001 state the post-merge place of the lanes."
+      ],
+      "verification_bullets": [
+        "selftests pass: lane_digest 76, lane_input_closure 10, lane_graph 36, lane_decl 19, lanes_gate 14, git_tree 14, gate_ledger, script_exercise_census 67/67.",
+        "lane_digest --check: 194 lanes digested, 22 opaque.",
+        "verify-once --plan on this branch selects 56 lanes (was 199 with whole-file inputs)."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "22 opaque lanes are always selected; give each a declared input closure.",
+        "the three hand_back tests of wz-capi-coop build on no host lane (wz_round needs a target without 64-bit atomics)."
+      ]
+    },
+    "Round 4665": {
+      "decision_summary": "Land mcast-perf: the multicast receive and put paths of the pico preset win\nagainst zenoh-pico (receive 3,102 vs 3,532 Ir per message, put 2,211 vs\n2,555), with the lanes it carried for the unicast read and the listener. Layer\nC1cc now builds the pico CLIs its interop legs run, so a run of the layer\nalone judges the same tree as hosted CI.",
+      "changes_bullets": [
+        "capi-coop/session-core: multicast receive and put paths cut to beat zenoh-pico per message.",
+        "capi-coop: a face with no wire is skipped by the ? operator in the declaration watch walks.",
+        "ci: Layer C1cc builds the pico CLIs its interop legs run."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-capi-coop, wz-capi-pico, wz-runtime-coop, wz-runtime-posix, wz-runtime-tokio, wz-session-core, wz-session-mcu clippy-clean after merging main.",
+        "tests: wz-capi-coop arena 68 and 73 (runtime-plan), tx_pool; wz-session-core session_tables 103 passed.",
+        "Layer C1cc: 74 of 78 legs reached; the one red leg (a coop pico listener sends no initial-interest final) is main's, not this lane's.",
+        "measured multicast Ir per message: receive 0.88x, put 0.87x zenoh-pico."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "coop engine sends no initial-interest DeclareFinal to a dialling zenoh peer (Layer C1cc leg); lane coop-final.",
+        "wz-capi-coop hand_back tests build on no host lane (wz_round needs a target without 64-bit atomics)."
+      ]
     }
   },
   "inventory_entries": {

@@ -187,6 +187,31 @@ mod host_std {
         }
     }
 
+    /// A hold of one value's lock as a value of its own ([`HostMutex::hold`]): the value is
+    /// reached through it until it drops, and the lock is let go by its [`Held`] then.
+    pub struct HostHold<'a, T> {
+        value: &'a UnsafeCell<T>,
+        _held: Held<'a>,
+    }
+
+    impl<T> core::ops::Deref for HostHold<'_, T> {
+        type Target = T;
+
+        #[inline]
+        fn deref(&self) -> &T {
+            // SAFETY: this thread holds the value's lock until `_held` drops, with the hold.
+            unsafe { &*self.value.get() }
+        }
+    }
+
+    impl<T> core::ops::DerefMut for HostHold<'_, T> {
+        #[inline]
+        fn deref_mut(&mut self) -> &mut T {
+            // SAFETY: as in `Deref`, the hold borrowed mutably, so this is the one reference.
+            unsafe { &mut *self.value.get() }
+        }
+    }
+
     impl<T> HostMutex<T> {
         pub const fn new(value: T) -> Self {
             Self {
@@ -209,6 +234,15 @@ mod host_std {
             let _held = Held::try_enter(&self.lock)?;
             // SAFETY: as in `with`: this thread holds `lock` until `_held` drops.
             Some(f(unsafe { &mut *self.value.get() }))
+        }
+
+        /// [`Self::with`] as a value, let go of as it drops, waiting for whatever holds the lock
+        /// now.
+        pub fn hold(&self) -> HostHold<'_, T> {
+            HostHold {
+                value: &self.value,
+                _held: Held::enter(&self.lock),
+            }
         }
     }
 
@@ -243,38 +277,21 @@ mod host_std {
 #[cfg(feature = "host-lock-sys")]
 mod host_sys {
     use core::cell::UnsafeCell;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use wz_host_sync::{current_thread, RawLock};
+    use wz_host_sync::{process_section, RawLock};
 
     use super::CriticalSection;
 
-    /// The process's critical section.
-    static LOCK: RawLock = RawLock::new();
-    /// The thread inside the section, 0 when none is (no thread's number is 0). A thread writes
-    /// its own number here only while it holds `LOCK` and clears it before letting go, so a thread
-    /// that reads its own number back is the one inside, in a nested section.
-    static OWNER: AtomicUsize = AtomicUsize::new(0);
-    /// How deep the owner is in sections. Only the thread that holds `LOCK` reads or writes it, and
-    /// the lock orders one owner's writes before the next one's reads.
-    static DEPTH: AtomicUsize = AtomicUsize::new(0);
-
-    /// One level of this thread's critical sections, from [`Section::enter`] to drop. Entered and
-    /// left out of line, for the reason the module above gives.
+    /// One level of this thread's critical sections, from [`Section::enter`] to drop: a level of
+    /// the process's one section (`wz_host_sync::process_section`), whose words lie beside the
+    /// first thread record, so the read thread's spawn and every section write one page of them.
+    /// Entered and left out of line, for the reason the module above gives.
     struct Section;
 
     impl Section {
         #[inline(never)]
         fn enter() -> Self {
-            let me = current_thread();
-            if OWNER.load(Ordering::Relaxed) != me {
-                LOCK.lock();
-                OWNER.store(me, Ordering::Relaxed);
-            }
-            DEPTH.store(
-                DEPTH.load(Ordering::Relaxed).saturating_add(1),
-                Ordering::Relaxed,
-            );
+            process_section().enter();
             Self
         }
     }
@@ -282,15 +299,9 @@ mod host_sys {
     impl Drop for Section {
         #[inline(never)]
         fn drop(&mut self) {
-            // A section is made only by `enter`, so the count is at least one here.
-            let depth = DEPTH.load(Ordering::Relaxed).saturating_sub(1);
-            DEPTH.store(depth, Ordering::Relaxed);
-            if depth == 0 {
-                // The outermost section ends: the lock goes, its owner cleared first.
-                OWNER.store(0, Ordering::Relaxed);
-                // SAFETY: this thread took `LOCK` at its outermost section, which ends here.
-                unsafe { LOCK.unlock() };
-            }
+            // SAFETY: a section is made only by `enter`, which entered the process's section on
+            // this thread, and this drop leaves that level once.
+            unsafe { process_section().leave() };
         }
     }
 
@@ -336,6 +347,31 @@ mod host_sys {
         }
     }
 
+    /// A hold of one value's lock as a value of its own ([`HostMutex::hold`]): the value is
+    /// reached through it until it drops, and the lock is let go by its [`Held`] then.
+    pub struct HostHold<'a, T> {
+        value: &'a UnsafeCell<T>,
+        _held: Held<'a>,
+    }
+
+    impl<T> core::ops::Deref for HostHold<'_, T> {
+        type Target = T;
+
+        #[inline]
+        fn deref(&self) -> &T {
+            // SAFETY: this thread holds the value's lock until `_held` drops, with the hold.
+            unsafe { &*self.value.get() }
+        }
+    }
+
+    impl<T> core::ops::DerefMut for HostHold<'_, T> {
+        #[inline]
+        fn deref_mut(&mut self) -> &mut T {
+            // SAFETY: as in `Deref`, the hold borrowed mutably, so this is the one reference.
+            unsafe { &mut *self.value.get() }
+        }
+    }
+
     impl<T> HostMutex<T> {
         pub const fn new(value: T) -> Self {
             Self {
@@ -358,13 +394,22 @@ mod host_sys {
             // SAFETY: as in `with`: this thread holds `lock` until `_held` drops.
             Some(f(unsafe { &mut *self.value.get() }))
         }
+
+        /// [`Self::with`] as a value, let go of as it drops, waiting for whatever holds the lock
+        /// now.
+        pub fn hold(&self) -> HostHold<'_, T> {
+            HostHold {
+                value: &self.value,
+                _held: Held::enter(&self.lock),
+            }
+        }
     }
 
     pub(super) fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
         let section = Section::enter();
-        // SAFETY: this thread holds `LOCK`, taken at its outermost section, and keeps it until
-        // that section ends; every critical section of this crate is entered through `with`, so
-        // no other thread holds a token while this one does.
+        // SAFETY: this thread holds the process's section, taken at its outermost level, and keeps
+        // it until that level ends; every critical section of this crate is entered through `with`,
+        // so no other thread holds a token while this one does.
         let token = unsafe { CriticalSection::new() };
         let result = f(token);
         drop(section);
@@ -384,7 +429,7 @@ mod host_sys {
 }
 
 #[cfg(feature = "host-lock")]
-pub use host::HostMutex;
+pub use host::{HostHold, HostMutex};
 
 #[cfg(all(test, feature = "single-context", not(feature = "host-lock")))]
 mod single_context_tests {
@@ -568,5 +613,59 @@ mod tests {
         assert_eq!(sum, 3);
         assert_eq!(outer.try_with(|value| *value), Some(1), "the outer is free");
         assert_eq!(inner.try_with(|value| *value), Some(2), "the inner is free");
+    }
+
+    /// A hold of a cell as a value keeps the cell held until the hold drops: a try on this
+    /// thread finds it held, another thread's take waits for the drop and then reads what the
+    /// hold wrote. Turned red by a hold that lets go of the lock before its drop, or never.
+    #[test]
+    fn a_hold_keeps_its_cell_until_it_drops() {
+        let cell = Arc::new(HostMutex::new(0u32));
+        let mut hold = cell.hold();
+        *hold = 1;
+        assert_eq!(
+            cell.try_with(|value| *value),
+            None,
+            "held, a try takes nothing"
+        );
+        let other = {
+            let cell = cell.clone();
+            std::thread::spawn(move || {
+                cell.with(|value| {
+                    *value += 1;
+                    *value
+                })
+            })
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !other.is_finished(),
+            "another thread's take waits for the hold"
+        );
+        drop(hold);
+        assert_eq!(other.join().expect("the other thread ran"), 2);
+        assert_eq!(cell.try_with(|value| *value), Some(2));
+    }
+
+    /// The kind of several threads holds a value through that value's own lock: a try while the
+    /// hold lives finds it held, and after the drop reads what the hold wrote. Turned red by a
+    /// `HoldKind` of `ManyThreads` that holds anything but the value's lock.
+    #[cfg(all(feature = "runtime", target_has_atomic = "8", target_has_atomic = "64"))]
+    #[test]
+    fn the_kind_of_several_threads_holds_a_value_by_its_own_lock() {
+        use crate::sync::{HoldKind, LockKind, ManyThreads};
+        let cell = <ManyThreads as LockKind>::wrap(3u32);
+        {
+            let mut held = <ManyThreads as HoldKind>::hold(&cell);
+            *held += 1;
+            assert_eq!(
+                <ManyThreads as LockKind>::try_with(&cell, |value| *value),
+                None
+            );
+        }
+        assert_eq!(
+            <ManyThreads as LockKind>::try_with(&cell, |value| *value),
+            Some(4)
+        );
     }
 }

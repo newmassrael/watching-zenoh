@@ -225,14 +225,14 @@ fn host_plan(config: &CoopConfig) -> Result<ArenaPlan, ArenaRefused> {
 
 /// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
 /// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
     crate::engine::RuntimeTables::of::<PosixClock>(config)
 }
 
 /// The runtime tables a session `config` opens, as the engine's form sizes them: a form whose
 /// links run as tasks sizes their cells by the clock's task, the one-link read reserves none.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 fn runtime_tables(config: &CoopConfig) -> crate::engine::RuntimeTables {
     crate::engine::RuntimeTables::of(config)
 }
@@ -259,6 +259,8 @@ fn held_plan(
             planes: crate::engine::SessionPlanes::OF_BUILD,
             #[cfg(feature = "listen")]
             admission: core::mem::size_of::<crate::engine::Admission<PosixClock>>(),
+            #[cfg(not(wz_round))]
+            direct_face: Engine::DIRECT_FACE_BYTES,
         },
     )?;
     Ok(plan)
@@ -613,17 +615,19 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     );
 
     let dialling = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
-    for part in [
-        "link port datagram flags",
-        "link port datagram slots",
-        "udp port peers",
-        "udp port queue",
-    ] {
-        assert!(
-            dialling.rows().all(|laid| laid.part() != part),
-            "a session that listens on nothing lays out no {part}"
-        );
-    }
+    assert!(
+        dialling.rows().all(|row| !PORT_PARTS.contains(&row.part())),
+        "a session that listens on nothing lays out no row of the ports: {dialling:?}"
+    );
+    let mut session =
+        SessionArena::reserve(&dialling, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let tables = dialling.transport().links_from(&mut lend);
+    lend.finish().expect("the plan lays the links out");
+    assert!(
+        tables.port_rx().is_none(),
+        "a session that listens on nothing is lent no table for ports"
+    );
 }
 
 /// A session that listens on `tcp/` alone binds no udp port, so its plan lays out none of the
@@ -697,8 +701,8 @@ fn the_link_buffers_a_report_reads_are_the_plans_rows() {
     for config in configs {
         let plan = ArenaPlan::of(&config, &limits).expect("lays an arena out");
         let links = links_of(&config).expect("within the address space");
-        let buffers =
-            link_buffers(links, config.batch_size, &limits).expect("the plan's batch and pools");
+        let buffers = link_buffers(links, config.max_faces, config.batch_size, &limits)
+            .expect("the plan's batch and pools");
         let receive = row(&plan, "link receive buffers");
         let transmit = row(&plan, "link transmit slots");
         assert_eq!(
@@ -719,6 +723,30 @@ fn the_link_buffers_a_report_reads_are_the_plans_rows() {
     }
 }
 
+/// A report's table of chains is the session's share for each face read where it lies, the dial
+/// role's place and one for each face besides it where the session listens and reads each face
+/// where it lies, and the share alone otherwise; a count past the address space is refused as the
+/// plan is. Turned red by a report that reads the share alone where the plan multiplies it.
+#[test]
+fn a_reports_table_of_chains_is_a_share_for_each_face_read_where_it_lies() {
+    let limits = SessionLimits::defaults();
+    let batch = client_config().batch_size;
+    let report = |beside: usize| {
+        crate::arena::link_buffers(1, beside, batch, &limits).map(|buffers| buffers.chains)
+    };
+    let apart = cfg!(feature = "listen") && !cfg!(wz_round);
+    let places = |beside: usize| if apart { beside + 1 } else { 1 };
+    assert_eq!(report(0), Ok(caps::REASSEMBLY_CHAINS));
+    assert_eq!(report(3), Ok(caps::REASSEMBLY_CHAINS * places(3)));
+    if apart && caps::REASSEMBLY_CHAINS > 1 {
+        assert_eq!(
+            report(usize::MAX),
+            Err(ArenaRefused::TooLarge),
+            "a table past the address space"
+        );
+    }
+}
+
 /// A list of endpoints counts its `udp/` ones, in the host's form and in a source's alike.
 /// Turned red by a count that reads another scheme as udp, or a source's count that drops one.
 #[test]
@@ -735,6 +763,16 @@ fn a_list_of_endpoints_counts_its_udp_ones() {
     assert_eq!((counted.count(), counted.udp()), (3, 2));
     assert_eq!(Counted::of(None::<&str>), Counted::default());
 }
+
+/// The parts of an arena that only a session that listens lays out: the slots its udp ports read
+/// their datagrams into, and the ports' books of their peers and of the datagrams waiting.
+#[cfg(feature = "listen")]
+const PORT_PARTS: [&str; 4] = [
+    "link port datagram flags",
+    "link port datagram slots",
+    "udp port peers",
+    "udp port queue",
+];
 
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest
 /// batch a group it names sends, under the build's multicast batch, with the links' tables: the
@@ -978,10 +1016,7 @@ fn a_build_that_puts_nothing_in_the_round_lays_out_none_of_it() {
 fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     let built =
         ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("lays an arena out");
-    #[cfg(any(
-        not(feature = "runtime-plan"),
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(any(not(feature = "runtime-plan"), not(wz_round)))]
     assert!(
         built.rows().all(|row| row.part() != "registry lend"),
         "a read that steps its one link, or a region, lends no registry from the arena"
@@ -993,7 +1028,7 @@ fn the_plan_lays_out_the_places_the_session_lends_in_for_a_step() {
     );
     #[cfg(feature = "runtime-plan")]
     let lends: &[(&str, usize)] = &[
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         ("registry lend", crate::engine::REGISTRY_LEND_BYTES),
         ("router lend", crate::engine::ROUTER_LEND_BYTES),
     ];
@@ -1422,7 +1457,7 @@ fn a_pool_past_what_a_u16_names_refuses_the_open_by_its_limit() {
 /// faces: `HANDED_LEG_BYTES` cut into places of its links' batch, with their flags, under the
 /// build's `held-faces` value of `held-publish-drop`, and none under `every-face`. Turned red
 /// by places sized by anything but the links' batch, or reserved when the policy keeps none.
-#[cfg(feature = "listen")]
+#[cfg(all(feature = "listen", wz_round))]
 #[test]
 fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     use wz_session_core::policy::HeldPublishDrop;
@@ -1443,6 +1478,41 @@ fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     assert_eq!(row(&plan, "handed leg flags").count, expected);
 }
 
+/// A session that listens and sends each face its own leg (`direct`) reserves no place for a
+/// handed publish, whatever `held-publish-drop` says: a leg dropped is dropped on its own face,
+/// and no other face is owed it. The CONTROL is the links' receive buffers, which it reserves.
+/// Turned red by the handed legs' rows laid out in a build that reads its faces where they lie.
+#[cfg(all(feature = "listen", not(wz_round)))]
+#[test]
+fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
+    let config = CoopConfig {
+        max_faces: 2,
+        ..client_config()
+    };
+    let plan = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
+    assert!(
+        row(&plan, "link receive buffers").count > 0,
+        "CONTROL: the links' buffers are laid out"
+    );
+    for part in ["handed leg places", "handed leg flags", "handed legs"] {
+        assert!(
+            plan.rows().all(|row| row.part() != part),
+            "no row of {part}"
+        );
+    }
+}
+
+/// The faces whose reads stage their chains apart, a share of the reassembly table each: each set
+/// of face tables of a session that listens and reads each face where it lies, and one otherwise
+/// (`crate::arena::ArenaPlan::lay_out`).
+fn chain_shares(plan: &ArenaPlan) -> usize {
+    if cfg!(wz_round) || !cfg!(feature = "listen") {
+        1
+    } else {
+        plan.peers().sets()
+    }
+}
+
 /// The session is lent one table of reassembly buffers its links share, as many as its
 /// `REASSEMBLY_CHAINS` however many links the session may hold, each as long as the session's
 /// `PICO_FRAG_MAX_BYTES`: the build's count and length for a session that states neither, the
@@ -1457,18 +1527,18 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_an
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(
-        row(&built, "reassembly buffers").count,
-        caps::REASSEMBLY_CHAINS
-    );
+    // Where the links are tasks they share the one table's chains; where each face's read stages
+    // its chains in a Router of its own (`direct`), the table holds the session's count for each
+    // face read where it lies, so the chains of one face never take another's buffers: each set
+    // of tables where the session listens, and the dial role's alone otherwise, a group's session
+    // staging its chains itself.
+    let chains = caps::REASSEMBLY_CHAINS * chain_shares(&built);
+    assert_eq!(row(&built, "reassembly buffers").count, chains);
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
         caps::PICO_FRAG_MAX_BYTES
     );
-    assert_eq!(
-        built.reassembly(),
-        (caps::PICO_FRAG_MAX_BYTES, caps::REASSEMBLY_CHAINS)
-    );
+    assert_eq!(built.reassembly(), (caps::PICO_FRAG_MAX_BYTES, chains));
     let one_link = ArenaPlan::of(
         &CoopConfig {
             max_faces: 0,
@@ -1479,25 +1549,30 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_an
     .expect("lays an arena out");
     assert_eq!(
         one_link.reassembly(),
-        built.reassembly(),
-        "the table does not grow with the links"
+        (
+            caps::PICO_FRAG_MAX_BYTES,
+            caps::REASSEMBLY_CHAINS * chain_shares(&one_link)
+        ),
+        "the table grows with the sets of the faces read where they lie alone"
     );
     let lowered_bytes = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
     let plan = ArenaPlan::of(&config, &lowered_bytes).expect("lays an arena out");
     assert_eq!(row(&plan, "reassembly buffers").entry_bytes, 1024);
     let one = lowered(|l| l.select_reassembly_chains(Quota::at_most(1)));
     let plan = ArenaPlan::of(&config, &one).expect("lays an arena out");
+    let stated = chain_shares(&plan);
     assert_eq!(
         plan.reassembly(),
-        (caps::PICO_FRAG_MAX_BYTES, 1),
-        "the count the session states"
+        (caps::PICO_FRAG_MAX_BYTES, stated),
+        "the count the session states, for each face read where it lies"
     );
-    assert_eq!(row(&plan, "reassembly buffers").count, 1);
-    assert_eq!(row(&plan, "reassembly flags").count, 1);
+    assert_eq!(row(&plan, "reassembly buffers").count, stated);
+    assert_eq!(row(&plan, "reassembly flags").count, stated);
     assert_eq!(
-        crate::arena::link_buffers(1, config.batch_size, &one).map(|buffers| buffers.chains),
-        Ok(1),
-        "a report reads the count the plan lays out"
+        crate::arena::link_buffers(1, config.max_faces, config.batch_size, &one)
+            .map(|buffers| buffers.chains),
+        Ok(stated),
+        "a report reads the plan's count"
     );
     let none = lowered(|l| l.select_reassembly_chains(Quota::at_most(0)));
     let plan = ArenaPlan::of(&config, &none).expect("lays an arena out");
@@ -1538,7 +1613,8 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_an
         };
         assert_eq!(ArenaPlan::of(&config, &raised), Err(refused));
         assert_eq!(
-            crate::arena::link_buffers(1, config.batch_size, &raised).map(|buffers| buffers.chains),
+            crate::arena::link_buffers(1, 0, config.batch_size, &raised)
+                .map(|buffers| buffers.chains),
             Err(refused),
             "a report is refused as the plan is"
         );
@@ -2639,6 +2715,13 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
     if let Some(row) = owed.first() {
         assert_eq!(row.count, peer.peers().pools.remote_decls);
     }
+    // The peer listens on `tcp/` alone and binds no udp port, so neither lays out a port's row.
+    assert!(
+        peer.rows()
+            .chain(client.rows())
+            .all(|row| !PORT_PARTS.contains(&row.part())),
+        "a session that binds no udp port lays out no row of one"
+    );
     let rows: Vec<_> = peer
         .rows()
         .filter(|row| row.part() != "owed tokens")
@@ -2689,6 +2772,12 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         } else if FACE_PARTS.contains(&theirs.part()) {
             // The gets' tables, and the ends of their legs, hold the session's own once.
             ours.count / (1 + own) * (faces + own)
+        } else if !cfg!(wz_round)
+            && ["reassembly flags", "reassembly buffers"].contains(&theirs.part())
+        {
+            // Each face's read stages its chains in a Router of its own (`direct`): the table
+            // holds a share for each set of tables.
+            ours.count / client.peers().sets() * peer.peers().sets()
         } else {
             ours.count
         };
@@ -3126,6 +3215,8 @@ fn a_plan_with_every_row_holds_exactly_arena_rows() {
     plan.lay_planes(crate::engine::SessionPlanes::OF_BUILD);
     #[cfg(feature = "listen")]
     plan.lay_admission(64);
+    #[cfg(not(wz_round))]
+    plan.lay_direct_faces(64);
     plan.settled()
         .expect("the build's limits lay the planes' and the admission's places out");
     assert_eq!(plan.rows().count(), crate::arena::ARENA_ROWS);
@@ -3520,4 +3611,117 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
     );
     wz_capi_port::SessionDrive::close(&*engine);
     assert!(!handle.is_open(), "a second close changes nothing");
+}
+
+/// Where each face is read where it lies (no `wz_round`), each face's Router stages its chains
+/// apart: the reassembly table holds one face's share for each face read where it lies, and the
+/// faces past the dial role's are laid out a row each, of one face's read slot and send place.
+/// Only a session that listens reads a face past the dial role's where it lies: a build without
+/// `listen`, groups and all, has one share and no such row whatever its face table's places, a
+/// group's place being read through the group's own session. Turned red by a table of one share
+/// whatever the faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for
+/// each place of a build that does not (`read_faces`), or by a row for the dial role's face,
+/// which lies in the engine's place (`ArenaPlan::lay_direct_faces`).
+#[cfg(not(wz_round))]
+#[test]
+fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
+    let config = CoopConfig {
+        max_faces: BESIDE_DIAL,
+        ..client_config()
+    };
+    let plan = host_plan(&config).expect("lays an arena out");
+    let sets = plan.peers().sets();
+    if crate::arena::TAKES_FACES {
+        assert!(
+            sets > 1,
+            "CONTROL: the face table has places past the dial role's"
+        );
+    }
+    let read = if cfg!(feature = "listen") { sets } else { 1 };
+    assert_eq!(
+        row(&plan, "reassembly buffers").count,
+        caps::REASSEMBLY_CHAINS * read
+    );
+    let direct = plan.rows().find(|row| row.part() == "direct faces");
+    if read > 1 {
+        let direct = direct.expect("a row of the faces past the dial role's");
+        assert_eq!(direct.count, read - 1);
+        assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
+    } else {
+        assert!(
+            direct.is_none(),
+            "the dial role's face lies in the engine's place"
+        );
+    }
+}
+
+/// An open's plan lays out what a listed plan of the same session lays out, every sum and every
+/// layer's rows, and lists no row, so the open's frame holds no table of them; a listed plan taken
+/// on by an open's plan, as a region's is, is the same plan. Turned red by a walk whose sums depend
+/// on the list it keeps, or a `take_on` that leaves a sum or a layer's rows behind.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
+    let config = client_config();
+    let listed = ArenaPlan::of(&config, &config.limits).expect("lays an arena out");
+    let mut open = crate::arena::OpenPlan::blank();
+    open.count(&config, &config.limits)
+        .expect("lays an arena out");
+    assert!(
+        listed.rows().count() > 0,
+        "CONTROL: the listed plan lists its rows"
+    );
+    assert_eq!(open.rows().count(), 0);
+    assert_eq!(open.reserved_bytes(), listed.reserved_bytes());
+    assert_eq!(open.transport(), listed.transport());
+    assert_eq!(open.session(), listed.session());
+    assert_eq!(open.places(), listed.places());
+    let mut taken = crate::arena::OpenPlan::blank();
+    taken.take_on(&listed);
+    assert_eq!(taken, open);
+}
+
+/// A plan that takes a laid plan on is that plan, whatever it held before: every sum, every layer's
+/// rows and every listed row, so the plan an open made is replaced whole and keeps nothing of its
+/// own. Turned red by a `take_on` that leaves a sum, a layer's rows or a listed row of the plan it
+/// overwrote as it was.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn a_plan_taken_on_is_the_laid_plan_whatever_it_held() {
+    let laid = ArenaPlan::of(
+        &preset_client(caps::MAX_STATIC_CONNECT),
+        &SessionLimits::PICO_PRESET,
+    )
+    .expect("the preset lays a client out");
+    let mut taken = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        taken, laid,
+        "CONTROL: the plan written over differs from the one taken on"
+    );
+    taken.take_on(&laid);
+    assert_eq!(taken, laid);
+}
+
+/// A region lays its plan out over a plan that held another as over a vacant one, in a build that
+/// lays its plans out at the open and in one that does not: the open lays the region's plan over
+/// the plan it made, which keeps nothing of its own. Turned red by a `lay_out_on` that leaves a sum,
+/// a layer's rows or a listed row of the plan it lays out over as it was.
+#[test]
+fn a_region_lays_its_plan_over_one_that_held_another() {
+    let config = preset_client(caps::MAX_STATIC_CONNECT);
+    let mut vacant = ArenaPlan::vacant();
+    PRESET_REGION
+        .lay_out_on(&mut vacant, &config)
+        .expect("the region admits a client of its own shape");
+    let mut held = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        held, vacant,
+        "CONTROL: the plan laid over differs from the region's"
+    );
+    PRESET_REGION
+        .lay_out_on(&mut held, &config)
+        .expect("the region admits a client of its own shape");
+    assert_eq!(held, vacant);
 }

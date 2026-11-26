@@ -4175,6 +4175,154 @@ fn a_row_undeclared_while_a_pinned_call_runs_is_passed_and_let_go_after() {
     assert!(tables.subscribers().contains(three.handle));
 }
 
+/// The numbers of the rows `calls` were begun on, in their order.
+fn numbers(calls: &[<CClosure<u32> as RowCallback>::Call]) -> Vec<u32> {
+    calls.iter().map(|call| call.call).collect()
+}
+
+/// End every call of `calls`: whether one was the last call of a row undeclared meanwhile.
+fn end_all<const N: usize>(
+    calls: &mut BoundedVec<<CClosure<u32> as RowCallback>::Call, N, Static>,
+) -> bool {
+    let mut drained = false;
+    while let Some(call) = calls.pop() {
+        drained |= ended::<CClosure<u32>>(call);
+    }
+    drained
+}
+
+/// One pin of every row a message reaches begins a call on each row the walk that pins one row at
+/// a time reaches, in its order, for a peer's message and for the session's own, and reaches the
+/// table's end; a pin from where it ended pins nothing. Turned red by a pin that stops before the
+/// last row reached, matches by another rule than the walk's, or leaves the walk where a second pin
+/// begins the calls again.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
+#[test]
+fn one_pin_of_every_row_begins_the_calls_the_walk_would_in_its_order() {
+    let mut tables = latched_tables();
+    for (n, key, origin) in [
+        (1, "a/b", Locality::Any),
+        (2, "a/*", Locality::Remote),
+        (3, "c", Locality::Any),
+        (4, "a/**", Locality::SessionLocal),
+        (5, "a/b", Locality::Any),
+    ] {
+        tables
+            .declare_subscriber(key, origin, KeyForm::default(), latched(n))
+            .unwrap();
+    }
+    // What makes a fresh fan-out of the message, beside the rows the walk reaches with it.
+    type FanOf = fn() -> PinnedFanOut<'static>;
+    let fans: [(FanOf, Vec<u32>); 2] = [
+        (|| PinnedFanOut::new("a/b", None), std::vec![1, 2, 5]),
+        (|| PinnedFanOut::local("a/b"), std::vec![1, 4, 5]),
+    ];
+    for (fan_of, rows) in fans {
+        assert_eq!(
+            pinned_in_turn(&mut tables, &mut fan_of()),
+            rows,
+            "CONTROL: the rows the walk reaches"
+        );
+        let mut fan = fan_of();
+        let mut calls = BoundedVec::<_, 8, Static>::new_static();
+        assert!(
+            tables.pin_subscribers(&mut fan, &mut calls),
+            "the pin reached the table's end"
+        );
+        assert_eq!(numbers(&calls), rows);
+        let mut again = BoundedVec::<_, 8, Static>::new_static();
+        assert!(tables.pin_subscribers(&mut fan, &mut again));
+        assert!(again.is_empty(), "a walk that ended stays ended");
+        assert!(!end_all(&mut calls), "a live row's call marks nothing");
+    }
+}
+
+/// A pin with room for fewer calls than the rows a message reaches says so and leaves the walk at
+/// the first row it had no room for, with no call begun on it: the next pin begins with that row,
+/// and once every call ended no row is held by one. Turned red by a pin that begins a call it has
+/// no room for, or that leaves the walk past the row.
+#[test]
+fn a_pin_out_of_room_leaves_the_walk_at_the_row_it_had_no_room_for() {
+    let mut tables = latched_tables();
+    let mut declared = Vec::new();
+    for n in 1..=3 {
+        let row = tables
+            .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(n))
+            .unwrap();
+        declared.push(row.handle);
+    }
+    let mut fan = PinnedFanOut::new("k", None);
+    let mut first = BoundedVec::<_, 2, Static>::new_static();
+    assert!(
+        !tables.pin_subscribers(&mut fan, &mut first),
+        "room for two calls of three"
+    );
+    assert_eq!(numbers(&first), std::vec![1, 2]);
+    let mut rest = BoundedVec::<_, 2, Static>::new_static();
+    assert!(tables.pin_subscribers(&mut fan, &mut rest));
+    assert_eq!(numbers(&rest), std::vec![3], "the next pin begins with it");
+    assert!(!end_all(&mut first));
+    assert!(!end_all(&mut rest));
+    for handle in declared {
+        assert!(
+            tables.undeclare_subscriber(handle).unwrap().taken.is_some(),
+            "no call of the row runs: one begun twice would hold it still"
+        );
+    }
+}
+
+/// The calls one pin begins are the rows that hold of the tables found: a row undeclared after the
+/// pin keeps its slot, its callback not handed back, until its call there has ended, and a row
+/// declared after it is not among them, nor in the slot of the undeclared one. Turned red by a pin
+/// that begins a row's call only when the delivery reaches it, or by a slot given to a declaration
+/// while a call pinned on it runs.
+#[test]
+fn the_rows_one_pin_reaches_are_those_its_hold_of_the_tables_found() {
+    let mut tables = latched_tables();
+    let one = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let two = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(2))
+        .unwrap();
+    let mut fan = PinnedFanOut::new("k", None);
+    let mut calls = BoundedVec::<_, 4, Static>::new_static();
+    assert!(tables.pin_subscribers(&mut fan, &mut calls));
+    assert!(
+        tables
+            .undeclare_subscriber(two.handle)
+            .unwrap()
+            .taken
+            .is_none(),
+        "its pinned call holds the undeclared row"
+    );
+    let three = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(3))
+        .unwrap();
+    assert!(
+        tables.subscribers().holds_slot(two.handle),
+        "the undeclared row keeps its slot while its call is pinned"
+    );
+    assert_eq!(
+        numbers(&calls),
+        std::vec![1, 2],
+        "the row declared after the pin is not among its calls"
+    );
+    assert!(
+        tables.release_drained_subscriber(&mut 0).is_none(),
+        "CONTROL: the pinned call has not ended"
+    );
+    assert!(end_all(&mut calls), "the last call of the undeclared row");
+    assert!(tables.release_drained_subscriber(&mut 0).is_some());
+    assert!(!tables.subscribers().holds_slot(two.handle));
+    assert!(tables.subscribers().contains(one.handle));
+    assert!(tables.subscribers().contains(three.handle));
+}
+
 /// Three subscribers that hear peers, on `a/b`, `a/*` and `a/c` (numbered 1, 2, 3), in tables
 /// whose key gate is `gate`. Of the keys of the test catalogue, `a/b` is one and `a/c` is not.
 #[cfg(feature = "key-set-closed")]

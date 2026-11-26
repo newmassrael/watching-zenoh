@@ -383,3 +383,61 @@ fn a_pace_the_build_cannot_reach_is_refused_and_changes_nothing() {
     );
     SessionDrive::close(&*engine);
 }
+
+/// A declaration made after the look that brought a new link up and before the replay's first
+/// lap, the window an operation of another thread falls into once the read lets go of the
+/// session's lock, is told to the new peer once, by the replay: the announce leaves alone a link
+/// still owed its lap, which reads the declaration off the tables. The CONTROL is that the
+/// declaration was made in that window. Turned red, in a build that reaches no pace, by an
+/// announce that tells such a link at once (`announce_on`'s `emits_now`): the peer hears it
+/// twice.
+#[cfg(not(wz_round))]
+#[test]
+fn a_declaration_made_before_the_first_lap_is_told_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let first = Router::start(CatchAll::None);
+    let port = first.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..config(&first)
+    });
+    subscribe(&engine, "e/1");
+    until(&engine, "the router to be told the subscriber", || {
+        told(&first) == 1
+    });
+    first.send(Command::Close);
+    drop(first);
+    until(&engine, "the link to be lost", || {
+        engine.peer_identities().is_empty()
+    });
+    let made = Arc::new(AtomicBool::new(false));
+    let session = EngineHold::downgrade(&engine);
+    *engine
+        .takes
+        .after_bring_up
+        .lock()
+        .expect("no test hook panicked") = Some(Box::new({
+        let made = made.clone();
+        move || {
+            if let Some(engine) = session.upgrade() {
+                subscribe(&engine, "e/2");
+                made.store(true, Ordering::SeqCst);
+            }
+        }
+    }));
+    let second = Router::start_on(port, CatchAll::None);
+    until(&engine, "the replay's lap", || told(&second) >= 2);
+    step_for(&engine, Duration::from_millis(300));
+    assert!(
+        made.load(Ordering::SeqCst),
+        "CONTROL: the subscriber was made between the link coming up and the lap"
+    );
+    assert_eq!(told(&second), 2, "e/1 and e/2, each told once");
+    let mut ids = told_subscribers(&second);
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 2, "two subscribers, neither told twice");
+}

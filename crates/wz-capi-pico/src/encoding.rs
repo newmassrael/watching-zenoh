@@ -75,6 +75,25 @@ pub use wz_codecs::encoding_ids::ENCODING_ID_TO_STR;
 /// same SSOT as the table it indexes.
 use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 
+/// The bytes that complete the word `EncodingState::packed_id` begins.
+const STATE_FILL: usize = core::mem::size_of::<usize>() - core::mem::size_of::<u32>();
+
+// A state is as many bytes as its fields, so none of them is padding, and a constant's view, its
+// handle and its state, is as large and as aligned as the loaned view the C side holds it by.
+const _: () = {
+    use core::mem::{align_of, size_of};
+    assert!(
+        size_of::<EncodingState>()
+            == size_of::<u32>()
+                + STATE_FILL
+                + size_of::<*const u8>()
+                + size_of::<usize>()
+                + size_of::<Option<Block>>()
+    );
+    assert!(size_of::<ConstantView>() == size_of::<z_loaned_encoding_t>());
+    assert!(align_of::<ConstantView>() == align_of::<z_loaned_encoding_t>());
+};
+
 /// Behind a loaned encoding: the packed wire word and where the schema lies. The handle of an owned
 /// encoding points at the state of its [`HeldEncoding`], or for an encoding of no schema at the
 /// state of its well-known constant ([`constant_of`]); a sample's, a reply's or a query's at the
@@ -82,8 +101,15 @@ use wz_codecs::encoding_ids::ENCODING_ID_DEFAULT;
 ///
 /// The schema is a start and a length whoever holds its bytes, so reading the encoding
 /// ([`Self::view`]) has no branch on where they lie; what holds them is `_block`, beside the read.
+///
+/// The fields fill whole words, with no padding between them: a well-known constant's state lies
+/// in the four words of its loaned view the C side never reads ([`ConstantView`]), and a view is
+/// read as five pointers, which a byte of padding would make a read of an uninitialised one.
+#[repr(C)]
 pub(crate) struct EncodingState {
     packed_id: u32,
+    /// The rest of the word `packed_id` begins, zero; none on a target of 32-bit words.
+    _fill: [u8; STATE_FILL],
     /// Where the schema starts, null for an encoding that carries none. The bytes are another's:
     /// a received message's, read for as long as the marshal that holds this state does
     /// ([`Self::lent`]), or the room of the held encoding this state is part of, which never moves
@@ -112,6 +138,7 @@ impl EncodingState {
             // The wire word is `(id << 1) | has_schema`, and a constant never carries a schema, so
             // bit 0 is clear by construction rather than by a second field agreeing with the first.
             packed_id: (id as u32) << 1,
+            _fill: [0; STATE_FILL],
             schema_start: core::ptr::null(),
             schema_len: 0,
             _block: None,
@@ -126,6 +153,7 @@ impl EncodingState {
     pub(crate) unsafe fn lent(packed_id: u32, schema: Option<&[u8]>) -> Self {
         Self {
             packed_id,
+            _fill: [0; STATE_FILL],
             schema_start: schema.map_or(core::ptr::null(), <[u8]>::as_ptr),
             schema_len: schema.map_or(0, <[u8]>::len),
             _block: None,
@@ -167,6 +195,7 @@ impl EncodingState {
         };
         Ok(Self {
             packed_id: self.packed_id,
+            _fill: [0; STATE_FILL],
             schema_start,
             schema_len: self.schema_len,
             _block: block,
@@ -275,15 +304,17 @@ fn constant_of(encoding: EncodingRef<'_>) -> Option<&'static EncodingState> {
     if encoding.schema.is_some() || encoding.packed_id & 1 != 0 {
         return None;
     }
-    STATES.get(usize::try_from(encoding.packed_id >> 1).ok()?)
+    VIEWS
+        .get(usize::try_from(encoding.packed_id >> 1).ok()?)
+        .map(|view| &view.state)
 }
 
 /// Whether `state` is a well-known constant's, which no slot holds and nothing lets go: whether it
-/// lies in the table of constants, whatever it reads.
+/// lies in the table of constants' views, whatever it reads.
 fn is_constant(state: &EncodingState) -> bool {
-    STATES
-        .as_ptr_range()
-        .contains(&(state as *const EncodingState))
+    let views = VIEWS.as_ptr_range();
+    (views.start.cast::<u8>()..views.end.cast::<u8>())
+        .contains(&(state as *const EncodingState).cast::<u8>())
 }
 
 /// An encoding a program moved into a call, held for as long as its holder holds it: its
@@ -635,33 +666,46 @@ pub unsafe extern "C" fn z_encoding_set_schema_from_substr(
 
 // --- the well-known constants ----------------------------------------------
 
-/// A loaned encoding view that lives for the whole program.
+/// A well-known encoding's loaned view, which lives for the whole program, with its state inside
+/// it: a `z_loaned_encoding_t` is a handle and four words the C side never reads, so the view holds
+/// the state its handle points at there, and one table is both. The handle is first, where the
+/// loaned view has it, and the state fills the four words with no padding ([`EncodingState`]).
 ///
-/// `z_loaned_encoding_t` holds a raw pointer, so it is not `Sync` and cannot be
-/// a `static` on its own. This newtype carries the argument that makes it safe:
-/// the value is written ONCE at compile time, never mutated, and its handle
-/// points at a `'static` [`EncodingState`] — so every thread reads the same
-/// immutable bytes pointing at the same immutable state.
-#[repr(transparent)]
-pub(crate) struct StaticLoanedEncoding(z_loaned_encoding_t);
+/// It holds a raw pointer, so it is not `Sync` of itself; it is written once when the library is
+/// compiled, never mutated, and its handle points into itself, so every thread reads the same
+/// immutable bytes.
+#[repr(C)]
+pub(crate) struct ConstantView {
+    handle: *mut c_void,
+    state: EncodingState,
+}
 
-// SAFETY: see the type's docs — immutable after compile time, pointing at a
-// `'static`.
-unsafe impl Sync for StaticLoanedEncoding {}
+// SAFETY: see the type's docs: immutable after compile time, pointing at a `'static`.
+unsafe impl Sync for ConstantView {}
 
-/// Build the `'static` loaned view for a `'static` state.
-const fn static_view(state: &'static EncodingState) -> StaticLoanedEncoding {
-    StaticLoanedEncoding(z_loaned_encoding_t {
-        handle: state as *const EncodingState as *mut c_void,
-        _pad: [core::ptr::null_mut(); 4],
-    })
+impl ConstantView {
+    /// The view of the well-known encoding `id`, whose state lies at `state`, inside the view
+    /// itself.
+    const fn of(id: u16, state: *const EncodingState) -> Self {
+        Self {
+            handle: state.cast_mut().cast(),
+            state: EncodingState::constant(id),
+        }
+    }
+
+    /// The view as the loaned encoding the C side holds it by: the handle is first in both, so its
+    /// address is the view's.
+    fn loaned(&self) -> *const z_loaned_encoding_t {
+        core::ptr::addr_of!(self.handle).cast()
+    }
 }
 
 /// Emit the well-known encodings of pico's `ENCODING_CONSTANT_MACRO` entries
-/// (`src/api/encoding.c:27-33`): one table of states and one of their `'static` loaned views, in
-/// `.rodata` at the index of their wire id, and one exported accessor per entry that hands back
-/// the address of its view. Each accessor is then an address and a return, and the test of whether
-/// a state is a constant ([`is_constant`]) is whether it lies in the table.
+/// (`vendor/zenoh-pico/src/api/encoding.c` @ `#define ENCODING_CONSTANT_MACRO(_cname, _fname, _id)`):
+/// one table of their `'static` loaned views, each holding its state,
+/// at the index of their wire id, and one exported accessor per entry that hands back the address
+/// of its view. Each accessor is then an address and a return, and the test of whether a state is
+/// a constant ([`is_constant`]) is whether it lies in the table.
 ///
 /// The (name -> id) pairing is the only transcribed fact, and it is adjudicated against upstream's
 /// COMPILED library by
@@ -685,13 +729,10 @@ macro_rules! encoding_constants {
             }
         };
 
-        /// The state of each well-known encoding, at the index of its wire id.
-        static STATES: [EncodingState; ENCODING_ID_TO_STR.len()] =
-            [$(EncodingState::constant($id)),*];
-
-        /// The loaned view of each state of [`STATES`], at the same index.
-        static VIEWS: [StaticLoanedEncoding; ENCODING_ID_TO_STR.len()] =
-            [$(static_view(&STATES[$id])),*];
+        /// The loaned view of each well-known encoding, at the index of its wire id, its handle
+        /// pointing at the state inside it.
+        static VIEWS: [ConstantView; ENCODING_ID_TO_STR.len()] =
+            [$(ConstantView::of($id, core::ptr::addr_of!(VIEWS[$id].state))),*];
 
         $(
             /// A well-known encoding constant (pico `ENCODING_CONSTANT_MACRO`).
@@ -701,7 +742,7 @@ macro_rules! encoding_constants {
             /// nothing to release.
             #[no_mangle]
             pub extern "C" fn $fname() -> *const z_loaned_encoding_t {
-                &VIEWS[$id].0
+                VIEWS[$id].loaned()
             }
         )*
     };
@@ -1217,19 +1258,26 @@ mod tests {
     /// from the constant of its id.
     #[test]
     fn each_constant_sits_at_the_index_of_its_id() {
-        for (id, (view, state)) in VIEWS.iter().zip(STATES.iter()).enumerate() {
+        for (id, view) in VIEWS.iter().enumerate() {
             assert!(
-                core::ptr::eq(view.0.handle.cast::<EncodingState>(), state),
-                "the view at an id is the view of the state at that id"
+                core::ptr::eq(view.handle.cast::<EncodingState>(), &view.state),
+                "the view at an id points at the state inside it"
             );
+            assert_eq!(view.state._fill, [0; STATE_FILL]);
             // SAFETY: a `'static` view this module minted.
-            let read = unsafe { encoding_view(&view.0) }.expect("a constant is never absent");
+            let read = unsafe { encoding_view(view.loaned()) }.expect("a constant is never absent");
             assert_eq!(read.packed_id, (id as u32) << 1);
+            assert_eq!(read.schema, None);
         }
-        assert_eq!(STATES.len(), ENCODING_ID_TO_STR.len());
-        assert_eq!(z_encoding_zenoh_bytes(), &VIEWS[0].0 as *const _);
-        assert_eq!(z_encoding_text_plain(), &VIEWS[4].0 as *const _);
-        assert_eq!(z_encoding_video_vp9(), &VIEWS[52].0 as *const _);
+        assert_eq!(VIEWS.len(), ENCODING_ID_TO_STR.len());
+        assert_eq!(z_encoding_zenoh_bytes(), VIEWS[0].loaned());
+        assert_eq!(z_encoding_text_plain(), VIEWS[4].loaned());
+        assert_eq!(z_encoding_video_vp9(), VIEWS[52].loaned());
+        assert_eq!(
+            z_encoding_text_plain().cast::<u8>(),
+            core::ptr::addr_of!(VIEWS[4]).cast::<u8>(),
+            "a loaned constant is the address of its whole view"
+        );
     }
 
     /// A state is a constant by where it lies, not by what it reads: one that reads as a well-known
@@ -1239,10 +1287,12 @@ mod tests {
         // SAFETY: no schema is borrowed.
         let lookalike = unsafe { EncodingState::lent(4 << 1, None) };
         assert!(!is_constant(&lookalike));
-        assert!(is_constant(&STATES[4]));
-        assert!(is_constant(STATES.last().expect("a table of constants")));
+        assert!(is_constant(&VIEWS[4].state));
+        assert!(is_constant(
+            &VIEWS.last().expect("a table of constants").state
+        ));
         let read = constant_of(lookalike.view()).expect("a constant of the id");
-        assert!(core::ptr::eq(read, &STATES[4]));
+        assert!(core::ptr::eq(read, &VIEWS[4].state));
     }
 
     /// An encoding of no schema whose id the table names is its constant: it takes no slot, as

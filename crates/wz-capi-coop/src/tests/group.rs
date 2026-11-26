@@ -8,7 +8,7 @@
 //! put crosses the group, and a session that closes tells the group it leaves and lets its stack
 //! leave the group.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
@@ -277,16 +277,19 @@ fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
 }
 
 /// The endpoint a [`LateDialStack`] answers late; any other unicast endpoint it refuses.
+#[cfg(wz_round)]
 const LATE: &str = "tcp/192.0.2.50:7447";
 
 /// A member's stack that also dials: it joins [`GROUP`] as [`MemberStack`] does, answers a dial
 /// of [`LATE`] up only once the session has asked it and gone on, and refuses any other; each
 /// unicast endpoint it is asked to open is recorded.
+#[cfg(wz_round)]
 struct LateDialStack {
     member: MemberStack,
     dialled: Arc<Mutex<Vec<String>>>,
 }
 
+#[cfg(wz_round)]
 impl AppPort for LateDialStack {
     fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
         if kind == AppLinkKind::Group {
@@ -320,7 +323,9 @@ impl AppPort for LateDialStack {
 /// the endpoint's, so the second endpoint would be refused the same, and the dial role dials it
 /// not; the open, which redials none, ends for want of a task. Turned red by a walk that goes on
 /// to the next endpoint after a late answer whose task was refused, which dials the second
-/// endpoint and ends with that endpoint's refusal.
+/// endpoint and ends with that endpoint's refusal. Only where a group's session is a task (the
+/// round's form) do the groups hold the cells.
+#[cfg(wz_round)]
 #[test]
 fn a_late_answer_refused_a_task_dials_no_further_endpoint() {
     use wz_runtime_coop::executor::SpawnRefusal;
@@ -476,6 +481,48 @@ fn a_member_whose_group_link_is_lost_joins_the_group_again() {
     assert_eq!(network.joins_of(2), 2, "joined again once, and only once");
     SessionDrive::close(&*second);
     SessionDrive::close(&*first);
+}
+
+/// A put on an empty key is refused on the groups' leg as a face's leg refuses it, whatever face
+/// the session has up: here none. The CONTROL is the put on a key, which the group takes. Turned
+/// red by a groups' leg that sends a key the session's tables name nothing by
+/// (`CoopEngine::publish_to_groups_on` without its refusal).
+#[test]
+fn a_put_on_an_empty_key_is_refused_on_the_groups_leg() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let remote = PublishOptions::put().with_locality(Locality::Remote);
+    assert!(
+        member
+            .publish_on_wire_all("demo/group/a", &WireKey::literal(), b"keyed", &remote)
+            .is_ok(),
+        "CONTROL: a key the group takes"
+    );
+    assert_eq!(
+        member.publish_on_wire_all("", &WireKey::literal(), b"no-key", &remote),
+        Err(wz_capi_port::FanoutError::ExceedsCapacity),
+        "an empty key is refused on the groups' leg"
+    );
+    SessionDrive::close(&*member);
+}
+
+/// A put of a member that dials nothing, whose dial role's face rests from the open, tries no
+/// face's send place: the face holds no link that is up, and the put goes to the group by the
+/// groups' leg alone. Turned red by a walk of the faces that tries a face at rest
+/// (`CoopEngine::on_face_legs` without its look at `DirectFace::rests`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_members_put_tries_no_send_place_of_a_face_at_rest() {
+    let network = Arc::new(Network::default());
+    let member = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+    let tried = member.takes.place_tries.load(Ordering::Relaxed);
+    put(&member, "demo/group/a", b"to-the-group");
+    assert_eq!(
+        member.takes.place_tries.load(Ordering::Relaxed),
+        tried,
+        "no face's send place was tried"
+    );
+    SessionDrive::close(&*member);
 }
 
 /// What a member's group received is in the session's message reading, and stays there when the
@@ -1099,305 +1146,6 @@ mod mapped {
     }
 }
 
-/// A member whose group socket fills: the session's puts follow the stage rule the tokio
-/// engine's group does, on a queue bounded by its lanes. No read task runs, so what moves the
-/// group's task is the session's own puts.
-mod congested {
-    use std::sync::atomic::AtomicBool;
-
-    use wz_session_core::qos::{CongestionControl, Priority};
-    use wz_session_core::session_init_params::TxQueueConf;
-
-    use super::*;
-
-    /// What a droppable put waits for room, at most.
-    const DROP_WAIT: Duration = Duration::from_millis(20);
-    /// What a blocking put waits for room, at most.
-    const CLOSE_WAIT: Duration = Duration::from_millis(300);
-    /// A payload two of which fill a lane of one 2 KiB batch.
-    const PAYLOAD: [u8; 1_500] = [0x5a; 1_500];
-
-    /// A stack whose group socket takes every datagram until it is told it is full, and then
-    /// none, answering would-block, until it is told it is writable again.
-    #[derive(Default)]
-    struct Filling {
-        full: AtomicBool,
-        sent: AtomicUsize,
-        closes: AtomicUsize,
-        link: Mutex<Option<LinkHandle>>,
-    }
-
-    struct FillingPort(Arc<Filling>);
-
-    impl AppPort for FillingPort {
-        fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
-            if kind != AppLinkKind::Group || locator != GROUP {
-                return ProgramOpen::Refused;
-            }
-            *self.0.link.lock().unwrap() = Some(link);
-            ProgramOpen::Up
-        }
-
-        fn send(&self, _link: LinkHandle, bytes: &[u8]) -> ProgramSend {
-            if self.0.full.load(Ordering::SeqCst) {
-                return ProgramSend::WouldBlock;
-            }
-            self.0.sent.fetch_add(1, Ordering::SeqCst);
-            ProgramSend::Wrote(bytes.len())
-        }
-
-        fn close(&self, _link: LinkHandle) {
-            self.0.closes.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-
-    /// A member over a filling stack whose lanes hold one batch each, with the two waits above.
-    fn open_filling() -> (EngineHold<Engine>, Arc<Filling>, Arc<AppTransport>) {
-        let stack = Arc::new(Filling::default());
-        let transport = Arc::new(AppTransport::new(
-            Box::new(Table(Mutex::new(AppLinkTable::new()))),
-            Box::new(FillingPort(Arc::clone(&stack))),
-        ));
-        let config = CoopConfig {
-            tx_queue: TxQueueConf {
-                sizes: [1; Priority::NUM],
-                wait_before_drop_us: DROP_WAIT.as_micros() as u64,
-                wait_before_close_us: CLOSE_WAIT.as_micros() as u64,
-                no_progress_us: None,
-                ..client_config().tx_queue
-            },
-            ..member_config(1, GROUP)
-        };
-        let engine = Engine::open(
-            app_links(SessionTransport::new(
-                Arc::clone(&transport),
-                &config.limits,
-            )),
-            PosixClock,
-            PosixEntropy,
-            config,
-        )
-        .expect("the member joins");
-        (engine, stack, transport)
-    }
-
-    /// Put [`PAYLOAD`] on the group with `congestion`, and how long the put took.
-    fn put_with(engine: &Engine, congestion: CongestionControl) -> Duration {
-        let started = Instant::now();
-        let sent = engine.publish_on_wire_all(
-            "demo/group/full",
-            &WireKey::literal(),
-            &PAYLOAD,
-            &PublishOptions::put()
-                .with_locality(Locality::Remote)
-                .with_congestion_control(congestion),
-        );
-        assert_eq!(sent, Ok(0), "a dropped put succeeds, as zenoh's does");
-        started.elapsed()
-    }
-
-    /// The stack takes datagrams again and says so.
-    fn writable(stack: &Filling, transport: &AppTransport) {
-        stack.full.store(false, Ordering::SeqCst);
-        let link = stack.link.lock().unwrap().expect("the group was joined");
-        let _ = transport.event(link, ProgramEvent::Writable);
-    }
-
-    /// On a full socket the lane fills with what the session puts, and a droppable put that
-    /// finds it full waits its `wait_before_drop` for room and is dropped and counted; the lane's
-    /// mark then drops the next one at once. Once the socket takes datagrams again, the group's
-    /// task, stepped by the session's read, drains what was queued.
-    #[test]
-    fn a_droppable_put_on_a_full_group_is_dropped_within_its_wait_and_counted() {
-        let (member, stack, transport) = open_filling();
-        stack.full.store(true, Ordering::SeqCst);
-
-        // The first put's own write takes it off its lane, and the socket keeps it from writing
-        // it; the two after it fill the lane.
-        for _ in 0..3 {
-            let took = put_with(&member, CongestionControl::Drop);
-            assert!(
-                took < Duration::from_secs(1),
-                "a put on a lane with room took {took:?}"
-            );
-        }
-        assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 0);
-
-        let took = put_with(&member, CongestionControl::Drop);
-        assert_eq!(
-            member.group_congestion_drops(Priority::DEFAULT),
-            1,
-            "a droppable put on the full lane is dropped and counted"
-        );
-        assert!(took >= DROP_WAIT, "dropped after {took:?}, before its wait");
-        assert!(
-            took < Duration::from_secs(1),
-            "a droppable put waited {took:?}"
-        );
-
-        let took = put_with(&member, CongestionControl::Drop);
-        assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 2);
-        #[cfg(feature = "transport-stats")]
-        assert_eq!(
-            member.transport_stats().tx.n_dropped,
-            2,
-            "the group's drops are the transport's, as the tokio group counts them"
-        );
-        assert!(
-            took < DROP_WAIT,
-            "the lane's mark drops a put at once, not after {took:?}"
-        );
-
-        let before = stack.sent.load(Ordering::SeqCst);
-        writable(&stack, &transport);
-        SessionDrive::start_read_task(&*member).expect("the read task starts");
-        eventually("what was queued to leave", || {
-            stack.sent.load(Ordering::SeqCst) >= before + 3
-        });
-        SessionDrive::close(&*member);
-    }
-
-    /// The replies a group's dispatch stages past the reply limit are dropped and charged to the
-    /// transport's drops, beside the session's own messages its lanes had no room for, as the tokio
-    /// engine's group charges every message it drops. No read runs, so nothing staged leaves.
-    #[cfg(feature = "transport-stats")]
-    #[test]
-    fn replies_past_the_reply_limit_are_the_transports_drops() {
-        use wz_session_core::caps::MAX_MULTICAST_REPLIES;
-        use wz_session_core::multicast_tx::MulticastTxItem;
-        let (member, _stack, _transport) = open_filling();
-        let reply = || {
-            let push = wz_session_core::push_build::build_push_literal_with_meta(
-                "demo/group/reply",
-                b"r",
-                &wz_session_core::metadata::PushMetadata::default(),
-            )
-            .expect("a push of a short key");
-            MulticastTxItem::Push {
-                push: Box::new(push),
-                reliable: true,
-                priority: Priority::DEFAULT,
-            }
-        };
-        member.stage_group_replies(MAX_MULTICAST_REPLIES, reply);
-        assert_eq!(
-            member.transport_stats().tx.n_dropped,
-            0,
-            "CONTROL: the reply limit holds this many"
-        );
-        member.stage_group_replies(2, reply);
-        assert_eq!(
-            member.transport_stats().tx.n_dropped,
-            2,
-            "the replies past the limit are the transport's drops"
-        );
-        SessionDrive::close(&*member);
-    }
-
-    /// A droppable put that finds the session held asks the group's socket for room as it asks a
-    /// link's: the session's waits for room hold the group's, which answers congestion while the
-    /// socket is full and room once it takes datagrams again.
-    #[test]
-    fn a_held_session_asks_the_group_socket_for_room() {
-        use crate::engine::Room;
-        let (member, stack, transport) = open_filling();
-        assert_eq!(
-            member.rooms().within(1_000),
-            Room::Free,
-            "CONTROL: a socket with room"
-        );
-        stack.full.store(true, Ordering::SeqCst);
-        // Each put offers the socket a datagram, which it refuses.
-        for _ in 0..3 {
-            put_with(&member, CongestionControl::Drop);
-        }
-        assert!(
-            matches!(member.rooms().within(1_000), Room::Congested(faces) if faces.len() == 1),
-            "the group's socket is the congestion, and the session's only face"
-        );
-        writable(&stack, &transport);
-        assert_eq!(member.rooms().within(1_000), Room::Free);
-        SessionDrive::close(&*member);
-    }
-
-    /// Under the pico profile a droppable put that finds the session held, here by a blocking put
-    /// waiting for room on the full group, is dropped at once and its caller is told, as pico's
-    /// put fails when its held transmit lock drops the message: the group's leg reports the held
-    /// session as a link's does.
-    #[test]
-    fn under_the_pico_profile_a_put_behind_a_held_group_session_is_told() {
-        let (member, stack, _transport) = open_filling();
-        stack.full.store(true, Ordering::SeqCst);
-        for _ in 0..3 {
-            put_with(&member, CongestionControl::Drop);
-        }
-        let blocking = {
-            let member = member.clone();
-            std::thread::spawn(move || put_with(&member, CongestionControl::Block))
-        };
-        // Long enough for the blocking put to take the session, well inside its wait.
-        std::thread::sleep(CLOSE_WAIT / 3);
-        let started = Instant::now();
-        let dropped = member.publish_on_wire_all(
-            "demo/group/full",
-            &WireKey::literal(),
-            b"behind",
-            &PublishOptions::put()
-                .with_locality(Locality::Remote)
-                .with_congestion_control(CongestionControl::Drop),
-        );
-        assert_eq!(dropped, Err(wz_capi_port::FanoutError::HeldConduit));
-        assert!(
-            started.elapsed() < CLOSE_WAIT / 3,
-            "the droppable put waited {:?}",
-            started.elapsed()
-        );
-        assert!(
-            !blocking.is_finished(),
-            "the blocking put still holds the session"
-        );
-        let waited = blocking.join().expect("the blocking put");
-        assert!(
-            waited >= CLOSE_WAIT,
-            "the blocking put returned after {waited:?}"
-        );
-        SessionDrive::close(&*member);
-    }
-
-    /// A blocking put that finds the lane full waits its whole `wait_before_close` for room, and
-    /// is then dropped and counted, as the tokio engine's group drops it: a multicast transport
-    /// closes nothing on a congestion drop. The group is still joined, and carries the next put
-    /// once the socket takes datagrams again.
-    #[test]
-    fn a_blocking_put_on_a_full_group_waits_its_close_wait_and_closes_nothing() {
-        let (member, stack, transport) = open_filling();
-        stack.full.store(true, Ordering::SeqCst);
-        for _ in 0..3 {
-            put_with(&member, CongestionControl::Drop);
-        }
-
-        let took = put_with(&member, CongestionControl::Block);
-        assert!(took >= CLOSE_WAIT, "a blocking put returned after {took:?}");
-        assert!(
-            took < Duration::from_secs(5),
-            "a blocking put waited {took:?}"
-        );
-        assert_eq!(member.group_congestion_drops(Priority::DEFAULT), 1);
-        assert!(!SessionDrive::is_closed(&*member), "the session is open");
-        assert_eq!(
-            stack.closes.load(Ordering::SeqCst),
-            0,
-            "the group was not left"
-        );
-
-        let before = stack.sent.load(Ordering::SeqCst);
-        writable(&stack, &transport);
-        put_with(&member, CongestionControl::Block);
-        assert!(stack.sent.load(Ordering::SeqCst) >= before + 2);
-        SessionDrive::close(&*member);
-    }
-}
-
 /// A put whose fragment chain finds its lane full part of the way: the session pushes a chain onto
 /// the group's stage fragment by fragment, as the tokio engine's group producer pushes it, so a
 /// chain whose lane stays full between two fragments is stopped by the drop marker, and the other
@@ -1824,6 +1572,82 @@ mod woken {
         SessionDrive::close(&*member);
     }
 
+    /// A publisher's bare put through its write filter, on a session whose one transport is a
+    /// group, goes to the group the plain way its filter's row keeps: it is answered as sent, its
+    /// datagram is written before the put returns, with one take of the session and no key named
+    /// in the session's tables. CONTROL: a filter whose row keeps no plain way is still answered
+    /// `NotPlain`, nothing sent, for the general publish to send. Turned red by a groups' leg that
+    /// answers `NotPlain` for the general publish to send the put again
+    /// (`CoopEngine::put_through_filter_in` without its `is_groups_leg` arm), which takes the
+    /// session twice, or by one that names the key in the session's tables.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_bare_put_through_its_filter_reaches_the_group_the_plain_way() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let hold = member
+            .acquire_keyexpr("demo/group/plain")
+            .expect("a session with ids left declares a keyexpr");
+        let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+        let declare = || {
+            member
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    "demo/group/plain",
+                    &WireKey::literal(),
+                    None,
+                    false,
+                )
+                .expect("a session with ids left declares")
+                .id
+        };
+        let bare = declare();
+        assert_eq!(
+            member.publish_filtered(bare, "demo/group/plain", &wire, b"general", None),
+            wz_capi_port::FilteredPut::NotPlain,
+            "CONTROL: a row that keeps no plain way sends nothing itself"
+        );
+        let filter = declare();
+        let params = PublishOptions::put()
+            .plain_put_params()
+            .expect("a plain put");
+        member.keep_write_filter_plain(filter, Some((params, wire.declared())));
+        let sent_before = stack.sent.lock().unwrap().len();
+        let (takes, namings) = (
+            member.takes.core.load(SeqCst),
+            member.takes.namings.load(SeqCst),
+        );
+        assert!(
+            matches!(
+                member.publish_filtered(filter, "demo/group/plain", &wire, b"plain", None),
+                wz_capi_port::FilteredPut::Sent(Ok(_))
+            ),
+            "the bare put is sent the plain way"
+        );
+        assert_eq!(
+            member.takes.core.load(SeqCst) - takes,
+            1,
+            "one take of the session for the put"
+        );
+        assert_eq!(
+            member.takes.namings.load(SeqCst),
+            namings,
+            "no key named in the session's tables"
+        );
+        let sent = stack.sent.lock().unwrap();
+        assert_eq!(
+            sent.len(),
+            sent_before + 1,
+            "one datagram, written before it returned"
+        );
+        assert!(sent
+            .last()
+            .is_some_and(|datagram| datagram.ends_with(b"plain")));
+        drop(sent);
+        drop(hold);
+        SessionDrive::close(&*member);
+    }
+
     /// A put made while a read waits on the group's socket is written by the putting thread before
     /// the put returns: the read, on a thread of its own, has no part in it, and the datagram it
     /// waits for ends its wait after.
@@ -2184,11 +2008,13 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
-    /// A burst of a member's datagrams is read by one read, each a step of its own, and the links
-    /// are moved once, by the step that finds the group's socket empty, as one receive of a link's
-    /// is read. Turned red by a step that moves the links after each group datagram (the group's
-    /// `Stepped::Read` return taken out of `CoopEngine::step`): a build of threads then ends the
-    /// read after the first datagram, and one of a single thread moves the links once a datagram.
+    /// A burst of a member's datagrams is read by one read, in one step of the group's session
+    /// that reads up to the deploy's bound of them, and the links are moved once at most for it,
+    /// as one receive of a link's is read: a step of a group moves no face's link, and the read
+    /// looks at the faces' lives once, which moves a link only where one is due or brought
+    /// something. Turned red by a read that leaves the datagrams after the first to the next read
+    /// (a bound of one handed to the group's step in `CoopEngine::step_groups`), or by one that
+    /// moves the links once a datagram.
     #[test]
     fn a_burst_of_a_members_datagrams_moves_the_links_once() {
         const FRAMES: u64 = 8;
@@ -2225,10 +2051,63 @@ mod in_place {
             1 + FRAMES as usize,
             "every datagram of the burst, by the one read"
         );
+        assert!(
+            session.link_polls() - polls <= 1,
+            "one move of the links at most for the burst"
+        );
+        SessionDrive::close(&*session);
+    }
+
+    /// A member's datagrams of samples hand none of the face's tables out to a write: the member
+    /// the walk names ahead of each datagram's records is read by no plane and is not dispatched,
+    /// so a stream of samples leaves every answer read off the peers' declarations standing and
+    /// owes the read no bookkeeping. Turned red by a sink that dispatches that name as a record
+    /// (`DirectSink::event` without its `IterationEvent::MulticastSource` return), which counts a
+    /// write of the face's tables once a datagram.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_members_samples_write_none_of_the_faces_tables() {
+        const FRAMES: u64 = 8;
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        let heard = subscribe(&session, "demo/unwritten/**");
+        let read_until = |count: usize| {
+            for _ in 0..200 {
+                if heard.lock().unwrap().len() >= count {
+                    break;
+                }
+                SessionDrive::read(&*session, false).expect("the session reads");
+            }
+        };
+        // The member is admitted, which writes its face's tables, before the samples are counted.
+        let mut first = beacon(7);
+        first.extend_from_slice(&frame_of_puts(0, &["demo/unwritten/0"]));
+        hand_in(&network, 1, 7, &first);
+        read_until(1);
         assert_eq!(
-            session.link_polls() - polls,
+            heard.lock().unwrap().len(),
             1,
-            "one move of the links for the burst"
+            "CONTROL: the member's first put"
+        );
+        let written = session.faces_written();
+        for sn in 1..=FRAMES {
+            hand_in(
+                &network,
+                1,
+                7,
+                &frame_of_puts(sn, &[&format!("demo/unwritten/{sn}")]),
+            );
+        }
+        read_until(1 + FRAMES as usize);
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1 + FRAMES as usize,
+            "CONTROL: every datagram's sample"
+        );
+        assert_eq!(
+            session.faces_written(),
+            written,
+            "a member's samples handed the face's tables out to a write"
         );
         SessionDrive::close(&*session);
     }

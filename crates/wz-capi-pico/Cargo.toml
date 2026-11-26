@@ -173,7 +173,9 @@ os-zephyr = [
 # `std`'s own. The cooperative engine on a host announces a session's initial sequence number by
 # the session core's compact function of the two zids (`initial-sn-compact`) in place of zenoh's
 # SHAKE128 of them: zenoh-pico draws that origin from its random source, so the derivation is no
-# part of this ABI's contract, and the Keccak permutation is not linked.
+# part of this ABI's contract, and the Keccak permutation is not linked. Its one SHA-256, the
+# acceptor's cookie MAC, is compiled small (`sha256-compact`): the same digest, a handshake's few
+# compressions rolled (`docs/win-budget/rss.md`, section 5.2, C1).
 os-host = [
     "dep:wz-capi-coop",
     "dep:wz-host-sync",
@@ -183,6 +185,7 @@ os-host = [
     "wz-capi-coop/tx-lend-only",
     "wz-capi-port/os-sys",
     "wz-session-core/initial-sn-compact",
+    "wz-session-core/sha256-compact",
     "wz-session-core/limits-lent-at-open",
     "wz-session-core/session-fixed-storage",
     "wz-session-core/session-keeps-keyexprs",

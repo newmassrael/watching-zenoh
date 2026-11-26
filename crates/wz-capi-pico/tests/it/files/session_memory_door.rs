@@ -216,6 +216,7 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         let (chains, rx_bytes) = (
             wz_capi_coop::arena::link_buffers(
                 1,
+                0,
                 u16::try_from(limits.pico_unicast_batch_bytes()).expect("a batch is a u16"),
                 &limits,
             )
@@ -244,14 +245,29 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         #[cfg(not(feature = "engine-tokio"))]
         {
             let _ = listening;
+            let batch = limits.pico_unicast_batch_bytes();
+            // The listener dials nothing: its links are its faces, and the one table they share
+            // holds the session's share for each face read where it lies.
+            let faces = wz_capi_coop::arena::admitted_faces(&limits).expect("the preset's faces");
+            let shared = wz_capi_coop::arena::link_buffers(
+                faces,
+                faces,
+                u16::try_from(batch).expect("a batch is a u16"),
+                &limits,
+            )
+            .expect("the preset's batch and pools")
+            .chains;
+            assert!(
+                shared >= chains,
+                "a share for each face, the dial's at least"
+            );
             assert_eq!(
                 (reassembly.door.bounded, reassembly.door.count),
-                (1, chains),
+                (1, shared),
                 "a listener's links share the session's one table"
             );
             // The listener's links read and encode into buffers of the advertised batch; where
             // they share pools, the pools' and not one for each of the ten faces.
-            let batch = limits.pico_unicast_batch_bytes();
             let (receive, transmit) = (
                 row(&listened, "link receive buffers"),
                 row(&listened, "link transmit queues"),
