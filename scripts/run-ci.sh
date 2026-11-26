@@ -2780,6 +2780,11 @@ layer_c0_test_discipline() {
     _runci_leg git_tree.selftest -- python3 scripts/lib/git_tree.py --selftest
     _runci_leg lane_graph.selftest --after git_tree.selftest -- python3 scripts/lib/lane_graph.py --selftest
     _runci_leg lane_graph --after lane_graph.selftest -- python3 scripts/lib/lane_graph.py --check
+    # The lane declaration (scripts/lib/lanes.toml): its reader, then the declaration held to the
+    # dispatch table, the hosted jobs and the workspaces (UNDECLARED, ORPHAN, DUPLICATE, FIELD).
+    _runci_leg lane_decl.selftest -- python3 scripts/lib/lane_decl.py --selftest
+    _runci_leg lanes_gate.selftest --after lane_decl.selftest,lane_graph.selftest -- python3 scripts/lib/lanes_gate.py --selftest
+    _runci_leg lanes_gate --after lanes_gate.selftest -- python3 scripts/lib/lanes_gate.py --check
     # Layer Cmut's table (docs/mutation-testing.md): the gate's own fixtures, then its scopes and
     # rows. The mutants themselves run nightly; this is what a push can afford of them.
     _runci_leg mutation_ratchet_gate.selftest -- python3 scripts/lib/mutation_ratchet_gate.py --selftest

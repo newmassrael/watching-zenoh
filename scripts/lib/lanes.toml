@@ -1,0 +1,1106 @@
+# The lane declaration of RFC 0001 (docs/rfc/0001-a-lane-lands-alone-and-a-verdict-is-keyed-by-what-it-read.md):
+# one entry per dispatch line `run_layer <id> <fn>` of scripts/run-ci.sh, in its order. The schema and
+# its reader are scripts/lib/lane_decl.py; scripts/lib/lanes_gate.py holds this file to the dispatch
+# table (UNDECLARED, ORPHAN, DUPLICATE, FIELD); scripts/lib/lane_digest.py puts each entry into its
+# lane's key D(L, t).
+#
+# class: D, the verdict is a function of the key; E, also of a machine environment the key does not
+# hold yet (an oracle, a tool, an SDK the machine provides; `reason` says which); S, a statistic
+# (`nondet` says of what), never reused and not gating a landing (RFC 0001 section 5.5). A lane whose
+# hosted job provisions anything, or that asks the machine for a program or a package, is E: the gate
+# refuses D for it. An E lane becomes D when the image that carries its environment is in the key.
+#
+# decl: tracked files the lane reads that neither the packages its cargo calls build nor the scripts
+# it runs name; lane_input_closure.py is the traced audit that finds one missing. packages and legs:
+# what the lane builds when its commands do not say (a lane with neither is opaque when they do not).
+
+schema = "wz-lanes/1"
+
+[[lane]]
+id = "0"
+fn = "layer_0_preflight_lints"
+class = "E"
+reason = "it runs shellcheck and actionlint, programs the machine provides and the key does not hold"
+
+[[lane]]
+id = "A"
+fn = "layer_a_mnemosyne"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+decl = ["docs/.atomic/**", "mnemosyne.toml"]
+
+[[lane]]
+id = "A2"
+fn = "layer_a2_audit_mid_values"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "A3"
+fn = "layer_a3_audit_catalog_status"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "A4"
+fn = "layer_a4_audit_crossimpl_proof"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "A5"
+fn = "layer_a5_apfull_membership"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+decl = ["docs/.atomic/**", "mnemosyne.toml"]
+
+[[lane]]
+id = "B"
+fn = "layer_b_verify_codegen"
+class = "E"
+reason = "its hosted job (codegen-verify) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "B2"
+fn = "layer_b2_regen_diff"
+class = "E"
+reason = "its hosted job (codegen-verify) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0"
+fn = "layer_c0_test_discipline"
+class = "E"
+reason = "its hosted job (gate-provenance) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0mut"
+fn = "layer_c0mut_verdict_legs"
+class = "D"
+
+[[lane]]
+id = "Cmut"
+fn = "layer_cmut_code_mutation"
+class = "E"
+reason = "it runs the machine's cargo-mutants (the pin of bx.toml), which the key does not hold"
+
+[[lane]]
+id = "C0i"
+fn = "layer_c0i_impact_ref_gate"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "U"
+fn = "layer_u_upstream_release_distance"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0b"
+fn = "layer_c0b_job_budget_margin"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0d"
+fn = "layer_c0d_doclink_dependents"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0e"
+fn = "layer_c0e_inventory_tag_reader"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0f"
+fn = "layer_c0f_lane_demo_feature_restore"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0g"
+fn = "layer_c0g_apt_ceiling"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C0s"
+fn = "layer_c0s_test_lane_discipline"
+class = "E"
+reason = "its hosted job (validate-codegen) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C1"
+fn = "layer_c1_cargo_test"
+class = "E"
+reason = "it runs zephyr, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1cap"
+fn = "layer_c1cap_capture_shard"
+class = "D"
+
+[[lane]]
+id = "C1b"
+fn = "layer_c1b_cargo_test_alloc"
+class = "D"
+
+[[lane]]
+id = "C1c"
+fn = "layer_c1c_cargo_test_codec_declare"
+class = "D"
+
+[[lane]]
+id = "C1t"
+fn = "layer_c1t_cargo_test_serial"
+class = "D"
+
+[[lane]]
+id = "C1u"
+fn = "layer_c1u_cargo_test_tls"
+class = "D"
+
+[[lane]]
+id = "C1v"
+fn = "layer_c1v_cargo_test_ws"
+class = "E"
+reason = "it runs zenohd, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1aa"
+fn = "layer_c1aa_cargo_test_unixsock"
+class = "D"
+
+[[lane]]
+id = "C1ab"
+fn = "layer_c1ab_cargo_test_vsock"
+class = "E"
+reason = "it runs sudo, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1ac"
+fn = "layer_c1ac_cargo_test_quic"
+class = "D"
+
+[[lane]]
+id = "C1ad"
+fn = "layer_c1ad_cargo_test_lowlatency"
+class = "D"
+
+[[lane]]
+id = "C1ae"
+fn = "layer_c1ae_cargo_test_compression"
+class = "D"
+
+[[lane]]
+id = "C1af"
+fn = "layer_c1af_cargo_test_shm"
+class = "E"
+reason = "it runs protoc, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1ag"
+fn = "layer_c1ag_cargo_test_transport_compose"
+class = "D"
+
+[[lane]]
+id = "C1ah"
+fn = "layer_c1ah_cargo_test_time_hlc"
+class = "D"
+
+[[lane]]
+id = "C1ai"
+fn = "layer_c1ai_cargo_test_liveliness_history"
+class = "D"
+
+[[lane]]
+id = "C1aj"
+fn = "layer_c1aj_cargo_test_quic_datagram"
+class = "D"
+
+[[lane]]
+id = "C1ci"
+fn = "layer_c1ci_cargo_test_udp_reliable"
+class = "D"
+
+[[lane]]
+id = "C1ak"
+fn = "layer_c1ak_cargo_test_transport_stats"
+class = "D"
+
+[[lane]]
+id = "C1al"
+fn = "layer_c1al_cargo_test_unixpipe"
+class = "D"
+
+[[lane]]
+id = "C1am"
+fn = "layer_c1am_cargo_test_adminspace"
+class = "D"
+
+[[lane]]
+id = "C1an"
+fn = "layer_c1an_cargo_test_adminspace_nodefault"
+class = "D"
+
+[[lane]]
+id = "C1ao"
+fn = "layer_c1ao_cargo_test_config_mutate_runtime"
+class = "D"
+
+[[lane]]
+id = "C1ap"
+fn = "layer_c1ap_cargo_test_ext_pubsub_serde"
+class = "D"
+
+[[lane]]
+id = "C1aq"
+fn = "layer_c1aq_cargo_test_ext_pubsub_advanced"
+class = "E"
+reason = "it runs zenohd, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1ar"
+fn = "layer_c1ar_cargo_test_ext_pubsub_advanced_sub"
+class = "D"
+
+[[lane]]
+id = "C1as"
+fn = "layer_c1as_cargo_test_reply_source_info"
+class = "D"
+
+[[lane]]
+id = "C1at"
+fn = "layer_c1at_cargo_test_ext_pubsub_advanced_recovery"
+class = "D"
+
+[[lane]]
+id = "C1au"
+fn = "layer_c1au_cargo_test_ext_pubsub_sample_miss_detection"
+class = "D"
+
+[[lane]]
+id = "C1av"
+fn = "layer_c1av_cargo_test_ext_pubsub_advanced_history"
+class = "D"
+
+[[lane]]
+id = "C1aw"
+fn = "layer_c1aw_cargo_test_ext_pubsub_group_membership"
+class = "E"
+reason = "it runs zenohd, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1ax"
+fn = "layer_c1ax_cargo_test_routing_namespace"
+class = "D"
+
+[[lane]]
+id = "C1ay"
+fn = "layer_c1ay_cargo_test_router_hat"
+class = "E"
+reason = "it runs west, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1az"
+fn = "layer_c1az_cargo_test_rest_sse"
+class = "D"
+
+[[lane]]
+id = "C1ba"
+fn = "layer_c1ba_cargo_clippy_transport_multilink"
+class = "E"
+reason = "it runs protoc, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1bb"
+fn = "layer_c1bb_cargo_test_qos"
+class = "E"
+reason = "it runs protoc, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1bc"
+fn = "layer_c1bc_cargo_test_mcast_qos"
+class = "D"
+
+[[lane]]
+id = "C1bd"
+fn = "layer_c1bd_locator_iface"
+class = "D"
+
+[[lane]]
+id = "C1be"
+fn = "layer_c1be_cargo_test_query_value"
+class = "D"
+
+[[lane]]
+id = "C1bf"
+fn = "layer_c1bf_cargo_clippy_all_features"
+class = "E"
+reason = "it runs zephyr, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1bn"
+fn = "layer_c1bn_passive_dissection_features"
+class = "E"
+reason = "it arms an oracle the machine provides (a WZ_*_REQUIRE), which the key does not hold"
+
+[[lane]]
+id = "C1bnl"
+fn = "layer_c1bnl_all_nondefault_test_legs"
+class = "D"
+legs = "scripts/lib/nondefault-tests-gate.sh"
+
+[[lane]]
+id = "C1bo"
+fn = "layer_c1bo_dissect_c_abi"
+class = "E"
+reason = "it runs nm, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1cj"
+fn = "layer_c1cj_replay_c_abi"
+class = "E"
+reason = "it runs nm, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1so"
+fn = "layer_c1so_cdylib_soname"
+class = "D"
+
+[[lane]]
+id = "C1st"
+fn = "layer_c1st_abi_stamp"
+class = "E"
+reason = "it traces with the machine's strace and bwrap, which the key does not hold"
+
+[[lane]]
+id = "C1sp"
+fn = "layer_c1sp_cross_platforms"
+class = "E"
+reason = "its hosted job (capi-c-arms) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C1bt"
+fn = "layer_c1bt_capture_no_default_features"
+class = "D"
+
+[[lane]]
+id = "C1bq"
+fn = "layer_c1bq_zero_copy_arena"
+class = "D"
+
+[[lane]]
+id = "C1br"
+fn = "layer_c1br_uring_fixed_buffers"
+class = "E"
+reason = "it runs sudo, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1bs"
+fn = "layer_c1bs_live_capture"
+class = "E"
+reason = "it runs sudo, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1bw"
+fn = "layer_c1bw_analyze_cli"
+class = "D"
+
+[[lane]]
+id = "C1bx"
+fn = "layer_c1bx_tls_record_oracle"
+class = "D"
+
+[[lane]]
+id = "C1bz"
+fn = "layer_c1bz_docs_resolve"
+class = "E"
+reason = "it runs zephyr, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1bzr"
+fn = "layer_c1bzr_reduced_docs_resolve"
+class = "D"
+
+[[lane]]
+id = "C1w"
+fn = "layer_c1w_cargo_test_routing_accept"
+class = "D"
+
+[[lane]]
+id = "C1bl"
+fn = "layer_c1bl_cargo_test_router_failfast"
+class = "D"
+
+[[lane]]
+id = "C1bm"
+fn = "layer_c1bm_cargo_test_pico_failfast"
+class = "E"
+reason = "it runs shellcheck, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1pc"
+fn = "layer_c1pc_capi_pico_engines"
+class = "E"
+reason = "it runs shellcheck, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1x"
+fn = "layer_c1x_cargo_test_routing_routes"
+class = "D"
+
+[[lane]]
+id = "C1y"
+fn = "layer_c1y_cargo_test_routing_peer"
+class = "E"
+reason = "it runs protoc, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1z"
+fn = "layer_c1z_cargo_test_storage_driver"
+class = "D"
+
+[[lane]]
+id = "C1d"
+fn = "layer_c1d_cargo_test_pubsub"
+class = "D"
+
+[[lane]]
+id = "C1e"
+fn = "layer_c1e_cargo_test_query"
+class = "D"
+
+[[lane]]
+id = "C1f"
+fn = "layer_c1f_cargo_test_reply"
+class = "D"
+
+[[lane]]
+id = "C1g"
+fn = "layer_c1g_cargo_test_observer"
+class = "E"
+reason = "it arms an oracle the machine provides (a WZ_*_REQUIRE), which the key does not hold"
+
+[[lane]]
+id = "C1own"
+fn = "layer_c1own_own_space_witnesses"
+class = "D"
+
+[[lane]]
+id = "C1h"
+fn = "layer_c1h_arbitrary_subset_matrix"
+class = "E"
+reason = "it runs shellcheck, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1sb"
+fn = "layer_c1sb_switchboard_crates"
+class = "D"
+
+[[lane]]
+id = "C1ca"
+fn = "layer_c1ca_cargo_test_derived_initial_sn"
+class = "D"
+
+[[lane]]
+id = "C1cb"
+fn = "layer_c1cb_cargo_test_init_ack_admission"
+class = "D"
+
+[[lane]]
+id = "C1cg"
+fn = "layer_c1cg_cargo_test_runtime_partition"
+class = "D"
+
+[[lane]]
+id = "C1ch"
+fn = "layer_c1ch_capi_c_config_surface"
+class = "E"
+reason = "it runs nm, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1cf"
+fn = "layer_c1cf_reduced_features"
+class = "D"
+
+[[lane]]
+id = "C1cs"
+fn = "layer_c1cs_capability_cost"
+class = "D"
+
+[[lane]]
+id = "Z8"
+fn = "layer_z8_upstream_suite"
+class = "E"
+reason = "it runs the upstream suite of the pinned zenoh checkout the machine provides, which the key does not hold"
+
+[[lane]]
+id = "C1co"
+fn = "layer_c1co_pico_client_dials_a_listener"
+class = "E"
+reason = "it runs shellcheck, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1p32"
+fn = "layer_c1p32_pico_i686"
+class = "E"
+reason = "it builds 32-bit programs with the machine's C compiler mode (gcc-multilib), which the key does not hold"
+
+[[lane]]
+id = "C1nh"
+fn = "layer_c1nh_no_heap_after_open"
+class = "D"
+
+[[lane]]
+id = "C1cn"
+fn = "layer_c1cn_nondefault_features"
+class = "D"
+packages = ["crates:*"]
+
+[[lane]]
+id = "C1i"
+fn = "layer_c1i_cargo_test_scouting"
+class = "D"
+
+[[lane]]
+id = "C1k"
+fn = "layer_c1k_cargo_test_scouting_static"
+class = "D"
+
+[[lane]]
+id = "C1l"
+fn = "layer_c1l_reassembly"
+class = "D"
+
+[[lane]]
+id = "C1m"
+fn = "layer_c1m_session_lwip"
+class = "E"
+reason = "it runs protoc, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1n"
+fn = "layer_c1n_mcu_session_acceptor"
+class = "E"
+reason = "it runs ip link, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1r"
+fn = "layer_c1r_mcu_multicast_e2e"
+class = "D"
+
+[[lane]]
+id = "C1ns"
+fn = "layer_c1ns_nostd_members_isolated"
+class = "E"
+reason = "it runs zephyr, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C1s"
+fn = "layer_c1s_runtime_tokio_multicast_tests"
+class = "D"
+
+[[lane]]
+id = "C1o"
+fn = "layer_c1o_keyexpr_gating_behavior"
+class = "D"
+
+[[lane]]
+id = "C1p"
+fn = "layer_c1p_multicast"
+class = "D"
+
+[[lane]]
+id = "C1q"
+fn = "layer_c1q_multicast_glue"
+class = "D"
+
+[[lane]]
+id = "C1j"
+fn = "layer_c1j_runtime_tokio_subset_behavior"
+class = "D"
+
+[[lane]]
+id = "C1bg"
+fn = "layer_c1bg_cargo_test_storage_backend_filesystem"
+class = "D"
+
+[[lane]]
+id = "C1bh"
+fn = "layer_c1bh_cargo_test_storage_host_dir"
+class = "D"
+
+[[lane]]
+id = "C1bi"
+fn = "layer_c1bi_cargo_test_pubsub_qos"
+class = "D"
+
+[[lane]]
+id = "C1bj"
+fn = "layer_c1bj_cargo_test_loopback_metadata_gates"
+class = "D"
+
+[[lane]]
+id = "C1bk"
+fn = "layer_c1bk_cargo_test_query_pub_field_gates"
+class = "D"
+
+[[lane]]
+id = "C2"
+fn = "layer_c2_cargo_clippy"
+class = "E"
+reason = "it runs qemu, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C2m"
+fn = "layer_c2m_mcu_deploy_clippy"
+class = "E"
+reason = "it cross-compiles with the machine's arm-none-eabi-gcc, which the key does not hold"
+
+[[lane]]
+id = "C3"
+fn = "layer_c3_per_pkg_isolated_lint"
+class = "E"
+reason = "it runs shellcheck, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "C4"
+fn = "layer_c4_preset_matrix"
+class = "D"
+
+[[lane]]
+id = "C4b"
+fn = "layer_c4b_facade_subset_matrix"
+class = "D"
+
+[[lane]]
+id = "C4c"
+fn = "layer_c4c_runtime_tokio_subset_matrix"
+class = "D"
+
+[[lane]]
+id = "C4d"
+fn = "layer_c4d_runtime_tokio_subset_clippy"
+class = "D"
+
+[[lane]]
+id = "C4e"
+fn = "layer_c4e_transport_axis_matrix"
+class = "D"
+
+[[lane]]
+id = "D"
+fn = "layer_d_validate_deploy"
+class = "D"
+
+[[lane]]
+id = "L"
+fn = "layer_l_lockfile_freshness"
+class = "D"
+
+[[lane]]
+id = "C1bp"
+fn = "layer_c1bp_plugin_dynamic_loading"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C1bv"
+fn = "layer_c1bv_dynamic_volume_loading"
+class = "D"
+
+[[lane]]
+id = "C1cc"
+fn = "layer_c1cc_api_compat_c"
+class = "E"
+reason = "it runs the C ABI tests under the machine's valgrind, which the key does not hold"
+
+[[lane]]
+id = "C1ce"
+fn = "layer_c1ce_api_compat_c_unstable_oracle"
+class = "E"
+reason = "its hosted job (capi-c-arms) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C1cd"
+fn = "layer_c1cd_api_compat_c_attachment"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C1by"
+fn = "layer_c1by_replay_engine"
+class = "E"
+reason = "it runs shellcheck, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "Epico"
+fn = "layer_epico_library_oracles"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "Ewire"
+fn = "layer_ewire_pico_wire_dissection"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "Ero"
+fn = "layer_ero_read_only_tree"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "C1ob"
+fn = "layer_c1ob_offline_build_entry"
+class = "E"
+reason = "it builds in a bwrap sandbox with the machine's C toolchain and libclang, which the key does not hold"
+
+[[lane]]
+id = "Ewirez"
+fn = "layer_ewirez_zenohd_wire_dissection"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E"
+fn = "layer_e_ap_demo_round_trip"
+class = "E"
+reason = "its hosted job (e2e-demo-pico) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E2"
+fn = "layer_e2_facade_subset_e2e"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E3"
+fn = "layer_e3_router_multi_peer"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E4"
+fn = "layer_e4_router_reject"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E4i"
+fn = "layer_e4i_demo_inert_flags"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E5"
+fn = "layer_e5_router_forward"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E5u"
+fn = "layer_e5u_router_unixpipe_forward"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6u"
+fn = "layer_e6u_peer_unixpipe_forward"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6"
+fn = "layer_e6_peer_mesh"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6b"
+fn = "layer_e6b_adminspace_introspection"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6c"
+fn = "layer_e6c_peer_multilink"
+class = "D"
+
+[[lane]]
+id = "E6d"
+fn = "layer_e6d_peer_multilink_qos"
+class = "D"
+
+[[lane]]
+id = "E6e"
+fn = "layer_e6e_adminspace_plugins"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6f"
+fn = "layer_e6f_adminspace_metrics"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6g"
+fn = "layer_e6g_adminspace_read"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6h"
+fn = "layer_e6h_adminspace_config_hotreload"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6i"
+fn = "layer_e6i_storage_host_adminspace_read_deny"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E6j"
+fn = "layer_e6j_admin_permit_per_get_one_session"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7"
+fn = "layer_e7_router_hat"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7b"
+fn = "layer_e7b_router_connect_reconcile"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7b2"
+fn = "layer_e7b2_router_connect_add_over_the_wire"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7c"
+fn = "layer_e7c_router_adminspace_linkstate"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7g"
+fn = "layer_e7g_router_adminspace_read_deny"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7u"
+fn = "layer_e7u_router_hat_unixpipe_forward"
+class = "E"
+reason = "its hosted job (e2e-demo) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E7s"
+fn = "layer_e7s_router_hat_data_plane_scaling"
+class = "D"
+
+[[lane]]
+id = "E7m"
+fn = "layer_e7m_wz_mesh_client_conformance"
+class = "D"
+
+[[lane]]
+id = "E8"
+fn = "layer_e8_router_hat_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E8t"
+fn = "layer_e8t_router_hat_hlc_stamp_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E9"
+fn = "layer_e9_apfull_preset_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E10"
+fn = "layer_e10_close_frame_on_teardown"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E11"
+fn = "layer_e11_apfull_advanced_pubsub_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E12"
+fn = "layer_e12_apfull_adminspace_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E13"
+fn = "layer_e13_apfull_storage_plane_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E14"
+fn = "layer_e14_apfull_dynamic_volume_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E15"
+fn = "layer_e15_apfull_reconcile_federation_pico"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E16"
+fn = "layer_e16_fs_backend_shares_a_directory_with_upstream"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E17"
+fn = "layer_e17_stats_registry_writes_upstreams_document"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E18"
+fn = "layer_e18_zenoh_family_conformance"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "F"
+fn = "layer_f_codec_footprint"
+class = "D"
+
+[[lane]]
+id = "Fz"
+fn = "layer_fz_fuzz_regress"
+class = "D"
+
+[[lane]]
+id = "Vcov"
+fn = "layer_vcov_coverage"
+class = "E"
+reason = "it runs rustup's pinned nightly, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "Vtsan"
+fn = "layer_vtsan_thread_sanitizer"
+class = "E"
+reason = "it runs rustup's pinned nightly and the machine's C toolchain, which the key does not hold"
+
+[[lane]]
+id = "Vasan"
+fn = "layer_vasan_address_sanitizer"
+class = "E"
+reason = "it runs rustup's pinned nightly and the machine's C toolchain, which the key does not hold"
+
+[[lane]]
+id = "Vmiri"
+fn = "layer_vmiri_interpreter"
+class = "E"
+reason = "it runs rustup's pinned nightly, which the machine provides and the key does not hold"
+
+[[lane]]
+id = "G"
+fn = "layer_g_cross_compile_cortex_m"
+class = "E"
+reason = "it cross-compiles with the machine's arm-none-eabi-gcc, which the key does not hold"
+
+[[lane]]
+id = "Q"
+fn = "layer_q_qemu_mcu_e2e"
+class = "E"
+reason = "it builds with the machine's arm-none-eabi-gcc and boots under its qemu, which the key does not hold"
+
+[[lane]]
+id = "Qa"
+fn = "layer_qa_mcu_admin_node_vs_zenohd"
+class = "E"
+reason = "it builds with the machine's ARM toolchain, boots under its qemu and talks to its zenohd, none of which the key holds"
+
+[[lane]]
+id = "Qz"
+fn = "layer_qz_zephyr_boot"
+class = "E"
+reason = "it boots images built with the Zephyr SDK under the machine's qemu, neither of which the key holds"
+
+[[lane]]
+id = "Qza"
+fn = "layer_qza_zephyr_admin_node_vs_zenohd"
+class = "E"
+reason = "it boots under the machine's qemu and talks to its zenohd, which the key does not hold"
+
+[[lane]]
+id = "Qzp"
+fn = "layer_qzp_pico_abi_mcu_image"
+class = "E"
+reason = "it boots under the machine's qemu with the pico ABI image, which the key does not hold"
+
+[[lane]]
+id = "Qzb"
+fn = "layer_qzb_zephyr_board_matrix"
+class = "E"
+reason = "it builds board images with the Zephyr SDK the machine provides, which the key does not hold"
+
+[[lane]]
+id = "Qzk"
+fn = "layer_qzk_client_images_build"
+class = "E"
+reason = "it builds client images with the Zephyr SDK the machine provides, which the key does not hold"
+
+[[lane]]
+id = "M"
+fn = "layer_m_scouting_multicast"
+class = "S"
+reason = "it reads the host's multicast interfaces, socket buffers and scheduling"
+nondet = ["interfaces", "host-buffers", "scheduler"]
+
+[[lane]]
+id = "Z"
+fn = "layer_z_zenohd_interop"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "E5z"
+fn = "layer_e5z_router_query_target"
+class = "E"
+reason = "its hosted job (interop) provisions what it runs against on the machine, which the key does not hold"
+
+[[lane]]
+id = "P"
+fn = "layer_p_throughput_differential"
+class = "S"
+reason = "it compares throughput measured in wall-clock time on the host's cores"
+nondet = ["wall-clock", "cores", "scheduler"]
+
+[[lane]]
+id = "S"
+fn = "layer_s_pico_stability"
+class = "S"
+reason = "it is a stress sample of the pico C ABI under the host's scheduler, timed"
+nondet = ["scheduler", "wall-clock", "cores"]
