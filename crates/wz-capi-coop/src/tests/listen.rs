@@ -801,6 +801,35 @@ fn a_row_a_face_left_wakes_for_the_face_an_attach_gives_it() {
     );
 }
 
+/// A listener's one client face, up with nothing owed while the dial role's face rests, is found
+/// quiet by its look; no face is while a second client's face is up beside it, and the first is
+/// again once the second has gone. CONTROL: a listener with no client has no quiet face. Turned
+/// red by a look that never marks its face quiet (`CoopEngine::quiet_until`), or one that marks
+/// a face quiet beside another that does not rest.
+#[cfg(not(wz_round))]
+#[test]
+fn a_lone_face_is_found_quiet_by_its_look_and_not_beside_another() {
+    let (listener, endpoint) = listening(|config| config.max_faces = 2);
+    assert_eq!(
+        listener.quiet_faces(),
+        0,
+        "CONTROL: a listener with no client has no quiet face"
+    );
+    let first = client(&endpoint, 0xc1);
+    eventually("the first client's face", || listener.faces_up() == 1);
+    eventually("the lone face found quiet", || listener.quiet_faces() == 1);
+    let second = client(&endpoint, 0xc2);
+    eventually("the second client's face", || listener.faces_up() == 2);
+    eventually("no face found quiet beside another", || {
+        listener.quiet_faces() == 0
+    });
+    drop(second);
+    eventually("the first face alone, and quiet again", || {
+        listener.faces_up() == 1 && listener.quiet_faces() == 1
+    });
+    drop(first);
+}
+
 /// A session whose one link is a stream waits on that link's input with nothing of the session
 /// held, and the step after the wait reads what came: each put a listener makes reaches it after
 /// such a wait. CONTROL: the listener, whose port is waited on beside its link, waits the same way.

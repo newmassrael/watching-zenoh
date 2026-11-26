@@ -47,6 +47,8 @@ use core::sync::atomic::AtomicBool;
 use wz_runtime_coop::faces::MessageCount;
 #[cfg(not(any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::SiteSend;
+#[cfg(any(feature = "listen", feature = "group"))]
+use wz_runtime_coop::faces::WireLook;
 use wz_runtime_coop::faces::{
     Dial, FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
 };
@@ -1204,6 +1206,16 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// session's lock and not the face's slot.
     #[cfg(any(feature = "listen", feature = "group"))]
     rests: AtomicBool,
+    /// Whether the face's last look found it quiet (`CoopEngine::quiet_until`): its link up with
+    /// nothing owed, every other face at rest, and nothing of the session due before
+    /// `quiet_until_us`, so its read may read it alone until then. Written by the look alone,
+    /// with the face's read slot held.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    quiet: AtomicBool,
+    /// When the quiet read the face's last look allowed ends, on the session's clock in
+    /// microseconds; read only while `quiet` is set.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    quiet_until_us: AtomicU64,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
@@ -1250,6 +1262,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             {
                 addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
                 addr_of_mut!((*at).rests).write(AtomicBool::new(false));
+                addr_of_mut!((*at).quiet).write(AtomicBool::new(false));
+                addr_of_mut!((*at).quiet_until_us).write(AtomicU64::new(0));
             }
             #[cfg(feature = "listen")]
             addr_of_mut!((*at).holds_face).write(AtomicBool::new(false));
@@ -1265,6 +1279,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             slot.noted_us = due_us;
             self.due_us.store(due_us, Ordering::Relaxed);
         }
+    }
+
+    /// Show what the face's look found of its quiet read: until `until_us`, or none.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[inline(always)]
+    fn mark_quiet(&self, until_us: Option<u64>) {
+        if let Some(until_us) = until_us {
+            self.quiet_until_us.store(until_us, Ordering::Relaxed);
+        }
+        self.quiet.store(until_us.is_some(), Ordering::Release);
     }
 
     /// The end a wire of the face's link holds.
@@ -2181,6 +2205,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core.settle_ledger();
         }
         let jobs_due_ms = core.jobs_due_at(now_us);
+        #[cfg(any(feature = "listen", feature = "group"))]
+        face.mark_quiet(self.quiet_until(
+            face,
+            core,
+            slot,
+            now_us,
+            ended.is_none() && !replays && jobs_due_ms.is_none(),
+        ));
         Some(LinkTurn {
             #[cfg(feature = "liveliness")]
             retracts: core.session.registry.retracting(),
@@ -2194,6 +2226,71 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(feature = "listen")]
             accepts: core.transport.links.ports_to_ask(),
         })
+    }
+
+    /// When a quiet read of `face` ends, judged at its look under the session's lock `core`, its
+    /// read slot held as `slot`, the look's reading of the clock `now_us`, and `settled` when
+    /// the look owes the face nothing more (no end, no replay's turn, no job due): `None` where
+    /// the face is not quiet. A quiet face's link is up and established, with no dial, no opened
+    /// link and no change of its send place owed; it holds no input, owes no write, waits for no
+    /// buffer and gives a wait of its own; every other face rests, no group is joined, no port is
+    /// to be asked, no chain is staged in its Router, and the bookkeeping owes nothing. The read
+    /// then ends by the earliest of the face's own due, the bookkeeping's, the next job and the
+    /// session's wait bound, which keeps every latency a read has.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    fn quiet_until(
+        &self,
+        face: &DirectFace<L, C>,
+        core: &Core<L, C>,
+        slot: &DirectSlot<L, C>,
+        now_us: u64,
+        settled: bool,
+    ) -> Option<u64> {
+        #[cfg(feature = "group")]
+        if self.joins_groups {
+            return None;
+        }
+        #[cfg(feature = "threads")]
+        if slot.site_owed.is_some() {
+            return None;
+        }
+        #[cfg(feature = "liveliness")]
+        if core.session.registry.retracting() {
+            return None;
+        }
+        let lone_link = core.transport.links.face(slot.at()).is_some_and(|row| {
+            matches!(row.life.phase(), LinkPhase::Up)
+                && row.link.wire().is_some_and(|wire| {
+                    wire.look() == WireLook::Quiet && wire.input_wait().is_some()
+                })
+        });
+        let quiet = settled
+            && lone_link
+            && slot.opened.is_none()
+            && !slot.brought_up
+            && !face.end.over()
+            && slot.router.due_ms() == u64::MAX
+            && slot
+                .records
+                .as_ref()
+                .is_some_and(|records| records.actions.is_established())
+            && !core.transport.links.ports_to_ask()
+            && !core.ledger.owes(now_us, core.seen())
+            && self
+                .direct
+                .walked()
+                .all(|other| ::core::ptr::eq(other, face) || other.rests.load(Ordering::Acquire));
+        if !quiet {
+            return None;
+        }
+        let bound_us =
+            now_us.saturating_add(u64::from(core.config.idle_wait_ms).saturating_mul(1000));
+        #[cfg(feature = "ticker")]
+        let bound_us = core
+            .tickers
+            .next_due_ms()
+            .map_or(bound_us, |due_ms| bound_us.min(due_ms.saturating_mul(1000)));
+        Some(bound_us.min(slot.due_us()).min(core.ledger.next_due_us()))
     }
 
     /// Step the pump with nothing of the session held: its own bookkeeping when it is due or owes
@@ -3022,6 +3119,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     ))]
     pub(crate) fn walked_rows(&self) -> usize {
         self.direct.walked().count()
+    }
+
+    /// How many faces their last look found quiet (`DirectFace::quiet`).
+    #[cfg(all(
+        test,
+        feature = "listen",
+        feature = "query",
+        feature = "queryable",
+        feature = "threads"
+    ))]
+    pub(crate) fn quiet_faces(&self) -> usize {
+        self.direct
+            .walked()
+            .filter(|face| face.quiet.load(Ordering::Acquire))
+            .count()
     }
 
     /// How many legs a publish's walk of the faces hands out (`Self::on_faces`), and how many
