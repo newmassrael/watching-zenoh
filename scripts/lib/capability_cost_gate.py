@@ -216,10 +216,6 @@ SHIP_PROFILE = "ship"
 # The configuration of the library without `std` (`crates/.cargo/capi-nostd.toml`), which a case
 # composes with the profile of the same name.
 NOSTD_CONFIG = ".cargo/capi-nostd.toml"
-# The code generation flag that file gives a POSIX host's library besides its unwind tables: a
-# `match` of fewer than eight arms lowered to compares, not to a jump table in `.rodata`
-# (docs/win-budget/rss.md, section 5.3, R2.1).
-NOSTD_JUMP_TABLES = "llvm-args=-min-jump-table-entries=8"
 # The crate a C program links for a case's ABI crate, and the name that crate's manifest gives its
 # dependency on the ABI: the pico ABI is an rlib (`wz-capi-pico`), and its C library is
 # `wz-capi-pico-lib`, which takes the ABI's capabilities through its dependency `abi`. A case names
@@ -2700,10 +2696,9 @@ def cmd_selftest() -> int:
         except ValueError:
             expect(f"the configuration {shape!r} is refused", True)
     nostd = (CRATES / NOSTD_CONFIG).read_text(encoding="utf-8")
-    expect("the configuration without std drops the unwind tables and the short jump tables on a "
-           "POSIX host only",
+    expect("the configuration without std drops the unwind tables on a POSIX host only",
            config_rustflags(nostd, "x86_64-unknown-linux-gnu", linux_gnu)
-           == ["-C", "force-unwind-tables=no", "-C", NOSTD_JUMP_TABLES]
+           == ["-C", "force-unwind-tables=no"]
            and config_rustflags(nostd, "x86_64-pc-windows-msvc", windows_msvc) == [])
 
     def readable(path: str) -> bool:
@@ -2821,8 +2816,6 @@ def cmd_selftest() -> int:
            and bare_build.lib
            == TARGET / "x86_64-unknown-linux-gnu" / "capi-nostd" / "libwz_capi_pico.so"
            and "force-unwind-tables=no"
-           in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
-           and NOSTD_JUMP_TABLES
            in bare_build.env[build_normalization.ENCODED_RUSTFLAGS].split("\x1f")
            and discards_unwind_tables(bare_build.link_args)
            and PACKED_RELOCS_LINK in bare_build.link_args)
