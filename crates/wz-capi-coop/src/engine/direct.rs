@@ -1650,20 +1650,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// The read of the set of faces `faces` names, each read slot taken in turn: the wait, then a
-    /// look at each face's life and a step of its pump, the session's periodic jobs once every
-    /// face was turned. A slot found held is a read under way on this thread, whose callback this
-    /// read is called from: it reads nothing, so no record is handed out inside another's call;
-    /// the read task's (`TASK`) finds it held by another thread's read (`Self::held_elsewhere`).
+    /// The read of the set of faces `faces` names, the dial role's first: the wait, then a look at
+    /// each face's life and a step of its pump, the session's periodic jobs once every face was
+    /// turned. The dial role's read slot is the read's own from before the wait until the
+    /// deliveries, as the read of that face alone holds it (`Self::read_dial`), and each other
+    /// face's is taken for its turn. The dial role's slot found held is a read under way on this
+    /// thread, whose callback this read is called from: it reads nothing, so no record is handed
+    /// out inside another's call; the read task's (`TASK`) finds it held by another thread's read
+    /// (`Self::held_elsewhere`).
     #[cfg(any(feature = "listen", feature = "group"))]
     fn read_faces<'f, const TASK: bool, I, F>(&'f self, faces: F) -> Result<(), SessionClosed>
     where
         F: Fn() -> I,
         I: Iterator<Item = &'f DirectFace<L, C>>,
     {
-        if !faces().all(|face| <CoopForm as LockForm>::try_lock(&face.slot).is_some()) {
+        // The dial role's slot is held by one read at a time, from before its wait until its
+        // deliveries, so each other face's slot is tried once, at its turn.
+        let dial_face = &self.direct.dial;
+        let Some(mut dial) = <CoopForm as LockForm>::try_lock(&dial_face.slot) else {
             return self.held_elsewhere::<TASK>(self.faces_due_us());
-        }
+        };
         // The wait is handed back to the session by the first face's look at its life, or by the
         // read itself when no face was looked at. Each face's records are handed out with its
         // slot still held, so a callback's read finds it held.
@@ -1697,6 +1703,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // with no face turned the first at rest is turned all the same, for that bookkeeping.
         let mut rested = None;
         let mut turned = false;
+        // A face's turn: through the read's own hold of the dial role's slot, or a try of the
+        // face's own, which no other read holds. Whether the face was turned, and whether the
+        // read goes on to the next face.
+        let mut turn = |face: &DirectFace<L, C>| -> (bool, bool) {
+            if core::ptr::eq(face, dial_face) {
+                return (true, turn_face(face, &mut dial.0));
+            }
+            match <CoopForm as LockForm>::try_lock(&face.slot) {
+                Some(mut held) => (true, turn_face(face, &mut held.0)),
+                None => (false, true),
+            }
+        };
         for face in faces() {
             if face.rests.load(Ordering::Acquire) {
                 if rested.is_none() {
@@ -1704,25 +1722,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
                 continue;
             }
-            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
-                continue;
-            };
-            turned = true;
-            if !turn_face(face, &mut held.0) {
+            let (was_turned, goes_on) = turn(face);
+            turned |= was_turned;
+            if !goes_on {
                 break;
             }
         }
         if let (false, Some(face)) = (turned, rested) {
-            if let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) {
-                turn_face(face, &mut held.0);
-            }
+            let _ = turn(face);
         }
         // Each group's session is stepped after the faces, with no face's slot but the dial
-        // role's held (`Self::read_groups`).
+        // role's held (`Self::read_groups_held`).
         #[cfg(feature = "group")]
         if read.is_ok() {
-            self.read_groups();
+            self.read_groups_held();
         }
+        drop(dial);
         // What the faces' and the groups' records left to hand out, handed out once for the read
         // rather than once a face and once a run of Pushes: no slot is held, and a callback's read
         // reads nothing inside the delivery (`Self::read_direct`).
@@ -1767,9 +1782,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return;
         }
         if let Some(_reading) = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot) {
-            self.step_groups();
-            self.poll_groups();
+            self.read_groups_held();
         }
+    }
+
+    /// [`Self::read_groups`] by a read that holds the dial role's read slot already.
+    #[cfg(feature = "group")]
+    fn read_groups_held(&self) {
+        if !self.joins_groups {
+            return;
+        }
+        self.step_groups();
+        self.poll_groups();
     }
 
     /// Step each group's session, its read slot taken out of the session for its steps and put
@@ -3137,6 +3161,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 held.0.let_go();
             }
         }
+    }
+
+    /// Run `f` with the dial role's read slot held, as a read under way on this thread holds it
+    /// from before its wait until its deliveries: what a test of a read that finds one reads.
+    #[cfg(all(test, feature = "std", feature = "listen"))]
+    pub(crate) fn with_dial_slot_held<T>(&self, f: impl FnOnce() -> T) -> T {
+        let _reading = <CoopForm as LockForm>::lock(&self.direct.dial.slot);
+        f()
     }
 
     /// Run `f` on the session's one reassembly Router with the time now on the epoch its chains
