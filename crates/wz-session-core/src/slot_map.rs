@@ -448,19 +448,6 @@ impl Core {
             .nth(rank)
             .map(|(at, slot)| (at, slot.generation))
     }
-
-    /// The next slot at or after `cursor` whose state is `state`, the cursor moved past it.
-    #[inline(never)]
-    fn next_in(meta: &[Meta], cursor: &mut usize, state: State) -> Option<(usize, u16)> {
-        while let Some(slot) = meta.get(*cursor) {
-            let at = *cursor;
-            *cursor = at.saturating_add(1);
-            if slot.state == state {
-                return Some((at, slot.generation));
-            }
-        }
-        None
-    }
 }
 
 /// Where a column's rows lie, apart from their type: the first of rows that follow one another,
@@ -556,6 +543,29 @@ fn find_row(
     named.then(|| unsafe { rows.row(place, stride) })
 }
 
+/// The next slot at or after `cursor` whose state is `state`, the cursor moved past it: its place,
+/// its generation and the place of its row. One body for every table, as [`find_row`] is, which a
+/// walk of a table of any row type steps by.
+#[inline(never)]
+fn next_row(
+    meta: &[Meta],
+    rows: RowsAt,
+    stride: usize,
+    cursor: &mut usize,
+    state: State,
+) -> Option<(usize, u16, NonNull<u8>)> {
+    while let Some(slot) = meta.get(*cursor) {
+        let at = *cursor;
+        *cursor = at.saturating_add(1);
+        if slot.state == state {
+            // SAFETY: `at` is a slot of the metadata column, and the rows' column is at least as
+            // long (a slot is added to the rows' column first).
+            return Some((at, slot.generation, unsafe { rows.row(at, stride) }));
+        }
+    }
+    None
+}
+
 /// A table's slots and the places of its rows, apart from its rows' type: the bodies every table
 /// of every row type and bound shares, which a caller that names a table by a value and not by a
 /// type reaches it through. Made by [`SlotMap::raw`] and [`SlotMap::raw_for_insert`]. A row is
@@ -633,6 +643,25 @@ impl RawSlots<'_> {
             Retired::Now(at) => Some(RawRemoval::Freed(unsafe { self.rows.row(at, self.stride) })),
             Retired::Deferred => Some(RawRemoval::AfterCalls),
         }
+    }
+
+    /// Pin the live row `handle` names; `false` when it names none or its pins are at their
+    /// count's end.
+    pub fn pin(&mut self, handle: RawHandle) -> bool {
+        Core::pin(self.meta, handle.place(), handle.generation)
+    }
+
+    /// The next live row at or after `cursor`, the cursor moved past it: its handle and the place
+    /// of its row, which holds the row's `Some`.
+    pub fn next_live(&self, cursor: &mut usize) -> Option<(RawHandle, NonNull<u8>)> {
+        while let Some((at, generation, row)) =
+            next_row(&*self.meta, self.rows, self.stride, cursor, State::Live)
+        {
+            if let Some(handle) = RawHandle::at(at, generation) {
+                return Some((handle, row));
+            }
+        }
+        None
     }
 }
 
@@ -1202,7 +1231,17 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
             .unpin(&mut self.meta, handle.place(), handle.generation)?
         {
             Unpinned::Held => None,
-            Unpinned::Freed(at) => self.rows.get_mut(at)?.take(),
+            // SAFETY: `at` is the slot just freed, a slot of the metadata column, whose rows'
+            // column is at least as long; its row is taken out once, leaving the `None` of a free
+            // slot.
+            Unpinned::Freed(at) => unsafe {
+                self.rows
+                    .rows_at_mut()
+                    .row(at, Self::STRIDE)
+                    .cast::<Option<T>>()
+                    .as_ptr()
+                    .replace(None)
+            },
         }
     }
 
@@ -1233,7 +1272,17 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
     /// `rank`-th, found off the slots alone as [`Self::rank_of`] is.
     pub fn nth_live(&self, rank: usize) -> Option<(Handle<K>, &T)> {
         let (at, generation) = Core::nth_live(&self.meta, rank)?;
-        Some((Handle::at(at, generation)?, self.rows.get(at)?.as_ref()?))
+        let handle = Handle::at(at, generation)?;
+        // SAFETY: `at` is a slot of the metadata column, whose rows' column is at least as long;
+        // the row is read while the table is borrowed.
+        let row = unsafe {
+            self.rows
+                .rows_at()
+                .row(at, Self::STRIDE)
+                .cast::<Option<T>>()
+                .as_ref()
+        };
+        Some((handle, row.as_ref()?))
     }
 
     /// The next live row at or after `cursor`, the cursor moved past it, so a caller can walk the
@@ -1251,9 +1300,12 @@ impl<K, T, const N: usize, P: Storage> SlotMap<K, T, N, P> {
 
     /// The next row at or after `cursor` whose slot is in `state`, the cursor moved past it.
     fn next_in(&self, cursor: &mut usize, state: State) -> Option<(Handle<K>, &T)> {
-        while let Some((at, generation)) = Core::next_in(&self.meta, cursor, state) {
-            if let (Some(handle), Some(Some(row))) = (Handle::at(at, generation), self.rows.get(at))
-            {
+        while let Some((at, generation, row)) =
+            next_row(&self.meta, self.rows.rows_at(), Self::STRIDE, cursor, state)
+        {
+            // SAFETY: the place of a row of this table's column, read while the table is borrowed.
+            let row = unsafe { row.cast::<Option<T>>().as_ref() };
+            if let (Some(handle), Some(row)) = (Handle::at(at, generation), row.as_ref()) {
                 return Some((handle, row));
             }
         }
