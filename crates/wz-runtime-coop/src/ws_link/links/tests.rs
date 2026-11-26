@@ -158,6 +158,32 @@ impl SessionLinks for NoLinks {
     }
 }
 
+/// A stack with no link of its own that places its links in cells of the session's, of one
+/// arena alignment, which the WebSocket links widen to what theirs hold.
+struct CelledLinks;
+
+impl SessionLinks for CelledLinks {
+    type Pump = HeapLink;
+    type Dial = Dialled<HeapLink>;
+    type Waits = NoWaits;
+
+    fn waits(&self) -> NoWaits {
+        NoWaits
+    }
+
+    fn open_acceptor(&self, _port: u16) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        Err(LinkOpenError::Unsupported)
+    }
+
+    fn open_initiator(&self, _to: Locator) -> Result<OpenedLink<HeapLink>, LinkOpenError> {
+        Err(LinkOpenError::Unsupported)
+    }
+
+    fn link_cell_bytes(&self) -> usize {
+        wz_session_core::bounded::ARENA_ALIGN
+    }
+}
+
 fn stack() -> (WsLinks<NoLinks, Open>, Rc<Dial>) {
     let dial = Rc::new(Dial {
         net: Rc::new(Net::default()),
@@ -212,6 +238,64 @@ fn a_dial_upgrades_its_connection_and_keeps_what_followed_the_answer() {
     dial.net.inbox.borrow_mut().extend([0x82, 0x02, b'o', b'k']);
     let link = pending.poll().expect("answered").expect("upgraded");
     assert_eq!(received(&link).as_deref(), Some(&b"ok"[..]));
+}
+
+/// A dial of links lent cells holds one for its handshake from the moment it is begun, and gives
+/// it back before its link claims one, so a table of one cell carries the dial to its link; a
+/// dial begun while no cell is free is refused as exhausted. Turned red by a cell size that leaves
+/// out the handshake, by a dial that keeps its cell while its link is made, or by one that holds
+/// no cell and so finds out only after it connected that its link has none.
+#[test]
+fn a_dial_holds_a_cell_of_the_table_its_link_is_made_in() {
+    use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+    #[derive(Clone, Copy)]
+    #[repr(C, align(16))]
+    struct Block([u8; ARENA_ALIGN]);
+
+    let (_, dial) = stack();
+    let mut links = WsLinks::new(CelledLinks, Open(Rc::clone(&dial)), 1);
+    let size = links.link_cell_bytes();
+    assert!(
+        size >= CellRc::<DialCell<Open, OneTask>>::cell_bytes(),
+        "a cell holds the handshake of a dial"
+    );
+    let bytes = Arena::byte_cells_bytes(size, 1).expect("within the address space");
+    let region: &'static mut [Block] =
+        alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+    // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+    // leaked, so nothing else uses it and it outlives every value placed in it.
+    let mut arena = unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+    let cells = arena.lend_byte_cells(size, 1).expect("one cell");
+    links.lend_cells(cells);
+
+    let mut pending = links
+        .begin_initiator(Locator::ws(SERVER))
+        .expect("a dial begun in the cell");
+    assert_eq!(cells.in_use(), 1, "the dial holds the cell");
+    assert!(
+        matches!(
+            links.begin_initiator(Locator::ws(SERVER)),
+            Err(LinkOpenError::Exhausted)
+        ),
+        "a dial past the cells is refused"
+    );
+    assert_eq!(cells.in_use(), 1, "the refused dial took nothing");
+
+    dial.net.connected.set(true);
+    assert!(pending.poll().is_none(), "no answer yet");
+    let accept = request_accept(&dial.net);
+    let mut answer = [0u8; 256];
+    let len = write_response(&mut answer, &accept).expect("room");
+    dial.net.inbox.borrow_mut().extend(&answer[..len]);
+    let link = pending
+        .poll()
+        .expect("answered")
+        .expect("the link in the cell the dial gave back");
+    assert_eq!(cells.in_use(), 1, "the link holds the one cell");
+    assert!(pending.poll().is_none(), "a dial answers once");
+    drop(link);
+    assert_eq!(cells.in_use(), 0, "the link that went gave its cell back");
 }
 
 /// A server that answers with another accept value, or not with an upgrade, refuses the dial; a

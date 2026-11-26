@@ -35,6 +35,20 @@ description = "MCU session shell over any network stack: application layer, admi
 name = "wz_session_mcu"
 path = "src/lib.rs"
 
+# The configurations this crate has, which Layers C1bf and C1bz build in place of `--all-features`
+# (`scripts/lib/doc_feature_sets.py`). `session-slot` is a selector: under it the heap profile's
+# shell (the dialer, the connection manager, the admin node and the in-memory network its tests run
+# on) is not compiled, so a build of every feature compiles none of it or its tests. The features
+# that imply it (`client-slot`, `client-verbs`, `group`, `listen`) are the slot profile's and are
+# built with it. Each profile is a set of its own, with every other feature.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap profile: every feature but the slot selector, every target.
+    { name = "heap", except = ["session-slot"] },
+    # The slot profile, with every other feature beside it: the build `--all-features` makes.
+    { name = "slot", except = [] },
+]
+
 [features]
 default = ["alloc"]
 
