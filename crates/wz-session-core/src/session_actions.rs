@@ -4923,6 +4923,15 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         self.send_response_final(request_id, qos);
     }
 
+    // The holder of the answer route, a trait object, reaches the face's own hold through it.
+    fn hold_replies(&self) -> bool {
+        SessionLinkActions::hold_replies(self)
+    }
+
+    fn release_replies(&self, raised: bool) {
+        SessionLinkActions::release_replies(self, raised);
+    }
+
     // The replies of a drain and the `Final` that ends them leave as one frame. The window is
     // opened only when nobody has one open (the application's own `batch_start`, or the writer's
     // standing one), and closed only by the call that opened it, so neither is ever cut short.

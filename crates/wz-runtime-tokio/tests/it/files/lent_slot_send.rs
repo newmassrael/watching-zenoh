@@ -1424,6 +1424,35 @@ fn held_replies_leave_in_one_send_at_the_release() {
     assert_eq!(link.lent().len(), 2, "the hold is not left raised");
 }
 
+/// The hold a holder of the answer route reaches through it (`ResponseSink::hold_replies`), a
+/// trait object, is the face's own: the replies sent through the route wait, and its release sends
+/// them in one send. Turned red by a sink whose forward is the provided form, which holds
+/// nothing, so each Final leaves at once.
+#[cfg(all(feature = "transport-batching", feature = "codec-response-final"))]
+#[test]
+fn the_answer_route_holds_the_faces_replies() {
+    use wz_session_core::response_sink::ResponseSink;
+    use wz_session_core::sample::QosLevel;
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    let route: &dyn ResponseSink = &*actions;
+    let raised = route.hold_replies();
+    assert!(
+        raised,
+        "nothing held the replies, so the route raised the hold"
+    );
+    route.send_response_final(1, QosLevel::DEFAULT);
+    route.send_response_final(2, QosLevel::DEFAULT);
+    assert!(
+        link.doors().is_empty(),
+        "nothing leaves while the replies are held"
+    );
+    route.release_replies(raised);
+    assert_eq!(link.lent().len(), 1, "one send for both");
+    link.assert_every_slot_home();
+}
+
 /// A message that is not a reply is not held: sent during a hold it leaves at once, and the frame
 /// the held reply left open leaves before it, so the wire is the one the two make with no hold,
 /// SN for SN.
