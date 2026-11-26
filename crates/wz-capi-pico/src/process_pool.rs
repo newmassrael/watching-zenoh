@@ -19,7 +19,8 @@
 //! the same code for an object and for a payload's bytes. A session of the cooperative engine
 //! lies in its own arena, not here, and so do its entities, each in a place its open laid out
 //! under the session's own limit (`crate::object_slot::held_places`): a count of the pools' for
-//! an entity does not apply there.
+//! an entity does not apply there. Where the doors are, such a session's open takes a seat here,
+//! a slot that holds nothing, so the count of sessions bounds the sessions open at once.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -757,11 +758,17 @@ impl Plan {
             sizes: [0; POOLS],
         }
         .with_payloads(&objects.payload_blocks);
-        // A session of the cooperative engine lies in its own arena; its pool is the program's to
-        // reserve where the doors are.
-        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        // A session of the tokio engine lies in its slot. One of the cooperative engine lies in
+        // its own arena, and where the doors are its slot is the seat its open takes, which holds
+        // nothing (`crate::session::SessionSeat`): the sessions the program reserved bound the
+        // sessions open at once on either engine.
+        #[cfg(feature = "engine-tokio")]
         {
             plan = plan.with::<crate::session::SessionPlace>(Kind::Session, objects.sessions);
+        }
+        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
+        {
+            plan = plan.with::<crate::session::SessionSeat>(Kind::Session, objects.sessions);
         }
         // An entity of the cooperative engine lies in its own session's arena, as many as the
         // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
@@ -2646,11 +2653,17 @@ mod tests {
                  count={count:>4} unused={unused:>7} unused_exact={unused_exact:>7}"
             );
         };
-        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        #[cfg(feature = "engine-tokio")]
         row(
             "session",
             Kind::Session,
             core::mem::size_of::<crate::session::SessionPlace>(),
+        );
+        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
+        row(
+            "session seat",
+            Kind::Session,
+            core::mem::size_of::<crate::session::SessionSeat>(),
         );
         row(
             "publisher",

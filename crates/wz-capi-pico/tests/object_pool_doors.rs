@@ -284,8 +284,10 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
             * (usize::from(cfg!(feature = "queryable"))
                 + 2 * usize::from(cfg!(feature = "liveliness"))
                 + usize::from(cfg!(feature = "query")));
-        // The session, the publisher and the subscriber where they are pooled, the planes', the
-        // declared key expression, the config and the four payload blocks: no slot for a payload.
+        // The session's slot (its handle's on the tokio engine, on the cooperative engine the seat
+        // its open takes, its handle lying in its arena), the publisher and the subscriber where
+        // they are pooled, the planes', the declared key expression, the config and the four
+        // payload blocks: no slot for a payload.
         let reported = 1 + 2 * pooled + held_by_plane + 1 + configs_reported + 4;
         assert_eq!(slots(), reported);
         let laid: usize = classes().iter().map(|class| class.bytes).sum();
@@ -335,7 +337,9 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
 
         // ARM 7: the one session's place is taken; a second open is refused before it dials, and
         // consumes its config. Each config states the held values the reservation holds, so the
-        // second is refused for the session's place and not for a held value.
+        // second is refused for the session's place and not for a held value. Open, the pools
+        // hold the four payloads' blocks and the session's slot, on either engine: the config's
+        // slot went back as the open read it.
         let mut cfg = config(Z_CONFIG_LISTEN_KEY, &counts);
         let mut session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(

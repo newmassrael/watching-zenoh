@@ -84,7 +84,7 @@ pub struct wz_ext_object_pool_counts_t {
     /// The bytes of the struct the program was compiled with, `sizeof` of it: the counts past them
     /// are read as zero, and a size short of the counts up to `encodings` is refused.
     pub struct_size: usize,
-    /// Open sessions.
+    /// Sessions open at once: an open past them is refused as out of memory, before it dials.
     pub sessions: usize,
     /// Publishers of each session.
     pub publishers: usize,

@@ -31,8 +31,8 @@ use crate::prelude::*;
 /// nowhere is not a variant of it, and each keeps its number in every build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    // The cooperative engine's session lies in its own arena (`crate::session_place`); its pool
-    // is the program's to reserve where the doors are.
+    // The cooperative engine's session lies in its own arena (`crate::session_place`); where the
+    // doors are, its open takes a seat of this pool (`crate::session::SessionSeat`).
     #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
     Session = 0,
     Publisher = 1,
