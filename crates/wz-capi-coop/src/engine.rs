@@ -8290,6 +8290,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         skip: Option<&DroppedOn>,
         tx: LinkTx<'_, C>,
     ) -> Result<usize, FanoutError> {
+        #[cfg(not(wz_round))]
+        if !tx.reaches_groups() {
+            return Ok(0);
+        }
         let Publication {
             keyexpr,
             wire,
@@ -8298,45 +8302,53 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             meta,
             ..
         } = *put;
+        let put = GroupPut {
+            keyexpr,
+            wire,
+            payload,
+            kind: opts.kind,
+            meta,
+            reliable: send.reliable,
+            priority: send.priority,
+        };
         #[cfg(not(wz_round))]
-        let _ = skip;
-        #[cfg(not(wz_round))]
-        if !tx.reaches_groups() {
-            return Ok(0);
+        {
+            let _ = skip;
+            self.put_on_groups(core, put)
         }
         #[cfg(wz_round)]
-        let _ = tx;
+        {
+            let _ = tx;
+            let mut outcome = Ok(0);
+            for group in &core.transport.groups {
+                if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
+                    continue;
+                }
+                let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
+                // A group whose queue is full runs the session's tasks while it waits for room
+                // (`group::SessionPace`): what they dispatch reaches the registry lent for that
+                // wait.
+                let sent = core
+                    .registry_lend
+                    .lend_for(&mut core.session.registry, || group.publish(put));
+                if sent.is_err() {
+                    outcome = sent;
+                }
+            }
+            outcome
+        }
+    }
+
+    /// `put` on each group the session joined, by the groups' one leg: what the last group that
+    /// failed came to, else `Ok(0)`. Where the read steps a group's session itself, a wait for
+    /// room runs no task, so nothing of the session is lent around a group's publish. Every group
+    /// is the groups' leg's, and a send on one is marked at that leg's place.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    #[inline(always)]
+    fn put_on_groups(&self, core: &Core<L, C>, put: GroupPut<'_>) -> Result<usize, FanoutError> {
         let mut outcome = Ok(0);
         for group in &core.transport.groups {
-            #[cfg(wz_round)]
-            if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
-                continue;
-            }
-            // Where each face's leg is sent apart, every group is the groups' one leg's, and a send
-            // on one is marked at that leg's place.
-            #[cfg(not(wz_round))]
-            let place = direct::GROUPS_LEG;
-            #[cfg(wz_round)]
-            let place = group.at();
-            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(place));
-            let put = GroupPut {
-                keyexpr,
-                wire,
-                payload,
-                kind: opts.kind,
-                meta,
-                reliable: send.reliable,
-                priority: send.priority,
-            };
-            // A group whose queue is full runs the session's tasks while it waits for room
-            // (`group::SessionPace`): what they dispatch reaches the registry lent for that wait.
-            // Where the read steps the group's session itself the wait runs no task, and the
-            // registry is lent to none.
-            #[cfg(wz_round)]
-            let sent = core
-                .registry_lend
-                .lend_for(&mut core.session.registry, || group.publish(put));
-            #[cfg(not(wz_round))]
+            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(direct::GROUPS_LEG));
             let sent = group.publish(put);
             if sent.is_err() {
                 outcome = sent;
@@ -9630,25 +9642,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         params: &PlainPutParams,
         head: Option<wz_session_core::lent_push::PutHead>,
     ) -> FilteredPut {
+        if let Some(answered) = Self::plain_off_the_wire(on, keyexpr, params) {
+            return answered;
+        }
         let core = on.core;
-        // A put one of the session's own subscribers wants is not plain: the general publish
-        // sends it and delivers it there. A leg the first face's leg decided sends as that one
-        // did, and is not asked again.
-        #[cfg(feature = "local-subscriber")]
-        if !on.decided
-            && params.destination.allows_local()
-            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
-                tables(&core.session.registry),
-                keyexpr,
-            )
-        {
+        // A group is sent a put by the general publish, which pushes it onto the group's stage,
+        // where no leg of the put is the groups' own: a hold that reaches every face and every
+        // group. The groups' own leg sends the plain put itself (`Self::put_plain_on_groups`).
+        #[cfg(all(not(wz_round), feature = "group"))]
+        if !on.decided && on.tx.reaches_groups() && !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
-        if !params.destination.allows_remote() {
-            return FilteredPut::Sent(Ok(0));
-        }
-        // A group is sent a put by the general publish, which pushes it onto the group's stage.
-        #[cfg(feature = "group")]
+        #[cfg(all(wz_round, feature = "group"))]
         if !on.decided && !core.transport.groups.is_empty() {
             return FilteredPut::NotPlain;
         }
@@ -9660,6 +9665,73 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return FilteredPut::NotPlain;
         };
         self.send_plain(on, named, payload, params, head, false)
+    }
+
+    /// What a plain put through a write filter comes to before a leg sends it, when it is not
+    /// the wire's: `NotPlain` for a put one of the session's own subscribers wants, which the
+    /// general publish sends and delivers there, and nothing sent for one whose destination admits
+    /// no peer. A leg the first leg decided sends as that one did, and is not asked again.
+    #[inline(always)]
+    fn plain_off_the_wire(
+        on: Holding<'_, L, C>,
+        keyexpr: &str,
+        params: &PlainPutParams,
+    ) -> Option<FilteredPut> {
+        #[cfg(feature = "local-subscriber")]
+        if !on.decided
+            && params.destination.allows_local()
+            && wz_session_core::pubsub::LocalSubscribers::has_local_matching(
+                tables(&on.core.session.registry),
+                keyexpr,
+            )
+        {
+            return Some(FilteredPut::NotPlain);
+        }
+        #[cfg(not(feature = "local-subscriber"))]
+        let _ = (on, keyexpr);
+        if !params.destination.allows_remote() {
+            return Some(FilteredPut::Sent(Ok(0)));
+        }
+        None
+    }
+
+    /// The groups' own leg of a plain put through a write filter (`Self::put_through_filter_in`):
+    /// the put written from `params` onto each group the session joined, as the general
+    /// publish's groups' leg writes it (`Self::publish_to_groups`), its key named as `wire`
+    /// names it. Nothing is named in the session's tables, which a group's key does not read, and
+    /// no plan is kept. An empty key is left to the general publish (`NotPlain`), which refuses
+    /// it on every leg alike.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    fn put_plain_on_groups(
+        &self,
+        on: Holding<'_, L, C>,
+        keyexpr: &str,
+        wire: &WireKey,
+        payload: &[u8],
+        params: &PlainPutParams,
+    ) -> FilteredPut {
+        if let Some(answered) = Self::plain_off_the_wire(on, keyexpr, params) {
+            return answered;
+        }
+        if keyexpr.is_empty() {
+            return FilteredPut::NotPlain;
+        }
+        // A plain put carries its QoS and nothing else of a publication's.
+        let meta = PushMetadata {
+            qos: params.qos,
+            ..PushMetadata::default()
+        };
+        let put = GroupPut {
+            keyexpr,
+            wire,
+            payload,
+            kind: SampleKind::Put,
+            meta: &meta,
+            reliable: params.reliable,
+            priority: params.priority,
+        };
+        let _publishing = SendingOn::enter(&self.sending_on, PUBLISHING);
+        FilteredPut::Sent(self.put_on_groups(on.core, put))
     }
 
     /// The plain put its write filter's row planned at the session's send epoch
@@ -10702,7 +10774,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         payload: &[u8],
         params: &PlainPutParams,
     ) -> FilteredPut {
-        self.put_through_filter(filter, keyexpr, payload, Some((declared, *params)))
+        // The declaration names the whole key, as a group is sent it too.
+        let wire = WireKey::aliased(declared.id, None).at_row(declared.row);
+        self.put_through_filter(filter, keyexpr, &wire, payload, Some((declared, *params)))
     }
 
     #[inline(never)]
@@ -10742,7 +10816,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             ));
         }
         // A write that brings nothing of its own goes in the plain form its filter's row keeps.
-        self.put_through_filter(filter, keyexpr, payload, None)
+        self.put_through_filter(filter, keyexpr, wire, payload, None)
     }
 
     /// Each group the session joined takes the step too, and is counted as a link is: a group's
@@ -11937,11 +12011,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
     /// one take of the session for each face, as zenoh-pico's put reads its filter's state and takes only its
     /// transmit lock (`vendor/zenoh-pico/src/api/api.c` @ `!_z_write_filter_active(&pub->_filter)`).
+    /// `wire` is how the entity names its key, which a group is sent the plain put by.
     #[inline(never)]
     fn put_through_filter(
         &self,
         filter: FilterId,
         keyexpr: &str,
+        wire: &WireKey,
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
@@ -11967,7 +12043,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     tx,
                     decided: answer.is_some(),
                 };
-                let sent = self.put_through_filter_in(on, filter, keyexpr, payload, given);
+                let sent = self.put_through_filter_in(on, filter, keyexpr, wire, payload, given);
                 answer = Some(fold_filtered(answer.take(), sent));
                 Ok(0)
             });
@@ -11984,7 +12060,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 tx,
                 decided: false,
             };
-            self.put_through_filter_in(on, filter, keyexpr, payload, given)
+            self.put_through_filter_in(on, filter, keyexpr, wire, payload, given)
         })
         .unwrap_or(FilteredPut::Sent(Ok(0)))
     }
@@ -11998,6 +12074,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         on: Holding<'_, L, C>,
         filter: FilterId,
         keyexpr: &str,
+        wire: &WireKey,
         payload: &[u8],
         given: Option<(KeyexprRef, PlainPutParams)>,
     ) -> FilteredPut {
@@ -12045,6 +12122,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 (way.key, way.params, way.head)
             }
         };
+        // The groups' leg is sent the plain put from the same parts, with no key named in the
+        // session's tables and no plan kept: a group names the key as its declarations say.
+        #[cfg(all(not(wz_round), feature = "group"))]
+        if tx.is_groups_leg() {
+            return self.put_plain_on_groups(on, keyexpr, wire, payload, &params);
+        }
+        #[cfg(not(all(not(wz_round), feature = "group")))]
+        let _ = wire;
         let sent = self.put_plain_in(on, keyexpr, key, payload, &params, head);
         // The row's own way, sent plain to the peers of a filter that counts subscribers, is
         // planned at this epoch when every link names the filter's key as the session does, by

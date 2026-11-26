@@ -668,6 +668,14 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
         self.alone.is_none() || self.held.is_none()
     }
 
+    /// Whether this is a publish's own leg to the groups ([`GROUPS_LEG`]), which reaches the
+    /// groups and no face: an operation's hold reaches both.
+    #[cfg(feature = "group")]
+    #[inline(always)]
+    pub(super) fn is_groups_leg(&self) -> bool {
+        self.alone == Some(GROUPS_LEG)
+    }
+
     /// Every leg reaches the dial role's face where it is the only face: a publish hands a leg
     /// only to a face whose place it holds.
     #[cfg(not(any(feature = "listen", feature = "group")))]

@@ -1572,6 +1572,82 @@ mod woken {
         SessionDrive::close(&*member);
     }
 
+    /// A publisher's bare put through its write filter, on a session whose one transport is a
+    /// group, goes to the group the plain way its filter's row keeps: it is answered as sent, its
+    /// datagram is written before the put returns, with one take of the session and no key named
+    /// in the session's tables. CONTROL: a filter whose row keeps no plain way is still answered
+    /// `NotPlain`, nothing sent, for the general publish to send. Turned red by a groups' leg that
+    /// answers `NotPlain` for the general publish to send the put again
+    /// (`CoopEngine::put_through_filter_in` without its `is_groups_leg` arm), which takes the
+    /// session twice, or by one that names the key in the session's tables.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_bare_put_through_its_filter_reaches_the_group_the_plain_way() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (member, stack, _transport) = open_alone(PosixClock, 5_000);
+        let hold = member
+            .acquire_keyexpr("demo/group/plain")
+            .expect("a session with ids left declares a keyexpr");
+        let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
+        let declare = || {
+            member
+                .declare_write_filter(
+                    FilterPlane::Subscribers,
+                    "demo/group/plain",
+                    &WireKey::literal(),
+                    None,
+                    false,
+                )
+                .expect("a session with ids left declares")
+                .id
+        };
+        let bare = declare();
+        assert_eq!(
+            member.publish_filtered(bare, "demo/group/plain", &wire, b"general", None),
+            wz_capi_port::FilteredPut::NotPlain,
+            "CONTROL: a row that keeps no plain way sends nothing itself"
+        );
+        let filter = declare();
+        let params = PublishOptions::put()
+            .plain_put_params()
+            .expect("a plain put");
+        member.keep_write_filter_plain(filter, Some((params, wire.declared())));
+        let sent_before = stack.sent.lock().unwrap().len();
+        let (takes, namings) = (
+            member.takes.core.load(SeqCst),
+            member.takes.namings.load(SeqCst),
+        );
+        assert!(
+            matches!(
+                member.publish_filtered(filter, "demo/group/plain", &wire, b"plain", None),
+                wz_capi_port::FilteredPut::Sent(Ok(_))
+            ),
+            "the bare put is sent the plain way"
+        );
+        assert_eq!(
+            member.takes.core.load(SeqCst) - takes,
+            1,
+            "one take of the session for the put"
+        );
+        assert_eq!(
+            member.takes.namings.load(SeqCst),
+            namings,
+            "no key named in the session's tables"
+        );
+        let sent = stack.sent.lock().unwrap();
+        assert_eq!(
+            sent.len(),
+            sent_before + 1,
+            "one datagram, written before it returned"
+        );
+        assert!(sent
+            .last()
+            .is_some_and(|datagram| datagram.ends_with(b"plain")));
+        drop(sent);
+        drop(hold);
+        SessionDrive::close(&*member);
+    }
+
     /// A put made while a read waits on the group's socket is written by the putting thread before
     /// the put returns: the read, on a thread of its own, has no part in it, and the datagram it
     /// waits for ends its wait after.

@@ -2078,6 +2078,7 @@ struct Announced {
 }
 
 /// One publication the session puts on its groups.
+#[derive(Clone, Copy)]
 pub(super) struct GroupPut<'a> {
     pub(super) keyexpr: &'a str,
     /// How the session's peers were told the key, which a group told the session's keyexprs is
