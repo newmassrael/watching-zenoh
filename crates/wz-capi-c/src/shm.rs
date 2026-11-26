@@ -616,8 +616,8 @@ impl Backing {
     /// `buffer`, which this provider issued, held with the provider.
     fn issued(&self, buffer: ShmBufInner) -> IssuedBuffer {
         match self {
-            Backing::Posix(provider) => IssuedBuffer::new(buffer, Arc::clone(provider)),
-            Backing::Foreign(provider) => IssuedBuffer::new(buffer, Arc::clone(provider)),
+            Backing::Posix(provider) => IssuedBuffer::new(buffer, provider.clone()),
+            Backing::Foreign(provider) => IssuedBuffer::new(buffer, provider.clone()),
         }
     }
 

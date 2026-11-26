@@ -420,7 +420,7 @@ impl IssuedBuffer {
             .wait()
             .map_err(|e| io::Error::other(e.to_string()))?
             .into_inner();
-        Ok(Self::new(buffer, Arc::clone(provider)))
+        Ok(Self::new(buffer, provider.clone()))
     }
 
     /// The buffer.
@@ -609,18 +609,24 @@ pub(crate) fn sweep_orphans() {
     if KEPT.load(Ordering::Acquire) == 0 {
         return;
     }
+    // One sweep at a time, the drop of what it took out included: a sweep that returns has let
+    // go of every provider that was finished when it began, whoever else swept beside it, and
+    // `KEPT` counts a provider until it is dropped, so a sweep that reads 0 has nothing pending.
+    static SWEEP: Mutex<()> = Mutex::new(());
+    let _sweep = SWEEP.lock().unwrap_or_else(|e| e.into_inner());
     // A provider that drops reclaims its slots, which takes the storage's locks, so the finished
-    // ones are taken out under this lock and dropped after it.
+    // ones are taken out under the list's lock and dropped after it.
     let finished: Vec<Orphan> = {
         let mut kept = orphans().lock().unwrap_or_else(|e| e.into_inner());
         let (finished, live) = std::mem::take(&mut *kept)
             .into_iter()
             .partition(Orphan::is_finished);
         *kept = live;
-        KEPT.store(kept.len(), Ordering::Release);
         finished
     };
     drop(finished);
+    let kept = orphans().lock().unwrap_or_else(|e| e.into_inner());
+    KEPT.store(kept.len(), Ordering::Release);
 }
 
 /// How many providers the process keeps for buffers a receiver still holds. A diagnostic: the
