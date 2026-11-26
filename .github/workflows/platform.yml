@@ -1395,7 +1395,8 @@ jobs:
       # The release DLL's text against zenoh-pico's, both built on this runner in this job, held to the
       # width's row of the ceiling (docs/upstream-parity.md D9). The plan derives the reference from the
       # package's own manifest; the reference is built from an archive of the pinned submodule, as a
-      # Windows host given the same plan by hand builds it; the judge reads both DLLs and grades the
+      # Windows host given the same plan by hand builds it, and linked by the pinned Rust toolchain's
+      # lld-link, the linker the release DLL is linked with; the judge reads both DLLs and grades the
       # ratio. A finding, an unfilled row or a ratio over its ratchet fails the step.
       - name: the release DLL against zenoh-pico built as the same build, held to its ceiling row (gated)
         if: ${{ !cancelled() && steps.package.outcome == 'success' && matrix.form == 'single' }}
@@ -1416,7 +1417,14 @@ jobs:
           mkdir -p "$work"
           python scripts/lib/pico_windows_package.py --size-plan "$zip" "$(cygpath -w "$work/plan.json")"
           git -C vendor/zenoh-pico archive --format=zip --prefix=zenoh-pico/ -o "$(cygpath -w "$work/zenoh-pico.zip")" HEAD
-          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/host-bench/windows/size_ceiling.ps1 -Plan "$(cygpath -w "$work/plan.json")" -PicoSource "$(cygpath -w "$work/zenoh-pico.zip")" -Work "$(cygpath -w "$work/build")" -Out "$(cygpath -w "$work/reading")"
+          sysroot="$(cygpath -u "$(rustc --print sysroot)")"
+          host="$(rustc -vV | sed -n 's/^host: //p')"
+          linker="$sysroot/lib/rustlib/$host/bin/gcc-ld/lld-link.exe"
+          if [ ! -f "$linker" ]; then
+            echo "pico-size-ceiling on Windows $WZ_PACKAGE_ARCH: the Rust toolchain ships no $linker: FAIL" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          powershell -NoProfile -ExecutionPolicy Bypass -File scripts/host-bench/windows/size_ceiling.ps1 -Plan "$(cygpath -w "$work/plan.json")" -PicoSource "$(cygpath -w "$work/zenoh-pico.zip")" -Linker "$(cygpath -w "$linker")" -Work "$(cygpath -w "$work/build")" -Out "$(cygpath -w "$work/reading")"
           python scripts/lib/pico_windows_package.py --size-judge "$zip" "$(cygpath -w "$work/reading")"
 
       # The like-for-like verdict of the same DLL (docs/upstream-parity.md D9): the release DLL counts

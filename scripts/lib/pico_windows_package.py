@@ -58,13 +58,14 @@ by (`pico_host_ceiling.py`). Three steps, so that a host with no Python can buil
 derivation the size gate and the host performance matrix use) and the rest of the same build
 (`REFERENCE_CMAKE`, the width's CMake platform), and refuses a package of another form than the one a
 release ships or one built from a commit whose derivation inputs differ from this tree;
-`scripts/host-bench/windows/size_ceiling.ps1` builds zenoh-pico as the plan says with MSVC and leaves
-its DLL, its config.h, its CMake cache entries and the toolchain in a reading directory; and
+`scripts/host-bench/windows/size_ceiling.ps1` builds zenoh-pico as the plan says with MSVC's compiler,
+linked by the Rust toolchain's `lld-link` the release DLL is linked with (`READING_LINKER`), and leaves
+its DLL, its config.h, its CMake cache entries, the linker and the toolchain in a reading directory; and
 `--size-judge` reads the package's release DLL and the reference's, each from its own headers and
 section table, and grades the ratio of their texts. The text is `pe_sizes`' (the sections loaded
 read-only, the unwind data, import, export and debug directories among them; not the relocations,
 which a loaded image drops), as `size` reads a library on Linux. The two DLLs are compared only when
-they are of the width's machine, were written by one version of `link.exe`, both hold unwind data or
+they are of the width's machine, were written by one linker of one version, both hold unwind data or
 neither does, and the reference's CMake cache holds every argument the plan asked; any other reading
 is a finding and no figure. A switch zenoh-pico built otherwise than asked is printed, as on Linux.
 The Platform workflow's package job runs the three steps for each width on the package it built;
@@ -241,7 +242,11 @@ CMAKE_PLATFORMS = {"x64": "x64", "x86": "Win32"}
 # What `--size-plan` writes, what scripts/host-bench/windows/size_ceiling.ps1 leaves beside a copy
 # of it, and the names of the files of that reading directory.
 SIZE_PLAN_SCHEMA = "wz-pico-size-windows-plan/1"
-SIZE_READING_SCHEMA = "wz-pico-size-windows-reading/1"
+SIZE_READING_SCHEMA = "wz-pico-size-windows-reading/2"
+# The linker a reading's reference is linked with, as its `--version` names itself: the release DLL is
+# linked by the Rust toolchain's `rust-lld` with no library of Visual Studio (`NOSTD_CONFIG`), so the
+# reference is linked by the same linker, which the PowerShell script is given (`-Linker`).
+READING_LINKER = "LLD "
 SIZE_PLAN = "plan.json"
 SIZE_READING = "reading.json"
 REFERENCE_DLL = "zenohpico.dll"
@@ -990,7 +995,8 @@ def size_findings(facts: dict, wz_image: bytes, pico_image: bytes, header: str,
                             f"{MACHINES[arch]:#06x}")
     if len(set(linkers.values())) != 1:
         findings.append("the two DLLs were written by two linkers ("
-                        + ", ".join(f"{side} by link.exe {version}" for side, version in linkers.items())
+                        + ", ".join(f"{side} by a linker of version {version}"
+                                    for side, version in linkers.items())
                         + "): a ratio of two links is not a ratio of one build")
     unwind = {side: unwind_bytes(image) for side, image in sides.items()}
     if len({bool(size) for size in unwind.values()}) != 1:
@@ -1403,7 +1409,8 @@ def size_plan(package: pathlib.Path) -> dict:
 
 def read_reading(reading_dir: pathlib.Path) -> tuple[dict, dict]:
     """The plan and the reading a run of scripts/host-bench/windows/size_ceiling.ps1 left in
-    `reading_dir`, each of its schema, the reading stating its toolchain, date and CMake cache."""
+    `reading_dir`, each of its schema, the reading stating its toolchain, date and CMake cache, and
+    its reference linked by the linker the release DLL is linked with (`READING_LINKER`)."""
     plan = json.loads((reading_dir / SIZE_PLAN).read_text(encoding="utf-8"))
     reading = json.loads((reading_dir / SIZE_READING).read_text(encoding="utf-8"))
     if plan.get("schema") != SIZE_PLAN_SCHEMA:
@@ -1414,6 +1421,11 @@ def read_reading(reading_dir: pathlib.Path) -> tuple[dict, dict]:
     if not (isinstance(toolchain, str) and toolchain and isinstance(date, str) and date
             and isinstance(cache, dict)):
         raise Refusal(f"{reading_dir.name}/{SIZE_READING} states no toolchain, date or CMake cache")
+    linker = reading.get("linker")
+    if not (isinstance(linker, str) and linker.startswith(READING_LINKER)):
+        raise Refusal(f"{reading_dir.name}/{SIZE_READING} states its reference linked by {linker!r}, not by "
+                      f"the Rust toolchain's lld-link the release DLL is linked with: give size_ceiling.ps1 "
+                      f"that linker as -Linker")
     return plan, reading
 
 
@@ -2268,6 +2280,32 @@ def selftest() -> int:
     found, _ = size_findings(facts, wz_dll, other_link, built, asked_cache)
     expect("two linkers are a finding naming both versions",
            len(found) == 1 and "14.44" in found[0] and "14.38" in found[0])
+    nostd_config = (CRATES / NOSTD_CONFIG).read_text(encoding="utf-8")
+    expect("the release DLL of each width is linked by rust-lld, the linker a reading's reference is held to",
+           all(re.search(rf'^\[target\.{re.escape(target)}\]\nlinker = "rust-lld"$', nostd_config, re.M)
+               for target, _ in ARCHES.values()))
+    with tempfile.TemporaryDirectory() as tmp:
+        reading_dir = pathlib.Path(tmp)
+        (reading_dir / SIZE_PLAN).write_text(json.dumps({"schema": SIZE_PLAN_SCHEMA}), encoding="utf-8")
+        stated = {"schema": SIZE_READING_SCHEMA, "toolchain": "t", "date": "d", "reference_cache": {},
+                  "linker": "LLD 20.1.8"}
+        (reading_dir / SIZE_READING).write_text(json.dumps(stated), encoding="utf-8")
+        expect("a reading whose reference the Rust toolchain's lld-link linked is read",
+               read_reading(reading_dir)[1]["linker"] == "LLD 20.1.8")
+        for linker in ("Microsoft (R) Incremental Linker Version 14.52.37029.0", None):
+            (reading_dir / SIZE_READING).write_text(json.dumps({**stated, "linker": linker}), encoding="utf-8")
+            try:
+                read_reading(reading_dir)
+                expect(f"a reading whose reference was linked by {linker!r} is refused", False)
+            except Refusal as err:
+                expect(f"the refusal names the linker to give ({err})", "-Linker" in str(err))
+        (reading_dir / SIZE_READING).write_text(
+            json.dumps({**stated, "schema": "wz-pico-size-windows-reading/1"}), encoding="utf-8")
+        try:
+            read_reading(reading_dir)
+            expect("a reading of the schema that stated no linker is refused", False)
+        except Refusal as err:
+            expect(f"the refusal names the schema ({err})", SIZE_READING_SCHEMA in str(err))
     found, _ = size_findings(facts, pe_image([(b".text", 5000, 0x60000020), (b".pdata", 1, 0x40000040)],
                                              optional=240, machine=0x014C), pico_dll, built, asked_cache)
     expect("a DLL of another machine than the width's is a finding naming its side",

@@ -457,7 +457,8 @@ derived from the declaration and never chosen by hand:
      reference from the package's own manifest, its switches by `wz_config.pico_reference` as on
      Linux, and refuses a package of another form or one built from a commit whose derivation
      inputs differ from the tree; the PowerShell script builds zenoh-pico with MSVC, CMake's Visual
-     Studio generator for the width's platform, pico's own Release build (its CMake compiles any
+     Studio generator for the width's platform, linked by the pinned Rust toolchain's `lld-link`
+     (the script's `-Linker`), pico's own Release build (its CMake compiles any
      other build type with `/Od`), shared, linked with `/OPT:REF /OPT:ICF` as rustc links every
      optimized DLL; `--size-judge` reads both DLLs. What is the same as on Linux: the ratio, the
      tolerance, the rows, the derivation of the switches, a switch pico built otherwise than asked
@@ -465,7 +466,9 @@ derived from the declaration and never chosen by hand:
      (`pe_sizes`: every section loaded read-only, so the unwind data, the import, export and debug
      directories, and not the base relocations, which a loaded image drops; on Linux the dynamic
      relocations are in `size`'s text, which is why the Linux cases pack them); the linker is
-     MSVC's `link.exe` on both sides, held to one version read from each DLL's optional header,
+     the Rust toolchain's `lld-link` on both sides, since the release DLL is linked without Visual
+     Studio (`crates/.cargo/capi-nostd.toml`): the reading states the reference's linker, which the
+     judge refuses unless it is LLD, and each DLL's optional header must record one linker version,
      where Linux holds both to GNU ld; and no unwind data is discarded, since on x64 it is the ABI's
      own and the system's exception dispatch reads it, so the judge asks that both DLLs hold it or
      neither does, where Linux discards it on both sides. The release DLL is measured as shipped,
