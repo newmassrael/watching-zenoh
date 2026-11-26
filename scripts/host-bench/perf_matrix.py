@@ -185,6 +185,7 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -1160,6 +1161,18 @@ def run_stdlib(builds: dict) -> str | None:
     return stdlib if stdlib in STDLIBS else None
 
 
+def run_preset(builds: dict) -> str | None:
+    """The preset a run's arm W was built as, as the record of its build states it (`reference` writes
+    `wz_preset`); `None` when it states none, or no preset of PRESETS: a build of the crate's default features."""
+    preset = builds.get("wz_preset")
+    return preset if preset in PRESETS else None
+
+
+def build_said(preset: str | None) -> str:
+    """The build a preset names, in a sentence."""
+    return f"{preset}'s preset" if preset is not None else "the crate's default features"
+
+
 def host_record(args: argparse.Namespace) -> dict:
     cpu = "unknown"
     try:
@@ -1185,6 +1198,7 @@ def host_record(args: argparse.Namespace) -> dict:
         record["builds"] = json.loads(pathlib.Path(args.reference_record).read_text(encoding="utf-8"))
     record["engine"] = run_engine(record.get("builds") or {})
     record["stdlib"] = run_stdlib(record.get("builds") or {})
+    record["preset"] = run_preset(record.get("builds") or {})
     record["external"] = (json.loads(pathlib.Path(args.external_record).read_text(encoding="utf-8"))
                           if args.external_record else
                           {"status": "not-measured", "why": "the run was given no record of arm X"})
@@ -1567,6 +1581,11 @@ ENGINES = ("tokio", "coop")
 STDLIBS = ("std", "nostd")
 #: The standard library of a reading that names none: every library was built with `std` before the field.
 UNSTATED_STDLIB = "std"
+#: The builds arm W is compared as, by the original whose preset in wz it is (`wz_config.PICO_BENCH_ORIGINAL`):
+#: a run records the one its build states (`reference` writes `wz_preset`) and a table the one its rows were
+#: filled from, and the gate refuses a run against another build's rows. A run that states none measured the
+#: crate's default features, which carry planes zenoh-pico's own build has not.
+PRESETS = ("zenoh-pico",)
 PAIR_NAMES = {"P": "W/P", "X": "W/X"}
 #: The figures the gate holds, per workload: the round trip at its middle and its tail, the CPU the
 #: answering side spent per answer, the delivered rate and the CPU a delivered message cost both sides, and
@@ -1843,6 +1862,28 @@ def table_stdlib(text: str) -> str | None:
     return stdlib
 
 
+def table_preset(text: str) -> str | None:
+    """The preset a table says arm W was built as when its rows were filled, `None` when it says none; one that
+    is no preset of PRESETS is refused."""
+    try:
+        doc = json.loads(text)
+    except ValueError as error:
+        raise Refused(f"not JSON: {error}") from None
+    preset = doc.get("preset") if isinstance(doc, dict) else None
+    if preset is not None and preset not in PRESETS:
+        raise Refused(f"`preset` is one of {', '.join(PRESETS)}, not {preset!r}")
+    return preset
+
+
+def preset_named(record: object, what: str) -> str | None:
+    """The preset a run's record names, `None` when it names none (arm W built of the crate's default features);
+    one that is no preset of PRESETS is refused."""
+    preset = record.get("preset") if isinstance(record, dict) else None
+    if preset is not None and preset not in PRESETS:
+        raise Refused(f"{what} names the preset {preset!r}, and arm W is built as one of {', '.join(PRESETS)}")
+    return preset
+
+
 def stdlib_named(record: object, what: str) -> str:
     """The standard library a run's record names, `std` when it names none (UNSTATED_STDLIB); one that is no
     standard library is refused."""
@@ -1875,15 +1916,17 @@ def table_platform(text: str) -> str:
     return platform_named(doc, "the table")
 
 
-def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None, str, str | None]:
-    """The rows, the tolerance, the engine, the platform and the standard library of the table at `path`."""
+def load_table(path: pathlib.Path, pair: str) -> tuple[dict, float, str | None, str, str | None, str | None]:
+    """The rows, the tolerance, the engine, the platform, the standard library and the preset of the table at
+    `path`."""
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as error:
         raise Refused(f"{path} cannot be read: {error}") from None
     try:
         rows, tolerance = parse_table(text, pair)
-        return rows, tolerance, table_engine(text), table_platform(text), table_stdlib(text)
+        return (rows, tolerance, table_engine(text), table_platform(text), table_stdlib(text),
+                table_preset(text))
     except Refused as why:
         raise Refused(f"{path}: {why}") from None
 
@@ -1903,9 +1946,10 @@ def repository_roots() -> list[pathlib.Path]:
     return roots
 
 
-def table_document(pair: str, rows: dict, tolerance: float, engine: str, platform: str, stdlib: str) -> str:
+def table_document(pair: str, rows: dict, tolerance: float, engine: str, platform: str, stdlib: str,
+                   preset: str | None) -> str:
     return json.dumps({"schema": TABLE_SCHEMA, "pair": pair, "engine": engine, "platform": platform,
-                       "stdlib": stdlib, "tolerance": tolerance, "rows": rows}, indent=1)
+                       "stdlib": stdlib, "preset": preset, "tolerance": tolerance, "rows": rows}, indent=1)
 
 
 def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judged]) -> str:
@@ -1933,12 +1977,12 @@ def print_pair(pair: str, table: str, tolerance: float | None, judged: list[Judg
 
 
 def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: list[pathlib.Path],
-              engine: str, platform: str, stdlib: str) -> str:
-    """Judge the pair of W and `ref`, arm W measured on `engine` with `stdlib` in a run on `platform`. A table of W
-    over X inside the repository is refused; one that is not named, or does not exist yet, fails with the whole
-    table to write printed. A table whose rows were filled from another engine, another standard library or on
-    another platform is refused, and so is a table of W over P that does not say its engine or its standard
-    library."""
+              engine: str, platform: str, stdlib: str, preset: str | None) -> str:
+    """Judge the pair of W and `ref`, arm W measured on `engine` with `stdlib` and built as `preset` in a run on
+    `platform`. A table of W over X inside the repository is refused; one that is not named, or does not exist
+    yet, fails with the whole table to write printed. A table whose rows were filled from another engine, another
+    standard library, another build or on another platform is refused, and so is a table of W over P that does not
+    say its engine, its standard library or its build."""
     pair = PAIR_NAMES[ref]
     found = readings(cells, ref)
     if ref == "X":
@@ -1951,12 +1995,12 @@ def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: li
             rows = {key: fill_row(found[key]) for key in sorted(found, key=key_order)}
             print(f"perf-gate {pair}: arm X was measured and no table judges it ({where}); the table this run "
                   f"writes, to be kept outside the repository:", flush=True)
-            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine, platform, stdlib), flush=True)
+            print(table_document(pair, rows, DEFAULT_TOLERANCE, engine, platform, stdlib, preset), flush=True)
             print(f"perf-gate {pair}: FAIL", flush=True)
             return "FAIL"
     if table is None:
         raise Refused(f"no table of {pair} was named")
-    rows, tolerance, filled_from, filled_on, filled_with = load_table(table, pair)
+    rows, tolerance, filled_from, filled_on, filled_with, filled_as = load_table(table, pair)
     if filled_on != platform:
         raise Refused(f"{table} holds rows of runs on {filled_on}, and this run was made on {platform}: judge "
                       f"it against the table of its own platform ({PLATFORMS[platform].relative_to(ROOT)})")
@@ -1973,7 +2017,13 @@ def gate_pair(ref: str, cells: list[dict], table: pathlib.Path | None, roots: li
         raise Refused(f"{table} holds rows filled from arm W built {filled_with}, and this run measured it built "
                       f"{stdlib}: judge it against a table of its own form, or run that form "
                       f"(PICO_CMP_STDLIB={filled_with})")
-    print(f"perf-gate {pair}: arm W on the {engine} engine, {stdlib}", flush=True)
+    if filled_as is None and ref == "P":
+        raise Refused(f"{table} does not say which build arm W was when its rows were filled (`preset`)")
+    if filled_as is not None and filled_as != preset:
+        raise Refused(f"{table} holds rows filled from arm W built as {build_said(filled_as)}, and this run "
+                      f"measured it built as {build_said(preset)}: judge it against a table of its own build, or "
+                      f"build arm W as the table's (perf_matrix.py wz-arm)")
+    print(f"perf-gate {pair}: arm W on the {engine} engine, {stdlib}, {build_said(preset)}", flush=True)
     return print_pair(pair, str(table), tolerance, judge(found, rows, tolerance))
 
 
@@ -1988,6 +2038,7 @@ def cmd_gate(args: argparse.Namespace) -> int:
             raise Refused(f"{args.result} does not say which engine arm W was built on")
         platform = platform_named(doc.get("record"), f"the record of {args.result}")
         stdlib = stdlib_named(doc.get("record"), f"the record of {args.result}")
+        preset = preset_named(doc.get("record"), f"the record of {args.result}")
         external = doc.get("record", {}).get("external") or {
             "status": "not-measured", "why": "the run's record says nothing of arm X"}
         # A transport the run left out says why in its record (a group the host's network does not carry);
@@ -1995,11 +2046,11 @@ def cmd_gate(args: argparse.Namespace) -> int:
         for transport, why in sorted((doc.get("record", {}).get("not_measured") or {}).items()):
             print(f"perf-gate: the run did not measure {transport}: {why}", flush=True)
         table = pathlib.Path(args.table) if args.table else PLATFORMS[platform]
-        outcomes = [gate_pair("P", cells, table, [], engine, platform, stdlib)]
+        outcomes = [gate_pair("P", cells, table, [], engine, platform, stdlib, preset)]
         if external.get("status") == "built":
             named = args.external_table or os.environ.get(EXTERNAL_TABLE, "")
             outcomes.append(gate_pair("X", cells, pathlib.Path(named) if named else None, repository_roots(),
-                                      engine, platform, stdlib))
+                                      engine, platform, stdlib, preset))
         elif args.without_external:
             print(f"perf-gate W/X: not asked (--without-external); arm X NOT-MEASURED, {external.get('why')}",
                   flush=True)
@@ -2017,7 +2068,7 @@ def check_table(path: pathlib.Path) -> int:
     is the one its platform's runs are judged by (PLATFORMS), so the table of one platform cannot stand where the
     other's is read."""
     try:
-        rows, tolerance, engine, platform, stdlib = load_table(path, PAIR_NAMES["P"])
+        rows, tolerance, engine, platform, stdlib, preset = load_table(path, PAIR_NAMES["P"])
     except Refused as why:
         print(f"perf-gate table: refused: {why}", file=sys.stderr)
         return 2
@@ -2033,6 +2084,10 @@ def check_table(path: pathlib.Path) -> int:
         print(f"  perf-gate table FAIL: {path} does not say which standard library arm W was built with when its "
               "rows were filled (`stdlib`)", file=sys.stderr)
         return 1
+    if preset is None:
+        print(f"  perf-gate table FAIL: {path} does not say which build arm W was when its rows were filled "
+              "(`preset`)", file=sys.stderr)
+        return 1
     wanted = set(population("P"))
     missing = sorted(wanted - set(rows), key=key_order)
     extra = sorted(set(rows) - wanted, key=key_order)
@@ -2044,15 +2099,15 @@ def check_table(path: pathlib.Path) -> int:
         return 1
     filled = sum(value is not None for value in rows.values())
     print(f"  perf-gate table: {len(rows)} row(s), the population of the default matrix; {filled} filled, "
-          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine, {stdlib}, on "
-          f"{platform}")
+          f"{len(rows) - filled} not yet (tolerance {tolerance}), filled from the {engine} engine, {stdlib}, "
+          f"{build_said(preset)}, on {platform}")
     return 0
 
 
 # -- a run on Windows ----------------------------------------------------------------------------------------
 
 #: What `windows-plan` writes and scripts/host-bench/windows/perf_matrix.ps1 reads.
-WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/2"
+WINDOWS_PLAN_SCHEMA = "wz-pico-perf-windows-plan/3"
 WINDOWS_PLATFORM = "windows-x64"
 #: The width of Windows a plan is made for, by the package's name for it (pico_windows_package.ARCHES).
 WINDOWS_ARCH = "x64"
@@ -2069,13 +2124,17 @@ WINDOWS_NOT_RUN = {
 }
 
 
-def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, target: str) -> dict:
+def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, target: str,
+                 preset_of: Callable[[str, str], set[str]]) -> dict:
     """What a run on Windows measures, from a package's manifest and build statement: arm W is the package's
     library, built for `target` with the features its manifest lists on the engine its statement states and with
     the standard library its manifest states (`pico_windows_package.stdlib_of`: every package is the library
     without `std`, so none is on the tokio engine), and arm P zenoh-pico built as the same build, every switch
     the declaration answers set from those features (`wz_config.pico_reference`), as `reference` derives the
-    Linux arm from the bench's build.
+    Linux arm from the bench's build. The plan states the build the package is (`wz_preset`): zenoh-pico's
+    preset when its features are exactly the ones `preset_of(engine, stdlib)` names (`wz_config.preset_features`,
+    the one declaration the Linux arms are built from), and none otherwise, with what it has beyond the preset and
+    what it lacks of it, so the gate refuses to judge a package of another build against the preset's table.
     `table` is the feature table of wz-capi-pico, `decl` the declaration. A package of another width, one that
     names a feature the crate lacks, one whose statement's engine is not the one its features run, and one whose
     manifest states no standard library, or one its features do not build, are refused."""
@@ -2106,7 +2165,11 @@ def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, targe
         wz_config.engine_stdlib(engine, stdlib)
     except wz_config.PresetError as why:
         raise Refused(f"the package's manifest says it is built {stdlib}: {why}") from None
+    preset = preset_of(engine, stdlib)
+    beyond, short = sorted(enabled - preset), sorted(preset - enabled)
     return {"wz_features": sorted(features), "wz_engine": engine, "wz_stdlib": stdlib,
+            "wz_preset": None if beyond or short else PRESETS[0],
+            "wz_beyond_preset": beyond, "wz_short_of_preset": short,
             "reference_switches": wz_config.pico_reference(decl, enabled)}
 
 
@@ -2147,8 +2210,14 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
                           f"{', '.join(drift)}, from which arm P's switches are derived: make the plan in a "
                           f"checkout of that commit")
         table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
-        plan = windows_plan(manifest, statement, table, wz_config.load_decl(), pwp.ARCHES[WINDOWS_ARCH][0])
-    except (OSError, ValueError, KeyError, zipfile.BadZipFile, pwp.Refusal, Refused) as why:
+        decl = wz_config.load_decl()
+        kconf = wz_config.pico_bench_configuration()
+
+        def preset_of(engine: str, stdlib: str) -> set[str]:
+            return wz_config.preset_features(engine, [], table, stdlib, decl, kconf)
+
+        plan = windows_plan(manifest, statement, table, decl, pwp.ARCHES[WINDOWS_ARCH][0], preset_of)
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, pwp.Refusal, Refused, wz_config.PresetError) as why:
         print(f"perf-matrix: windows-plan refused: {why}", file=sys.stderr, flush=True)
         return 2
     status = subprocess.run(["git", "-C", str(ROOT), "status", "--porcelain", "--untracked-files=no"],
@@ -2619,6 +2688,8 @@ def cmd_selftest() -> int:
            and refused_call(lambda: stdlib_named({"stdlib": "alloc"}, "r")))
     import pico_windows_package as pwp
     import wz_config
+    expect("the build a run names is the preset a bench against zenoh-pico builds",
+           PRESETS == (wz_config.PICO_BENCH_ORIGINAL,))
     expect("the standard libraries a run names are the ones a bench builds, and a package states one of them",
            STDLIBS == wz_config.PICO_STDLIBS and set(pwp.STDLIBS) <= set(STDLIBS)
            and set(pwp.RELEASE_STDLIBS) <= set(pwp.STDLIBS))
@@ -2744,8 +2815,11 @@ def cmd_selftest() -> int:
            and exit_status(["PASS", "PASS"]) == 0 and outcome_of([]) == "NOT-MEASURED")
     expect("a value rounds up to three decimals for its ratchet", ceil3(0.9301) == 0.931 and ceil3(0.93) == 0.93)
 
-    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio", platform=None, stdlib="std"):
+    def table(rows, pair="W/P", tolerance=0.05, schema=TABLE_SCHEMA, engine="tokio", platform=None, stdlib="std",
+              preset=PRESETS[0]):
         doc = {"schema": schema, "pair": pair, "tolerance": tolerance, "rows": rows}
+        if preset is not None:
+            doc["preset"] = preset
         if engine is not None:
             doc["engine"] = engine
         if platform is not None:
@@ -2793,7 +2867,8 @@ def cmd_selftest() -> int:
     locked = {key: {"locked": True} for key in keys}
 
     def gate(cells, record, table_rows, external_table="", without=False, x_rows=None, schema=SCHEMA,
-             table_engine_="tokio", table_platform_=None, table_stdlib_="std", x_stdlib="std"):
+             table_engine_="tokio", table_platform_=None, table_stdlib_="std", x_stdlib="std",
+             table_preset_=PRESETS[0], x_preset=PRESETS[0]):
         with tempfile.TemporaryDirectory() as scratch:
             base = pathlib.Path(scratch)
             (base / "perf.json").write_text(json.dumps({"schema": schema, "record": record, "cells": cells}),
@@ -2801,24 +2876,24 @@ def cmd_selftest() -> int:
             if external_table == "absent":
                 external_table = str(base / "no-such-table.json")
             (base / "table.json").write_text(table(table_rows, engine=table_engine_, platform=table_platform_,
-                                                   stdlib=table_stdlib_), encoding="utf-8")
+                                                   stdlib=table_stdlib_, preset=table_preset_), encoding="utf-8")
             if x_rows is not None:
                 where = base / "x.json"
-                where.write_text(table(x_rows, pair="W/X", stdlib=x_stdlib), encoding="utf-8")
+                where.write_text(table(x_rows, pair="W/X", stdlib=x_stdlib, preset=x_preset), encoding="utf-8")
                 external_table = str(where)
             args = argparse.Namespace(result=str(base / "perf.json"), table=str(base / "table.json"),
                                       external_table=external_table, without_external=without)
             with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                 return cmd_gate(args)
 
-    no_x = {"engine": "tokio", "external": {"status": "not-measured", "why": "unset"}}
+    no_x = {"engine": "tokio", "preset": PRESETS[0], "external": {"status": "not-measured", "why": "unset"}}
     expect("a run without arm X is NOT-MEASURED for W/X even when W/P holds",
            gate(run_cells, no_x, locked) == 3)
     expect("asked W/P alone, a run whose every row holds passes", gate(run_cells, no_x, locked, without=True) == 0)
     expect("a row missing from the table fails the gate",
            gate(run_cells, no_x, {k: v for k, v in locked.items() if k != keys[0]}, without=True) == 1)
     x_cells = run_cells + [dict(c, arm="X") for c in run_cells if c["arm"] == "P"]
-    built_x = {"engine": "tokio", "external": {"status": "built", "name": "lab"}}
+    built_x = {"engine": "tokio", "preset": PRESETS[0], "external": {"status": "built", "name": "lab"}}
     expect("a run that measured arm X and was given no table of it fails, asked W/P alone or not",
            gate(x_cells, built_x, locked, external_table="absent") == 1
            and gate(x_cells, built_x, locked, external_table="absent", without=True) == 1)
@@ -2892,7 +2967,30 @@ def cmd_selftest() -> int:
            gate(run_cells, dict(no_x, stdlib="alloc"), locked, without=True) == 2
            and gate(run_cells, no_x, locked, without=True, table_stdlib_="alloc") == 2)
     expect("a table written for a run states the standard library it was filled from",
-           json.loads(table_document("W/P", {}, 0.05, "coop", "linux", "nostd"))["stdlib"] == "nostd")
+           json.loads(table_document("W/P", {}, 0.05, "coop", "linux", "nostd", PRESETS[0]))["stdlib"] == "nostd")
+    # The build: a run states the preset arm W was built as and a table the one its rows were filled from, and a
+    # run is judged only against rows of its own build; a run that states none measured the crate's default
+    # features, which no committed table holds.
+    expect("a run of the preset its table was filled from is judged",
+           gate(run_cells, no_x, locked, without=True) == 0
+           and gate(run_cells, no_x, locked, without=True, table_preset_=PRESETS[0]) == 0)
+    expect("a run of the crate's default features is refused against a table of the preset",
+           gate(run_cells, {k: v for k, v in no_x.items() if k != "preset"}, locked, without=True) == 2)
+    expect("a table of W/P that does not say its build is refused, and one of W/X need not",
+           gate(run_cells, no_x, locked, without=True, table_preset_=None) == 2
+           and gate(x_cells, built_x, locked, x_rows=locked, x_preset=None) == 0
+           and gate(x_cells, built_x, locked, x_rows=locked, x_preset="zenoh-c") == 2)
+    expect("a reading or a table that names what is no preset is refused",
+           gate(run_cells, dict(no_x, preset="zenoh-c"), locked, without=True) == 2
+           and gate(run_cells, no_x, locked, without=True, table_preset_="zenoh-c") == 2)
+    expect("a run's build is the preset its build's record states, and nothing else",
+           run_preset({"wz_preset": PRESETS[0]}) == PRESETS[0] and run_preset({}) is None
+           and run_preset({"wz_preset": "zenoh-c"}) is None
+           and preset_named({}, "r") is None and preset_named({"preset": PRESETS[0]}, "r") == PRESETS[0]
+           and refused_call(lambda: preset_named({"preset": "zenoh-c"}, "r")))
+    expect("a table written for a run states the build it was filled from",
+           json.loads(table_document("W/P", {}, 0.05, "coop", "linux", "nostd", PRESETS[0]))["preset"]
+           == PRESETS[0])
 
     # -- the plan of a run on Windows ------------------------------------------------------------------------
     feature_table = {"default": ["os-host"], "engine-tokio": [], "os-host": [], "advanced": [],
@@ -2906,17 +3004,32 @@ def cmd_selftest() -> int:
         {"original": "zenoh-c", "switch": "Z_FEATURE_SHARED_MEMORY", "class": "always"}]}
     x64 = "x86_64-pc-windows-msvc"
     package_manifest = {"target": x64, "features": ["os-host", "app-transport"], "stdlib": "nostd"}
-    planned = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64)
+    package_build = {"os-host", "app-transport", "advanced"}
+
+    def package_preset(engine, stdlib):
+        return package_build if (engine, stdlib) == ("coop", "nostd") else set()
+
+    def narrower_preset(engine, stdlib):
+        return {"os-host", "zenoh-pico-only"}
+
+    planned = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64, package_preset)
     expect("a plan pairs the package's library with pico built with the switches its features answer",
            planned["reference_switches"] == {"Z_FEATURE_ADVANCED_PUBLICATION": 1, "Z_FEATURE_MATCHING": 1,
                                              "Z_FEATURE_RAWETH_TRANSPORT": 0}
            and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "os-host"]
            and planned["wz_stdlib"] == "nostd")
+    expect("a package built as zenoh-pico's preset is planned as that build",
+           planned["wz_preset"] == PRESETS[0] and planned["wz_beyond_preset"] == []
+           and planned["wz_short_of_preset"] == [])
+    other = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64, narrower_preset)
+    expect("a package of another build is planned as no preset, with what it has beyond the preset and lacks",
+           other["wz_preset"] is None and other["wz_beyond_preset"] == ["advanced", "app-transport"]
+           and other["wz_short_of_preset"] == ["zenoh-pico-only"])
     tokio_manifest = {"target": x64, "features": ["engine-tokio", "app-transport"], "stdlib": "std"}
 
     def plan_refused(manifest, statement):
         try:
-            windows_plan(manifest, statement, feature_table, switch_rows, x64)
+            windows_plan(manifest, statement, feature_table, switch_rows, x64, package_preset)
         except Refused:
             return True
         return False
