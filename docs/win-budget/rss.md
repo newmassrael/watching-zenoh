@@ -535,3 +535,9 @@ which reads nothing of it. `is_constant` tests whether a state's address lies in
 - C1: SHA-256 compiled small in the C libraries (`sha256-compact` under `os-host`, `sha2` at `opt-level = "s"`
   in `capi-small` and `capi-nostd`), section 5.2.
 - Section 5.3: R2 and R3 read part by part on the preset's run, and the bundle that crosses their pages.
+- R2 and R3's rows, one commit each, measured one by one by R0's per-mapping figures: R2.1 (the jump
+  table floor in `.cargo/capi-nostd.toml`), R2.2 (the accept's errnos as bit sets), R3.3 (the encoding
+  names as one string and `u16` ends), R2.3 (each constant's state in its view, its padding read first,
+  section 5.3.1), R3.4 (an empty pool stage a tag of zero, the scout table made in place per window) and
+  R3.2 (a limit row's id as offsets into its snapshot's ids, `LimitNames`, emitted by the generator; the
+  generated module is regenerated where the branch is merged). R3.1 (a) stays a design.
