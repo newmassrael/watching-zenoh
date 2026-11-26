@@ -69,16 +69,16 @@ use wz_switchboard_schema::SwitchboardSpec;
 /// The codecs a received Push is read through, frame to sample: the ones whose body reads the
 /// receive path takes for every message (docs/adr/0139 of the pinned SCE).
 const HOT_DECODE_CODECS: &[&str] = &[
-    "codec_zenoh_transport_frame_header",
-    "codec_zenoh_frame",
-    "codec_zenoh_push",
-    "codec_zenoh_msg_put",
-    "codec_zenoh_ext_entry",
-    "codec_zenoh_ext_unit",
-    "codec_zenoh_ext_zint",
-    "codec_zenoh_ext_zbuf",
-    "codec_zenoh_timestamp",
-    "codec_zenoh_encoding",
+    "transport_frame_header",
+    "frame",
+    "push",
+    "msg_put",
+    "ext_entry",
+    "ext_unit",
+    "ext_zint",
+    "ext_zbuf",
+    "timestamp",
+    "encoding",
 ];
 
 const CODECS: &[&str] = &[
