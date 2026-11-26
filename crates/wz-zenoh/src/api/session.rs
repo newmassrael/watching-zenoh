@@ -7393,8 +7393,8 @@ mod tests {
 
         let value = another_overload();
         let mut config = peer_stating_overload("c8a1d1", value);
-        config.state_profile("upstream").expect(
-            "a hosted build allows every value the `upstream` profile states (see `another_overload`)",
+        config.state_profile("standard").expect(
+            "a hosted build allows every value the `standard` profile states (see `another_overload`)",
         );
         let session = open(config).wait().expect("opens");
         let resolved = session.resolved_policies();
@@ -7404,7 +7404,7 @@ mod tests {
         );
         assert_eq!(
             resolved.provenance.origin("key-set"),
-            Some(Origin::Profile("upstream"))
+            Some(Origin::Profile("standard"))
         );
     }
 

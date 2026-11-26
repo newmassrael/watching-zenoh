@@ -2226,14 +2226,14 @@ def wire_code_problems(pid: str, pol: dict, choices: list) -> list[str]:
 
 PROFILE_KEYS = {"id", "help", "policies"}
 # The profile that states every policy at upstream's behaviour, which each policy's `default` is.
-UPSTREAM_PROFILE = "upstream"
+STANDARD_PROFILE = "standard"
 
 
 def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
     """A profile is a named set of policy values a run-time document starts from (`zext/profile`):
     each value is one the declaration gives its policy, and no policy the build alone decides is
     in it. Whether the build's domain allows a value is the open's question, not this one. The
-    profile `upstream` states every policy a document may state, each at its `default`."""
+    profile `standard` states every policy a document may state, each at its `default`."""
     out: list[str] = []
     ids = [p.get("id") for p in profiles]
     if len(ids) != len(set(ids)):
@@ -2272,7 +2272,7 @@ def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
                 continue
             if not isinstance(value, str) or value not in values:
                 out.append(f"{where}: {value!r} is not a value of `{pid}` ({', '.join(values)})")
-        if name == UPSTREAM_PROFILE:
+        if name == STANDARD_PROFILE:
             missing = [p.get("id") for p in policies
                        if p.get("binding") != "build" and p.get("id") not in stated]
             if missing:
@@ -5685,12 +5685,12 @@ Flush early.
 """
 
 
-# Two profiles over POLICY_SAMPLE; the upstream one lists its values out of the declaration's
+# Two profiles over POLICY_SAMPLE; the standard one lists its values out of the declaration's
 # order, which the generated table does not follow.
 PROFILE_SAMPLE = """\
 
 [[profile]]
-id = "upstream"
+id = "standard"
 help = '''
 Every policy at upstream's behaviour.
 '''
@@ -6799,15 +6799,15 @@ def cmd_selftest() -> int:
            profile_refused('binding = "open"\nmutability = "fixed"\n',
                            'binding = "build"\nmutability = "fixed"\n',
                            "profile `quiet`: `eager-flush` is decided by the build alone"))
-    expect("the upstream profile that leaves out a policy a document may state is refused",
+    expect("the standard profile that leaves out a policy a document may state is refused",
            profile_refused('wire-mode = "os-default"\n', "",
-                           "profile `upstream`: states every policy a document may state, and "
+                           "profile `standard`: states every policy a document may state, and "
                            "leaves out wire-mode"))
-    expect("the upstream profile that states a policy off its default is refused",
+    expect("the standard profile that states a policy off its default is refused",
            profile_refused('wire-mode = "os-default"', 'wire-mode = "on"',
-                           "profile `upstream`: states `wire-mode` = 'on', and its default, "
+                           "profile `standard`: states `wire-mode` = 'on', and its default, "
                            "upstream's behaviour, is 'os-default'"))
-    expect("the upstream profile leaves out a policy only the build decides, and validates",
+    expect("the standard profile leaves out a policy only the build decides, and validates",
            validate_decl(read_decl_toml(with_profile.replace(
                'binding = "open"\nmutability = "fixed"\n', 'binding = "build"\nmutability = "fixed"\n')
                .replace('eager-flush = "off"\n', "").replace('eager-flush = "on"\n', ""))) == [])
@@ -6846,14 +6846,14 @@ def cmd_selftest() -> int:
     rprofiles = emit_rust_policies(profile_decl)
     expect("a profile is a constant whose statements follow the declaration's order of policies",
            "use crate::policy_document::{Profile, Statement};\n" in rprofiles
-           and "const PROFILE_UPSTREAM: Profile = Profile {\n    id: \"upstream\",\n"
+           and "const PROFILE_STANDARD: Profile = Profile {\n    id: \"standard\",\n"
                "    statements: &[\n        Statement::new(\"wire-mode\", \"os-default\"),\n"
                "        Statement::new(\"eager-flush\", \"off\"),\n    ],\n};\n" in rprofiles
            and "const PROFILE_QUIET: Profile = Profile {\n    id: \"quiet\",\n    statements: &[\n"
                "        Statement::new(\"eager-flush\", \"on\"),\n    ],\n};\n" in rprofiles)
     expect("a profile's doc is its help, and PROFILES holds every profile",
            "/// The profile `quiet`: Flush early, wire left alone.\nconst PROFILE_QUIET" in rprofiles
-           and "pub static PROFILES: [Profile; 2] = [PROFILE_UPSTREAM, PROFILE_QUIET];\n" in rprofiles)
+           and "pub static PROFILES: [Profile; 2] = [PROFILE_STANDARD, PROFILE_QUIET];\n" in rprofiles)
     expect("a statement past rustfmt's call width goes one argument a line",
            rust_statement("p" * 50, "v" * 20)
            == ["        Statement::new(", '            "' + "p" * 50 + '",',
@@ -6869,7 +6869,7 @@ def cmd_selftest() -> int:
     expect("the schema names the profiles a document may start from, before its policies",
            list(pschema["properties"]["zext"]["properties"])
            == ["profile", "policies", "limits", "owned-address"]
-           and pschema["properties"]["zext"]["properties"]["profile"]["enum"] == ["upstream", "quiet"])
+           and pschema["properties"]["zext"]["properties"]["profile"]["enum"] == ["standard", "quiet"])
     expect("the schema names the node's own address as a dotted IPv4 string",
            pschema["properties"]["zext"]["properties"]["owned-address"]["format"] == "ipv4"
            and pschema["properties"]["zext"]["properties"]["owned-address"]["type"] == "string")

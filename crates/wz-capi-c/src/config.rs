@@ -2184,7 +2184,7 @@ mod tests {
             let quoted = format!("\"{value}\"");
             let quoted = quoted.as_str();
             let object = format!(
-                r#"{{ profile: "upstream", policies: {{ "subscriber-overload": "{value}" }} }}"#
+                r#"{{ profile: "standard", policies: {{ "subscriber-overload": "{value}" }} }}"#
             );
             let object = object.as_str();
             let with_profile = format!(r#"{{ "zext": {object} }}"#);
@@ -2200,7 +2200,7 @@ mod tests {
                 ),
                 (
                     vec![
-                        ("zext/profile", "\"upstream\""),
+                        ("zext/profile", "\"standard\""),
                         ("zext/policies/subscriber-overload", quoted),
                     ],
                     with_profile,
@@ -2254,7 +2254,7 @@ mod tests {
             // SAFETY: a config built through the C doors.
             let cfg = unsafe {
                 config_of(&[
-                    ("zext/profile", "\"upstream\""),
+                    ("zext/profile", "\"standard\""),
                     ("zext/policies/key-set", "\"open\""),
                 ])
             };
@@ -2262,7 +2262,7 @@ mod tests {
             unsafe {
                 assert_eq!(
                     get_text(&cfg, "zext/profile"),
-                    (Z_OK, String::from("\"upstream\""))
+                    (Z_OK, String::from("\"standard\""))
                 );
                 assert_eq!(
                     get_text(&cfg, "zext/policies"),
@@ -2273,7 +2273,7 @@ mod tests {
                     (
                         Z_OK,
                         String::from(
-                            "{\"profile\":\"upstream\",\"policies\":{\"key-set\":\"open\"}}"
+                            "{\"profile\":\"standard\",\"policies\":{\"key-set\":\"open\"}}"
                         )
                     )
                 );
@@ -2289,7 +2289,7 @@ mod tests {
         fn a_member_the_document_states_twice_is_refused_at_the_open_as_elsewhere() {
             for document in [
                 r#"{ zext: { policies: { "key-set": "open", "key-set": "closed" } } }"#,
-                r#"{ zext: { profile: "upstream" }, zext: {} }"#,
+                r#"{ zext: { profile: "standard" }, zext: {} }"#,
                 r#"{ zext: { policies: { "key-set": "open" }, policies: {} } }"#,
             ] {
                 assert_eq!(resolved_as_document(document), None, "{document}");
@@ -2310,9 +2310,9 @@ mod tests {
         fn a_path_through_a_value_is_refused_at_the_door_and_stores_nothing() {
             // SAFETY: a config built through the C doors, and NUL-terminated strings.
             unsafe {
-                let mut cfg = config_of(&[("zext/profile", "\"upstream\"")]);
+                let mut cfg = config_of(&[("zext/profile", "\"standard\"")]);
                 let key = std::ffi::CString::new("zext/profile/id").expect("no NUL");
-                let value = std::ffi::CString::new("\"upstream\"").expect("no NUL");
+                let value = std::ffi::CString::new("\"standard\"").expect("no NUL");
                 let rc = zc_config_insert_json5(
                     z_config_loan_mut(&mut cfg),
                     key.as_ptr(),
@@ -2324,22 +2324,22 @@ mod tests {
                     key.as_ptr(),
                     "zext/profile/id".len(),
                     value.as_ptr(),
-                    "\"upstream\"".len(),
+                    "\"standard\"".len(),
                 );
                 assert_eq!(rc, Z_EGENERIC);
                 assert_eq!(
                     get_text(&cfg, "zext"),
-                    (Z_OK, String::from("{\"profile\":\"upstream\"}")),
+                    (Z_OK, String::from("{\"profile\":\"standard\"}")),
                     "a refused insert stores nothing"
                 );
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
 
                 let (rc, _) =
-                    from_str(r#"{ zext: { profile: "upstream" }, "zext/profile/id": 1 }"#);
+                    from_str(r#"{ zext: { profile: "standard" }, "zext/profile/id": 1 }"#);
                 assert_eq!(rc, Z_EPARSE);
 
                 // A member that is no object is a statement the door stores and the open refuses.
-                let cfg = config_of(&[("zext", "\"upstream\"")]);
+                let cfg = config_of(&[("zext", "\"standard\"")]);
                 assert_eq!(resolved_at_open(&cfg), None);
                 z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
             }
@@ -2384,11 +2384,11 @@ mod tests {
             let quoted = format!("\"{value}\"");
             // An image whose domain leaves out a value of the profile refuses it, and the round
             // trip then compares two refusals.
-            let upstream_allowed =
-                resolved_as_document(r#"{ zext: { profile: "upstream" } }"#).is_some();
+            let standard_allowed =
+                resolved_as_document(r#"{ zext: { profile: "standard" } }"#).is_some();
             for inserts in [
                 vec![
-                    ("zext/profile", "\"upstream\""),
+                    ("zext/profile", "\"standard\""),
                     ("zext/policies/subscriber-overload", quoted.as_str()),
                     ("mode", "\"peer\""),
                 ],
@@ -2407,7 +2407,7 @@ mod tests {
                     let names_the_profile = inserts.iter().any(|(key, _)| *key == "zext/profile");
                     assert_eq!(
                         resolved.is_some(),
-                        upstream_allowed || !names_the_profile,
+                        standard_allowed || !names_the_profile,
                         "{document}"
                     );
                     assert_eq!(resolved_at_open(&back), resolved, "{document}");
@@ -2422,7 +2422,7 @@ mod tests {
                 }
             }
             // A member stated twice is written twice and still refused once read back.
-            let twice = r#"{ zext: { profile: "upstream" }, zext: { policies: {} } }"#;
+            let twice = r#"{ zext: { profile: "standard" }, zext: { policies: {} } }"#;
             // SAFETY: as above.
             unsafe {
                 let (rc, cfg) = from_str(twice);

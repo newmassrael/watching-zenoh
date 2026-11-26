@@ -1048,11 +1048,11 @@ mod tests {
     #[test]
     fn every_top_level_wz_member_but_a_null_is_kept() {
         let config =
-            Config::from_json5(r#"{ zext: { profile: "upstream" }, zext: null, zext: {} }"#)
+            Config::from_json5(r#"{ zext: { profile: "standard" }, zext: null, zext: {} }"#)
                 .unwrap();
         assert_eq!(
             config.1.member,
-            [object(&[("profile", text("upstream"))]), object(&[])]
+            [object(&[("profile", text("standard"))]), object(&[])]
         );
     }
 
@@ -1076,18 +1076,18 @@ mod tests {
             r#"{"policies":{"key-set":"closed"}}"#
         );
         config
-            .insert_json5("zext", r#"{ profile: "upstream" }"#)
+            .insert_json5("zext", r#"{ profile: "standard" }"#)
             .unwrap();
         assert_eq!(
             config.get_json("zext").unwrap(),
-            r#"{"profile":"upstream"}"#
+            r#"{"profile":"standard"}"#
         );
         assert!(config.insert_json5("zext/profile/id", r#""x""#).is_err());
         assert!(config.insert_json5("zext//profile", r#""x""#).is_err());
         assert!(config.insert_json5("zext/profile", "{").is_err());
         assert_eq!(
             config.get_json("zext").unwrap(),
-            r#"{"profile":"upstream"}"#
+            r#"{"profile":"standard"}"#
         );
         assert!(config.get_json("zext/policies").is_err());
         // A key that only begins with the member's name is zenoh's, which has no such key.
@@ -1152,21 +1152,21 @@ mod tests {
     /// The member is written after zenoh's own members, by the text and by serde, and read back.
     #[test]
     fn the_member_is_written_with_the_configuration_and_read_back() {
-        let config = Config::from_json5(r#"{ zext: { profile: "upstream" } }"#).unwrap();
+        let config = Config::from_json5(r#"{ zext: { profile: "standard" } }"#).unwrap();
         let written = config.to_string();
         assert!(
-            written.ends_with(r#","zext":{"profile":"upstream"}}"#),
+            written.ends_with(r#","zext":{"profile":"standard"}}"#),
             "{written}"
         );
         let parsed: serde_json::Value = serde_json::from_str(&written).expect("JSON");
-        assert_eq!(parsed["zext"]["profile"], "upstream");
+        assert_eq!(parsed["zext"]["profile"], "standard");
         let serialized = serde_json::to_value(&config).unwrap();
         assert_eq!(
             serialized["zext"],
-            serde_json::json!({ "profile": "upstream" })
+            serde_json::json!({ "profile": "standard" })
         );
         let read: Config =
-            serde_json::from_str(r#"{ "mode": "peer", "zext": { "profile": "upstream" } }"#)
+            serde_json::from_str(r#"{ "mode": "peer", "zext": { "profile": "standard" } }"#)
                 .expect("serde reads the member as from_json5 does");
         assert_eq!(read.1.member, config.1.member);
         assert_eq!(read.get_json("mode").unwrap(), r#""peer""#);

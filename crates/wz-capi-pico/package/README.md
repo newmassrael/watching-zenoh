@@ -202,7 +202,7 @@ z_owned_config_t config;
 z_config_default(&config);
 zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447");
 z_result_t rc = zext_config_document(z_config_loan_mut(&config),
-    "{ zext: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
+    "{ zext: { profile: \"standard\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
 if (rc != Z_OK) { /* refused: the config is as it was */ }
 z_open(&session, z_config_move(&config), NULL);
 ```
@@ -212,7 +212,7 @@ its `zext` member, so one file configures both. A program reads the file and han
 `zext_config_document`; a second call replaces the first. The members of `zext`, whose every
 name and value `config\wz-config.schema.json` lists:
 
-* `profile`: a named set of policy values the session starts from. `upstream` states every
+* `profile`: a named set of policy values the session starts from. `standard` states every
   policy at upstream's behaviour, whatever this build's defaults are.
 * `policies`: a policy's id mapped to one of its values' ids, over the profile.
 * `limits`: a session limit's id mapped to a whole number or `"unbounded"`, over the build's.

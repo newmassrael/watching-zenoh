@@ -983,10 +983,10 @@ mod tests {
         })
     }
 
-    /// The upstream profile, when the build allows every value it states.
-    fn upstream_allowed() -> Option<&'static Profile> {
-        let upstream = Profile::find("upstream").expect("declared");
-        upstream
+    /// The standard profile, when the build allows every value it states.
+    fn standard_allowed() -> Option<&'static Profile> {
+        let standard = Profile::find("standard").expect("declared");
+        standard
             .statements
             .iter()
             .all(|statement| {
@@ -995,7 +995,7 @@ mod tests {
                     .find(|entry| entry.id() == statement.policy)
                     .is_some_and(|entry| entry.domain().contains(statement.value))
             })
-            .then_some(upstream)
+            .then_some(standard)
     }
 
     /// What a config that states nothing resolves: the build's policies, each from the build
@@ -1238,10 +1238,10 @@ mod tests {
             .values()
             .iter()
             .any(|known| core::ptr::eq(*known, held)));
-        if upstream_allowed().is_some() {
-            assert_eq!(config.profile("upstream"), Z_OK);
+        if standard_allowed().is_some() {
+            assert_eq!(config.profile("standard"), Z_OK);
             let kept = config.state().policies.profile.expect("a profile kept");
-            let declared = Profile::find("upstream").expect("declared");
+            let declared = Profile::find("standard").expect("declared");
             assert!(core::ptr::eq(kept, declared.id));
         }
     }
@@ -1249,19 +1249,19 @@ mod tests {
     #[test]
     fn the_profile_door_refuses_a_profile_the_build_does_not_have() {
         let mut config = Config::new();
-        let upstream = upstream_allowed();
-        match upstream {
-            Some(_) => assert_eq!(config.profile("upstream"), Z_OK),
+        let standard = standard_allowed();
+        match standard {
+            Some(_) => assert_eq!(config.profile("standard"), Z_OK),
             // The build leaves a value the profile states out of a domain.
-            None => assert_eq!(config.profile("upstream"), Z_ERR_CONFIG_INVALID_VALUE),
+            None => assert_eq!(config.profile("standard"), Z_ERR_CONFIG_INVALID_VALUE),
         }
         assert_eq!(
             config.profile("no-such-profile"),
             Z_ERR_CONFIG_INVALID_VALUE
         );
         let resolved = config.resolved();
-        let expected = match upstream {
-            Some(_) => Origin::Profile("upstream"),
+        let expected = match standard {
+            Some(_) => Origin::Profile("standard"),
             None => Origin::BuildDefault,
         };
         assert!(resolved
@@ -1284,7 +1284,7 @@ mod tests {
         let refused = [
             String::from("{ zext: "),
             String::from("[1, 2]"),
-            String::from("{ zext: \"upstream\" }"),
+            String::from("{ zext: \"standard\" }"),
             String::from("{ zext: { policies: [\"a\", \"b\"] } }"),
             String::from("{ zext: { profile: 1 } }"),
             String::from("{ zext: { limits: { NO_SUCH_LIMIT: 4 } } }"),
@@ -1543,7 +1543,7 @@ mod tests {
     #[cfg(feature = "config-document")]
     #[test]
     fn the_door_overrides_the_document_which_overrides_the_profile() {
-        let (Some((entry, in_document, in_door)), Some(_)) = (two_allowed(), upstream_allowed())
+        let (Some((entry, in_document, in_door)), Some(_)) = (two_allowed(), standard_allowed())
         else {
             // The build allows one value of every policy, or refuses the profile.
             return;
@@ -1561,7 +1561,7 @@ mod tests {
             ])),
             Z_OK
         );
-        assert_eq!(config.profile("upstream"), Z_OK);
+        assert_eq!(config.profile("standard"), Z_OK);
         let resolved = config.resolved();
         assert_eq!(entry.value_in(&resolved.policy), in_door);
         assert_eq!(other.value_in(&resolved.policy), other_value);
@@ -1571,7 +1571,7 @@ mod tests {
             } else if policy.id() == other.id() {
                 Origin::Document
             } else {
-                Origin::Profile("upstream")
+                Origin::Profile("standard")
             };
             assert_eq!(origin, expected, "{}", policy.id());
         }
@@ -1638,20 +1638,20 @@ mod tests {
     #[cfg(feature = "config-document")]
     #[test]
     fn the_documents_profile_stands_when_the_door_names_none() {
-        if upstream_allowed().is_none() {
+        if standard_allowed().is_none() {
             assert_eq!(
-                Config::new().document("{ zext: { profile: \"upstream\" } }"),
+                Config::new().document("{ zext: { profile: \"standard\" } }"),
                 Z_ERR_CONFIG_INVALID_VALUE
             );
             return;
         }
         let mut config = Config::new();
-        assert_eq!(config.document("{ zext: { profile: \"upstream\" } }"), Z_OK);
+        assert_eq!(config.document("{ zext: { profile: \"standard\" } }"), Z_OK);
         assert!(config
             .resolved()
             .provenance
             .iter()
-            .all(|(_, origin)| origin == Origin::Profile("upstream")));
+            .all(|(_, origin)| origin == Origin::Profile("standard")));
     }
 
     /// One document, through this door and through the reader of the zenoh document over the
@@ -1666,8 +1666,8 @@ mod tests {
             Some((entry, _, second)) => (entry, second),
             None => one_allowed(),
         };
-        let profile = if upstream_allowed().is_some() {
-            "profile: \"upstream\", "
+        let profile = if standard_allowed().is_some() {
+            "profile: \"standard\", "
         } else {
             ""
         };
@@ -1757,7 +1757,7 @@ mod tests {
         let held = wz_capi_port::runtime_limits::held();
         for text in [
             "{ zext: { limits: { MAX_SUBSCRIPTIONS: 1 } } }",
-            "{ zext: { profile: \"upstream\" } }",
+            "{ zext: { profile: \"standard\" } }",
             "not a document",
             "{ zext: { limits: { NO_SUCH_LIMIT: 1 } } }",
         ] {

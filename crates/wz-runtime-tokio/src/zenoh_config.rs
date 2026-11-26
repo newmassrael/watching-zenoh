@@ -15705,10 +15705,10 @@ mod wz_member_tests {
         }
     }
 
-    /// Whether the build's domain allows every value the `upstream` profile states; an image
+    /// Whether the build's domain allows every value the `standard` profile states; an image
     /// whose domain leaves one out refuses the profile.
-    fn the_upstream_profile_is_allowed() -> bool {
-        Profile::find("upstream").is_some_and(|profile| {
+    fn the_standard_profile_is_allowed() -> bool {
+        Profile::find("standard").is_some_and(|profile| {
             profile.statements.iter().all(|statement| {
                 POLICIES
                     .iter()
@@ -15749,7 +15749,7 @@ mod wz_member_tests {
             "zext/limitsx",
             "zext/policies/no-such-policy",
             "zext/policies/key-set/open",
-            "zext/profile/upstream",
+            "zext/profile/standard",
             "zext/",
             "wzx",
             "wzx/profile",
@@ -15969,9 +15969,9 @@ mod wz_member_tests {
     #[test]
     fn the_export_reads_back_to_an_equal_snapshot_and_provenance() {
         let value = a_chosen_overload();
-        let allowed = the_upstream_profile_is_allowed();
+        let allowed = the_standard_profile_is_allowed();
         let profile = if allowed {
-            r#"profile: "upstream", "#
+            r#"profile: "standard", "#
         } else {
             ""
         };
@@ -15996,14 +15996,14 @@ mod wz_member_tests {
         if allowed {
             assert_eq!(
                 tree.get("zext/profile"),
-                Some(&Json5Value::String(String::from("upstream"))),
+                Some(&Json5Value::String(String::from("standard"))),
                 "{export}"
             );
             // The profile's values are not flattened into the document's statements.
             assert_eq!(tree.get("zext/policies/key-set"), None, "{export}");
             assert_eq!(
                 back.policies.provenance.origin("key-set"),
-                Some(Origin::Profile("upstream"))
+                Some(Origin::Profile("standard"))
             );
         } else {
             assert_eq!(tree.get("zext/profile"), None, "{export}");

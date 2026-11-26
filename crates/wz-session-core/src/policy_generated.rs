@@ -4099,12 +4099,12 @@ pub static POLICIES: [PolicyEntry; POLICY_COUNT] = [
     PolicyEntry::of::<HeldPublishDrop>(),
 ];
 
-/// The profile `upstream`: Every policy at upstream's behaviour, stated explicitly, so a
+/// The profile `standard`: Every policy at upstream's behaviour, stated explicitly, so a
 /// document that names it behaves as the original whatever the build states as its
 /// defaults. Where upstream has no such behaviour, the value is the one wz had before the
 /// policy existed.
-const PROFILE_UPSTREAM: Profile = Profile {
-    id: "upstream",
+const PROFILE_STANDARD: Profile = Profile {
+    id: "standard",
     statements: &[
         Statement::new("multicast-loopback", "os-default"),
         Statement::new("tx-no-progress-deadline", "off"),
@@ -4143,4 +4143,4 @@ const PROFILE_UPSTREAM: Profile = Profile {
 };
 
 /// Every profile the declaration states, which a document names by its id (`zext/profile`).
-pub static PROFILES: [Profile; 1] = [PROFILE_UPSTREAM];
+pub static PROFILES: [Profile; 1] = [PROFILE_STANDARD];

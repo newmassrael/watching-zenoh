@@ -520,7 +520,7 @@ PAYLOAD_SET = (
 # states each op).
 CONFIG_OPS = (
     b"\0" + b'{ zext: { "key-ids": { dictionary: [ { id: 40, key: "lab/rig" } ] } } }',
-    b"\0" + b'{ mode: "peer", zext: { profile: "upstream" } }',
+    b"\0" + b'{ mode: "peer", zext: { profile: "standard" } }',
     b"\0" + b"{ zext: { limits: { MAX_SUBSCRIPTIONS: 1 } } }",
     b"\0" + b"{ zext: { limits: { NO_SUCH_LIMIT: 1 } } }",
     b"\0" + b"{ zext: {}, zext: {} }",
@@ -528,7 +528,7 @@ CONFIG_OPS = (
     b"\x01" + b"key-set\0closed\0",
     b"\x01" + b"sn-resolution\0bits-16\0",
     b"\x01" + b"no-such-policy\0on\0",
-    b"\x02" + b"upstream\0",
+    b"\x02" + b"standard\0",
     b"\x02" + b"no-such-profile\0",
     b"\x03\x02" + struct.pack("<H", 40) + b"lab/rig\0" + struct.pack("<H", 41) + b"lab/rig/alpha\0",
     b"\x03\x01" + struct.pack("<H", 0) + b"lab/a\0",
@@ -536,7 +536,7 @@ CONFIG_OPS = (
     b"\x04" + b"tcp/192.0.2.7:7447\0declared\0",
     b"\x04" + b"\0shared\0",
     b"\x05" + b"{ zext: { limits: { MESSAGE_CATALOG_ENTRIES: 4 } } }",
-    b"\x05" + b'{ zext: { profile: "upstream" } }',
+    b"\x05" + b'{ zext: { profile: "standard" } }',
     bytes([6 + 8]) + b"tcp/192.0.2.7:7447\0",
     bytes([6 + 16]) + b"udp/192.0.2.8:7447\0",
     bytes([6]) + b"peer\0",

@@ -1195,7 +1195,7 @@ pub(crate) mod tests {
         let value = SessionPolicy::defaults().subscriber_overload().id();
         let quoted = format!("\"{value}\"");
         let stated = format!(
-            r#"{{ "zext": {{ "profile": "upstream", "policies": {{ "subscriber-overload": "{value}" }} }} }}"#
+            r#"{{ "zext": {{ "profile": "standard", "policies": {{ "subscriber-overload": "{value}" }} }} }}"#
         );
         let want = resolve_document(
             SessionPolicy::defaults(),
@@ -1208,7 +1208,7 @@ pub(crate) mod tests {
                 wz_capi_c_config_to_json5,
                 &[
                     ("mode", "\"peer\""),
-                    ("zext/profile", "\"upstream\""),
+                    ("zext/profile", "\"standard\""),
                     ("zext/policies/subscriber-overload", quoted.as_str()),
                 ],
             )

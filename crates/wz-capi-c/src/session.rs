@@ -1259,7 +1259,7 @@ mod policy_document_tests {
             ("zext/policies/subscriber-overload", r#""sometimes""#),
             ("zext/policies/no-such-policy", r#""on""#),
             ("zext/profile", r#""no-such-profile""#),
-            ("zext", r#""upstream""#),
+            ("zext", r#""standard""#),
             ("zext/limits", "{ NO_SUCH_LIMIT: 1 }"),
         ] {
             // SAFETY: as above; the open makes no session, so there is none to close.

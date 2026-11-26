@@ -6440,11 +6440,11 @@ does.
 # that build. Each is generated into `PROFILES` (crates/wz-session-core/src/policy_generated.rs)
 # and into the enum of `zext/profile` in the schema.
 #
-# `upstream` states every policy a document may state at its `default`, upstream's behaviour, so a
+# `standard` states every policy a document may state at its `default`, upstream's behaviour, so a
 # document that names it behaves as the original even where the build states other defaults
 # (`WZ_POLICY_<NAME>`); `wz_config.py --check` holds it to every policy's default.
 [[profile]]
-id = "upstream"
+id = "standard"
 help = '''
 Every policy at upstream's behaviour, stated explicitly, so a document that names
 it behaves as the original whatever the build states as its defaults. Where

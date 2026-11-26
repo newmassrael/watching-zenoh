@@ -2595,18 +2595,18 @@ mod tests {
         }
     }
 
-    /// The `upstream` profile states every policy once, each at a value the policy has.
+    /// The `standard` profile states every policy once, each at a value the policy has.
     #[test]
-    fn the_upstream_profile_states_every_policy_once() {
-        let upstream = Profile::find("upstream").expect("declared");
-        assert_eq!(upstream.statements.len(), POLICY_COUNT);
-        for (statement, entry) in upstream.statements.iter().zip(POLICIES.iter()) {
+    fn the_standard_profile_states_every_policy_once() {
+        let standard = Profile::find("standard").expect("declared");
+        assert_eq!(standard.statements.len(), POLICY_COUNT);
+        for (statement, entry) in standard.statements.iter().zip(POLICIES.iter()) {
             assert_eq!(statement.policy, entry.id());
             assert!(entry.values().contains(&statement.value), "{statement:?}");
         }
         assert_eq!(
-            upstream.layer().origin,
-            Origin::Profile("upstream"),
+            standard.layer().origin,
+            Origin::Profile("standard"),
             "a profile's values take its origin"
         );
         assert_eq!(Profile::find("no-such-profile"), None);
@@ -3086,7 +3086,7 @@ mod tests {
                 limits: StatedLimits::Read(&[]),
             },
             Overrides {
-                profile: Some("upstream"),
+                profile: Some("standard"),
                 statements: Stated::Read(&[]),
                 limits: StatedLimits::Read(&[]),
             },
@@ -3169,11 +3169,11 @@ mod tests {
         #[test]
         fn the_wz_member_is_read_into_its_profile_and_statements() {
             let tree = parse(
-                r#"{ zext: { profile: "upstream", policies: { "key-set": "open", "sn-resolution": "bits-32" } } }"#,
+                r#"{ zext: { profile: "standard", policies: { "key-set": "open", "sn-resolution": "bits-32" } } }"#,
             )
             .unwrap();
             let read = statements_from_json5(&tree).expect("well formed");
-            assert_eq!(read.profile, Some("upstream"));
+            assert_eq!(read.profile, Some("standard"));
             assert_eq!(
                 read.statements,
                 [
@@ -3187,27 +3187,28 @@ mod tests {
         /// keeps the build default.
         #[test]
         fn a_named_profile_is_read_below_the_documents_policies() {
-            let upstream = Profile::find("upstream").expect("declared");
-            let allowed = upstream.statements.iter().all(|statement| {
+            let standard = Profile::find("standard").expect("declared");
+            let allowed = standard.statements.iter().all(|statement| {
                 POLICIES
                     .iter()
                     .find(|entry| entry.id() == statement.policy)
                     .is_some_and(|entry| entry.domain().contains(statement.value))
             });
             let tree =
-                parse(r#"{ zext: { profile: "upstream", policies: { "key-set": "open" } } }"#)
+                parse(r#"{ zext: { profile: "standard", policies: { "key-set": "open" } } }"#)
                     .unwrap();
             let resolved = resolve_document(SessionPolicy::defaults(), &tree);
             if !allowed {
-                // The build leaves an upstream value out of a domain: the profile is refused.
+                // The build leaves a value of the standard profile out of a domain: the profile is
+                // refused.
                 assert!(resolved.is_err());
                 return;
             }
-            let resolved = resolved.expect("every upstream value allowed");
+            let resolved = resolved.expect("every value of the standard profile allowed");
             let origin = |policy| resolved.provenance.origin(policy);
             assert_eq!(origin("key-set"), Some(Origin::Document));
-            assert_eq!(origin("event-ring-full"), Some(Origin::Profile("upstream")));
-            for statement in upstream.statements {
+            assert_eq!(origin("event-ring-full"), Some(Origin::Profile("standard")));
+            for statement in standard.statements {
                 let entry = POLICIES
                     .iter()
                     .find(|entry| entry.id() == statement.policy)
@@ -3232,7 +3233,7 @@ mod tests {
             assert_eq!(
                 format!("{refusal}"),
                 "the document names the profile `no-such-profile`, and the build has no such \
-                 profile (its profiles: `upstream`)"
+                 profile (its profiles: `standard`)"
             );
         }
 
@@ -3263,7 +3264,7 @@ mod tests {
                 resolve_document(SessionPolicy::defaults(), &tree).expect("states no policy"),
                 Resolved::unchanged(SessionPolicy::defaults())
             );
-            let silent = parse(r#"{ zext: { profile: "upstream" } }"#).unwrap();
+            let silent = parse(r#"{ zext: { profile: "standard" } }"#).unwrap();
             assert_eq!(
                 statements_from_json5(&silent).expect("reads").owned_address,
                 None,
@@ -3646,7 +3647,7 @@ mod tests {
 
         #[test]
         fn a_member_or_policies_that_is_not_an_object_is_refused() {
-            let tree = parse(r#"{ zext: "upstream" }"#).unwrap();
+            let tree = parse(r#"{ zext: "standard" }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(refusal.reason, Reason::NotAnObject { member: "zext" });
             let tree = parse(r#"{ zext: { policies: ["key-set", "open"] } }"#).unwrap();
@@ -3677,10 +3678,10 @@ mod tests {
                     value: "closed"
                 }
             );
-            let tree = parse(r#"{ zext: { profile: "upstream" }, zext: {} }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "standard" }, zext: {} }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(refusal.reason, Reason::MemberStatedTwice { member: "zext" });
-            let tree = parse(r#"{ zext: { profile: "upstream", profile: "upstream" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "standard", profile: "standard" } }"#).unwrap();
             let refusal = only(&statements_from_json5(&tree).unwrap_err());
             assert_eq!(
                 refusal.reason,
@@ -3744,11 +3745,11 @@ mod tests {
             ));
         }
 
-        /// Whether the build's domains allow every value the `upstream` profile states, so that
+        /// Whether the build's domains allow every value the `standard` profile states, so that
         /// a resolution that reads the profile is not refused for it.
-        fn upstream_allowed() -> bool {
-            let upstream = Profile::find("upstream").expect("declared");
-            upstream.statements.iter().all(|statement| {
+        fn standard_allowed() -> bool {
+            let standard = Profile::find("standard").expect("declared");
+            standard.statements.iter().all(|statement| {
                 POLICIES
                     .iter()
                     .find(|entry| entry.id() == statement.policy)
@@ -3848,7 +3849,7 @@ mod tests {
                 ..DocumentLayers::default()
             };
             let named = Overrides {
-                profile: Some("upstream"),
+                profile: Some("standard"),
                 ..Overrides::default()
             };
             assert!(resolve_layers_under(base, unknown, named).is_err());
@@ -3885,7 +3886,7 @@ mod tests {
                     limits: StatedLimits::Read(&[]),
                 },
                 Overrides {
-                    profile: Some("upstream"),
+                    profile: Some("standard"),
                     statements: Stated::Read(&[]),
                     limits: StatedLimits::Read(&[]),
                 },
@@ -3917,19 +3918,19 @@ mod tests {
         fn the_profile_the_overrides_name_is_read_below_the_document() {
             let tree = parse(r#"{ zext: { policies: { "key-set": "open" } } }"#).unwrap();
             let overrides = Overrides {
-                profile: Some("upstream"),
+                profile: Some("standard"),
                 statements: Stated::Read(&[]),
                 limits: StatedLimits::Read(&[]),
             };
             let resolved = resolve_document_under(SessionPolicy::defaults(), &tree, overrides);
-            if !upstream_allowed() {
+            if !standard_allowed() {
                 assert!(resolved.is_err());
                 return;
             }
-            let resolved = resolved.expect("every upstream value allowed");
+            let resolved = resolved.expect("every value of the standard profile allowed");
             let origin = |policy| resolved.provenance.origin(policy);
             assert_eq!(origin("key-set"), Some(Origin::Document));
-            assert_eq!(origin("event-ring-full"), Some(Origin::Profile("upstream")));
+            assert_eq!(origin("event-ring-full"), Some(Origin::Profile("standard")));
         }
 
         /// The open's profile stands in for the document's, so it is the one looked up: an
@@ -3937,7 +3938,7 @@ mod tests {
         /// the build has.
         #[test]
         fn a_profile_the_overrides_name_and_the_build_does_not_have_is_refused_as_theirs() {
-            let tree = parse(r#"{ zext: { profile: "upstream" } }"#).unwrap();
+            let tree = parse(r#"{ zext: { profile: "standard" } }"#).unwrap();
             let overrides = Overrides {
                 profile: Some("no-such-profile"),
                 statements: Stated::Read(&[]),
@@ -3968,7 +3969,7 @@ mod tests {
         fn the_documents_unknown_profile_is_refused_though_the_overrides_name_one() {
             let tree = parse(r#"{ zext: { profile: "no-such-profile" } }"#).unwrap();
             let overrides = Overrides {
-                profile: Some("upstream"),
+                profile: Some("standard"),
                 statements: Stated::Read(&[]),
                 limits: StatedLimits::Read(&[]),
             };
