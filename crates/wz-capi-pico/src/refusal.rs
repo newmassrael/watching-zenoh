@@ -56,6 +56,10 @@ pub(crate) enum Door {
 /// [`Refusal`], each door's row the code zenoh-pico's own door answers for the cause. A plane the
 /// build does not hold, and a statement the engine does not carry out, have no pico code at any
 /// door, as zenoh-pico has neither; each is wz's [`ZEXT_ERR_UNSUPPORTED`].
+///
+/// Out of line: every declaring door reaches it on its refusal path only, and each copy inlined
+/// there carried the whole table folded for its door.
+#[inline(never)]
 pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
     if matches!(refusal, Refusal::NotBuilt | Refusal::NotHonoured(_)) {
         return ZEXT_ERR_UNSUPPORTED;
