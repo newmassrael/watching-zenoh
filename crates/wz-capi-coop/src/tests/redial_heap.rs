@@ -27,7 +27,7 @@ use wz_session_core::policy::SessionPolicy;
 
 use super::{client_config, config, CatchAll, Command, Router, LOOPBACK};
 use crate::arena::AllocatorMemory;
-use crate::open_source::{Counted, EndpointWriter, OpenSource};
+use crate::open_source::{Counted, OpenEndpoints, OpenSource};
 use crate::{CoopConfig, CoopEngine, OpenError, OpenKeyIds};
 
 thread_local! {
@@ -467,20 +467,11 @@ struct Written {
 }
 
 impl OpenSource for Written {
-    fn into_parts(
-        self,
-    ) -> (
-        CoopConfig<Counted>,
-        impl FnOnce(&mut EndpointWriter<'_>) -> Result<(), OpenError>,
-    ) {
-        let dial = self.dial;
-        let write = move |writer: &mut EndpointWriter<'_>| -> Result<(), OpenError> {
-            for text in dial {
-                writer.dial(text)?;
-            }
-            Ok(())
-        };
-        (self.config, write)
+    fn into_input(self, endpoints: &mut OpenEndpoints) -> CoopConfig<Counted> {
+        for text in self.dial {
+            endpoints.dial(text);
+        }
+        self.config
     }
 }
 
