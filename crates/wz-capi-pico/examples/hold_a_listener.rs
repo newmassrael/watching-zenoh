@@ -25,6 +25,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::io::BufRead;
 use std::time::Duration;
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::liveliness::{
     z_liveliness_declare_subscriber, z_liveliness_declare_token, z_liveliness_token_drop,
     z_liveliness_token_move, z_owned_liveliness_token_t,
@@ -202,6 +203,18 @@ fn main() {
                 z_config_loan_mut(&mut cfg),
                 Z_CONFIG_LISTEN_KEY,
                 endpoint.as_ptr()
+            ),
+            Z_OK
+        );
+        // A session opens its tables at what one of zenoh-pico's own programs holds, and this node
+        // holds more: the subscriber, the queryable and the token each declare a key of their own
+        // (`demo`, `demo/listener`, `demo/listener/alive`), a `token` line declares a fourth, and
+        // that token is held beside the first. A count past what the build reserves is refused here.
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                WZ_EXT_CONFIG_LIMITS_KEY,
+                c"MAX_DECLARED_KEYEXPRS=4,MAX_LOCAL_TOKENS=2".as_ptr()
             ),
             Z_OK
         );
