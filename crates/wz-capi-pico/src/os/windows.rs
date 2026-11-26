@@ -65,19 +65,50 @@ const _: () = {
 // Memory and sleep
 // ---------------------------------------------------------------------------
 
+// The C runtime's heap, imported from the system's C runtime (the Universal CRT, through the API
+// set it exports its heap by) by DLL name, so the link needs neither an import library nor the C
+// runtime of Visual Studio: the heap a `/MD` program's `malloc` takes from, which a `/MT` one's
+// takes from too, the process heap. x86 decorates a C name with an underscore that the DLL's
+// export has not, so the loader is told the bare name there.
+#[cfg_attr(
+    target_arch = "x86",
+    link(
+        name = "api-ms-win-crt-heap-l1-1-0.dll",
+        kind = "raw-dylib",
+        modifiers = "+verbatim",
+        import_name_type = "undecorated"
+    )
+)]
+#[cfg_attr(
+    not(target_arch = "x86"),
+    link(
+        name = "api-ms-win-crt-heap-l1-1-0.dll",
+        kind = "raw-dylib",
+        modifiers = "+verbatim"
+    )
+)]
+extern "C" {
+    #[link_name = "malloc"]
+    fn crt_malloc(size: usize) -> *mut c_void;
+    #[link_name = "free"]
+    fn crt_free(ptr: *mut c_void);
+    #[link_name = "realloc"]
+    fn crt_realloc(ptr: *mut c_void, size: usize) -> *mut c_void;
+}
+
 /// pico `z_malloc`: the C runtime's `malloc`, as pico's Windows backend's is.
 pub unsafe fn malloc(size: usize) -> *mut c_void {
-    libc::malloc(size)
+    crt_malloc(size)
 }
 
 /// pico `z_free`: the C runtime's `free`, null-tolerant as it is.
 pub unsafe fn free(ptr: *mut c_void) {
-    libc::free(ptr)
+    crt_free(ptr)
 }
 
 /// pico `z_realloc`: the C runtime's `realloc`.
 pub unsafe fn realloc(ptr: *mut c_void, size: usize) -> *mut c_void {
-    libc::realloc(ptr, size)
+    crt_realloc(ptr, size)
 }
 
 // ---------------------------------------------------------------------------

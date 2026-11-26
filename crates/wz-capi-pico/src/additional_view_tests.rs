@@ -100,9 +100,9 @@ stands_for!(
     view::abi::z_moved_string_t => crate::abi::z_moved_string_t,
     view::session::z_loaned_session_t => crate::session::z_loaned_session_t,
     view::session::z_subscriber_options_t => crate::session::z_subscriber_options_t,
-    view::ext_interface::wz_ext_interface_version_t => crate::ext_interface::wz_ext_interface_version_t,
-    view::ext_interface::wz_ext_session_facts_t => crate::ext_interface::wz_ext_session_facts_t,
-    view::ext_interface::wz_ext_runtime_facts_t => crate::ext_interface::wz_ext_runtime_facts_t,
+    view::ext_interface::zext_interface_version_t => crate::ext_interface::zext_interface_version_t,
+    view::ext_interface::zext_session_facts_t => crate::ext_interface::zext_session_facts_t,
+    view::ext_interface::zext_runtime_facts_t => crate::ext_interface::zext_runtime_facts_t,
 );
 
 // The types only the replay doors read, behind one gated private module: a gated macro call at
@@ -134,8 +134,8 @@ mod replay_types {
         view::get::z_moved_encoding_t => crate::encoding::z_moved_encoding_t,
         view::get::z_query_consolidation_t => crate::get::z_query_consolidation_t,
         view::get::z_get_options_t => crate::get::z_get_options_t,
-        view::decl_watch::wz_ext_decl_event_t => crate::decl_watch::wz_ext_decl_event_t,
-        view::decl_watch::wz_ext_owned_decl_watch_t => crate::decl_watch::wz_ext_owned_decl_watch_t,
+        view::decl_watch::zext_decl_event_t => crate::decl_watch::zext_decl_event_t,
+        view::decl_watch::zext_owned_decl_watch_t => crate::decl_watch::zext_owned_decl_watch_t,
     );
 
     #[cfg(feature = "unstable-api")]
@@ -212,17 +212,17 @@ fn every_function_the_view_imports_has_the_core_s_signature() {
     same_fn!(keyexpr::z_view_keyexpr_from_substr(_, _, _));
     same_fn!(keyexpr::z_view_keyexpr_loan(_));
     same_fn!(keyexpr::z_view_string_loan(_));
-    same_fn!(ext_interface::wz_ext_interface_version(_));
-    same_fn!(ext_interface::wz_ext_interface_major_1());
-    same_fn!(ext_interface::wz_ext_interface_bytes_view(_, _, _));
-    same_fn!(ext_interface::wz_ext_interface_runtime_facts(_));
-    same_fn!(ext_interface::wz_ext_interface_run_in_callback(_, _));
+    same_fn!(ext_interface::zext_interface_version(_));
+    same_fn!(ext_interface::zext_interface_major_1());
+    same_fn!(ext_interface::zext_interface_bytes_view(_, _, _));
+    same_fn!(ext_interface::zext_interface_runtime_facts(_));
+    same_fn!(ext_interface::zext_interface_run_in_callback(_, _));
     #[cfg(feature = "query")]
-    same_fn!(ext_interface::wz_ext_interface_session_facts(_, _));
+    same_fn!(ext_interface::zext_interface_session_facts(_, _));
     // A block, so the census named above reads a statement and not a possible public item.
     #[cfg(feature = "event-ring")]
     {
-        same_fn!(event_log::wz_ext_event_emit(_, _, _, _));
+        same_fn!(event_log::zext_event_emit(_, _, _, _));
     }
 }
 
@@ -249,9 +249,9 @@ fn every_function_the_replay_doors_import_has_the_core_s_signature() {
     same_fn!(get::z_get_options_default(_));
     same_fn!(get::z_reply_is_ok(_));
     same_fn!(get::z_reply_ok(_));
-    same_fn!(get_to_peer::wz_ext_get_to_peer(_, _, _, _, _, _));
-    same_fn!(decl_watch::wz_ext_decl_watch_declare(_, _, _, _, _, _));
-    same_fn!(decl_watch::wz_ext_decl_watch_drop(_));
+    same_fn!(get_to_peer::zext_get_to_peer(_, _, _, _, _, _));
+    same_fn!(decl_watch::zext_decl_watch_declare(_, _, _, _, _, _));
+    same_fn!(decl_watch::zext_decl_watch_drop(_));
 }
 
 #[test]
@@ -267,21 +267,21 @@ fn every_value_the_doors_allocate_has_the_core_s_layout() {
     same_size!(view::abi::z_view_keyexpr_t, crate::abi::z_view_keyexpr_t);
     same_size!(view::abi::z_owned_bytes_t, crate::abi::z_owned_bytes_t);
     same_size!(
-        view::ext_interface::wz_ext_interface_version_t,
-        crate::ext_interface::wz_ext_interface_version_t
+        view::ext_interface::zext_interface_version_t,
+        crate::ext_interface::zext_interface_version_t
     );
     same_fields!(
-        view::ext_interface::wz_ext_interface_version_t,
-        crate::ext_interface::wz_ext_interface_version_t;
+        view::ext_interface::zext_interface_version_t,
+        crate::ext_interface::zext_interface_version_t;
         struct_size, major, minor
     );
     same_size!(
-        view::ext_interface::wz_ext_session_facts_t,
-        crate::ext_interface::wz_ext_session_facts_t
+        view::ext_interface::zext_session_facts_t,
+        crate::ext_interface::zext_session_facts_t
     );
     same_fields!(
-        view::ext_interface::wz_ext_session_facts_t,
-        crate::ext_interface::wz_ext_session_facts_t;
+        view::ext_interface::zext_session_facts_t,
+        crate::ext_interface::zext_session_facts_t;
         struct_size,
         closed,
         replay_reply_shape,
@@ -293,12 +293,12 @@ fn every_value_the_doors_allocate_has_the_core_s_layout() {
         replay_depth_max,
     );
     same_size!(
-        view::ext_interface::wz_ext_runtime_facts_t,
-        crate::ext_interface::wz_ext_runtime_facts_t
+        view::ext_interface::zext_runtime_facts_t,
+        crate::ext_interface::zext_runtime_facts_t
     );
     same_fields!(
-        view::ext_interface::wz_ext_runtime_facts_t,
-        crate::ext_interface::wz_ext_runtime_facts_t;
+        view::ext_interface::zext_runtime_facts_t,
+        crate::ext_interface::zext_runtime_facts_t;
         struct_size,
         reserved,
         message_catalog_entries,
@@ -369,12 +369,12 @@ fn every_value_the_replay_doors_allocate_has_the_core_s_layout() {
         cancellation_token
     );
     same_size!(
-        view::decl_watch::wz_ext_decl_event_t,
-        crate::decl_watch::wz_ext_decl_event_t
+        view::decl_watch::zext_decl_event_t,
+        crate::decl_watch::zext_decl_event_t
     );
     same_fields!(
-        view::decl_watch::wz_ext_decl_event_t,
-        crate::decl_watch::wz_ext_decl_event_t;
+        view::decl_watch::zext_decl_event_t,
+        crate::decl_watch::zext_decl_event_t;
         kind,
         entity,
         zid_len,
@@ -386,12 +386,12 @@ fn every_value_the_replay_doors_allocate_has_the_core_s_layout() {
         zid,
     );
     same_size!(
-        view::decl_watch::wz_ext_owned_decl_watch_t,
-        crate::decl_watch::wz_ext_owned_decl_watch_t
+        view::decl_watch::zext_owned_decl_watch_t,
+        crate::decl_watch::zext_owned_decl_watch_t
     );
     same_fields!(
-        view::decl_watch::wz_ext_owned_decl_watch_t,
-        crate::decl_watch::wz_ext_owned_decl_watch_t;
+        view::decl_watch::zext_owned_decl_watch_t,
+        crate::decl_watch::zext_owned_decl_watch_t;
         _val
     );
 }
@@ -402,28 +402,28 @@ fn every_constant_the_view_states_is_the_core_s() {
     use view::ext_interface as view_ext;
 
     assert_eq!(
-        view_ext::WZ_EXT_INTERFACE_MAJOR,
-        core_ext::WZ_EXT_INTERFACE_MAJOR
+        view_ext::ZEXT_INTERFACE_MAJOR,
+        core_ext::ZEXT_INTERFACE_MAJOR
     );
     assert_eq!(
-        view_ext::WZ_EXT_INTERFACE_MINOR,
-        core_ext::WZ_EXT_INTERFACE_MINOR
+        view_ext::ZEXT_INTERFACE_MINOR,
+        core_ext::ZEXT_INTERFACE_MINOR
     );
     assert_eq!(
-        view_ext::WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
-        core_ext::WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE
+        view_ext::ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
+        core_ext::ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE
     );
     assert_eq!(
-        view_ext::WZ_EXT_REPLAY_SHAPE_SEGMENTED,
-        core_ext::WZ_EXT_REPLAY_SHAPE_SEGMENTED
+        view_ext::ZEXT_REPLAY_SHAPE_SEGMENTED,
+        core_ext::ZEXT_REPLAY_SHAPE_SEGMENTED
     );
     assert_eq!(
-        view_ext::WZ_EXT_REPLAY_LIVE_DELIVER,
-        core_ext::WZ_EXT_REPLAY_LIVE_DELIVER
+        view_ext::ZEXT_REPLAY_LIVE_DELIVER,
+        core_ext::ZEXT_REPLAY_LIVE_DELIVER
     );
     assert_eq!(
-        view_ext::WZ_EXT_REPLAY_LIVE_HOLD_BACK,
-        core_ext::WZ_EXT_REPLAY_LIVE_HOLD_BACK
+        view_ext::ZEXT_REPLAY_LIVE_HOLD_BACK,
+        core_ext::ZEXT_REPLAY_LIVE_HOLD_BACK
     );
 }
 
@@ -434,24 +434,24 @@ fn every_event_constant_the_view_states_is_the_core_s() {
     use view::event_log as view_log;
 
     assert_eq!(
-        view_log::WZ_EXT_EVENT_LEVEL_LIBRARY,
-        core_log::WZ_EXT_EVENT_LEVEL_LIBRARY
+        view_log::ZEXT_EVENT_LEVEL_LIBRARY,
+        core_log::ZEXT_EVENT_LEVEL_LIBRARY
     );
     assert_eq!(
-        view_log::WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
-        core_log::WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED
+        view_log::ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED,
+        core_log::ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED
     );
     assert_eq!(
-        view_log::WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE,
-        core_log::WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE
+        view_log::ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE,
+        core_log::ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE
     );
     assert_eq!(
-        view_log::WZ_EXT_EVENT_INSTANCE_KEY_ABSENT,
-        core_log::WZ_EXT_EVENT_INSTANCE_KEY_ABSENT
+        view_log::ZEXT_EVENT_INSTANCE_KEY_ABSENT,
+        core_log::ZEXT_EVENT_INSTANCE_KEY_ABSENT
     );
     assert_eq!(
-        view_log::WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED,
-        core_log::WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED
+        view_log::ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED,
+        core_log::ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED
     );
 }
 
@@ -468,20 +468,20 @@ fn every_constant_the_replay_doors_read_is_the_core_s() {
         crate::get::Z_QUERY_TARGET_ALL
     );
     assert_eq!(
-        view::decl_watch::WZ_EXT_DECL_DECLARED,
-        crate::decl_watch::WZ_EXT_DECL_DECLARED
+        view::decl_watch::ZEXT_DECL_DECLARED,
+        crate::decl_watch::ZEXT_DECL_DECLARED
     );
     assert_eq!(
-        view::decl_watch::WZ_EXT_DECL_UNDECLARED,
-        crate::decl_watch::WZ_EXT_DECL_UNDECLARED
+        view::decl_watch::ZEXT_DECL_UNDECLARED,
+        crate::decl_watch::ZEXT_DECL_UNDECLARED
     );
     assert_eq!(
-        view::decl_watch::WZ_EXT_DECL_LOST,
-        crate::decl_watch::WZ_EXT_DECL_LOST
+        view::decl_watch::ZEXT_DECL_LOST,
+        crate::decl_watch::ZEXT_DECL_LOST
     );
     assert_eq!(
-        view::decl_watch::WZ_EXT_DECL_QUERYABLE,
-        crate::decl_watch::WZ_EXT_DECL_QUERYABLE
+        view::decl_watch::ZEXT_DECL_QUERYABLE,
+        crate::decl_watch::ZEXT_DECL_QUERYABLE
     );
 }
 
@@ -490,6 +490,6 @@ fn every_constant_the_replay_doors_read_is_the_core_s() {
 #[test]
 fn the_view_s_import_of_the_major_version_reaches_the_core() {
     // SAFETY: an import of a function that takes nothing and reads a constant.
-    let imported = unsafe { view::ext_interface::wz_ext_interface_major_1() };
-    assert_eq!(imported, crate::ext_interface::wz_ext_interface_major_1());
+    let imported = unsafe { view::ext_interface::zext_interface_major_1() };
+    assert_eq!(imported, crate::ext_interface::zext_interface_major_1());
 }

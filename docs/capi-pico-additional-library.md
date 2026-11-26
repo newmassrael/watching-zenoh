@@ -17,7 +17,7 @@ library or as two, what crosses between the two, and how the two forms are held 
 
 A door names the core only as a library linked through C could: an `extern "C"` function, a
 constant, a static or a `#[repr(C)]` type of a public module of the crate root, or an item of the
-extension interface (`crates/wz-capi-pico/src/ext_interface.rs`, `wz_ext_interface_*`), the
+extension interface (`crates/wz-capi-pico/src/ext_interface.rs`, `zext_interface_*`), the
 versioned C interface through which the doors read what the core holds beyond the pico API: a
 session's facts, a payload's bytes in place, and the core's in-callback mark. Of the other crates
 of the stack a door names only stateless libraries (`wz-app-frame`, the models and pure values of
@@ -75,8 +75,8 @@ state, allocator and runtime.
    holds a type of no size by value: in the doors' library the copy would hold nothing, and a
    pointer to it would point into the door's own memory, which the core reads as its value
    (`layer_direction_gate.py` rule 8). Fields are declared only where the C header declares them
-   for a program to set (`z_get_options_t`) or read (`wz_ext_session_facts_t`,
-   `wz_ext_decl_event_t`, `z_id_t`). A door's own handles (`wz_ext_owned_e2e_sender_t`, ...) are a
+   for a program to set (`z_get_options_t`) or read (`zext_session_facts_t`,
+   `zext_decl_event_t`, `z_id_t`). A door's own handles (`zext_owned_e2e_sender_t`, ...) are a
    word the core never reads.
 2. **What a library allocates, that library frees.** A door boxes its own state and frees it in its
    own `*_drop`. A refusal string a door writes is made by the core's `z_string_copy_from_substr`
@@ -87,11 +87,11 @@ state, allocator and runtime.
 3. **No object of a language runtime crosses.** No `FILE`, no heap block of one C runtime for the
    other to free, no Rust value: a door and the core exchange C scalars, pointers to `#[repr(C)]`
    storage and C function pointers. Each library links its own Rust standard library and allocator.
-4. **The interface's version is asked.** `wz_ext_interface_version` answers the core's major and
-   minor version. The doors call `wz_ext_interface_major_1`, a function named by the major
+4. **The interface's version is asked.** `zext_interface_version` answers the core's major and
+   minor version. The doors call `zext_interface_major_1`, a function named by the major
    version, so the system's loader does not load the doors' library over a core of another major
    version, and a function added in a later minor version is an import the loader resolves by name
-   too. At run time `wz_ext_additional_interface` answers the version the doors were built against
+   too. At run time `zext_additional_interface` answers the version the doors were built against
    and whether the core answers one they run on.
 
 ## How the two forms are held to one behaviour
@@ -114,4 +114,4 @@ state, allocator and runtime.
   missing there is a failure; any other run that finds no forms says so and passes.
 - **A program sees one library.** The Windows package's test compiles every example and the check
   program against each form's package and runs them; the check program asks
-  `wz_ext_additional_interface` of the pair it links.
+  `zext_additional_interface` of the pair it links.

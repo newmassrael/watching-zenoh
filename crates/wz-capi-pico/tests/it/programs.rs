@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex, MutexGuard, PoisonError};
 
 use wz_capi_pico::object_pool::{
-    wz_ext_object_pool_bytes, wz_ext_object_pool_counts_t, wz_ext_object_pool_reserve,
+    zext_object_pool_bytes, zext_object_pool_counts_t, zext_object_pool_reserve,
 };
 use wz_capi_pico::Z_OK;
 use wz_session_core::caps;
@@ -42,9 +42,9 @@ fn programs() -> usize {
 /// The counts of `programs` programs, each holding what the build reserves for one: its
 /// `HELD_*` values, and `HELD_SESSIONS` sessions each holding the build's value of every
 /// entity's limit, which the limits a session opens under hold it to.
-fn share(programs: usize) -> wz_ext_object_pool_counts_t {
+fn share(programs: usize) -> zext_object_pool_counts_t {
     let each = |count: usize| count.saturating_mul(programs);
-    wz_ext_object_pool_counts_t {
+    zext_object_pool_counts_t {
         sessions: each(caps::HELD_SESSIONS),
         publishers: caps::MAX_PUBLISHERS,
         subscribers: caps::MAX_SUBSCRIPTIONS,
@@ -68,7 +68,7 @@ fn share(programs: usize) -> wz_ext_object_pool_counts_t {
         small_payload_blocks: each(caps::HELD_SMALL_PAYLOAD_BLOCKS),
         medium_payload_blocks: each(caps::HELD_MEDIUM_PAYLOAD_BLOCKS),
         large_payload_blocks: each(caps::HELD_LARGE_PAYLOAD_BLOCKS),
-        ..wz_ext_object_pool_counts_t::default()
+        ..zext_object_pool_counts_t::default()
     }
 }
 
@@ -148,7 +148,7 @@ extern "C" fn reserve_the_programs_share() {
     let programs = programs();
     let counts = share(programs);
     // SAFETY: `counts` is a live struct of this build's size, `struct_size` first.
-    let code = unsafe { wz_ext_object_pool_reserve(&counts) };
+    let code = unsafe { zext_object_pool_reserve(&counts) };
     if code != Z_OK {
         eprintln!("the test harness could not reserve the share of its programs: {code}");
         std::process::abort();
@@ -193,7 +193,7 @@ fn the_share_is_one_programs_held_values_times_the_programs() {
     assert_eq!(one.publishers, caps::MAX_PUBLISHERS);
     assert_eq!(one.subscribers, caps::MAX_SUBSCRIPTIONS);
     let three = share(3);
-    let held = |counts: &wz_ext_object_pool_counts_t| {
+    let held = |counts: &zext_object_pool_counts_t| {
         [
             counts.sessions,
             counts.samples,
@@ -208,7 +208,7 @@ fn the_share_is_one_programs_held_values_times_the_programs() {
         ]
     };
     assert_eq!(held(&three), held(&one).map(|count| count * 3));
-    let entities = |counts: &wz_ext_object_pool_counts_t| {
+    let entities = |counts: &zext_object_pool_counts_t| {
         [
             counts.publishers,
             counts.subscribers,
@@ -230,7 +230,7 @@ fn the_share_is_one_programs_held_values_times_the_programs() {
     assert!(programs() >= 1);
     let mut bytes: usize = 0;
     // SAFETY: the counts are a live struct of this build's size, `bytes` a live word.
-    let code = unsafe { wz_ext_object_pool_bytes(&share(programs()), &mut bytes) };
+    let code = unsafe { zext_object_pool_bytes(&share(programs()), &mut bytes) };
     assert_eq!(code, Z_OK);
     assert!(bytes > 0);
 }

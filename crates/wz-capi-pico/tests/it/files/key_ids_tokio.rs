@@ -20,7 +20,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wz_capi_pico::key_ids::{wz_ext_config_key_ids, wz_ext_config_key_wire_form_for};
+use wz_capi_pico::key_ids::{zext_config_key_ids, zext_config_key_wire_form_for};
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_bytes_to_slice, z_close, z_closure_query,
     z_closure_query_move, z_closure_reply, z_closure_reply_move, z_closure_sample,
@@ -55,7 +55,7 @@ unsafe fn open_with(key: u8, endpoint: &str, holds: bool, form: &CStr) -> z_owne
     if holds {
         let keys: Vec<*const std::ffi::c_char> = KEYS.iter().map(|key| key.as_ptr()).collect();
         assert_eq!(
-            wz_ext_config_key_ids(
+            zext_config_key_ids(
                 z_config_loan_mut(&mut cfg),
                 IDS.as_ptr(),
                 keys.as_ptr(),
@@ -65,7 +65,7 @@ unsafe fn open_with(key: u8, endpoint: &str, holds: bool, form: &CStr) -> z_owne
         );
     }
     assert_eq!(
-        wz_ext_config_key_wire_form_for(z_config_loan_mut(&mut cfg), text.as_ptr(), form.as_ptr()),
+        zext_config_key_wire_form_for(z_config_loan_mut(&mut cfg), text.as_ptr(), form.as_ptr()),
         Z_OK
     );
     let mut session: z_owned_session_t = std::mem::zeroed();

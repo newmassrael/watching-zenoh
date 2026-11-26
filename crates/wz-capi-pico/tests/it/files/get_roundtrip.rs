@@ -1147,9 +1147,9 @@ fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout
     let _program = crate::programs::admit();
     use std::sync::atomic::AtomicU64;
     use wz_capi_pico::time_base::{
-        wz_ext_config_time_base, wz_ext_owned_time_base_t, wz_ext_time_base_advanced,
-        wz_ext_time_base_drop, wz_ext_time_base_loan, wz_ext_time_base_move, wz_ext_time_base_new,
-        wz_ext_time_base_t,
+        zext_config_time_base, zext_owned_time_base_t, zext_time_base_advanced,
+        zext_time_base_drop, zext_time_base_loan, zext_time_base_move, zext_time_base_new,
+        zext_time_base_t,
     };
 
     let port = free_port();
@@ -1158,13 +1158,13 @@ fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout
     let time = Box::new(AtomicU64::new(0));
 
     unsafe {
-        let mut time_base: wz_ext_owned_time_base_t = std::mem::zeroed();
-        let calls = wz_ext_time_base_t {
+        let mut time_base: zext_owned_time_base_t = std::mem::zeroed();
+        let calls = zext_time_base_t {
             context: &*time as *const AtomicU64 as *mut c_void,
             now_ns: Some(program_now_ns),
             drop: None,
         };
-        assert_eq!(wz_ext_time_base_new(&mut time_base, &calls), Z_OK);
+        assert_eq!(zext_time_base_new(&mut time_base, &calls), Z_OK);
         let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
         let mut cfg: z_owned_config_t = std::mem::zeroed();
         assert_eq!(z_config_default(&mut cfg), Z_OK);
@@ -1177,10 +1177,7 @@ fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout
             Z_OK
         );
         assert_eq!(
-            wz_ext_config_time_base(
-                z_config_loan_mut(&mut cfg),
-                wz_ext_time_base_loan(&time_base)
-            ),
+            zext_config_time_base(z_config_loan_mut(&mut cfg), zext_time_base_loan(&time_base)),
             Z_OK
         );
         let mut zs: z_owned_session_t = std::mem::zeroed();
@@ -1224,7 +1221,7 @@ fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout
 
         time.store(600_000_000, Ordering::SeqCst);
         assert_eq!(
-            wz_ext_time_base_advanced(wz_ext_time_base_loan(&time_base)),
+            zext_time_base_advanced(zext_time_base_loan(&time_base)),
             Z_OK
         );
         let told_at = Instant::now();
@@ -1247,7 +1244,7 @@ fn c_get_on_a_time_base_completes_only_when_the_programs_time_passes_its_timeout
         z_session_drop(z_session_move(&mut zs));
         die.notify_one();
         let _ = peer.join();
-        wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
+        zext_time_base_drop(zext_time_base_move(&mut time_base));
     }
     drop(time);
 }

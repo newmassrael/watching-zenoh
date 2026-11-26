@@ -5,17 +5,22 @@
 //! resolver, and the walk over the host's addresses that passes from a refused address to the
 //! next, at once or when the refusal comes later, answering one refusal once none is left.
 //!
-//! Dialing is cold: it runs once per link, never per message, so it is one body here for every
-//! stack, and a stack's own part of a dial is the link it begins at one address
-//! (`SessionLinks::begin_initiator`) and its resolver (`SessionLinks::resolve`). The faces begin
-//! a dial here (`LinkSupervisor::begin_dial`), hold the [`Begun`] dial and pass it on with
+//! Dialing is cold: it runs once per link, never per message. Its plane is one body generic over
+//! nothing, [`dial_step`], which reads a [`LinkPlan`] (the endpoint's text, as the open wrote it
+//! in the session's row, and whether the network resolves names) and a [`DialCursor`], and answers
+//! what the dial asks of the stack next ([`DialAsk`]): a link begun at an address, a host
+//! resolved, or the dial's refusal. What touches the stack's own types is the short shell that
+//! does what it is asked (`begin`, `HostWalk::pass_on`): the stack begins a link at one
+//! address (`SessionLinks::begin_initiator`) and resolves a name (`SessionLinks::resolve`), and
+//! no trait object is made for the plane. The faces begin a dial here
+//! (`LinkSupervisor::begin_dial`), hold the [`Begun`] dial and pass it on with
 //! `HostWalk::pass_on` when the network refuses the address it is under way to.
 
 use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use crate::link_cells::CountKind;
 use crate::locator_text::{read_dial_target, DialTarget, NamedHost, NamedLink};
-use crate::session_drive::{LinkOpenError, LinkProto, SessionLinks};
+use crate::session_drive::{LinkOpenError, LinkProto, Locator, SessionLinks};
 use crate::transport::{EndpointRefusal, Refusal, TransportRefusal};
 
 /// How many of the addresses a host name resolves to a dial of it tries, one at a time, in the
@@ -26,6 +31,33 @@ pub const HOST_ADDRESSES: usize = 4;
 
 /// What a place for a resolved address holds until one is written there; never dialled.
 const UNRESOLVED: SocketAddr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0));
+
+/// What a dial of one endpoint is planned from, values of no type of the stack's: the endpoint's
+/// text, as the open wrote it in the session's row of endpoints to dial, and whether the network
+/// the dial runs on answers a host name with its addresses (`SessionLinks::RESOLVES`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkPlan<'a> {
+    endpoint: &'a str,
+    resolves: bool,
+}
+
+impl<'a> LinkPlan<'a> {
+    /// The plan of a dial of `endpoint` over a network that `resolves` host names or not.
+    pub const fn new(endpoint: &'a str, resolves: bool) -> Self {
+        Self { endpoint, resolves }
+    }
+
+    /// The endpoint dialled.
+    pub fn endpoint(&self) -> &'a str {
+        self.endpoint
+    }
+
+    /// The dial's refusal for `why`: the endpoint is one the session dials, so it is refused as
+    /// one the session cannot reach, naming it.
+    pub fn refused(&self, why: Refusal) -> TransportRefusal {
+        TransportRefusal::Unreachable(EndpointRefusal::new(self.endpoint, why))
+    }
+}
 
 /// The addresses of a named host a dial has not tried yet, each at the port the name is dialled
 /// at, and the link the dial opens at each: it begins the first, and passes to the next in turn
@@ -50,29 +82,25 @@ impl HostWalk {
         link: NamedLink::Ip(LinkProto::Udp),
     };
 
-    /// The addresses `links`' network resolves the host `name` to, each to be dialled with its
-    /// link; those past the room are not kept (`SessionLinks::resolve`). The resolver may block
-    /// for as long as the network's name service takes, so it is asked as a dial begins and
-    /// never on a link's way.
-    fn of_host<N: CountKind, L: SessionLinks<N>>(name: &NamedHost<'_>, links: &L) -> Self {
-        let mut walk = Self {
-            link: name.link(),
-            ..Self::NONE
-        };
-        let count = links.resolve(name, &mut walk.addresses);
-        walk.count = u8::try_from(count.min(HOST_ADDRESSES)).unwrap_or(0);
-        walk
-    }
-
     /// How many addresses are left to dial.
     pub fn left(&self) -> usize {
         usize::from(self.count.saturating_sub(self.next))
     }
 
+    /// The locator of the next address left, which is then passed: `None` once none is left.
+    fn next_locator(&mut self) -> Option<Locator> {
+        if self.next >= self.count {
+            return None;
+        }
+        let at = *self.addresses.get(usize::from(self.next))?;
+        self.next = self.next.wrapping_add(1);
+        Some(self.link.locator(at))
+    }
+
     /// Begin a dial over `links` of the next address the network begins, passing over each one
     /// it refuses at once: the stack's dial, or the refusal of the last address tried, which is
-    /// `refused` when none is left to try. Out of line: the first address of a host and the
-    /// pass from a refused one share this one walk.
+    /// `refused` when none is left to try. Out of line: every dial a face passes on is begun by
+    /// this one shell, and the walk itself is `next_locator`'s, generic over nothing.
     #[inline(never)]
     pub(crate) fn pass_on<N: CountKind, L: SessionLinks<N>>(
         &mut self,
@@ -80,17 +108,93 @@ impl HostWalk {
         refused: LinkOpenError,
     ) -> Result<L::Dial, LinkOpenError> {
         let mut last = refused;
-        while self.next < self.count {
-            let Some(&at) = self.addresses.get(usize::from(self.next)) else {
-                break;
-            };
-            self.next = self.next.wrapping_add(1);
-            match links.begin_initiator(self.link.locator(at)) {
+        while let Some(to) = self.next_locator() {
+            match links.begin_initiator(to) {
                 Ok(pending) => return Ok(pending),
                 Err(why) => last = why,
             }
         }
         Err(last)
+    }
+}
+
+/// Where a dial of one plan stands: whether its endpoint's text was read, and the addresses of
+/// the host it names that are left to dial. A dial begins at [`DialCursor::START`] and keeps its
+/// [`HostWalk`] once a link is begun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DialCursor {
+    read: bool,
+    walk: HostWalk,
+}
+
+impl DialCursor {
+    /// A dial whose endpoint has not been read yet.
+    pub const START: Self = Self {
+        read: false,
+        walk: HostWalk::NONE,
+    };
+
+    /// The room the network's resolver writes the host's addresses in, at the front, when the
+    /// dial asks for them ([`DialAsk::Resolve`]).
+    pub fn room(&mut self) -> &mut [SocketAddr] {
+        &mut self.walk.addresses
+    }
+
+    /// The resolver wrote `count` addresses at the front of [`Self::room`]: those past the room
+    /// are not kept, and the dial walks them from the first.
+    pub fn resolved(&mut self, count: usize) {
+        self.walk.count = u8::try_from(count.min(HOST_ADDRESSES)).unwrap_or(0);
+        self.walk.next = 0;
+    }
+
+    /// The addresses left after the one a link was begun at, for the dial to pass to later.
+    pub fn walk(&self) -> HostWalk {
+        self.walk
+    }
+}
+
+/// What a dial asks of the stack next ([`dial_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialAsk<'a> {
+    /// Begin a link at this locator: the address the endpoint names, or the next of its host's.
+    Begin(Locator),
+    /// Resolve this host into the cursor's room ([`DialCursor::room`]) and tell the cursor how
+    /// many addresses were written ([`DialCursor::resolved`]).
+    Resolve(NamedHost<'a>),
+    /// No link is begun: why. The endpoint's own refusal for a text no dial reaches, read before
+    /// any resolver is asked; the network's otherwise, the refusal of the last address tried, and
+    /// [`LinkOpenError::Refused`] for a host that resolves to no address, an answer of the
+    /// network a later dial may not meet.
+    Refused(Refusal),
+}
+
+/// The next move of the dial of `plan` at `at`, after `last`, the network's refusal of the
+/// address the dial was last asked to begin at (`None` when it asked none or the resolver was
+/// asked): the endpoint's text is read at the first step, and an address it names is begun with
+/// no address to pass to; a host it names is resolved, then each of its addresses begun in turn
+/// until one is not refused at once. Out of line and generic over nothing: every dial of every
+/// stack reads its text and walks its host here, in one body.
+#[cold]
+#[inline(never)]
+pub fn dial_step<'a>(
+    plan: &LinkPlan<'a>,
+    at: &mut DialCursor,
+    last: Option<LinkOpenError>,
+) -> DialAsk<'a> {
+    if !at.read {
+        at.read = true;
+        return match read_dial_target(plan.endpoint, plan.resolves) {
+            Ok(DialTarget::At(to)) => DialAsk::Begin(to),
+            Ok(DialTarget::Named(name)) => {
+                at.walk.link = name.link();
+                DialAsk::Resolve(name)
+            }
+            Err(refused) => DialAsk::Refused(Refusal::Locator(refused)),
+        };
+    }
+    match at.walk.next_locator() {
+        Some(to) => DialAsk::Begin(to),
+        None => DialAsk::Refused(Refusal::Link(last.unwrap_or(LinkOpenError::Refused))),
     }
 }
 
@@ -116,41 +220,169 @@ impl<D> Begun<D> {
 /// Begin a dial of `endpoint` over `links`, which the network answers later: of the address it
 /// names, or of the first address of the host it names that the network begins, the rest kept
 /// for the dial to pass to. Refused as [`TransportRefusal::Unreachable`], with the endpoint and
-/// why: the locator's refusal for a text no dial over `links` reaches ([`read_dial_target`]),
-/// asked before the resolver; the network's otherwise: the refusal of the last address tried,
-/// and, for a host that resolves to no address, [`LinkOpenError::Refused`], an answer of the
-/// network a later dial may not meet. Out of line and cold: every dial of every face begins here,
-/// and each refusal is written into its answer in this one place.
+/// why ([`DialAsk::Refused`]). The shell of [`dial_step`] over the stack: it does what the
+/// dial asks and nothing else, so its body is the stack's two calls and the loop.
 #[cold]
 #[inline(never)]
 pub(crate) fn begin<N: CountKind, L: SessionLinks<N>>(
     endpoint: &str,
     links: &L,
 ) -> Result<Begun<L::Dial>, TransportRefusal> {
-    begin_on::<N, L>(endpoint, links)
-        .map_err(|why| TransportRefusal::Unreachable(EndpointRefusal::new(endpoint, why)))
+    let plan = LinkPlan::new(endpoint, L::RESOLVES);
+    let mut at = DialCursor::START;
+    let mut last = None;
+    loop {
+        match dial_step(&plan, &mut at, last) {
+            DialAsk::Begin(to) => match links.begin_initiator(to) {
+                Ok(pending) => {
+                    return Ok(Begun {
+                        pending,
+                        walk: at.walk(),
+                    })
+                }
+                Err(why) => last = Some(why),
+            },
+            DialAsk::Resolve(name) => {
+                let found = links.resolve(&name, at.room());
+                at.resolved(found);
+            }
+            DialAsk::Refused(why) => return Err(plan.refused(why)),
+        }
+    }
 }
 
-/// `begin`, answering why a dial was refused without the endpoint.
-// Always inlined: its one caller writes the endpoint into whichever refusal this answers.
-#[inline(always)]
-fn begin_on<N: CountKind, L: SessionLinks<N>>(
-    endpoint: &str,
-    links: &L,
-) -> Result<Begun<L::Dial>, Refusal> {
-    let name = match read_dial_target(endpoint, L::RESOLVES) {
-        Ok(DialTarget::At(to)) => {
-            return links
-                .begin_initiator(to)
-                .map(Begun::alone)
-                .map_err(Refusal::Link)
+#[cfg(test)]
+mod tests {
+    use core::net::SocketAddr;
+
+    use super::{dial_step, DialAsk, DialCursor, LinkPlan, HOST_ADDRESSES};
+    use crate::locator_text::DialRefused;
+    use crate::session_drive::{LinkOpenError, LinkProto, Locator};
+    use crate::transport::{EndpointRefusal, Refusal, TransportRefusal};
+
+    const HOST: &str = "tcp/router.example:7447";
+
+    fn tcp(at: SocketAddr) -> DialAsk<'static> {
+        DialAsk::Begin(Locator::ip(LinkProto::Tcp, at))
+    }
+
+    /// The host's addresses as a resolver answers them, at the name's port.
+    fn addresses() -> [SocketAddr; 2] {
+        [
+            SocketAddr::from(([0u16, 0, 0, 0, 0, 0, 0, 1], 7447)),
+            SocketAddr::from(([127, 0, 0, 1], 7447)),
+        ]
+    }
+
+    /// A dial of `HOST` stepped past its resolve, the resolver having written `found`.
+    fn resolved(plan: &LinkPlan<'static>, found: &[SocketAddr]) -> DialCursor {
+        let mut at = DialCursor::START;
+        let DialAsk::Resolve(name) = dial_step(plan, &mut at, None) else {
+            panic!("a host name is resolved first");
+        };
+        assert_eq!((name.host(), name.port()), ("router.example", 7447));
+        for (place, address) in at.room().iter_mut().zip(found) {
+            *place = *address;
         }
-        Ok(DialTarget::Named(name)) => name,
-        Err(refused) => return Err(Refusal::Locator(refused)),
-    };
-    let mut walk = HostWalk::of_host::<N, L>(&name, links);
-    let pending = walk
-        .pass_on::<N, L>(links, LinkOpenError::Refused)
-        .map_err(Refusal::Link)?;
-    Ok(Begun { pending, walk })
+        at.resolved(found.len());
+        at
+    }
+
+    /// An address is begun at the first step, with no resolver asked and no address to pass to;
+    /// its refusal is the dial's. Turned red by an address read as a name, or a refusal of the
+    /// address that asks for another one.
+    #[test]
+    fn an_address_is_begun_at_once_and_its_refusal_is_the_dials() {
+        let plan = LinkPlan::new("tcp/127.0.0.1:7447", true);
+        let mut at = DialCursor::START;
+        assert_eq!(
+            dial_step(&plan, &mut at, None),
+            tcp(SocketAddr::from(([127, 0, 0, 1], 7447)))
+        );
+        assert_eq!(at.walk().left(), 0, "an address has none to pass to");
+        assert_eq!(
+            dial_step(&plan, &mut at, Some(LinkOpenError::Unsupported)),
+            DialAsk::Refused(Refusal::Link(LinkOpenError::Unsupported))
+        );
+    }
+
+    /// A host whose first address the network refuses is dialled at its second, in the order the
+    /// resolver answered; the refusal of the last address tried is the dial's. Turned red when the
+    /// walk stops at the first refusal, dials out of order, or answers an earlier refusal.
+    #[test]
+    fn an_endpoint_whose_first_address_refuses_dials_the_second() {
+        let plan = LinkPlan::new(HOST, true);
+        let [v6, v4] = addresses();
+        let mut at = resolved(&plan, &[v6, v4]);
+        assert_eq!(dial_step(&plan, &mut at, None), tcp(v6));
+        assert_eq!(at.walk().left(), 1);
+        assert_eq!(
+            dial_step(&plan, &mut at, Some(LinkOpenError::Refused)),
+            tcp(v4)
+        );
+        assert_eq!(at.walk().left(), 0);
+        assert_eq!(
+            dial_step(&plan, &mut at, Some(LinkOpenError::Exhausted)),
+            DialAsk::Refused(Refusal::Link(LinkOpenError::Exhausted))
+        );
+    }
+
+    /// A host that resolves to no address is refused as a link the other end did not take, which
+    /// a later dial may find. Turned red by a refusal for good, or a dial begun at a place no
+    /// address was written in.
+    #[test]
+    fn a_host_of_no_address_is_refused_as_not_taken() {
+        let plan = LinkPlan::new(HOST, true);
+        let mut at = resolved(&plan, &[]);
+        assert_eq!(
+            dial_step(&plan, &mut at, None),
+            DialAsk::Refused(Refusal::Link(LinkOpenError::Refused))
+        );
+    }
+
+    /// The resolver's addresses past the room are not kept. Turned red by a count past the room,
+    /// which would walk addresses never written.
+    #[test]
+    fn addresses_past_the_room_are_not_kept() {
+        let plan = LinkPlan::new(HOST, true);
+        let mut at = DialCursor::START;
+        assert!(matches!(
+            dial_step(&plan, &mut at, None),
+            DialAsk::Resolve(_)
+        ));
+        at.resolved(HOST_ADDRESSES + 3);
+        assert_eq!(at.walk().left(), HOST_ADDRESSES);
+    }
+
+    /// A name is refused at the first step, before any resolver is asked, where no dial of it
+    /// reaches the host written: over a network without a resolver, and over a link that names
+    /// its peer by the address it dials. Turned red by a resolve asked for either.
+    #[test]
+    fn a_name_no_dial_reaches_is_refused_before_the_resolver() {
+        let mut at = DialCursor::START;
+        assert_eq!(
+            dial_step(&LinkPlan::new(HOST, false), &mut at, None),
+            DialAsk::Refused(Refusal::Locator(DialRefused::NoResolver))
+        );
+        let mut at = DialCursor::START;
+        assert_eq!(
+            dial_step(
+                &LinkPlan::new("tls/router.example:7447", true),
+                &mut at,
+                None
+            ),
+            DialAsk::Refused(Refusal::Locator(DialRefused::PeerNamedByAddress))
+        );
+    }
+
+    /// A dial's refusal names its endpoint as one the session dials, never one it listens on.
+    /// Turned red when the roles are swapped, or the endpoint is left out.
+    #[test]
+    fn a_refused_dial_names_its_endpoint_as_one_to_dial() {
+        let why = Refusal::Link(LinkOpenError::Refused);
+        assert_eq!(
+            LinkPlan::new(HOST, true).refused(why),
+            TransportRefusal::Unreachable(EndpointRefusal::new(HOST, why))
+        );
+    }
 }

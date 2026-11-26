@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! [`WZ_EXT_CONFIG_LIMITS_KEY`]: the limits of the session `z_open` opens from a config, stated
+//! [`ZEXT_CONFIG_LIMITS_KEY`]: the limits of the session `z_open` opens from a config, stated
 //! through the numbered keys every build of this ABI reads (`zp_config_insert`).
 //!
 //! A session opens its tables at a few (`crate::session::opening_limits`) and takes no memory
@@ -24,7 +24,7 @@ use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
 
 /// The config key whose value states the session's limits (`wz_ext.h`). Past zenoh-pico's own
 /// keys, which end at `Z_CONFIG_LISTEN_EXIT_ON_FAILURE_KEY` (0x5A), so no upstream key is taken.
-pub const WZ_EXT_CONFIG_LIMITS_KEY: u8 = 0xC0;
+pub const ZEXT_CONFIG_LIMITS_KEY: u8 = 0xC0;
 
 /// What an open composes from a config: the limits of the session it opens and, where the build
 /// has process pools, the counts of the values a program holds apart from any session.

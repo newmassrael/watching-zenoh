@@ -72,7 +72,7 @@ MAX_PAYLOADS = 256
 # walks and engines behind them.
 INGRESS = ("ingress_frames", "codec_roundtrip", "session_unicast", "slot_session", "coop_read")
 
-# The targets of the pico C ABI's own doors (`wz_ext_*`), built as the release
+# The targets of the pico C ABI's own doors (`zext_*`), built as the release
 # package builds the library (`crates/wz-fuzz/pico-ext`). `pico_transport`
 # reads its input as an ingress target does.
 PICO_EXT = ("pico_transport", "pico_config", "pico_e2e", "pico_instance_key", "pico_catalog", "pico_payload")

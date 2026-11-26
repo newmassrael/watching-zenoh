@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
- * A zenoh-pico C program that DIALS over a transport it supplies (wz_ext_transport_*,
+ * A zenoh-pico C program that DIALS over a transport it supplies (zext_transport_*,
  * wz_ext.h) and answers nothing: the client half of pico_app_transport.c, which needs no
  * listener, no group and no query, so it is the check of the app-transport capability on any
  * build that has it (the host library without std among them).
@@ -50,12 +50,12 @@ static int failures = 0;
 /* What the program saw, under `lock`: the session calls in from its own threads. */
 static struct {
     z_owned_mutex_t lock;
-    wz_ext_owned_transport_t transport;
+    zext_owned_transport_t transport;
     int report;               /* report the dial connected from the task */
     int opens;
     int open_kind;
     char open_locator[64];
-    wz_ext_link_t link;
+    zext_link_t link;
     int sends;
     unsigned char first[8];
     size_t first_len;
@@ -68,7 +68,7 @@ static struct {
 static void lock(void) { z_mutex_lock(z_mutex_loan_mut(&seen.lock)); }
 static void unlock(void) { z_mutex_unlock(z_mutex_loan_mut(&seen.lock)); }
 
-static wz_ext_link_result_t on_open(void *context, wz_ext_link_t link, wz_ext_link_kind_t kind,
+static zext_link_result_t on_open(void *context, zext_link_t link, zext_link_kind_t kind,
                                     const char *locator) {
     (void)context;
     lock();
@@ -78,10 +78,10 @@ static wz_ext_link_result_t on_open(void *context, wz_ext_link_t link, wz_ext_li
     snprintf(seen.open_locator, sizeof seen.open_locator, "%s", locator);
     unlock();
     /* Under way: the task reports it, or nothing ever does. */
-    return WZ_EXT_LINK_WOULD_BLOCK;
+    return ZEXT_LINK_WOULD_BLOCK;
 }
 
-static wz_ext_link_result_t on_send(void *context, wz_ext_link_t link, const uint8_t *data, size_t len,
+static zext_link_result_t on_send(void *context, zext_link_t link, const uint8_t *data, size_t len,
                                     size_t *written) {
     (void)context;
     (void)link;
@@ -95,15 +95,15 @@ static wz_ext_link_result_t on_send(void *context, wz_ext_link_t link, const uin
     unlock();
     /* Taken and carried nowhere: no peer answers. */
     *written = len;
-    return WZ_EXT_LINK_OK;
+    return ZEXT_LINK_OK;
 }
 
-static void on_close(void *context, wz_ext_link_t link) {
+static void on_close(void *context, zext_link_t link) {
     (void)context;
     (void)link;
 }
 
-static void on_drained(void *context, wz_ext_link_t link) {
+static void on_drained(void *context, zext_link_t link) {
     (void)context;
     (void)link;
 }
@@ -118,7 +118,7 @@ static void on_drop(void *context) {
 /* The task: report the dialled link connected REPORT_AFTER_MS after the open began. */
 static void *reporter(void *arg) {
     (void)arg;
-    wz_ext_link_t link = 0;
+    zext_link_t link = 0;
     for (int i = 0; i < 500 && link == 0; i++) {
         lock();
         link = seen.link;
@@ -130,7 +130,7 @@ static void *reporter(void *arg) {
     seen.reported_ms = z_clock_elapsed_ms(&seen.started);
     unlock();
     if (link != 0) {
-        wz_ext_transport_event(wz_ext_transport_loan(&seen.transport), link, WZ_EXT_LINK_EVENT_CONNECTED);
+        zext_transport_event(zext_transport_loan(&seen.transport), link, ZEXT_LINK_EVENT_CONNECTED);
     }
     return NULL;
 }
@@ -148,20 +148,20 @@ static int dial(int report, unsigned long *took_ms) {
     seen.drops = 0;
     unlock();
 
-    wz_ext_transport_t calls;
+    zext_transport_t calls;
     memset(&calls, 0, sizeof calls);
     calls.open = on_open;
     calls.send = on_send;
     calls.close = on_close;
     calls.drained = on_drained;
     calls.drop = on_drop;
-    CHECK(wz_ext_transport_new(&seen.transport, &calls) == Z_OK, "wz_ext_transport_new");
+    CHECK(zext_transport_new(&seen.transport, &calls) == Z_OK, "zext_transport_new");
 
     z_owned_config_t config;
     z_config_default(&config);
     zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, LOCATOR);
-    CHECK(wz_ext_config_transport(z_config_loan_mut(&config), wz_ext_transport_loan(&seen.transport)) == Z_OK,
-          "wz_ext_config_transport");
+    CHECK(zext_config_transport(z_config_loan_mut(&config), zext_transport_loan(&seen.transport)) == Z_OK,
+          "zext_config_transport");
 
     z_owned_task_t task;
     int tasked = 0;
@@ -178,7 +178,7 @@ static int dial(int report, unsigned long *took_ms) {
         z_session_drop(z_session_move(&session));
     }
     if (tasked) z_task_join(z_task_move(&task));
-    wz_ext_transport_drop(wz_ext_transport_move(&seen.transport));
+    zext_transport_drop(zext_transport_move(&seen.transport));
     for (int i = 0; i < 1000; i++) {
         lock();
         int drops = seen.drops;
@@ -198,7 +198,7 @@ int main(void) {
     int rc = dial(1, &took);
     lock();
     CHECK(seen.opens >= 1, "the session never asked the program to open a link");
-    CHECK(seen.open_kind == WZ_EXT_LINK_STREAM_DIAL, "the open was of kind %d, not a stream dial", seen.open_kind);
+    CHECK(seen.open_kind == ZEXT_LINK_STREAM_DIAL, "the open was of kind %d, not a stream dial", seen.open_kind);
     CHECK(strcmp(seen.open_locator, LOCATOR) == 0, "the open named '%s'", seen.open_locator);
     CHECK(seen.sends > 0, "the dial sent nothing once reported connected");
     /* A stream is framed by the session: a two-byte length, then the batch, whose first

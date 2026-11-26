@@ -10,7 +10,7 @@
 use wz_capi_port::Refusal;
 
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_ERR_GENERIC, Z_ERR_OVERFLOW, Z_ERR_SESSION_CLOSED,
+    ZResult, ZEXT_ERR_UNSUPPORTED, Z_ERR_GENERIC, Z_ERR_OVERFLOW, Z_ERR_SESSION_CLOSED,
     Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TRANSPORT_TX_FAILED,
 };
 
@@ -36,7 +36,7 @@ pub(crate) enum Door {
         all(feature = "multicast-transport", not(feature = "multi-thread"))
     ))]
     Session,
-    /// A watch of what the peers declare (`wz_ext_decl_watch_declare`), wz's own door, which a
+    /// A watch of what the peers declare (`zext_decl_watch_declare`), wz's own door, which a
     /// build without the declaration watch has none of.
     #[cfg(any(
         feature = "remote-declaration-watch",
@@ -55,10 +55,10 @@ pub(crate) enum Door {
 /// The code of a call the engine refused at `door`: this ABI's one table for the port's
 /// [`Refusal`], each door's row the code zenoh-pico's own door answers for the cause. A plane the
 /// build does not hold, and a statement the engine does not carry out, have no pico code at any
-/// door, as zenoh-pico has neither; each is wz's [`WZ_EXT_ERR_UNSUPPORTED`].
+/// door, as zenoh-pico has neither; each is wz's [`ZEXT_ERR_UNSUPPORTED`].
 pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
     if matches!(refusal, Refusal::NotBuilt | Refusal::NotHonoured(_)) {
-        return WZ_EXT_ERR_UNSUPPORTED;
+        return ZEXT_ERR_UNSUPPORTED;
     }
     // An entity copies its key, which takes one more holder of the key's declaration, and pico
     // refuses that copy at every door with its code for a count past its bound
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(at(Refusal::KeyTooLong), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(at(Refusal::NoEntityId), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(at(Refusal::Closed), Z_ERR_GENERIC);
-        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+        assert_eq!(at(Refusal::NotBuilt), ZEXT_ERR_UNSUPPORTED);
     }
 
     /// A get pico has no room for is out of memory, one on a closed session is
@@ -168,12 +168,12 @@ mod tests {
         assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(at(Refusal::Closed), Z_ERR_SESSION_CLOSED);
         assert_eq!(at(Refusal::ExceedsCapacity), Z_ERR_GENERIC);
-        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+        assert_eq!(at(Refusal::NotBuilt), ZEXT_ERR_UNSUPPORTED);
         assert_eq!(
             at(Refusal::NotHonoured(
                 wz_capi_port::StatementNotHonoured::TargetPeer
             )),
-            WZ_EXT_ERR_UNSUPPORTED
+            ZEXT_ERR_UNSUPPORTED
         );
     }
 
@@ -215,10 +215,7 @@ mod tests {
                 refusal_code(Refusal::ExceedsCapacity, door),
                 Z_ERR_TRANSPORT_TX_FAILED
             );
-            assert_eq!(
-                refusal_code(Refusal::NotBuilt, door),
-                WZ_EXT_ERR_UNSUPPORTED
-            );
+            assert_eq!(refusal_code(Refusal::NotBuilt, door), ZEXT_ERR_UNSUPPORTED);
         }
         assert_eq!(
             refusal_code(Refusal::Closed, Door::Keyexpr),
@@ -252,7 +249,7 @@ mod tests {
         );
         assert_eq!(
             refusal_code(Refusal::NotBuilt, Door::Session),
-            WZ_EXT_ERR_UNSUPPORTED
+            ZEXT_ERR_UNSUPPORTED
         );
     }
 
@@ -265,7 +262,7 @@ mod tests {
     #[test]
     fn each_refusal_of_a_declaration_watch_answers_its_code() {
         let at = |refusal| refusal_code(refusal, Door::DeclWatch);
-        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+        assert_eq!(at(Refusal::NotBuilt), ZEXT_ERR_UNSUPPORTED);
         assert_eq!(at(Refusal::Closed), Z_ERR_SESSION_CLOSED);
         assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
     }
@@ -278,6 +275,6 @@ mod tests {
         assert_eq!(at(Refusal::KeyTooLong), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(at(Refusal::NoEntityId), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(at(Refusal::Closed), Z_ERR_GENERIC);
-        assert_eq!(at(Refusal::NotBuilt), WZ_EXT_ERR_UNSUPPORTED);
+        assert_eq!(at(Refusal::NotBuilt), ZEXT_ERR_UNSUPPORTED);
     }
 }

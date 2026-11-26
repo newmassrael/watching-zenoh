@@ -136,7 +136,9 @@ pub mod time_base;
 pub mod tls_material;
 pub use decl_watch::{DeclPlane, DeclWatchEvent, DeclWatchId, DeclWatchSink};
 pub use deliveries::EngineDeliveries;
-pub use drive::{CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive};
+pub use drive::{
+    CalledFromReadTask, ReadTaskStartRefused, SessionClosed, SessionDrive, StepRefused,
+};
 pub use engine::{
     DeclarationReach, EngineHolder, KeyHolds, RedeclareRefusal, SessionEngine, Tickers,
 };

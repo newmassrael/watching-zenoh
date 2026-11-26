@@ -612,7 +612,7 @@ impl LinkKeyForms {
 }
 
 /// What a session is opened with: the dictionary, when it is given one, and the links whose
-/// key-wire form a deployment states apart from the session's (`wz_ext_config_key_wire_form_for`),
+/// key-wire form a deployment states apart from the session's (`zext_config_key_wire_form_for`),
 /// each named by the locator the configuration dials or listens on.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyIdsAtOpen {

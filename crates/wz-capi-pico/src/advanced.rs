@@ -3334,7 +3334,7 @@ mod tests {
             let stated = unsafe {
                 crate::config::zp_config_insert(
                     config,
-                    crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY,
+                    crate::config_limits::ZEXT_CONFIG_LIMITS_KEY,
                     c"MAX_SUBSCRIPTIONS=2,MAX_DECLARED_KEYEXPRS=4".as_ptr(),
                 )
             };

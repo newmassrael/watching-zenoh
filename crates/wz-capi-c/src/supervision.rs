@@ -21,7 +21,7 @@
 //! is refused until the hook returns.
 //!
 //! What the supervisor does is [`wz_capi_port::observation::supervision`]'s, which the pico ABI's
-//! `wz_ext_supervision_*` doors act on too; this file is this ABI's names and result codes for it.
+//! `zext_supervision_*` doors act on too; this file is this ABI's names and result codes for it.
 
 use std::ffi::c_void;
 

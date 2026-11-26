@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_event_emit`, `wz_ext_event_read`, `wz_ext_event_release` and `wz_ext_event_dropped`: the
+//! `zext_event_emit`, `zext_event_read`, `zext_event_release` and `zext_event_dropped`: the
 //! node's event log, written and read from C (the event ring of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `unstable-api` carries none of it.
 //!
@@ -17,7 +17,7 @@
 //! and none of them takes an event from another. The cursor starts at 0: a log that has wrapped
 //! tells the reader how many events it missed before it hands it the oldest one left. Under
 //! `drop-newest` nothing is freed by reading; the program says how far it is done with
-//! (`wz_ext_event_release`), and that is what makes room.
+//! (`zext_event_release`), and that is what makes room.
 //!
 //! What the log does is [`wz_capi_port::observation::events`]'s, which the zenoh-c ABI's doors act
 //! on too; this file is the pico ABI's names and result codes for it.
@@ -27,47 +27,47 @@ use crate::sized::{Out, SizedOut};
 use wz_capi_port::observation::events::{self, Read};
 
 /// What a read found: an event.
-pub const WZ_EXT_EVENT_RECORD: u8 = 0;
+pub const ZEXT_EVENT_RECORD: u8 = 0;
 /// What a read found: nothing newer than the cursor.
-pub const WZ_EXT_EVENT_EMPTY: u8 = 1;
+pub const ZEXT_EVENT_EMPTY: u8 = 1;
 /// What a read found: events were overwritten before they were read; `sequence` is how many.
-pub const WZ_EXT_EVENT_LOST: u8 = 2;
+pub const ZEXT_EVENT_LOST: u8 = 2;
 
 /// The level of every event the library writes (a program's own levels are its own).
-pub const WZ_EXT_EVENT_LEVEL_LIBRARY: u8 = events::LEVEL_LIBRARY;
+pub const ZEXT_EVENT_LEVEL_LIBRARY: u8 = events::LEVEL_LIBRARY;
 /// The first source number the library uses; a program's sources are below it.
-pub const WZ_EXT_EVENT_SOURCE_LIBRARY: u16 = events::SOURCE_LIBRARY;
+pub const ZEXT_EVENT_SOURCE_LIBRARY: u16 = events::SOURCE_LIBRARY;
 /// A supervised checkpoint missed its deadline. One integer: the checkpoint's number.
-pub const WZ_EXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 = events::SOURCE_SUPERVISION_EXPIRED;
+pub const ZEXT_EVENT_SOURCE_SUPERVISION_EXPIRED: u16 = events::SOURCE_SUPERVISION_EXPIRED;
 /// A host's secure-channel listener ended a connection without a stream. Two integers: why
-/// (`WZ_EXT_EVENT_TLS_DROP_*`) and the channel's own code.
-pub const WZ_EXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED: u16 = events::SOURCE_TLS_HANDSHAKE_DROPPED;
+/// (`ZEXT_EVENT_TLS_DROP_*`) and the channel's own code.
+pub const ZEXT_EVENT_SOURCE_TLS_HANDSHAKE_DROPPED: u16 = events::SOURCE_TLS_HANDSHAKE_DROPPED;
 /// The first integer of a dropped handshake: a peer that stalled past the accept budget.
-pub const WZ_EXT_EVENT_TLS_DROP_STALLED: u64 = events::TLS_DROP_STALLED;
+pub const ZEXT_EVENT_TLS_DROP_STALLED: u64 = events::TLS_DROP_STALLED;
 /// The first integer of a dropped handshake: the arena or the key store had no room.
-pub const WZ_EXT_EVENT_TLS_DROP_NO_ROOM: u64 = events::TLS_DROP_NO_ROOM;
+pub const ZEXT_EVENT_TLS_DROP_NO_ROOM: u64 = events::TLS_DROP_NO_ROOM;
 /// The first integer of a dropped handshake: any other failure, or a peer the policy refused.
-pub const WZ_EXT_EVENT_TLS_DROP_OTHER: u64 = events::TLS_DROP_OTHER;
-/// An instance key reported the samples it dropped (`wz_ext_instance_keyer_*`). Three integers:
-/// why the latest of them was dropped (`WZ_EXT_EVENT_INSTANCE_KEY_*`), which key field, and how
+pub const ZEXT_EVENT_TLS_DROP_OTHER: u64 = events::TLS_DROP_OTHER;
+/// An instance key reported the samples it dropped (`zext_instance_keyer_*`). Three integers:
+/// why the latest of them was dropped (`ZEXT_EVENT_INSTANCE_KEY_*`), which key field, and how
 /// many were dropped since the last report.
-pub const WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED: u16 = events::SOURCE_INSTANCE_KEY_DROPPED;
+pub const ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED: u16 = events::SOURCE_INSTANCE_KEY_DROPPED;
 /// The first integer of an instance key's report: the payload is not a message of the schema.
-pub const WZ_EXT_EVENT_INSTANCE_KEY_UNDECODABLE: u64 = events::INSTANCE_KEY_UNDECODABLE;
+pub const ZEXT_EVENT_INSTANCE_KEY_UNDECODABLE: u64 = events::INSTANCE_KEY_UNDECODABLE;
 /// The first integer of an instance key's report: a key field with presence is absent.
-pub const WZ_EXT_EVENT_INSTANCE_KEY_ABSENT: u64 = events::INSTANCE_KEY_ABSENT;
+pub const ZEXT_EVENT_INSTANCE_KEY_ABSENT: u64 = events::INSTANCE_KEY_ABSENT;
 /// The first integer of an instance key's report: a key value is in no list.
-pub const WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED: u64 = events::INSTANCE_KEY_NOT_LISTED;
+pub const ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED: u64 = events::INSTANCE_KEY_NOT_LISTED;
 
-/// One event, as `wz_ext_event_read` gives it, into a struct the program sized (`crate::sized`).
+/// One event, as `zext_event_read` gives it, into a struct the program sized (`crate::sized`).
 #[repr(C)]
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_event_t {
+pub struct zext_event_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
-    /// `WZ_EXT_EVENT_RECORD`, `WZ_EXT_EVENT_EMPTY` or `WZ_EXT_EVENT_LOST`.
+    /// `ZEXT_EVENT_RECORD`, `ZEXT_EVENT_EMPTY` or `ZEXT_EVENT_LOST`.
     pub kind: u8,
     /// How serious it is, in the program's own scale.
     pub level: u8,
@@ -78,13 +78,13 @@ pub struct wz_ext_event_t {
     /// What said it, in the program's own numbering.
     pub source: u16,
     pub reserved2: u16,
-    /// The event's number in the log; for a `WZ_EXT_EVENT_LOST` read, how many events are gone.
+    /// The event's number in the log; for a `ZEXT_EVENT_LOST` read, how many events are gone.
     pub sequence: u64,
     /// When, as an NTP64 word, or `0` where the clock did not know the date.
     pub timestamp: u64,
 }
 
-impl Default for wz_ext_event_t {
+impl Default for zext_event_t {
     /// No event, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -102,7 +102,7 @@ impl Default for wz_ext_event_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_event_t {
+unsafe impl SizedOut for zext_event_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -116,7 +116,7 @@ unsafe impl SizedOut for wz_ext_event_t {
 /// # Safety
 /// `args` must be null or point to `arg_count` readable integers.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_event_emit(
+pub unsafe extern "C" fn zext_event_emit(
     level: u8,
     source: u16,
     args: *const u64,
@@ -150,9 +150,9 @@ pub unsafe extern "C" fn wz_ext_event_emit(
 /// `cursor` must be valid and writable, `out` a struct of `struct_size` writable bytes, and
 /// `args` null or writable for `args_capacity` integers.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_event_read(
+pub unsafe extern "C" fn zext_event_read(
     cursor: *mut u64,
-    out: *mut wz_ext_event_t,
+    out: *mut zext_event_t,
     args: *mut u64,
     args_capacity: usize,
 ) -> ZResult {
@@ -176,8 +176,8 @@ pub unsafe extern "C" fn wz_ext_event_read(
                 source,
                 sequence,
                 timestamp,
-            } => wz_ext_event_t {
-                kind: WZ_EXT_EVENT_RECORD,
+            } => zext_event_t {
+                kind: ZEXT_EVENT_RECORD,
                 level,
                 arg_count,
                 source,
@@ -185,12 +185,12 @@ pub unsafe extern "C" fn wz_ext_event_read(
                 timestamp,
                 ..Default::default()
             },
-            Read::Empty => wz_ext_event_t {
-                kind: WZ_EXT_EVENT_EMPTY,
+            Read::Empty => zext_event_t {
+                kind: ZEXT_EVENT_EMPTY,
                 ..Default::default()
             },
-            Read::Lost { missed } => wz_ext_event_t {
-                kind: WZ_EXT_EVENT_LOST,
+            Read::Lost { missed } => zext_event_t {
+                kind: ZEXT_EVENT_LOST,
                 sequence: missed,
                 ..Default::default()
             },
@@ -203,7 +203,7 @@ pub unsafe extern "C" fn wz_ext_event_read(
 /// forward; a number past the last event frees what there is. Under `overwrite-oldest` nothing
 /// waits for it, and it changes nothing a reader sees.
 #[no_mangle]
-pub extern "C" fn wz_ext_event_release(upto: u64) -> ZResult {
+pub extern "C" fn zext_event_release(upto: u64) -> ZResult {
     crate::ffi::guarded(|| {
         events::release(upto);
         Z_OK
@@ -212,7 +212,7 @@ pub extern "C" fn wz_ext_event_release(upto: u64) -> ZResult {
 
 /// How many events a full log refused under `drop-newest`. `0` under `overwrite-oldest`.
 #[no_mangle]
-pub extern "C" fn wz_ext_event_dropped() -> u32 {
+pub extern "C" fn zext_event_dropped() -> u32 {
     events::dropped()
 }
 
@@ -225,10 +225,10 @@ mod tests {
     #[test]
     fn a_read_into_a_short_struct_is_refused_and_moves_nothing() {
         let mut cursor = 0u64;
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_event_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_event_t, _>(
             |out| {
                 // SAFETY: `cursor` and `out` are live; no integers are asked for.
-                unsafe { wz_ext_event_read(&mut cursor, out, core::ptr::null_mut(), 0) }
+                unsafe { zext_event_read(&mut cursor, out, core::ptr::null_mut(), 0) }
             },
             crate::result::Z_EINVAL,
         );

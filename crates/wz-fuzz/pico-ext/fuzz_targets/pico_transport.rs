@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A transport the program supplies (`wz_ext_transport_*`), fed by this target as a program's own
+//! A transport the program supplies (`zext_transport_*`), fed by this target as a program's own
 //! network stack feeds it: a session of the library dials over it, a far end the harness plays
 //! answers the dial's handshake from inside the program's `send`, as a stack that delivers at
 //! once does, and every byte the fuzzer writes then reaches the session through
-//! `wz_ext_transport_received`, the door a program hands the bytes of its link to.
+//! `zext_transport_received`, the door a program hands the bytes of its link to.
 //!
 //! Input: a byte of arguments, then the units (`wz_fuzz_ingress_common::units`), which a stream
 //! link is handed as the stream they make (each unit behind its two-byte little-endian length, as
@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::app_transport::*;
 use wz_capi_pico::result::{
-    WZ_EXT_ERR_LINK_CLOSED, WZ_EXT_ERR_LINK_FULL, WZ_EXT_ERR_LINK_UNKNOWN, Z_EINVAL, Z_OK,
+    ZEXT_ERR_LINK_CLOSED, ZEXT_ERR_LINK_FULL, ZEXT_ERR_LINK_UNKNOWN, Z_EINVAL, Z_OK,
 };
 use wz_capi_pico::{
     z_close, z_closure_sample, z_closure_sample_move, z_config_default, z_config_loan_mut,
@@ -80,19 +80,19 @@ struct Far {
     opens: AtomicUsize,
     closes: AtomicUsize,
     /// The links the session closed on the program, each recorded before its close returns: the
-    /// transport answers `WZ_EXT_ERR_LINK_UNKNOWN` for a link only once its close has returned.
-    closed_links: Mutex<HashSet<wz_ext_link_t>>,
+    /// transport answers `ZEXT_ERR_LINK_UNKNOWN` for a link only once its close has returned.
+    closed_links: Mutex<HashSet<zext_link_t>>,
     drops: AtomicUsize,
     dropped: AtomicBool,
     samples: AtomicUsize,
 }
 
 impl Far {
-    fn loan(&self) -> *const wz_ext_loaned_transport_t {
+    fn loan(&self) -> *const zext_loaned_transport_t {
         // SAFETY: the address of the program's owned transport, which outlives every call.
         unsafe {
-            wz_ext_transport_loan(
-                self.transport.load(Ordering::SeqCst) as *const wz_ext_owned_transport_t
+            zext_transport_loan(
+                self.transport.load(Ordering::SeqCst) as *const zext_owned_transport_t
             )
         }
     }
@@ -126,32 +126,32 @@ fn framed(stream: bool, unit: &[u8]) -> Vec<u8> {
 
 unsafe extern "C" fn on_open(
     context: *mut c_void,
-    link: wz_ext_link_t,
-    kind: wz_ext_link_kind_t,
+    link: zext_link_t,
+    kind: zext_link_kind_t,
     _locator: *const c_char,
-) -> wz_ext_link_result_t {
+) -> zext_link_result_t {
     let far = far(context);
     far.called("open");
     let wanted = if far.stream {
-        WZ_EXT_LINK_STREAM_DIAL
+        ZEXT_LINK_STREAM_DIAL
     } else {
-        WZ_EXT_LINK_DATAGRAM
+        ZEXT_LINK_DATAGRAM
     };
     if kind != wanted {
-        return WZ_EXT_LINK_FAILED;
+        return ZEXT_LINK_FAILED;
     }
     far.opens.fetch_add(1, Ordering::SeqCst);
     far.link.store(link, Ordering::SeqCst);
-    WZ_EXT_LINK_OK
+    ZEXT_LINK_OK
 }
 
 unsafe extern "C" fn on_send(
     context: *mut c_void,
-    link: wz_ext_link_t,
+    link: zext_link_t,
     _data: *const u8,
     len: usize,
     written: *mut usize,
-) -> wz_ext_link_result_t {
+) -> zext_link_result_t {
     let far = far(context);
     far.called("send");
     *written = len;
@@ -163,7 +163,7 @@ unsafe extern "C" fn on_send(
     };
     if let Some(reply) = reply {
         let bytes = framed(far.stream, &reply);
-        let rc = wz_ext_transport_received(
+        let rc = zext_transport_received(
             far.loan(),
             link,
             bytes.as_ptr(),
@@ -175,10 +175,10 @@ unsafe extern "C" fn on_send(
             "transport_received: the far end's reply answered {rc}"
         );
     }
-    WZ_EXT_LINK_OK
+    ZEXT_LINK_OK
 }
 
-unsafe extern "C" fn on_close(context: *mut c_void, link: wz_ext_link_t) {
+unsafe extern "C" fn on_close(context: *mut c_void, link: zext_link_t) {
     let far = far(context);
     far.called("close");
     far.closes.fetch_add(1, Ordering::SeqCst);
@@ -224,7 +224,7 @@ fuzz_target!(|data: &[u8]| {
         samples: AtomicUsize::new(0),
     });
     let context = &*far as *const Far as *mut c_void;
-    let calls = wz_ext_transport_t {
+    let calls = zext_transport_t {
         context,
         open: Some(on_open),
         send: Some(on_send),
@@ -232,15 +232,15 @@ fuzz_target!(|data: &[u8]| {
         drained: None,
         drop: Some(on_drop),
     };
-    let mut transport: Box<wz_ext_owned_transport_t> = Box::new(unsafe { core::mem::zeroed() });
+    let mut transport: Box<zext_owned_transport_t> = Box::new(unsafe { core::mem::zeroed() });
     // SAFETY: `transport` is writable; `calls` is readable for the call.
     assert_eq!(
-        unsafe { wz_ext_transport_new(&mut *transport, &calls) },
+        unsafe { zext_transport_new(&mut *transport, &calls) },
         Z_OK,
         "transport_new"
     );
     far.transport.store(
-        &*transport as *const wz_ext_owned_transport_t as usize,
+        &*transport as *const zext_owned_transport_t as usize,
         Ordering::SeqCst,
     );
 
@@ -259,9 +259,9 @@ fuzz_target!(|data: &[u8]| {
             Z_OK
         );
         assert_eq!(
-            wz_ext_config_transport(
+            zext_config_transport(
                 z_config_loan_mut(&mut config),
-                wz_ext_transport_loan(&*transport)
+                zext_transport_loan(&*transport)
             ),
             Z_OK,
             "config_transport"
@@ -333,7 +333,7 @@ fuzz_target!(|data: &[u8]| {
     unsafe {
         let _ = z_close(z_session_loan_mut(&mut session), core::ptr::null());
         z_session_drop(z_session_move(&mut session));
-        wz_ext_transport_drop(wz_ext_transport_move(&mut *transport));
+        zext_transport_drop(zext_transport_move(&mut *transport));
     }
     let deadline = Instant::now() + DROP_WAIT;
     while far.drops.load(Ordering::SeqCst) == 0 {
@@ -367,18 +367,18 @@ fuzz_target!(|data: &[u8]| {
 
 /// Hand `bytes` in on `link`: whether the link still takes bytes. A full link is given
 /// `DRAIN_WAIT` to be read down; a link the session has closed takes nothing more: it answers
-/// `WZ_EXT_ERR_LINK_CLOSED` until the program's close of it returns, and `WZ_EXT_ERR_LINK_UNKNOWN`
+/// `ZEXT_ERR_LINK_CLOSED` until the program's close of it returns, and `ZEXT_ERR_LINK_UNKNOWN`
 /// after, which this program's own thread meets when the session closes the link under it.
 ///
 /// A call of more bytes than the link's bound is refused with `Z_EINVAL`, and refused again
 /// whenever it is repeated: a stream's bytes are then handed in as two halves, each in turn, and
 /// a datagram is dropped, the link still taking the next one.
-fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
+fn hand_in(far: &Far, link: zext_link_t, bytes: &[u8]) -> bool {
     let deadline = Instant::now() + DRAIN_WAIT;
     loop {
         // SAFETY: the program's live transport; `bytes` is readable for the call.
         let rc = unsafe {
-            wz_ext_transport_received(
+            zext_transport_received(
                 far.loan(),
                 link,
                 bytes.as_ptr(),
@@ -392,9 +392,9 @@ fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
             &[
                 Z_OK,
                 Z_EINVAL,
-                WZ_EXT_ERR_LINK_FULL,
-                WZ_EXT_ERR_LINK_CLOSED,
-                WZ_EXT_ERR_LINK_UNKNOWN,
+                ZEXT_ERR_LINK_FULL,
+                ZEXT_ERR_LINK_CLOSED,
+                ZEXT_ERR_LINK_UNKNOWN,
             ],
         );
         if rc == Z_EINVAL {
@@ -410,7 +410,7 @@ fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
             let (front, back) = bytes.split_at(bytes.len() / 2);
             return hand_in(far, link, front) && hand_in(far, link, back);
         }
-        if rc == WZ_EXT_ERR_LINK_UNKNOWN {
+        if rc == ZEXT_ERR_LINK_UNKNOWN {
             assert!(
                 far.closed_links
                     .lock()
@@ -421,7 +421,7 @@ fn hand_in(far: &Far, link: wz_ext_link_t, bytes: &[u8]) -> bool {
         }
         match rc {
             Z_OK => return true,
-            WZ_EXT_ERR_LINK_FULL if Instant::now() < deadline => {
+            ZEXT_ERR_LINK_FULL if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_micros(200))
             }
             _ => return false,

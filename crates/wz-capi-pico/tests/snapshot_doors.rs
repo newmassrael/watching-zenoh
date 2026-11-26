@@ -16,9 +16,8 @@ use std::time::Duration;
 
 use wz_capi_pico::result::{Z_ERR_GENERIC, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
 use wz_capi_pico::snapshot::{
-    wz_ext_resource_reading_t, wz_ext_snapshot_poll, wz_ext_snapshot_read,
-    wz_ext_snapshot_set_source, wz_ext_snapshot_size, WZ_EXT_SNAPSHOT_HAS_CPU,
-    WZ_EXT_SNAPSHOT_HAS_HEAP, WZ_EXT_SNAPSHOT_HAS_TASKS,
+    zext_resource_reading_t, zext_snapshot_poll, zext_snapshot_read, zext_snapshot_set_source,
+    zext_snapshot_size, ZEXT_SNAPSHOT_HAS_CPU, ZEXT_SNAPSHOT_HAS_HEAP, ZEXT_SNAPSHOT_HAS_TASKS,
 };
 use wz_capi_pico::{
     z_close, z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
@@ -56,24 +55,24 @@ unsafe fn close_session(session: &mut z_owned_session_t) {
 
 /// The latest snapshot as the door writes it, decoded.
 unsafe fn read_latest() -> Decoded {
-    let mut bytes = vec![0u8; wz_ext_snapshot_size()];
+    let mut bytes = vec![0u8; zext_snapshot_size()];
     let mut length = 0usize;
     assert_eq!(
-        wz_ext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
+        zext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
         Z_OK
     );
     assert_eq!(length, bytes.len(), "the whole record is written");
     Decoded::from_bytes(&bytes[..length]).expect("the record decodes")
 }
 
-unsafe extern "C" fn platform(_context: *mut c_void, out: *mut wz_ext_resource_reading_t) -> i8 {
+unsafe extern "C" fn platform(_context: *mut c_void, out: *mut zext_resource_reading_t) -> i8 {
     // A source writes no byte past the size the library hands it; one too short to hold the
     // readings answers nothing.
-    if (*out).struct_size < std::mem::size_of::<wz_ext_resource_reading_t>() {
+    if (*out).struct_size < std::mem::size_of::<zext_resource_reading_t>() {
         return -1;
     }
-    *out = wz_ext_resource_reading_t {
-        available: WZ_EXT_SNAPSHOT_HAS_CPU | WZ_EXT_SNAPSHOT_HAS_HEAP | WZ_EXT_SNAPSHOT_HAS_TASKS,
+    *out = zext_resource_reading_t {
+        available: ZEXT_SNAPSHOT_HAS_CPU | ZEXT_SNAPSHOT_HAS_HEAP | ZEXT_SNAPSHOT_HAS_TASKS,
         cpu_permille: 420,
         tasks: 7,
         heap_in_use: 10_000,
@@ -85,22 +84,22 @@ unsafe extern "C" fn platform(_context: *mut c_void, out: *mut wz_ext_resource_r
 
 #[test]
 fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
-    assert_eq!(WZ_EXT_SNAPSHOT_HAS_CPU, HAS_CPU);
-    assert_eq!(WZ_EXT_SNAPSHOT_HAS_HEAP, HAS_HEAP);
-    assert_eq!(WZ_EXT_SNAPSHOT_HAS_TASKS, HAS_TASKS);
+    assert_eq!(ZEXT_SNAPSHOT_HAS_CPU, HAS_CPU);
+    assert_eq!(ZEXT_SNAPSHOT_HAS_HEAP, HAS_HEAP);
+    assert_eq!(ZEXT_SNAPSHOT_HAS_TASKS, HAS_TASKS);
     // SAFETY: fresh configs and sessions, each closed before the function returns; the buffers are
     // sized by the door's own answer.
     unsafe {
         // ARM 1: before the first snapshot there is nothing to read, and the size is the build's.
-        assert_eq!(wz_ext_snapshot_size(), Decoded::SIZE);
+        assert_eq!(zext_snapshot_size(), Decoded::SIZE);
         let mut one = [0u8; 1];
         let mut length = 0usize;
         assert_eq!(
-            wz_ext_snapshot_read(one.as_mut_ptr(), one.len(), &mut length),
+            zext_snapshot_read(one.as_mut_ptr(), one.len(), &mut length),
             Z_ERR_GENERIC,
             "no snapshot yet"
         );
-        assert_eq!(wz_ext_snapshot_poll(std::ptr::null()), Z_ERR_NULL);
+        assert_eq!(zext_snapshot_poll(std::ptr::null()), Z_ERR_NULL);
 
         // The listening session receives the handshake of the one that dials it.
         let port = free_port();
@@ -110,11 +109,11 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
         // ARM 2: with a source set, the first poll takes a snapshot of what the source answered and
         // of the messages the session received; a second poll at once finds none due.
         assert_eq!(
-            wz_ext_snapshot_set_source(Some(platform), std::ptr::null_mut()),
+            zext_snapshot_set_source(Some(platform), std::ptr::null_mut()),
             Z_OK
         );
-        assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
-        assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 0);
+        assert_eq!(zext_snapshot_poll(z_session_loan(&listener)), 1);
+        assert_eq!(zext_snapshot_poll(z_session_loan(&listener)), 0);
         let first = read_latest();
         // The ring's loss count is the library's to state, so it is measured exactly when the
         // build has the ring, whatever the program's source answers.
@@ -148,10 +147,10 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
 
         // ARM 3: the record starts with its layout version and size, which is what lets a reader
         // of another build tell what it holds.
-        let mut bytes = vec![0u8; wz_ext_snapshot_size()];
+        let mut bytes = vec![0u8; zext_snapshot_size()];
         let mut length = 0usize;
         assert_eq!(
-            wz_ext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
+            zext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), &mut length),
             Z_OK
         );
         assert_eq!(u16::from_le_bytes([bytes[0], bytes[1]]), LAYOUT_VERSION);
@@ -162,16 +161,16 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
 
         // ARM 4: the doors refuse what they cannot use.
         assert_eq!(
-            wz_ext_snapshot_read(bytes.as_mut_ptr(), bytes.len() - 1, &mut length),
+            zext_snapshot_read(bytes.as_mut_ptr(), bytes.len() - 1, &mut length),
             Z_ERR_OVERFLOW,
             "a buffer smaller than the record gets none of it"
         );
         assert_eq!(
-            wz_ext_snapshot_read(std::ptr::null_mut(), bytes.len(), &mut length),
+            zext_snapshot_read(std::ptr::null_mut(), bytes.len(), &mut length),
             Z_ERR_NULL
         );
         assert_eq!(
-            wz_ext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), std::ptr::null_mut()),
+            zext_snapshot_read(bytes.as_mut_ptr(), bytes.len(), std::ptr::null_mut()),
             Z_ERR_NULL
         );
 
@@ -180,8 +179,8 @@ fn a_snapshot_is_taken_on_its_period_and_read_as_bytes() {
         // session is closed first, and the count of what the node received does not fall with it.
         close_session(&mut dialler);
         std::thread::sleep(Duration::from_millis(SNAPSHOT_PERIOD_MS as u64 + 100));
-        assert_eq!(wz_ext_snapshot_set_source(None, std::ptr::null_mut()), Z_OK);
-        assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
+        assert_eq!(zext_snapshot_set_source(None, std::ptr::null_mut()), Z_OK);
+        assert_eq!(zext_snapshot_poll(z_session_loan(&listener)), 1);
         let second = read_latest();
         assert_eq!(second.sequence, first.sequence.wrapping_add(1));
         assert_eq!(

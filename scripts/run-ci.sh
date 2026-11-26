@@ -3510,11 +3510,11 @@ layer_c0_test_discipline() {
     # R3440 (drop-in and extension are separate namespaces) -- the pico drop-in
     # header declares only what zenoh-pico's own header declares at the pin, read
     # through the preprocessor under three configurations, and wz_ext.h only
-    # wz_ext_* doors.
+    # zext_* doors.
     _runci_leg drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py --selftest >/dev/null
     _runci_leg drop_in_header_gate --after drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py
     # The release proof of the pico Windows DLL (docs/release-proof-pico-windows.md): every
-    # public function, switch, example and test of zenoh-pico at the pin, and every wz_ext_*
+    # public function, switch, example and test of zenoh-pico at the pin, and every zext_*
     # door, has a row, and a row's status is what the lanes it cites make it. It reads
     # zenoh-pico's header through the drop-in gate's reader, three `cc -E` runs, no build.
     _runci_leg release_proof_ledger_gate.selftest -- python3 scripts/lib/release_proof_ledger_gate.py --selftest

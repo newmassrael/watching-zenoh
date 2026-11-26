@@ -2862,12 +2862,17 @@ mod link_stamps {
         assert_eq!(step(100 + 1 + lease), [LeaseCheckOutcome::Expired]);
     }
 
-    /// Between two checks a step is told the due the last check read, not one read anew: the
-    /// lease cut short through its door, which counts no move, leaves the due the timers answer
-    /// at the expiry they hold. The CONTROL is timers that read the lease now: they answer the
-    /// earlier wake. Turned red by a due that reads the stamps and the clock at every step.
+    /// The due a step is told is the one the timers hold, read again only where what it was read
+    /// under changed: a stamp changed through its door is answered at once; a receipt, which
+    /// moves the lease only later, leaves the held deadline answered, early and never late, until
+    /// the check at it reads the later one; and after that check a lease cut short through its
+    /// door, which counts no move, leaves the due the check read. The CONTROL is timers that read
+    /// the lease now: they answer the earlier wake. Turned red by a wait that keeps its deadline
+    /// across a door's move (the earlier expiry missed), by one that reads the stamps at every
+    /// call (the receipt's expiry answered before the check), or by a due that reads the stamps
+    /// and the clock at every step between checks.
     #[test]
-    fn a_step_between_checks_is_told_the_due_the_last_check_read() {
+    fn a_step_is_told_the_due_the_timers_hold() {
         use crate::session_timeouts::SessionTimeouts;
         use crate::transport_timers::TransportTimers;
 
@@ -2877,24 +2882,48 @@ mod link_stamps {
             .link
             .lease_armed
             .store(true, core::sync::atomic::Ordering::SeqCst);
-        actions.link.fact_established_at(|slot| *slot = Some(100));
-        let held = crate::drive::lease_wake_deadline(&*actions);
+        actions.link.fact_established_at(|slot| *slot = Some(900));
+        let lease = actions.adopted_lease_ms();
+        assert!(900 < 10 + 1 + lease, "CONTROL: 900 is before either expiry");
         let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 900),
+            Some(900 + 1 + lease),
+            "the expiry read"
+        );
+        actions.link.fact_established_at(|slot| *slot = Some(10));
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 900),
+            Some(10 + 1 + lease),
+            "a door's move is read at once"
+        );
+        actions.link.note_received_at(950);
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 901),
+            Some(10 + 1 + lease),
+            "a receipt leaves the held expiry"
+        );
         assert!(
-            lease_checks(&mut timers, &mut engine, &actions, 100).is_empty(),
-            "CONTROL: nothing is due at the establishment"
+            lease_checks(&mut timers, &mut engine, &actions, 10 + 1 + lease).is_empty(),
+            "the check at it reads the later one and judges nothing"
+        );
+        let held = Some(950 + 1 + lease);
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 10 + 1 + lease),
+            held,
+            "and the wait answers the later one"
         );
         actions.fact_peer_open_lease_ms(|slot| *slot = Some(0));
         let now = crate::drive::lease_wake_deadline(&*actions);
         assert_ne!(now, held, "CONTROL: the lease cut short wakes earlier");
         assert_eq!(
-            timers.next_due_ms(&engine, &*actions, 100),
+            timers.next_due_ms(&engine, &*actions, 10 + 1 + lease),
             held,
             "the step was told a due read anew"
         );
         let mut fresh = TransportTimers::new(SessionTimeouts::spec_defaults());
         assert_eq!(
-            fresh.next_due_ms(&engine, &*actions, 100),
+            fresh.next_due_ms(&engine, &*actions, 10 + 1 + lease),
             now,
             "CONTROL: timers that read the lease now answer its earlier wake"
         );

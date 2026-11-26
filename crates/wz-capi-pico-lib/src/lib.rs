@@ -21,3 +21,8 @@ extern crate abi;
 // `std`'s runtime is linked where the library unwinds, and two panic handlers are refused.
 #[cfg(panic = "abort")]
 abi::c_library_runtime!();
+
+// The C runtime of an MSVC target, in Visual Studio's place, where nothing else links one: a build
+// with `std` links the C runtime itself, whose names this crate's would meet.
+#[cfg(all(panic = "abort", windows, target_env = "msvc"))]
+extern crate wz_msvc_runtime;

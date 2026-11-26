@@ -158,11 +158,11 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
     let profile = CString::new(PROFILE).unwrap();
     let values = CString::new(VALUES).unwrap();
     unsafe {
-        let mut options: wz_ext_e2e_sender_options_t = std::mem::zeroed();
-        wz_ext_e2e_sender_options_default(&mut options);
+        let mut options: zext_e2e_sender_options_t = std::mem::zeroed();
+        zext_e2e_sender_options_default(&mut options);
         options.streams = THREADS;
-        let mut tx: wz_ext_owned_e2e_sender_t = std::mem::zeroed();
-        let rc = wz_ext_e2e_sender_new(
+        let mut tx: zext_owned_e2e_sender_t = std::mem::zeroed();
+        let rc = zext_e2e_sender_new(
             &mut tx,
             profile.as_ptr(),
             values.as_ptr(),
@@ -170,11 +170,11 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
             std::ptr::null_mut(),
         );
         assert_eq!(rc, Z_OK, "the sender is made");
-        let mut judge_options: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
-        wz_ext_e2e_receiver_options_default(&mut judge_options);
+        let mut judge_options: zext_e2e_receiver_options_t = std::mem::zeroed();
+        zext_e2e_receiver_options_default(&mut judge_options);
         judge_options.streams = THREADS;
-        let mut rx: wz_ext_owned_e2e_receiver_t = std::mem::zeroed();
-        let rc = wz_ext_e2e_receiver_new(
+        let mut rx: zext_owned_e2e_receiver_t = std::mem::zeroed();
+        let rc = zext_e2e_receiver_new(
             &mut rx,
             profile.as_ptr(),
             values.as_ptr(),
@@ -189,14 +189,14 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
             for stream in 0..THREADS {
                 let start = &start;
                 scope.spawn(move || {
-                    let tx = wz_ext_e2e_sender_loan(tx_at.get());
-                    let rx = wz_ext_e2e_receiver_loan(rx_at.get());
+                    let tx = zext_e2e_sender_loan(tx_at.get());
+                    let rx = zext_e2e_receiver_loan(rx_at.get());
                     let payload = [stream as u8; 5];
                     start.wait();
                     for round in 0..ROUNDS {
                         let mut frame = [0u8; 64];
                         let (mut written, mut counter) = (0usize, 0u64);
-                        let rc = wz_ext_e2e_sender_protect(
+                        let rc = zext_e2e_sender_protect(
                             tx,
                             stream,
                             payload.as_ptr(),
@@ -212,8 +212,8 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
                             counter, round as u64,
                             "stream {stream} keeps its own counter"
                         );
-                        let mut verdict = wz_ext_e2e_verdict_t::default();
-                        let rc = wz_ext_e2e_receiver_judge(
+                        let mut verdict = zext_e2e_verdict_t::default();
+                        let rc = zext_e2e_receiver_judge(
                             rx,
                             stream,
                             frame.as_ptr(),
@@ -223,9 +223,9 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
                         );
                         assert_eq!(rc, Z_OK);
                         let want = if round == 0 {
-                            WZ_EXT_E2E_FIRST
+                            ZEXT_E2E_FIRST
                         } else {
-                            WZ_EXT_E2E_OK
+                            ZEXT_E2E_OK
                         };
                         assert_eq!(
                             (verdict.status, verdict.failed, verdict.counter),
@@ -239,15 +239,15 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
 
         for stream in 0..THREADS {
             let mut next = 0u64;
-            assert!(wz_ext_e2e_sender_next(
-                wz_ext_e2e_sender_loan(&tx),
+            assert!(zext_e2e_sender_next(
+                zext_e2e_sender_loan(&tx),
                 stream,
                 &mut next
             ));
             assert_eq!(next, ROUNDS as u64, "stream {stream} moved once a frame");
         }
-        wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut tx));
-        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut rx));
+        zext_e2e_sender_drop(zext_e2e_sender_move(&mut tx));
+        zext_e2e_receiver_drop(zext_e2e_receiver_move(&mut rx));
     }
 }
 
@@ -258,13 +258,13 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
     const ROOM: usize = 32;
     let mut storage = vec![0u8; THREADS * ROOM];
     unsafe {
-        let mut options: wz_ext_instance_keyer_options_t = std::mem::zeroed();
-        wz_ext_instance_keyer_options_default(&mut options);
+        let mut options: zext_instance_keyer_options_t = std::mem::zeroed();
+        zext_instance_keyer_options_default(&mut options);
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = ROOM;
-        let mut keyer: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
-        let rc = wz_ext_instance_keyer_from_descriptor_set(
+        let mut keyer: zext_owned_instance_keyer_t = std::mem::zeroed();
+        let rc = zext_instance_keyer_from_descriptor_set(
             &mut keyer,
             KEYED_SET.as_ptr(),
             KEYED_SET.len(),
@@ -280,24 +280,24 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
             for instance in 0..THREADS {
                 let start = &start;
                 scope.spawn(move || {
-                    let keyer = wz_ext_instance_keyer_loan(at.get());
+                    let keyer = zext_instance_keyer_loan(at.get());
                     let bay = [12u64, 30][instance / 2];
                     let tilt = [-3i32, 5][instance % 2];
                     start.wait();
                     for round in 0..ROUNDS {
                         // An undecodable payload between each two, which every thread counts.
-                        let mut key = wz_ext_instance_key_t::default();
+                        let mut key = zext_instance_key_t::default();
                         let garbage = [0xFFu8, 0xFF];
-                        let rc = wz_ext_instance_keyer_index(
+                        let rc = zext_instance_keyer_index(
                             keyer,
                             garbage.as_ptr(),
                             garbage.len(),
                             0,
                             &mut key,
                         );
-                        assert_eq!((rc, key.status), (Z_OK, WZ_EXT_INSTANCE_KEY_UNDECODABLE));
+                        assert_eq!((rc, key.status), (Z_OK, ZEXT_INSTANCE_KEY_UNDECODABLE));
                         let payload = reading(bay, tilt, &[instance as u8, round as u8]);
-                        let rc = wz_ext_instance_keyer_index(
+                        let rc = zext_instance_keyer_index(
                             keyer,
                             payload.as_ptr(),
                             payload.len(),
@@ -308,15 +308,15 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
                         assert_eq!(
                             (key.status, key.instance, key.last),
                             (
-                                WZ_EXT_INSTANCE_KEY_INDEXED,
+                                ZEXT_INSTANCE_KEY_INDEXED,
                                 instance,
-                                WZ_EXT_INSTANCE_KEY_LAST_RECORDED
+                                ZEXT_INSTANCE_KEY_LAST_RECORDED
                             ),
                             "thread {instance} round {round}"
                         );
                         let mut out = [0u8; ROOM];
                         let mut len = 0usize;
-                        let rc = wz_ext_instance_keyer_last(
+                        let rc = zext_instance_keyer_last(
                             keyer,
                             instance,
                             out.as_mut_ptr(),
@@ -335,8 +335,8 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
         });
 
         let mut undecodable = 0u64;
-        let rc = wz_ext_instance_keyer_counts(
-            wz_ext_instance_keyer_loan(&keyer),
+        let rc = zext_instance_keyer_counts(
+            zext_instance_keyer_loan(&keyer),
             &mut undecodable,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -347,7 +347,7 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
             (THREADS * ROUNDS) as u64,
             "every drop of every thread is counted"
         );
-        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut keyer));
+        zext_instance_keyer_drop(zext_instance_keyer_move(&mut keyer));
     }
     drop(storage);
 }
@@ -357,11 +357,11 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
     let _program = crate::programs::admit();
     let text = CString::new(CATALOG).unwrap();
     unsafe {
-        let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
-        let rc = wz_ext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut());
+        let mut catalog: zext_owned_message_catalog_t = std::mem::zeroed();
+        let rc = zext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut());
         assert_eq!(rc, Z_OK, "the synthetic catalog is read");
-        let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
-        let rc = wz_ext_payload_schema_from_descriptor_set(
+        let mut schema: zext_owned_payload_schema_t = std::mem::zeroed();
+        let rc = zext_payload_schema_from_descriptor_set(
             &mut schema,
             PAYLOAD_SET.as_ptr(),
             PAYLOAD_SET.len(),
@@ -375,21 +375,21 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
             for thread in 0..THREADS {
                 let start = &start;
                 scope.spawn(move || {
-                    let catalog = wz_ext_message_catalog_loan(catalog_at.get());
-                    let schema = wz_ext_payload_schema_loan(schema_at.get());
+                    let catalog = zext_message_catalog_loan(catalog_at.get());
+                    let schema = zext_payload_schema_loan(schema_at.get());
                     let message = CString::new("syn.thread.Pose").unwrap();
                     let path = CString::new("serial").unwrap();
                     // The thread's storage, which outlives its payload.
                     let (fields, bytes) = (8, 64);
-                    let mut storage = vec![0u8; wz_ext_message_payload_storage_size(fields, bytes)];
-                    let options = wz_ext_message_payload_options_t {
+                    let mut storage = vec![0u8; zext_message_payload_storage_size(fields, bytes)];
+                    let options = zext_message_payload_options_t {
                         storage: storage.as_mut_ptr(),
                         storage_len: storage.len(),
                         fields,
                         bytes,
                     };
-                    let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
-                    let rc = wz_ext_message_payload_new(
+                    let mut payload: zext_owned_message_payload_t = std::mem::zeroed();
+                    let rc = zext_message_payload_new(
                         &mut payload,
                         catalog,
                         thread % 2,
@@ -399,51 +399,51 @@ fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
                         std::ptr::null_mut(),
                     );
                     assert_eq!(rc, Z_OK, "thread {thread}'s payload");
-                    let mine = wz_ext_message_payload_loan(&payload);
+                    let mine = zext_message_payload_loan(&payload);
                     start.wait();
                     for round in 0..ROUNDS {
-                        let mut entry = wz_ext_message_entry_t::default();
+                        let mut entry = zext_message_entry_t::default();
                         let index = round % 2;
-                        let rc = wz_ext_message_catalog_entry(catalog, index, &mut entry);
+                        let rc = zext_message_catalog_entry(catalog, index, &mut entry);
                         assert_eq!(rc, Z_OK);
                         let key = CStr::from_ptr(entry.key_expr);
                         let mut found = usize::MAX;
-                        let rc = wz_ext_message_catalog_find(catalog, key.as_ptr(), &mut found);
+                        let rc = zext_message_catalog_find(catalog, key.as_ptr(), &mut found);
                         assert_eq!((rc, found), (Z_OK, index), "a key finds its own entry");
 
                         let serial = (thread * ROUNDS + round) as u64;
-                        let rc = wz_ext_message_payload_set_uint(mine, path.as_ptr(), serial);
+                        let rc = zext_message_payload_set_uint(mine, path.as_ptr(), serial);
                         assert_eq!(rc, Z_OK);
                         let mut size = 0usize;
                         let rc =
-                            wz_ext_message_payload_encode(mine, std::ptr::null_mut(), 0, &mut size);
+                            zext_message_payload_encode(mine, std::ptr::null_mut(), 0, &mut size);
                         assert!(rc == Z_OK || rc == Z_ERR_OVERFLOW, "{rc}");
                         let mut bytes = vec![0u8; size];
-                        let rc = wz_ext_message_payload_encode(
+                        let rc = zext_message_payload_encode(
                             mine,
                             bytes.as_mut_ptr(),
                             bytes.len(),
                             &mut size,
                         );
                         assert_eq!(rc, Z_OK);
-                        let rc = wz_ext_message_payload_reset(mine);
+                        let rc = zext_message_payload_reset(mine);
                         assert_eq!(rc, Z_OK);
-                        let rc = wz_ext_message_payload_decode(mine, bytes.as_ptr(), bytes.len());
+                        let rc = zext_message_payload_decode(mine, bytes.as_ptr(), bytes.len());
                         assert_eq!(rc, Z_OK);
                         let mut back = u64::MAX;
-                        let rc = wz_ext_message_payload_get_uint(mine, path.as_ptr(), &mut back);
+                        let rc = zext_message_payload_get_uint(mine, path.as_ptr(), &mut back);
                         assert_eq!(
                             (rc, back),
                             (Z_OK, serial),
                             "thread {thread} reads its own value"
                         );
                     }
-                    wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut payload));
+                    zext_message_payload_drop(zext_message_payload_move(&mut payload));
                 });
             }
         });
 
-        wz_ext_payload_schema_drop(wz_ext_payload_schema_move(&mut schema));
-        wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog));
+        zext_payload_schema_drop(zext_payload_schema_move(&mut schema));
+        zext_message_catalog_drop(zext_message_catalog_move(&mut catalog));
     }
 }

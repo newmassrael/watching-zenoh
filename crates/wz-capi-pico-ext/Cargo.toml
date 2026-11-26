@@ -46,7 +46,7 @@ default = ["std", "unstable-api", "multi-thread", "query"]
 std = []
 # What the core library this one runs over is built with, as far as the doors read it: the layout
 # of the C types the doors allocate (`unstable-api`, `local-queryable` in `z_get_options_t`), the
-# interface functions a core has (`query`: `wz_ext_interface_session_facts`), the event log the
+# interface functions a core has (`query`: `zext_interface_session_facts`), the event log the
 # instance keys report to (`event-ring`) and the threads a supervisor may run on
 # (`multi-thread`). Each is the wz-capi-pico feature of that name, and the two libraries are built
 # from one feature list (scripts/pico-additional-forms.sh, scripts/lib/pico_windows_package.py).
