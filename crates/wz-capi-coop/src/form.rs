@@ -259,22 +259,32 @@ mod tests {
 
     /// The one-thread form lends a link's session its values under the session's one lock, with no
     /// lock of their own; the form of several threads gives each value its own lock, counts what
-    /// the faces share across threads and a link's own handles for one task. Turned red, at
-    /// build, by a form whose `SessionLock` is another kind.
+    /// the faces share across threads and a link's own handles for one task, where the build gives
+    /// value locks (`wz_value_locks`), and keeps them under the session's lock as the one-thread
+    /// form does where it does not. Turned red, at build, by a form whose `SessionLock` is
+    /// another kind.
     #[test]
     fn each_form_lends_a_links_values_under_its_own_lock_kind() {
         fn same<T>(_: PhantomData<T>, _: PhantomData<T>) {}
+        #[cfg(wz_value_locks)]
         same(
             PhantomData::<<Threads as LockForm>::SessionLock>,
             PhantomData::<wz_runtime_coop::sync::ManyThreads>,
         );
+        #[cfg(wz_value_locks)]
         same(
             PhantomData::<<<Threads as LockForm>::SessionLock as LockKind>::LinkCount>,
             PhantomData::<wz_runtime_coop::link_cells::OneFace>,
         );
+        #[cfg(wz_value_locks)]
         same(
             PhantomData::<<<Threads as LockForm>::SessionLock as LockKind>::SharedCount>,
             PhantomData::<wz_runtime_coop::link_cells::Atomic>,
+        );
+        #[cfg(not(wz_value_locks))]
+        same(
+            PhantomData::<<Threads as LockForm>::SessionLock>,
+            PhantomData::<Confined<UnderCoreLock>>,
         );
         same(
             PhantomData::<<super::SessionLock as LockKind>::LinkCount>,

@@ -13,11 +13,23 @@
 //! each value has a lock of its own: it reaches a face's values with no session's lock held, and a
 //! group's, of one thread's types, under that lock. A `threads` build keeps the round where its
 //! form has no such lock.
+//!
+//! The environment may withhold those locks from a build whose host would give them
+//! (`WZ_COOP_VALUE_LOCKS=off`): the form of a `threads` image with no host lock, which keeps the
+//! round, is then built on a host, whose tests have `std`. No feature can say it, since `std` is
+//! both what the tests need and what gives the locks; a leg of the non-default tests gate builds
+//! the crate's tests so, and it is the one host build that compiles the round.
+
+/// The environment word that withholds the value locks a host lock would give ([`withheld`]).
+const VALUE_LOCKS: &str = "WZ_COOP_VALUE_LOCKS";
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_round)");
     println!("cargo:rustc-check-cfg=cfg(wz_value_locks)");
-    let value_locks = value_locks();
+    println!("cargo:rerun-if-env-changed={VALUE_LOCKS}");
+    // Read whatever the target, so a word the script refuses is refused on every build.
+    let withheld = withheld();
+    let value_locks = value_locks() && !withheld;
     if value_locks {
         println!("cargo:rustc-cfg=wz_value_locks");
     }
@@ -39,4 +51,15 @@ fn value_locks() -> bool {
     let atomics = std::env::var("CARGO_CFG_TARGET_HAS_ATOMIC").unwrap_or_default();
     let has = |width: &str| atomics.split(',').any(|held| held == width);
     host_lock && has("8") && has("64")
+}
+
+/// Whether the environment withholds the value locks (`WZ_COOP_VALUE_LOCKS=off`). Any other
+/// value is refused: a misspelt word would otherwise build the host's form under a leg that
+/// claims the other.
+fn withheld() -> bool {
+    match std::env::var(VALUE_LOCKS) {
+        Err(std::env::VarError::NotPresent) => false,
+        Ok(word) if word == "off" => true,
+        other => panic!("{VALUE_LOCKS} is `off` or unset, not {other:?}"),
+    }
 }

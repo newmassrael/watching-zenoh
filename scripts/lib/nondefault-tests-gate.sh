@@ -867,8 +867,10 @@ files::decl_watch_doors::"
     # aliases of every member a group's face holds, in the pool and in the face's set
     # (`multicast-declarations`). The one a record still reads in, kept past its return, is the
     # round's: the engine keeps a round only where its form has no value locks (`wz_round`, its
-    # build script), which no build of its tests on `std` is, so the round's own crate holds that
-    # test and runs it over its default `alloc`, named here so the leg refuses to run nothing.
+    # build script), which a build of its tests on `std` is only where the environment withholds
+    # them (the `WZ_COOP_VALUE_LOCKS` rows below, which run the engine's copy among the round's
+    # tests), so the round's own crate holds that test too and runs it over its default `alloc`,
+    # named here so the leg refuses to run nothing.
     "wz-capi-coop|hook|app-transport,group,connectivity|engine::group::told_tests::"
     "wz-capi-coop|hook|app-transport,group|engine::member_key_tests::"
     "wz-capi-coop|hook|app-transport,group|tests::arena::a_session_that_joins_groups_is_lent_a_receive_buffer_for_each"
@@ -944,6 +946,18 @@ files::decl_watch_doors::"
     # The constant that form is chosen by, in the same environment: no snapshot of it selects
     # `on`, and `ReplayPacing::REACHABLE` says so (`replay_pacing::`).
     "wz-session-core|lane|@env:WZ_POLICY_DECLARATION_SYNC_PACING_ALLOWS_ON=off|replay_pacing::"
+    # The crate in the form of a `threads` image with no host lock: the environment withholds the
+    # value locks a host would give (`WZ_COOP_VALUE_LOCKS=off`, the crate's build script), so the
+    # read task keeps the round (`wz_round`) and a link's values stay under the session's one lock.
+    # No feature reaches that form, since `std`, which the tests need, is what gives the locks;
+    # without these rows no host build compiles `crate::round`, the gate it holds each link
+    # behind, or the round's tests (`tests::round::`). The features are those the round's tests
+    # are written under: a group's buffers, the stacks of several links, tokens, a get's legs and
+    # the session's own subscribers. The first row runs the round's tests before a push; the
+    # second the whole suite in that form, scope `lane`: its seconds are not measured on a build
+    # host yet.
+    "wz-capi-coop|hook|@env:WZ_COOP_VALUE_LOCKS=off,app-transport,group,listen,liveliness,local-subscriber,query,queryable|tests::round::"
+    "wz-capi-coop|lane|@env:WZ_COOP_VALUE_LOCKS=off,app-transport,group,listen,liveliness,local-subscriber,query,queryable|"
     # What a hosted OS tells a node about its network, and the multicast sockets built from it,
     # which the tokio runtime and the cooperative host both open. The `#iface=` honor (the v4 and
     # v6 interface selectors and the tests that read them off the loopback) is compiled only with

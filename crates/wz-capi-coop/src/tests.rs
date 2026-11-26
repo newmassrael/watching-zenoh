@@ -2812,13 +2812,7 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
 /// wait for the callback, which waits for the put), and, as it does not build, by `threads` kept
 /// among the features that keep the round where each value has a lock of its own (`build.rs`):
 /// the face count read below is the direct read's.
-#[cfg(all(
-    feature = "threads",
-    any(feature = "std", feature = "host-sys"),
-    target_has_atomic = "8",
-    target_has_atomic = "64",
-    not(feature = "group")
-))]
+#[cfg(all(feature = "threads", wz_value_locks, not(feature = "group")))]
 #[test]
 fn a_put_another_thread_makes_inside_a_read_tasks_callback_is_sent_and_both_return() {
     let router = Router::start(CatchAll::Held);
@@ -4040,16 +4034,20 @@ mod tx_pool;
 /// read is no reason to keep it: the read task steps a group's session under the session's lock
 /// and hands its records out with that lock let go of. The read that hands each record out as it
 /// is read queues none, a get's reply included. A build that keeps none compiles no
-/// `crate::round`, so this is read here, where every build reads it. Turned red by `group` put
-/// back in the script's predicate: the shipped host preset (`threads` and `group`) would read
-/// through the round again.
+/// `crate::round`, so this is read here, where every build reads it. The environment withholds
+/// the value locks (`WZ_COOP_VALUE_LOCKS=off`), read here as the compiler was handed it, so a
+/// host builds the form of a `threads` image with no host lock. Turned red by `group` put back
+/// in the script's predicate: the shipped host preset (`threads` and `group`) would read
+/// through the round again; and by a script that gives the locks the environment withholds.
 #[test]
 fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
-    let value_locks = cfg!(all(
-        any(feature = "std", feature = "host-sys"),
-        target_has_atomic = "8",
-        target_has_atomic = "64"
-    ));
+    let withheld = option_env!("WZ_COOP_VALUE_LOCKS") == Some("off");
+    let value_locks = !withheld
+        && cfg!(all(
+            any(feature = "std", feature = "host-sys"),
+            target_has_atomic = "8",
+            target_has_atomic = "64"
+        ));
     assert_eq!(cfg!(wz_value_locks), value_locks);
     assert_eq!(cfg!(wz_round), cfg!(feature = "threads") && !value_locks);
 }
