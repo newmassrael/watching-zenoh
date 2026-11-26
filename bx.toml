@@ -434,8 +434,8 @@ local = "never"
 # instead of queueing them behind its one path. Each is safe under concurrent writers:
 # - .debug: perf's build-id cache, content-addressed by build id.
 # - .local/mn: the pinned mnemosyne-cli, one directory per revision (scripts/install-mnemosyne-cli.sh).
-# - wz-kit-lane and the kitnm-* lane homes: scripts/kit-lane.sh builds there under KIT_LANE_LOCK.
-shared = [".debug", ".local/mn", "wz-kit-lane", "kitnm-int", "kitnm-kn", "kitnm-main", "kitnm-oct31"]
+# - wz-kit-lane: scripts/kit-lane.sh's default KIT_LANE_HOME, built under KIT_LANE_LOCK.
+shared = [".debug", ".local/mn", "wz-kit-lane"]
 
 [land]
 remote         = "origin"
