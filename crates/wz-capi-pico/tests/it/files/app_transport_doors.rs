@@ -50,8 +50,8 @@ use wz_capi_pico::{
     z_sample_payload, z_session_drop, z_session_loan, z_session_loan_mut, z_session_move,
     z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move, z_subscriber_move,
     z_undeclare_queryable, z_undeclare_subscriber, z_view_keyexpr_from_str, z_view_keyexpr_loan,
-    z_view_keyexpr_t, zp_config_insert, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_ERR_NULL,
-    Z_OK,
+    z_view_keyexpr_t, zp_config_insert, ZResult, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY,
+    Z_ERR_NULL, Z_OK,
 };
 
 /// The locators the sessions name. Synthetic: no socket is opened for any.
@@ -111,6 +111,8 @@ struct Pipe {
     groups: Mutex<HashMap<Side, u64>>,
     /// How many times the transport told a side a link was read down.
     drained: AtomicUsize,
+    /// What a side's transport answered each hand-over it did not take (`zext_transport_received`).
+    refusals: Mutex<Vec<ZResult>>,
 }
 
 impl Pipe {
@@ -126,6 +128,31 @@ impl Pipe {
 
     fn peer_of(&self, side: Side, link: u64) -> Option<u64> {
         self.peers.lock().unwrap().get(&(side, link)).copied()
+    }
+
+    /// Whether `code`, what a side's transport answered a hand-over, is `Z_OK`; any other answer
+    /// is kept for the message of a failure ([`Self::summary`]).
+    fn took(&self, code: ZResult) -> bool {
+        if code != Z_OK {
+            self.refusals.lock().unwrap().push(code);
+        }
+        code == Z_OK
+    }
+
+    /// What the pipe saw, for the message of a failure: a link lost and dialled again, or bytes
+    /// a side refused, is what turns a sequence short or a get unanswered.
+    fn summary(&self) -> String {
+        format!(
+            "the pipe saw {} dials, {} closes, {} sends with no pair, {} partial sends, \
+             {} would-blocks, {} drained calls, refused hand-overs {:?}",
+            self.dials.load(Ordering::SeqCst),
+            self.closes.load(Ordering::SeqCst),
+            self.orphan_sends.load(Ordering::SeqCst),
+            self.partials.load(Ordering::SeqCst),
+            self.blocks.load(Ordering::SeqCst),
+            self.drained.load(Ordering::SeqCst),
+            self.refusals.lock().unwrap().as_slice(),
+        )
     }
 }
 
@@ -236,13 +263,13 @@ unsafe extern "C" fn on_send(
     };
     if let Some(other) = member {
         if let Some(other) = other {
-            let _ = zext_transport_received(
+            pipe.took(zext_transport_received(
                 pipe.loan(ctx.side.other()),
                 other,
                 data,
                 len,
                 member_source(ctx.side).as_ptr(),
-            );
+            ));
         }
         *written = len;
         return ZEXT_LINK_OK;
@@ -257,14 +284,13 @@ unsafe extern "C" fn on_send(
             Side::Dialling => CString::new(DATAGRAM_REMOTE).unwrap(),
             Side::Listening => CString::new(DATAGRAM_LISTEN).unwrap(),
         };
-        if zext_transport_received(
+        if !pipe.took(zext_transport_received(
             pipe.loan(ctx.side.other()),
             peer,
             data,
             len,
             source.as_ptr(),
-        ) != Z_OK
-        {
+        )) {
             return ZEXT_LINK_CLOSED;
         }
         *written = len;
@@ -289,14 +315,13 @@ unsafe extern "C" fn on_send(
         }
     }
     let bytes = std::slice::from_raw_parts(data, take);
-    if zext_transport_received(
+    if !pipe.took(zext_transport_received(
         pipe.loan(ctx.side.other()),
         peer,
         bytes.as_ptr(),
         bytes.len(),
         std::ptr::null(),
-    ) != Z_OK
-    {
+    )) {
         return ZEXT_LINK_CLOSED;
     }
     *written = take;
@@ -386,9 +411,24 @@ fn config_over(key: u8, locator: &str, transport: *mut zext_owned_transport_t) -
 }
 
 fn wait_until(what: &str, within: Duration, done: impl Fn() -> bool) {
+    wait_until_told(what, within, done, || None);
+}
+
+/// [`wait_until`], whose failure also says what `detail` reads at the deadline.
+fn wait_until_told(
+    what: &str,
+    within: Duration,
+    done: impl Fn() -> bool,
+    detail: impl Fn() -> Option<String>,
+) {
     let deadline = Instant::now() + within;
     while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        if Instant::now() >= deadline {
+            match detail() {
+                Some(detail) => panic!("timed out waiting for {what}: {detail}"),
+                None => panic!("timed out waiting for {what}"),
+            }
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -425,23 +465,54 @@ unsafe extern "C" fn on_sample_drop(context: *mut c_void) {
     drop(Arc::from_raw(context as *const Heard));
 }
 
-unsafe extern "C" fn on_query(query: *const z_loaned_query_t, _context: *mut c_void) {
+/// What a queryable whose closure carries it was asked, and each call of its answer that did not
+/// answer `Z_OK`, by the call's name: a reply that never left is told apart from a query that never
+/// came.
+#[derive(Default)]
+struct Served {
+    asked: AtomicUsize,
+    failures: Mutex<Vec<(&'static str, ZResult)>>,
+}
+
+/// Answer the query with one reply. The context is null or a `Served` it records into.
+unsafe extern "C" fn on_query(query: *const z_loaned_query_t, context: *mut c_void) {
+    let served = (context as *const Served).as_ref();
+    if let Some(served) = served {
+        served.asked.fetch_add(1, Ordering::SeqCst);
+    }
+    let failed = |call: &'static str, code: ZResult| {
+        if let Some(served) = served {
+            served.failures.lock().unwrap().push((call, code));
+        }
+    };
     let mut payload = std::mem::zeroed();
-    if z_bytes_copy_from_str(&mut payload, c"answer-over-the-pipe".as_ptr()) == Z_OK {
-        let _ = z_query_reply(
-            query,
-            z_query_keyexpr(query),
-            z_bytes_move(&mut payload),
-            std::ptr::null(),
-        );
+    let code = z_bytes_copy_from_str(&mut payload, c"answer-over-the-pipe".as_ptr());
+    if code != Z_OK {
+        failed("z_bytes_copy_from_str", code);
+        return;
+    }
+    let code = z_query_reply(
+        query,
+        z_query_keyexpr(query),
+        z_bytes_move(&mut payload),
+        std::ptr::null(),
+    );
+    if code != Z_OK {
+        failed("z_query_reply", code);
     }
 }
 
-unsafe extern "C" fn on_query_drop(_context: *mut c_void) {}
+unsafe extern "C" fn on_query_drop(context: *mut c_void) {
+    if !context.is_null() {
+        drop(Arc::from_raw(context as *const Served));
+    }
+}
 
 #[derive(Default)]
 struct Replies {
     payloads: Mutex<Vec<Vec<u8>>>,
+    /// The replies that were not ok.
+    errors: AtomicUsize,
     done: AtomicBool,
     /// When the get's closure was dropped, which is the get's end; written before `done`.
     ended_at: Mutex<Option<Instant>>,
@@ -452,6 +523,8 @@ unsafe extern "C" fn on_reply(reply: *mut z_loaned_reply_t, context: *mut c_void
     if z_reply_is_ok(reply) {
         let payload = bytes_of(z_sample_payload(z_reply_ok(reply)));
         replies.payloads.lock().unwrap().push(payload);
+    } else {
+        replies.errors.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -461,26 +534,33 @@ unsafe extern "C" fn on_reply_drop(context: *mut c_void) {
     replies.done.store(true, Ordering::SeqCst);
 }
 
-unsafe fn put(session: &z_owned_session_t, key: &CStr, payload: &str) {
+/// Put `payload` on `key` of `session`: what `z_put` answered.
+unsafe fn put(session: &z_owned_session_t, key: &CStr, payload: &str) -> ZResult {
     let mut ke: z_view_keyexpr_t = std::mem::zeroed();
     assert_eq!(z_view_keyexpr_from_str(&mut ke, key.as_ptr()), Z_OK);
     let text = CString::new(payload).unwrap();
     let mut bytes = std::mem::zeroed();
     assert_eq!(z_bytes_copy_from_str(&mut bytes, text.as_ptr()), Z_OK);
-    let _ = z_put(
+    z_put(
         z_session_loan(session),
         z_view_keyexpr_loan(&ke),
         z_bytes_move(&mut bytes),
         std::ptr::null(),
-    );
+    )
 }
 
 /// Put `probe` on `key` until the subscriber has heard one, as the declaration of a subscriber
-/// takes a moment to reach the putting session.
+/// takes a moment to reach the putting session. A put refused meanwhile (a link not up yet, or
+/// lost and dialled again) is put again, and the count of those is told if none ever arrives.
 unsafe fn converge(session: &z_owned_session_t, key: &CStr, heard: &Heard, probe: &str) {
     let deadline = Instant::now() + Duration::from_secs(15);
+    let (mut refused, mut last) = (0usize, Z_OK);
     loop {
-        put(session, key, probe);
+        let code = put(session, key, probe);
+        if code != Z_OK {
+            refused += 1;
+            last = code;
+        }
         std::thread::sleep(Duration::from_millis(20));
         if heard
             .payloads
@@ -493,7 +573,7 @@ unsafe fn converge(session: &z_owned_session_t, key: &CStr, heard: &Heard, probe
         }
         assert!(
             Instant::now() < deadline,
-            "the probe {probe:?} never arrived"
+            "the probe {probe:?} never arrived; z_put refused {refused} of its puts, the last with {last}"
         );
     }
 }
@@ -548,13 +628,14 @@ fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_qu
             Z_OK
         );
 
+        let served = Arc::new(Served::default());
         let mut query_closure = std::mem::zeroed();
         assert_eq!(
             z_closure_query(
                 &mut query_closure,
                 Some(on_query),
                 Some(on_query_drop),
-                std::ptr::null_mut()
+                Arc::into_raw(Arc::clone(&served)) as *mut c_void,
             ),
             Z_OK
         );
@@ -594,10 +675,15 @@ fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_qu
         // A sequence arrives whole and in order, through the injected faults.
         heard.payloads.lock().unwrap().clear();
         let sequence: Vec<String> = (0..40).map(|n| format!("seq-{n:03}")).collect();
-        for item in &sequence {
-            put(&dialler, c"demo/pipe/seq", item);
+        for (n, item) in sequence.iter().enumerate() {
+            assert_eq!(
+                put(&dialler, c"demo/pipe/seq", item),
+                Z_OK,
+                "z_put of item {n} of the sequence; {}",
+                pipe.summary()
+            );
         }
-        wait_until("the whole sequence", Duration::from_secs(15), || {
+        let arrived = || {
             heard
                 .payloads
                 .lock()
@@ -605,8 +691,20 @@ fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_qu
                 .iter()
                 .filter(|payload| payload.starts_with(b"seq-"))
                 .count()
-                >= sequence.len()
-        });
+        };
+        wait_until_told(
+            "the whole sequence",
+            Duration::from_secs(15),
+            || arrived() >= sequence.len(),
+            || {
+                Some(format!(
+                    "{} of {} items arrived; {}",
+                    arrived(),
+                    sequence.len(),
+                    pipe.summary()
+                ))
+            },
+        );
         let got: Vec<Vec<u8>> = heard
             .payloads
             .lock()
@@ -649,6 +747,7 @@ fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_qu
         let mut get_opts: z_get_options_t = std::mem::zeroed();
         z_get_options_default(&mut get_opts);
         get_opts.timeout_ms = 5000;
+        let asked = Instant::now();
         assert_eq!(
             z_get(
                 z_session_loan(&dialler),
@@ -659,13 +758,45 @@ fn two_sessions_joined_by_the_programs_transport_carry_a_put_a_sequence_and_a_qu
             ),
             Z_OK
         );
-        wait_until("the get to complete", Duration::from_secs(10), || {
-            replies.done.load(Ordering::SeqCst)
-        });
+        wait_until_told(
+            "the get to complete",
+            Duration::from_secs(10),
+            || replies.done.load(Ordering::SeqCst),
+            || {
+                Some(format!(
+                    "the queryable was asked {} times; {}",
+                    served.asked.load(Ordering::SeqCst),
+                    pipe.summary()
+                ))
+            },
+        );
+        // A get that ended well before its deadline reached no queryable, or was answered with a
+        // Final alone; one that ended at it lost its request or its answer on the way.
+        let took = replies
+            .ended_at
+            .lock()
+            .unwrap()
+            .expect("the end is stamped before it is told")
+            .duration_since(asked);
+        let failures = served.failures.lock().unwrap().clone();
+        assert!(
+            failures.is_empty(),
+            "every call of the queryable's answer returned Z_OK: {failures:?}; the get ended after \
+             {took:?}; {}",
+            pipe.summary()
+        );
+        assert_eq!(
+            served.asked.load(Ordering::SeqCst),
+            1,
+            "the query reached the queryable once; the get ended after {took:?}; {}",
+            pipe.summary()
+        );
         assert_eq!(
             replies.payloads.lock().unwrap().as_slice(),
             [b"answer-over-the-pipe".to_vec()],
-            "the query got its one reply"
+            "the query got its one reply; {} error replies; the get ended after {took:?}; {}",
+            replies.errors.load(Ordering::SeqCst),
+            pipe.summary()
         );
 
         // Cutting the pipe closes both ends; the dialling session dials again over the
