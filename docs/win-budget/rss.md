@@ -129,9 +129,10 @@ there, and `wz_config.py --selftest` holds the perf matrix's list to the parity'
 by the same rule, so its ratio compares like with like already.
 
 By name (section 2.1), the preset takes out of arm W `advanced` (100,974 bytes), the connectivity
-listeners (20,699), the digest (13,540) and the config policy's and device requirements' doors, and
-out of arm P pico's advanced publisher and subscriber; liveliness and scouting stay in both, since
-pico's default build has them.
+listeners (20,699) and the config policy's, the conformance digest's and the device requirements' doors,
+and out of arm P pico's advanced publisher and subscriber; liveliness and scouting stay in both, since
+pico's default build has them. The bytes named digest stay too: they are the acceptor's cookie MAC, not
+the conformance digest (section 5.1).
 
 ## 3. Table W: what an arm W process holds resident, by component
 
@@ -180,6 +181,56 @@ makes most of the text resident, R1 alone accounts for the figure, and the other
 tens of KiB each. That is why R1's split between (a), (b) and (c) waits for cell R3: the size of
 a run's resident text is what the layout changes, and only the run's own page map says it.
 
+### 5.1 The preset's run, part by part (R0 read, 2026-11-26)
+
+The first run of both arms as zenoh-pico's preset with `PERF_SMAPS=1` (3 repetitions, idle host) reads W
+over P at 1.14 to 1.16 in every cell, from 1.25 to 1.31 on the crate default's build: comparing like with
+like alone took that much. Summed over the two processes of a cell, in KiB, W against P: the library 1,668
+against 856 (1.95), anonymous 272 against 108 (2.5), the main thread's stack 76 against 48, the brk heap 44
+against 40, libc 2,952 against 3,208 (W ahead: pico calls more of libc), the rollup's private dirty 560
+against 340. Arm W's library text is resident whole: 191 of 191 pages in every role (`resident-text`), so
+its resident text is its text size, and R1 is the text lane's work and nothing a layout of it can take.
+
+**What the preset still carries that no run calls.** Of section 2.1's groups the run holds 30,552 bytes
+named liveliness or token, 22,880 named scout and 13,773 named digest. Liveliness and scouting are
+capabilities of pico's default build (`Z_FEATURE_LIVELINESS`, `Z_FEATURE_SCOUTING`, section 2.2) and stay.
+The digest is not the conformance digest, which the preset leaves out (arm W names no
+`conformance-digest`): it is the HMAC-SHA256 of the acceptor's cookie (`wz_session_core::accept_cookie`,
+`signing_key::compute_hmac_sha256_full` 1,108 bytes, `sha2::sha256::compress256` 11,596 and its SHA-NI form
+`digest_blocks` 947), which a listener mints in its InitAck and checks in the OpenSyn so that it can carry the
+negotiated state there. zenoh-pico answers an InitSyn with an empty cookie
+(`src/transport/unicast/transport.c`, `_z_t_msg_make_init_ack(mode, *local_zid, cookie)` with
+`_z_slice_null()`). Leaving the MAC out would leave the acceptor's state unauthenticated, a change of the
+handshake's guarantee, so it is a decision of its own and not a build switch this lane may flip.
+
+**Anonymous memory, W - P = +164 KiB**, read per process from the mappings of the tcp round trip cell
+(`perf.json`, `smaps_client` and `smaps_server`); the other cells read the same within 4 KiB a part:
+
+| part | W dialer | W listener | P dialer | P listener | W - P | what it is, counted |
+|---|---:|---:|---:|---:|---:|---|
+| session arena (one mapping of fresh pages, `os::HostPages`) | 60 mapped, 48 resident | 160 mapped, 112 resident | none | none | +160 | the rows `ArenaPlan::of` lays out at the preset's limits (`WZ_LIMITS_ZENOH_PICO`): the dialer one face, the listener a face set and link buffers for each of `max_faces` and `accept_pending`; a row the open never writes is never resident (`Arena::over_zeroed`), so the resident part is the rows the open writes, the places it constructs (engine, runtime, planes, rooms, link cells) and the tables a face takes |
+| library `.bss` past its last file page | 8 | 8 | 0 | 0 | +16 | 7,440 bytes: `wz_host_sync::RECORDS` 5,120 (the thread records), the scout window's buffer 2,048 and the callback table 144, with the critical section's words (`wz_runtime_coop::cs::host_sys` `LOCK`, `DEPTH`, `OWNER`) on the second page, written by every critical section, so both pages are dirty |
+| the read thread's malloc arena | 0 | 0 | 4 | 8 | -12 | pico's read task allocates, so glibc gives it an arena of its own; wz allocates nothing after the open (section 4) |
+| the read thread's stack (8 MiB mapped) | 12 | 12 | 12 | 12 | 0 | |
+| libc's and the loader's own (52, 8 and 8 KiB mappings) | 36 | 36 | 36 | 36 | 0 | the listener's 8 KiB one lies against the arena and is read inside the 168 KiB mapping smaps shows |
+
+**The main thread's stack, W - P = +28 KiB** (W 40 and 36, P 24 and 24): the pages of the caller's stack
+the open touches. Counted from the run's own library (`objdump -d`, each function's frame from its
+prologue, the deepest chain of direct calls): `z_open` 2,400 bytes, then `CoopEngine::assemble` 8,464,
+`lend_session` 6,272, `RegistryOf::new` 2,448 and `PeerPools::lent` 400, 20,048 bytes in all; a
+declaration reaches 7,648 (`SlotObserverOf::drain_declare_replies` 5,360 of it), a put 3,496, the close
+4,624. The open's chain is five pages of stack, against the probe's and libc's own 24 KiB that both arms
+share.
+
+**What takes them, largest first.**
+
+| row | KiB (two processes) | structure | state |
+|---|---:|---|---|
+| A1 arena pages the listener's open writes | 112 + 48 | the rows the open constructs (link cells, rooms, runtime and engine places, the planes) laid together at the head of the arena and the face sets after them, so the sets of faces not yet accepted stay unwritten; which rows those pages are is read first, by the arena's own page map (R5) against its row report | R5 first |
+| A2 the open's stack | 28 | `assemble` and `lend_session` build `SessionLent` and the plan in their frames and return them by value: the plan laid out in the arena's head and the lent tables written where they will live, so neither frame holds them | count, R5 |
+| A3 `.bss` | 16 | the words every critical section writes kept off the page the thread records lie on, so a process that spawns one thread dirties one page | count |
+| A4 the read thread's malloc arena | -12 | none | a win |
+
 ## 6. Measurement cells
 
 - **R0, the absolute figure and its parts.** `PERF_SMAPS=1` in the matrix's environment makes
@@ -194,9 +245,10 @@ a run's resident text is what the layout changes, and only the run's own page ma
   size), a thread's stack (8 MiB and a guard page) and a malloc arena (64 MiB) are told apart.
 - **R1, the libraries of the current tree.** Section 2's table again on the run's `lib-W` and
   `lib-P`, with `nm -S` by crate: first on the preset's build (section 2.2; `reference.json` says
-  `wz_preset`), then after the text lanes land. The committed ceiling table
-  (`deploy/pico_perf_ceiling.json`) was filled from the crate default's build, and the gate does not
-  yet tell the two builds apart.
+  `wz_preset`), then after the text lanes land. The committed ceiling tables
+  (`deploy/pico_perf_ceiling.json`, `deploy/pico_perf_ceiling_windows.json`) state the build their rows
+  are filled from (`preset` `zenoh-pico`), every row null until a run of the preset fills it, and the gate
+  refuses a run of the crate default's build, whose record names no preset, against them.
 - **R2, R4 landed.** `readelf -d` of `perf_probe_W` lists no `libgcc_s`, and R0's
   `smaps_libgcc_s_kib` of arm W reads 0.
 - **R3, the run's resident text.** Which pages of the library's text a run holds: with
@@ -210,6 +262,11 @@ a run's resident text is what the layout changes, and only the run's own page ma
   Resident bytes of a plane the run never calls are fault-around's, which is what (b) can take; the
   page map does not tell a page the run executed from one fault-around brought in beside it, so the
   bytes of the planes it does call bound the rest from above.
+- **R5, the arena's written rows.** Which rows of the session arena a run writes (section 5.1, A1): the
+  page map R3 reads of each executable mapping read of the arena's mapping too, against the row report of
+  the same open (`cargo test -p wz-capi-pico --lib --no-default-features --features <the preset's list>
+  the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture` under the preset's
+  limits, `WZ_LIMITS_ZENOH_PICO`), each present page named by the rows that lie on it.
 
 ## 7. What this lane landed
 
@@ -219,5 +276,10 @@ a run's resident text is what the layout changes, and only the run's own page ma
 - R3's naming of the present pages (`perf_matrix.py resident-text`, with its selftest).
 - R1 (a0): the perf matrix builds both arms as zenoh-pico's preset (`wz_config.preset_named_features`,
   section 2.2), from the declaration the parity matrix and the instruction counts read.
+- The preset axis of the gate (`preset` of a table, `record.preset` of a run, `wz_preset` of a build's
+  record and of a Windows plan), and every bench of the pico library on the preset: the cargo words and
+  `config.h` of the rtt, thr, nodrop, profile and tids modes (`bench_cargo_args`, `--bench-config-h`), the
+  batch arm and its references (`batch_control.py`), the Windows plan (`windows_plan`).
+- Section 5.1: the preset's run read part by part, its anonymous memory and stack counted, levers A1 to A3.
 - R4: `_Unwind_Resume` defined in the library, `libgcc_s` no longer mapped by its programs,
   held by the size gate's `pico-client-coop-nostd` case (`forbid_undefined`).
