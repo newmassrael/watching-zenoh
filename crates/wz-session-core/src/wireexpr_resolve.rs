@@ -437,13 +437,18 @@ impl<P: Storage> Clone for PeerSpace<'_, P> {
 impl<P: Storage> Copy for PeerSpace<'_, P> {}
 
 enum PeerSpaceRepr<'a, P: Storage> {
-    /// A plain map; a build with no allocator has none.
+    /// A plain map; a build with no allocator has none, and only the growable policy makes one
+    /// ([`Storage::HeapForm`]), so a bounded policy's reads carry no arm for it.
     #[cfg(feature = "alloc")]
-    Map(&'a HashMap<u64, String>),
+    Map(&'a HashMap<u64, String>, P::HeapForm),
     /// Our own table standing in the sender's half, for a message this node sends
-    /// ([`MappingSpaces::as_sent`]): it is keyed by the ids we allocate.
+    /// ([`MappingSpaces::as_sent`]): it is keyed by the ids we allocate. The growable policy's
+    /// alone, as the plain map is.
     #[cfg(feature = "alloc")]
-    Ours(&'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>),
+    Ours(
+        &'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>,
+        P::HeapForm,
+    ),
     /// The alias table of the session's policy; under the lent policy its keys lie in the
     /// session's key arena.
     Aliases(AliasesRef<'a, P>),
@@ -468,12 +473,6 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
         Self { repr, sender: 0 }
     }
 
-    /// A plain map, as a peer space.
-    #[cfg(feature = "alloc")]
-    fn of_map(map: &'a HashMap<u64, String>) -> Self {
-        Self::of(PeerSpaceRepr::Map(map))
-    }
-
     /// The alias table of the session's policy, lent by its owner, as a peer space.
     fn of_aliases(table: AliasesRef<'a, P>) -> Self {
         Self::of(PeerSpaceRepr::Aliases(table))
@@ -490,9 +489,15 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
         let key = crate::wire_id::sender_peer_key(self.sender, id);
         match self.repr {
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Map(map) => map.get(&key).map(|text| (text.as_str(), None)),
+            PeerSpaceRepr::Map(map, heap) => {
+                crate::bounded::HeapOnly::granted(heap);
+                map.get(&key).map(|text| (text.as_str(), None))
+            }
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Ours(table) => table.literal(id).map(|text| (text, None)),
+            PeerSpaceRepr::Ours(table, heap) => {
+                crate::bounded::HeapOnly::granted(heap);
+                table.literal(id).map(|text| (text, None))
+            }
             PeerSpaceRepr::Aliases(table) => table
                 .find(key)
                 .map(|row| (KeyBacking::as_str(row), KeyBacking::held(row))),
@@ -509,11 +514,34 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
         let key = crate::wire_id::sender_peer_key(self.sender, id);
         match self.repr {
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Map(map) => map.get(&key).map(String::as_str),
+            PeerSpaceRepr::Map(map, heap) => {
+                crate::bounded::HeapOnly::granted(heap);
+                map.get(&key).map(String::as_str)
+            }
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Ours(table) => table.literal(id),
+            PeerSpaceRepr::Ours(table, heap) => {
+                crate::bounded::HeapOnly::granted(heap);
+                table.literal(id)
+            }
             PeerSpaceRepr::Aliases(table) => table.find(key).map(KeyBacking::as_str),
         }
+    }
+}
+
+/// The forms of a peer space only the growable policy makes, whose arms a bounded policy's reads
+/// do not carry ([`Storage::HeapForm`]).
+#[cfg(feature = "alloc")]
+impl<'a> PeerSpace<'a, crate::bounded::Heap> {
+    /// A plain map, as a peer space.
+    fn of_map(map: &'a HashMap<u64, String>) -> Self {
+        Self::of(PeerSpaceRepr::Map(map, ()))
+    }
+
+    /// Our own table standing in the sender's half, as a peer space.
+    fn of_ours(
+        table: &'a crate::declared_keyexprs::DeclaredKeyexprs<crate::bounded::Heap>,
+    ) -> Self {
+        Self::of(PeerSpaceRepr::Ours(table, ()))
     }
 }
 
@@ -539,9 +567,15 @@ impl<'a, P: Storage> PeerSpaceView<'a, P> {
     pub fn len(&self) -> usize {
         match self.0.repr {
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Map(map) => map.len(),
+            PeerSpaceRepr::Map(map, heap) => {
+                crate::bounded::HeapOnly::granted(heap);
+                map.len()
+            }
             #[cfg(feature = "alloc")]
-            PeerSpaceRepr::Ours(table) => table.len(),
+            PeerSpaceRepr::Ours(table, heap) => {
+                crate::bounded::HeapOnly::granted(heap);
+                table.len()
+            }
             PeerSpaceRepr::Aliases(table) => table.count(),
         }
     }
@@ -723,7 +757,7 @@ impl<'a> MappingSpaces<'a, crate::bounded::Heap> {
         theirs: &'a dyn OwnMappingSpace,
     ) -> Self {
         Self {
-            peer: PeerSpace::of(PeerSpaceRepr::Ours(ours)),
+            peer: PeerSpace::of_ours(ours),
             own: Some(OwnSpace::of_handle(theirs)),
             #[cfg(feature = "shared-key-ids")]
             shared: None,

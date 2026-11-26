@@ -229,6 +229,9 @@ listen = [
 # application registers after a peer asked is staged for that peer's face before each drain. A peer
 # asks a node that listens or joins a group, so `listen` and `group` turn it on; a client that
 # only dials answers no Interest, as zenoh-pico's unicast session does, and has none of it.
+# The `DeclareFinal` of the initial interest that ends what a peer face is told when its link comes
+# up (`CoopConfig::initial_interest`) is such an answer, to the Interest the peer hat acts as if the
+# face had sent, so a client build links none of that either.
 interest-answer = ["wz-session-core/interest-answer"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.

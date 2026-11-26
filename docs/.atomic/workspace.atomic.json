@@ -8214,6 +8214,59 @@
       "carry_forward_bullets": [
         "the initial interest Final is built into client-only coop builds (about 400 B) for lack of a peer-role feature."
       ]
+    },
+    "Round 4674": {
+      "decision_summary": "A build that answers no Interest (wz-capi-coop without interest-answer) links\nno initial interest Final, since such a build only ever meets peers as a\nclient. Peer builds keep the Final unchanged. Measured about -370 B on the\nclient-only pico build.",
+      "changes_bullets": [
+        "capi-coop: the initial Final's state, owing and send are built with interest-answer only.",
+        "tests: a build without interest-answer sends no initial Final to a peer."
+      ],
+      "verification_bullets": [
+        "wz-capi-coop replay tests (default, listen, app-transport+group); clippy default, listen, host-sys; wz-capi-pico lib 538.",
+        "size ledger check passes; pico-client-coop-nostd area sum 628 B below main3f90 (size-5's 257 included).",
+        "subprofile receive W 3,078.3 vs P 4,049.4 Ir per message."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
+    },
+    "Round 4675": {
+      "decision_summary": "Read an imported Python module for the names its importers call, not whole,\nand declare the builds of the lanes whose builds are computed. The opaque\nlanes, always selected because their inputs could not be read, fall from 22\nto 4 (C0, Z8, Ero, Q); the rest are keyed by what they read.",
+      "changes_bullets": [
+        "lane_digest: an imported module is read for what its importers use; one-word shell constants and module string constants resolve.",
+        "lanes.toml: thirteen lanes declare the packages their computed builds build."
+      ],
+      "verification_bullets": [
+        "lane_digest selftest 89, lane_input_closure 10, lane_decl 19, lanes_gate selftest 14 and --check pass; python floor lint clean.",
+        "lane_digest --check: 194 lanes, 4 opaque."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "audit each newly declared lane with lane_input_closure --run (strace) for an input the declaration misses.",
+        "the reader still misses three build shapes: a cargo path argv, a printed argv run by the shell, cargo-mutants."
+      ]
+    },
+    "Round 4676": {
+      "decision_summary": "A bounded peer space's reads no longer carry the heap arms a bounded policy\ncan never make: the storage policy names its heap form, uninhabited for the\nbounded policies, so those arms compile out. Measured about -400 B on the\npico client build. The win budget now reads each area of the pico preset\nagainst the zenoh-pico functions that do the same work.",
+      "changes_bullets": [
+        "session-core: Storage::HeapForm; the Map and Ours arms of a peer space exist only under the heap policy.",
+        "docs/win-budget/size.md: per-area table against zenoh-pico and the next designs (doors, sessions, transport)."
+      ],
+      "verification_bullets": [
+        "size ledger check passes; area sum 660 B below main3f90 (size-5's 257 included).",
+        "wz-session-core heap form and wireexpr_resolve tests; nondefault-features clean; citation anchors pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "doors: compose each door from one request read and one out-of-line engine body (about 10,100 B vs zenoh-pico 1,300 B)."
+      ]
     }
   },
   "inventory_entries": {
