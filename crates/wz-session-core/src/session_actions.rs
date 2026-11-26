@@ -4783,53 +4783,6 @@ enum FrameSnAt {
     },
 }
 
-/// The room check and SN mint a frame opened under `tx-lend-only` starts with
-/// (`SessionLinkActions::open_frame_lent`), as a trait object so that the staged and the fresh
-/// dispatch, whose admissions are closures of different types, share one body. A trait of its
-/// own and not `dyn Fn`: a closure's `dyn Fn` table also holds its `FnOnce` shim, which
-/// carries a second copy of the closure's body.
-#[cfg(all(
-    feature = "tx-lend-only",
-    any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )
-))]
-trait AdmitFrame {
-    /// The frame's emit once its link has room, its SN not yet taken (`sn` is zero until the
-    /// frame is written into a slot); `None` when the link is congested.
-    fn admit(&self) -> Option<FrameEmit>;
-}
-
-#[cfg(all(
-    feature = "tx-lend-only",
-    any(
-        feature = "codec-push",
-        feature = "codec-request",
-        feature = "codec-response",
-        feature = "codec-response-final",
-        feature = "declare-keyexpr",
-        feature = "declare-subscriber",
-        feature = "declare-queryable",
-        feature = "declare-token",
-        feature = "declare-interest",
-        feature = "liveliness-token",
-    )
-))]
-impl<F: Fn() -> Option<FrameEmit>> AdmitFrame for F {
-    fn admit(&self) -> Option<FrameEmit> {
-        self()
-    }
-}
-
 // R2928 — the outcome and the deadline moved to `crate::tx_deadline`, which
 // the multicast transmission pipeline shares.
 #[cfg(any(
@@ -12970,6 +12923,43 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.outbound_frame_sn.mint(priority, reliable, sn_mask)
     }
 
+    /// Whether the link a frame of `reliability` and `priority` leaves by stayed full for what is
+    /// left of `deadline`, which the ask spends. A sender that holds the room (`reserved`, see
+    /// `DispatchStage::Reserved`) asks nothing: asking would count its own promise against the
+    /// lane and find it full when it is exactly full enough. One body for every ask a send makes
+    /// before its frame takes an SN.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    fn congested_within(
+        &self,
+        reliability: Reliability,
+        priority: Priority,
+        reserved: bool,
+        deadline: &mut PushDeadline,
+    ) -> bool {
+        if reserved {
+            return false;
+        }
+        // The room of the queue this message's class leaves by: a best-effort message on a link
+        // that carries it apart never waits for its streams' room.
+        let answer = self.with_conduit_link(reliability, priority, |link| {
+            link.link_driver()
+                .wait_for_room_for(reliability, priority, deadline.ask())
+        });
+        deadline.spend(answer.waited_us);
+        answer.room == crate::link::LinkRoom::Congested
+    }
+
     /// R311y215 (transport-qos) / R3122 -- the EFFECTIVE priority a message is routed on: the
     /// caller's when this session negotiated QoS, else forced to DEFAULT (a non-QoS session has
     /// one conduit and writes no ext_qos). Without `transport-qos` the priority passes straight
@@ -13451,22 +13441,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         } else {
             PushDeadline::new(droppable, &self.params.tx_queue)
         });
+        // A lend-only build asks for room only where its frame opens (`Self::open_frame_lent`),
+        // and, with a heap, while a droppable message waits for its conduit's lock.
+        #[cfg(any(feature = "alloc", not(feature = "tx-lend-only")))]
         let congested = || {
-            // The sender holds the room (see `DispatchStage::Reserved`): asking would count its
-            // own promise against the lane and find it full when it is exactly full enough.
-            if reserved {
-                return false;
-            }
             let mut left = deadline.get();
-            // The room of the queue this message's class leaves by: a best-effort message on a
-            // link that carries it apart never waits for its streams' room.
-            let answer = self.with_conduit_link(wire_reliability, priority, |link| {
-                link.link_driver()
-                    .wait_for_room_for(wire_reliability, priority, left.ask())
-            });
-            left.spend(answer.waited_us);
+            let congested = self.congested_within(wire_reliability, priority, reserved, &mut left);
             deadline.set(left);
-            answer.room == crate::link::LinkRoom::Congested
+            congested
         };
         // A control-plane message (a declaration, an OAM) is a BARRIER between the data staged
         // before it and the data staged after. With the link's writer pulling what the conduits
@@ -13520,24 +13502,18 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 link.link_driver().tx_fence()
             });
         }
-        // The room check that opens a frame under `tx-lend-only` ([`Self::open_frame_lent`]):
-        // `None` when the conduit's link has no room. The SN is not taken here but where the
-        // frame is written into a slot, so `sn` stays zero until then. The deadline is read
-        // after the check spent from it.
+        // The frame a message opens under `tx-lend-only` ([`Self::open_frame_lent`]), its room
+        // not yet asked for out of the deadline it carries. The SN is not taken here but where
+        // the frame is written into a slot, so `sn` stays zero until then.
         #[cfg(feature = "tx-lend-only")]
-        let admit = || {
-            if congested() {
-                return None;
-            }
-            Some(FrameEmit {
-                ext_qos,
-                sn: 0,
-                reliable,
-                mtu,
-                sn_mask,
-                max_reassembly_bytes,
-                deadline: deadline.get(),
-            })
+        let frame_emit = || FrameEmit {
+            ext_qos,
+            sn: 0,
+            reliable,
+            mtu,
+            sn_mask,
+            max_reassembly_bytes,
+            deadline: deadline.get(),
         };
         let stage_and_emit = |batch: &mut BatchTx| {
             // Whatever this sender does with the conduit, a wait for room included, is a send
@@ -13577,7 +13553,14 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 // message past the budget leaves as a chain of lent fragments (with
                 // fragmentation) or is refused as oversize (without it).
                 #[cfg(feature = "tx-lend-only")]
-                return self.open_frame_lent(batch, true, priority, reliable, &admit, encode_body);
+                return self.open_frame_lent(
+                    batch,
+                    true,
+                    priority,
+                    reserved,
+                    frame_emit(),
+                    encode_body,
+                );
                 // R311y835 — every arm below works on THIS message's own
                 // priority conduit (R2920: the one locked above); a message
                 // never sees, and never flushes, another priority's staged frame.
@@ -13836,7 +13819,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             #[cfg(feature = "tx-lend-only")]
             {
-                self.open_frame_lent(batch, false, priority, reliable, &admit, encode_body)
+                self.open_frame_lent(batch, false, priority, reserved, frame_emit(), encode_body)
             }
         };
         // The lock is this conduit's own, and a sender holds it across its wait for room, up to
@@ -13996,9 +13979,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// The frame one message goes into under `tx-lend-only`, from the room check to the answer.
     /// In the batch window (`in_window`) the message first joins the frame its conduit holds open
     /// in a lent slot ([`Self::append_lent_batch`]), which needs no room check; a frame it does
-    /// not join is closed there and a fresh one opens. To open one, `admit` asks the conduit's
-    /// link for room and mints the SN once it has, and the frame is written into a slot that link
-    /// lends, kept open for the messages after it in the window or sent at once. A message past
+    /// not join is closed there and a fresh one opens. To open one, the conduit's link is asked
+    /// for room out of `emit`'s deadline (none when the sender holds it, `reserved`), the SN is
+    /// minted once the link lends a slot, and the frame is written into that slot, kept open for
+    /// the messages after it in the window or sent at once. A message past
     /// the budget leaves as a chain of lent fragments, or is refused as oversize without
     /// fragmentation; no slot, or one short of what the frame needs, is a refusal, as is a
     /// message its encoder refuses, whose SN is given back. Nothing is staged on the heap, which
@@ -14027,8 +14011,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         batch: &mut BatchTx,
         in_window: bool,
         priority: Priority,
-        reliable: bool,
-        admit: &dyn AdmitFrame,
+        reserved: bool,
+        mut emit: FrameEmit,
         encode_body: &P,
     ) -> Result<UnicastPush, SendWireError>
     where
@@ -14044,19 +14028,24 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 batch,
                 TxConduits::<R>::conduit_index(priority),
                 priority,
-                reliable,
+                emit.reliable,
                 encode_body,
             )
         {
             return Ok(UnicastPush::Pushed);
         }
-        let Some(mut emit) = admit.admit() else {
+        if self.congested_within(
+            Reliability::from_reliable_bool(emit.reliable),
+            priority,
+            reserved,
+            &mut emit.deadline,
+        ) {
             return Ok(UnicastPush::Congested);
-        };
+        }
         // A build without batching opens no window, and has no open frame to join.
         #[cfg(not(feature = "transport-batching"))]
         let in_window = {
-            let _ = (in_window, reliable);
+            let _ = in_window;
             false
         };
         // Every frame asks for the whole budget, as zenoh-pico's batch is the budget whatever it

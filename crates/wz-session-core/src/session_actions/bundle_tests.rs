@@ -1044,7 +1044,8 @@ mod lent_handshake {
 /// Under `tx-lend-only` a frame the link lends no slot for is refused before a byte of it is
 /// written, and takes no sequence number: the next frame of the conduit carries the one it would
 /// have, so the reliable channel has no gap no frame fills. Turned red by an SN taken before the
-/// slot is lent (`open_frame_lent` minting in its admission again), whose next frame carries SN 1.
+/// slot is lent (`open_frame_lent` minting before its room is asked or its slot lent), whose next
+/// frame carries SN 1.
 #[cfg(all(feature = "tx-lend-only", feature = "codec-push", feature = "alloc"))]
 mod lent_frame_refusal {
     use alloc::sync::Arc;
@@ -1053,15 +1054,20 @@ mod lent_frame_refusal {
     use std::sync::Mutex;
 
     use super::{params, PlainRuntime, StillClock};
-    use crate::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::link::{
+        BoxedLinkDriver, LinkDropCause, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait, TxSlot,
+        TxSlotGrant,
+    };
     use crate::qos::Priority;
     use crate::reliability::Reliability;
     use crate::send_wire_error::SendWireError;
     use crate::session_actions::SessionLinkActions;
 
-    /// A link of one slot that lends it only while `lends` says so, and keeps each frame sent.
+    /// A link of one slot that lends it only while `lends` says so, has no room while `full`
+    /// says so, and keeps each frame sent.
     struct DryLink {
         lends: AtomicBool,
+        full: AtomicBool,
         slot: Mutex<Vec<u8>>,
         sent: Mutex<Vec<Vec<u8>>>,
         asked: Mutex<Vec<usize>>,
@@ -1071,6 +1077,7 @@ mod lent_frame_refusal {
         fn of_width(width: usize, lends: bool) -> Arc<Self> {
             Arc::new(Self {
                 lends: AtomicBool::new(lends),
+                full: AtomicBool::new(false),
                 slot: Mutex::new(alloc::vec![0; width]),
                 sent: Mutex::new(Vec::new()),
                 asked: Mutex::new(Vec::new()),
@@ -1086,6 +1093,19 @@ mod lent_frame_refusal {
         fn open_blocking(&self) {}
 
         fn close_blocking(&self) {}
+
+        fn wait_for_room_for(
+            &self,
+            _class: Reliability,
+            _priority: Priority,
+            _wait: RoomWait,
+        ) -> RoomAnswer {
+            RoomAnswer::at_once(if self.full.load(Ordering::SeqCst) {
+                LinkRoom::Congested
+            } else {
+                LinkRoom::Free
+            })
+        }
 
         fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
             self.asked.lock().expect("the asks").push(want);
@@ -1232,6 +1252,43 @@ mod lent_frame_refusal {
             *link.asked.lock().expect("the asks"),
             [budget],
             "one ask, for the budget"
+        );
+    }
+
+    /// A put its link has no room for is dropped before its frame asks for a slot or takes an SN:
+    /// nothing reaches the link, and the next frame carries the SN the dropped one left untaken.
+    /// Turned red by `open_frame_lent` lending its frame before it asks for room
+    /// (`congested_within` after `lend_frame`), whose dropped put asks for a slot and takes SN 0,
+    /// or by the room not asked at all, whose put is sent while the link is full.
+    #[test]
+    fn a_put_its_link_has_no_room_for_asks_no_slot_and_takes_no_sequence_number() {
+        let link = DryLink::of_width(512, true);
+        link.full.store(true, Ordering::SeqCst);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        assert_eq!(
+            put(&actions),
+            Some(Ok(())),
+            "a droppable put the link has no room for is dropped, not refused"
+        );
+        assert!(
+            link.asked.lock().expect("the asks").is_empty(),
+            "no slot was asked for"
+        );
+        assert!(
+            link.sent.lock().expect("the sends").is_empty(),
+            "nothing reached the link"
+        );
+        link.full.store(false, Ordering::SeqCst);
+        assert_eq!(put(&actions), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "only the second put reached the link");
+        assert_eq!(
+            sent[0][1], 0,
+            "the second frame carries the SN the dropped one left untaken"
         );
     }
 
