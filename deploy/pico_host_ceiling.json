@@ -3,36 +3,36 @@
   "schema": 1,
   "cases": {
     "pico-client": {
-      "ratio_at_most": 1.8054,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 719708,
-        "pico_text": 398645,
+        "date": "2026-11-26",
+        "wz_text": 319943,
+        "pico_text": 400269,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-small": {
-      "ratio_at_most": 1.6773,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 668645,
-        "pico_text": 398645,
+        "date": "2026-11-26",
+        "wz_text": 319943,
+        "pico_text": 400269,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-udp": {
-      "ratio_at_most": 1.8069,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 728315,
-        "pico_text": 403086,
+        "date": "2026-11-26",
+        "wz_text": 326810,
+        "pico_text": 404758,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-nostd": {
@@ -47,113 +47,113 @@
       }
     },
     "pico-client-coop-unstable": {
-      "ratio_at_most": 1.8073,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 731845,
-        "pico_text": 404952,
+        "date": "2026-11-26",
+        "wz_text": 331372,
+        "pico_text": 406624,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-local": {
-      "ratio_at_most": 1.815,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 735935,
-        "pico_text": 405486,
+        "date": "2026-11-26",
+        "wz_text": 332258,
+        "pico_text": 407094,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-connectivity": {
-      "ratio_at_most": 1.8556,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 816205,
-        "pico_text": 439863,
+        "date": "2026-11-26",
+        "wz_text": 395530,
+        "pico_text": 441759,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-admin-space": {
-      "ratio_at_most": 2.0048,
+      "ratio_at_most": 1.0126,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 890840,
-        "pico_text": 444356,
+        "date": "2026-11-26",
+        "wz_text": 452070,
+        "pico_text": 446472,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-query": {
-      "ratio_at_most": 2.1144,
+      "ratio_at_most": 1.0741,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 925457,
-        "pico_text": 437696,
+        "date": "2026-11-26",
+        "wz_text": 471768,
+        "pico_text": 439256,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-local-queryable": {
-      "ratio_at_most": 2.1731,
+      "ratio_at_most": 1.1171,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 956653,
-        "pico_text": 440232,
+        "date": "2026-11-26",
+        "wz_text": 493411,
+        "pico_text": 441704,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-client-coop-scout": {
-      "ratio_at_most": 1.9886,
+      "verdict": "win",
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 816214,
-        "pico_text": 410463,
+        "date": "2026-11-26",
+        "wz_text": 390531,
+        "pico_text": 412095,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-peer-coop": {
-      "ratio_at_most": 2.2435,
+      "ratio_at_most": 1.26,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 932380,
-        "pico_text": 415599,
+        "date": "2026-11-26",
+        "wz_text": 525815,
+        "pico_text": 417335,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-peer": {
-      "ratio_at_most": 2.2435,
+      "ratio_at_most": 1.26,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 932380,
-        "pico_text": 415599,
+        "date": "2026-11-26",
+        "wz_text": 525815,
+        "pico_text": 417335,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-default": {
-      "ratio_at_most": 3.0664,
+      "ratio_at_most": 2.0874,
       "debt": "debt-pico-host-size-ceiling",
       "reading": {
-        "date": "2026-11-25",
-        "wz_text": 1861864,
-        "pico_text": 607197,
+        "date": "2026-11-26",
+        "wz_text": 1273020,
+        "pico_text": 609873,
         "pico_pin": "6a881c21dad1",
-        "toolchain": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0; cmake version 3.28.3"
+        "toolchain": "cc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0; cmake version 3.31.6"
       }
     },
     "pico-release-windows-x64": {
