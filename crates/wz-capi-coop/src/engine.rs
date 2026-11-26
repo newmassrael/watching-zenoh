@@ -160,7 +160,7 @@ use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as Hands
 use wz_session_core::link_life::{LinkRole, LinkTimes, UnicastLink};
 use wz_session_core::locality::Locality;
 
-use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
+use crate::open_source::{Counted, EndpointList, OpenInput, OpenSource};
 use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
@@ -5276,10 +5276,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// `Self::open_in` (a build with `runtime-plan`), its config read from `source` inside the
-    /// open, once, before anything else: an ABI that builds the config from its own values hands
-    /// the source (a maker of the config is one), so the config is never a value of its frame,
-    /// which the open's handshake runs under. The source writes the endpoints' texts into the rows the open lends for them, and is
-    /// let go of before anything is bound or dialled ([`OpenSource`]).
+    /// open, once, before anything else: a host that builds the config from its own values hands
+    /// the source (a maker of the config is one), so neither the config nor its endpoints' texts
+    /// are values of a frame the open's handshake runs under ([`OpenSource`]). An ABI that writes
+    /// the texts in its own form opens with [`Self::assemble`] and [`Self::open_assembled`].
     ///
     /// The open is two frames that never lie on the stack together. The first builds the engine
     /// where it is kept (the session's state and its arena's tables, in the engine's place in the
@@ -5303,7 +5303,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         key_ids: OpenKeyIds,
         storage: OpenStorage,
     ) -> Result<EngineHold<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, storage)?;
+        let engine = Self::assemble_from(links, clock, entropy, source, policy, key_ids, storage)?;
+        Self::open_assembled(engine)
+    }
+
+    /// [`Self::assemble`] of the input `source` makes, made in this frame, which has returned
+    /// before the first link is opened.
+    #[inline(never)]
+    fn assemble_from(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        source: impl OpenSource,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+        storage: OpenStorage,
+    ) -> Result<EngineHold<Self>, OpenError> {
+        source.open_with(|input| {
+            Self::assemble(links, clock, entropy, input, policy, key_ids, storage)
+        })
+    }
+
+    /// Open the links of `engine`, which [`Self::assemble`] built: an open that fails here ends
+    /// what it began as a dropped session does.
+    pub fn open_assembled(engine: EngineHold<Self>) -> Result<EngineHold<Self>, OpenError> {
         engine.open_links()?;
         Ok(engine)
     }
@@ -5317,13 +5340,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// One frame from the config to the state: the links, the config, the entropy and what the
     /// arena lent are each borrowed while the open decides, and a value borrowed once is copied
     /// when it is handed on by value. Made here, each is moved only into the state, which is moved
-    /// once, into the engine's place ([`Self::engine_of`]).
+    /// once, into the engine's place (`Self::engine_of`).
+    ///
+    /// The input is a value of no type of the ABI's ([`OpenInput`]): its config is moved into
+    /// the session and its texts read and written into the rows the arena lends for them by one
+    /// body of no type parameter, so no line of the ABI's is in this body.
     #[inline(never)]
-    fn assemble(
+    pub fn assemble(
         mut links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
-        source: impl OpenSource,
+        input: OpenInput<'_>,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         storage: OpenStorage,
@@ -5333,7 +5360,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             held,
             plan: from,
         } = storage;
-        let (config, write_endpoints) = source.into_parts();
+        let OpenInput { config, endpoints } = input;
         admit_sn_widths(&config)?;
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
@@ -5362,10 +5389,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
-        // The texts of the endpoints, each written once by the source into the row the plan laid
-        // out for it: the session names an endpoint by its row from here, and what the source
-        // held goes with its writer, here, before anything is bound or dialled.
-        let written = write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints));
+        // The texts of the endpoints, each read and written once into the row the plan laid out
+        // for it: the session names an endpoint by its row from here, and a text that has no row
+        // is refused here, before anything is bound or dialled.
+        let written = endpoints.write_into(&mut lent.transport.endpoints);
         // One refusal for the three, so what the arena lent is let go of on one path. The rooms
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
@@ -10332,6 +10359,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // close finds it closed whatever still holds the engine.
         self.reach.clear();
         let core = &mut guard.0;
+        // A key the program keeps past the close copies and gives back its hold at its row, with
+        // no reach of the session: the row's word is what tells it the session is gone.
+        tables(&core.session.registry).close_keyexpr_counts();
         core.end_links();
         // The rows of the session's own declarations, and the callbacks they hold, go after the
         // lock is let go of, one row at a time (`Self::let_go_of_rows`).

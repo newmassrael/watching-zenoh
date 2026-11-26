@@ -190,7 +190,7 @@ fn read(endpoint: &str, _role: Role) -> Result<EndpointReading, Refused> {
 }
 
 /// The cooperative engine's reading of one endpoint, which pico's reading already admitted
-/// (`requirement_of`): a unicast endpoint is the text that reading keeps (`with_engine_text`,
+/// (`requirement_of`): a unicast endpoint is the text that reading keeps (`engine_text`,
 /// the one the engine is handed), read by the engine's own grammar (`locator_text`), which
 /// dials an address or a host name (`read_dial_target`, the function the open's dial reads with,
 /// over the same network), listens on an address, and refuses a config or metadata part and a port
@@ -207,8 +207,10 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
     use wz_session_core::locator::Proto;
     // A name is read where the engine reads it, and the link it opens at any address of the host
     // is its kind; the address a resolver answers is no part of what the open asks for.
+    let mut kept = wz_session_core::locator_directory::LocatorText::new();
     let parsed = match role {
-        Role::Dial => crate::endpoint::with_engine_text(endpoint, |text: &str| {
+        Role::Dial => {
+            let text = crate::endpoint::engine_text(endpoint, &mut kept);
             let resolves = resolves::<crate::coop_host::Links>();
             read_dial_target(text, resolves).map(|target| match target {
                 DialTarget::At(at) => (at, false),
@@ -217,10 +219,9 @@ fn read(endpoint: &str, role: Role) -> Result<EndpointReading, Refused> {
                     true,
                 ),
             })
-        }),
-        Role::Listen => crate::endpoint::with_engine_text(endpoint, |text: &str| {
-            parse_listen_locator(text).map(|at| (at, false))
-        }),
+        }
+        Role::Listen => parse_listen_locator(crate::endpoint::engine_text(endpoint, &mut kept))
+            .map(|at| (at, false)),
         Role::Group => return read_group(endpoint),
     };
     let (locator, named) = parsed.map_err(refused_reading)?;
