@@ -3547,3 +3547,24 @@ fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
     taken.take_on(&listed);
     assert_eq!(taken, open);
 }
+
+/// A plan that takes a laid plan on is that plan, whatever it held before: every sum, every layer's
+/// rows and every listed row, so the plan an open made is replaced whole and keeps nothing of its
+/// own. Turned red by a `take_on` that leaves a sum, a layer's rows or a listed row of the plan it
+/// overwrote as it was.
+#[test]
+fn a_plan_taken_on_is_the_laid_plan_whatever_it_held() {
+    let laid = ArenaPlan::of(
+        &preset_client(caps::MAX_STATIC_CONNECT),
+        &SessionLimits::PICO_PRESET,
+    )
+    .expect("the preset lays a client out");
+    let mut taken = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        taken, laid,
+        "CONTROL: the plan written over differs from the one taken on"
+    );
+    taken.take_on(&laid);
+    assert_eq!(taken, laid);
+}

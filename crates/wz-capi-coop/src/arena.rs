@@ -1719,17 +1719,28 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             runtime_bytes,
         } = laid;
         #[cfg(any(feature = "runtime-plan", test))]
-        {
-            let listed = ROWS.min(LAID);
-            self.rows[..listed].copy_from_slice(&rows[..listed]);
-        }
-        self.len = *len;
-        self.reserved = *reserved;
-        self.refused = *refused;
-        self.transport = *transport;
-        self.session = *session;
-        self.places = *places;
-        self.runtime_bytes = *runtime_bytes;
+        let rows = {
+            let mut listed = [UNLAID_ROW; ROWS];
+            let shared = ROWS.min(LAID);
+            listed[..shared].copy_from_slice(&rows[..shared]);
+            listed
+        };
+        let taken = Self {
+            #[cfg(any(feature = "runtime-plan", test))]
+            rows,
+            len: *len,
+            reserved: *reserved,
+            refused: *refused,
+            transport: *transport,
+            session: *session,
+            places: *places,
+            runtime_bytes: *runtime_bytes,
+        };
+        // Made apart and stored whole, as `clone_from` stores a plan, so that no byte of the open's
+        // blank plan outlives this store and its making is dead code. Stored field by field, the
+        // blank plan stayed live: an open by a region without `runtime-plan`, whose plans list no
+        // rows, kept the call to the blank's out-of-line body and the stores, and gained nothing.
+        *self = taken;
     }
 
     /// Lay out on this plan, [`Self::vacant`] as made, the rows of a session of `shape` under
