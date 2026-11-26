@@ -9,7 +9,7 @@
 //! must keep alive while the keyexpr is used (the pico contract). `z_put` /
 //! `z_declare_*` read the borrowed UTF-8 back via `keyexpr_str`.
 
-use core::ffi::{c_char, c_void, CStr};
+use core::ffi::{c_char, c_void};
 use core::mem::ManuallyDrop;
 
 use crate::prelude::*;
@@ -1046,14 +1046,157 @@ fn non_wild_prefix(literal: &str) -> &str {
 
 /// Whether `text` is a key expression in canon form, as pico's
 /// `_z_keyexpr_is_canon` answers it: valid, and already what canonizing it
-/// would produce. The one judgement behind [`z_keyexpr_is_canon`], the two
-/// checked view constructors and the checked owned constructor.
+/// would produce. The one judgement [`key_from`] makes of a text, for every door that checks one.
 fn is_pico_canon(text: &str) -> bool {
     // Judged without writing the canonical form, so a view of a key allocates nothing.
     wz_session_core::keyexpr_canon::is_canon(
         text,
         wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
     )
+}
+
+/// What a door that makes a key of a caller's text, or judges or canonizes the text, does with
+/// it: the flags [`key_from`] reads, the whole difference between those doors.
+mod how {
+    /// `out` is a view (`z_view_keyexpr_t`) of the text where it lies.
+    pub(super) const VIEW: u8 = 1;
+    /// `out` is an owned key (`z_owned_keyexpr_t`) holding the text's form.
+    pub(super) const OWNED: u8 = 1 << 1;
+    /// A text not in canon form is refused, and so is one past the bound for an owned key.
+    pub(super) const CHECK: u8 = 1 << 2;
+    /// The text's canonical form is taken: written over the caller's bytes where no owned key is
+    /// made, into the owned key where one is.
+    pub(super) const CANONIZE: u8 = 1 << 3;
+    /// The text ends at its NUL, which a text canonized where it lies is terminated with again.
+    pub(super) const NUL: u8 = 1 << 4;
+    /// The text's length is read at `len_at`, and the form's length written back there.
+    pub(super) const LEN_AT: u8 = 1 << 5;
+}
+
+/// The one body of every door that makes a key of a caller's text (the view and owned
+/// constructors, checked, unchecked and canonizing) or judges or canonizes the text where it lies,
+/// as `flags` ([`how`]) says. Each such door is a call of it, so each step of the walk is reached
+/// from one place: the canon judgement ([`is_pico_canon`]), the in-place canonizer and the
+/// canonizing store ([`store_canonized`]), where each door carried the copy it reached inlined.
+///
+/// The doors' answers: `Z_ERR_NULL` for no object, no length or no text, and for a text an owned
+/// key cannot read; `Z_ERR_INVALID` for a text that is not UTF-8, and for a text not in canon
+/// form where no object is made (`z_keyexpr_is_canon`); `Z_EINVAL` for an object of a text not in
+/// canon form; `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for an owned key past the bound ([`fits`]); the
+/// canonizer's status for a text no canonizing makes a key of. An owned key is null and a view
+/// empty before the text is read, so a refusal leaves them so; a checked view that does not
+/// canonize is left as it was, as zenoh-pico's is (`vendor/zenoh-pico/src/api/api.c` @
+/// `if (_z_keyexpr_is_canon(name, len) != Z_KEYEXPR_CANON_SUCCESS) {`).
+///
+/// # Safety
+/// `out` is null or a valid, writable object of the kind `flags` names; `text` is null or
+/// points at the bytes `flags` says (up to a NUL, `len` or `*len_at`), writable where the text is
+/// canonized where it lies, and outliving a view of it; `len_at` is null or valid and writable.
+#[inline(never)]
+unsafe fn key_from(
+    out: *mut c_void,
+    text: *mut c_char,
+    len: usize,
+    len_at: *mut usize,
+    flags: u8,
+) -> ZResult {
+    let has = |flag: u8| flags & flag != 0;
+    if (has(how::VIEW | how::OWNED) && out.is_null()) || (has(how::LEN_AT) && len_at.is_null()) {
+        return Z_ERR_NULL;
+    }
+    if has(how::OWNED) {
+        *out.cast::<z_owned_keyexpr_t>() = z_owned_keyexpr_t::null_value();
+    } else if has(how::VIEW) && flags & (how::CHECK | how::CANONIZE) != how::CHECK {
+        z_view_keyexpr_empty(out.cast());
+    }
+    if text.is_null() {
+        return Z_ERR_NULL;
+    }
+    let len = if has(how::NUL) {
+        c_str_len(text)
+    } else if has(how::LEN_AT) {
+        *len_at
+    } else {
+        len
+    };
+    let Some(read) = crate::abi::text_of(core::slice::from_raw_parts(text.cast::<u8>(), len))
+    else {
+        return if has(how::OWNED) {
+            Z_ERR_NULL
+        } else {
+            Z_ERR_INVALID
+        };
+    };
+    let form = if !has(how::CANONIZE) {
+        read
+    } else if has(how::OWNED) {
+        // The text is the one part of a join with nothing on its left, so it is canonized, held
+        // to the bound and stored by the body the joins use, as a literal. pico copies the text
+        // and canonizes the copy (`vendor/zenoh-pico/src/api/api.c` @
+        // `z_keyexpr_canonize((char *)_z_string_data(&key->_val._inner._keyexpr),`), answering
+        // its canonize status.
+        return match store_canonized(
+            out.cast(),
+            core::ptr::null(),
+            &[read.as_bytes()],
+            PartsForm::Canonized,
+        ) {
+            Ok(written) => {
+                if has(how::LEN_AT) {
+                    *len_at = written;
+                }
+                Z_OK
+            }
+            Err(code) => code,
+        };
+    } else {
+        // Over the caller's own bytes, as pico canonizes them, of any length: the form never
+        // grows, so it takes no buffer and no bound. `read` is not read again.
+        let bytes = core::slice::from_raw_parts_mut(text.cast::<u8>(), len);
+        let written =
+            match wz_session_core::keyexpr_canon::canonize_in_place(bytes, KeyexprDialect::Pico) {
+                Ok(written) => written,
+                Err(err) => return pico_canon_status(&err),
+            };
+        if has(how::LEN_AT) {
+            *len_at = written;
+        }
+        if has(how::NUL) {
+            *text.add(written) = 0;
+        }
+        match crate::abi::text_of(core::slice::from_raw_parts(text.cast::<u8>(), written)) {
+            Some(form) => form,
+            None => return Z_ERR_INVALID,
+        }
+    };
+    if has(how::CHECK) {
+        // The bound first, as [`canon_key`] judges it: whether a text past it is judged canon
+        // depends on the profile's scratch.
+        if has(how::OWNED) && !fits(form) {
+            return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY;
+        }
+        if !is_pico_canon(form) {
+            return if has(how::VIEW | how::OWNED) {
+                Z_EINVAL
+            } else {
+                Z_ERR_INVALID
+            };
+        }
+    }
+    if has(how::OWNED) {
+        return match DeclaredKeyexpr::literal_only(form) {
+            Ok(key) => store_owned_keyexpr(out.cast(), key),
+            Err(code) => code,
+        };
+    }
+    if has(how::VIEW) {
+        *out.cast::<z_view_keyexpr_t>() = z_view_keyexpr_t {
+            _start: form.as_ptr(),
+            _len: form.len(),
+            _pad: [0usize; 4],
+        };
+    }
+    Z_OK
 }
 
 /// Build a view keyexpr borrowing the caller's C string (pico
@@ -1073,9 +1216,13 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    // pico's is the substring form over the string's length, and so is this one, so the two
-    // judge a text through one body.
-    z_view_keyexpr_from_substr(keyexpr, name, c_str_len(name))
+    key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        0,
+        core::ptr::null_mut(),
+        how::VIEW | how::CHECK | how::NUL,
+    )
 }
 
 /// Build a view keyexpr WITHOUT validating it (pico
@@ -1098,7 +1245,13 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
 ) {
-    z_view_keyexpr_from_substr_unchecked(keyexpr, name, c_str_len(name));
+    let _ = key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        0,
+        core::ptr::null_mut(),
+        how::VIEW | how::NUL,
+    );
 }
 
 /// Build a view keyexpr borrowing `len` bytes of the caller's buffer (pico
@@ -1113,69 +1266,38 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_unchecked(
 /// the checked [`z_view_keyexpr_from_str`] (which pico implements as this
 /// function): a view this crate stores must be readable as `&str` at every
 /// later publish, and a text that is not canon is refused with `Z_EINVAL`.
-///
-/// Out of line: the `_from_str` door and both autocanonizing view doors end in this one, and
-/// each held the reading and the judgement of its own.
 #[no_mangle]
-#[inline(never)]
 pub unsafe extern "C" fn z_view_keyexpr_from_substr(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
     len: usize,
 ) -> ZResult {
-    guarded(|| {
-        if keyexpr.is_null() || name.is_null() {
-            return Z_ERR_NULL;
-        }
-        let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
-        let Some(text) = crate::abi::text_of(bytes) else {
-            return Z_ERR_INVALID;
-        };
-        if !is_pico_canon(text) {
-            return Z_EINVAL;
-        }
-        *keyexpr = z_view_keyexpr_t {
-            _start: bytes.as_ptr(),
-            _len: len,
-            _pad: [0usize; 4],
-        };
-        Z_OK
-    })
+    key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        len,
+        core::ptr::null_mut(),
+        how::VIEW | how::CHECK,
+    )
 }
 
 /// Build a view keyexpr over `len` bytes WITHOUT validating it (pico
 /// `z_view_keyexpr_from_substr_unchecked`). Same no-error-channel contract as
 /// [`z_view_keyexpr_from_str_unchecked`], including leaving the view EMPTY
 /// rather than storing bytes this crate could not later read as `&str`.
-///
-/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
-#[inline(never)]
 pub unsafe extern "C" fn z_view_keyexpr_from_substr_unchecked(
     keyexpr: *mut z_view_keyexpr_t,
     name: *const c_char,
     len: usize,
 ) {
-    let _ = guarded(|| {
-        if keyexpr.is_null() {
-            return Z_ERR_NULL;
-        }
-        if name.is_null() {
-            z_view_keyexpr_empty(keyexpr);
-            return Z_ERR_INVALID;
-        }
-        let bytes = core::slice::from_raw_parts(name.cast::<u8>(), len);
-        if crate::abi::text_of(bytes).is_none() {
-            z_view_keyexpr_empty(keyexpr);
-            return Z_ERR_INVALID;
-        }
-        *keyexpr = z_view_keyexpr_t {
-            _start: bytes.as_ptr(),
-            _len: len,
-            _pad: [0usize; 4],
-        };
-        Z_OK
-    });
+    let _ = key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        len,
+        core::ptr::null_mut(),
+        how::VIEW,
+    );
 }
 
 /// `true` iff the view keyexpr is empty (pico `z_view_keyexpr_is_empty`).
@@ -1503,7 +1625,13 @@ pub unsafe extern "C" fn z_keyexpr_from_str(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    z_keyexpr_from_substr(keyexpr, name, c_str_len(name))
+    key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        0,
+        core::ptr::null_mut(),
+        how::OWNED | how::CHECK | how::NUL,
+    )
 }
 
 /// Build an owned keyexpr from an explicitly-sized substring (pico
@@ -1519,20 +1647,13 @@ pub unsafe extern "C" fn z_keyexpr_from_substr(
     name: *const c_char,
     len: usize,
 ) -> ZResult {
-    guarded(|| {
-        let Some(text) = owned_keyexpr_input(keyexpr, name, len) else {
-            return Z_ERR_NULL;
-        };
-        // The canon CHECK, not the canon transform: equality with the canonical
-        // form is exactly `_z_keyexpr_is_canon` returning OK.
-        if let Err(code) = canon_key(text) {
-            return code;
-        }
-        match DeclaredKeyexpr::literal_only(text) {
-            Ok(key) => store_owned_keyexpr(keyexpr, key),
-            Err(code) => code,
-        }
-    })
+    key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        len,
+        core::ptr::null_mut(),
+        how::OWNED | how::CHECK,
+    )
 }
 
 /// Build an owned keyexpr from a NUL-terminated string, CANONIZING it first
@@ -1546,8 +1667,13 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
 ) -> ZResult {
-    let mut len = c_str_len(name);
-    z_keyexpr_from_substr_autocanonize(keyexpr, name, &mut len)
+    key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        0,
+        core::ptr::null_mut(),
+        how::OWNED | how::CANONIZE | how::NUL,
+    )
 }
 
 /// Build an owned keyexpr from a substring, canonizing it and writing the
@@ -1561,65 +1687,19 @@ pub unsafe extern "C" fn z_keyexpr_from_str_autocanonize(
 /// # Safety
 /// `keyexpr` must be valid and writable; `name` must be null or point at
 /// `*len` readable bytes; `len` must be null or valid and writable.
-///
-/// Out of line: the `_from_str` door ends in this one, and held a copy of its own.
 #[no_mangle]
-#[inline(never)]
 pub unsafe extern "C" fn z_keyexpr_from_substr_autocanonize(
     keyexpr: *mut z_owned_keyexpr_t,
     name: *const c_char,
     len: *mut usize,
 ) -> ZResult {
-    guarded(|| {
-        if len.is_null() {
-            return Z_ERR_NULL;
-        }
-        let Some(text) = owned_keyexpr_input(keyexpr, name, *len) else {
-            return Z_ERR_NULL;
-        };
-        // The text is the one part of a join with nothing on its left, so it is canonized, held
-        // to the bound and stored by the body the joins use, as a literal. pico copies the text and
-        // canonizes the copy (`vendor/zenoh-pico/src/api/api.c` @
-        // `z_keyexpr_canonize((char *)_z_string_data(&key->_val._inner._keyexpr),`), answering
-        // its canonize status.
-        match store_canonized(
-            keyexpr,
-            core::ptr::null(),
-            &[text.as_bytes()],
-            PartsForm::Canonized,
-        ) {
-            Ok(written) => {
-                *len = written;
-                Z_OK
-            }
-            Err(code) => code,
-        }
-    })
-}
-
-/// Null `keyexpr` and read `name[..len]` as UTF-8 where it lies, or `None` on any bad
-/// input. The owned key is made from it once, where it is stored, so nothing is copied to read it.
-///
-/// Shared by the owned constructors so the "null the destination FIRST"
-/// discipline cannot drift between them: a constructor that failed without
-/// nulling would leave the caller's stack value looking live.
-///
-/// # Safety
-/// `keyexpr` must be null or valid and writable; `name` must be null or point at `len`
-/// readable bytes, which outlive the answer.
-unsafe fn owned_keyexpr_input<'a>(
-    keyexpr: *mut z_owned_keyexpr_t,
-    name: *const c_char,
-    len: usize,
-) -> Option<&'a str> {
-    if keyexpr.is_null() {
-        return None;
-    }
-    *keyexpr = z_owned_keyexpr_t::null_value();
-    if name.is_null() {
-        return None;
-    }
-    crate::abi::text_of(core::slice::from_raw_parts(name.cast::<u8>(), len))
+    key_from(
+        keyexpr.cast(),
+        name.cast_mut(),
+        0,
+        len,
+        how::OWNED | how::CANONIZE | how::LEN_AT,
+    )
 }
 
 /// Copy a keyexpr into an owned one (pico `z_keyexpr_clone`, which is
@@ -1941,20 +2021,13 @@ pub unsafe extern "C" fn z_keyexpr_relation_to(
 /// `start` must be null or point at `len` readable bytes.
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_is_canon(start: *const c_char, len: usize) -> ZResult {
-    guarded(|| {
-        if start.is_null() {
-            return Z_ERR_NULL;
-        }
-        let Some(text) = crate::abi::text_of(core::slice::from_raw_parts(start.cast::<u8>(), len))
-        else {
-            return Z_ERR_INVALID;
-        };
-        if is_pico_canon(text) {
-            Z_OK
-        } else {
-            Z_ERR_INVALID
-        }
-    })
+    key_from(
+        core::ptr::null_mut(),
+        start.cast_mut(),
+        len,
+        core::ptr::null_mut(),
+        how::CHECK,
+    )
 }
 
 /// wz's typed canon error as pico's `zp_keyexpr_canon_status_t`
@@ -1995,36 +2068,18 @@ fn pico_canon_status(err: &wz_session_core::keyexpr_canon::KeyexprCanonError) ->
 /// keeps the count. The buffer is NOT NUL-terminated here; that is
 /// [`z_keyexpr_canonize_null_terminated`]'s job, and the split is upstream's.
 ///
-/// Out of line: the NUL-terminated form and the substring autocanonizing view door canonize
-/// through this one, and each held the reading and the status mapping of its own.
-///
 /// # Safety
 /// `start` must be null or point at `*len` readable AND writable bytes; `len`
 /// must be null or valid and writable.
 #[no_mangle]
-#[inline(never)]
 pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize) -> ZResult {
-    guarded(|| {
-        if start.is_null() || len.is_null() {
-            return Z_ERR_NULL;
-        }
-        let text = core::slice::from_raw_parts_mut(start.cast::<u8>(), *len);
-        if crate::abi::text_of(text).is_none() {
-            return Z_ERR_INVALID;
-        }
-        // Over the caller's own bytes, as pico canonizes them, of any length: the form never
-        // grows, so it takes no buffer and no bound.
-        match wz_session_core::keyexpr_canon::canonize_in_place(
-            text,
-            wz_session_core::keyexpr_canon::KeyexprDialect::Pico,
-        ) {
-            Ok(written) => {
-                *len = written;
-                Z_OK
-            }
-            Err(err) => pico_canon_status(&err),
-        }
-    })
+    key_from(
+        core::ptr::null_mut(),
+        start,
+        0,
+        len,
+        how::CANONIZE | how::LEN_AT,
+    )
 }
 
 /// Canonize a NUL-terminated buffer in place, re-terminating it (pico
@@ -2034,17 +2089,13 @@ pub unsafe extern "C" fn z_keyexpr_canonize(start: *mut c_char, len: *mut usize)
 /// `start` must be null or a valid NUL-terminated, WRITABLE buffer.
 #[no_mangle]
 pub unsafe extern "C" fn z_keyexpr_canonize_null_terminated(start: *mut c_char) -> ZResult {
-    guarded(|| {
-        if start.is_null() {
-            return Z_ERR_NULL;
-        }
-        let mut len = CStr::from_ptr(start).to_bytes().len();
-        let rc = z_keyexpr_canonize(start, &mut len);
-        if rc == Z_OK {
-            *start.add(len) = 0;
-        }
-        rc
-    })
+    key_from(
+        core::ptr::null_mut(),
+        start,
+        0,
+        core::ptr::null_mut(),
+        how::CANONIZE | how::NUL,
+    )
 }
 
 /// Point a view keyexpr at a NUL-terminated string, canonizing it IN PLACE
@@ -2062,17 +2113,13 @@ pub unsafe extern "C" fn z_view_keyexpr_from_str_autocanonize(
     keyexpr: *mut z_view_keyexpr_t,
     name: *mut c_char,
 ) -> ZResult {
-    guarded(|| {
-        if keyexpr.is_null() {
-            return Z_ERR_NULL;
-        }
-        z_view_keyexpr_empty(keyexpr);
-        let rc = z_keyexpr_canonize_null_terminated(name);
-        if rc != Z_OK {
-            return rc;
-        }
-        z_view_keyexpr_from_str(keyexpr, name)
-    })
+    key_from(
+        keyexpr.cast(),
+        name,
+        0,
+        core::ptr::null_mut(),
+        how::VIEW | how::CANONIZE | how::CHECK | how::NUL,
+    )
 }
 
 /// Point a view keyexpr at an explicitly-sized substring, canonizing it in
@@ -2089,17 +2136,13 @@ pub unsafe extern "C" fn z_view_keyexpr_from_substr_autocanonize(
     name: *mut c_char,
     len: *mut usize,
 ) -> ZResult {
-    guarded(|| {
-        if keyexpr.is_null() || len.is_null() {
-            return Z_ERR_NULL;
-        }
-        z_view_keyexpr_empty(keyexpr);
-        let rc = z_keyexpr_canonize(name, len);
-        if rc != Z_OK {
-            return rc;
-        }
-        z_view_keyexpr_from_substr(keyexpr, name, *len)
-    })
+    key_from(
+        keyexpr.cast(),
+        name,
+        0,
+        len,
+        how::VIEW | how::CANONIZE | how::CHECK | how::LEN_AT,
+    )
 }
 
 #[cfg(test)]
@@ -2261,6 +2304,322 @@ mod door_reading_tests {
                 z_view_keyexpr_loan(&b_star)
             ));
             assert!(!z_keyexpr_intersects(ab, z_view_keyexpr_loan(&other)));
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_from_tests {
+    use super::*;
+
+    /// Every door [`key_from`] serves.
+    #[derive(Clone, Copy, Debug)]
+    enum Door {
+        ViewStr,
+        ViewSubstr,
+        ViewStrUnchecked,
+        ViewSubstrUnchecked,
+        ViewStrAuto,
+        ViewSubstrAuto,
+        OwnedStr,
+        OwnedSubstr,
+        OwnedStrAuto,
+        OwnedSubstrAuto,
+        IsCanon,
+        Canonize,
+        CanonizeNul,
+    }
+
+    /// The texts each door is handed: in canon form; in canon form once rewritten; one no
+    /// canonizing makes a key of; not UTF-8; none.
+    const TEXTS: [Option<&[u8]>; 5] = [
+        Some(b"a/b".as_slice()),
+        Some(b"demo/$*/x".as_slice()),
+        Some(b"home//temp".as_slice()),
+        Some(b"a/\xff".as_slice()),
+        None,
+    ];
+
+    /// What `door` answered for `text` and left behind: its code (none for a door with no
+    /// result); the key its view or owned key holds (`x` for a view left as it was, none for an
+    /// empty view or a null key), or the caller's text after a canonizer that succeeded; the
+    /// length the door was handed, as the door left it. The text lies in a NUL-terminated buffer
+    /// of its own and the view held `x`; `null_out` hands the door no object.
+    fn answer(
+        door: Door,
+        text: Option<&[u8]>,
+        null_out: bool,
+    ) -> (Option<ZResult>, Option<String>, usize) {
+        let mut buffer: Option<Vec<u8>> = text.map(|text| {
+            let mut buffer = text.to_vec();
+            buffer.push(0);
+            buffer
+        });
+        let at = buffer.as_mut().map_or(core::ptr::null_mut(), |buffer| {
+            buffer.as_mut_ptr().cast::<c_char>()
+        });
+        let mut len = text.map_or(0, <[u8]>::len);
+        let mut view = z_view_keyexpr_t {
+            _start: b"x".as_ptr(),
+            _len: 1,
+            _pad: [0usize; 4],
+        };
+        let mut owned = z_owned_keyexpr_t::null_value();
+        let (v, o) = if null_out {
+            (core::ptr::null_mut(), core::ptr::null_mut())
+        } else {
+            (
+                core::ptr::addr_of_mut!(view),
+                core::ptr::addr_of_mut!(owned),
+            )
+        };
+        // SAFETY: objects of this frame or null, a writable NUL-terminated buffer of this frame
+        // or null, and `len` its length.
+        let code = unsafe {
+            match door {
+                Door::ViewStr => Some(z_view_keyexpr_from_str(v, at)),
+                Door::ViewSubstr => Some(z_view_keyexpr_from_substr(v, at, len)),
+                Door::ViewStrUnchecked => {
+                    z_view_keyexpr_from_str_unchecked(v, at);
+                    None
+                }
+                Door::ViewSubstrUnchecked => {
+                    z_view_keyexpr_from_substr_unchecked(v, at, len);
+                    None
+                }
+                Door::ViewStrAuto => Some(z_view_keyexpr_from_str_autocanonize(v, at)),
+                Door::ViewSubstrAuto => {
+                    Some(z_view_keyexpr_from_substr_autocanonize(v, at, &mut len))
+                }
+                Door::OwnedStr => Some(z_keyexpr_from_str(o, at)),
+                Door::OwnedSubstr => Some(z_keyexpr_from_substr(o, at, len)),
+                Door::OwnedStrAuto => Some(z_keyexpr_from_str_autocanonize(o, at)),
+                Door::OwnedSubstrAuto => Some(z_keyexpr_from_substr_autocanonize(o, at, &mut len)),
+                Door::IsCanon => Some(z_keyexpr_is_canon(at, len)),
+                Door::Canonize => Some(z_keyexpr_canonize(at, &mut len)),
+                Door::CanonizeNul => Some(z_keyexpr_canonize_null_terminated(at)),
+            }
+        };
+        let text_of = |bytes: &[u8]| String::from_utf8(bytes.to_vec()).expect("a key of text");
+        let holds = match door {
+            Door::ViewStr
+            | Door::ViewSubstr
+            | Door::ViewStrUnchecked
+            | Door::ViewSubstrUnchecked
+            | Door::ViewStrAuto
+            | Door::ViewSubstrAuto => (!view._start.is_null()).then(|| {
+                // SAFETY: a view the door wrote over the buffer of this frame, or the static `x`.
+                text_of(unsafe { core::slice::from_raw_parts(view._start, view._len) })
+            }),
+            Door::OwnedStr | Door::OwnedSubstr | Door::OwnedStrAuto | Door::OwnedSubstrAuto => {
+                // SAFETY: an owned key of this frame, let go of once.
+                unsafe {
+                    z_internal_keyexpr_check(&owned).then(|| {
+                        let key = keyexpr_str(z_keyexpr_loan(&owned))
+                            .expect("a key of text")
+                            .to_owned();
+                        z_keyexpr_drop(z_keyexpr_move(&mut owned));
+                        key
+                    })
+                }
+            }
+            Door::IsCanon => None,
+            Door::Canonize => (code == Some(Z_OK)).then(|| {
+                text_of(
+                    buffer
+                        .as_deref()
+                        .and_then(|b| b.get(..len))
+                        .expect("the form"),
+                )
+            }),
+            Door::CanonizeNul => (code == Some(Z_OK)).then(|| {
+                let buffer = buffer.as_deref().expect("a buffer");
+                let end = buffer.iter().position(|&b| b == 0).expect("terminated");
+                text_of(&buffer[..end])
+            }),
+        };
+        (code, holds, len)
+    }
+
+    /// Each door, over each of [`TEXTS`], answers what it answered before it was a call of
+    /// [`key_from`]: the code, what its object holds and the length it hands back. Turned red by
+    /// one door's flags mapped wrong: a checked view that canonizes makes a key of the rewritten
+    /// text, an unchecked one that checks refuses it, an owned constructor that reads no length
+    /// back leaves it as it was, and a checked view emptied first leaves no `x`.
+    #[test]
+    fn every_key_door_answers_as_it_answered_before() {
+        const OK: Option<ZResult> = Some(Z_OK);
+        const EINVAL: Option<ZResult> = Some(Z_EINVAL);
+        const INVALID: Option<ZResult> = Some(Z_ERR_INVALID);
+        const NULL: Option<ZResult> = Some(Z_ERR_NULL);
+        const EMPTY_CHUNK: Option<ZResult> = Some(-4);
+        type Row = [(Option<ZResult>, Option<&'static str>, usize); 5];
+        let refused_view: Row = [
+            (OK, Some("a/b"), 3),
+            (EINVAL, Some("x"), 9),
+            (EINVAL, Some("x"), 10),
+            (INVALID, Some("x"), 3),
+            (NULL, Some("x"), 0),
+        ];
+        let unchecked_view: Row = [
+            (None, Some("a/b"), 3),
+            (None, Some("demo/$*/x"), 9),
+            (None, Some("home//temp"), 10),
+            (None, None, 3),
+            (None, None, 0),
+        ];
+        let canonized = |len: [usize; 2], not_text: Option<ZResult>| -> Row {
+            [
+                (OK, Some("a/b"), len[0]),
+                (OK, Some("demo/*/x"), len[1]),
+                (EMPTY_CHUNK, None, 10),
+                (not_text, None, 3),
+                (NULL, None, 0),
+            ]
+        };
+        let refused_owned: Row = [
+            (OK, Some("a/b"), 3),
+            (EINVAL, None, 9),
+            (EINVAL, None, 10),
+            (NULL, None, 3),
+            (NULL, None, 0),
+        ];
+        let table: [(Door, Row); 13] = [
+            (Door::ViewStr, refused_view),
+            (Door::ViewSubstr, refused_view),
+            (Door::ViewStrUnchecked, unchecked_view),
+            (Door::ViewSubstrUnchecked, unchecked_view),
+            (Door::ViewStrAuto, canonized([3, 9], INVALID)),
+            (Door::ViewSubstrAuto, canonized([3, 8], INVALID)),
+            (Door::OwnedStr, refused_owned),
+            (Door::OwnedSubstr, refused_owned),
+            (Door::OwnedStrAuto, canonized([3, 9], NULL)),
+            (Door::OwnedSubstrAuto, canonized([3, 8], NULL)),
+            (
+                Door::IsCanon,
+                [
+                    (OK, None, 3),
+                    (INVALID, None, 9),
+                    (INVALID, None, 10),
+                    (INVALID, None, 3),
+                    (NULL, None, 0),
+                ],
+            ),
+            (Door::Canonize, canonized([3, 8], INVALID)),
+            (Door::CanonizeNul, canonized([3, 9], INVALID)),
+        ];
+        for (door, row) in table {
+            for (text, (code, holds, len)) in TEXTS.into_iter().zip(row) {
+                let (got_code, got_holds, got_len) = answer(door, text, false);
+                assert_eq!(
+                    (got_code, got_holds.as_deref(), got_len),
+                    (code, holds, len),
+                    "{door:?} over {text:?}"
+                );
+            }
+        }
+    }
+
+    /// A door handed no object answers `Z_ERR_NULL` and writes nothing, and so does a door that
+    /// reads its length back from a null place, which leaves its view, its key and the caller's
+    /// text as they were. Turned red by a door that writes or reads through either pointer
+    /// before it is checked.
+    #[test]
+    fn a_door_handed_no_object_or_no_length_writes_nothing() {
+        for door in [
+            Door::ViewStr,
+            Door::ViewSubstr,
+            Door::ViewStrAuto,
+            Door::ViewSubstrAuto,
+            Door::OwnedStr,
+            Door::OwnedSubstr,
+            Door::OwnedStrAuto,
+            Door::OwnedSubstrAuto,
+        ] {
+            assert_eq!(
+                answer(door, Some(b"demo/$*/x"), true).0,
+                Some(Z_ERR_NULL),
+                "{door:?}"
+            );
+        }
+        let mut text = *b"demo/$*/x\0";
+        let at = text.as_mut_ptr().cast::<c_char>();
+        let x: &[u8] = b"x";
+        let mut view = z_view_keyexpr_t {
+            _start: x.as_ptr(),
+            _len: 1,
+            _pad: [0usize; 4],
+        };
+        let mut owned = z_owned_keyexpr_t::null_value();
+        // SAFETY: objects and a writable buffer of this frame, and null lengths.
+        unsafe {
+            assert_eq!(
+                z_view_keyexpr_from_substr_autocanonize(&mut view, at, core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                (view._start, view._len),
+                (x.as_ptr(), 1),
+                "the view as it was"
+            );
+            assert_eq!(
+                z_keyexpr_from_substr_autocanonize(&mut owned, at, core::ptr::null_mut()),
+                Z_ERR_NULL
+            );
+            assert!(!z_internal_keyexpr_check(&owned));
+            assert_eq!(z_keyexpr_canonize(at, core::ptr::null_mut()), Z_ERR_NULL);
+        }
+        assert_eq!(&text, b"demo/$*/x\0", "the text as it was");
+    }
+
+    /// A text canonized is in canon form, and canonized again it is unchanged, by the in-place
+    /// canonizer and by the owned canonizing constructor. Turned red by a walk that is not
+    /// idempotent, or by a store that rewrites a form it is handed.
+    #[test]
+    fn a_text_canonized_twice_is_unchanged_the_second_time() {
+        for text in ["a/b", "demo/$*/x", "a/**/*", "a/**/**", "demo/$*x"] {
+            let mut once = text.as_bytes().to_vec();
+            let mut len = once.len();
+            // SAFETY: writable buffers and owned keys of this frame, each key let go of once.
+            unsafe {
+                assert_eq!(
+                    z_keyexpr_canonize(once.as_mut_ptr().cast(), &mut len),
+                    Z_OK,
+                    "{text}"
+                );
+                once.truncate(len);
+                assert_eq!(
+                    z_keyexpr_is_canon(once.as_ptr().cast(), once.len()),
+                    Z_OK,
+                    "{text}"
+                );
+                let mut twice = once.clone();
+                let mut again = twice.len();
+                assert_eq!(
+                    z_keyexpr_canonize(twice.as_mut_ptr().cast(), &mut again),
+                    Z_OK,
+                    "{text}"
+                );
+                assert_eq!(&twice[..again], &once[..], "{text}");
+                let mut key = z_owned_keyexpr_t::null_value();
+                let mut owned_len = once.len();
+                assert_eq!(
+                    z_keyexpr_from_substr_autocanonize(
+                        &mut key,
+                        once.as_ptr().cast(),
+                        &mut owned_len
+                    ),
+                    Z_OK,
+                    "{text}"
+                );
+                assert_eq!(owned_len, once.len(), "{text}");
+                assert_eq!(
+                    keyexpr_str(z_keyexpr_loan(&key)).map(str::as_bytes),
+                    Some(&once[..]),
+                    "{text}"
+                );
+                z_keyexpr_drop(z_keyexpr_move(&mut key));
+            }
         }
     }
 }
