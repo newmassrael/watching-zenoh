@@ -409,40 +409,75 @@ const PRIORITIES: [Priority; 8] = [
     Priority::Background,
 ];
 
-impl NetworkMessagePayloadLabels {
-    /// How many label sets the payload families have: the product of their four closed axes.
-    pub const COUNT: usize = StatSpace::COUNT * PRIORITIES.len() * MessageLabel::ALL.len() * 2;
+/// The labels of one link's `zenoh_{tx,rx}_network_message` series but its protocol, which is the
+/// link's: a closed product of three axes, so a link holds a counter for each from its open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct LinkNetworkLabels {
+    priority: Priority,
+    message: MessageLabel,
+    shm: bool,
+}
+
+impl LinkNetworkLabels {
+    /// How many label sets one link counts.
+    const COUNT: usize = PRIORITIES.len() * MessageLabel::ALL.len() * 2;
 
     /// This label set's place among the [`Self::COUNT`]. The axes nest in field order, each in its
     /// own order, so the places run in the order the derived `Ord` gives: a table walked by place
     /// is written in the order a map keyed by the labels was.
-    pub fn index(&self) -> usize {
+    fn index(self) -> usize {
         // Below COUNT at every step, so no operation wraps.
-        let space = self.space.index();
-        let priority = space
-            .wrapping_mul(PRIORITIES.len())
-            .wrapping_add(self.priority as usize);
-        let message = priority
+        let message = (self.priority as usize)
             .wrapping_mul(MessageLabel::ALL.len())
             .wrapping_add(self.message as usize);
         message.wrapping_mul(2).wrapping_add(usize::from(self.shm))
     }
 
     /// The label set at `index`, [`Self::index`]'s inverse; `None` past [`Self::COUNT`].
-    pub fn from_index(index: usize) -> Option<Self> {
+    fn from_index(index: usize) -> Option<Self> {
         let messages = MessageLabel::ALL.len();
-        let priorities = PRIORITIES.len();
         let shm = index.checked_rem(2)? == 1;
         let rest = index.checked_div(2)?;
         let message = *MessageLabel::ALL.get(rest.checked_rem(messages)?)?;
-        let rest = rest.checked_div(messages)?;
-        let priority = *PRIORITIES.get(rest.checked_rem(priorities)?)?;
-        let space = *StatSpace::ALL.get(rest.checked_div(priorities)?)?;
+        let priority = *PRIORITIES.get(rest.checked_div(messages)?)?;
         Some(Self {
-            space,
             priority,
             message,
             shm,
+        })
+    }
+}
+
+impl NetworkMessagePayloadLabels {
+    /// How many label sets the payload families have: the product of their four closed axes.
+    pub const COUNT: usize = StatSpace::COUNT * LinkNetworkLabels::COUNT;
+
+    /// This label set's place among the [`Self::COUNT`]: the space outermost, then the link's
+    /// axes in their own order, which is field order, so the places run in the order the derived
+    /// `Ord` gives and a table walked by place is written in the order a map keyed by the labels
+    /// was.
+    pub fn index(&self) -> usize {
+        let rest = LinkNetworkLabels {
+            priority: self.priority,
+            message: self.message,
+            shm: self.shm,
+        };
+        // Below COUNT, so no operation wraps.
+        self.space
+            .index()
+            .wrapping_mul(LinkNetworkLabels::COUNT)
+            .wrapping_add(rest.index())
+    }
+
+    /// The label set at `index`, [`Self::index`]'s inverse; `None` past [`Self::COUNT`].
+    pub fn from_index(index: usize) -> Option<Self> {
+        let rest = LinkNetworkLabels::from_index(index.checked_rem(LinkNetworkLabels::COUNT)?)?;
+        let space = *StatSpace::ALL.get(index.checked_div(LinkNetworkLabels::COUNT)?)?;
+        Some(Self {
+            space,
+            priority: rest.priority,
+            message: rest.message,
+            shm: rest.shm,
         })
     }
 }
@@ -715,8 +750,83 @@ pub struct LinkSlot(usize);
 struct LinkDirection {
     bytes: u64,
     transport_message: u64,
-    /// Keyed by `Copy` labels only; the link's protocol is the link's.
-    network_message: BTreeMap<(Priority, MessageLabel, bool), u64>,
+    /// Labelled but for the protocol, which is the link's.
+    network_message: LinkNetworkCounts,
+}
+
+impl LinkDirection {
+    /// Fold this side of a closing link into `own`, the transport's cells, under the link's
+    /// `protocol`, and keep nothing: a closed link counts no more. A folded series is created
+    /// even at zero, as upstream's `drain_into` creates its target.
+    fn drain_into(&mut self, own: &mut TransportDirection, protocol: &str) {
+        // Counters wrap, as every counter of this registry does.
+        let bytes = own
+            .bytes
+            .entry(BytesLabels {
+                protocol: String::from(protocol),
+            })
+            .or_default();
+        *bytes = bytes.wrapping_add(core::mem::take(&mut self.bytes));
+        let transport_message = own
+            .transport_message
+            .entry(TransportMessageLabels {
+                protocol: String::from(protocol),
+            })
+            .or_default();
+        *transport_message =
+            transport_message.wrapping_add(core::mem::take(&mut self.transport_message));
+        for (labels, value) in self.network_message.take().counted() {
+            let count = own
+                .network_message
+                .entry(NetworkMessageLabels {
+                    priority: labels.priority,
+                    message: labels.message,
+                    shm: labels.shm,
+                    protocol: String::from(protocol),
+                })
+                .or_default();
+            *count = count.wrapping_add(value);
+        }
+    }
+}
+
+/// One direction of one link's `zenoh_{tx,rx}_network_message` counters: a counter for every
+/// label set, at the set's [`LinkNetworkLabels::index`].
+///
+/// The label sets are a closed product, so every series has its place from the moment the link
+/// opens and counting a message is an index, never an insert: the link's first message of a
+/// label set takes no memory, where a map keyed by the labels took a node. A series that counted
+/// nothing is one upstream has not created yet, and it is written only once it has counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LinkNetworkCounts(Box<[u64]>);
+
+impl Default for LinkNetworkCounts {
+    fn default() -> Self {
+        Self(alloc::vec![0; LinkNetworkLabels::COUNT].into_boxed_slice())
+    }
+}
+
+impl LinkNetworkCounts {
+    fn inc(&mut self, labels: LinkNetworkLabels) {
+        if let Some(count) = self.0.get_mut(labels.index()) {
+            *count = count.wrapping_add(1);
+        }
+    }
+
+    /// The label sets counted, in label order, with their counts.
+    fn counted(&self) -> impl Iterator<Item = (LinkNetworkLabels, u64)> + '_ {
+        self.0
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count != 0)
+            .filter_map(|(index, count)| Some((LinkNetworkLabels::from_index(index)?, *count)))
+    }
+
+    /// These counters, leaving none in their place: a closed link holds no memory for counts it
+    /// can no longer take.
+    fn take(&mut self) -> Self {
+        Self(core::mem::take(&mut self.0))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -934,14 +1044,14 @@ fn network_message_cells(
 ) -> Cells<'_, NetworkMessageLabels, u64> {
     let mut cells = Vec::new();
     for link in m.open_links() {
-        for ((priority, message, shm), value) in &d.of(&link.directions).network_message {
+        for (series, value) in d.of(&link.directions).network_message.counted() {
             let labels = NetworkMessageLabels {
-                priority: *priority,
-                message: *message,
-                shm: *shm,
+                priority: series.priority,
+                message: series.message,
+                shm: series.shm,
                 protocol: link.protocol.clone(),
             };
-            cells.push((Some(&link.labels), labels, *value));
+            cells.push((Some(&link.labels), labels, value));
         }
     }
     let own = &d.of(&m.directions).network_message;
@@ -1010,10 +1120,11 @@ fn payload_per_key_cells(
 /// One transport's counters in both directions: what a session records into.
 ///
 /// Recording on a link goes through the [`LinkSlot`] its open returned, and
-/// every recording call is allocation-free once its series exists — the hot
-/// path is an index and a `Copy`-keyed map lookup. The payload families take no
-/// memory to count at all: their tables are made with the transport, and the
-/// per-key rows when its filter list is set.
+/// every recording call is allocation-free once its series exists. The link's
+/// families and the payload families take no memory to count at all: a link's
+/// counters are made with the link, the payload tables with the transport, and
+/// the per-key rows when its filter list is set. Only a dropped payload's
+/// series is made the first time a drop of its labels is counted.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TransportMetrics {
     links: Vec<LinkMetrics>,
@@ -1087,40 +1198,12 @@ impl TransportMetrics {
     /// folded series is created even at zero, as upstream's `drain_into`
     /// creates its target.
     pub fn close_link(&mut self, slot: LinkSlot) {
-        let Some(link) = self.link_mut(slot) else {
+        let Some(link) = self.links.get_mut(slot.0).filter(|link| link.open) else {
             return;
         };
         link.open = false;
-        let protocol = link.protocol.clone();
-        let drained = core::mem::take(&mut link.directions);
-        // Counters wrap, as every counter of this registry does.
-        for (own, link_side) in self.directions.iter_mut().zip(drained.iter()) {
-            let bytes = own
-                .bytes
-                .entry(BytesLabels {
-                    protocol: protocol.clone(),
-                })
-                .or_default();
-            *bytes = bytes.wrapping_add(link_side.bytes);
-            let transport_message = own
-                .transport_message
-                .entry(TransportMessageLabels {
-                    protocol: protocol.clone(),
-                })
-                .or_default();
-            *transport_message = transport_message.wrapping_add(link_side.transport_message);
-            for ((priority, message, shm), value) in &link_side.network_message {
-                let count = own
-                    .network_message
-                    .entry(NetworkMessageLabels {
-                        priority: *priority,
-                        message: *message,
-                        shm: *shm,
-                        protocol: protocol.clone(),
-                    })
-                    .or_default();
-                *count = count.wrapping_add(*value);
-            }
+        for (own, link_side) in self.directions.iter_mut().zip(link.directions.iter_mut()) {
+            link_side.drain_into(own, &link.protocol);
         }
     }
 
@@ -1157,12 +1240,14 @@ impl TransportMetrics {
         shm: bool,
     ) {
         if let Some(link) = self.link_mut(slot) {
-            let cell = direction
+            direction
                 .of_mut(&mut link.directions)
                 .network_message
-                .entry((priority, message, shm))
-                .or_default();
-            *cell = cell.wrapping_add(1);
+                .inc(LinkNetworkLabels {
+                    priority,
+                    message,
+                    shm,
+                });
         }
     }
 
@@ -1235,14 +1320,28 @@ impl TransportMetrics {
     ) {
         let protocol = link
             .and_then(|slot| self.links.get(slot.0))
-            .map(|link| link.protocol.clone());
-        direction
+            .map(|link| link.protocol.as_str());
+        let series = &mut direction
             .of_mut(&mut self.directions)
-            .network_message_dropped_payload
+            .network_message_dropped_payload;
+        // A series that exists is found by its parts, so counting in it copies no protocol; a
+        // map keyed by the labels is asked by an owned key. The series are few: one per label
+        // set a drop has met.
+        if let Some(histogram) = series.iter_mut().find_map(|(labels, histogram)| {
+            (labels.priority == priority
+                && labels.message == message
+                && labels.reason == reason
+                && labels.protocol.as_deref() == protocol)
+                .then_some(histogram)
+        }) {
+            histogram.observe(size);
+            return;
+        }
+        series
             .entry(NetworkMessageDroppedPayloadLabels {
                 priority,
                 message,
-                protocol,
+                protocol: protocol.map(String::from),
                 reason,
             })
             .or_default()
