@@ -870,6 +870,12 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// reads the due there, so a build of that face alone keeps no copy of it.
     #[cfg(any(feature = "listen", feature = "group"))]
     due_us: AtomicU64,
+    /// Whether the face table's row of the face holds a face, so a read turns it: set as the row
+    /// is given to a link taken off a port or a dial attached beside the dial role's, and cleared
+    /// as that face goes with its link. A read of many rows turns those alone, so a row no face
+    /// holds costs it neither a take of the session nor a reading of the clock.
+    #[cfg(feature = "listen")]
+    holds_face: AtomicBool,
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> {
@@ -913,7 +919,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             addr_of_mut!((*at).end).write(EndFlags::default());
             #[cfg(any(feature = "listen", feature = "group"))]
             addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
+            #[cfg(feature = "listen")]
+            addr_of_mut!((*at).holds_face).write(AtomicBool::new(false));
         }
+    }
+
+    /// Mark whether the face table's row of the face holds a face (`Self::holds_face`).
+    #[cfg(feature = "listen")]
+    pub(super) fn hold_face(&self, holds: bool) {
+        self.holds_face.store(holds, Ordering::Release);
     }
 
     /// Show when the face is next due by `slot`, its read slot, held: written only when it
@@ -1028,10 +1042,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         }
     }
 
+    /// The faces a read turns, in the order of the face table's rows: the dial role's, whose life
+    /// dials the session's endpoints whether or not it holds a link, then each past it whose row
+    /// holds a face (`DirectFace::hold_face`).
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[inline(always)]
+    pub(super) fn turned(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
+        #[cfg(feature = "listen")]
+        {
+            core::iter::once(&self.dial).chain(
+                self.taken
+                    .iter()
+                    .filter(|face| face.holds_face.load(Ordering::Acquire)),
+            )
+        }
+        #[cfg(not(feature = "listen"))]
+        {
+            self.iter()
+        }
+    }
+
     /// The face of the face table's row `at`: the dial role's at the first, each past it in its
     /// row of the arena; `None` past the rows the open made.
     #[cfg(feature = "listen")]
-    fn face_at(&self, at: usize) -> Option<&DirectFace<L, C>> {
+    pub(super) fn face_at(&self, at: usize) -> Option<&DirectFace<L, C>> {
         match at.checked_sub(1) {
             None => Some(&self.dial),
             Some(row) => self.taken.get(row),
@@ -1126,7 +1160,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         #[cfg(any(feature = "listen", feature = "group"))]
         {
-            self.read_faces(|| self.direct.iter())
+            self.read_faces(|| self.direct.turned())
         }
         #[cfg(not(any(feature = "listen", feature = "group")))]
         {
@@ -1612,6 +1646,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // then its record and its tables.
             #[cfg(feature = "listen")]
             if effects.removes() {
+                face.hold_face(false);
                 slot.clear(&face.site);
                 core.remove_face(slot.at());
                 return Ok(());
@@ -1871,6 +1906,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core.remove_face(at);
             return;
         }
+        face.hold_face(true);
         let now_us = core.now_us();
         if let Some(record) = core.transport.links.face_mut(at) {
             // A taken link's handshake asks for nothing of the session.
