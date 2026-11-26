@@ -2669,12 +2669,21 @@ mod tests {
              flips nothing",
         );
 
-        // Now the local half goes away too.
+        // The id is withdrawn already, so a second undeclaration of it changes nothing and
+        // reads neither half again, even with the local half gone meanwhile.
         reg.dispatch_declare_with_local(
             &DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(1)),
             &HashMap::new(),
             &|_| false,
         );
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![true],
+            "an undeclaration of an id not held flips nothing",
+        );
+
+        // The local half going away is the session's own change, which it reports here.
+        assert_eq!(reg.reevaluate_matching(&|_| false), 1, "one watch flips");
         assert_eq!(
             *log.lock().unwrap(),
             vec![true, false],
