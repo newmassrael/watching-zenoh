@@ -194,6 +194,13 @@ impl Replay {
     pub(super) fn next_turn_ms(&self) -> Option<u64> {
         (ReplayPacing::REACHABLE && !self.cursor.finished()).then_some(self.next_turn_ms)
     }
+
+    /// Whether a turn of the replay is due at `now_ms`: one is owed and its time has come. Never
+    /// in a build that reaches no pace, whose replay is the one lap a link coming up is told.
+    #[cfg(not(wz_round))]
+    pub(super) fn turn_due(&self, now_ms: u64) -> bool {
+        self.next_turn_ms().is_some_and(|due_ms| now_ms >= due_ms)
+    }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
@@ -706,6 +713,28 @@ fn announce_on<C: ClockSource + 'static, L: CoopLinks + 'static>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A turn is due only while a replay is owed and its time has come: not before it, and not
+    /// once the replay is finished or before one is begun. Turned red by a turn found due with
+    /// none owed, which has each look hold the face's place for nothing (`Replay::turn_due`).
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_replay_turn_is_due_only_while_one_is_owed_at_its_time() {
+        let mut replay = Replay::idle();
+        assert!(!replay.turn_due(100), "an idle replay owes no turn");
+        replay.begin(3, 100);
+        // A build that reaches no pace has no turn to time (`Replay::next_turn_ms`).
+        if !ReplayPacing::REACHABLE {
+            assert!(!replay.turn_due(100), "the one lap is no timed turn");
+            return;
+        }
+        assert!(!replay.turn_due(99), "not before its time");
+        assert!(replay.turn_due(100), "due at once once begun");
+        let mut cursor = replay.cursor;
+        let _ = cursor.turn(usize::MAX);
+        assert_eq!(replay.settle(cursor, true, false, 100, None), TurnEnd::Kept);
+        assert!(!replay.turn_due(1_000), "a finished replay owes no turn");
+    }
 
     /// The cursor a turn of `burst` leaves when the link refuses its first send.
     fn refused_at_once(replay: &Replay, burst: usize) -> ReplayCursor {
