@@ -572,10 +572,11 @@ fn the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads() {
 /// for it: here a second batch lies whole in the stream link's buffer behind the first. Where the
 /// session keeps a round, the one read hands both out, the session taken once for its wait and
 /// once a batch, and moves the links once at most, after the second. Where the read steps the
-/// link itself (`direct`), a step reads one batch and the next read the one held behind it, with
-/// no wait, as `direct_receive` counts. Turned red by a read that ends after the first batch while
-/// the link holds the second, or one that moves the links after each batch; with `direct`, by a
-/// read that leaves the held batch to a later receive.
+/// link itself (`direct`), the one step of the face takes both, one take a batch, so the wait, the
+/// look at the life and the pump's deadlines are paid once for the two. Turned red by a read that
+/// ends after the first batch while the link holds the second, or one that moves the links after
+/// each batch; with `direct`, by a step that takes one batch a read
+/// (`CoopEngine::take_held_input`).
 #[test]
 fn a_read_goes_on_with_the_input_its_step_left_held() {
     let engine = open_with(CoopConfig {
@@ -652,17 +653,17 @@ fn a_read_goes_on_with_the_input_its_step_left_held() {
     }
     #[cfg(not(wz_round))]
     {
-        let _ = SessionDrive::read(&*engine, false);
-        assert_eq!(
-            received.load(Ordering::SeqCst),
-            PUTS,
-            "CONTROL: the read steps the first batch"
-        );
+        let takes = engine.takes.pump_reads.load(Ordering::SeqCst);
         let _ = SessionDrive::read(&*engine, false);
         assert_eq!(
             received.load(Ordering::SeqCst),
             2 * PUTS,
-            "the next read steps the batch the link held behind it"
+            "the one read hands out both batches, the one held behind the first too"
+        );
+        assert_eq!(
+            engine.takes.pump_reads.load(Ordering::SeqCst) - takes,
+            2,
+            "one take a batch, in the one step"
         );
     }
 }

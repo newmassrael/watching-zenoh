@@ -2043,9 +2043,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Step the pump with nothing of the session held: its own bookkeeping when it is due or owes
-    /// what was asked of it from outside, then one unit of its link's input, the Router lent for
-    /// it. A step that took nothing serves the pump, which tells its session of a link that is
-    /// gone. A pump that ended has its life looked at by the next read, at once. The link's send
+    /// what was asked of it from outside, then the units of input its link holds, the Router lent
+    /// for them. A step that took nothing serves the pump, which tells its session of a link that
+    /// is gone. A pump that ended has its life looked at by the next read, at once. The link's send
     /// part is not held for the step: a send a callback of a record makes inside it, or another
     /// thread makes meanwhile, holds that part itself.
     fn pump_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) {
@@ -2063,8 +2063,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// One step of the pump `slot` holds at `turn`: its own bookkeeping when it is due or owes
-    /// what was asked of it from outside, then one unit of its input, the slot's Router lent for
-    /// it. Whether the pump ended, and when it is due next; `None` while no pump is written.
+    /// what was asked of it from outside, then the units of its input the link holds
+    /// (`Self::take_held_input`), the slot's Router lent for them. Whether the pump ended, and
+    /// when it is due next; `None` while no pump is written.
     fn step_pump(&self, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) -> Option<(bool, u64)> {
         let (now_us, now_ms) = (turn.now_us, turn.now_ms);
         let DirectSlot {
@@ -2089,17 +2090,43 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             {
                 break 'step true;
             }
-            let took = lend.lend_for(router, || pump.take_input_now(now_ms, &mut sink));
-            #[cfg(test)]
-            if took {
-                self.takes.pump_reads.fetch_add(1, Ordering::Relaxed);
-            }
+            let took = lend.lend_for(router, || {
+                self.take_held_input(&mut *pump, now_ms, &mut sink)
+            });
             !took && pump.service_due(now_ms, &mut sink).is_some()
         };
         let due_us = pump.due_ms(now_ms).map_or(u64::MAX, |due_ms| {
             now_us.saturating_add(due_ms.saturating_sub(now_ms).saturating_mul(1000))
         });
         Some((ended, due_us))
+    }
+
+    /// Hand the pump the link's next unit of input at `now_ms`, then every unit the link already
+    /// took from its stack behind it: the wait, the look at the life and the gathering of the
+    /// pump's deadlines are paid once for what one receive brought, not once a batch, as
+    /// zenoh-pico's read of a peer's socket processes what the read left behind its first batch
+    /// before it waits again (`vendor/zenoh-pico/src/transport/unicast/read.c` @
+    /// `static z_result_t _zp_unicast_process_peer_event(`).
+    /// What the link holds bounds the run, so the next unit read from the stack waits for the next
+    /// read, which serves what fell due first. A run ends once a callback closed the session.
+    /// Whether a unit was taken.
+    #[inline(always)]
+    fn take_held_input<F: EventSink>(
+        &self,
+        pump: &mut DirectPump<L, C>,
+        now_ms: u64,
+        sink: &mut F,
+    ) -> bool {
+        let mut took = false;
+        while pump.take_input_now(now_ms, sink) {
+            took = true;
+            #[cfg(test)]
+            self.takes.pump_reads.fetch_add(1, Ordering::Relaxed);
+            if !pump.link().holds_input() || self.closed.load(Ordering::Acquire) {
+                break;
+            }
+        }
+        took
     }
 
     /// Tell the link's life `input` at `now_us` and carry out its effects, in the order the life
