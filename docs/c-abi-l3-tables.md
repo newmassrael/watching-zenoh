@@ -45,7 +45,7 @@ Read from `crates/wz-capi-coop/src/engine.rs`, `engine/registry.rs`, `engine/liv
 | liveliness subscriber | `Core::live_subs` (`LiveSubEntry`), `Registry::app.liveliness_subscribers` (pattern, history, sink), callback in `targets` | 2, callback 1 | `liveliness_subscribers` |
 | matching listener | `Core::matches` (`MatchEntry`), the `MatchingWatchList` inside `RemoteSubscriberTable` / `RemoteQueryableTable` (criterion with its own key, last verdict, sink; a growable list), the sink again in `targets`, the flips in `CoopEngine::matching` | 2, callback 2 | `matching` |
 | write filter | `Core::filters` (`FilterEntry`, with the peers' verdict cached) | 1, its key again in its Interest | `write_filters` (key read from its Interest) |
-| Interest the session holds open | `Core::interests` (`InterestHold`) | 1 | `interests` |
+| Interest the session holds open | `Core::interests` (`InterestHold`) | 1 | `write_filters` (the fields of its filter's row) |
 | what a face's peer declared | `FaceTables::peer` (`PeerTables`, rows in `PeerPools`) | 1 | stays in `PeerTables` (section 5) |
 | pending get | `FaceTables::gets` (`Requesters`: request id, key, deadline, consolidating sink), `Core::pending_gets` (`PendingGet`), the callback in `targets` (`TargetKey::Reply`), its end in `GetPlane::ended` | 3 | `pending_gets` |
 | query held for its callback | `QueryPlane` (`FinalHolds` and a queue of `OwnedQuery` copies), the Final in `PeerTables::finals` | a copy of every query | not in this phase: the query is answered from its view under a hold (phase 5) |
@@ -69,8 +69,7 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
 | `queryables` | `QueryableRow`: entity id, key form, origin, complete, callback | `MAX_QUERYABLES` |
 | `tokens` | `TokenRow`: entity id, key form | `MAX_LOCAL_TOKENS` |
 | `liveliness_subscribers` | `LivelinessSubscriberRow`: entity id (its Interest's), key form, history, callback | `MAX_LIVELINESS_SUBSCRIPTIONS` |
-| `interests` | `InterestRow`: entity id, kind, key, holders | `MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS` |
-| `write_filters` | `WriteFilterRow`: plane, its Interest, count-local, cached peers' verdict | `MAX_PUBLISHERS + MAX_QUERIERS` |
+| `write_filters` | `WriteFilterRow`: plane, key, its Interest's id, declaration, aggregate and rest, count-local, cached peers' verdict | `MAX_PUBLISHERS + MAX_QUERIERS + MAX_MATCHING_LISTENERS` |
 | `matching` | `MatchingRow`: plane, its Interest, count-local, last verdict, callback | `MAX_MATCHING_LISTENERS` |
 | `pending_gets` | `PendingGetRow`: request id, gate key (none for `_anyke`), legs owing a Final, deadline, callback | `MAX_PENDING_QUERIES` |
 
@@ -90,10 +89,12 @@ One `SessionTables<F, P>` per session, in the session's region (P3):
   id and the rest of the entity's own key. Holding the declaration is a count in its row, released
   when the entity is undeclared; the last release retracts the declaration. A filter keeps no
   key: it reads the key of the Interest it holds.
-- **Interests.** A write filter holds one Interest, shared by every filter on the same kind and
-  key; a new holder of an existing Interest sends nothing, the last release sends its Final. The
-  Interest table's bound is the filters', so a filter the table has room for always finds room
-  for its Interest.
+- **Interests.** A write filter that asks the peers holds one Interest of its own, as zenoh-pico's
+  `_z_write_filter_create` adds one for each filter, and is its one holder: the Interest's id,
+  declaration, aggregate and rest are fields of the filter's row, its key and kind the filter's,
+  and its Final goes with the filter. No table of Interests stands beside the filters; the replay
+  tells the filters' table as the Interests, a filter that asks nothing holding its place there
+  with nothing to send.
 - **Matching listeners.** A listener is declared on a write filter (its publisher's or
   querier's), whose row owns it: it reads the filter's kind, key and Interest, and undeclaring the
   filter undeclares every listener on it, each by the latch rule of P11 below.

@@ -10,7 +10,7 @@
 //! Each table is a [`SlotMap`] of the session's storage policy, bounded by the build's `caps` and,
 //! below that, by the value of its limit the session's open resolved ([`TableRows`]): the key
 //! expressions the session declares, its subscribers, queryables, liveliness tokens and liveliness
-//! subscribers, the Interests it holds open, its publishers' and queriers' write filters, its
+//! subscribers, its publishers' and queriers' write filters with the Interests they hold open, its
 //! matching listeners and its pending gets. A row is named by its table's [`Handle`]; the numbers
 //! the wire carries (entity ids, key expression ids, request ids) are minted here, once.
 //!
@@ -21,8 +21,10 @@
 //! ([`KeyForm::prefix`]) instead of a copy of its id and suffix: its wire form is read off both
 //! ([`SessionTables::wire_of`]), and the declaration is retracted when its last holder goes. Each
 //! write filter that asks the peers opens an Interest of its own, as zenoh-pico's
-//! `_z_write_filter_create` adds one for every filter. A matching listener is a callback of a
-//! filter, as zenoh-pico's is of its entity's: one declared on a key brings a filter of its own.
+//! `_z_write_filter_create` adds one for every filter, and keeps it in its own row: the filter is
+//! the Interest's one holder, so no table of Interests stands beside it. A matching listener is a
+//! callback of a filter, as zenoh-pico's is of its entity's: one declared on a key brings a filter
+//! of its own.
 //!
 //! # Refusals
 //!
@@ -106,9 +108,6 @@ pub mod kind {
     /// A liveliness subscriber of the session's.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum LivelinessSubscriber {}
-    /// An Interest the session holds open.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub enum Interest {}
     /// A write filter of a publisher or a querier.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum WriteFilter {}
@@ -130,8 +129,6 @@ pub type QueryableHandle = Handle<kind::Queryable>;
 pub type TokenHandle = Handle<kind::Token>;
 /// A liveliness subscriber's row.
 pub type LivelinessSubscriberHandle = Handle<kind::LivelinessSubscriber>;
-/// An Interest's row.
-pub type InterestHandle = Handle<kind::Interest>;
 /// A write filter's row.
 pub type WriteFilterHandle = Handle<kind::WriteFilter>;
 /// A matching listener's row.
@@ -148,7 +145,8 @@ pub enum DeclaredTable {
     Keyexprs,
     /// The subscribers.
     Subscribers,
-    /// The Interests held open.
+    /// The write filters, each told as the Interest it holds open; one that holds none has
+    /// nothing to tell.
     Interests,
     /// The queryables.
     Queryables,
@@ -172,7 +170,8 @@ impl DeclaredKind for kind::Subscriber {
     const TABLE: DeclaredTable = DeclaredTable::Subscribers;
 }
 
-impl DeclaredKind for kind::Interest {
+// A filter's row is its Interest's, so the filters' table is the one the Interests are told from.
+impl DeclaredKind for kind::WriteFilter {
     const TABLE: DeclaredTable = DeclaredTable::Interests;
 }
 
@@ -217,9 +216,6 @@ pub type FaceId = u64;
 pub const FILTER_ROWS: usize = caps::MAX_PUBLISHERS
     .saturating_add(caps::MAX_QUERIERS)
     .saturating_add(caps::MAX_MATCHING_LISTENERS);
-
-/// The build's bound of the Interests: one for each write filter at most.
-pub const INTEREST_ROWS: usize = FILTER_ROWS;
 
 /// What a write filter or a matching listener counts: the subscribers, or the queryables, complete
 /// ones alone where the querier's target requires them.
@@ -1012,52 +1008,35 @@ impl<Key, Cb> LivelinessSubscriberRow<Key, Cb> {
     }
 }
 
-/// An Interest the session holds open and how it names its key: the one write filter or matching
-/// listener that opened it holds it alone.
-#[derive(Debug)]
-pub struct InterestRow<Key> {
+/// The Interest a write filter holds open, kept in the filter's row: the filter is its one holder,
+/// as zenoh-pico's filter context keeps its Interest's id, so the Interest's key and kind are the
+/// filter's own and the row keeps only what the Interest adds to them.
+#[derive(Clone, Copy, Debug)]
+struct HeldInterest {
     id: EntityId,
-    kind: InterestKind,
-    key: Key,
     mapping_id: ExprId,
     aggregate: bool,
-    /// Where in `key` the rest of the key the Interest names lies, as a start and a length, so
-    /// the row keeps no copy of it; `None` for no rest.
+    /// Where in the filter's key the rest of the key the Interest names lies, as a start and a
+    /// length, so the row keeps no copy of it; `None` for no rest.
     suffix: Option<(u16, u16)>,
 }
 
-impl<Key: KeyBacking> InterestRow<Key> {
+/// The Interest a write filter holds open, read off its row ([`WriteFilterRow::interest`]): what
+/// a link is asked, borrowed from the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterInterest<'a> {
     /// The id the Interest carries.
-    pub fn id(&self) -> EntityId {
-        self.id
-    }
-
-    /// What it asks about.
-    pub fn kind(&self) -> InterestKind {
-        self.kind
-    }
-
-    /// The key it asks about.
-    pub fn key(&self) -> &str {
-        self.key.as_str()
-    }
-
+    pub id: EntityId,
+    /// What it asks about: what the filter counts.
+    pub kind: InterestKind,
+    /// The key it asks about: the filter's.
+    pub key: &'a str,
     /// The key expression declaration it names its key by, `0` for none.
-    pub fn mapping_id(&self) -> ExprId {
-        self.mapping_id
-    }
-
+    pub mapping_id: ExprId,
     /// Whether it asks the peer for aggregated answers.
-    pub fn aggregate(&self) -> bool {
-        self.aggregate
-    }
-
+    pub aggregate: bool,
     /// The rest of the key it names after its declaration: the whole key when it names none.
-    pub fn suffix(&self) -> Option<&str> {
-        let (at, len) = self.suffix?;
-        let at = usize::from(at);
-        self.key.as_str().get(at..at.checked_add(usize::from(len))?)
-    }
+    pub suffix: Option<&'a str>,
 }
 
 /// How an Interest names its key on the wire: a key expression declaration of the session and the
@@ -1084,7 +1063,7 @@ impl<'a> InterestName<'a> {
     }
 }
 
-/// How the row of an Interest on `key` keeps `name`: its declaration, whether it aggregates, and
+/// How the row of a write filter on `key` keeps the `name` of its Interest: its declaration, whether it aggregates, and
 /// where in `key` its rest lies, read there rather than copied. A rest is the tail of the key it
 /// names, so it is found at the end of `key`, else anywhere in it; one found nowhere is named as
 /// `key` whole by no declaration, the same key. `None` for a key too long to be told by a range.
@@ -1114,7 +1093,7 @@ fn kept_name(key: &str, name: InterestName<'_>) -> Option<KeptName> {
     }
 }
 
-/// An [`InterestName`] as the row of its Interest keeps it ([`kept_name`]).
+/// An [`InterestName`] as the row of its write filter keeps it ([`kept_name`]).
 struct KeptName {
     mapping_id: ExprId,
     aggregate: bool,
@@ -1127,7 +1106,7 @@ struct KeptName {
 pub struct WriteFilterRow<Key> {
     plane: Plane,
     /// The Interest it holds, `None` for a filter that asks the peers nothing.
-    interest: Option<InterestHandle>,
+    interest: Option<HeldInterest>,
     key: Key,
     /// The declaration the entity's key is named by, which the row holds as an entity's row holds
     /// its own ([`EntityKey::named`]), so the entity keeps no hold of its key; `None` for none.
@@ -1223,8 +1202,20 @@ impl<Key: KeyBacking> WriteFilterRow<Key> {
     }
 
     /// The Interest it holds, `None` when it asks the peers nothing.
-    pub fn interest(&self) -> Option<InterestHandle> {
-        self.interest
+    pub fn interest(&self) -> Option<FilterInterest<'_>> {
+        let held = self.interest?;
+        let key = self.key.as_str();
+        Some(FilterInterest {
+            id: held.id,
+            kind: self.plane.interest_kind(),
+            key,
+            mapping_id: held.mapping_id,
+            aggregate: held.aggregate,
+            suffix: held.suffix.and_then(|(at, len)| {
+                let at = usize::from(at);
+                key.get(at..at.checked_add(usize::from(len))?)
+            }),
+        })
     }
 
     /// The key it filters on.
@@ -1398,9 +1389,6 @@ pub type TokensKept<F, P> = <<F as RowCallbacks>::LivelinessPresence as Presence
 /// The liveliness subscribers' table where the tables keep one.
 pub type LivelinessSubscribersKept<F, P> =
     <<F as RowCallbacks>::LivelinessPresence as Presence>::Table<LivelinessSubscribers<F, P>>;
-/// The Interests' table where the tables keep write filters.
-pub type InterestsKept<F, P> =
-    <<F as RowCallbacks>::FilterPresence as Presence>::Table<Interests<P>>;
 /// The write filters' table where the tables keep one.
 pub type WriteFiltersKept<F, P> =
     <<F as RowCallbacks>::FilterPresence as Presence>::Table<WriteFilters<P>>;
@@ -1423,8 +1411,6 @@ pub type LivelinessSubscribers<F, P> = SlotMap<
     { caps::MAX_LIVELINESS_SUBSCRIPTIONS },
     P,
 >;
-/// The Interests' table.
-pub type Interests<P> = SlotMap<kind::Interest, InterestRow<<P as Storage>::Key>, INTEREST_ROWS, P>;
 /// The write filters' table.
 pub type WriteFilters<P> =
     SlotMap<kind::WriteFilter, WriteFilterRow<<P as Storage>::Key>, FILTER_ROWS, P>;
@@ -1474,12 +1460,6 @@ impl TableRows {
         self.publishers
             .saturating_add(self.queriers)
             .saturating_add(self.key_listeners)
-    }
-
-    /// The Interests: one for each write filter at most, so a filter the tables have room for
-    /// always finds room for its Interest.
-    pub const fn interests(&self) -> usize {
-        self.write_filters()
     }
 }
 
@@ -1664,11 +1644,12 @@ pub struct Watching<K> {
     pub interest: Option<OpenedInterest>,
 }
 
-/// An Interest a declaration opened, to send: its row, which the sender reads, and its id.
+/// An Interest a declaration opened, to send: the row of the write filter that holds it, which the
+/// sender reads it from, and its id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenedInterest {
-    /// Its row.
-    pub handle: InterestHandle,
+    /// The row of the write filter that holds it.
+    pub handle: WriteFilterHandle,
     /// The id it carries.
     pub id: EntityId,
 }
@@ -1755,7 +1736,6 @@ pub struct SessionTables<F: RowCallbacks, P: Storage = Profile> {
     queryables: QueryablesKept<F, P>,
     tokens: TokensKept<F, P>,
     liveliness_subscribers: LivelinessSubscribersKept<F, P>,
-    interests: InterestsKept<F, P>,
     write_filters: WriteFiltersKept<F, P>,
     /// What holds a plane's write filters to its own bound in the table the two planes share.
     plane_bounds: PlaneBounds,
@@ -2157,7 +2137,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             liveliness_subscribers: <F::LivelinessPresence as Presence>::empty::<
                 LivelinessSubscribers<F, P>,
             >(),
-            interests: <F::FilterPresence as Presence>::empty::<Interests<P>>(),
             write_filters: <F::FilterPresence as Presence>::empty::<WriteFilters<P>>(),
             plane_bounds: PlaneBounds::UNBOUND,
             matching: <F::FilterPresence as Presence>::empty::<MatchingListeners<F, P>>(),
@@ -2216,11 +2195,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         >(&mut self.liveliness_subscribers)
         {
             table.limit_to(rows.liveliness_subscribers);
-        }
-        if let Some(table) =
-            <F::FilterPresence as Presence>::get_mut::<Interests<P>>(&mut self.interests)
-        {
-            table.limit_to(rows.interests());
         }
         if let Some(table) =
             <F::FilterPresence as Presence>::get_mut::<WriteFilters<P>>(&mut self.write_filters)
@@ -2709,56 +2683,28 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         )
     }
 
-    // ---- Interests, write filters and matching listeners ------------------------------------
+    // ---- write filters, the Interests they hold, and matching listeners --------------------
 
-    /// Open an Interest of `kind` on `key`, handed back to be sent: one for each holder, as
-    /// zenoh-pico adds one for each write filter, whatever is open on the same key already. Its
-    /// row keeps `kept`, the holder's own key: one key kept for both rows, not a copy for each.
-    fn open_interest(
+    /// The Interest a write filter on `key` holds, named as `name` says and numbered: one for each
+    /// filter, as zenoh-pico adds one for each write filter, whatever is open on the same key
+    /// already. The filter's row keeps it, with no key of its own.
+    fn ask_interest(
         &mut self,
-        kind: InterestKind,
         key: &str,
-        kept: P::Key,
         name: InterestName<'_>,
-    ) -> Result<OpenedInterest, RegisterError> {
-        // Tables that keep no write filter hold no Interest of one.
-        let interests =
-            <F::FilterPresence as Presence>::get_mut::<Interests<P>>(&mut self.interests)
-                .ok_or(RegisterError::TableFull)?;
-        if interests.is_full() {
-            return Err(RegisterError::TableFull);
-        }
+    ) -> Result<HeldInterest, RegisterError> {
         let KeptName {
             mapping_id,
             aggregate,
             suffix,
         } = kept_name(key, name).ok_or(RegisterError::KeyexprTooLong)?;
         let id = self.next_entity.take().ok_or(RegisterError::IdsExhausted)?;
-        let handle = interests
-            .insert(InterestRow {
-                id,
-                kind,
-                key: kept,
-                mapping_id,
-                aggregate,
-                suffix,
-            })
-            .map_err(|_| RegisterError::TableFull)?;
-        Ok(OpenedInterest { handle, id })
-    }
-
-    /// Close the Interest `handle` names, its holder gone: its id, for its Final to go on the
-    /// wire.
-    fn close_interest(&mut self, handle: InterestHandle) -> Option<EntityId> {
-        let entry = self.kept_interests_mut()?.entry(handle)?;
-        let id = entry.get()?.id;
-        let _ = entry.discard();
-        Some(id)
-    }
-
-    /// The key of the Interest `handle` names.
-    pub fn interest_key(&self, handle: InterestHandle) -> Option<&str> {
-        self.kept_interests()?.get(handle).map(|row| text(&row.key))
+        Ok(HeldInterest {
+            id,
+            mapping_id,
+            aggregate,
+            suffix,
+        })
     }
 
     /// Declare the write filter of a publisher or a querier on `key`, its Interest naming `key`
@@ -2834,13 +2780,10 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             own.and_then(|own| Some((own, self.keyexprs.get(own)?.holds()))),
         )?;
         let kept = KeyMaker::shared(&self.keys, key).map_err(unkept)?;
-        let asked = match ask {
-            Some(name) => {
-                Some(self.open_interest(plane.interest_kind(), key, kept.clone(), name)?)
-            }
+        let interest = match ask {
+            Some(name) => Some(self.ask_interest(key, name)?),
             None => None,
         };
-        let interest = asked.map(|opened| opened.handle);
         let row = WriteFilterRow {
             plane,
             interest,
@@ -2859,21 +2802,15 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         let inserted = self
             .kept_write_filters_mut()
             .and_then(|filters| filters.insert(row).ok());
-        match inserted {
-            Some(handle) => {
-                hold_keyexpr(&self.keyexprs, own);
-                Ok(Watching {
-                    handle,
-                    interest: asked,
-                })
-            }
-            None => {
-                if let Some(interest) = interest {
-                    let _ = self.close_interest(interest);
-                }
-                Err(RegisterError::TableFull)
-            }
-        }
+        let handle = inserted.ok_or(RegisterError::TableFull)?;
+        hold_keyexpr(&self.keyexprs, own);
+        Ok(Watching {
+            handle,
+            interest: interest.map(|held| OpenedInterest {
+                handle,
+                id: held.id,
+            }),
+        })
     }
 
     /// Undeclare the write filter `handle` names, and every matching listener declared on it:
@@ -2886,9 +2823,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         handle: WriteFilterHandle,
         mut each: impl FnMut(MatchingListenerHandle, Removal<Matching<F>>),
     ) -> Option<FilterUnwatched> {
-        let (interest, own) = {
+        let (interest_final, own) = {
             let row = self.kept_write_filters()?.get(handle)?;
-            (row.interest, row.own)
+            (row.interest.map(|held| held.id), row.own)
         };
         let mut cursor = 0usize;
         while let Some((listener, owned)) = self
@@ -2905,7 +2842,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         // Its key is the arena's and its drop no program's, so it goes where it lies, with no copy
         // of the row moved out to be dropped by the caller under the same lock.
         self.kept_write_filters_mut()?.discard(handle)?;
-        let interest_final = interest.and_then(|interest| self.close_interest(interest));
         Some(FilterUnwatched {
             interest_final,
             held: own,
@@ -2973,8 +2909,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// Declare a matching listener of what `plane` counts on `key`, with no entity's write filter:
     /// it owns a filter of its own, whose Interest names `key` whole ([`InterestName::whole`]),
     /// whatever is open on the same key and kind, and starts as not matching, as one on a filter
-    /// does. Refused, the callback handed back and nothing held, when its table, the key
-    /// listeners' filters or the Interests have no room, or the key arena none for its key.
+    /// does. Refused, the callback handed back and nothing held, when its table or the key
+    /// listeners' filters have no room, the key arena none for its key, or no id is left for its
+    /// Interest.
     pub fn declare_matching_listener_on(
         &mut self,
         plane: Plane,
@@ -3811,11 +3748,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         &self.liveliness_subscribers
     }
 
-    /// The Interests held open, as the tables keep them.
-    pub fn interests(&self) -> &InterestsKept<F, P> {
-        &self.interests
-    }
-
     /// The write filters, as the tables keep them.
     pub fn write_filters(&self) -> &WriteFiltersKept<F, P> {
         &self.write_filters
@@ -3837,7 +3769,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         match table {
             DeclaredTable::Keyexprs => self.keyexprs.slots(),
             DeclaredTable::Subscribers => self.subscribers.slots(),
-            DeclaredTable::Interests => self.kept_interests().map_or(Slots::NONE, |t| t.slots()),
+            DeclaredTable::Interests => {
+                self.kept_write_filters().map_or(Slots::NONE, |t| t.slots())
+            }
             DeclaredTable::Queryables => self.kept_queryables().map_or(Slots::NONE, |t| t.slots()),
             DeclaredTable::Tokens => self.kept_tokens().map_or(Slots::NONE, |t| t.slots()),
             DeclaredTable::LivelinessSubscribers => self
@@ -3868,16 +3802,6 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         <F::LivelinessPresence as Presence>::get_mut::<LivelinessSubscribers<F, P>>(
             &mut self.liveliness_subscribers,
         )
-    }
-
-    /// The Interests' table, where the tables keep one.
-    pub fn kept_interests(&self) -> Option<&Interests<P>> {
-        <F::FilterPresence as Presence>::get::<Interests<P>>(&self.interests)
-    }
-
-    /// The Interests' table, to write, where the tables keep one.
-    pub fn kept_interests_mut(&mut self) -> Option<&mut Interests<P>> {
-        <F::FilterPresence as Presence>::get_mut::<Interests<P>>(&mut self.interests)
     }
 
     /// The write filters' table, where the tables keep one.
@@ -3934,10 +3858,6 @@ impl<F: RowCallbacks, P: Storage> fmt::Debug for SessionTables<F, P> {
                 ),
             )
             .field(
-                "interests",
-                &<F::FilterPresence as Presence>::get::<Interests<P>>(&self.interests),
-            )
-            .field(
                 "write_filters",
                 &<F::FilterPresence as Presence>::get::<WriteFilters<P>>(&self.write_filters),
             )
@@ -3984,10 +3904,6 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             liveliness_subscribers: <F::LivelinessPresence as Presence>::lent_from::<
                 LivelinessSubscribers<F, Lent>,
             >(&mut lend, rows.liveliness_subscribers),
-            interests: <F::FilterPresence as Presence>::lent_from::<Interests<Lent>>(
-                &mut lend,
-                rows.interests(),
-            ),
             write_filters: <F::FilterPresence as Presence>::lent_from::<WriteFilters<Lent>>(
                 &mut lend,
                 rows.write_filters(),
@@ -4020,7 +3936,6 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
             kept_bytes::<F::LivelinessPresence>(<LivelinessSubscribers<F, Lent>>::arena_bytes(
                 rows.liveliness_subscribers,
             )),
-            kept_bytes::<F::FilterPresence>(<Interests<Lent>>::arena_bytes(rows.interests())),
             kept_bytes::<F::FilterPresence>(<WriteFilters<Lent>>::arena_bytes(
                 rows.write_filters(),
             )),
@@ -4051,8 +3966,8 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
 unsafe impl<F: RowCallbacks> ZeroEmpty for SessionTables<F, Region> {}
 
 /// The lines a region's description holds for one [`SessionTables`] of the region policy, at most:
-/// two for each of its nine tables, one for its held replies; and its one key arena handle.
-pub const SESSION_TABLE_LINES: usize = 19;
+/// two for each of its eight tables, one for its held replies; and its one key arena handle.
+pub const SESSION_TABLE_LINES: usize = 17;
 
 /// The rows of a [`SessionTables`] of the region policy, which a region lays out beside the tables:
 /// each table's [`SlotRows`] at the build's bound of it, none of a kind the build keeps none of.
@@ -4068,7 +3983,6 @@ pub struct SessionRows<F: RowCallbacks> {
     liveliness_subscribers: <F::LivelinessPresence as Presence>::Table<
         SlotRows<LivelinessSubscriber<F, Region>, { caps::MAX_LIVELINESS_SUBSCRIPTIONS }>,
     >,
-    interests: <F::FilterPresence as Presence>::Table<SlotRows<InterestRow<KeyRef>, INTEREST_ROWS>>,
     write_filters:
         <F::FilterPresence as Presence>::Table<SlotRows<WriteFilterRow<KeyRef>, FILTER_ROWS>>,
     matching: <F::FilterPresence as Presence>::Table<
@@ -4124,10 +4038,6 @@ impl<F: RowCallbacks> SessionTables<F, Region> {
         }
         if <F::FilterPresence as Presence>::KEPT {
             lines = lines
-                .seqs(&<Interests<Region>>::places(
-                    at.wrapping_add(core::mem::offset_of!(Self, interests)),
-                    rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, interests)),
-                ))
                 .seqs(&<WriteFilters<Region>>::places(
                     at.wrapping_add(core::mem::offset_of!(Self, write_filters)),
                     rows.wrapping_add(core::mem::offset_of!(SessionRows<F>, write_filters)),

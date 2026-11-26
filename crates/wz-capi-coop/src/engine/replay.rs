@@ -8,11 +8,12 @@
 //! session declares it again, under the ids it was declared with. The session keeps its
 //! declarations in lists by kind, so the sequence the cursor walks is the lists in one fixed order
 //! (`ORDER`): the key expressions first, since a subscriber or an Interest may name one, then the
-//! subscribers and the Interests, the queryables, the tokens and the liveliness subscribers'
-//! Interests. The place of an entry is its kind's offset in that order plus its index in the list,
-//! so a declaration or a retraction that is made while the replay goes on asks the cursor what to
-//! do about the peer, and every list's push and remove goes through it (`announce` and
-//! `retract`).
+//! subscribers and the write filters' Interests (a filter's row is its Interest's place, and one
+//! that asks nothing holds its place with nothing to send), the queryables, the tokens and the
+//! liveliness subscribers' Interests. The place of an entry is its kind's offset in that order plus
+//! its index in the list, so a declaration or a retraction that is made while the replay goes on
+//! asks the cursor what to do about the peer, and every list's push and remove goes through it
+//! (`announce` and `retract_at`).
 //!
 //! Without the `declaration-sync-pacing` policy the replay is one turn of the whole sequence, as
 //! zenoh-pico's client reopens (`vendor/zenoh-pico/src/net/session.c` @
@@ -527,23 +528,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         self.announce_row(declared, OnRefusal::Undo, Some(undo), tx)
     }
 
-    /// The declaration at `index` of `table`'s slot order was removed: tell `retract`
-    /// ([`Self::retract_at`]). `index` is where it lay, and the tables before it in the replay's
-    /// order are as they were.
-    pub(super) fn retract(
-        &mut self,
-        table: DeclaredTable,
-        index: usize,
-        retract: Retract<'_>,
-        tx: super::LinkTx<'_, C>,
-    ) {
-        let place = self.place(table, index);
-        self.retract_at(place, Some(retract), tx);
-    }
-
-    /// The Interest `interest`, which a write filter or a matching listener held last, ended:
-    /// tell each face whose peer was asked it, `rank` its place among the Interests read while
-    /// it stood ([`Self::retract`]). Nothing when either is `None`.
+    /// The write filter whose place among the Interests was `rank`, read while it stood, went,
+    /// with `interest`, the Interest it held last: tell each face whose peer was asked it its
+    /// Final, and move every face's replay past the place ([`Self::retract_at`]), which a
+    /// filter that asked nothing held too. Nothing when `rank` is `None`.
     // Out of line: the filter's and the listener's undeclarations end their Interest alike.
     #[inline(never)]
     pub(super) fn end_interest(
@@ -552,13 +540,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         rank: Option<usize>,
         tx: super::LinkTx<'_, C>,
     ) {
-        if let (Some(interest), Some(at)) = (interest, rank) {
-            self.retract(
-                DeclaredTable::Interests,
-                at,
-                Retract::Interest(u64::from(interest)),
-                tx,
-            );
+        if let Some(at) = rank {
+            let place = self.place(DeclaredTable::Interests, at);
+            let retract = interest.map(|interest| Retract::Interest(u64::from(interest)));
+            self.retract_at(place, retract, tx);
         }
     }
 
@@ -655,9 +640,10 @@ fn told<C: ClockSource + 'static>(
                 .named(row.key())
                 .is_some_and(|key| super::SubscriberRow::declare(row.id(), key, actions))
         }
+        // A write filter is told as the Interest it holds; one that holds none has nothing to send.
         DeclaredTable::Interests => {
-            let row = tables.interests().get(Handle::from_bits(bits)?)?;
-            super::send_interest(super::InterestTell::of(row), actions)
+            let row = tables.write_filters().get(Handle::from_bits(bits)?)?;
+            super::send_interest(row.interest()?, actions)
         }
         #[cfg(feature = "queryable")]
         DeclaredTable::Queryables => {
