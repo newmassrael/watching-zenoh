@@ -1940,6 +1940,60 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
+    /// A member's datagrams of samples hand none of the face's tables out to a write: the member
+    /// the walk names ahead of each datagram's records is read by no plane and is not dispatched,
+    /// so a stream of samples leaves every answer read off the peers' declarations standing and
+    /// owes the read no bookkeeping. Turned red by a sink that dispatches that name as a record
+    /// (`DirectSink::event` without its `IterationEvent::MulticastSource` return), which counts a
+    /// write of the face's tables once a datagram.
+    #[cfg(not(wz_round))]
+    #[test]
+    fn a_members_samples_write_none_of_the_faces_tables() {
+        const FRAMES: u64 = 8;
+        let network = Arc::new(Network::default());
+        let session = open_member(&network, 1, member_config(1, GROUP)).expect("the member joins");
+        let heard = subscribe(&session, "demo/unwritten/**");
+        let read_until = |count: usize| {
+            for _ in 0..200 {
+                if heard.lock().unwrap().len() >= count {
+                    break;
+                }
+                SessionDrive::read(&*session, false).expect("the session reads");
+            }
+        };
+        // The member is admitted, which writes its face's tables, before the samples are counted.
+        let mut first = beacon(7);
+        first.extend_from_slice(&frame_of_puts(0, &["demo/unwritten/0"]));
+        hand_in(&network, 1, 7, &first);
+        read_until(1);
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1,
+            "CONTROL: the member's first put"
+        );
+        let written = session.faces_written();
+        for sn in 1..=FRAMES {
+            hand_in(
+                &network,
+                1,
+                7,
+                &frame_of_puts(sn, &[&format!("demo/unwritten/{sn}")]),
+            );
+        }
+        read_until(1 + FRAMES as usize);
+        assert_eq!(
+            heard.lock().unwrap().len(),
+            1 + FRAMES as usize,
+            "CONTROL: every datagram's sample"
+        );
+        assert_eq!(
+            session.faces_written(),
+            written,
+            "a member's samples handed the face's tables out to a write"
+        );
+        SessionDrive::close(&*session);
+    }
+
     /// What a member sends is counted with the session's transports (`transport-stats`): the
     /// datagram's bytes once, its two transport messages (the member's beacon and its frame) and
     /// each record of the frame once, whatever the walks its delivery took.

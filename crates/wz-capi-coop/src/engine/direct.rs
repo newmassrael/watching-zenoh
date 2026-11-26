@@ -338,8 +338,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static, A: RecordActions>
 {
     fn event(&mut self, event: IterationEvent<'_, '_>) {
         let push = lent_push(&event);
-        // What the Pushes before this record put off is done before it, as it was after each.
         if !push {
+            // The member a group's walk names ahead of each datagram's records is read by none of
+            // the session's planes: dispatched, it would hand the face's tables out to a write and
+            // so owe the read its bookkeeping for every datagram of a stream of samples.
+            if matches!(event, IterationEvent::MulticastSource(_)) {
+                return;
+            }
+            // What the Pushes before this record put off is done before it, as it was after each.
             self.drain_pushes(true);
         }
         match event {

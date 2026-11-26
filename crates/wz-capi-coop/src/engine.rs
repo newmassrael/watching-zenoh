@@ -7166,6 +7166,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.core.lock().0.link_polls.get()
     }
 
+    /// How often the faces' tables were handed out to a write since the open
+    /// (`RegistryOf::faces_written`): what a test of the bookkeeping a received sample owes counts.
+    /// Read under the lock, uncounted as a take.
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads",
+        not(wz_round)
+    ))]
+    pub(crate) fn faces_written(&self) -> u64 {
+        self.core.lock().0.session.registry.faces_written()
+    }
+
     /// How often a pass of the session's tasks read the clock to wake its timers since the open
     /// ([`Core::run_tasks`]): what a test of the cost of a batch counts. Read under the lock.
     #[cfg(all(test, feature = "std"))]
