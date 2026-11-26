@@ -8077,6 +8077,26 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4667": {
+      "decision_summary": "Adopt the SCE pin a4df06d15ae with codec bodies decoded out of line\n(InlineDecode::None). The pin progression since 65288b0696a moved the codec to\none ZInt decoder read in registers and reads a generated state, history or\nevent back from its number by a match. Against main the pico client build is\n1,125 B smaller and the unicast receive costs 4,277 Ir per message against\n4,295.",
+      "changes_bullets": [
+        "vendor/sce: pin a4df06d15ae; out/: state machines and the codec tree regenerated at it.",
+        "xtask: the codec tree is generated with no hot read sites inlined.",
+        "size-ledger: the explain names the bodies that hold each owner's bytes."
+      ],
+      "verification_bullets": [
+        "size ledger check passes; area sum 216,386 B against main's 217,511 B on pico-client-coop-nostd.",
+        "subprofile receive window: W 4,277.4 vs main 4,294.5 Ir per message (P 4,048.9).",
+        "nondefault-features: wz-session-core, wz-codecs, wz-capi-coop, wz-capi-pico clippy-clean; session-core lib 4,196, codecs, capi-coop 275 tests pass.",
+        "the generated state_of and event_of matches carry the cfg of each gated variant."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "unicast receive still loses to zenoh-pico at about 1.06x (4,277 vs 4,049 Ir per message)."
+      ]
     }
   },
   "inventory_entries": {
