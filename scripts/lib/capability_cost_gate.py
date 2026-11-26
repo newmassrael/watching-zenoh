@@ -172,12 +172,21 @@ with the run's other builds beside the case, so they weigh the cases against eac
 add up to the run's. The checks of the committed ceiling table itself are run by every shard, since
 they build nothing.
 
+## The parts of the fleet
+
+The fleet's planner of the whole gate (`scripts/lib/runci_plan.py`, `PARTED_LANES`) gives this
+lane to the build machines as parts, each a unit a machine runs by itself: `--parts` lists them,
+`shard-K-of-N` for the `FLEET_PARTS` shards, and `--part shard-K-of-N` builds the shard it names,
+as `--shards N --shard K` does. A part builds its cases at once on its machine (above), so the
+parts divide the work between machines and the grant divides it on each.
+
 Usage:
-    capability_cost_gate.py --check [--shards N --shard K] [ID...]
+    capability_cost_gate.py --check [--shards N --shard K | --part P] [ID...]
                                build every case (or the shard's, or the named ones), grade it
-    capability_cost_gate.py --measure [--shards N --shard K] [ID...]
+    capability_cost_gate.py --measure [--shards N --shard K | --part P] [ID...]
                                build the same and print what was measured, with each pico
                                case's ceiling row to commit
+    capability_cost_gate.py --parts        the lane's parts, one a line, for the fleet's planner
     capability_cost_gate.py --selftest     grade the grader on synthetic input
 """
 
@@ -2779,6 +2788,28 @@ def shard_cases(shards: int, shard: int, weights: dict[str, int], notes: list[st
     return [i for i in ids if i in planned]
 
 
+# The parts the fleet's planner cuts this lane into (`scripts/lib/runci_plan.py`, `PARTED_LANES`):
+# the cases dealt to this many shards by their seconds, as the hosted matrix deals them (module
+# doc, "The parts of the fleet").
+FLEET_PARTS = 2
+PART_NAME = re.compile(r"shard-(0|[1-9][0-9]*)-of-([1-9][0-9]*)")
+
+
+def fleet_parts(parts: int = FLEET_PARTS) -> list[str]:
+    """The names of the lane's parts, one a shard: what `--parts` prints for the planner."""
+    return [f"shard-{k}-of-{parts}" for k in range(parts)]
+
+
+def part_shard(name: str) -> tuple[int, int]:
+    """The shards and the shard (`--shards N --shard K`) a part's name says; a ValueError naming
+    the parts for a name that is none."""
+    found = PART_NAME.fullmatch(name)
+    if found is None or int(found.group(1)) >= int(found.group(2)):
+        raise ValueError(f"{name!r} is no part of Layer C1cs: a part is shard-K-of-N with K under "
+                         f"N, as `--parts` lists them ({', '.join(fleet_parts())})")
+    return int(found.group(2)), int(found.group(1))
+
+
 # The memory one build is held to when a run decides how many of its builds run at once
 # (`build_width`). An estimate, not a reading: no run of this gate has recorded the peak of one
 # build, so it is set above what a fat LTO link of the largest library (the C ABI default, about
@@ -3823,7 +3854,24 @@ def cmd_selftest() -> int:
     expect("a shard builds its cases in the gate's order",
            all(ids == [i for i in every if i in set(ids)]
                for ids in (shard_cases(2, k, weights, []) for k in range(2))))
-    # The builds at once.
+    # The parts of the fleet, and the builds at once.
+    expect("the parts the planner is given are the shards, each read back as the shard it names",
+           fleet_parts() == [f"shard-{k}-of-{FLEET_PARTS}" for k in range(FLEET_PARTS)]
+           and [part_shard(p) for p in fleet_parts()]
+           == [(FLEET_PARTS, k) for k in range(FLEET_PARTS)]
+           and sorted(i for p in fleet_parts() for i in shard_cases(*part_shard(p), weights, []))
+           == sorted(every))
+
+    def no_part(name: str) -> bool:
+        try:
+            part_shard(name)
+        except ValueError as e:
+            return "shard-0-of-" in str(e)
+        return False
+
+    expect("a name that is no part is refused, naming the parts",
+           all(no_part(n) for n in ("shard-2-of-2", "shard-0-of-0", "shard-01-of-2", "shard-0",
+                                    "part-0-of-2", "shard-0-of-2 ")))
     expect("the builds run as many at once as there are builds, cores and memory for, and one at "
            "least, the cores shared among them",
            build_width(24, 22, 32768, 4096) == (8, 3)
@@ -3856,23 +3904,37 @@ def cmd_selftest() -> int:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--selftest") or (
-        argv[1] == "--selftest" and len(argv) != 2
+    if len(argv) < 2 or argv[1] not in ("--check", "--measure", "--selftest", "--parts") or (
+        argv[1] in ("--selftest", "--parts") and len(argv) != 2
     ):
         print(__doc__, file=sys.stderr)
         return 2
     if argv[1] == "--selftest":
         return cmd_selftest()
+    if argv[1] == "--parts":
+        print("\n".join(fleet_parts()))
+        return 0
     parser = argparse.ArgumentParser(prog=f"capability_cost_gate.py {argv[1]}", add_help=False)
     parser.add_argument("--shards", type=int)
     parser.add_argument("--shard", type=int)
+    parser.add_argument("--part")
     parser.add_argument("ids", nargs="*")
     try:
         args = parser.parse_intermixed_args(argv[2:])
     except SystemExit:
         return 2
     shard = None
-    if args.shards is not None or args.shard is not None:
+    if args.part is not None:
+        if args.shards is not None or args.shard is not None:
+            print("  capability-cost: give a part or --shards N --shard K, not both",
+                  file=sys.stderr)
+            return 2
+        try:
+            shard = part_shard(args.part)
+        except ValueError as e:
+            print(f"  capability-cost: {e}", file=sys.stderr)
+            return 2
+    elif args.shards is not None or args.shard is not None:
         if args.shards is None or args.shard is None or not 0 <= args.shard < args.shards:
             print("  capability-cost: give --shards N and --shard K with 0 <= K < N",
                   file=sys.stderr)

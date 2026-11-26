@@ -13170,7 +13170,9 @@ layer_c1cf_reduced_features() {
 #
 # The hosted lane is a matrix of `WZ_C1CS_SHARDS` jobs, each building the cases the gate deals to
 # its `WZ_C1CS_SHARD` by their measured seconds (`c1cs_case_weights.tsv`): one job read 1,114 s
-# of its 1200 s budget at run 45051019628. Unset, every case is built here.
+# of its 1200 s budget at run 45051019628. The fleet's planner cuts the lane into the parts the gate
+# lists (`--parts`), and a unit runs one with `WZ_C1CS_PART` (`scripts/lib/runci_plan.py`). Both
+# unset, every case is built here.
 #
 # The second leg is the size ledger (docs/c-abi-architecture.md P9): `size_ledger_gate.py` reads
 # each case of its ledger the cost gate just built, one feature bundle each, and its zenoh-pico
@@ -13185,7 +13187,14 @@ layer_c1cf_reduced_features() {
 # the first does not hide the ledger's verdict.
 layer_c1cs_capability_cost() {
     local c1cs_shard_args=()
-    if [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
+    if [[ -n "${WZ_C1CS_PART:-}" && -n "${WZ_C1CS_SHARDS:-}" ]]; then
+        echo "  C1cs FAIL: WZ_C1CS_PART (a part of the fleet's) and WZ_C1CS_SHARDS (a hosted" \
+             "shard) are both set, and a run builds the cases of one of them" >&2
+        return 1
+    fi
+    if [[ -n "${WZ_C1CS_PART:-}" ]]; then
+        c1cs_shard_args=(--part "$WZ_C1CS_PART")
+    elif [[ -n "${WZ_C1CS_SHARDS:-}" ]]; then
         c1cs_shard_args=(--shards "$WZ_C1CS_SHARDS" --shard "${WZ_C1CS_SHARD:?WZ_C1CS_SHARDS is set, so WZ_C1CS_SHARD must be}")
     fi
     _runci_legs_open C1cs || return 1

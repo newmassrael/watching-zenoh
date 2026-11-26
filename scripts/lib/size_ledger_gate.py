@@ -217,20 +217,21 @@ mangled when it cannot.
 ## Where it runs
 
 Layer C1cs, as the leg after the cost gate, whose builds it reads; it builds nothing of its own.
-With `--shards N --shard K` a case is read only on the shard the cost gate deals it to, and every
-shard checks the ledger itself, which needs no build. A case is read from its own target directory
-(`capability_cost_gate.case_target`), where the cost gate built it and no other case builds.
-`--per-feature` builds a library and a reference for each step, one after another in the
-directory of the ledger's base case, so it is run by hand on one host and in no layer. Layer C0
+With `--shards N --shard K`, or the part of the fleet that names that shard (`--part shard-K-of-N`,
+capability_cost_gate.py "The parts of the fleet"), a case is read only on the shard the cost gate
+deals it to, and every shard checks the ledger itself, which needs no build. A case is read from its
+own target directory (`capability_cost_gate.case_target`), where the cost gate built it and no other
+case builds. `--per-feature` builds a library and a reference for each step, one after another in
+the directory of the ledger's base case, so it is run by hand on one host and in no layer. Layer C0
 runs `--selftest`, which holds the readers, the rules and the ratchet on synthetic input and the
 committed ledger to its own rules.
 
 Usage:
-    size_ledger_gate.py --check [--shards N --shard K] [ID...]
+    size_ledger_gate.py --check [--shards N --shard K | --part P] [ID...]
                                read each case (or the named ones), grade every area against its row
-    size_ledger_gate.py --measure [--shards N --shard K] [ID...]
+    size_ledger_gate.py --measure [--shards N --shard K | --part P] [ID...]
                                read the same and print each table and the rows to commit
-    size_ledger_gate.py --explain [--shards N --shard K] [ID...]
+    size_ledger_gate.py --explain [--shards N --shard K | --part P] [ID...]
                                --measure, then what holds each area's bytes, kept as JSON
     size_ledger_gate.py --per-feature [ID...]
                                step from the base case to each case, one feature at a time
@@ -4215,17 +4216,28 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog=f"size_ledger_gate.py {argv[1]}", add_help=False)
     parser.add_argument("--shards", type=int)
     parser.add_argument("--shard", type=int)
+    parser.add_argument("--part")
     parser.add_argument("ids", nargs="*")
     try:
         args = parser.parse_intermixed_args(argv[2:])
     except SystemExit:
         return 2
     shard = None
-    if args.shards is not None or args.shard is not None:
-        if argv[1] == "--per-feature":
-            print("  size-ledger: --per-feature reads its chains on one host, not on a shard",
-                  file=sys.stderr)
+    if argv[1] == "--per-feature" and (args.part is not None or args.shards is not None
+                                       or args.shard is not None):
+        print("  size-ledger: --per-feature reads its chains on one host, not on a shard",
+              file=sys.stderr)
+        return 2
+    if args.part is not None:
+        if args.shards is not None or args.shard is not None:
+            print("  size-ledger: give a part or --shards N --shard K, not both", file=sys.stderr)
             return 2
+        try:
+            shard = cost.part_shard(args.part)
+        except ValueError as e:
+            print(f"  size-ledger: {e}", file=sys.stderr)
+            return 2
+    elif args.shards is not None or args.shard is not None:
         if args.shards is None or args.shard is None or not 0 <= args.shard < args.shards:
             print("  size-ledger: give --shards N and --shard K with 0 <= K < N", file=sys.stderr)
             return 2
