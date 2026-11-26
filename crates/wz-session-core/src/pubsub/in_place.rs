@@ -10,7 +10,7 @@
 //! instead of projecting it into
 //! a boxed owned message. This module is the subscriber side of that: the
 //! keyexpr is resolved without a `String`
-//! ([`resolve_wireexpr_viewed_held_over`]), the payload, attachment and every
+//! ([`resolve_viewed_parts_held_over`]), the payload, attachment and every
 //! extension are read where they lie (the Push is read as its view, a few words
 //! and the bytes its chains occupy), and the subscribers are handed a
 //! sample over those bytes ([`SampleRef`]) through the same matcher
@@ -55,7 +55,9 @@ use crate::sink::{FanOut, SampleDelivery, SampleRef};
 use crate::wireexpr_resolve::resolve_plain_parts_over;
 #[cfg(all(feature = "alloc", feature = "pubsub-put"))]
 use crate::wireexpr_resolve::KeyexprBuf;
-use crate::wireexpr_resolve::{resolve_wireexpr_viewed_held_over, ComposeRoom, KeyexprPastBound};
+use crate::wireexpr_resolve::{
+    resolve_viewed_parts_held_over, ComposeRoom, KeyexprPastBound, ViewedParts,
+};
 
 /// The body-level fields of a Put or a Del read in place, before the keyexpr is
 /// known: what `dispatch_push`'s body match projects, on the lent form.
@@ -195,19 +197,6 @@ fn lent_body<'s, 'f>(push: &'s PushRead<'f>) -> Result<Option<LentBody<'s, 'f>>,
     }
 }
 
-/// The key a side's memory keeps a wireexpr's answer under ([`crate::match_set::PeerMatches`]):
-/// an id the sender `sender` declared, in its own space (`M=1`) and with no suffix, which names
-/// one key for as long as the side's aliases do not change. `None` for any other form: a suffix,
-/// our own space, or the literal of id 0, whose key is matched each time it arrives.
-fn declared_key(body: &wz_codecs::wireexpr::WireexprViewVariant<'_>, sender: u64) -> Option<u64> {
-    let (id, suffix, senders) = crate::wireexpr_resolve::id_suffix_and_space_viewed(body);
-    if senders && id != 0 && suffix.is_none() {
-        Some(crate::wire_id::sender_peer_key(sender, id))
-    } else {
-        None
-    }
-}
-
 impl<Q: Storage> SubscriberPeer<Q> {
     /// Deliver a Push the in-place receive path lent: the subscriber side of
     /// [`IterationEvent::InPlace`](crate::driver_loop::IterationEvent::InPlace).
@@ -268,8 +257,11 @@ impl<Q: Storage> SubscriberPeer<Q> {
             compose,
             subs,
             push,
-            reliability,
-            record.sender(),
+            ViewedParts::of(&push.view.keyexpr.body),
+            PushOrigin {
+                reliability,
+                sender: record.sender(),
+            },
             room,
         )
         .map_err(|why| {
@@ -322,13 +314,19 @@ impl<Q: Storage> SubscriberPeer<Q> {
             ..
         } = self;
         let mut room = LentRoom::default();
+        // The wireexpr is read once: for the key the sample names, and for the memory of what it
+        // reached, which a key the peer declared and names by its id alone is kept under.
+        let parts = ViewedParts::of(&push.view.keyexpr.body);
         let Some(sample) = Self::lend_sample(
             naming,
             compose,
             &*subs,
             push,
-            reliability,
-            sender,
+            parts,
+            PushOrigin {
+                reliability,
+                sender,
+            },
             &mut room,
         )?
         else {
@@ -340,7 +338,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let mut turn = FanOut::begin();
         // A key the peer declared and names by its id alone reaches what it reached last time
         // while nothing that decides it changed: its answer is kept in the side's memory.
-        let mark = match declared_key(&push.view.keyexpr.body, sender) {
+        let mark = match parts.declared_by(sender) {
             Some(wire) => matches.entry(wire, naming.names),
             None => None,
         };
@@ -379,10 +377,14 @@ impl<Q: Storage> SubscriberPeer<Q> {
         compose: &'s mut Q::Compose,
         subs: &L,
         push: &'s PushRead<'_>,
-        reliability: Reliability,
-        sender: u64,
+        parts: ViewedParts<'s>,
+        origin: PushOrigin,
         room: &'s mut LentRoom<Q>,
     ) -> Result<Option<SampleRef<'s>>, Fallback> {
+        let PushOrigin {
+            reliability,
+            sender,
+        } = origin;
         let Some(body) = lent_body(push)? else {
             return Ok(None);
         };
@@ -399,8 +401,8 @@ impl<Q: Storage> SubscriberPeer<Q> {
         let LentRoom { frame, source_info } = room;
         // Our own space is the table set the sample is delivered to: an `M=0` key is copied out
         // of it into the room before the delivery writes it.
-        let (keyexpr, held) = match resolve_wireexpr_viewed_held_over(
-            &push.view.keyexpr.body,
+        let (keyexpr, held) = match resolve_viewed_parts_held_over(
+            parts,
             naming.spaces().from_sender(sender),
             subs.own_space(),
             ComposeRoom::buffer(compose, frame),
@@ -1550,4 +1552,12 @@ mod tests {
             std::vec![(2, "demo/b".to_string()), (3, "demo/b".to_string())]
         );
     }
+}
+
+/// Where a lent Push came from: the reliability of the frame it was read in and the peer that
+/// sent it, the two facts of its record a sample carries besides its own parts.
+#[derive(Clone, Copy)]
+struct PushOrigin {
+    reliability: Reliability,
+    sender: u64,
 }

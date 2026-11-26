@@ -762,6 +762,231 @@ fn a_key_no_subscriber_reaches_keeps_an_empty_answer_until_one_does() {
     );
 }
 
+/// A key named by its text alone, past as many other keys as the subscribers' match memory
+/// keeps, still reaches its subscriber: what the memory forgot is matched again. Turned red by a
+/// miss of the memory taken as a key that reaches nobody.
+#[cfg(not(feature = "key-set-closed"))]
+#[test]
+fn a_key_past_the_memorys_entries_still_reaches_its_subscriber() {
+    use crate::pubsub::{LocalSubscribers, PeerDelivery};
+    let mut tables = Tables::new();
+    subscribe(&mut tables, "a/b", Locality::Any, 1);
+    let others = tables.memo_slot_count() + 2;
+    for how in [
+        PeerDelivery::default(),
+        PeerDelivery {
+            no_allocation: true,
+            ..PeerDelivery::default()
+        },
+    ] {
+        for round in 0..2 {
+            for n in 0..others {
+                let key = std::format!("x/{n}");
+                let mut seen = Vec::new();
+                tables.deliver_from_peer(&key, None, how, |_, row| seen.push(*row.row()));
+                assert!(seen.is_empty(), "{key} reaches no subscriber");
+            }
+            let mut seen = Vec::new();
+            tables.deliver_from_peer("a/b", None, how, |_, row| seen.push(*row.row()));
+            assert_eq!(seen, std::vec![1], "round {round}");
+        }
+    }
+}
+
+/// The numbers of the rows a peer's message on `key` reaches through `mark`, each row's call
+/// begun and ended at once.
+fn latched_marked(
+    tables: &mut LatchedTables,
+    key: &str,
+    mark: &mut crate::match_set::MatchEntry,
+) -> Vec<u32> {
+    let mut calls = Vec::new();
+    crate::pubsub::LocalSubscribers::deliver_from_peer_marked(tables, key, None, mark, |_, row| {
+        if let Some(call) = row.row().begin() {
+            calls.push(call);
+        }
+    });
+    calls
+        .into_iter()
+        .map(|call| {
+            let n = call.call;
+            assert!(!ended::<CClosure<u32>>(call), "a live row's call");
+            n
+        })
+        .collect()
+}
+
+/// A row undeclared while a call of it runs keeps its slot until that call ends, so a row
+/// declared meanwhile takes another; the answer kept for a key before a declaration is not read
+/// after it, so the row declared on the key hears the next message, and a row declared on another
+/// key in a slot let go of hears nothing on this one. Turned red by a declaration that leaves the
+/// epoch, an undeclaration and a declaration that both do, or a slot let go of while its call
+/// runs.
+#[cfg(not(feature = "key-set-closed"))]
+#[test]
+fn a_slot_is_taken_again_only_after_its_last_call_and_a_kept_answer_never_names_it() {
+    let mut tables = latched_tables();
+    let first = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let mut mark = crate::match_set::MatchEntry::NONE;
+    assert_eq!(latched_marked(&mut tables, "k", &mut mark), std::vec![1]);
+    // A call of the first row begun from the kept answer, still running.
+    let mut running = Vec::new();
+    crate::pubsub::LocalSubscribers::deliver_from_peer_marked(
+        &mut tables,
+        "k",
+        None,
+        &mut mark,
+        |_, row| running.extend(row.row().begin()),
+    );
+    assert_eq!(running.len(), 1);
+    assert!(
+        tables
+            .undeclare_subscriber(first.handle)
+            .unwrap()
+            .taken
+            .is_none(),
+        "a call runs: the row stays"
+    );
+    assert!(tables.subscribers().holds_slot(first.handle));
+    let second = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(2))
+        .unwrap();
+    assert_ne!(
+        second.handle.place(),
+        first.handle.place(),
+        "the slot of a running call is not taken"
+    );
+    assert_eq!(
+        latched_marked(&mut tables, "k", &mut mark),
+        std::vec![2],
+        "the row declared on the key hears it, the undeclared one does not"
+    );
+    for call in running {
+        assert!(
+            ended::<CClosure<u32>>(call),
+            "the last call of a retired row"
+        );
+    }
+    assert!(tables.release_drained_subscriber(&mut 0).is_some());
+    assert!(!tables.subscribers().holds_slot(first.handle));
+    // The answer now names the second row's slot alone; let go of, it is taken by a row on
+    // another key.
+    assert!(
+        tables
+            .undeclare_subscriber(second.handle)
+            .unwrap()
+            .taken
+            .is_some(),
+        "no call runs: let go of at once"
+    );
+    tables
+        .declare_subscriber("other", Locality::Any, KeyForm::default(), latched(3))
+        .unwrap();
+    assert!(
+        latched_marked(&mut tables, "k", &mut mark).is_empty(),
+        "a row on another key, wherever it lies, hears nothing on this one"
+    );
+}
+
+/// With threads, deliveries through a kept answer race an undeclaration of the row it names:
+/// each delivery begins its row's call whole or not at all, none begins once the undeclaration is
+/// done, the row is let go of by the call that ends last, and a row declared meanwhile takes
+/// another slot while a call of the old one runs. Turned red by a kept answer read past an
+/// undeclaration, or a slot let go of, or taken again, while a call of it runs.
+#[cfg(not(feature = "key-set-closed"))]
+#[test]
+fn an_undeclaration_racing_deliveries_lets_each_begin_whole_or_not_at_all() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    /// The tables, handed to the reading thread.
+    struct Shared(LatchedTables);
+    // SAFETY: every closure of these tables has a null context and a number for its call, so
+    // nothing a row holds belongs to the thread that made it; the tables are reached only under
+    // the mutex, and a call begun under it is ended by the thread that began it.
+    unsafe impl Send for Shared {}
+
+    let mut tables = latched_tables();
+    let first = tables
+        .declare_subscriber("k", Locality::Any, KeyForm::default(), latched(1))
+        .unwrap();
+    let shared = Arc::new(Mutex::new(Shared(tables)));
+    let undeclared = Arc::new(AtomicBool::new(false));
+    let rounds = Arc::new(AtomicUsize::new(0));
+    let reader = {
+        let shared = Arc::clone(&shared);
+        let undeclared = Arc::clone(&undeclared);
+        let rounds = Arc::clone(&rounds);
+        std::thread::spawn(move || {
+            let mut mark = crate::match_set::MatchEntry::NONE;
+            let (mut heard, mut after, mut released) = (Vec::new(), 0usize, 0usize);
+            for _ in 0..4000 {
+                let mut held = shared.lock().unwrap();
+                // Read under the lock the undeclaration is made under.
+                let gone = undeclared.load(Ordering::Acquire);
+                let mut calls = Vec::new();
+                crate::pubsub::LocalSubscribers::deliver_from_peer_marked(
+                    &mut held.0,
+                    "k",
+                    None,
+                    &mut mark,
+                    |_, row| calls.extend(row.row().begin()),
+                );
+                drop(held);
+                rounds.fetch_add(1, Ordering::Release);
+                for call in calls {
+                    heard.push(call.call);
+                    if gone {
+                        after += 1;
+                    }
+                    if ended::<CClosure<u32>>(call) {
+                        let mut held = shared.lock().unwrap();
+                        assert!(held.0.release_drained_subscriber(&mut 0).is_some());
+                        released += 1;
+                    }
+                }
+            }
+            (heard, after, released)
+        })
+    };
+    // Let the reader deliver a while before the undeclaration races it.
+    while rounds.load(Ordering::Acquire) < 200 && !reader.is_finished() {
+        std::thread::yield_now();
+    }
+    let taken_at_once = {
+        let mut held = shared.lock().unwrap();
+        let undone = held.0.undeclare_subscriber(first.handle).expect("declared");
+        undeclared.store(true, Ordering::Release);
+        let second = held
+            .0
+            .declare_subscriber("other", Locality::Any, KeyForm::default(), latched(2))
+            .unwrap();
+        if held.0.subscribers().holds_slot(first.handle) {
+            assert_ne!(
+                second.handle.place(),
+                first.handle.place(),
+                "the slot of a running call is not taken"
+            );
+        }
+        undone.taken.is_some()
+    };
+    let (heard, after, released) = reader.join().unwrap();
+    assert!(
+        heard.iter().all(|n| *n == 1),
+        "only the row on the key heard it"
+    );
+    assert_eq!(after, 0, "no call begun after the undeclaration");
+    assert_eq!(
+        released,
+        usize::from(!taken_at_once),
+        "the row is let go of once, by the undeclaration or by the last call"
+    );
+    let held = shared.lock().unwrap();
+    assert!(!held.0.subscribers().holds_slot(first.handle));
+}
+
 #[test]
 fn replacing_the_key_gate_moves_the_subscriber_epoch() {
     let mut tables = Tables::new();
@@ -4009,6 +4234,40 @@ fn a_closed_key_set_drops_from_the_fan_out_what_the_peers_row_does_not_allow() {
     );
     assert_eq!(tables.key_gate_refused().peer_not_allowed, 1);
     assert_eq!(tables.key_gate_refused().peer_unknown, 1);
+}
+
+/// A key the closed set refuses keeps its refusal as its answer: each message on it delivers
+/// nothing and is counted, the key not asked of the gate again, until the gate is replaced, after
+/// which the key reaches the row it names. Turned red by a refusal read past a new gate, or a kept
+/// refusal not counted.
+#[cfg(feature = "key-set-closed")]
+#[test]
+fn a_key_the_gate_refused_stays_refused_and_counted_until_the_gate_changes() {
+    use crate::key_catalogue::tests::TABLE;
+    use crate::pubsub::LocalSubscribers;
+    let mut tables = gated_tables(KeyGate::closed(&TABLE));
+    let mut mark = crate::match_set::MatchEntry::NONE;
+    for n in 1..=3 {
+        assert!(
+            latched_marked(&mut tables, "a/c", &mut mark).is_empty(),
+            "message {n}"
+        );
+        assert_eq!(tables.key_gate_refused().outside_set, n, "message {n}");
+    }
+    assert!(
+        mark.refusal(tables.epoch()).is_some(),
+        "the refusal is the kept answer"
+    );
+    tables.set_key_gate(KeyGate::open());
+    assert!(
+        mark.refusal(tables.epoch()).is_none(),
+        "a new gate moves past it"
+    );
+    assert!(
+        latched_marked(&mut tables, "a/c", &mut mark).contains(&3),
+        "the open gate lets the key reach its row"
+    );
+    assert_eq!(tables.key_gate_refused().total, 0);
 }
 
 /// The walk that pins one row at a time keeps the fan-out's key gate: a peer's message on a key

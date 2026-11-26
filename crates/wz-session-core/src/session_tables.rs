@@ -4271,13 +4271,13 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         mark: &mut crate::match_set::MatchEntry,
         deliver: D,
     ) -> usize {
-        let key_gate = &mut self.key_gate;
         fire_into_marked(
             &mut self.subscribers,
             mark,
             self.subscriber_epoch,
             key,
-            || !matches!(admit_from_peer(key_gate, key, class), Admission::Refused),
+            &mut self.key_gate,
+            class,
             deliver,
         )
     }
