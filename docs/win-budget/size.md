@@ -127,6 +127,60 @@ The per-call work of declare and undeclare (the parts moved by value, the link s
 refusal paths, the own key) is what tdecl-13 left as the declarations' debt; S1 stays the design,
 stated against a build where two kinds with callbacks coexist.
 
+#### 3.1.1 The sessions designs, by what each is expected to remove
+
+Read from the case's explain report of 2026-11-27, by owner (the bytes a module's lines place in
+sessions, inlined into other bodies included) and by body. First, four forms this area could take,
+and what the reading says of each:
+
+- **One row store for the slot map, the key arena and the id map.** The three owners place 6,600,
+  3,146 and 726 bytes, but their own bodies are 1,261, 841 and 139: about 8,200 bytes are their
+  lines inlined into some 30 other bodies, the declarations' above all (`declare_write_filter`
+  778 of the slot map and 331 of the key arena, `undeclare_write_filter_quietly` 730 of the slot
+  map). The three are not copies of one another (a table of generational slots, an arena of
+  counted texts, a map of a peer's ids) and each body has one instance in this build, so one store
+  that serves all three by a shape read at run time folds no copy and keeps at run time what the
+  typed face resolved: tdecl-13's +1,539 (`t-decl.md`, section 11) in another table. The inlined
+  bytes are the call sites' own work (a row moved out of its slot by value for its caller to drop,
+  an `Option<Removal<T>>` made and taken apart, a free-slot check per insert), so the design is at
+  the call sites (S-ROW), not in the store.
+- **One declaration transaction for every kind.** Each kind's declaration and undeclaration has one
+  instance in this build (one kind whose row keeps a callback, `t-decl.md` 11.2), so there is no
+  second body to fold. What is large is the write filter's plane, whose bodies are separate tables
+  and not instances of one generic (S-FILTER).
+- **The open as a plan computed when the build is compiled.** The region build has one already:
+  `ArenaRegion` is the plan evaluated at compile time, and the open copies it whole
+  (`ArenaRegion::lay_out_on`). What the open still lays out at run time are the holds after the
+  rows (`lay_out_open`: the links' cells, the rooms, the ABI's places, the runtime's span, the
+  engine's place, the planes), each of them a size of a type or a constant of the ABI in this
+  build (S-OPEN).
+- **The extension admission left out of the build.** It is not a path the preset may leave out: it
+  refuses a message whose chain carries a mandatory extension the message does not declare, the
+  reserved encoding, or a declared extension whose body its own reader refuses (`ext_admit.rs`),
+  as both upstreams do, zenoh-pico in its codec (911 bytes there). Leaving it out would change what
+  the session accepts. Its 2,318 bytes against those 911 are not designed here.
+
+| design | job (2.1) | what goes | expected, sessions | basis | status |
+|--------|-----------|-----------|-------------------:|-------|--------|
+| S-FILTER: a write filter is one row | declaration | Where a write filter is the only owner of an Interest (this preset: no liveliness, no querier), the Interest's facts (its id, its mapping, its aggregate, its suffix) are fields of the filter's row and the filter's matching listeners a count and slots on it, as zenoh-pico keeps one context per filter with its interest's id and its callbacks; the Interest table, its slot map, `open_interest`, `close_interest`, `interest_rank` and the listeners' own table go. A build with another owner of an Interest keeps the table, by `Presence`, as the queryables' table is kept. | -2,500 to -4,000 | the plane's bodies: `declare_write_filter` 2,418, `undeclare_write_filter_quietly` 1,423, `declare_filter_matching_listener` 640, `read_matching` 638, `undeclare_matching_listener` 536 and 418, `undeclare_write_filter` 407, `keep_write_filter_plain` 375, `write_filter_row_open` 316: about 7,200, against `filtering.c` 1,532 and matching 403 | designed; lane T-DECL. An Interest's place in the replay moves with its filter's, so the replay's order and the told walk are read again with it |
+| S-OPEN: the holds join the region | open, arena, assembly | The region is made with the holds of the engine type the ABI builds (`lay_cells` and `lay_held` as const fns, the runtime's span from the region's limits), so an open by it lays out nothing: `lay_out_open` and the lays it calls are evaluated with the region, and the open keeps only its comparison of the config with the region (`ArenaRegion::admit`), whose refusals are the ABI's | -800 to -1,500 | `lend_session` 4,535, of which 2,303 are `arena`'s lines (the lays, `settled`, the tables' places); `ArenaPlan::put` 88, `put_table` 46, `settled` 46 and `refuse` 22 are bodies only the open calls in this build | designed; lane T-OPEN, with `wz-capi-pico/src/session.rs`, where the region's constant is made |
+| S-ROW: a row that owns no program callback is dropped where it lies | declaration | `SlotMap::discard` and `Entry::discard`: the untyped core retires the row and the row is dropped in its slot, with no copy of it moved out through `Removal<T>` and its caller's frame. A write filter's undeclaration hands back its Interest's id and its key's hold alone (`FilterUnwatched`); an Interest's row and a declaration's row go the same way | -300 to -600 | a write filter's row, the largest of the four (its plain way, a put's facts and head, beside its key), was moved out of its slot to `unwatch_filter`'s frame to be dropped there under the same lock; `close_interest` (two callers), `release_keyexpr` (an entity's two holds, the program's own) and `retract_keyexpr` each moved a row out to drop it at once | landed with this section, the first step: no file of another lane, and S-FILTER's one row is undeclared this way |
+| S-SINK: the shared closures out of the C library | declaration, receive | section 3.1, second bullet | -300 to -500 | as stated there | designed |
+
+The link's turn and the receive (7,500 against 2,800) are not designed here: their bodies are the
+receive path (`DirectSink::event`, `hand_row_by_row`, the sample's marshal), whose instructions
+per message are under zenoh-pico's (3,078 against 4,049), and a design that moves bytes out of
+them is judged on both readings.
+
+Order: S-ROW first, as it moves no wire behaviour and takes no other lane's file; S-FILTER next, the
+largest, whose undeclaration of its one row is S-ROW's; S-OPEN with T-OPEN's lane, which holds the
+region's constant; S-SINK with the census and prose-name gates its feature name moves. Each is read
+on the case's sessions row and on the bodies named in its basis, and reverted when its row does not
+move by its expectation, as tdecl-13 was. S-ROW reads on `undeclare_write_filter_quietly`
+(1,423), `unwatch_filter` (104), and the bodies that inline `close_interest`, `release_keyexpr`
+and `retract_keyexpr` (`declare_write_filter`, the subscriber's undeclaration, the
+declarations' own).
+
 ### 3.2 Doors: a door reads its arguments into one request and makes one engine call
 
 pico's doors are each about 220 bytes because each reads its C arguments and calls one function of
