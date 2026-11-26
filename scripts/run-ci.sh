@@ -8943,7 +8943,9 @@ layer_c1af_cargo_test_shm() {
     # by its mutation, and the real interleaving on four sweeping threads).
     # 44 -> 45, the session keys counted as a session's (aff700b6c4), printed by hosted run
     # 43914611055 and pc5.
-    _runci_guarded_test C1af 45 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
+    # 45 -> 43 (2026-11-26, printed by guarded_count_gate.py --range 72ce26dae..HEAD): the two
+    # tests of the engine's data segment cache went with the cache, zenoh-shm's reader reading now.
+    _runci_guarded_test C1af 43 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
         || return 1
     # R3106 -- the segment module's own tests (`posix_shm`), which no lane counted: the cleanup
     # that removes a segment no one holds and keeps one a process holds, and whether a mapping may
