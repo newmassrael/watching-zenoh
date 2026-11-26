@@ -79,6 +79,15 @@ pub trait MulticastSocket: DatagramSocket {
     #[cfg(feature = "host-multicast")]
     fn set_multicast_loopback(&self, on: bool) -> Result<(), Self::Error>;
 
+    /// Have the kernel drop every datagram whose source is `own` before it is queued on this
+    /// socket: `true` when the kernel took it. The provided form takes none, and a socket that
+    /// does not leaves its receive to drop them.
+    #[cfg(feature = "host-multicast")]
+    fn drop_sent_by(&self, own: SocketAddr) -> bool {
+        let _ = own;
+        false
+    }
+
     /// Mark what the socket sends with the traffic class `class`, given as written and not shifted
     /// into the DSCP bits, in the option of its family (`IP_TOS`, `IPV6_TCLASS`): `Ok(false)`
     /// where the platform has no such option for the socket's family, and nothing was set.
@@ -296,6 +305,12 @@ impl MulticastSocket for PosixUdpSocket {
     #[cfg(feature = "host-multicast")]
     fn set_multicast_loopback(&self, on: bool) -> Result<(), PosixNetError> {
         PosixUdpSocket::set_multicast_loopback(self, on)
+    }
+
+    // A socket filter, which Linux runs on each datagram before it is queued.
+    #[cfg(all(feature = "host-multicast", target_os = "linux"))]
+    fn drop_sent_by(&self, own: SocketAddr) -> bool {
+        PosixUdpSocket::drop_sent_by(self, own)
     }
 
     #[cfg(feature = "host-multicast")]

@@ -769,7 +769,11 @@ impl<S: MulticastSocket> HostGroupTransport<S> {
     /// one of its own that reads a datagram up to the largest UDP payload whole. A datagram longer
     /// than the buffer is cut by the stack, which the session reads as a bad frame.
     pub fn new(read: S, write: S, group: SocketAddr, rx: Option<ByteBuf>) -> Self {
-        let own = Some(write.local());
+        let own = write.local();
+        // Dropped in the kernel where it takes a filter, so the reader is never woken by them; the
+        // receive still drops what reaches it.
+        read.drop_sent_by(own);
+        let own = Some(own);
         Self {
             write: Some(write),
             group,

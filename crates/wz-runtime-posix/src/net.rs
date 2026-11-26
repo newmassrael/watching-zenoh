@@ -450,6 +450,95 @@ fn set_receive_timeout_ms(fd: c_int, ms: c_int) -> Result<(), c_int> {
     }
 }
 
+/// The most instructions an `OwnSourceFilter` holds: an IPv6 source's, read as four words.
+#[cfg(all(feature = "host-multicast", target_os = "linux"))]
+const OWN_FILTER_MOST: usize = 12;
+
+/// A classic socket filter that drops a UDP datagram whose source address and port are `own`'s
+/// and keeps every other (`PosixUdpSocket::drop_sent_by`): the source compared where the kernel
+/// holds it, the packet's own bytes, as upstream's link compares it with its send socket's address
+/// (`io/zenoh-links/zenoh-link-udp/src/multicast.rs` @ `if self.unicast_addr == addr {`). At a
+/// UDP socket's filter the packet begins at its UDP header, whose first two bytes are the source
+/// port, and the network header is read past `SKF_NET_OFF`: an IPv4 source at its byte 12, an
+/// IPv6 source at its bytes 8 to 24.
+#[cfg(all(feature = "host-multicast", target_os = "linux"))]
+struct OwnSourceFilter {
+    code: [libc::sock_filter; OWN_FILTER_MOST],
+    len: u16,
+}
+
+#[cfg(all(feature = "host-multicast", target_os = "linux"))]
+impl OwnSourceFilter {
+    /// What a kept datagram keeps of itself: the whole of it.
+    const KEEP: u32 = u32::MAX;
+
+    /// The filter of `own`, or `None` where the source alone does not tell `own`'s datagrams
+    /// (an IPv6 address with a scope, which a receive compares by the interface too, as
+    /// `sent_by_own` does) or no datagram has it (the unspecified address, port zero).
+    fn of(own: SocketAddr) -> Option<Self> {
+        if own.ip().is_unspecified() || own.port() == 0 {
+            return None;
+        }
+        // The source as the words a filter loads, each read in the network's order, how many of
+        // them there are, and where in the network header they start.
+        let (words, count, at): ([u32; 4], usize, u32) = match own {
+            SocketAddr::V4(v4) => ([u32::from(*v4.ip()), 0, 0, 0], 1, 12),
+            SocketAddr::V6(v6) if v6.scope_id() == 0 => {
+                let bits = u128::from(*v6.ip());
+                let words = [
+                    (bits >> 96) as u32,
+                    (bits >> 64) as u32,
+                    (bits >> 32) as u32,
+                    bits as u32,
+                ];
+                (words, 4, 8)
+            }
+            SocketAddr::V6(_) => return None,
+        };
+        let net = libc::SKF_NET_OFF as u32;
+        let load_half = (libc::BPF_LD | libc::BPF_H | libc::BPF_ABS) as u16;
+        let load_word = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
+        let equal = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+        let ret = (libc::BPF_RET | libc::BPF_K) as u16;
+        let op = |code: u16, jf: usize, k: u32| libc::sock_filter {
+            code,
+            jt: 0,
+            jf: u8::try_from(jf).unwrap_or(u8::MAX),
+            k,
+        };
+        // Each comparison that fails jumps to the last instruction, which keeps the datagram; the
+        // one before it drops a datagram every comparison matched.
+        let keep_at = 2 * count + 3;
+        let mut code = [op(ret, 0, Self::KEEP); OWN_FILTER_MOST];
+        let mut len = 0usize;
+        let mut put = |instruction: libc::sock_filter| {
+            if let Some(slot) = code.get_mut(len) {
+                *slot = instruction;
+            }
+            len += 1;
+        };
+        put(op(load_half, 0, 0));
+        put(op(equal, keep_at - 2, u32::from(own.port())));
+        for (n, word) in words.iter().take(count).enumerate() {
+            let offset = net.wrapping_add(at).wrapping_add(4 * n as u32);
+            put(op(load_word, 0, offset));
+            put(op(equal, keep_at - 4 - 2 * n, *word));
+        }
+        put(op(ret, 0, 0));
+        put(op(ret, 0, Self::KEEP));
+        Some(Self {
+            code,
+            len: u16::try_from(len).ok()?,
+        })
+    }
+
+    /// The instructions written.
+    #[cfg(test)]
+    fn program(&self) -> &[libc::sock_filter] {
+        self.code.get(..usize::from(self.len)).unwrap_or_default()
+    }
+}
+
 /// Set the socket option `name` of `level` on `fd` to `value`: the `errno` when the kernel refuses.
 pub(crate) fn set_option<T>(fd: c_int, level: c_int, name: c_int, value: &T) -> Result<(), c_int> {
     // SAFETY: `value` is a live `T` and the length passed is its size.
@@ -1028,6 +1117,26 @@ impl PosixUdpSocket {
             SocketAddr::V6(_) => (libc::IPPROTO_IPV6, libc::IPV6_MULTICAST_LOOP),
         };
         set_option(self.fd, level, name, &c_int::from(on)).map_err(PosixNetError::MulticastOption)
+    }
+
+    /// Have the kernel drop every datagram `own` sent before it is queued on this socket, with a
+    /// socket filter (`SO_ATTACH_FILTER`, `OwnSourceFilter`) that reads the source's address and
+    /// port in the packet: `true` when the kernel took it. A group's own datagrams, which come back
+    /// on its joined socket while the loopback is on, then never wake its receive, where a receive
+    /// that drops them pays a system call, the source's conversion and a reading of the clock for
+    /// each. An `own` the filter cannot tell (one with an IPv6 scope, or the unspecified address)
+    /// is left to the receive, and nothing is set.
+    #[cfg(all(feature = "host-multicast", target_os = "linux"))]
+    pub(crate) fn drop_sent_by(&self, own: SocketAddr) -> bool {
+        let Some(mut filter) = OwnSourceFilter::of(own) else {
+            return false;
+        };
+        let program = libc::sock_fprog {
+            len: filter.len,
+            filter: filter.code.as_mut_ptr(),
+        };
+        // The kernel copies the program in the call, so it need not outlive it.
+        set_option(self.fd, libc::SOL_SOCKET, libc::SO_ATTACH_FILTER, &program).is_ok()
     }
 
     /// Mark what this socket sends with the traffic class `class`, as written: `IP_TOS` on an
@@ -1656,6 +1765,153 @@ mod tests {
         assert!(
             waited >= std::time::Duration::from_millis(120),
             "the wait is the armed 150 ms, took {waited:?}"
+        );
+    }
+
+    /// A classic socket filter run as the kernel runs one at a UDP socket, on a datagram from
+    /// `port` whose network header is `net`: how much of the datagram it keeps.
+    #[cfg(all(feature = "host-multicast", target_os = "linux"))]
+    fn run_filter(program: &[libc::sock_filter], port: u16, net: &[u8]) -> u32 {
+        let base = libc::SKF_NET_OFF as u32;
+        let mut a = 0u32;
+        let mut pc = 0usize;
+        while let Some(op) = program.get(pc) {
+            pc += 1;
+            match u32::from(op.code) {
+                c if c == libc::BPF_LD | libc::BPF_H | libc::BPF_ABS => {
+                    assert_eq!(op.k, 0, "the source port opens the UDP header");
+                    a = u32::from(port);
+                }
+                c if c == libc::BPF_LD | libc::BPF_W | libc::BPF_ABS => {
+                    let at = op.k.wrapping_sub(base) as usize;
+                    let word: [u8; 4] = net
+                        .get(at..at + 4)
+                        .expect("a word of the network header")
+                        .try_into()
+                        .expect("four bytes");
+                    a = u32::from_be_bytes(word);
+                }
+                c if c == libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K => {
+                    pc += usize::from(if a == op.k { op.jt } else { op.jf });
+                }
+                c if c == libc::BPF_RET | libc::BPF_K => return op.k,
+                other => panic!("an instruction the filter does not write: {other:#x}"),
+            }
+        }
+        panic!("the program ran past its end")
+    }
+
+    /// The filter of a group's own send socket drops a datagram from its address and port and keeps
+    /// one from another port or another address, in either family, run as the kernel runs it; an
+    /// own address the source alone does not tell (an IPv6 scope, the unspecified address, port
+    /// zero) has no filter. Turned red by a comparison that jumps to the wrong place, a source
+    /// read at the wrong offset of its header, or a filter made for a scoped or unspecified address
+    /// (`OwnSourceFilter::of`).
+    #[cfg(all(feature = "host-multicast", target_os = "linux"))]
+    #[test]
+    fn the_own_source_filter_drops_only_the_own_address_and_port() {
+        let keep = OwnSourceFilter::KEEP;
+        let v4 = |ip: [u8; 4]| {
+            let mut net = [0u8; 20];
+            net[0] = 0x45;
+            net[12..16].copy_from_slice(&ip);
+            net
+        };
+        let own = SocketAddr::from(([10, 0, 0, 5], 40_000));
+        let filter = OwnSourceFilter::of(own).expect("an IPv4 source");
+        let program = filter.program();
+        assert_eq!(program.len(), 6);
+        assert_eq!(
+            run_filter(program, 40_000, &v4([10, 0, 0, 5])),
+            0,
+            "its own"
+        );
+        assert_eq!(
+            run_filter(program, 40_001, &v4([10, 0, 0, 5])),
+            keep,
+            "another port"
+        );
+        assert_eq!(
+            run_filter(program, 40_000, &v4([10, 0, 0, 6])),
+            keep,
+            "another address"
+        );
+
+        let v6 = |ip: Ipv6Addr| {
+            let mut net = [0u8; 40];
+            net[0] = 0x60;
+            net[8..24].copy_from_slice(&ip.octets());
+            net
+        };
+        let addr = Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 5);
+        let own = SocketAddr::V6(SocketAddrV6::new(addr, 40_000, 0, 0));
+        let filter = OwnSourceFilter::of(own).expect("an IPv6 source with no scope");
+        let program = filter.program();
+        assert_eq!(program.len(), 12);
+        assert_eq!(run_filter(program, 40_000, &v6(addr)), 0, "its own");
+        assert_eq!(run_filter(program, 40_001, &v6(addr)), keep, "another port");
+        // One address for each of the four words the source is compared in.
+        for other in [
+            Ipv6Addr::new(0x2002, 0xdb8, 0, 0, 0, 0, 0, 5),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 1, 0, 0, 0, 5),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 1, 0, 5),
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 6),
+        ] {
+            assert_eq!(run_filter(program, 40_000, &v6(other)), keep, "{other}");
+        }
+
+        let scoped = SocketAddrV6::new(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 5), 40_000, 0, 3);
+        assert!(
+            OwnSourceFilter::of(SocketAddr::V6(scoped)).is_none(),
+            "a scoped address is left to the receive"
+        );
+        assert!(OwnSourceFilter::of(SocketAddr::from(([0, 0, 0, 0], 40_000))).is_none());
+        assert!(OwnSourceFilter::of(SocketAddr::from(([10, 0, 0, 5], 0))).is_none());
+    }
+
+    /// A socket that has the kernel drop what one socket sent never receives it, and still receives
+    /// what another socket sent: the member's datagram is the first its receive finds, with nothing
+    /// queued behind it. The CONTROL is the same two sends to a socket with no filter, whose first
+    /// datagram is the own one. Turned red by a filter the kernel refuses
+    /// (`PosixUdpSocket::drop_sent_by`), or one that drops the member's datagram too.
+    #[cfg(all(feature = "host-multicast", target_os = "linux"))]
+    #[test]
+    fn the_kernel_drops_what_the_own_socket_sent_and_keeps_a_members() {
+        let own = PosixUdpSocket::bind(LOOPBACK).expect("the own socket");
+        let member = PosixUdpSocket::bind(LOOPBACK).expect("a member's socket");
+        let plain = PosixUdpSocket::bind(LOOPBACK).expect("a socket with no filter");
+        let filtered = PosixUdpSocket::bind(LOOPBACK).expect("a filtered socket");
+        assert!(
+            filtered.drop_sent_by(own.local()),
+            "the kernel takes the filter"
+        );
+        for to in [plain.local(), filtered.local()] {
+            own.send_to(to, b"own").expect("a send");
+            member.send_to(to, b"member").expect("a send");
+        }
+        let mut buf = [0u8; 16];
+        let (len, from) = plain
+            .recv_waiting(&mut buf)
+            .expect("no error")
+            .expect("a datagram");
+        assert_eq!(
+            (&buf[..len], from),
+            (&b"own"[..], own.local()),
+            "CONTROL: the own datagram comes first"
+        );
+        let (len, from) = filtered
+            .recv_waiting(&mut buf)
+            .expect("no error")
+            .expect("a datagram");
+        assert_eq!(
+            (&buf[..len], from),
+            (&b"member"[..], member.local()),
+            "the own datagram was dropped"
+        );
+        assert_eq!(
+            filtered.recv_waiting(&mut buf),
+            Ok(None),
+            "and nothing is queued behind it"
         );
     }
 
