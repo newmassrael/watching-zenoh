@@ -26,6 +26,22 @@
 //! waits until it is told, on a waker it watches the time base with ([`TimeBaseHold::watch`]),
 //! which each word wakes, so the engine's one wait (over its links) is ended by the word too.
 //!
+//! A word wakes in place. The waits lie in a table kept in order of deadline, the latest first, so
+//! the ones whose time has come are taken from its end, earliest first; the wakers then run with no
+//! lock of the time base held, at most `WAKE_BATCH` at a time from a batch on the stack of the
+//! caller, so a word takes no memory however many it wakes.
+//!
+//! ## Room
+//!
+//! The waits and the watches lie in two tables of the time base. A session that takes no memory
+//! once it is open sets aside, when it opens, the slots it will use ([`TimeBaseHold::reserve`]):
+//! the tables grow then, and a wait or a watch made from the room it is given ([`TimeBaseRoom`])
+//! lies in one of those slots and never grows them. One past the room's slots is refused and
+//! counted ([`TimeBaseHold::refused`]): a refused wait ends at once, as one whose time has come
+//! does, and a refused watch is not made. A wait or a watch made with no room
+//! ([`TimeBaseRef::sleep_until`], [`TimeBaseHold::watch`]) grows a full table, for an engine whose
+//! timers start while it runs and have no count at its open.
+//!
 //! ## Holding
 //!
 //! A time base is held ([`TimeBaseHold`]) by the program, by each configuration that names it and
@@ -62,19 +78,308 @@ struct Installed {
     program: Option<Box<dyn ProgramTime>>,
 }
 
+/// How many wakers a word takes from the tables at a time, to wake once it has let go of their
+/// lock: the batch lies on the stack of the caller.
+const WAKE_BATCH: usize = 16;
+
 /// A wait registered for a time.
 struct Sleeper {
     id: u64,
     deadline_ns: u64,
     waker: Waker,
+    /// Whether it lies in a slot a room set aside ([`TimeBaseRoom`]).
+    roomed: bool,
 }
 
-/// The waits a time base holds.
+/// A waker each word wakes, by the id its watch removes it by ([`MoveWatch`]).
+struct Watcher {
+    id: u64,
+    waker: Waker,
+    /// Whether it lies in a slot a room set aside ([`TimeBaseRoom`]).
+    roomed: bool,
+}
+
+/// The slots the rooms of a time base set aside in one of its tables, and how many of them hold
+/// an entry.
+#[derive(Clone, Copy)]
+struct Slots {
+    set_aside: usize,
+    taken: usize,
+}
+
+impl Slots {
+    const NONE: Self = Self {
+        set_aside: 0,
+        taken: 0,
+    };
+
+    /// The slots set aside that hold no entry. A room let go of while a wait of it still waits
+    /// leaves more taken than set aside until that wait ends, and none free.
+    fn free(self) -> usize {
+        self.set_aside.saturating_sub(self.taken)
+    }
+
+    fn take(&mut self) {
+        self.taken += 1;
+    }
+
+    fn give(&mut self) {
+        self.taken = self.taken.saturating_sub(1);
+    }
+}
+
+/// The waits and the watches a time base holds. Each table's capacity is at least its length and
+/// its free slots ([`Slots::free`]) together, so an entry of a room is placed with no allocation.
 struct Sleepers {
     next_id: u64,
+    /// In order of deadline, the latest first; of two with one deadline, the one registered first
+    /// is nearer the end, and is woken first.
     waiting: Vec<Sleeper>,
-    /// The wakers each word wakes, by the id their watch removes them by ([`MoveWatch`]).
-    watching: Vec<(u64, Waker)>,
+    /// In order of id, which is the order they were made in.
+    watching: Vec<Watcher>,
+    wait_slots: Slots,
+    watch_slots: Slots,
+    /// The waits and watches refused for want of a slot, under the current lease.
+    refused: u64,
+}
+
+/// Why a time base gave no room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomRefused {
+    /// The heap refused the growth of the tables a reservation asked for; nothing was set aside.
+    NoMemory,
+    /// Every slot the rooms of the time base set aside holds an entry.
+    Full,
+}
+
+/// The wakers taken from the tables under their lock, to wake after it.
+struct WakeBatch {
+    wakers: [Option<Waker>; WAKE_BATCH],
+    len: usize,
+}
+
+impl WakeBatch {
+    const fn new() -> Self {
+        Self {
+            wakers: [const { None }; WAKE_BATCH],
+            len: 0,
+        }
+    }
+
+    fn is_full(&self) -> bool {
+        self.len == WAKE_BATCH
+    }
+
+    /// Keep `waker`; the caller has seen the batch is not full.
+    fn push(&mut self, waker: Waker) {
+        self.wakers[self.len] = Some(waker);
+        self.len += 1;
+    }
+
+    /// Wake every waker kept, in the order kept, and keep none.
+    fn wake_all(&mut self) {
+        for slot in &mut self.wakers[..self.len] {
+            if let Some(waker) = slot.take() {
+                waker.wake();
+            }
+        }
+        self.len = 0;
+    }
+}
+
+impl Sleepers {
+    const fn new() -> Self {
+        Self {
+            next_id: 0,
+            waiting: Vec::new(),
+            watching: Vec::new(),
+            wait_slots: Slots::NONE,
+            watch_slots: Slots::NONE,
+            refused: 0,
+        }
+    }
+
+    /// An id no wait or watch of the time base has had, across leases too, so a wait or a watch
+    /// of an earlier lease removes nothing of a later one.
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        id
+    }
+
+    /// Set aside `waits` slots of waits and `watches` of watches, the tables grown to hold them;
+    /// `NoMemory`, with nothing set aside, when the heap refuses.
+    fn set_aside(&mut self, waits: usize, watches: usize) -> Result<(), RoomRefused> {
+        let wait_slots = Slots {
+            set_aside: self
+                .wait_slots
+                .set_aside
+                .checked_add(waits)
+                .ok_or(RoomRefused::NoMemory)?,
+            ..self.wait_slots
+        };
+        let watch_slots = Slots {
+            set_aside: self
+                .watch_slots
+                .set_aside
+                .checked_add(watches)
+                .ok_or(RoomRefused::NoMemory)?,
+            ..self.watch_slots
+        };
+        self.waiting
+            .try_reserve(wait_slots.free())
+            .map_err(|_| RoomRefused::NoMemory)?;
+        self.watching
+            .try_reserve(watch_slots.free())
+            .map_err(|_| RoomRefused::NoMemory)?;
+        self.wait_slots = wait_slots;
+        self.watch_slots = watch_slots;
+        Ok(())
+    }
+
+    /// Give back slots a room set aside. The tables keep their capacity, for the next room.
+    fn give_back(&mut self, waits: usize, watches: usize) {
+        self.wait_slots.set_aside = self.wait_slots.set_aside.saturating_sub(waits);
+        self.watch_slots.set_aside = self.watch_slots.set_aside.saturating_sub(watches);
+    }
+
+    /// Place a wait for `deadline_ns` that `waker` wakes, in a free slot when `roomed`: its id, or
+    /// `None`, counted, for a room with no slot free.
+    fn place_wait(&mut self, deadline_ns: u64, waker: &Waker, roomed: bool) -> Option<u64> {
+        if roomed {
+            if self.wait_slots.free() == 0 {
+                self.refused = self.refused.saturating_add(1);
+                return None;
+            }
+            self.wait_slots.take();
+        } else {
+            // Room for this wait beside every free slot, so a wait of a room is still placed with
+            // no allocation however many waits of none came before it.
+            self.waiting.reserve(self.wait_slots.free() + 1);
+        }
+        let id = self.next_id();
+        let at = self
+            .waiting
+            .partition_point(|entry| entry.deadline_ns > deadline_ns);
+        self.waiting.insert(
+            at,
+            Sleeper {
+                id,
+                deadline_ns,
+                waker: waker.clone(),
+                roomed,
+            },
+        );
+        Some(id)
+    }
+
+    /// Take the wait `id` names out of its table, if the table still holds it.
+    fn remove_wait(&mut self, id: u64) -> Option<Sleeper> {
+        let at = self.waiting.iter().position(|entry| entry.id == id)?;
+        let sleeper = self.waiting.remove(at);
+        if sleeper.roomed {
+            self.wait_slots.give();
+        }
+        Some(sleeper)
+    }
+
+    /// Take the wait of the earliest deadline out of its table.
+    fn pop_wait(&mut self) -> Option<Sleeper> {
+        let sleeper = self.waiting.pop()?;
+        if sleeper.roomed {
+            self.wait_slots.give();
+        }
+        Some(sleeper)
+    }
+
+    /// Place a watch that `waker` is in a free slot of a room: its id, or `None`, counted, for a
+    /// room with no slot free.
+    fn place_watch_in_room(&mut self, waker: Waker) -> Option<u64> {
+        if self.watch_slots.free() == 0 {
+            self.refused = self.refused.saturating_add(1);
+            return None;
+        }
+        self.watch_slots.take();
+        Some(self.push_watch(waker, true))
+    }
+
+    /// Place a watch that `waker` is with no room, the table grown when it is full: its id.
+    fn place_watch_on_heap(&mut self, waker: Waker) -> u64 {
+        // Room for this watch beside every free slot, as for a wait of no room.
+        self.watching.reserve(self.watch_slots.free() + 1);
+        self.push_watch(waker, false)
+    }
+
+    /// Push a watch the table has the capacity for: its id.
+    fn push_watch(&mut self, waker: Waker, roomed: bool) -> u64 {
+        let id = self.next_id();
+        self.watching.push(Watcher { id, waker, roomed });
+        id
+    }
+
+    /// Take the watch `id` names out of its table, if the table still holds it.
+    fn remove_watch(&mut self, id: u64) -> Option<Watcher> {
+        let at = self.watching.iter().position(|entry| entry.id == id)?;
+        let watcher = self.watching.remove(at);
+        if watcher.roomed {
+            self.watch_slots.give();
+        }
+        Some(watcher)
+    }
+
+    /// Take the watch made last out of its table.
+    fn pop_watch(&mut self) -> Option<Watcher> {
+        let watcher = self.watching.pop()?;
+        if watcher.roomed {
+            self.watch_slots.give();
+        }
+        Some(watcher)
+    }
+
+    /// Keep in `batch` the wakers of the watches made after the one `after` names (every watch
+    /// for `None`), which stay, and then of the waits whose time has come by `now`, earliest first,
+    /// which leave their table: whether the batch filled with some left for another.
+    fn take_due(&mut self, now: u64, after: &mut Option<u64>, batch: &mut WakeBatch) -> bool {
+        let from = (*after).map_or(0, |last| {
+            self.watching.partition_point(|entry| entry.id <= last)
+        });
+        for watcher in &self.watching[from..] {
+            if batch.is_full() {
+                return true;
+            }
+            batch.push(watcher.waker.clone());
+            *after = Some(watcher.id);
+        }
+        while self
+            .waiting
+            .last()
+            .is_some_and(|last| last.deadline_ns <= now)
+        {
+            if batch.is_full() {
+                return true;
+            }
+            if let Some(sleeper) = self.pop_wait() {
+                batch.push(sleeper.waker);
+            }
+        }
+        false
+    }
+
+    /// Keep in `batch` the wakers of every wait, earliest first, and then of every watch, each of
+    /// which leaves its table: whether the batch filled with some left for another.
+    fn take_all(&mut self, batch: &mut WakeBatch) -> bool {
+        while !batch.is_full() {
+            let next = match self.pop_wait() {
+                Some(sleeper) => Some(sleeper.waker),
+                None => self.pop_watch().map(|watcher| watcher.waker),
+            };
+            let Some(waker) = next else {
+                return false;
+            };
+            batch.push(waker);
+        }
+        !self.waiting.is_empty() || !self.watching.is_empty()
+    }
 }
 
 /// One time base, never freed (see "Holding").
@@ -102,16 +407,13 @@ impl TimeBase {
             }),
             last_ns: AtomicU64::new(0),
             holders: AtomicUsize::new(0),
-            sleepers: Mutex::new(Sleepers {
-                next_id: 0,
-                waiting: Vec::new(),
-                watching: Vec::new(),
-            }),
+            sleepers: Mutex::new(Sleepers::new()),
         }
     }
 
     /// Install `program` under a new lease, for its first hold; the lease.
     fn install(&self, program: Box<dyn ProgramTime>) -> u64 {
+        locked(&self.sleepers).refused = 0;
         let mut installed = self.installed.write();
         installed.lease = installed.lease.wrapping_add(1);
         installed.program = Some(program);
@@ -138,80 +440,73 @@ impl TimeBase {
         last.max(now)
     }
 
-    /// Wake every watch, and every wait whose time has come by the reading under `lease`. The
-    /// wakers run with no lock of the time base held: a woken task may poll at once on another
-    /// thread.
+    /// Wake every watch, and every wait whose time has come by the reading under `lease`, earliest
+    /// first. The wakers run with no lock of the time base held: a woken task may poll at once on
+    /// another thread.
     fn wake_due(&self, lease: u64) {
         let now = self.now_ns(lease);
-        let due = {
-            let mut sleepers = locked(&self.sleepers);
-            let mut due: Vec<Waker> = sleepers
-                .watching
-                .iter()
-                .map(|(_, waker)| waker.clone())
-                .collect();
-            let mut at = 0;
-            while at < sleepers.waiting.len() {
-                if sleepers.waiting[at].deadline_ns <= now {
-                    due.push(sleepers.waiting.swap_remove(at).waker);
-                } else {
-                    at += 1;
-                }
+        let mut after = None;
+        let mut batch = WakeBatch::new();
+        loop {
+            let more = locked(&self.sleepers).take_due(now, &mut after, &mut batch);
+            batch.wake_all();
+            if !more {
+                return;
             }
-            due
-        };
-        for waker in due {
-            waker.wake();
         }
     }
 
-    /// Register a wait for `deadline_ns` that `waker` wakes, or give the wait `id` names this
-    /// waker; the id of the wait.
-    fn register(&self, id: Option<u64>, deadline_ns: u64, waker: &Waker) -> u64 {
+    /// Register a wait for `deadline_ns` that `waker` wakes, in a slot a room set aside when
+    /// `roomed`, or give the wait `id` names this waker: the id of the wait, or `None` when the
+    /// rooms have no slot free.
+    fn register(
+        &self,
+        id: Option<u64>,
+        deadline_ns: u64,
+        waker: &Waker,
+        roomed: bool,
+    ) -> Option<u64> {
         let mut sleepers = locked(&self.sleepers);
         if let Some(id) = id {
             if let Some(entry) = sleepers.waiting.iter_mut().find(|entry| entry.id == id) {
                 if !entry.waker.will_wake(waker) {
                     entry.waker = waker.clone();
                 }
-                return id;
+                return Some(id);
             }
         }
-        let id = sleepers.next_id;
-        sleepers.next_id = sleepers.next_id.wrapping_add(1);
-        sleepers.waiting.push(Sleeper {
-            id,
-            deadline_ns,
-            waker: waker.clone(),
-        });
-        id
+        sleepers.place_wait(deadline_ns, waker, roomed)
     }
 
-    /// Remove the wait `id` names, if the time base still holds it.
+    /// Remove the wait `id` names, if the time base still holds it; its waker goes after the lock.
     fn deregister(&self, id: u64) {
-        let mut sleepers = locked(&self.sleepers);
-        sleepers.waiting.retain(|entry| entry.id != id);
+        let removed = locked(&self.sleepers).remove_wait(id);
+        drop(removed);
     }
 
-    /// Keep `waker` for every word from now on; the id its watch removes it by. Ids are never
-    /// reused, across leases too, so a watch of an earlier lease removes nothing of a later one.
+    /// Keep `waker` for every word from now on, the table grown when it is full: the id its watch
+    /// removes it by.
     fn watch(&self, waker: Waker) -> u64 {
-        let mut sleepers = locked(&self.sleepers);
-        let id = sleepers.next_id;
-        sleepers.next_id = sleepers.next_id.wrapping_add(1);
-        sleepers.watching.push((id, waker));
-        id
+        locked(&self.sleepers).place_watch_on_heap(waker)
     }
 
-    /// Remove the watch `id` names, if the time base still holds it.
+    /// Keep `waker` for every word from now on, in a slot a room set aside: the id its watch
+    /// removes it by, or `None` when the rooms have no slot free.
+    fn watch_in_room(&self, waker: Waker) -> Option<u64> {
+        locked(&self.sleepers).place_watch_in_room(waker)
+    }
+
+    /// Remove the watch `id` names, if the time base still holds it; its waker goes after the
+    /// lock.
     fn unwatch(&self, id: u64) {
-        let mut sleepers = locked(&self.sleepers);
-        sleepers.watching.retain(|(at, _)| *at != id);
+        let removed = locked(&self.sleepers).remove_watch(id);
+        drop(removed);
     }
 
     /// End the lease: the program's read goes, with no lock of the time base held while its own
     /// drop runs, and every wait still registered is woken to read the time base as past its
-    /// deadline.
+    /// deadline. A watch is woken once more and let go: the base it watched is gone, and the next
+    /// program's words are not its.
     fn retire(&self) {
         let program = {
             let mut installed = self.installed.write();
@@ -220,20 +515,13 @@ impl TimeBase {
             installed.program.take()
         };
         drop(program);
-        let (waiting, watching) = {
-            let mut sleepers = locked(&self.sleepers);
-            (
-                core::mem::take(&mut sleepers.waiting),
-                // A watch is woken once more and let go: the base it watched is gone, and the next
-                // program's words are not its.
-                core::mem::take(&mut sleepers.watching),
-            )
-        };
-        for sleeper in waiting {
-            sleeper.waker.wake();
-        }
-        for (_, waker) in watching {
-            waker.wake();
+        let mut batch = WakeBatch::new();
+        loop {
+            let more = locked(&self.sleepers).take_all(&mut batch);
+            batch.wake_all();
+            if !more {
+                return;
+            }
         }
     }
 }
@@ -278,11 +566,86 @@ impl TimeBaseHold {
     /// Wake `waker` at each word that the program's time moved on ([`Self::advanced`]), and once
     /// more when the last hold goes, until the watch returned is dropped: a thread that waits for
     /// input and for the time together (an engine's read) waits on what the waker makes ready.
+    ///
+    /// The watch takes no slot of a room: its table grows when it is full. A session that takes no
+    /// memory after its open watches from the room it set aside ([`TimeBaseRoom::watch`]).
     pub fn watch(&self, waker: Waker) -> MoveWatch {
         MoveWatch {
             base: self.base,
             id: self.base.watch(waker),
         }
+    }
+
+    /// Set aside `waits` slots for waits and `watches` for watches, for a session that takes no
+    /// memory once it is open: the time base's tables grow now, and every wait and every watch made
+    /// from the room returned lies in one of its slots, until the room goes and gives them back.
+    /// The room is a hold of the time base as well.
+    ///
+    /// `RoomRefused::NoMemory`, with nothing set aside, when the heap refuses the growth.
+    pub fn reserve(&self, waits: usize, watches: usize) -> Result<TimeBaseRoom, RoomRefused> {
+        locked(&self.base.sleepers).set_aside(waits, watches)?;
+        Ok(TimeBaseRoom {
+            hold: self.clone(),
+            waits,
+            watches,
+        })
+    }
+
+    /// How many waits and watches the rooms of the time base had no slot for since its program was
+    /// installed: each refused wait ended at once, and each refused watch was not made.
+    pub fn refused(&self) -> u64 {
+        locked(&self.base.sleepers).refused
+    }
+}
+
+/// Slots a session set aside in a time base when it opened ([`TimeBaseHold::reserve`]), which its
+/// waits and watches lie in, and a hold of the time base. The slots go back when this is dropped;
+/// a wait of it still waiting keeps its slot until it ends.
+pub struct TimeBaseRoom {
+    hold: TimeBaseHold,
+    waits: usize,
+    watches: usize,
+}
+
+impl TimeBaseRoom {
+    /// [`TimeBaseRef::sleep_until`] in a slot of this room: a wait that, when the room has no slot
+    /// free as it is first polled, ends at once and is counted ([`TimeBaseHold::refused`]).
+    pub fn sleep_until(&self, deadline_ns: u64) -> ProgramSleep {
+        ProgramSleep {
+            time: self.hold.time(),
+            deadline_ns,
+            registered: None,
+            roomed: true,
+        }
+    }
+
+    /// [`TimeBaseHold::watch`] in a slot of this room; `RoomRefused::Full`, counted, when the room
+    /// has no slot free.
+    pub fn watch(&self, waker: Waker) -> Result<MoveWatch, RoomRefused> {
+        let id = self
+            .hold
+            .base
+            .watch_in_room(waker)
+            .ok_or(RoomRefused::Full)?;
+        Ok(MoveWatch {
+            base: self.hold.base,
+            id,
+        })
+    }
+}
+
+impl Drop for TimeBaseRoom {
+    fn drop(&mut self) {
+        locked(&self.hold.base.sleepers).give_back(self.waits, self.watches);
+    }
+}
+
+impl fmt::Debug for TimeBaseRoom {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TimeBaseRoom")
+            .field("waits", &self.waits)
+            .field("watches", &self.watches)
+            .finish_non_exhaustive()
     }
 }
 
@@ -358,12 +721,14 @@ impl TimeBaseRef {
     }
 
     /// A wait that ends when the program's time reaches `deadline_ns` and the program says so
-    /// ([`TimeBaseHold::advanced`]), or at once when it has already.
+    /// ([`TimeBaseHold::advanced`]), or at once when it has already. It takes no slot of a room:
+    /// its table grows when it is full ([`TimeBaseRoom::sleep_until`] is the wait that does not).
     pub fn sleep_until(&self, deadline_ns: u64) -> ProgramSleep {
         ProgramSleep {
             time: *self,
             deadline_ns,
             registered: None,
+            roomed: false,
         }
     }
 }
@@ -382,6 +747,8 @@ pub struct ProgramSleep {
     deadline_ns: u64,
     /// The wait the time base holds for this one, once it has been polled and not ended.
     registered: Option<u64>,
+    /// Whether it lies in a slot a room set aside ([`TimeBaseRoom::sleep_until`]).
+    roomed: bool,
 }
 
 impl ProgramSleep {
@@ -407,11 +774,14 @@ impl Future for ProgramSleep {
             this.forget();
             return Poll::Ready(());
         }
-        this.registered = Some(this.time.base.register(
-            this.registered,
-            this.deadline_ns,
-            cx.waker(),
-        ));
+        this.registered =
+            this.time
+                .base
+                .register(this.registered, this.deadline_ns, cx.waker(), this.roomed);
+        // A room with no slot free: the wait ends at once, and the time base counted it.
+        if this.registered.is_none() {
+            return Poll::Ready(());
+        }
         // Read again: a program that moved its time and said so between the first reading and the
         // registration found no wait to wake, and its time is seen here.
         if this.due() {
@@ -431,8 +801,53 @@ impl Drop for ProgramSleep {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::task::Wake;
+
+    thread_local! {
+        static ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The lib test binary's allocator: `System`'s, each allocation counted on the thread that
+    /// made it, so a test reads what its own calls took and none of the tests beside it.
+    struct Counting;
+
+    // SAFETY: every call forwards to `System` unchanged; the count is a thread-local cell with no
+    // destructor, which neither allocates nor unwinds.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS.with(|n| n.set(n.get() + 1));
+            // SAFETY: the caller's contract, forwarded.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            ALLOCATIONS.with(|n| n.set(n.get() + 1));
+            // SAFETY: the caller's contract, forwarded.
+            unsafe { System.alloc_zeroed(layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            ALLOCATIONS.with(|n| n.set(n.get() + 1));
+            // SAFETY: the caller's contract, forwarded.
+            unsafe { System.realloc(ptr, layout, new_size) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: the caller's contract, forwarded.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static COUNTING: Counting = Counting;
+
+    /// How many allocations the calling thread has made.
+    fn allocations() -> usize {
+        ALLOCATIONS.with(Cell::get)
+    }
 
     /// The program's time as the test sets it.
     struct SetTime(Arc<AtomicU64>);
@@ -615,6 +1030,170 @@ mod tests {
             1,
             "the last hold's going woke the watch"
         );
+    }
+
+    /// A waker that writes its name into a log shared by several, in the order they are woken.
+    struct Logs {
+        name: u64,
+        log: Arc<StdMutex<Vec<u64>>>,
+    }
+
+    impl Wake for Logs {
+        fn wake(self: Arc<Self>) {
+            self.log.lock().unwrap().push(self.name);
+        }
+    }
+
+    /// Once a room is set aside, words take no memory, however many waits they end and watches
+    /// they wake: the waits are taken in place and the wakers woken from a batch on the stack.
+    /// CONTROL: a wait of no room grows its table when it is full. Turned red by a word that
+    /// gathers the wakers it wakes into a new vector, or a wait of a room that grows its table.
+    #[test]
+    fn words_take_no_memory_once_a_room_is_set_aside() {
+        const WAITS: usize = 4;
+        let (now, hold) = time_at(0);
+        let room = hold.reserve(WAITS, 1).expect("the heap gives the room");
+        let (watched, watcher) = wakes();
+        let _watch = room.watch(watcher).expect("the room has its watch");
+        let (_ended, waker) = wakes();
+        let mut sleeps: Vec<ProgramSleep> = (1..=WAITS as u64)
+            .map(|at| room.sleep_until(1_000 * at))
+            .collect();
+        // Warm the calls once, so what a first call makes of the thread's own is not counted.
+        hold.advanced();
+        let before = allocations();
+        for round in 1..=100u64 {
+            for sleep in &mut sleeps {
+                let _ = poll(sleep, &waker);
+            }
+            now.store(round * 500, Ordering::SeqCst);
+            hold.advanced();
+        }
+        assert_eq!(
+            allocations() - before,
+            0,
+            "a word after the room took memory"
+        );
+        assert!(
+            sleeps
+                .iter_mut()
+                .all(|sleep| poll(sleep, &waker).is_ready()),
+            "every wait of the room ended"
+        );
+        assert_eq!(
+            watched.0.load(Ordering::SeqCst),
+            101,
+            "each word woke the watch"
+        );
+        assert_eq!(hold.refused(), 0, "the room had a slot for each");
+
+        // CONTROL: a wait of no room, past the capacity the table has, takes memory.
+        let mut filled: Vec<ProgramSleep> =
+            (0..64).map(|_| hold.time().sleep_until(u64::MAX)).collect();
+        let before = allocations();
+        for sleep in &mut filled {
+            assert!(poll(sleep, &waker).is_pending());
+        }
+        assert!(
+            allocations() > before,
+            "CONTROL: a wait of no room grows its table"
+        );
+    }
+
+    /// A room's waits and watches past its slots are refused and counted, with no memory taken: a
+    /// refused wait ends at once, a refused watch is not made, and a slot given back is taken
+    /// again. A reservation the heap cannot give sets nothing aside. Turned red by a wait or a
+    /// watch of a full room that grows its table, or a refusal left uncounted.
+    #[test]
+    fn a_rooms_wait_or_watch_past_its_slots_is_refused_and_counted() {
+        let (now, hold) = time_at(0);
+        assert_eq!(
+            hold.reserve(usize::MAX, 0).err(),
+            Some(RoomRefused::NoMemory),
+            "the heap cannot give a room of every slot"
+        );
+        let room = hold.reserve(1, 1).expect("the heap gives the room");
+        let (woken, waker) = wakes();
+        let first = room.watch(waker.clone()).expect("the room's one watch");
+        let mut waiting = room.sleep_until(1_000);
+        assert!(
+            poll(&mut waiting, &waker).is_pending(),
+            "the room's one wait"
+        );
+
+        let before = allocations();
+        assert_eq!(room.watch(waker.clone()).err(), Some(RoomRefused::Full));
+        let mut refused = room.sleep_until(1_000);
+        assert!(
+            poll(&mut refused, &waker).is_ready(),
+            "a wait the room has no slot for ends at once"
+        );
+        assert_eq!(allocations() - before, 0, "a refusal took memory");
+        assert_eq!(hold.refused(), 2, "both refusals are counted");
+
+        // The slots given back are taken again.
+        drop(first);
+        let _again = room
+            .watch(waker.clone())
+            .expect("the slot the dropped watch gave back");
+        now.store(1_000, Ordering::SeqCst);
+        hold.advanced();
+        assert!(poll(&mut waiting, &waker).is_ready());
+        let mut next = room.sleep_until(2_000);
+        assert!(
+            poll(&mut next, &waker).is_pending(),
+            "the slot the ended wait gave back"
+        );
+        assert_eq!(hold.refused(), 2);
+        assert!(woken.0.load(Ordering::SeqCst) >= 1);
+    }
+
+    /// A word ends the waits whose time has come earliest first, and of two with one deadline the
+    /// one registered first; a wait whose time has not come stays. Turned red by a table kept in
+    /// the order the waits came, or a tie put before the waits of its deadline already there.
+    #[test]
+    fn a_word_ends_the_waits_earliest_deadline_first() {
+        let (now, hold) = time_at(0);
+        let log = Arc::new(StdMutex::new(Vec::new()));
+        let mut sleeps: Vec<(ProgramSleep, Waker)> = [(1, 30), (2, 10), (3, 20), (4, 10), (5, 40)]
+            .into_iter()
+            .map(|(name, deadline)| {
+                let waker = Waker::from(Arc::new(Logs {
+                    name,
+                    log: log.clone(),
+                }));
+                (hold.time().sleep_until(deadline), waker)
+            })
+            .collect();
+        for (sleep, waker) in &mut sleeps {
+            assert!(poll(sleep, waker).is_pending());
+        }
+        now.store(30, Ordering::SeqCst);
+        hold.advanced();
+        assert_eq!(*log.lock().unwrap(), vec![2, 4, 3, 1]);
+        now.store(40, Ordering::SeqCst);
+        hold.advanced();
+        assert_eq!(*log.lock().unwrap(), vec![2, 4, 3, 1, 5]);
+    }
+
+    /// One word wakes every watch and ends every wait due, more than one batch holds of each, each
+    /// once. Turned red by a word that stops at its first batch, or one that wakes a watch twice
+    /// as it resumes.
+    #[test]
+    fn a_word_wakes_more_than_one_batch_each_once() {
+        let many = 3 * WAKE_BATCH + 1;
+        let (now, hold) = time_at(0);
+        let (watched, watcher) = wakes();
+        let _watches: Vec<MoveWatch> = (0..many).map(|_| hold.watch(watcher.clone())).collect();
+        let (ended, waker) = wakes();
+        let mut sleeps: Vec<ProgramSleep> = (0..many).map(|_| hold.time().sleep_until(5)).collect();
+        for sleep in &mut sleeps {
+            assert!(poll(sleep, &waker).is_pending());
+        }
+        now.store(5, Ordering::SeqCst);
+        hold.advanced();
+        assert_eq!(watched.0.load(Ordering::SeqCst), many, "every watch, once");
+        assert_eq!(ended.0.load(Ordering::SeqCst), many, "every wait due, once");
     }
 
     #[test]
