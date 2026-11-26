@@ -426,6 +426,47 @@ R2.3 (`.rodata` neutral, RELRO -1 page); then R3.1 (a) (RELRO -1 page). R2.2 and
 whichever lands first. The cell that reads each is R0's per-mapping figures, the `r--p` and `rw-p` mappings of
 `lib-W` above.
 
+#### 5.3.1 R2.3: the padding of a constant's state, read before the state moves into its view
+
+**What a view is read as.** `z_loaned_encoding_t` is `handle` and `_pad: [*mut c_void; 4]`
+(`crates/wz-capi-pico/src/encoding.rs`). Rust reads the four words by value in one place,
+`z_encoding_take_from_loaned`, which copies `(*src)._pad` into the destination; a C program copies a view
+as bytes, which the language does not judge. Once a constant's state lies in those four words, a byte of
+padding inside the state is read as part of a pointer, and an uninitialised byte read at a pointer's type
+is undefined behaviour whatever the file holds there: to the compiler a static's padding is uninitialised,
+however the linker fills it.
+
+**The state as it was** (`EncodingState`, `repr(Rust)`; `Block` is a `NonNull<BlockHead>`, so
+`Option<Block>` is one word whose `None` is null and holds no padding of its own):
+
+| field | 64-bit | 32-bit |
+|---|---:|---:|
+| `packed_id: u32` | 4 | 4 |
+| `schema_start: *const u8` | 8 | 4 |
+| `schema_len: usize` | 8 | 4 |
+| `_block: Option<Block>` | 8 | 4 |
+| the fields together | 28 | 16 |
+| the state's size | 32 | 16 |
+| **padding** | **4** | **0** |
+
+So on a 64-bit target the state carried four bytes of padding beside `packed_id`, and folding it into the
+view as it was would have made `take_from_loaned`'s copy read them. On a 32-bit target it carried none.
+
+**What the change makes of it.** The state is `repr(C)` with `_fill: [u8; size_of::<usize>() - 4]`, zero,
+after `packed_id`: 32 bytes of fields in 32 on 64-bit, 16 in 16 on 32-bit, each the size it had, so a held
+encoding's slot does not grow. Three assertions evaluated when the library is compiled hold it (beside
+`STATE_FILL`): the state's size is the sum of its fields' sizes, and a constant's view (`ConstantView`,
+`repr(C)`, the handle and then the state) has the size and the alignment of `z_loaned_encoding_t` (40 and 8
+on 64-bit, 20 and 4 on 32-bit). The handle is first in both, so the loaned pointer handed to C is the
+view's address and reads the same handle.
+
+**The other reads of a constant's view.** `encoding_view` reads the handle alone (`handle_ref`).
+`take_from_loaned` handed a constant would go on to write a null over a read-only static: a C program has
+no right to take from a constant (zenoh-pico's constants are `const` objects too), so its first read is the
+only one the padding concerned, and it now reads initialised words. The handle points at the state inside
+its own view: the static's initialiser takes the address of a field of itself (`addr_of!(VIEWS[id].state)`),
+which reads nothing of it. `is_constant` tests whether a state's address lies in `VIEWS`, the one table.
+
 ## 6. Measurement cells
 
 - **R0, the absolute figure and its parts.** `PERF_SMAPS=1` in the matrix's environment makes
