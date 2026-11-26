@@ -1402,9 +1402,10 @@ pub(crate) struct QosLevels {
 }
 
 impl QosLevels {
-    /// What an options struct states in the fields every one of them has. Inlined: a put reads
-    /// it on its way, and each caller hands it fields of its own layout.
-    #[inline]
+    /// What an options struct states in the fields every one of them has: one body every
+    /// declare, put and delete reads its options' QoS through, out of line so that none holds a
+    /// copy of the four conversions.
+    #[inline(never)]
     fn stated(
         priority: crate::qos::z_priority_t,
         congestion_control: crate::qos::z_congestion_control_t,
@@ -1505,8 +1506,9 @@ impl PublisherQos {
     ///
     /// The QoS are laid by the one body a session's put and delete lay theirs with
     /// ([`QosLevels::apply`]); the encoding's gap is filled here, at the caller, where it was read
-    /// inside the call before, so a publish makes the same one call.
-    #[inline]
+    /// inside the call before. Out of line: the publisher's put and delete reach it, and each
+    /// copy inlined carried the encoding's read of its own.
+    #[inline(never)]
     fn apply<'a>(&'a self, opts: &mut PublishOptions<'a>) {
         self.levels.apply(opts);
         if opts.encoding.is_none() {

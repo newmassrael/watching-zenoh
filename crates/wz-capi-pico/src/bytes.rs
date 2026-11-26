@@ -1344,7 +1344,7 @@ pub unsafe extern "C" fn z_string_from_str(
         0,
         deleter,
         context,
-        SliceMode::StringTakeStr,
+        SliceMode::STRING_TAKE_STR,
     )
 }
 
@@ -1398,36 +1398,91 @@ unsafe fn store_string(
     }
 }
 
-/// Which constructor of a payload, a slice or a string [`slice_from`] runs: what it makes, how it
-/// holds its source (a copy, a view, a static alias, or the caller's buffer taken with its
-/// deleter) and how it reads it (counted, or up to its NUL).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum SliceMode {
-    /// `z_bytes_copy_from_buf`: a null source is an empty payload.
-    BytesCopy,
-    /// `z_bytes_copy_from_str`.
-    BytesCopyStr,
-    /// `z_bytes_from_static_str`: the payload describes the source and never frees it.
-    BytesStaticStr,
-    /// `z_bytes_from_str`: the payload describes the source, its deleter owed on every path.
-    BytesTakeStr,
-    /// `z_slice_copy_from_buf`.
-    SliceCopy,
-    /// `z_slice_from_buf`: the slice describes the source, its deleter owed on every path.
-    SliceTake,
-    /// `z_view_slice_from_buf`.
+/// What [`slice_from`] makes: a payload, a slice or a string that holds its bytes, or a view of a
+/// slice or of a string, which shares one layout of a start and a length.
+#[derive(Clone, Copy)]
+enum Makes {
+    Bytes,
+    Slice,
+    String,
     SliceView,
-    /// `z_string_copy_from_substr`.
-    StringCopy,
-    /// `z_string_copy_from_str`: a null source is an empty string.
-    StringCopyStr,
-    /// `z_string_from_str`: the string describes the source, its deleter owed once it is made.
-    StringTakeStr,
-    /// `z_view_string_from_substr`.
     StringView,
+}
+
+// The view [`slice_from`] writes for both: a slice's and a string's views are one layout.
+const _: () = assert!(
+    core::mem::size_of::<z_view_slice_t>() == core::mem::size_of::<z_view_string_t>()
+        && core::mem::offset_of!(z_view_slice_t, _start)
+            == core::mem::offset_of!(z_view_string_t, _start)
+        && core::mem::offset_of!(z_view_slice_t, _len)
+            == core::mem::offset_of!(z_view_string_t, _len)
+);
+
+/// When [`slice_from`] refuses a null source.
+#[derive(Clone, Copy)]
+enum NullSource {
+    /// Never: a null source is an empty value.
+    Empty,
+    /// Unless the length is zero.
+    Counted,
+    /// Always.
+    Refused,
+}
+
+/// Which constructor of a payload, a slice or a string [`slice_from`] runs, as a row of facts its
+/// one body reads: what it makes, whether it copies its source or describes it (a view, a static
+/// alias, or the caller's buffer taken with its deleter), how it reads it (counted, or up to its
+/// NUL), when a null source is refused, and whether the deleter is owed from the call on. A value
+/// of five bytes, so a shell hands it in a register.
+#[derive(Clone, Copy)]
+pub(crate) struct SliceMode {
+    makes: Makes,
+    copies: bool,
+    nul: bool,
+    null: NullSource,
+    /// The caller's deleter is owed on every path, a refusal included: a payload or a slice that
+    /// takes the caller's buffer. A string that takes it owes it once it is made.
+    owed: bool,
+}
+
+impl SliceMode {
+    /// A row of the table.
+    const fn row(makes: Makes, copies: bool, nul: bool, null: NullSource, owed: bool) -> Self {
+        Self {
+            makes,
+            copies,
+            nul,
+            null,
+            owed,
+        }
+    }
+
+    /// `z_bytes_copy_from_buf`: a null source is an empty payload.
+    const BYTES_COPY: Self = Self::row(Makes::Bytes, true, false, NullSource::Empty, false);
+    /// `z_bytes_copy_from_str`.
+    const BYTES_COPY_STR: Self = Self::row(Makes::Bytes, true, true, NullSource::Refused, false);
+    /// `z_bytes_from_static_str`: the payload describes the source and never frees it.
+    const BYTES_STATIC_STR: Self = Self::row(Makes::Bytes, false, true, NullSource::Refused, false);
+    /// `z_bytes_from_str`: the payload describes the source, its deleter owed on every path.
+    const BYTES_TAKE_STR: Self = Self::row(Makes::Bytes, false, true, NullSource::Refused, true);
+    /// `z_slice_copy_from_buf`.
+    const SLICE_COPY: Self = Self::row(Makes::Slice, true, false, NullSource::Counted, false);
+    /// `z_slice_from_buf`: the slice describes the source, its deleter owed on every path.
+    const SLICE_TAKE: Self = Self::row(Makes::Slice, false, false, NullSource::Counted, true);
+    /// `z_view_slice_from_buf`.
+    const SLICE_VIEW: Self = Self::row(Makes::SliceView, false, false, NullSource::Refused, false);
+    /// `z_string_copy_from_substr`.
+    const STRING_COPY: Self = Self::row(Makes::String, true, false, NullSource::Counted, false);
+    /// `z_string_copy_from_str`: a null source is an empty string.
+    const STRING_COPY_STR: Self = Self::row(Makes::String, true, true, NullSource::Counted, false);
+    /// `z_string_from_str`: the string describes the source, its deleter owed once it is made.
+    const STRING_TAKE_STR: Self = Self::row(Makes::String, false, true, NullSource::Refused, false);
+    /// `z_view_string_from_substr`.
+    const STRING_VIEW: Self =
+        Self::row(Makes::StringView, false, false, NullSource::Refused, false);
     /// `z_view_string_from_str`.
-    StringViewStr,
+    const STRING_VIEW_STR: Self =
+        Self::row(Makes::StringView, false, true, NullSource::Refused, false);
 }
 
 /// Make at `out` what `mode` says of the `len` bytes at `data` (of its NUL-terminated text for
@@ -1448,39 +1503,32 @@ unsafe fn slice_from(
     context: *mut c_void,
     mode: SliceMode,
 ) -> ZResult {
-    use SliceMode::*;
     guarded(|| {
-        // A payload or a slice that takes the caller's buffer owes its deleter from here, on every
-        // path, a refusal included; a string owes it once it is made.
         let release = Release::new(
-            if matches!(mode, BytesTakeStr | SliceTake) {
-                deleter
-            } else {
-                None
-            },
+            if mode.owed { deleter } else { None },
             data as *mut c_void,
             context,
         );
         if out.is_null() {
             return Z_ERR_NULL;
         }
-        let len = match mode {
-            BytesCopyStr | BytesStaticStr | BytesTakeStr | StringCopyStr | StringTakeStr
-            | StringViewStr => crate::abi::c_str_len(data.cast()),
-            _ => len,
+        let len = if mode.nul {
+            crate::abi::c_str_len(data.cast())
+        } else {
+            len
         };
-        match mode {
-            SliceCopy | SliceTake => *out.cast::<z_owned_slice_t>() = z_owned_slice_t::null_value(),
-            StringCopy | StringCopyStr | StringTakeStr => {
-                *out.cast::<z_owned_string_t>() = z_owned_string_t::null_value();
-            }
-            StringView | StringViewStr => z_view_string_empty(out.cast()),
-            _ => {}
+        // What an export leaves in `out` when it refuses: an owned value null, a string's view
+        // empty, and a payload or a slice's view as the caller had them.
+        match mode.makes {
+            Makes::Slice => *out.cast::<z_owned_slice_t>() = z_owned_slice_t::null_value(),
+            Makes::String => *out.cast::<z_owned_string_t>() = z_owned_string_t::null_value(),
+            Makes::StringView => z_view_string_empty(out.cast()),
+            Makes::Bytes | Makes::SliceView => {}
         }
-        let refused = match mode {
-            BytesCopy => false,
-            SliceCopy | SliceTake | StringCopy | StringCopyStr => data.is_null() && len != 0,
-            _ => data.is_null(),
+        let refused = match mode.null {
+            NullSource::Empty => false,
+            NullSource::Counted => data.is_null() && len != 0,
+            NullSource::Refused => data.is_null(),
         };
         if refused {
             return Z_ERR_NULL;
@@ -1490,23 +1538,13 @@ unsafe fn slice_from(
         } else {
             core::slice::from_raw_parts(data, len)
         };
-        match mode {
-            BytesCopy | BytesCopyStr => store_bytes(out.cast(), ByteBuf::copy_of(bytes)),
-            BytesStaticStr | BytesTakeStr => {
-                store_bytes(out.cast(), ByteBuf::aliased(data, len, release))
-            }
-            SliceCopy => store_slice(out.cast(), ByteBuf::copy_of(bytes)),
-            SliceTake => store_slice(out.cast(), ByteBuf::aliased(data, len, release)),
-            SliceView => {
-                *out.cast::<z_view_slice_t>() = z_view_slice_t {
-                    _start: data,
-                    _len: len,
-                    _pad: [0usize; 2],
-                };
-                Z_OK
-            }
-            StringCopy | StringCopyStr => store_string(out.cast(), StringState::boxed(bytes)),
-            StringTakeStr => store_string(
+        match (mode.makes, mode.copies) {
+            (Makes::Bytes, true) => store_bytes(out.cast(), ByteBuf::copy_of(bytes)),
+            (Makes::Bytes, false) => store_bytes(out.cast(), ByteBuf::aliased(data, len, release)),
+            (Makes::Slice, true) => store_slice(out.cast(), ByteBuf::copy_of(bytes)),
+            (Makes::Slice, false) => store_slice(out.cast(), ByteBuf::aliased(data, len, release)),
+            (Makes::String, true) => store_string(out.cast(), StringState::boxed(bytes)),
+            (Makes::String, false) => store_string(
                 out.cast(),
                 StringState::aliased(
                     data,
@@ -1514,8 +1552,9 @@ unsafe fn slice_from(
                     Release::new(deleter, data as *mut c_void, context),
                 ),
             ),
-            StringView | StringViewStr => {
-                *out.cast::<z_view_string_t>() = z_view_string_t {
+            (Makes::SliceView | Makes::StringView, _) => {
+                // A slice's view and a string's are one layout of a start and a length.
+                *out.cast::<z_view_slice_t>() = z_view_slice_t {
                     _start: data,
                     _len: len,
                     _pad: [0usize; 2],
@@ -1550,7 +1589,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_buf(
         len,
         None,
         core::ptr::null_mut(),
-        SliceMode::BytesCopy,
+        SliceMode::BYTES_COPY,
     )
 }
 
@@ -1566,7 +1605,7 @@ pub unsafe extern "C" fn z_bytes_copy_from_str(
         0,
         None,
         core::ptr::null_mut(),
-        SliceMode::BytesCopyStr,
+        SliceMode::BYTES_COPY_STR,
     )
 }
 
@@ -1619,7 +1658,7 @@ pub unsafe extern "C" fn z_bytes_from_static_str(
         0,
         None,
         core::ptr::null_mut(),
-        SliceMode::BytesStaticStr,
+        SliceMode::BYTES_STATIC_STR,
     )
 }
 
@@ -1832,7 +1871,7 @@ pub unsafe extern "C" fn z_view_slice_from_buf(
         len,
         None,
         core::ptr::null_mut(),
-        SliceMode::SliceView,
+        SliceMode::SLICE_VIEW,
     )
 }
 
@@ -2151,7 +2190,7 @@ pub unsafe extern "C" fn z_bytes_from_str(
         0,
         deleter,
         context,
-        SliceMode::BytesTakeStr,
+        SliceMode::BYTES_TAKE_STR,
     )
 }
 
@@ -2207,7 +2246,7 @@ pub unsafe extern "C" fn z_slice_copy_from_buf(
         len,
         None,
         core::ptr::null_mut(),
-        SliceMode::SliceCopy,
+        SliceMode::SLICE_COPY,
     )
 }
 
@@ -2236,7 +2275,7 @@ pub unsafe extern "C" fn z_slice_from_buf(
         len,
         deleter,
         context,
-        SliceMode::SliceTake,
+        SliceMode::SLICE_TAKE,
     )
 }
 
@@ -2308,7 +2347,7 @@ pub unsafe extern "C" fn z_string_copy_from_str(
         0,
         None,
         core::ptr::null_mut(),
-        SliceMode::StringCopyStr,
+        SliceMode::STRING_COPY_STR,
     )
 }
 
@@ -2330,7 +2369,7 @@ pub unsafe extern "C" fn z_string_copy_from_substr(
         len,
         None,
         core::ptr::null_mut(),
-        SliceMode::StringCopy,
+        SliceMode::STRING_COPY,
     )
 }
 
@@ -2371,7 +2410,7 @@ pub unsafe extern "C" fn z_view_string_from_str(
         0,
         None,
         core::ptr::null_mut(),
-        SliceMode::StringViewStr,
+        SliceMode::STRING_VIEW_STR,
     )
 }
 
@@ -2393,7 +2432,7 @@ pub unsafe extern "C" fn z_view_string_from_substr(
         len,
         None,
         core::ptr::null_mut(),
-        SliceMode::StringView,
+        SliceMode::STRING_VIEW,
     )
 }
 
@@ -2999,7 +3038,8 @@ mod slice_from_tests {
                 Z_OK
             );
             assert_eq!(z_view_string_from_str(view_str.as_mut_ptr(), text), Z_OK);
-            source[0] = b'x';
+            // Written where a program would write it, through a write the compiler keeps.
+            core::ptr::write_volatile(source.as_mut_ptr(), b'x');
             assert_eq!(payload_of(&bytes), b"abc", "a copy");
             assert_eq!(payload_of(&bytes_str), b"abc", "a copy");
             assert_eq!(slice_of(&slice), b"abc", "a copy");
@@ -3050,7 +3090,8 @@ mod slice_from_tests {
                 z_string_from_str(&mut string, at.cast(), Some(counted), context),
                 Z_OK
             );
-            source[0] = b'x';
+            // Written where a program would write it, through a write the compiler keeps.
+            core::ptr::write_volatile(source.as_mut_ptr(), b'x');
             assert_eq!(payload_of(&bytes), b"xbc");
             assert_eq!(slice_of(&slice), b"xbc");
             assert_eq!(string_of(&string), b"xbc");
