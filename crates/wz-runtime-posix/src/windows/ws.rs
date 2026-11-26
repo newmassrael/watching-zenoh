@@ -51,7 +51,7 @@ wz_runtime_coop::with_heap_link_seams! {
         use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 
         use wz_runtime_coop::session_drive::{Locator, PendingDial, SessionDatagramLink, SessionLinks};
-        use wz_session_core::link::LinkEndsText;
+        use wz_session_core::link::{LinkEndsText, LinkSendOutcome};
         use wz_session_core::reliability::Reliability;
 
         use super::super::links::WindowsLinks;
@@ -98,7 +98,11 @@ wz_runtime_coop::with_heap_link_seams! {
             let ends = server.sink.link_endpoints().expect("both ends");
             assert_eq!(ends.src.as_str(), std::format!("ws/127.0.0.1:{port}"));
 
-            client.sink.send_blocking(b"zenoh", Reliability::Reliable);
+            assert_eq!(
+                client.sink.send_blocking(b"zenoh", Reliability::Reliable),
+                LinkSendOutcome::Sent,
+                "the client's link takes the batch"
+            );
             let mut got = None;
             for _ in 0..2_000 {
                 server

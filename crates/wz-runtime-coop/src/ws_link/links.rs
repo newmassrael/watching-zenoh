@@ -312,6 +312,9 @@ impl<P: StreamSocket, F: CellFlag> WsAccepting<P, F> {
     }
 }
 
+/// A row of a [`WsListener`]'s table: a connection whose request is still to be answered, or free.
+type HandshakeRow<O, N> = Option<WsAccepting<Stream<O>, <N as CountKind>::Flag>>;
+
 /// The accepting end of a `ws/` port: the stream listener of the stack's dial, and the
 /// connections it accepted whose requests are still to be answered, in a table of rows reserved
 /// when it opened, as many as the stack's `handshakes`.
@@ -321,7 +324,7 @@ struct WsListener<O: WsOpen, N: CountKind> {
     shape: WsShape<N>,
     /// One row for each handshake that may run at once, a connection or free: its length is
     /// fixed when the listener opens, so it never grows.
-    accepting: RefCell<Vec<Option<WsAccepting<Stream<O>, N::Flag>>>>,
+    accepting: RefCell<Vec<HandshakeRow<O, N>>>,
 }
 
 impl<O: WsOpen, N: CountKind> WsListener<O, N> {
