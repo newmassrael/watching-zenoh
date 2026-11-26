@@ -751,9 +751,10 @@ impl ArenaRegion {
         &self.limits
     }
 
-    /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
-    /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
-    /// and limits, refused as [`Self::admit`] refuses the config.
+    /// Lay out on `plan`, an open's blank plan or [`ArenaPlan::vacant`] as made, this region's
+    /// rows for an open of `config`, the plan [`ArenaPlan::count`] would lay out for a config of
+    /// the region's shape and limits, refused as [`Self::admit`] refuses the config.
+    #[cfg(feature = "runtime-plan")]
     pub(crate) fn lay_out_on<E: EndpointList, const ROWS: usize>(
         &self,
         plan: &mut ArenaPlan<ROWS>,
@@ -761,6 +762,22 @@ impl ArenaRegion {
     ) -> Result<(), ArenaRefused> {
         self.admit(config)?;
         plan.take_on(&self.plan);
+        Ok(())
+    }
+
+    /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
+    /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
+    /// and limits, refused as [`Self::admit`] refuses the config.
+    #[cfg(not(feature = "runtime-plan"))]
+    pub(crate) fn lay_out_on<E: EndpointList>(
+        &self,
+        plan: &mut ArenaPlan,
+        config: &CoopConfig<E>,
+    ) -> Result<(), ArenaRefused> {
+        self.admit(config)?;
+        // Stored whole over the plan the open made, so the optimiser drops that plan's making:
+        // a build without `runtime-plan` lists no rows, and its open's plan is this one alone.
+        plan.clone_from(&self.plan);
         Ok(())
     }
 
@@ -1631,10 +1648,23 @@ pub struct ArenaPlan<const ROWS: usize = ARENA_ROWS> {
 }
 
 impl ArenaPlan {
-    /// A plan of no rows that lists every row it lays out ([`Self::rows`]): the plan a report and a
-    /// test read row by row. An open lays out one that lists none (`OpenPlan`).
+    /// A plan of no rows that lists every row it lays out (`rows`, where a build keeps a list): the
+    /// plan a report and a test read row by row, and the place an open of a build without
+    /// `runtime-plan` lays its plan out in ([`Self::count`]). Out of line, so the plan is made
+    /// where its caller keeps it.
+    #[inline(never)]
     pub const fn vacant() -> Self {
-        Self::blank()
+        Self {
+            #[cfg(any(feature = "runtime-plan", test))]
+            rows: [UNLAID_ROW; ARENA_ROWS],
+            len: 0,
+            reserved: Some(0),
+            refused: None,
+            transport: TransportRows::NONE,
+            session: SessionRows::NONE,
+            places: PlaceRows::NONE,
+            runtime_bytes: 0,
+        }
     }
 
     /// The rows of a session `config` opens under `limits` (see the module), as a value: a
@@ -1660,23 +1690,21 @@ impl ArenaPlan {
     }
 }
 
-/// The plan an open lays out and reserves by (`lend_session`): every sum and every layer's rows of
-/// a listed plan, and no list of the rows, which only a report reads, so the open's frame holds no
-/// table of them and its walk writes none.
+/// The plan an open lays out and reserves by where the build lays its plans out at the open
+/// (`lend_session`): every sum and every layer's rows of a listed plan, and no list of the rows,
+/// which only a report reads, so the open's frame holds no table of them and its walk writes none.
+/// A build without `runtime-plan` lists no rows in any plan and opens by [`ArenaPlan::vacant`], so
+/// it has no second kind of plan to make.
 #[cfg(feature = "runtime-plan")]
 pub(crate) type OpenPlan = ArenaPlan<0>;
-/// The plan an open lays out and reserves by: a build whose session's shape is fixed when it is
-/// compiled keeps no list of rows in any plan, so its open's plan is the listed one.
-#[cfg(not(feature = "runtime-plan"))]
-pub(crate) type OpenPlan = ArenaPlan;
 
 impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]), listing the
     /// first `ROWS` rows it lays out: out of line, so the plan is made where its caller keeps it.
+    #[cfg(feature = "runtime-plan")]
     #[inline(never)]
     pub(crate) const fn blank() -> Self {
         Self {
-            #[cfg(any(feature = "runtime-plan", test))]
             rows: [UNLAID_ROW; ROWS],
             len: 0,
             reserved: Some(0),
@@ -1706,9 +1734,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// Take on the rows `laid` laid out and every sum of them, as this plan would have laid them
     /// out itself, listing as many of its listed rows as this plan lists: what an open by a region
     /// lays out, the region's plan made when the build was compiled.
+    #[cfg(feature = "runtime-plan")]
     pub(crate) fn take_on<const LAID: usize>(&mut self, laid: &ArenaPlan<LAID>) {
         let ArenaPlan {
-            #[cfg(any(feature = "runtime-plan", test))]
             rows,
             len,
             reserved,
@@ -1718,7 +1746,6 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             places,
             runtime_bytes,
         } = laid;
-        #[cfg(any(feature = "runtime-plan", test))]
         let rows = {
             let mut listed = [UNLAID_ROW; ROWS];
             let shared = ROWS.min(LAID);
@@ -1726,7 +1753,6 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             listed
         };
         let taken = Self {
-            #[cfg(any(feature = "runtime-plan", test))]
             rows,
             len: *len,
             reserved: *reserved,
@@ -1736,10 +1762,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             places: *places,
             runtime_bytes: *runtime_bytes,
         };
-        // Made apart and stored whole, as `clone_from` stores a plan, so that no byte of the open's
-        // blank plan outlives this store and its making is dead code. Stored field by field, the
-        // blank plan stayed live: an open by a region without `runtime-plan`, whose plans list no
-        // rows, kept the call to the blank's out-of-line body and the stores, and gained nothing.
+        // Made apart and stored whole, as `clone_from` stores a plan, so that no byte of the plan
+        // it replaces outlives this store.
         *self = taken;
     }
 

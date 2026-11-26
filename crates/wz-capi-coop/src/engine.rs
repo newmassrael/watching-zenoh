@@ -48,10 +48,12 @@ use crate::arena::AllocatorMemory;
 use crate::arena::CacheSpan;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::arena::HandedTable;
+#[cfg(feature = "runtime-plan")]
+use crate::arena::OpenPlan;
 use crate::arena::{
     ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EnginePlace, EntityKind,
-    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlan, OpenStorage,
-    PlaceTables, PlanFrom, SessionArena, SessionRows, TransportTables,
+    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
+    PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{CoopForm, Latch};
 use crate::form::{
@@ -878,7 +880,10 @@ fn lend_session(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
+    #[cfg(feature = "runtime-plan")]
     let mut plan = OpenPlan::blank();
+    #[cfg(not(feature = "runtime-plan"))]
+    let mut plan = ArenaPlan::vacant();
     match from {
         PlanFrom::Region(region) => region.lay_out_on(&mut plan, config)?,
         #[cfg(any(feature = "runtime-plan", test))]
