@@ -160,7 +160,7 @@ the conformance digest (section 5.1).
 | library RW | 12,912 B | about 12 KiB | section 2 |
 | session and transport | `_z_session_t` (`api.c` @ `z_malloc(sizeof(_z_session_t))`), one read and one write buffer of the batch size per transport (`Z_BATCH_UNICAST_SIZE` 2,048, `Z_BATCH_MULTICAST_SIZE` 2,048, `cmake/feature_config.cmake`), a peer per accepted link, a defragmentation buffer of `Z_FRAG_MAX_SIZE` (4,096) only when a first fragment arrives | about 17 KB peak for `z_sub`, 15 KB for `z_put` (`heap.md` 1) | `heap.md` 2 |
 | per message | a sample and the subscription cache's entry, built and freed by the read task each message (`std-heap.md` 1.1) | the chunks they reuse | |
-| threads | the caller's, the read task and the lease task (`zp_start_read_task`, `zp_start_lease_task`, default attributes) | two stacks' written frames | `vendor/zenoh-pico/src/system/unix/system.c` |
+| threads | the caller's, the read task and the lease task (`zp_start_read_task`, `zp_start_lease_task`, default attributes) | two stacks' written frames | `vendor/zenoh-pico/src/system/unix/system.c` @ `pthread_create(task, attr, fun, arg)` |
 | per-thread malloc arenas | the read task allocates, so glibc gives it an arena of its own (64 MiB reserved, written as used) | its top chunk's pages | `std-heap.md` S4 |
 
 ## 5. The differences, largest first, and the structure of each

@@ -735,7 +735,8 @@ impl ConstantView {
 }
 
 /// Emit the well-known encodings of pico's `ENCODING_CONSTANT_MACRO` entries
-/// (`src/api/encoding.c:27-33`): one table of their `'static` loaned views, each holding its state,
+/// (`vendor/zenoh-pico/src/api/encoding.c` @ `#define ENCODING_CONSTANT_MACRO(_cname, _fname, _id)`):
+/// one table of their `'static` loaned views, each holding its state,
 /// at the index of their wire id, and one exported accessor per entry that hands back the address
 /// of its view. Each accessor is then an address and a return, and the test of whether a state is
 /// a constant ([`is_constant`]) is whether it lies in the table.
