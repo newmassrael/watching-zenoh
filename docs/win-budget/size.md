@@ -2,7 +2,7 @@
 
 This note reads the text of `pico-client-coop-nostd` (`scripts/lib/size_ledger_gate.py`, the
 cooperative client built without `std`, as every pico library is) against zenoh-pico's build of
-the same capabilities, area by area, and states for the three largest gaps a design that removes
+the same capabilities, area by area, and states for each area that loses a design that removes
 bytes rather than moves them. `text.md` holds the earlier per-area budget (S1 to S10, D1 to D8,
 X1 to X5, R1 to R5) and its lanes; this note is the reading those lanes are judged against now, and
 what that reading changes in them.
@@ -84,7 +84,7 @@ function is cited at its definition in the submodule the reference is built from
 | sockets | `runtime_posix::net` 2,805, `stream` 1,036, `stream_link` 2,425, `udp_link` 1,230, `link_storage` 1,500 | `vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `z_result_t _z_tcp_open(` and the file (1,562), `vendor/zenoh-pico/src/link/transport/udp/udp_posix.c` @ `z_result_t _z_udp_unicast_open(` and the file (1,497) |
 | locks, cells, executor | `wz_host_sync` 2,867, `kept` 2,005, `link_cells` 1,506, `faces` 2,898, `executor` 227 | `vendor/zenoh-pico/src/runtime/executor.c` @ `_z_executor_status_t _z_executor_spin(` and the executor header (2,359), `vendor/zenoh-pico/src/system/unix/system.c` @ `z_result_t z_sleep_ms(` and the file (1,876) |
 
-## 3. The three largest gaps, and a design for each
+## 3. The four losing areas, and a design for each
 
 ### 3.1 Sessions: a session of the preset carries only the forms the preset makes
 
@@ -208,6 +208,63 @@ SCE runtime against pico's 2,300 of hand-written handshake. Its design is SCE's 
 operations one body each, the machine's tables as data), proposed through `docs/sce-proposals/`
 and measured in text plus rodata. Section 6 reads both again on the writer as it landed.
 
+### 3.4 Driver: what a pico library's links never run, and the bodies a lock is taken through
+
+The driver area is the fourth that loses, and its excess is spread over three jobs rather than
+held in one body: the sockets (about +5,900, section 2.4's third row), the locks, cells and faces
+(about +5,300) and the dial (about +2,500). The endpoint's text is already won: `locator_text`
+and the text `dial_step` holds are 2,246 bytes against `endpoint.c`'s 3,154. Three designs
+that read as the obvious ones are in the tree already or do not apply: the face table of a build
+that only dials is `faces::OneFace`, which carries no row walk of `ManyFaces` (the engine's
+`link_turn` and `face_turn` are one body there, `wz-capi-coop/src/engine/direct.rs` @
+`fn link_turn(`); the dial is a machine on data, one body generic over nothing
+(`wz-runtime-coop/src/dial.rs` @ `pub fn dial_step<'a>(`), with only the stack's two calls in
+its shell; and an endpoint cannot be read when the library is built, since `z_open` hands it in
+the program's config, so its text is read at run time as pico's is.
+
+What is left, largest first:
+
+- **The links' own waits, in a build where the owner waits for every link.** The pico library
+  makes its links `waited_by_owner` (`wz-capi-pico/src/session.rs` @
+  `let links = links.waited_by_owner();`), so the read task waits on the sockets with the
+  session free (`faces::IdleWait::wait`, 420 bytes, against pico's
+  `vendor/zenoh-pico/src/system/unix/network.c` @ `z_result_t _z_socket_wait_readable(`, 396).
+  Each driver still compiles the wait it would make in its own loop, because whether its owner
+  waits is a flag read at run time: `UdpDriver`'s `service`, `service_within` and
+  `wait_for_datagram` (787 bytes) and `StreamDriver`'s `service` and `service_within`
+  (374), all kept by the drivers' vtables. The design: whether the owner waits is the stack's type
+  (a parameter of `IpLinks` carried to the links it makes, its `waited_by_owner` the
+  conversion), so a driver of a stack whose owner waits has a `service` that reads what is
+  queued and nothing else, and the bodies of the loop's own wait are not in its build. Expected
+  -900 to -1,100. The receive is untouched: `recv_with` is the same body, called where it is.
+- **A typed lock taken and let go of at every place it is used.** `wz_host_sync`'s 2,867 bytes
+  are not a body of its own: they are the word's exchange, its wake and a notification, inlined
+  into every door that takes a typed lock, once for each path out of the body a guard is dropped
+  on (`wz_capi_pico::handlers::push` holds 234 of them, `matching::declare_on_filter` 200,
+  `WriteFilter`'s drop 134). pico's lock is a call (`vendor/zenoh-pico/src/system/unix/system.c`
+  @ `z_result_t _z_mutex_lock(_z_mutex_t *m)`). The design, landed with this section: the typed
+  guard takes and lets go of its word through one out-of-line body each, and a notification is one
+  body; the runtime's section and the locks of what it lends the session, which the receive takes,
+  keep the inline exchange inside the out-of-line bodies they already are
+  (`wz-runtime-coop/src/cs.rs` @ `fn enter(lock: &'a RawLock) -> Self {`). Expected -1,000 to
+  -1,600 in driver, nothing in the receive's instructions. The count of a kept value's holders
+  (`kept::Kept::retain` and `release`, inlined into every clone and drop of a `Shared`) is
+  the same shape and is out of line too: expected -300 to -500.
+- **The send of a stream link.** `tx_slot_send` 574, `write_owed` 477, `tx_slot_acquire` 275,
+  `wait_for_room` 177 and `drop_owed` 115 hold the slot a frame is written in, the frames the
+  stream has not taken whole, and the wait for room: 1,600 bytes against pico's one write of a
+  batch (`vendor/zenoh-pico/src/link/link.c` @ `z_result_t _z_link_send_wbuf(`, 254). This is
+  the link's half of section 3.3's one batch writer, and is designed with it: a frame the stream
+  takes whole, the case of every frame below the socket's buffer, leaves no owed entry, so the owed
+  ring is the cold body of a write the stream cut short.
+- **The dial's open.** `IpLinks::begin_initiator` (2,419) places a UDP link at once and a stream
+  later, each through its own placement (`LinkPlace::datagram` inlined, `LinkPlace::stream`
+  548), and `faces::Dial::answer_on` (1,084) drops a refused stream dial where the next is put.
+  Against pico's open (`vendor/zenoh-pico/src/link/link.c` @ `z_result_t _z_open_link(`, and the
+  TCP and UDP link files, about 2,900) the excess is about 2,500. The design: one non-generic body
+  places a link of either kind once its socket is made (the cell, the owner's wait, the buffers'
+  claim), so a dial's protocols differ only in the socket they make.
+
 ## 4. The step landed with this note: a peer space's heap arms out of the bounded policies' reads
 
 `wz-session-core`'s `Storage` gains `type HeapForm: HeapOnly`: `()` on `Heap`, and
@@ -237,6 +294,11 @@ each policy's `HeapForm`; the heap arms stay covered by `wireexpr_resolve`'s tes
 The main session reads each step on the case's explain report: the area table above, and for this
 step the body `PeerSpace<wz_session_core::bounded::Region>::literal` and the `hashbrown` owner
 lines in language. A step whose area does not move by its expectation is reverted, as tdecl-13 was.
+The driver's steps of section 3.4 are read on the driver row, the `wz_host_sync` and
+`wz_runtime_coop::kept` owner lines, and the bodies `wz_capi_pico::handlers::push` and
+`matching::declare_on_filter`; their check of the receive is `ir-receive.md`'s count of
+instructions a message, which neither step should move.
+
 
 ## 6. Transport read again: the send writer as it landed, and the session machine's bytes
 
@@ -342,3 +404,4 @@ callgrind of one handshake and one fragmented message (cell M9 of `text.md`).
 Together with 6.3 the transport area moves by about -1,800 to -2,700. The gap to pico that remains
 is the receive's (`drive` 4,657, `reassembly_dispatch` 2,111, `transport_timers` 786: `text.md`
 X2, X4, X5) and the send's admission jobs of section 6.1.
+||||||| parent of cb1055d1f4 (docs(size): Design the driver's steps against zenoh-pico's links)
