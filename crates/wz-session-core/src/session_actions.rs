@@ -6551,8 +6551,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// budget and refuses a slot short of it before a byte is written; a frame sent whole asks `want`, and the fill
     /// finds a slot that is short. Any slot not sent or kept goes back by the lease's drop.
     ///
-    /// Out of line: the send of one message reaches both callers, and each inlined carried the
-    /// lend and the fill again.
+    /// Out of line where the heap stages frames: the send of one message reaches both callers
+    /// there, and each inlined carried the lend and the fill again. Under `tx-lend-only` its one
+    /// caller is `Self::open_frame_lent`, which carries it, so a frame's opening makes no call
+    /// and spills no arguments for it.
     #[cfg(all(
         feature = "transport-tx-lend",
         any(
@@ -6568,7 +6570,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "liveliness-token",
         )
     ))]
-    #[inline(never)]
+    #[cfg_attr(not(feature = "tx-lend-only"), inline(never))]
     fn lend_frame<P>(
         &self,
         #[cfg(feature = "transport-batching")] window: Option<&mut BatchTx>,
