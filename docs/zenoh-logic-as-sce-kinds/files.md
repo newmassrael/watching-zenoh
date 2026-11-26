@@ -707,7 +707,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-tokio/src/session_spans.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_auth_segment.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_backend.rs` | S5 | |
-| `crates/wz-runtime-tokio/src/shm_clients.rs` | S5 | |
+| `crates/wz-runtime-tokio/src/shm_reader.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_posix_backend.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_provider.rs` | S5 | |
 | `crates/wz-runtime-tokio/src/shm_relay.rs` | S5 | |

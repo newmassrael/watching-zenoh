@@ -3171,7 +3171,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     }
 
     /// transport-shm — install the AP SHM resolver onto the subscriber registry
-    /// (the std mmap-open `PosixShmResolver`). Call once at bring-up so an inbound
+    /// (`crate::shm_reader::ShmReaderResolver`, zenoh-shm's reader). Call once at bring-up so an inbound
     /// SHM Put's descriptor can be resolved off /dev/shm; absent the resolver an
     /// SHM Put drops. The registry forwarder (the `set_own_zid` sibling).
     #[cfg(feature = "transport-shm")]
@@ -4300,7 +4300,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // (R311y516), so installing the reader for every session admits
         // nothing that negotiation did not.
         #[cfg(feature = "transport-shm")]
-        session.set_shm_resolver(Box::new(crate::shm_provider::PosixShmResolver));
+        session.set_shm_resolver(Box::new(crate::shm_reader::ShmReaderResolver::global()));
         session
     }
 
