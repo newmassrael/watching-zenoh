@@ -784,35 +784,6 @@ pub(crate) const fn word_after<L: LimitField<S>, S>() -> usize {
     L::WORD.saturating_add(L::HELD)
 }
 
-/// Where the id of the limit after `L` begins among the ids of the snapshot `S`
-/// ([`LimitNames::NAMES`]), or, after the last, how long they are. Read by the generated snapshots.
-pub(crate) const fn name_after<L: LimitField<S>, S>() -> usize {
-    L::NAME_AT.saturating_add(L::LIMIT.len())
-}
-
-/// The ids of a snapshot's limits, one after another in the order of its table, as the generator
-/// writes them beside it: an entry keeps where its limit's id lies in them, not a pointer to it,
-/// so a table of entries holds no word the loader of a shared library relocates.
-pub trait LimitNames {
-    /// Every id of the snapshot's limits, in the order of its table, with nothing between them.
-    const NAMES: &'static str;
-}
-
-/// Whether `names` holds `name` from `at`, every byte of it.
-const fn names_hold(names: &[u8], at: usize, name: &[u8]) -> bool {
-    if at > names.len() || name.len() > names.len() - at {
-        return false;
-    }
-    let mut i = 0;
-    while i < name.len() {
-        if names[at + i] != name[i] {
-            return false;
-        }
-        i += 1;
-    }
-    true
-}
-
 impl<L: LimitSpec<Value = Quota>, const HELD: usize> Limited<L, HELD> {
     /// Whether the table this bound limits admits a holder that would leave `count` in it. Asked
     /// before any state changes, with the count the request would leave (`occupied + 1`, or a
@@ -862,9 +833,6 @@ impl<L: LimitSpec, const HELD: usize> Default for Limited<L, HELD> {
 pub unsafe trait LimitField<S>: LimitSpec {
     /// The index, among the snapshot's words, of the word that keeps the limit's value.
     const WORD: usize;
-    /// Where the limit's id ([`LimitSpec::LIMIT`]) begins among the snapshot's ids
-    /// ([`LimitNames::NAMES`]): an entry made where it does not lie there does not compile.
-    const NAME_AT: usize;
 }
 
 /// One limit as a reader that names it by its id sees it, in the snapshot `S` that holds it.
@@ -874,14 +842,10 @@ pub struct LimitEntry<S: 'static> {
 }
 
 /// What an entry knows of its limit, apart from the type of the snapshot that holds it: one
-/// selection and one read serve every limit of every snapshot. It holds no pointer: the limit's id
-/// is where it lies among the snapshot's ids ([`LimitNames::NAMES`]), so a table of rows is
-/// read-only data with nothing for the loader to relocate.
+/// selection and one read serve every limit of every snapshot.
 #[derive(Clone, Copy)]
 struct LimitRow {
-    /// Where the limit's id begins among the snapshot's ids, and its length.
-    name_at: u16,
-    name_len: u16,
+    id: &'static str,
     kind: LimitKind,
     driven: Option<Driven>,
     /// `false` for a limit no machine reads from the snapshot: a statement of it is refused
@@ -891,7 +855,7 @@ struct LimitRow {
     domain: LimitDomain,
     /// The index of the word the snapshot keeps the value in ([`LimitField::WORD`]), read only
     /// where the domain is more than one value: a limit of one value keeps no word.
-    word: u16,
+    word: usize,
 }
 
 // Written out rather than derived: a derive would ask `S` for each trait, and an entry holds no `S`.
@@ -903,11 +867,11 @@ impl<S> Clone for LimitEntry<S> {
 
 impl<S> Copy for LimitEntry<S> {}
 
-impl<S: LimitNames> fmt::Debug for LimitEntry<S> {
+impl<S> fmt::Debug for LimitEntry<S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let row = &self.row;
         f.debug_struct("LimitEntry")
-            .field("id", &self.id())
+            .field("id", &row.id)
             .field("kind", &row.kind)
             .field("driven", &row.driven)
             .field("read_from_snapshot", &row.read_from_snapshot)
@@ -917,7 +881,7 @@ impl<S: LimitNames> fmt::Debug for LimitEntry<S> {
     }
 }
 
-impl<S: LimitNames> LimitEntry<S> {
+impl<S> LimitEntry<S> {
     /// The entry of the limit whose type is `L`.
     pub const fn of<L: LimitField<S>>() -> Self {
         // A limit that keeps a value keeps it in one word of the snapshot's words; a word past
@@ -932,34 +896,23 @@ impl<S: LimitNames> LimitEntry<S> {
                     )),
             "a limit's word is not inside its snapshot"
         );
-        assert!(
-            names_hold(S::NAMES.as_bytes(), L::NAME_AT, L::LIMIT.as_bytes())
-                && L::NAME_AT + L::LIMIT.len() <= u16::MAX as usize
-                && L::WORD <= u16::MAX as usize,
-            "a limit's id is not where its snapshot's names put it"
-        );
         Self {
             row: LimitRow {
-                name_at: L::NAME_AT as u16,
-                name_len: L::LIMIT.len() as u16,
+                id: L::LIMIT,
                 kind: <L::Value as LimitValueType>::KIND,
                 driven: L::DRIVEN,
                 read_from_snapshot: L::READ_FROM_SNAPSHOT,
                 capacity: L::CAPACITY,
                 domain: L::DOMAIN,
-                word: L::WORD as u16,
+                word: L::WORD,
             },
             snapshot: PhantomData,
         }
     }
 
-    /// The limit's id, as the declaration spells it ([`LimitSpec::LIMIT`]), read where the
-    /// snapshot's ids hold it.
-    pub fn id(&self) -> &'static str {
-        let at = usize::from(self.row.name_at);
-        S::NAMES
-            .get(at..at + usize::from(self.row.name_len))
-            .unwrap_or_default()
+    /// The limit's id, as the declaration spells it ([`LimitSpec::LIMIT`]).
+    pub const fn id(&self) -> &'static str {
+        self.row.id
     }
 
     /// Whether it is a bound or a parameter.
@@ -1003,7 +956,7 @@ impl<S: LimitNames> LimitEntry<S> {
         // index of the limit's word in `S`, and `snapshot` is borrowed for the write.
         Some(unsafe {
             self.row
-                .select_at(ptr::from_mut(snapshot).cast::<usize>(), value, self.id())
+                .select_at(ptr::from_mut(snapshot).cast::<usize>(), value)
         })
     }
 
@@ -1040,12 +993,11 @@ impl LimitRow {
         &self,
         base: *mut usize,
         value: LimitValue,
-        limit: &'static str,
     ) -> Result<(), OutsideLimitDomain> {
-        let word = self.admit(value, limit)?;
+        let word = self.admit(value)?;
         if !self.domain.is_singleton() {
             // SAFETY: the caller's contract.
-            unsafe { base.add(usize::from(self.word)).write(word) };
+            unsafe { base.add(self.word).write(word) };
         }
         Ok(())
     }
@@ -1061,7 +1013,7 @@ impl LimitRow {
             return self.domain.only();
         }
         // SAFETY: the caller's contract.
-        let word = unsafe { base.add(usize::from(self.word)).read() };
+        let word = unsafe { base.add(self.word).read() };
         match self.kind {
             LimitKind::Bound => Quota(word).as_value(),
             LimitKind::Parameter => LimitValue::Integer(word),
@@ -1070,9 +1022,8 @@ impl LimitRow {
 
     /// The word `value` is kept in where the domain allows it, else why not. A bound states the
     /// value as its quota does, so every bit set is `unbounded`; a parameter has no `unbounded`,
-    /// refused before its domain is asked, whatever the domain keeps. `limit` is the limit's id,
-    /// which a refusal names.
-    fn admit(&self, value: LimitValue, limit: &'static str) -> Result<usize, OutsideLimitDomain> {
+    /// refused before its domain is asked, whatever the domain keeps.
+    fn admit(&self, value: LimitValue) -> Result<usize, OutsideLimitDomain> {
         let (stated, word) = match (self.kind, value) {
             (LimitKind::Bound, _) => {
                 let quota = Quota::of_value(value);
@@ -1080,19 +1031,19 @@ impl LimitRow {
             }
             (LimitKind::Parameter, LimitValue::Integer(word)) => (value, word),
             (LimitKind::Parameter, LimitValue::Unbounded) => {
-                return Err(self.outside(limit, value, Outside::UnboundedParameter));
+                return Err(self.outside(value, Outside::UnboundedParameter));
             }
         };
         match self.domain.check(stated) {
             Ok(()) => Ok(word),
-            Err(why) => Err(self.outside(limit, stated, why)),
+            Err(why) => Err(self.outside(stated, why)),
         }
     }
 
-    /// The refusal of `value` by the limit `limit`, for `why`.
-    fn outside(&self, limit: &'static str, value: LimitValue, why: Outside) -> OutsideLimitDomain {
+    /// The refusal of `value`, for `why`.
+    fn outside(&self, value: LimitValue, why: Outside) -> OutsideLimitDomain {
         OutsideLimitDomain {
-            limit,
+            limit: self.id,
             value,
             domain: self.domain,
             why,
@@ -1245,80 +1196,26 @@ mod tests {
     // limits before it, inside `SNAPSHOT_WORDS`.
     unsafe impl LimitField<Snapshot> for Open {
         const WORD: usize = 0;
-        const NAME_AT: usize = 0;
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Sized8 {
         const WORD: usize = word_after::<Open, Snapshot>();
-        const NAME_AT: usize = name_after::<Open, Snapshot>();
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Read8 {
         const WORD: usize = word_after::<Sized8, Snapshot>();
-        const NAME_AT: usize = name_after::<Sized8, Snapshot>();
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Range64 {
         const WORD: usize = word_after::<Read8, Snapshot>();
-        const NAME_AT: usize = name_after::<Read8, Snapshot>();
     }
 
     // SAFETY: as above.
     unsafe impl LimitField<Snapshot> for Pinned4 {
         const WORD: usize = word_after::<Range64, Snapshot>();
-        const NAME_AT: usize = name_after::<Range64, Snapshot>();
-    }
-
-    impl LimitNames for Snapshot {
-        const NAMES: &'static str = "TEST_OPENTEST_SIZEDTEST_READTEST_RANGETEST_PINNED";
-    }
-
-    /// Each entry reads its id where the snapshot's ids hold it, the ids one after another in the
-    /// table's order, and the last ends where they do. Turned red by an id read one byte off, or
-    /// an entry that keeps the length of another's.
-    #[test]
-    fn each_entry_reads_its_id_from_the_snapshots_names() {
-        let ids: std::vec::Vec<&str> = SNAPSHOT_LIMITS.iter().map(LimitEntry::id).collect();
-        assert_eq!(
-            ids,
-            [
-                "TEST_OPEN",
-                "TEST_SIZED",
-                "TEST_READ",
-                "TEST_RANGE",
-                "TEST_PINNED"
-            ]
-        );
-        assert_eq!(name_after::<Pinned4, Snapshot>(), Snapshot::NAMES.len());
-    }
-
-    /// An entry whose limit's id is not where its `NAME_AT` says among the snapshot's ids is
-    /// refused when it is made. Turned red by an entry made of any offset.
-    #[test]
-    #[should_panic(expected = "a limit's id is not where its snapshot's names put it")]
-    fn an_id_not_where_the_names_put_it_is_refused() {
-        struct Misnamed;
-
-        impl LimitSpec for Misnamed {
-            type Value = usize;
-            const LIMIT: &'static str = "TEST_SIZED";
-            const DRIVEN: Option<Driven> = None;
-            const READ_FROM_SNAPSHOT: bool = true;
-            const CAPACITY: Option<usize> = None;
-            const DOMAIN: LimitDomain = LimitDomain::parameter(1, 64, None);
-            const DEFAULT: usize = 4;
-        }
-
-        // SAFETY: the first word of `Snapshot`; the entry refuses the id before any access.
-        unsafe impl LimitField<Snapshot> for Misnamed {
-            const WORD: usize = 0;
-            const NAME_AT: usize = 0;
-        }
-
-        let _ = LimitEntry::<Snapshot>::of::<Misnamed>();
     }
 
     /// A count's domain is every count up to the build's value, whatever the build keeps of its
@@ -1819,7 +1716,6 @@ mod tests {
         // SAFETY: deliberately not a word of `Snapshot`; the entry refuses it before any access.
         unsafe impl LimitField<Snapshot> for Past {
             const WORD: usize = SNAPSHOT_WORDS;
-            const NAME_AT: usize = 0;
         }
 
         let _ = LimitEntry::<Snapshot>::of::<Past>();

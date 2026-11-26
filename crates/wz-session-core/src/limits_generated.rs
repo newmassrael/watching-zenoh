@@ -17,8 +17,8 @@
 
 use crate::caps;
 use crate::limit_binding::{
-    limit_defaults_only, name_after, word_after, LimitDomain, LimitEntry, LimitField, LimitNames,
-    LimitSpec, LimitValue, Limited, OutsideLimitDomain, Quota,
+    limit_defaults_only, word_after, LimitDomain, LimitEntry, LimitField, LimitSpec, LimitValue,
+    Limited, OutsideLimitDomain, Quota,
 };
 use crate::policy_binding::Driven;
 
@@ -3455,564 +3455,420 @@ impl core::fmt::Debug for SessionLimits {
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxKeyexprBytes {
     const WORD: usize = 0;
-    const NAME_AT: usize = 0;
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for KeyArenaBytes {
     const WORD: usize = word_after::<MaxKeyexprBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxKeyexprBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxSubscriptions {
     const WORD: usize = word_after::<KeyArenaBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<KeyArenaBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MatchMemoSlots {
     const WORD: usize = word_after::<MaxSubscriptions, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxSubscriptions, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneEvents {
     const WORD: usize = word_after::<MatchMemoSlots, SessionLimits>();
-    const NAME_AT: usize = name_after::<MatchMemoSlots, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneBytes {
     const WORD: usize = word_after::<DeliveryLaneEvents, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeliveryLaneEvents, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeliveryLaneCallbacks {
     const WORD: usize = word_after::<DeliveryLaneBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeliveryLaneBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxQueryables {
     const WORD: usize = word_after::<DeliveryLaneCallbacks, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeliveryLaneCallbacks, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingQueries {
     const WORD: usize = word_after::<MaxQueryables, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxQueryables, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for LinkNotedRequests {
     const WORD: usize = word_after::<MaxPendingQueries, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPendingQueries, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxDeclObservers {
     const WORD: usize = word_after::<LinkNotedRequests, SessionLimits>();
-    const NAME_AT: usize = name_after::<LinkNotedRequests, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxLivelinessSubscriptions {
     const WORD: usize = word_after::<MaxDeclObservers, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxDeclObservers, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxLocalTokens {
     const WORD: usize = word_after::<MaxLivelinessSubscriptions, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxLivelinessSubscriptions, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPublishers {
     const WORD: usize = word_after::<MaxLocalTokens, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxLocalTokens, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxQueriers {
     const WORD: usize = word_after::<MaxPublishers, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPublishers, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxMatchingListeners {
     const WORD: usize = word_after::<MaxQueriers, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxQueriers, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxDeclWatches {
     const WORD: usize = word_after::<MaxMatchingListeners, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxMatchingListeners, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxTransportEventsListeners {
     const WORD: usize = word_after::<MaxDeclWatches, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxDeclWatches, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxLinkEventsListeners {
     const WORD: usize = word_after::<MaxTransportEventsListeners, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxTransportEventsListeners, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxDeclaredKeyexprs {
     const WORD: usize = word_after::<MaxLinkEventsListeners, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxLinkEventsListeners, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingLivelinessGets {
     const WORD: usize = word_after::<MaxDeclaredKeyexprs, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxDeclaredKeyexprs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingDeclares {
     const WORD: usize = word_after::<MaxPendingLivelinessGets, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPendingLivelinessGets, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxInboundSubInterests {
     const WORD: usize = word_after::<MaxPendingDeclares, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPendingDeclares, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPeerKeyexprAliases {
     const WORD: usize = word_after::<MaxInboundSubInterests, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxInboundSubInterests, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxSharedKeyIds {
     const WORD: usize = word_after::<MaxPeerKeyexprAliases, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPeerKeyexprAliases, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxRemoteDecls {
     const WORD: usize = word_after::<MaxSharedKeyIds, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxSharedKeyIds, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingReplies {
     const WORD: usize = word_after::<MaxRemoteDecls, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxRemoteDecls, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxPendingFinals {
     const WORD: usize = word_after::<MaxPendingReplies, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPendingReplies, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxReplyPayloadBytes {
     const WORD: usize = word_after::<MaxPendingFinals, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxPendingFinals, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxMulticastReplies {
     const WORD: usize = word_after::<MaxReplyPayloadBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxReplyPayloadBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for GroupReadsPerMove {
     const WORD: usize = word_after::<MaxMulticastReplies, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxMulticastReplies, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxAdvancedPublishers {
     const WORD: usize = word_after::<GroupReadsPerMove, SessionLimits>();
-    const NAME_AT: usize = name_after::<GroupReadsPerMove, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxAdvancedSubscribers {
     const WORD: usize = word_after::<MaxAdvancedPublishers, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxAdvancedPublishers, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxFaces {
     const WORD: usize = word_after::<MaxAdvancedSubscribers, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxAdvancedSubscribers, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for MaxAcceptPending {
     const WORD: usize = word_after::<MaxFaces, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxFaces, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for RxPoolBuffers {
     const WORD: usize = word_after::<MaxAcceptPending, SessionLimits>();
-    const NAME_AT: usize = name_after::<MaxAcceptPending, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for TxPoolSlots {
     const WORD: usize = word_after::<RxPoolBuffers, SessionLimits>();
-    const NAME_AT: usize = name_after::<RxPoolBuffers, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for ReassemblyChains {
     const WORD: usize = word_after::<TxPoolSlots, SessionLimits>();
-    const NAME_AT: usize = name_after::<TxPoolSlots, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
     const WORD: usize = word_after::<ReassemblyChains, SessionLimits>();
-    const NAME_AT: usize = name_after::<ReassemblyChains, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for SessionMaxRemoteDecls {
     const WORD: usize = word_after::<SessionMaxPeerKeyexprAliases, SessionLimits>();
-    const NAME_AT: usize = name_after::<SessionMaxPeerKeyexprAliases, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for SessionMaxInboundSubInterests {
     const WORD: usize = word_after::<SessionMaxRemoteDecls, SessionLimits>();
-    const NAME_AT: usize = name_after::<SessionMaxRemoteDecls, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for QuerierMaxPendingQueries {
     const WORD: usize = word_after::<SessionMaxInboundSubInterests, SessionLimits>();
-    const NAME_AT: usize = name_after::<SessionMaxInboundSubInterests, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for TxNoProgressWindowUs {
     const WORD: usize = word_after::<QuerierMaxPendingQueries, SessionLimits>();
-    const NAME_AT: usize = name_after::<QuerierMaxPendingQueries, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for TxExpiryCloseAfter {
     const WORD: usize = word_after::<TxNoProgressWindowUs, SessionLimits>();
-    const NAME_AT: usize = name_after::<TxNoProgressWindowUs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DatagramFragmentBurst {
     const WORD: usize = word_after::<TxExpiryCloseAfter, SessionLimits>();
-    const NAME_AT: usize = name_after::<TxExpiryCloseAfter, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DatagramFragmentGapUs {
     const WORD: usize = word_after::<DatagramFragmentBurst, SessionLimits>();
-    const NAME_AT: usize = name_after::<DatagramFragmentBurst, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for QueryParametersMaxBytes {
     const WORD: usize = word_after::<DatagramFragmentGapUs, SessionLimits>();
-    const NAME_AT: usize = name_after::<DatagramFragmentGapUs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for QueryAttachmentMaxBytes {
     const WORD: usize = word_after::<QueryParametersMaxBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<QueryParametersMaxBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoTxQueueSize {
     const WORD: usize = word_after::<QueryAttachmentMaxBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<QueryAttachmentMaxBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for AppLinkQueueBytes {
     const WORD: usize = word_after::<PicoTxQueueSize, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoTxQueueSize, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for E2eSenderSlots {
     const WORD: usize = word_after::<AppLinkQueueBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<AppLinkQueueBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for ReplayDepthMax {
     const WORD: usize = word_after::<E2eSenderSlots, SessionLimits>();
-    const NAME_AT: usize = name_after::<E2eSenderSlots, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for InstanceKeyFields {
     const WORD: usize = word_after::<ReplayDepthMax, SessionLimits>();
-    const NAME_AT: usize = name_after::<ReplayDepthMax, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for InstancesPerMessage {
     const WORD: usize = word_after::<InstanceKeyFields, SessionLimits>();
-    const NAME_AT: usize = name_after::<InstanceKeyFields, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncBurstMessages {
     const WORD: usize = word_after::<InstancesPerMessage, SessionLimits>();
-    const NAME_AT: usize = name_after::<InstancesPerMessage, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncFinalTimeoutMs {
     const WORD: usize = word_after::<DeclarationSyncBurstMessages, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeclarationSyncBurstMessages, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncIntervalMs {
     const WORD: usize = word_after::<DeclarationSyncFinalTimeoutMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeclarationSyncFinalTimeoutMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncRxNoProgressMs {
     const WORD: usize = word_after::<DeclarationSyncIntervalMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeclarationSyncIntervalMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncRetryIntervalMs {
     const WORD: usize = word_after::<DeclarationSyncRxNoProgressMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeclarationSyncRxNoProgressMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for DeclarationSyncTxNoProgressMs {
     const WORD: usize = word_after::<DeclarationSyncRetryIntervalMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeclarationSyncRetryIntervalMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for HandedLegBytes {
     const WORD: usize = word_after::<DeclarationSyncTxNoProgressMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<DeclarationSyncTxNoProgressMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for UdpPortSlots {
     const WORD: usize = word_after::<HandedLegBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<HandedLegBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoUnicastBatchBytes {
     const WORD: usize = word_after::<UdpPortSlots, SessionLimits>();
-    const NAME_AT: usize = name_after::<UdpPortSlots, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoMulticastBatchBytes {
     const WORD: usize = word_after::<PicoUnicastBatchBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoUnicastBatchBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoLeaseMs {
     const WORD: usize = word_after::<PicoMulticastBatchBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoMulticastBatchBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoSocketTimeoutMs {
     const WORD: usize = word_after::<PicoLeaseMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoLeaseMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoConnectTimeoutMs {
     const WORD: usize = word_after::<PicoSocketTimeoutMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoSocketTimeoutMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoFragMaxBytes {
     const WORD: usize = word_after::<PicoConnectTimeoutMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoConnectTimeoutMs, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoAcceptTimeoutMs {
     const WORD: usize = word_after::<PicoFragMaxBytes, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoFragMaxBytes, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
 unsafe impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
     const WORD: usize = word_after::<PicoAcceptTimeoutMs, SessionLimits>();
-    const NAME_AT: usize = name_after::<PicoAcceptTimeoutMs, SessionLimits>();
-}
-
-impl LimitNames for SessionLimits {
-    const NAMES: &'static str = "\
-        MAX_KEYEXPR_BYTES\
-        KEY_ARENA_BYTES\
-        MAX_SUBSCRIPTIONS\
-        MATCH_MEMO_SLOTS\
-        DELIVERY_LANE_EVENTS\
-        DELIVERY_LANE_BYTES\
-        DELIVERY_LANE_CALLBACKS\
-        MAX_QUERYABLES\
-        MAX_PENDING_QUERIES\
-        LINK_NOTED_REQUESTS\
-        MAX_DECL_OBSERVERS\
-        MAX_LIVELINESS_SUBSCRIPTIONS\
-        MAX_LOCAL_TOKENS\
-        MAX_PUBLISHERS\
-        MAX_QUERIERS\
-        MAX_MATCHING_LISTENERS\
-        MAX_DECL_WATCHES\
-        MAX_TRANSPORT_EVENTS_LISTENERS\
-        MAX_LINK_EVENTS_LISTENERS\
-        MAX_DECLARED_KEYEXPRS\
-        MAX_PENDING_LIVELINESS_GETS\
-        MAX_PENDING_DECLARES\
-        MAX_INBOUND_SUB_INTERESTS\
-        MAX_PEER_KEYEXPR_ALIASES\
-        MAX_SHARED_KEY_IDS\
-        MAX_REMOTE_DECLS\
-        MAX_PENDING_REPLIES\
-        MAX_PENDING_FINALS\
-        MAX_REPLY_PAYLOAD_BYTES\
-        MAX_MULTICAST_REPLIES\
-        GROUP_READS_PER_MOVE\
-        MAX_ADVANCED_PUBLISHERS\
-        MAX_ADVANCED_SUBSCRIBERS\
-        MAX_FACES\
-        MAX_ACCEPT_PENDING\
-        RX_POOL_BUFFERS\
-        TX_POOL_SLOTS\
-        REASSEMBLY_CHAINS\
-        SESSION_MAX_PEER_KEYEXPR_ALIASES\
-        SESSION_MAX_REMOTE_DECLS\
-        SESSION_MAX_INBOUND_SUB_INTERESTS\
-        QUERIER_MAX_PENDING_QUERIES\
-        TX_NO_PROGRESS_WINDOW_US\
-        TX_EXPIRY_CLOSE_AFTER\
-        DATAGRAM_FRAGMENT_BURST\
-        DATAGRAM_FRAGMENT_GAP_US\
-        QUERY_PARAMETERS_MAX_BYTES\
-        QUERY_ATTACHMENT_MAX_BYTES\
-        PICO_TX_QUEUE_SIZE\
-        APP_LINK_QUEUE_BYTES\
-        E2E_SENDER_SLOTS\
-        REPLAY_DEPTH_MAX\
-        INSTANCE_KEY_FIELDS\
-        INSTANCES_PER_MESSAGE\
-        DECLARATION_SYNC_BURST_MESSAGES\
-        DECLARATION_SYNC_FINAL_TIMEOUT_MS\
-        DECLARATION_SYNC_INTERVAL_MS\
-        DECLARATION_SYNC_RX_NO_PROGRESS_MS\
-        DECLARATION_SYNC_RETRY_INTERVAL_MS\
-        DECLARATION_SYNC_TX_NO_PROGRESS_MS\
-        HANDED_LEG_BYTES\
-        UDP_PORT_SLOTS\
-        PICO_UNICAST_BATCH_BYTES\
-        PICO_MULTICAST_BATCH_BYTES\
-        PICO_LEASE_MS\
-        PICO_SOCKET_TIMEOUT_MS\
-        PICO_CONNECT_TIMEOUT_MS\
-        PICO_FRAG_MAX_BYTES\
-        PICO_ACCEPT_TIMEOUT_MS\
-        PICO_KEEPALIVES_PER_LEASE";
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
@@ -4354,84 +4210,60 @@ impl core::fmt::Debug for RuntimeLimits {
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for MaxLocatorLen {
     const WORD: usize = 0;
-    const NAME_AT: usize = 0;
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for MaxStaticConnect {
     const WORD: usize = word_after::<MaxLocatorLen, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<MaxLocatorLen, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for SnapshotPeriodMs {
     const WORD: usize = word_after::<MaxStaticConnect, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<MaxStaticConnect, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for SnapshotHistogramBuckets {
     const WORD: usize = word_after::<SnapshotPeriodMs, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<SnapshotPeriodMs, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for SupervisionCheckpoints {
     const WORD: usize = word_after::<SnapshotHistogramBuckets, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<SnapshotHistogramBuckets, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for E2eSupervisedStreams {
     const WORD: usize = word_after::<SupervisionCheckpoints, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<SupervisionCheckpoints, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for EventRingSlots {
     const WORD: usize = word_after::<E2eSupervisedStreams, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<E2eSupervisedStreams, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for ClockSources {
     const WORD: usize = word_after::<EventRingSlots, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<EventRingSlots, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for MessageCatalogEntries {
     const WORD: usize = word_after::<ClockSources, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<ClockSources, RuntimeLimits>();
 }
 
 // SAFETY: `RuntimeLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `RUNTIME_LIMIT_WORDS`.
 unsafe impl LimitField<RuntimeLimits> for ClockMaxForwardStepMs {
     const WORD: usize = word_after::<MessageCatalogEntries, RuntimeLimits>();
-    const NAME_AT: usize = name_after::<MessageCatalogEntries, RuntimeLimits>();
-}
-
-impl LimitNames for RuntimeLimits {
-    const NAMES: &'static str = "\
-        MAX_LOCATOR_LEN\
-        MAX_STATIC_CONNECT\
-        SNAPSHOT_PERIOD_MS\
-        SNAPSHOT_HISTOGRAM_BUCKETS\
-        SUPERVISION_CHECKPOINTS\
-        E2E_SUPERVISED_STREAMS\
-        EVENT_RING_SLOTS\
-        CLOCK_SOURCES\
-        MESSAGE_CATALOG_ENTRIES\
-        CLOCK_MAX_FORWARD_STEP_MS";
 }
 
 /// How many limits [`RuntimeLimits`] holds: the length of [`RUNTIME_LIMITS`].
