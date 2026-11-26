@@ -51,7 +51,7 @@ const fn row_capacity<const N: usize>() -> usize {
 /// not valid UTF-8.
 ///
 /// Both arms keep the literal at slots 0/1 (see [`z_loaned_keyexpr_t`]). A view's text is the
-/// caller's and is checked; a key that names the object keeping it (slot 3) lies in that object's
+/// caller's and is checked, unless a checked constructor marked the view ([`PROVEN_CANON`]); a key that names the object keeping it (slot 3) lies in that object's
 /// text, or in the text the session's record of an entity keeps, either of which was a `str` when
 /// it was kept, and is read as it is.
 ///
@@ -66,16 +66,20 @@ pub(crate) unsafe fn keyexpr_str<'a>(ke: *const z_loaned_keyexpr_t) -> Option<&'
         return None;
     }
     let bytes = view_bytes((*ke)._start, (*ke)._len)?;
-    if (*ke)._state.is_null() {
+    // One test for both: a view a checked constructor marked was read as UTF-8 where it was made.
+    if ((*ke)._state as usize | ((*ke)._handle & PROVEN_CANON)) == 0 {
         return crate::abi::text_of(bytes);
     }
     // SAFETY: slots 0/1 of a key that names its object are that object's text, a `str` it keeps
-    // unchanged while the key is lent.
+    // unchanged while the key is lent; those of a marked view were read as UTF-8 when it was made,
+    // and the caller keeps them unchanged while the view stands (the view's contract).
     Some(unsafe { core::str::from_utf8_unchecked(bytes) })
 }
 
 /// The key a declaration or a get names, read where the caller holds it: `Z_ERR_INVALID` when it
-/// is null or not UTF-8, and otherwise refused as [`outbound_key`] refuses it. Judged here, before
+/// is null or not UTF-8, and otherwise refused as [`outbound_key`] refuses it, unless the
+/// constructor that made it proved both of what that judges ([`PROVEN`]), which is read and not
+/// judged again. Judged here, before
 /// anything is declared or asked, because a session declares and asks per face at its best, and
 /// would swallow a refusal of one face. One body every such door calls, so the gate and its codes
 /// are not copied into each.
@@ -87,7 +91,9 @@ pub(crate) unsafe fn outbound_keyexpr<'a>(
     ke: *const z_loaned_keyexpr_t,
 ) -> Result<&'a str, ZResult> {
     let key = keyexpr_str(ke).ok_or(Z_ERR_INVALID)?;
-    outbound_key(key)?;
+    if proof_of(ke) != PROVEN {
+        outbound_key(key)?;
+    }
     Ok(key)
 }
 
@@ -2275,6 +2281,48 @@ mod door_reading_tests {
             );
             z_view_keyexpr_from_str_unchecked(&mut view, core::ptr::null());
             assert!(z_view_keyexpr_is_empty(&view));
+        }
+    }
+
+    /// The outbound gate reads a key a checked constructor marked as it lies, and judges every
+    /// other key as before: a view of a text not in canon form made unchecked is `Z_EINVAL`, and
+    /// a canon key the pico-safe gate refuses is `Z_ERR_INVALID` though its view was made checked.
+    /// The mark is what is read: a view marked by hand over a text not in canon form is not walked.
+    /// Turned red by [`outbound_keyexpr`] trusting a key with no mark or with the canon mark alone,
+    /// or judging a marked one again.
+    #[test]
+    fn the_outbound_gate_reads_a_marked_key_and_judges_the_rest() {
+        let mut marked = unchecked(c"x");
+        let mut canon_only = unchecked(c"x");
+        let off_canon = unchecked(c"demo//a");
+        let mut forged = unchecked(c"demo//a");
+        forged._pad[0] = PROVEN;
+        // SAFETY: views of this frame, and C strings that outlive them.
+        unsafe {
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut marked, c"demo/a/**".as_ptr()),
+                Z_OK
+            );
+            let read = outbound_keyexpr(z_view_keyexpr_loan(&marked)).expect("a marked key");
+            assert_eq!(read, "demo/a/**");
+            assert_eq!(read.as_ptr(), marked._start, "read where the view holds it");
+            assert_eq!(
+                z_view_keyexpr_from_str(&mut canon_only, c"**/c/*".as_ptr()),
+                Z_OK
+            );
+            assert_eq!(
+                outbound_keyexpr(z_view_keyexpr_loan(&canon_only)),
+                Err(Z_ERR_INVALID)
+            );
+            assert_eq!(
+                outbound_keyexpr(z_view_keyexpr_loan(&off_canon)),
+                Err(Z_EINVAL)
+            );
+            assert_eq!(
+                outbound_keyexpr(z_view_keyexpr_loan(&forged)),
+                Ok("demo//a"),
+                "a marked key is read, not judged"
+            );
         }
     }
 
