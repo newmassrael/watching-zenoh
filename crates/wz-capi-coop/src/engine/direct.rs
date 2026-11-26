@@ -2162,7 +2162,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let sent = if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
                 self.try_leg(face, at, &mut leg)
             } else {
-                Self::hold_leg(face, &mut leg)
+                Self::wait_leg(face, &mut leg)
             };
             if let Some(Err(error)) = sent {
                 outcome = Err(error);
@@ -2175,7 +2175,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// `None`, with `leg` not run, while the place holds no parts.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
-    fn hold_leg(
+    fn wait_leg(
         face: &DirectFace<L, C>,
         leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Option<Result<usize, FanoutError>> {
@@ -2226,7 +2226,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
             match self.behind_held_place(at) {
                 Behind::TryAgain => core::hint::spin_loop(),
-                Behind::WaitForSession => return Self::hold_leg(face, leg),
+                Behind::WaitForSession => return Self::wait_leg(face, leg),
                 Behind::Dropped { told, .. } => return Some(self.dropped_on_face(told)),
             }
         }

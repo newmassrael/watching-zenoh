@@ -2700,10 +2700,8 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
 fn a_put_another_thread_makes_inside_a_read_tasks_callback_is_sent_and_both_return() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    assert!(
-        engine.direct_faces() >= 1,
-        "the read steps the faces itself"
-    );
+    let (_, turned) = engine.direct_faces();
+    assert!(turned >= 1, "the read steps the faces itself");
     let (entered, inside) = channel::<()>();
     let (put_done, put_seen) = channel::<bool>();
     let put_seen = Mutex::new(put_seen);
