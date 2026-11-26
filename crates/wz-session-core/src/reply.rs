@@ -1558,6 +1558,77 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         self.pending.is_empty()
     }
 
+    /// The row the next entry is held in: what a table whose request ids each name one entry puts
+    /// in the id of the entry it is about to hold ([`crate::wire_id::request_id_at`]).
+    pub fn next_row(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// The row of the entry `rid` names, in a table whose ids each name one entry: the row the
+    /// id carries when the entry is still in it, else the first entry of the id. An entry moves
+    /// only toward the front, when one before it ends, so the carried row is read first and the
+    /// walk is the case of an earlier end. The id is compared whole, so a row held again under a
+    /// later serial is not named by the id of the entry it held before.
+    fn row_of(&self, rid: crate::wire_id::RequestId) -> Option<usize> {
+        let carried = crate::wire_id::request_row(rid);
+        if self
+            .pending
+            .get(carried)
+            .is_some_and(|entry| entry.rid == rid)
+        {
+            return Some(carried);
+        }
+        self.pending.iter().position(|entry| entry.rid == rid)
+    }
+
+    /// Hand a reply from a peer to the one entry its id names (`Self::row_of`), through the key
+    /// gate and the entry's accepted keys as `Self::fire_replies_for` hands it: whether the
+    /// entry was handed it. For a table whose ids each name one entry; a table whose ids its
+    /// callers chose, two of which may share one, hands a reply to each ([`Self::dispatch_borrowed`]).
+    pub fn reply_to_one(&mut self, reply: &dyn ReplyView) -> bool {
+        if reply.kind() != crate::reply_sink::ReplyKind::Err
+            && self.key_gate.admit_key(reply.keyexpr()).is_err()
+        {
+            return false;
+        }
+        let Some(at) = self.row_of(reply.rid()) else {
+            return false;
+        };
+        let Some(entry) = self.pending.get_mut(at) else {
+            return false;
+        };
+        if !entry.accept.admits(reply) {
+            return false;
+        }
+        entry.sink.on_reply(reply);
+        true
+    }
+
+    /// A Final for the one entry `rid` names (`Self::row_of`): it owes one fewer, and the last
+    /// ends it, as `Self::fire_final_for` ends an entry. An entry that owes none is left alone.
+    pub fn final_to_one(&mut self, rid: crate::wire_id::RequestId) {
+        let Some(at) = self.row_of(rid) else {
+            return;
+        };
+        let Some(entry) = self.pending.get_mut(at) else {
+            return;
+        };
+        match entry.remaining_finals.checked_sub(1) {
+            Some(0) => {}
+            Some(left) => {
+                entry.remaining_finals = left;
+                return;
+            }
+            None => return,
+        }
+        let mut entry = self.pending.remove(at);
+        let held_due = entry.deadline_ms == Some(self.due_ms);
+        entry.sink.on_final(rid);
+        if held_due {
+            self.rearm_due();
+        }
+    }
+
     /// Route an inbound `Response` through the pending table.
     ///
     /// - The Response's keyexpr is resolved through
@@ -2228,6 +2299,7 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                     self.dispatch_response_in_place(
                         response,
                         MappingSpaces::from_sender(peer_keyexpr_table, record.sender()),
+                        Reach::Every,
                     );
                 }
                 #[cfg(all(
@@ -2240,6 +2312,70 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// A Response or a ResponseFinal the in-place receive path lent, for a table whose request
+    /// ids each name one entry ([`crate::wire_id::request_id_at`]): read off the view its decode
+    /// made and handed to the entry its id names, read in the row the id carries before any walk
+    /// ([`Self::reply_to_one`], [`Self::final_to_one`]). A dispatch that tells a record's kind
+    /// hands a reply here and to no other plane; a record of another kind is not this table's.
+    #[cfg(all(
+        feature = "storage-profile",
+        any(
+            feature = "codec-response",
+            all(
+                feature = "rx-lent-control",
+                feature = "codec-frame",
+                feature = "codec-response-final"
+            )
+        )
+    ))]
+    pub fn dispatch_lent_reply<PS: Storage, OS: Storage>(
+        &mut self,
+        record: &crate::driver_loop::InPlaceRecord<'_, '_>,
+        spaces: MappingSpaces<'_, PS, OS>,
+    ) {
+        #[cfg(feature = "codec-response")]
+        if let Some(response) = record.response() {
+            self.dispatch_response_in_place(
+                response,
+                MappingSpaces::from_sender(spaces, record.sender()),
+                Reach::One,
+            );
+        }
+        #[cfg(not(feature = "codec-response"))]
+        let _ = spaces;
+        #[cfg(all(
+            feature = "rx-lent-control",
+            feature = "codec-frame",
+            feature = "codec-response-final"
+        ))]
+        if let Some(response_final) = record.response_final() {
+            self.final_to_one(response_final.request_id);
+        }
+    }
+}
+
+/// Which entries of a table a reply from a peer is handed to.
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+#[derive(Clone, Copy)]
+enum Reach {
+    /// Every entry of its id, in their order: a table whose ids its callers chose, two of which
+    /// may share one.
+    Every,
+    /// The one entry its id names: a table whose ids each name one
+    /// ([`ReplyRegistry::reply_to_one`]).
+    One,
+}
+
+#[cfg(all(feature = "storage-profile", feature = "codec-response"))]
+impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
+    /// Hand `reply`, from a peer, to the entries `reach` names: how many were handed it.
+    fn fire_to(&mut self, reply: &dyn ReplyView, reach: Reach) -> usize {
+        match reach {
+            Reach::Every => self.fire_replies_for(reply, true),
+            Reach::One => usize::from(self.reply_to_one(reply)),
         }
     }
 }
@@ -5690,6 +5826,128 @@ mod tests {
             put_encoding: None,
         });
         assert_eq!(none, 0, "non-matching rid does not fire");
+    }
+
+    /// A reply from a peer of the given id, for the tests of a table whose ids each name one entry.
+    fn put_reply(rid: crate::wire_id::RequestId) -> crate::reply_sink::BorrowedReply<'static> {
+        crate::reply_sink::BorrowedReply {
+            rid,
+            keyexpr: "q/k",
+            kind: ReplyKind::Put,
+            payload: b"v",
+            err_encoding: None,
+            attachment: None,
+            put_encoding: None,
+        }
+    }
+
+    /// An id names its entry by the row it carries and the serial above it: once the row is held
+    /// again under a later serial, a reply or a Final of the earlier id reaches no entry, and the
+    /// later id reaches its own. Turned red by the carried row taken for the entry without the
+    /// whole id compared (`row_of`), which hands the earlier id's reply to the later entry.
+    #[test]
+    fn a_row_held_again_is_not_named_by_the_id_of_its_earlier_entry() {
+        use crate::wire_id::{request_id_at, request_row};
+        let mut reg = ReplyRegistry::new();
+        let seen: Arc<Mutex<Vec<&'static str>>> = Arc::new(Mutex::new(Vec::new()));
+        let earlier = request_id_at(1, reg.next_row());
+        let seen_earlier = seen.clone();
+        reg.register(
+            earlier,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_| seen_earlier.lock().unwrap().push("earlier"),
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
+        reg.final_to_one(earlier);
+        assert!(reg.is_empty(), "the earlier entry ended at its Final");
+        let later = request_id_at(2, reg.next_row());
+        assert_eq!(request_row(earlier), request_row(later), "the same row");
+        assert_ne!(earlier, later);
+        let seen_later = seen.clone();
+        let ended = Arc::new(AtomicUsize::new(0));
+        let ended_later = ended.clone();
+        reg.register(
+            later,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_| seen_later.lock().unwrap().push("later"),
+            move |_| {
+                ended_later.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("no quota is stated on this table");
+        assert!(
+            !reg.reply_to_one(&put_reply(earlier)),
+            "no entry of that id"
+        );
+        reg.final_to_one(earlier);
+        assert_eq!(
+            reg.len(),
+            1,
+            "the later entry is not ended by the earlier id"
+        );
+        assert!(reg.reply_to_one(&put_reply(later)));
+        assert_eq!(*seen.lock().unwrap(), vec!["later"]);
+        reg.final_to_one(later);
+        assert_eq!(ended.load(Ordering::SeqCst), 1);
+        assert!(reg.is_empty());
+    }
+
+    /// An entry that an earlier one's end moved to the front is still named by its id, though the
+    /// row it carries no longer holds it, and an entry owed two Finals ends at the second, its
+    /// deadline leaving the table's with it. Turned red by the walk left out of `row_of` (the
+    /// moved entry is then never answered), or by an entry ended at its first Final of two.
+    #[test]
+    fn an_entry_moved_by_an_earlier_end_is_found_and_ends_at_its_last_final() {
+        use crate::wire_id::request_id_at;
+        let mut reg = ReplyRegistry::new();
+        let replies = Arc::new(AtomicUsize::new(0));
+        let ends = Arc::new(AtomicUsize::new(0));
+        let first = request_id_at(1, reg.next_row());
+        reg.register(
+            first,
+            1,
+            None,
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            |_| {},
+            |_| {},
+        )
+        .expect("no quota is stated on this table");
+        let second = request_id_at(2, reg.next_row());
+        let replies_second = replies.clone();
+        let ends_second = ends.clone();
+        reg.register(
+            second,
+            2,
+            Some(100),
+            crate::reply_acceptance::ReplyAcceptance::Any,
+            move |_| {
+                replies_second.fetch_add(1, Ordering::SeqCst);
+            },
+            move |_| {
+                ends_second.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .expect("no quota is stated on this table");
+        reg.final_to_one(first);
+        assert_eq!(reg.len(), 1);
+        assert!(reg.reply_to_one(&put_reply(second)), "found past its row");
+        assert_eq!(replies.load(Ordering::SeqCst), 1);
+        reg.final_to_one(second);
+        assert_eq!(
+            ends.load(Ordering::SeqCst),
+            0,
+            "one Final of two is owed still"
+        );
+        assert_eq!(reg.due_ms(), 100);
+        reg.final_to_one(second);
+        assert_eq!(ends.load(Ordering::SeqCst), 1);
+        assert!(reg.is_empty());
+        assert_eq!(reg.due_ms(), u64::MAX, "its deadline left with it");
     }
 
     /// A closed key set drops a reply a peer sent on a key outside the set, on every path that

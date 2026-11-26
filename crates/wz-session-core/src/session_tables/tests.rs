@@ -1926,6 +1926,36 @@ fn a_key_is_named_as_the_session_sends_it_by_the_declaration_that_stands() {
     );
 }
 
+/// A row's key is judged by the wire's pre-emit gate once, when the row is made, and the key the
+/// tables name for each send carries that judgement: proven for a key the gate admits, unproven
+/// for one it refuses, which each send then judges and refuses. A key the program names by an id
+/// is no row's and is not proven. Turned red by a row that keeps its key proven without the
+/// gate's judgement, or by `named` leaving the row's judgement off the key it names.
+#[cfg(feature = "storage-profile")]
+#[test]
+fn a_rows_key_carries_the_gate_judgement_made_when_the_row_was() {
+    let mut tables = Tables::new();
+    let form = || KeyForm {
+        prefix: None,
+        own: None,
+        retraction: Retraction::ById,
+    };
+    let admitted = tables.declare_token("demo/x", form()).unwrap();
+    let refused = tables.declare_token("**/c/*", form()).unwrap();
+    let admitted = tables.tokens().get(admitted.handle).unwrap().key();
+    let named = tables.named(admitted).unwrap();
+    assert!(named.is_proven());
+    assert!(named.check_outbound().is_ok());
+    let refused = tables.tokens().get(refused.handle).unwrap().key();
+    let named = tables.named(refused).unwrap();
+    assert!(!named.is_proven());
+    assert!(
+        named.check_outbound().is_err(),
+        "each send judges it and refuses it"
+    );
+    assert!(!tables.named_by("demo/y", 0).unwrap().is_proven());
+}
+
 #[test]
 fn ids_handed_out_apart_from_any_row_come_from_the_same_space() {
     let mut tables = Tables::new();
