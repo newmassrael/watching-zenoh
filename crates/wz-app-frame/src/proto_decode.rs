@@ -1018,7 +1018,7 @@ impl<'b> Visit<'b> for Listing<'_, '_> {
 
 /// Where one field path of a message stands in its bytes, as a protobuf parser reads it: the last
 /// occurrence of the field wins, and the occurrences of a message field are one message.
-#[cfg(any(test, feature = "instance-key"))]
+#[cfg(any(feature = "instance-key", all(test, feature = "proto-text")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum AtPath<'b> {
     /// The field is there, with this value.
@@ -1030,7 +1030,7 @@ pub(crate) enum AtPath<'b> {
 }
 
 /// The walk that reads one field path ([`SchemaSet::read_path`]) and keeps nothing else.
-#[cfg(any(test, feature = "instance-key"))]
+#[cfg(any(feature = "instance-key", all(test, feature = "proto-text")))]
 struct PathRead<'p, 'b> {
     /// The field numbers along the path, the outermost first.
     path: &'p [u64],
@@ -1043,7 +1043,7 @@ struct PathRead<'p, 'b> {
     found: Option<Item<'b>>,
 }
 
-#[cfg(any(test, feature = "instance-key"))]
+#[cfg(any(feature = "instance-key", all(test, feature = "proto-text")))]
 impl<'b> Visit<'b> for PathRead<'_, 'b> {
     fn known(&mut self, number: u64, _spec: &Spec<'_>, item: Item<'b>, _span: (usize, usize)) {
         if self.matched == self.depth
@@ -1075,7 +1075,7 @@ impl<'b> Visit<'b> for PathRead<'_, 'b> {
     }
 }
 
-#[cfg(any(test, feature = "instance-key"))]
+#[cfg(any(feature = "instance-key", all(test, feature = "proto-text")))]
 impl SchemaSet {
     /// The value at the field path `numbers` (the outermost field's number first) of `bytes` read
     /// as `message`, as [`AtPath`] says a parser reads it. The bytes are read and refused as
