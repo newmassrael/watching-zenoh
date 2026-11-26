@@ -413,11 +413,10 @@ impl<O> HeldReplies<O, crate::bounded::Region> {
     /// The line of a region's description ([`place_seqs`](crate::bounded::place_seqs)) that places
     /// this hold's rows: the hold at `at` in the region, its `MAX_PENDING_REPLIES` rows at `rows`.
     pub const fn place(at: usize, rows: usize) -> crate::bounded::SeqPlace {
-        crate::bounded::SeqPlace::of::<HeldReply<O, crate::bounded::Region>>(
-            at.wrapping_add(core::mem::offset_of!(Self, rows)),
-            rows,
-            caps::MAX_PENDING_REPLIES,
-        )
+        crate::bounded::SeqPlace::of_room::<
+            HeldReply<O, crate::bounded::Region>,
+            { caps::MAX_PENDING_REPLIES },
+        >(at.wrapping_add(core::mem::offset_of!(Self, rows)), rows)
     }
 }
 

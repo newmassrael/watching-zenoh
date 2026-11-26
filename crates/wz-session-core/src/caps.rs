@@ -504,11 +504,15 @@ pub const MAX_SHARED_KEY_IDS: usize = generated::MAX_SHARED_KEY_IDS;
 /// application, as one whose keyexpr does not resolve never was.
 pub const MAX_REMOTE_DECLS: usize = generated::MAX_REMOTE_DECLS;
 
-/// Maximum number of data replies a queryable's handlers may have staged for ONE
-/// session between two drains (the deploy `limits` key `pending_replies`). On the
-/// fixed backing a reply past it is refused with
-/// [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
-/// made it is told, and nothing is built on the heap in its place.
+/// Maximum number of data replies a dispatch that calls a session's queryables under
+/// the session's lock may have staged for ONE session between two drains (the deploy
+/// `limits` key `pending_replies`). On the fixed backing a reply past it is refused
+/// with [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
+/// made it is told, and nothing is built on the heap in its place. A queryable whose
+/// callback runs with no lock held hands each reply on as it makes it
+/// ([`crate::reply_pass::ReplyPass`]), and this count bounds none of its replies. The
+/// same count sizes the rows a consolidating get holds back
+/// ([`crate::reply_hold::HeldReplies`]).
 pub const MAX_PENDING_REPLIES: usize = generated::MAX_PENDING_REPLIES;
 
 /// Maximum number of `ResponseFinal`s ONE session may owe between two drains (the

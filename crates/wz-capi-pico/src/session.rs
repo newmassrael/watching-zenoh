@@ -1043,14 +1043,30 @@ pub(crate) struct SessionTail {
 }
 
 impl SessionTail {
-    /// What stays beside `handle` in its place: no closure counted yet.
-    fn of(handle: &PicoSessionHandle) -> Self {
-        #[cfg(feature = "engine-tokio")]
-        let _ = handle;
+    /// What stays beside a handle of the tokio engine in its place: no closure counted yet.
+    #[cfg(feature = "engine-tokio")]
+    fn unheld() -> Self {
         Self {
             open: crate::ffi::OpenClosures::default(),
-            #[cfg(not(feature = "engine-tokio"))]
-            arena: core::mem::ManuallyDrop::new(engine_held(handle).clone()),
+        }
+    }
+
+    /// What stays beside a handle of the cooperative engine in its place, made at `at`: no
+    /// closure counted yet, and `arena`, the hold on the engine whose arena the place lies in. The
+    /// count's lock is made where it stays, as a kernel's is.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it and holds none, and the tail is not
+    /// moved from it.
+    #[cfg(not(feature = "engine-tokio"))]
+    unsafe fn write_at(at: core::ptr::NonNull<Self>, arena: EngineHold) {
+        let at = at.as_ptr();
+        // SAFETY: the caller's: each field is written once through a pointer to it.
+        unsafe {
+            crate::ffi::OpenClosures::init_at(core::ptr::NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).open),
+            ));
+            core::ptr::addr_of_mut!((*at).arena).write(core::mem::ManuallyDrop::new(arena));
         }
     }
 }
@@ -2087,7 +2103,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let handle = PicoSessionHandle::new(drive, ext);
             #[cfg(feature = "session-memory")]
             let handle = handle.with_memory(memory);
-            let beside = SessionTail::of(&handle);
+            let beside = SessionTail::unheld();
             *zs = z_owned_session_t {
                 _val: slot.fill(SessionPlace::holding(handle, beside)) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
@@ -2578,9 +2594,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // row it does not use and a page no row uses is never resident; an image's is its heap's,
     // written where a row must read empty.
     #[cfg(all(feature = "os-host", any(unix, windows)))]
-    let memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
     #[cfg(not(all(feature = "os-host", any(unix, windows))))]
-    let memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
         &wz_capi_coop::arena::AllocatorMemory;
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
@@ -2590,7 +2606,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         request.key_ids,
         wz_capi_coop::arena::OpenStorage {
-            memory,
+            memory: arena_memory,
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
             plan,
         },
@@ -2643,11 +2659,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "session-memory")]
     let handle = handle.with_memory(memory);
     debug_assert!(place.bytes() >= SessionPlace::LAYOUT.size());
-    let beside = SessionTail::of(&handle);
+    let arena = engine_held(&handle).clone();
     *zs = z_owned_session_t {
         // SAFETY: the arena lent the place for `SessionPlace::LAYOUT`, aligned as a span starts,
-        // to this handle alone, and it stands while the engine the tail beside it holds does.
-        _val: SessionPlace::fill(place.as_ptr(), handle, beside) as *mut c_void,
+        // to this handle alone, and it stands while the engine the tail beside it holds does; the
+        // tail is made there, beside the handle, and stays.
+        _val: SessionPlace::fill(place.as_ptr(), handle, |tail| {
+            SessionTail::write_at(tail, arena)
+        }) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     // The multi-threaded arm's read task starts with the open unless the options say not to. A

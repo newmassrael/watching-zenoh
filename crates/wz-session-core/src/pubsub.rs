@@ -3163,10 +3163,12 @@ impl SubscriberPeer<crate::bounded::Region> {
         #[cfg(all(feature = "declare-subscriber", feature = "interest-answer"))]
         let lines = lines
             .keys_at(at.wrapping_add(core::mem::offset_of!(Self, interests.keys)))
-            .seq(crate::bounded::SeqPlace::of::<SubInterestReply>(
+            .seq(crate::bounded::SeqPlace::of_room::<
+                SubInterestReply,
+                { caps::MAX_PENDING_DECLARES },
+            >(
                 at.wrapping_add(core::mem::offset_of!(Self, interests.staged)),
                 rows.wrapping_add(core::mem::offset_of!(SubscriberPeerRows, staged)),
-                caps::MAX_PENDING_DECLARES,
             ));
         #[cfg(not(feature = "storage-profile"))]
         let _ = at;

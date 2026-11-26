@@ -1461,11 +1461,23 @@ struct HandBack {
 
 #[cfg(feature = "threads")]
 impl HandBack {
-    fn new() -> Self {
-        Self {
-            behind: core::sync::atomic::AtomicUsize::new(0),
-            handed: Mutex::new(0),
-            back: os::Condvar::new(),
+    /// A hand-back no read waits at, made in `at` with its lock and condition variable made where
+    /// they stay: a kernel's objects are not moved once made, so neither is built by value.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The hand-back is not moved from `at` until it is dropped there.
+    unsafe fn init_at(at: NonNull<Self>) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            addr_of_mut!((*at).behind).write(core::sync::atomic::AtomicUsize::new(0));
+            os::mutex_in(
+                NonNull::new_unchecked(addr_of_mut!((*at).handed)),
+                |handed| handed.write(0),
+            );
+            os::condvar_in(NonNull::new_unchecked(addr_of_mut!((*at).back)));
         }
     }
 
@@ -5693,13 +5705,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 addr_of_mut!((*at).held_drop).write(held_drop);
                 addr_of_mut!((*at).sending_on).write(AtomicU64::new(NOT_SENDING));
                 #[cfg(any(feature = "listen", feature = "group"))]
-                addr_of_mut!((*at).handed).write(Mutex::new(handed));
+                os::mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).handed)),
+                    |table| table.write(handed),
+                );
                 #[cfg(any(feature = "listen", feature = "group"))]
                 addr_of_mut!((*at).owed).write(AtomicBool::new(false));
                 #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
                 addr_of_mut!((*at).input_held).write(AtomicBool::new(false));
                 #[cfg(feature = "threads")]
-                addr_of_mut!((*at).hand_back).write(HandBack::new());
+                HandBack::init_at(NonNull::new_unchecked(addr_of_mut!((*at).hand_back)));
                 #[cfg(any(feature = "listen", feature = "group"))]
                 addr_of_mut!((*at).handed_limits).write(handed_limits);
                 #[cfg(feature = "transport-stats")]
@@ -5974,15 +5989,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The waits for room a publish that finds the session held asks. Compiled where its
-    /// readers are: the group tests over the program's transport (`tests::group`).
-    #[cfg(all(test, feature = "group", feature = "app-transport"))]
+    /// readers are: the group tests over the program's transport, each member stepped by its read
+    /// task (`tests::group`).
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads"
+    ))]
     pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
-    #[cfg(all(test, feature = "group", feature = "app-transport"))]
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads"
+    ))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
             core.0
@@ -6271,8 +6297,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// How many turns of an answer held their link's replies to leave with the Final in one send,
-    /// each counted where it let them go ([`Self::answer`]).
-    #[cfg(all(test, feature = "std", feature = "queryable"))]
+    /// each counted where it let them go ([`Self::answer`]). Compiled where its reader is: a build
+    /// whose links a task or a listener reads (`tests::queryable`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "queryable",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(crate) fn answers_held(&self) -> usize {
         self.takes.held_answers.load(Ordering::Relaxed)
     }
@@ -10987,15 +11019,29 @@ mod member_key_tests {
 #[cfg(all(test, feature = "std", feature = "threads"))]
 mod hand_back_tests {
     use super::{lock, HandBack};
+    use core::ptr::NonNull;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// A hand-back made where it stays, as the engine makes its own.
+    fn made() -> Arc<HandBack> {
+        let mut place = Arc::<HandBack>::new_uninit();
+        let at =
+            NonNull::from(Arc::get_mut(&mut place).expect("the one holder")).cast::<HandBack>();
+        // SAFETY: `at` is the place the Arc holds, aligned for a `HandBack` and holding none,
+        // which the Arc does not move; every field is written before it is read as made.
+        unsafe {
+            HandBack::init_at(at);
+            place.assume_init()
+        }
+    }
 
     /// A read waiting for another read's buffer wakes when the buffer is handed back, well
     /// before its bound, and is counted out after. Turned red by a hand-back that wakes no one,
     /// which leaves a read task asleep for its whole bound behind a program's read.
     #[test]
     fn a_read_waiting_for_the_buffer_wakes_when_it_is_handed_back() {
-        let back = Arc::new(HandBack::new());
+        let back = made();
         let seen = back.enter();
         let handing = {
             let back = back.clone();
@@ -11021,7 +11067,7 @@ mod hand_back_tests {
     /// at once. Turned red by a wait that looks for a notification alone, which this one missed.
     #[test]
     fn a_hand_back_before_the_wait_begins_ends_it_at_once() {
-        let back = HandBack::new();
+        let back = made();
         let seen = back.enter();
         back.handed_back();
         let started = Instant::now();
@@ -11033,7 +11079,7 @@ mod hand_back_tests {
     /// that counts a hand-back no read waits for.
     #[test]
     fn a_hand_back_with_no_read_waiting_counts_nothing() {
-        let back = HandBack::new();
+        let back = made();
         back.handed_back();
         assert_eq!(*lock(&back.handed), 0);
     }

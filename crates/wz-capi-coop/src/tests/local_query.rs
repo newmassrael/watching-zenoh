@@ -638,8 +638,10 @@ fn a_queryable_of_the_session_reads_what_its_own_get_carries() {
 
 /// A queryable that undeclares itself from inside its call on the session's own get does not wait
 /// for itself: the undeclaration returns inside the call, and the row is let go of once the call
-/// has returned, before the get does, by one walk of the session's tables. A get after it is
-/// answered by none and walks no table; the CONTROL is the first get, which the queryable answered.
+/// has returned, before the get does. A get after it is answered by none; the CONTROL is the first
+/// get, which the queryable answered. A build that keeps the round lets the row go by one walk of
+/// the session's tables, and the get after it walks none; one that does not lets it go in the walk
+/// that ended its call, and counts no walk.
 #[test]
 fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_get_returns() {
     struct Dropped(Arc<AtomicUsize>);
@@ -668,7 +670,9 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
         }
     });
     *own.lock().unwrap() = Some(id);
+    #[cfg(wz_round)]
     let walks = || engine.takes.walks.load(Ordering::SeqCst);
+    #[cfg(wz_round)]
     let before = walks();
     let (issued, leg) = ask(
         &engine,
@@ -689,6 +693,7 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
         1,
         "let go of once its own call returned, before the get did"
     );
+    #[cfg(wz_round)]
     assert_eq!(walks() - before, 1, "one walk let the marked row go");
     let (_, leg) = ask(
         &engine,
@@ -702,6 +707,8 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
         leg.lock().unwrap().replies.is_empty(),
         "nothing is left to answer"
     );
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "let go of once");
+    #[cfg(wz_round)]
     assert_eq!(
         walks() - before,
         1,

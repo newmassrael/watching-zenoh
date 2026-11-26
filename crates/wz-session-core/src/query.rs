@@ -1470,10 +1470,10 @@ fn literal_key(keyexpr: &str) -> LiteralKey<'_> {
 #[cfg(all(feature = "codec-request", feature = "storage-profile"))]
 impl<'a> QueryResponder<'a> {
     /// R311li — public constructor: the Session-tier deferred queryable
-    /// job (wz-runtime-tokio) builds a responder over its own reply
-    /// buffer when it runs the user handler OUTSIDE the observer lock,
-    /// then routes the accumulated [`QueryReply`]s per query origin
-    /// (wire -> `OwnedResponseSink::send_response`, local ->
+    /// job (wz-runtime-tokio) builds a responder over a
+    /// [`crate::reply_pass::ReplyPass`] when it runs the user handler OUTSIDE
+    /// the observer lock, which routes each [`QueryReply`] per query origin as
+    /// the handler makes it (wire -> the link or the group, local ->
     /// `ReplyRegistry::deliver_local_reply`). In-module dispatch keeps
     /// building the struct literally.
     /// R311y834 — `accept` is REQUIRED, for the reason the requester-side

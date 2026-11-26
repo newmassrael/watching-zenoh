@@ -1650,7 +1650,21 @@ struct BatchStage {
 
 #[cfg(feature = "transport-batching")]
 impl BatchStage {
-    /// Whether a frame is open on this conduit, in a lent slot or on the heap.
+    /// Whether a frame is open on this conduit, in a lent slot or on the heap. Read where a
+    /// message that joins no window may find one open (`window_may_hold_open`), and compiled
+    /// where that is.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
     fn is_open(&self) -> bool {
         #[cfg(feature = "transport-tx-lend")]
         if self.lent.is_some() {
@@ -13380,7 +13394,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::sn::to_wire(sn),
                 crate::frame_encode::frame_flags(emit.reliable),
                 emit.ext_qos,
-                &crate::tx_buf::wire_body(encode_body),
+                crate::tx_buf::wire_body(encode_body),
             );
             match written {
                 Ok(()) => {}

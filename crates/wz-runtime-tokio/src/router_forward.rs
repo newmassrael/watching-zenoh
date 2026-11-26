@@ -4688,7 +4688,8 @@ impl RouterForwarder {
     /// The queryable is called with no tables held: it is the program's callback and may declare
     /// on the node or ask it a query. Only [`Self::deliver_owed`] calls this, once the span of the
     /// route that owed the job has ended and its guard is let go. The tables are taken for reading
-    /// after the handler returns, to send its replies and to end the branch.
+    /// to send each reply as the handler makes it, and after the handler returns to end the
+    /// branch.
     fn run_query_job(&self, job: QueryJob) {
         let QueryJob {
             handler,
@@ -4715,8 +4716,22 @@ impl RouterForwarder {
         } else {
             &full
         };
-        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(self.reply_bounds());
+        // Each reply leaves as the handler makes it, under the tables taken for reading for that
+        // send alone: nothing is held between two replies, so no count of rows bounds how many
+        // one query has, as zenoh-pico's queryable sends each at the call.
+        let namespaced = record.namespaced;
         {
+            let mut replies = wz_session_core::reply_pass::ReplyPass::new(
+                self.reply_bounds(),
+                |parts: wz_session_core::reply_stage::ReplyParts<'_>| {
+                    self.on_tables().send_queryable_reply(
+                        wz_session_core::query::QueryReply::from_parts(&parts),
+                        inbound,
+                        reliable,
+                        namespaced,
+                    );
+                },
+            );
             let mut responder = QueryResponder::new(
                 full.rid(),
                 view.keyexpr().to_string(),
@@ -4730,8 +4745,6 @@ impl RouterForwarder {
             let _ = handler.call(|h| h(view, &mut responder));
             HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
         }
-        self.on_tables()
-            .send_hosted_replies(replies, inbound, reliable, record.namespaced);
         // The handler has returned: its hold is let go, and the branch ends with the last.
         self.release_held(&record);
     }
@@ -12652,19 +12665,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(to) = self.pending.guard().peek(LOCAL_FACE, record.qid) else {
             return;
         };
-        let mut replies =
-            wz_session_core::reply_stage::ReplyStage::held_to(self.fwd.reply_bounds());
-        {
-            let mut responder = QueryResponder::new(
-                to.rid,
-                record.keyexpr.clone(),
-                record.accept,
-                to.qos,
-                &mut replies,
-            );
-            answer(&mut responder);
-        }
-        self.send_hosted_replies(replies, to.face, record.reliable, record.namespaced);
+        // Each reply leaves as `answer` makes it, as a hosted queryable's does from its job.
+        let mut replies = wz_session_core::reply_pass::ReplyPass::new(
+            self.fwd.reply_bounds(),
+            |parts: wz_session_core::reply_stage::ReplyParts<'_>| {
+                self.send_queryable_reply(
+                    wz_session_core::query::QueryReply::from_parts(&parts),
+                    to.face,
+                    record.reliable,
+                    record.namespaced,
+                );
+            },
+        );
+        let mut responder = QueryResponder::new(
+            to.rid,
+            record.keyexpr.clone(),
+            record.accept,
+            to.qos,
+            &mut replies,
+        );
+        answer(&mut responder);
     }
 
     /// Let go of one hold of a held query; the last one ends its branch of the fan, which sends
@@ -13893,38 +13913,36 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.send_to_face(target, reliable, build)
     }
 
-    /// Send what a queryable of the node's own session staged in `replies` to the face `target`
-    /// that asked, each under the session's namespace when the queryable is `namespaced`. A
-    /// reply whose payload is a buffer of shared memory goes as the buffer, as a publication of
-    /// one does ([`Self::publish_shm_with`]): the faces are sent its descriptor with a reference
-    /// of their own or its bytes, through the pass that holds it, and a get of the session
-    /// itself is handed the buffer.
-    fn send_hosted_replies(
+    /// Send a reply a queryable of the node's own session made to the face `target` that asked,
+    /// under the session's namespace when the queryable is `namespaced`. A reply whose payload
+    /// is a buffer of shared memory goes as the buffer, as a publication of one does
+    /// ([`Self::publish_shm_with`]): the faces are sent its descriptor with a reference of their
+    /// own or its bytes, through the pass that holds it, and a get of the session itself is
+    /// handed the buffer.
+    fn send_queryable_reply(
         &self,
-        replies: wz_session_core::reply_stage::ReplyStage,
+        reply: wz_session_core::query::QueryReply,
         target: FaceId,
         reliable: bool,
         namespaced: bool,
     ) {
-        for reply in replies {
-            #[cfg(feature = "transport-shm")]
-            if let Some(handle) = reply.shared_payload().cloned() {
-                self.send_hosted_shm_reply(reply, handle, target, reliable, namespaced);
-                continue;
-            }
-            let Ok(mut resp) = reply.into_response() else {
-                continue;
-            };
-            if namespaced {
-                self.fwd.put_under_namespace(&mut resp);
-            }
-            self.send_hosted_reply(target, reliable, || {
-                NetworkMessage::Response(Box::new(resp.clone()))
-            });
+        #[cfg(feature = "transport-shm")]
+        if let Some(handle) = reply.shared_payload().cloned() {
+            self.send_hosted_shm_reply(reply, handle, target, reliable, namespaced);
+            return;
         }
+        let Ok(mut resp) = reply.into_response() else {
+            return;
+        };
+        if namespaced {
+            self.fwd.put_under_namespace(&mut resp);
+        }
+        self.send_hosted_reply(target, reliable, || {
+            NetworkMessage::Response(Box::new(resp.clone()))
+        });
     }
 
-    /// [`Self::send_hosted_replies`] for one reply whose payload is the buffer `handle`.
+    /// [`Self::send_queryable_reply`] for one reply whose payload is the buffer `handle`.
     #[cfg(feature = "transport-shm")]
     fn send_hosted_shm_reply(
         &self,
@@ -30978,6 +30996,90 @@ mod tests {
             fwd.pending.guard().len(),
             0,
             "the branch ended with the last hold"
+        );
+    }
+
+    /// Session limits that state `MAX_PENDING_REPLIES` as two, as the pico preset states it,
+    /// where the build lets a statement choose it, and the build's value otherwise.
+    fn two_pending_replies() -> wz_session_core::limits::SessionLimits {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::{MaxPendingReplies, SessionLimits};
+        let mut limits = SessionLimits::defaults();
+        if !MaxPendingReplies::DOMAIN.is_singleton() {
+            limits
+                .select_max_pending_replies(Quota::at_most(2))
+                .expect("two is inside the domain");
+        }
+        limits
+    }
+
+    /// The replies and the final of query `rid` a querier is sent when its query is answered ten
+    /// times.
+    fn ten_replies_then_the_final(rid: u32) -> Vec<String> {
+        let mut sent = vec![format!("Reply {rid}"); 10];
+        sent.push(format!("Final {rid}"));
+        sent
+    }
+
+    /// A hosted queryable answers one query with every reply it makes, whatever count of rows the
+    /// node's limits state for the replies a dispatch holds back: with two stated, all ten replies
+    /// reach the querier, and then the final.
+    #[test]
+    fn a_hosted_queryable_of_a_node_stating_two_pending_replies_sends_all_ten_it_makes() {
+        let fwd = RouterForwarder::new(zid(0x01)).with_limits(&two_pending_replies());
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.tick();
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                for _ in 0..10 {
+                    out.reply(b"now");
+                }
+            }),
+        );
+        sink_querier.reset();
+        forward_one(&fwd, FaceId(0), request_best(43, "demo/h"));
+        assert_eq!(
+            responses_sent(&sink_querier),
+            ten_replies_then_the_final(43)
+        );
+        assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
+    }
+
+    /// The same for a query the hosted queryable keeps: ten replies made through it all reach the
+    /// querier before the final its drop sends.
+    #[test]
+    fn a_kept_query_of_a_node_stating_two_pending_replies_answers_all_ten() {
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)).with_limits(&two_pending_replies()));
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.tick();
+        let kept = Arc::new(std::sync::Mutex::new(None));
+        let keeper = kept.clone();
+        let router = Arc::downgrade(&fwd);
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                let held = router.upgrade().and_then(|fwd| fwd.hold_current_query());
+                *keeper.lock().unwrap() = held;
+            }),
+        );
+        sink_querier.reset();
+        forward_one(&fwd, FaceId(0), request_best(44, "demo/h"));
+
+        let held = kept.lock().unwrap().take().expect("the query was kept");
+        held.reply(&mut |out: &mut dyn ReplyOut| {
+            for _ in 0..10 {
+                out.reply(b"later");
+            }
+        });
+        drop(held);
+        assert_eq!(
+            responses_sent(&sink_querier),
+            ten_replies_then_the_final(44)
         );
     }
 
