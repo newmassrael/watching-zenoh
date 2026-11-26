@@ -136,11 +136,14 @@ pub(crate) fn refusal_code(refusal: Refusal, door: Door) -> ZResult {
         // one asked of a session that is closed is `_Z_ERR_SESSION_CLOSED`
         // (`vendor/zenoh-pico/src/net/primitives.c` @
         // `return _z_session_is_closed(zn) ? _Z_ERR_SESSION_CLOSED : _Z_RES_OK;`), and one larger
-        // than the session's codec carries the generic error, as a publication of one is.
+        // than the session's codec carries the generic error, as a publication of one is. One whose
+        // request no link took answers what pico's send answers on a transport that is not there
+        // (`vendor/zenoh-pico/src/transport/common/tx.c` @ `_Z_ERROR_LOG(_Z_ERR_TRANSPORT_NOT_AVAILABLE);`).
         #[cfg(feature = "query")]
         Door::Get => match refusal {
             Refusal::Closed => Z_ERR_SESSION_CLOSED,
             Refusal::ExceedsCapacity => Z_ERR_GENERIC,
+            Refusal::Unavailable => crate::result::Z_ERR_TRANSPORT_NOT_AVAILABLE,
             _ => Z_ERR_SYSTEM_OUT_OF_MEMORY,
         },
     }
@@ -172,6 +175,10 @@ mod tests {
         assert_eq!(at(Refusal::TableFull), Z_ERR_SYSTEM_OUT_OF_MEMORY);
         assert_eq!(at(Refusal::Closed), Z_ERR_SESSION_CLOSED);
         assert_eq!(at(Refusal::ExceedsCapacity), Z_ERR_GENERIC);
+        assert_eq!(
+            at(Refusal::Unavailable),
+            crate::result::Z_ERR_TRANSPORT_NOT_AVAILABLE
+        );
         assert_eq!(at(Refusal::NotBuilt), ZEXT_ERR_UNSUPPORTED);
         assert_eq!(
             at(Refusal::NotHonoured(

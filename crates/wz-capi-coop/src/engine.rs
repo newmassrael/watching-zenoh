@@ -3951,6 +3951,38 @@ fn issued_so_far(issued: usize) -> Result<usize, Declined> {
     }
 }
 
+/// What a get comes to once its legs are issued: the count of those that went out; when none
+/// did, a refusal for the legs no pending table held (`unheld`), else the refusal of a leg whose
+/// request no link took (`unsent`), else `0`, a get that reached nobody and is over at once.
+#[cfg(feature = "query")]
+pub(crate) fn get_outcome(
+    issued: usize,
+    unheld: usize,
+    unsent: Option<Declined>,
+) -> Result<usize, Declined> {
+    if issued > 0 {
+        return Ok(issued);
+    }
+    if unheld > 0 {
+        return Err(Declined::TableFull);
+    }
+    unsent.map_or(Ok(0), Err)
+}
+
+/// The refusal of a get's leg whose request the link did not take, by the send's error: a request
+/// past what the session's codec or reassembly carries is the request's own, and any other the
+/// link's, which is down or did not take it now (`None`: the face's place held no link). zenoh-pico
+/// answers a get whose send failed with that send's error
+/// (`vendor/zenoh-pico/src/net/primitives.c` @
+/// `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
+#[cfg(feature = "query")]
+pub(crate) fn unsent_refusal(why: Option<SendWireError>) -> Declined {
+    match why.map(PublishError::from) {
+        Some(PublishError::ExceedsCapacity) => Declined::ExceedsCapacity,
+        _ => Declined::Unavailable,
+    }
+}
+
 /// The deadline of a leg asked at `now_us` that waits `timeout_ms`, in milliseconds on the
 /// session's clock, rounded up so a sweep that reads whole milliseconds never ends the leg before
 /// its timeout. A clock of microseconds read in milliseconds leaves room past it for any timeout a
@@ -11590,6 +11622,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // The legs refused for want of a row in their face's table of pending gets: a get that
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
+        // Why the last leg whose face was up did not go out: a get that issued none is refused
+        // with it, as zenoh-pico's get answers the error of the send that failed.
+        let mut unsent: Option<Declined> = None;
         // The faces whose links are up, each asked once in the order of their ids: the walk keeps
         // the last face it asked and holds the faces and the session for each, holding no list of
         // them; it ends with the face after which none is up, read in that face's hold, so none is
@@ -11663,6 +11698,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // The link names the key as its own key-wire form says, and the query is written
                 // from the options where they lie, with nothing copied.
                 let abi = abi_names(wire, keyexpr);
+                let refused = core::cell::Cell::new(None);
                 let sent = core.up_wire(face).and_then(|link| {
                     send_through(link, tx, &|actions: &LinkActions<C>| {
                         get_key_on_link(actions, keyexpr, abi, |mapping_id, suffix| {
@@ -11674,16 +11710,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                                             key,
                                             query: request,
                                         })
+                                        .map_err(|why| refused.set(Some(why)))
                                         .is_ok()
                                 })
                         })
                     })
                 }) == Some(true);
                 if !sent {
-                    // Nothing went out: the entry and the leg go, and the leg is over.
+                    // Nothing went out: the entry and the leg go, and the leg is over. The get is
+                    // told why when no other leg goes out, not ended as one that reached nobody.
                     if let Some(tables) = core.session.registry.face_mut(face) {
                         tables.gets.replies.unregister(rid);
                     }
+                    unsent = Some(unsent_refusal(refused.get()));
                     return LegTurn::Ended(leg_id);
                 }
                 if !core.session.note_pending(PendingGet {
@@ -11851,11 +11890,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 LegHeld::NoRoom | LegHeld::Gone => unheld = unheld.saturating_add(1),
             }
         }
-        // Asked of someone and held by none, with nothing sent: refused whole.
-        if issued == 0 && unheld > 0 {
-            return Err(Declined::TableFull);
-        }
-        Ok(issued)
+        get_outcome(issued, unheld, unsent)
     }
 
     #[cfg(feature = "liveliness-get")]

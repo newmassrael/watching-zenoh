@@ -636,3 +636,44 @@ fn a_get_ends_with_its_link() {
     });
     assert!(leg.lock().unwrap().replies.is_empty());
 }
+
+/// A get that issued no leg is refused when its legs' requests went out on no link, with why the
+/// last did not, and not ended as one that reached nobody: a request past what the session sends
+/// is the request's refusal, any other the link's. The CONTROL is a get that issued a leg, which is
+/// its count whatever another leg came to, and one that asked nobody, which is over at once.
+/// Turned red by a get whose unsent leg ends it as one that reached nobody.
+#[test]
+fn a_get_whose_request_went_out_on_no_link_is_refused_with_why() {
+    use crate::engine::{get_outcome, unsent_refusal};
+    use wz_session_core::send_wire_error::SendWireError;
+    let unavailable = unsent_refusal(Some(SendWireError::TransportUnavailable));
+    assert_eq!(unavailable, Refusal::Unavailable);
+    assert_eq!(
+        unsent_refusal(None),
+        Refusal::Unavailable,
+        "a place that held no link"
+    );
+    assert_eq!(
+        unsent_refusal(Some(SendWireError::ExceedsReassemblyCap)),
+        Refusal::ExceedsCapacity
+    );
+    assert_eq!(
+        get_outcome(0, 0, Some(unavailable)),
+        Err(Refusal::Unavailable)
+    );
+    assert_eq!(
+        get_outcome(0, 1, Some(unavailable)),
+        Err(Refusal::TableFull),
+        "a leg no table held is refused first"
+    );
+    assert_eq!(
+        get_outcome(1, 0, Some(unavailable)),
+        Ok(1),
+        "CONTROL: a leg that went out"
+    );
+    assert_eq!(
+        get_outcome(0, 0, None),
+        Ok(0),
+        "CONTROL: a get that asked nobody"
+    );
+}
