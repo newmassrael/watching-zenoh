@@ -8093,7 +8093,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
                 continue;
             }
-            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(group.at()));
+            // Where each face's leg is sent apart, every group is the groups' one leg's, and a send
+            // on one is marked at that leg's place.
+            #[cfg(not(wz_round))]
+            let place = direct::GROUPS_LEG;
+            #[cfg(wz_round)]
+            let place = group.at();
+            let _sending = SendingOn::enter(&self.sending_on, mark_of_place(place));
             let put = GroupPut {
                 keyexpr,
                 wire,
@@ -12208,6 +12214,20 @@ mod sending_on_tests {
             );
         }
         assert_eq!(mark.load(Ordering::Relaxed), NOT_SENDING);
+    }
+
+    /// A send on a group, marked at the groups' leg's place where each face's leg is sent apart,
+    /// reads as a send to a droppable leg that finds the session held, and not as a holder that
+    /// sends on no face. Turned red by a place whose mark is one of those, as `usize::MAX`'s is
+    /// `PUBLISHING` on a 64-bit target.
+    #[cfg(all(feature = "group", not(wz_round)))]
+    #[test]
+    fn a_send_on_a_group_is_marked_as_a_send() {
+        let mark = super::mark_of_place(super::direct::GROUPS_LEG);
+        assert!(
+            ![NOT_SENDING, super::WAITING, PUBLISHING].contains(&mark),
+            "the groups' leg is marked {mark}, a holder's that sends on no face"
+        );
     }
 }
 

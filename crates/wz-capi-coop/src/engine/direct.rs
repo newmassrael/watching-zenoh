@@ -529,8 +529,12 @@ pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
 /// The place a publish's leg to the session's groups holds alone (`FaceTx::reaches_groups`):
 /// past every face's, so the leg reaches no face's link, no face is asked for its room on its
 /// behalf (`LinkRooms::within_face` finds no place there), and no send marked on a face is its.
+/// A send on a group is marked at this place (`CoopEngine::publish_to_groups`), so a droppable
+/// leg to the groups behind one is dropped as a face's leg behind a send on its face is
+/// (`LinkRooms::for_held`): its mark is below those of a holder that sends on no face
+/// (`NOT_SENDING`, `WAITING`, `PUBLISHING`), which the last places' marks are.
 #[cfg(feature = "group")]
-const GROUPS_LEG: usize = usize::MAX;
+pub(super) const GROUPS_LEG: usize = usize::MAX - 3;
 
 impl<C: ClockSource + 'static> Clone for FaceTx<'_, C> {
     fn clone(&self) -> Self {
