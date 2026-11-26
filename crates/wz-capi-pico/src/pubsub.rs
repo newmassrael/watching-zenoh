@@ -2428,6 +2428,70 @@ mod put_options_tests {
         }
     }
 
+    /// A session's delete and a publisher's put and delete, each a jump to the body it shares with
+    /// its sibling, refuse what names no session or no publisher; a publisher's put spends its
+    /// payload before it reads the handle, and refuses a missing payload before that. Turned red
+    /// by the publisher's body reading the handle before the payload.
+    #[test]
+    fn the_shared_write_bodies_refuse_a_missing_session_or_publisher() {
+        use super::{
+            z_delete, z_delete_options_default, z_delete_options_t, z_publisher_delete,
+            z_publisher_delete_options_default, z_publisher_delete_options_t, z_publisher_put,
+        };
+        use crate::abi::{z_moved_bytes_t, z_owned_bytes_t};
+        use crate::result::{Z_ERR_NULL, Z_OK};
+        // SAFETY: each pointer handed over is null or points at a live value of its type, which
+        // outlives the call.
+        unsafe {
+            assert_eq!(
+                z_delete(core::ptr::null(), core::ptr::null(), core::ptr::null()),
+                Z_ERR_NULL,
+                "no session, no options"
+            );
+            let mut options = core::mem::MaybeUninit::<z_delete_options_t>::uninit();
+            z_delete_options_default(options.as_mut_ptr());
+            let options = options.assume_init();
+            assert_eq!(
+                z_delete(core::ptr::null(), core::ptr::null(), &options),
+                Z_ERR_NULL,
+                "no session, the default options"
+            );
+
+            assert_eq!(
+                z_publisher_delete(core::ptr::null(), core::ptr::null()),
+                Z_ERR_NULL,
+                "no publisher, no options"
+            );
+            let mut options = core::mem::MaybeUninit::<z_publisher_delete_options_t>::uninit();
+            z_publisher_delete_options_default(options.as_mut_ptr());
+            let options = options.assume_init();
+            assert_eq!(
+                z_publisher_delete(core::ptr::null(), &options),
+                Z_ERR_NULL,
+                "no publisher, the default options"
+            );
+
+            let mut owned = z_owned_bytes_t::null_value();
+            let copied = crate::bytes::z_bytes_copy_from_buf(&mut owned, b"payload".as_ptr(), 7);
+            assert_eq!(copied, Z_OK);
+            let mut payload = z_moved_bytes_t { _this: owned };
+            assert_eq!(
+                z_publisher_put(core::ptr::null(), &mut payload, core::ptr::null()),
+                Z_ERR_NULL,
+                "no publisher"
+            );
+            assert!(
+                payload._this.handle.is_null(),
+                "the payload is spent before the handle is read"
+            );
+            assert_eq!(
+                z_publisher_put(core::ptr::null(), core::ptr::null_mut(), core::ptr::null()),
+                Z_ERR_NULL,
+                "no payload"
+            );
+        }
+    }
+
     /// A put reads the payload it is moved where it lies: a borrow of a delivered sample's payload
     /// is read in the bytes its marshal holds and not copied, a payload of the caller's own is
     /// taken out of its place, a null one is none, and each leaves the caller's slot spent.
@@ -3211,37 +3275,67 @@ unsafe fn publisher_delete_options<'a>(
     PutCarried::stamps((*options).timestamp, source_info).fold(opts, held);
 }
 
-/// Publish `payload` on a session's key with `opts`: the body `z_put` and `z_delete` share, out
-/// of line so that neither export holds a copy of it. A key not in canon form, which only an
-/// unchecked view can hold, is refused as every door refuses it
-/// ([`canon_key`](crate::keyexpr::canon_key)) and nothing is sent; zenoh-pico sends whatever text
-/// the key holds. The key is read where it lies and named as
+/// Which write a session door makes, with the options struct the door takes: one body reads
+/// either ([`session_write`]).
+#[derive(Clone, Copy)]
+enum SessionWrite {
+    /// `z_put`, whose options carry an encoding and an attachment besides the stamps and QoS.
+    Put(*const z_put_options_t),
+    /// `z_delete`, whose Del body has no payload field.
+    Delete(*const z_delete_options_t),
+}
+
+/// Publish on a session's key: the body `z_put` and `z_delete` share, out of line so that each
+/// export is its arguments and a jump. The options' moved values are spent first, then a put's
+/// payload, so every refusal after them has spent all three, as pico's `z_put` drops them
+/// whatever `_z_write` answered. A key not in canon form, which only an unchecked view can hold,
+/// is refused as every door refuses it ([`canon_key`](crate::keyexpr::canon_key)) and nothing is
+/// sent; zenoh-pico sends whatever text the key holds. The key is read where it lies and named as
 /// its declaration names it on this session ([`wire_key_of`]), which is the reason
 /// `z_declare_keyexpr` exists: pico's `_z_write` reads the same discriminant off its
 /// `_z_declared_keyexpr_t`. Each face resolves the literal from its own outbound mapping table,
 /// so this is right for a face that joined after the declaration and got it by replay.
 ///
 /// # Safety
-/// `zs` and `keyexpr` must be null or live loans.
+/// `zs` and `keyexpr` must be null or live loans; `payload` and the options as their door
+/// requires them, `payload` read only for a put.
 #[inline(never)]
-unsafe fn session_publish(
+unsafe fn session_write(
     zs: *const z_loaned_session_t,
     keyexpr: *const z_loaned_keyexpr_t,
-    payload: &[u8],
-    opts: &PublishOptions,
+    payload: *mut z_moved_bytes_t,
+    write: SessionWrite,
 ) -> ZResult {
-    let Some(state) = session_handle(zs) else {
-        return Z_ERR_NULL;
-    };
-    let Some(ke) = keyexpr_str(keyexpr) else {
-        return Z_ERR_INVALID;
-    };
-    if let Err(code) = crate::keyexpr::canon_key(ke) {
-        return code;
-    }
-    let engine = engine_ref(state);
-    let wire = wire_key_of(keyexpr, engine);
-    publish_code(engine.publish_on_wire_all(ke, &wire, payload, opts))
+    guarded(|| {
+        let mut held = PutHeld::default();
+        let mut opts = put_options();
+        let buf = match write {
+            SessionWrite::Put(options) => {
+                session_put_options(options, &mut held, &mut opts);
+                let Some(buf) = read_moved_bytes(payload) else {
+                    return Z_ERR_NULL;
+                };
+                Some(buf)
+            }
+            SessionWrite::Delete(options) => {
+                session_delete_options(options, &mut held, &mut opts);
+                None
+            }
+        };
+        let Some(state) = session_handle(zs) else {
+            return Z_ERR_NULL;
+        };
+        let Some(ke) = keyexpr_str(keyexpr) else {
+            return Z_ERR_INVALID;
+        };
+        if let Err(code) = crate::keyexpr::canon_key(ke) {
+            return code;
+        }
+        let engine = engine_ref(state);
+        let wire = wire_key_of(keyexpr, engine);
+        let payload = buf.as_deref().map_or(&[][..], ByteBuf::as_slice);
+        publish_code(engine.publish_on_wire_all(ke, &wire, payload, &opts))
+    })
 }
 
 /// Publish a payload on a session (pico `z_put`). Consumes the moved payload, and the options'
@@ -3254,22 +3348,14 @@ pub unsafe extern "C" fn z_put(
     payload: *mut z_moved_bytes_t,
     options: *const z_put_options_t,
 ) -> ZResult {
-    guarded(|| {
-        let mut held = PutHeld::default();
-        let mut opts = put_options();
-        session_put_options(options, &mut held, &mut opts);
-        let Some(buf) = read_moved_bytes(payload) else {
-            return Z_ERR_NULL;
-        };
-        session_publish(zs, keyexpr, &buf, &opts)
-    })
+    session_write(zs, keyexpr, payload, SessionWrite::Put(options))
 }
 
 /// Publish a DELETE on a session (pico `z_delete`).
 ///
 /// A Del is not a Put with an empty payload: it carries a different inner body,
 /// and a subscriber reads `z_sample_kind` to tell them apart. The empty payload
-/// handed to the shared body is the Del body's own shape, not a stand-in for a
+/// the shared body sends is the Del body's own shape, not a stand-in for a
 /// missing one: `_z_msg_del_t` has no payload field.
 ///
 /// # Safety
@@ -3281,11 +3367,61 @@ pub unsafe extern "C" fn z_delete(
     keyexpr: *const z_loaned_keyexpr_t,
     options: *const z_delete_options_t,
 ) -> ZResult {
+    session_write(
+        zs,
+        keyexpr,
+        core::ptr::null_mut(),
+        SessionWrite::Delete(options),
+    )
+}
+
+/// Which write a publisher door makes, with the options struct the door takes: one body reads
+/// either ([`publisher_write`]).
+#[derive(Clone, Copy)]
+enum PublisherWrite {
+    /// `z_publisher_put`.
+    Put(*const z_publisher_put_options_t),
+    /// `z_publisher_delete`, which sends no payload.
+    Delete(*const z_publisher_delete_options_t),
+}
+
+/// Publish through a declared publisher: the body `z_publisher_put` and `z_publisher_delete`
+/// share, out of line so that each export is its arguments and a jump. A put's payload is spent
+/// first, even for a handle that names no publisher (pico's consume-on-all-paths contract). A
+/// delete always sends its own options, which name its kind; a put whose options carry nothing
+/// sends none, and goes the plain way the publisher's filter keeps ([`PlainPublisher::publish`]).
+///
+/// # Safety
+/// `publisher` must be null or a live loaned publisher; `payload` and the options as their door
+/// requires them, `payload` read only for a put.
+#[inline(never)]
+unsafe fn publisher_write(
+    publisher: *const z_loaned_publisher_t,
+    payload: *mut z_moved_bytes_t,
+    write: PublisherWrite,
+) -> ZResult {
     guarded(|| {
+        let buf = match write {
+            PublisherWrite::Put(_) => match read_moved_bytes(payload) {
+                Some(buf) => Some(buf),
+                None => return Z_ERR_NULL,
+            },
+            PublisherWrite::Delete(_) => None,
+        };
+        let Some(state) = handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) else {
+            return Z_ERR_NULL;
+        };
         let mut held = PutHeld::default();
-        let mut opts = put_options();
-        session_delete_options(options, &mut held, &mut opts);
-        session_publish(zs, keyexpr, &[], &opts)
+        let mut room = None;
+        let opts = match write {
+            PublisherWrite::Put(options) => publisher_put_options(options, &mut held, &mut room),
+            PublisherWrite::Delete(options) => {
+                let opts = room.insert(put_options());
+                publisher_delete_options(options, &mut held, opts);
+                Some(opts)
+            }
+        };
+        state.publish(buf.as_deref().map_or(&[][..], ByteBuf::as_slice), opts)
     })
 }
 
@@ -3301,17 +3437,11 @@ pub unsafe extern "C" fn z_publisher_delete(
     publisher: *const z_loaned_publisher_t,
     options: *const z_publisher_delete_options_t,
 ) -> ZResult {
-    guarded(|| {
-        let state = match crate::abi::handle_ref::<z_loaned_publisher_t, PublisherState>(publisher)
-        {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        let mut held = PutHeld::default();
-        let mut opts = put_options();
-        publisher_delete_options(options, &mut held, &mut opts);
-        state.publish(&[], Some(&mut opts))
-    })
+    publisher_write(
+        publisher,
+        core::ptr::null_mut(),
+        PublisherWrite::Delete(options),
+    )
 }
 
 // --- publisher exports -----------------------------------------------------
@@ -3448,33 +3578,16 @@ pub unsafe extern "C" fn z_declare_publisher(
     })
 }
 
-/// Publish through a publisher (pico `z_publisher_put`). Consumes the payload.
+/// Publish through a publisher (pico `z_publisher_put`). Consumes the payload, and the options'
+/// moved encoding and attachment once the handle names a publisher; the options' encoding,
+/// attachment and timestamp are each sent, beside the QoS the publisher was declared with.
 #[no_mangle]
 pub unsafe extern "C" fn z_publisher_put(
     publisher: *const z_loaned_publisher_t,
     payload: *mut z_moved_bytes_t,
     options: *const z_publisher_put_options_t,
 ) -> ZResult {
-    guarded(|| {
-        // Consume the moved payload first (pico consume-on-all-paths contract):
-        // dropped + source nulled even if the publisher handle is invalid.
-        let Some(buf) = read_moved_bytes(payload) else {
-            return Z_ERR_NULL;
-        };
-        let state = match handle_ref::<z_loaned_publisher_t, PublisherState>(publisher) {
-            Some(s) => s,
-            None => return Z_ERR_NULL,
-        };
-        // R311y529 — `_options` used to be `*const c_void` and DROPPED. The
-        // link measurement could not see that: `z_pub_attachment.c` linked,
-        // ran, and printed its own "Putting Data" lines while a REAL pico
-        // subscriber reported `encoding: zenoh/bytes` with no attachment and no
-        // timestamp, because all three were being thrown away here. A link is
-        // not a pass, and this is what the difference looked like.
-        let mut held = PutHeld::default();
-        let mut room = None;
-        state.publish(&buf, publisher_put_options(options, &mut held, &mut room))
-    })
+    publisher_write(publisher, payload, PublisherWrite::Put(options))
 }
 
 /// Undeclare a publisher (pico `z_undeclare_publisher`).
