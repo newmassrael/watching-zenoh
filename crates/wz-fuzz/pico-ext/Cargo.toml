@@ -58,6 +58,7 @@ message-catalog = ["wz-capi-pico/message-catalog"]
 message-payload = ["wz-capi-pico/message-payload"]
 proto-text = ["wz-capi-pico/proto-text"]
 replay-cache = ["wz-capi-pico/replay-cache"]
+time-base = ["wz-capi-pico/time-base"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"
