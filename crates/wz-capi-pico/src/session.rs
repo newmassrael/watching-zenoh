@@ -2578,9 +2578,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // row it does not use and a page no row uses is never resident; an image's is its heap's,
     // written where a row must read empty.
     #[cfg(all(feature = "os-host", any(unix, windows)))]
-    let memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
     #[cfg(not(all(feature = "os-host", any(unix, windows))))]
-    let memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
         &wz_capi_coop::arena::AllocatorMemory;
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
@@ -2590,7 +2590,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         request.key_ids,
         wz_capi_coop::arena::OpenStorage {
-            memory,
+            memory: arena_memory,
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
             plan,
         },

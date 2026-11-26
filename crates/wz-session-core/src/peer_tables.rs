@@ -255,10 +255,12 @@ impl PeerTables<Region> {
                 at.wrapping_add(core::mem::offset_of!(Self, tokens)),
             ));
         #[cfg(feature = "liveliness-token")]
-        let lines = lines.seq(crate::bounded::SeqPlace::of::<DeclResponseItem>(
+        let lines = lines.seq(crate::bounded::SeqPlace::of_room::<
+            DeclResponseItem,
+            { caps::MAX_PENDING_DECLARES },
+        >(
             at.wrapping_add(core::mem::offset_of!(Self, pending_declares)),
             rows.wrapping_add(core::mem::offset_of!(PeerTableRows, pending_declares)),
-            caps::MAX_PENDING_DECLARES,
         ));
         lines
     }
