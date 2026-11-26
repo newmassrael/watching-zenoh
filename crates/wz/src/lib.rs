@@ -266,7 +266,7 @@ pub use wz_runtime_core as runtime_core;
 ///
 /// The Rust compatibility surface carries upstream's names only, as the drop-in C headers do,
 /// so a program that reaches for something here says by its path that it is not portable to
-/// zenoh. The C doors of the same switches and behaviour are `wz_ext_*`.
+/// zenoh. The C doors of the same switches and behaviour are `zext_*`.
 pub mod ext {
     /// The open's own layer of policies and what an open resolved, through the Rust API.
     ///
@@ -289,7 +289,7 @@ pub mod ext {
     /// that holds that the peer lost declarations the session made. The count of declarations
     /// sent, or why none was: a build without `session-reconnect` keeps no record of them
     /// (`FeatureDisabled`), and a refused send stops the telling where it was. The C door is
-    /// `wz_ext_redeclare`.
+    /// `zext_redeclare`.
     #[cfg(all(feature = "runtime-tokio", feature = "transport-unicast"))]
     pub fn redeclare(
         session: &crate::runtime_tokio::session::TokioSession,

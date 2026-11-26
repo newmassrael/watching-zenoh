@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 #
-# The targets of the pico C ABI's own doors (`wz_ext_*`, fuzz_targets/), against the library as
+# The targets of the pico C ABI's own doors (`zext_*`, fuzz_targets/), against the library as
 # the release package builds it: `wz-capi-pico` in the build `configs/profiles/host-peer-ext.conf`
 # resolves to. A package of its own so the features cargo unifies for it are that build's alone
 # (../README.md).

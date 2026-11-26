@@ -13,7 +13,7 @@ The owner's release criteria of 2026-11-23 for the Windows DLL (no_std, no heap 
 os-windows, the one library of the package profile host-peer-ext) ask for a run of every zenoh-pico
 feature on that DLL and production evidence for every door zenoh-pico does not have.
 `docs/release-proof-pico-windows.md` is the ledger of that evidence: for every public function,
-build switch, example and test of zenoh-pico at the pin, and every `wz_ext_*` door, the lanes that
+build switch, example and test of zenoh-pico at the pin, and every `zext_*` door, the lanes that
 run it and whether one of them runs the release form. This gate keeps the ledger from saying more
 than the tree does:
 
@@ -23,7 +23,7 @@ than the tree does:
   `fnmatch` patterns it matches, and every pattern claims a name. The switch rows are exactly the
   `Z_FEATURE_*` switches of zenoh-pico's CMake (`upstream_switch_map.pico_switches`), each with its
   default. The example and test rows are exactly the programs of those directories. The door rows
-  claim every `wz_ext_*` function `wz_ext.h` declares, every `#if` arm kept.
+  claim every `zext_*` function `wz_ext.h` declares, every `#if` arm kept.
 * LANES. Every source file and workflow job a lane names exists, every program pattern matches a
   file, and `release form` is `yes` exactly when the host is Windows, the form `nostd` and the
   profile `host-peer-ext`.
@@ -65,7 +65,7 @@ BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
 LINE_COMMENT = re.compile(r"//[^\n]*")
 EXAMPLE_DIRS = ("examples/unix/c11", "examples/unix/c99", "examples/windows")
 TEST_SUFFIXES = (".c", ".py", ".sh")
-EXT_PREFIX = "wz_ext_"
+EXT_PREFIX = "zext_"
 
 MARKER = re.compile(r"^<!-- release-proof: ([a-z]+) -->\s*$")
 TICKS = re.compile(r"\x60([^\x60]+)\x60")
@@ -409,7 +409,7 @@ def check(text: str, pops: dict, root: pathlib.Path) -> list[str]:
 
 
 def ext_doors(header: str) -> set[str]:
-    """The `wz_ext_*` functions a header declares in any of its `#if` arms: its text with the
+    """The `zext_*` functions a header declares in any of its `#if` arms: its text with the
     comments removed, read by the drop-in gate's declaration reader."""
     text = LINE_COMMENT.sub(" ", BLOCK_COMMENT.sub(" ", header))
     return {n for n in dig.declared_functions(text)
@@ -505,8 +505,8 @@ def fixture_tables() -> dict[str, list[list[str]]]:
             ["C01", "size", "a reading", "L03", "unproven", "W01"],
         ],
         "ext": [
-            ["E01", "f", "\x60wz_ext_a*\x60", "yes", "\x60src/x.rs\x60", "none", "none", "none", "\x60src/x.rs\x60", "W01"],
-            ["E02", "g", "\x60wz_ext_b\x60", "no", NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "not in the release DLL"],
+            ["E01", "f", "\x60zext_a*\x60", "yes", "\x60src/x.rs\x60", "none", "none", "none", "\x60src/x.rs\x60", "W01"],
+            ["E02", "g", "\x60zext_b\x60", "no", NOTHING, NOTHING, NOTHING, NOTHING, NOTHING, "not in the release DLL"],
         ],
         "work": [
             ["W01", "P0", "do it", "small", "\x60src/x.rs\x60"],
@@ -538,7 +538,7 @@ def fixture_pops() -> dict:
         "switch_defaults": {"Z_FEATURE_X": "1", "Z_FEATURE_Y": "0"},
         "examples": {"ex/z_put.c"},
         "tests": {"ts/z_api_t.c", "ts/z_priv.c"},
-        "ext": {"wz_ext_a1", "wz_ext_a2", "wz_ext_b"},
+        "ext": {"zext_a1", "zext_a2", "zext_b"},
     }
 
 
@@ -648,7 +648,7 @@ def cmd_selftest() -> int:
                has(run(add_row("lanes", ["L04", "idle", NOTHING, "\x60src/x.rs\x60", "linux", "std", "p", "gate", "no"])),
                    "lane L04 is cited by no row"))
         expect("a door no row claims",
-               has(run(pops_change=lambda p: p["ext"].add("wz_ext_c")), "wz_ext_c is claimed by no row"))
+               has(run(pops_change=lambda p: p["ext"].add("zext_c")), "zext_c is claimed by no row"))
         expect("a carried door with an empty evidence cell",
                has(run(set_cell("ext", 0, "docs", NOTHING)), "docs cell is empty"))
         expect("a carried door reading none with no work item",
@@ -670,9 +670,9 @@ def cmd_selftest() -> int:
         expect("an empty population fails rather than passing",
                has(run(pops_change=lambda p: p["api"].clear()), "population of the API is empty"))
         expect("the door reader keeps every #if arm and drops comments, function types and types",
-               ext_doors("/* wz_ext_old(void); */\nint wz_ext_a(void);\n#if X\nint wz_ext_b(int x);\n#endif\n"
-                         "typedef int wz_ext_cb_fn(void *c);\n// wz_ext_c(void);\n")
-               == {"wz_ext_a", "wz_ext_b"})
+               ext_doors("/* zext_old(void); */\nint zext_a(void);\n#if X\nint zext_b(int x);\n#endif\n"
+                         "typedef int zext_cb_fn(void *c);\n// zext_c(void);\n")
+               == {"zext_a", "zext_b"})
         expect("comments of a C program are not names it calls",
                NAME_REF.findall(strip_comments("p.c", "z_a(); /* z_b() */ // z_c()\n")) == ["z_a"])
     print(f"  release-proof selftest: {ok}/{ok + bad} arm(s) pass")

@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_stream_supervisor_*`: reception supervision per stream, from C. A receiver gives each
+//! `zext_stream_supervisor_*`: reception supervision per stream, from C. A receiver gives each
 //! periodic stream a deadline of its period times a factor, says when a stream is received, and
 //! polls; a stream that stops arriving is told to the program's callback once per loss, with
 //! saturating error counts per stream and per node.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: the
 //! `e2e-supervision` capability implies `unstable-api`.
 //!
@@ -17,7 +17,7 @@
 //!
 //! # Storage
 //!
-//! The table is the program's: an array of `wz_ext_stream_slot_t`, and under the build's
+//! The table is the program's: an array of `zext_stream_slot_t`, and under the build's
 //! `e2e-supervision-notify = last-value` a byte area of one cell per slot for the last payload.
 //! The supervisor writes both when it is made and owns them until it is dropped; the program
 //! neither reads nor frees them in between.
@@ -30,9 +30,9 @@
 //!
 //! # The poll
 //!
-//! The program calls `wz_ext_stream_supervisor_poll` on its own cadence, which is how the
+//! The program calls `zext_stream_supervisor_poll` on its own cadence, which is how the
 //! cooperative engine and a single-threaded program drive it. A build with tasks can instead have
-//! the library poll on a task of its own (`wz_ext_stream_supervisor_start_task`).
+//! the library poll on a task of its own (`zext_stream_supervisor_start_task`).
 //!
 //! # Threads
 //!
@@ -64,26 +64,25 @@ use crate::result::{ZResult, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
 /// One row of the program's stream table: five 32-bit words the supervisor owns.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct wz_ext_stream_slot_t {
+pub struct zext_stream_slot_t {
     _opaque: [u32; 5],
 }
 
 // The C header sizes the table by this type, and the supervisor writes `StreamSlot` into it.
 const _: () = assert!(
-    core::mem::size_of::<wz_ext_stream_slot_t>() == core::mem::size_of::<StreamSlot>()
-        && core::mem::align_of::<wz_ext_stream_slot_t>() == core::mem::align_of::<StreamSlot>()
+    core::mem::size_of::<zext_stream_slot_t>() == core::mem::size_of::<StreamSlot>()
+        && core::mem::align_of::<zext_stream_slot_t>() == core::mem::align_of::<StreamSlot>()
 );
 
 /// The program's clock: writes the milliseconds of a monotonic source, in 32 bits that wrap, and
 /// returns 0, or returns anything else when it cannot say what time it is.
-pub type wz_ext_stream_clock_fn =
-    unsafe extern "C" fn(context: *mut c_void, now_ms: *mut u32) -> i8;
+pub type zext_stream_clock_fn = unsafe extern "C" fn(context: *mut c_void, now_ms: *mut u32) -> i8;
 
 /// One loss, as the callback reads it: 32 bytes on a 64-bit target, 24 on a 32-bit one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct wz_ext_stream_loss_t {
-    /// The number `wz_ext_stream_supervisor_add` gave the stream.
+pub struct zext_stream_loss_t {
+    /// The number `zext_stream_supervisor_add` gave the stream.
     pub stream: u32,
     /// The sender the stream was added with.
     pub sender: u32,
@@ -100,7 +99,7 @@ pub struct wz_ext_stream_loss_t {
     pub value_len: usize,
 }
 
-impl wz_ext_stream_loss_t {
+impl zext_stream_loss_t {
     fn of(loss: &Loss<'_>) -> Self {
         let (value, value_len) = match loss.value {
             Some(value) => (value.as_ptr(), value.len()),
@@ -121,44 +120,44 @@ impl wz_ext_stream_loss_t {
 }
 
 /// What the supervisor calls for each loss, with the program's context.
-pub type wz_ext_stream_loss_fn =
-    unsafe extern "C" fn(context: *mut c_void, loss: *const wz_ext_stream_loss_t);
+pub type zext_stream_loss_fn =
+    unsafe extern "C" fn(context: *mut c_void, loss: *const zext_stream_loss_t);
 
 /// No poll has had a clock yet.
-pub const WZ_EXT_STREAM_UNCLOCKED: u8 = 0;
+pub const ZEXT_STREAM_UNCLOCKED: u8 = 0;
 /// The start delay runs.
-pub const WZ_EXT_STREAM_DELAYING: u8 = 1;
+pub const ZEXT_STREAM_DELAYING: u8 = 1;
 /// The delay has passed and the condition does not hold: nothing is judged.
-pub const WZ_EXT_STREAM_INACTIVE: u8 = 2;
+pub const ZEXT_STREAM_INACTIVE: u8 = 2;
 /// The delay has passed and the condition holds: every poll judges the streams.
-pub const WZ_EXT_STREAM_ACTIVE: u8 = 3;
-/// What `wz_ext_stream_supervisor_phase` answers for a null supervisor or the gravestone.
-pub const WZ_EXT_STREAM_NO_SUPERVISOR: u8 = 255;
+pub const ZEXT_STREAM_ACTIVE: u8 = 3;
+/// What `zext_stream_supervisor_phase` answers for a null supervisor or the gravestone.
+pub const ZEXT_STREAM_NO_SUPERVISOR: u8 = 255;
 
 /// A loss tells the stream and its counts.
-pub const WZ_EXT_STREAM_NOTIFY_STATUS_ONLY: u8 = 0;
+pub const ZEXT_STREAM_NOTIFY_STATUS_ONLY: u8 = 0;
 /// A loss also hands back the stream's last payload.
-pub const WZ_EXT_STREAM_NOTIFY_LAST_VALUE: u8 = 1;
+pub const ZEXT_STREAM_NOTIFY_LAST_VALUE: u8 = 1;
 
 /// An owned supervisor: the handle in its one word, null for the gravestone.
 #[repr(C)]
-pub struct wz_ext_owned_stream_supervisor_t {
+pub struct zext_owned_stream_supervisor_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned supervisor: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_stream_supervisor_t {
+pub struct zext_loaned_stream_supervisor_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved supervisor (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_stream_supervisor_t {
-    pub(crate) _this: wz_ext_owned_stream_supervisor_t,
+pub struct zext_moved_stream_supervisor_t {
+    pub(crate) _this: zext_owned_stream_supervisor_t,
 }
 
-impl wz_ext_owned_stream_supervisor_t {
+impl zext_owned_stream_supervisor_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
@@ -167,7 +166,7 @@ impl wz_ext_owned_stream_supervisor_t {
 }
 
 struct Clock {
-    read: Option<wz_ext_stream_clock_fn>,
+    read: Option<zext_stream_clock_fn>,
     context: SendPtr,
     origin: Instant,
 }
@@ -188,7 +187,7 @@ impl Clock {
 }
 
 struct Callback {
-    call: wz_ext_stream_loss_fn,
+    call: zext_stream_loss_fn,
     context: SendPtr,
 }
 
@@ -262,7 +261,7 @@ fn poll_state(state: &Mutex<State>) -> usize {
     } = &mut *state;
     supervisor.poll(now, |loss| {
         if let Some(callback) = callback.as_ref() {
-            let told = wz_ext_stream_loss_t::of(&loss);
+            let told = zext_stream_loss_t::of(&loss);
             // SAFETY: the program gave the callback and its context for as long as it is set.
             unsafe { (callback.call)(callback.context.0, &told) };
         }
@@ -273,7 +272,7 @@ fn poll_state(state: &Mutex<State>) -> usize {
 ///
 /// # Safety
 /// `this_` is null or a loaned supervisor of this library.
-unsafe fn handle_of<'a>(this_: *const wz_ext_loaned_stream_supervisor_t) -> Option<&'a Handle> {
+unsafe fn handle_of<'a>(this_: *const zext_loaned_stream_supervisor_t) -> Option<&'a Handle> {
     if this_.is_null() {
         return None;
     }
@@ -311,21 +310,21 @@ fn create_code(refusal: CreateRefused) -> ZResult {
 /// dropped; `clock` is safe to call with `clock_context` from any thread that polls, for as long.
 #[no_mangle]
 #[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_new(
-    this_: *mut wz_ext_owned_stream_supervisor_t,
-    slots: *mut wz_ext_stream_slot_t,
+pub unsafe extern "C" fn zext_stream_supervisor_new(
+    this_: *mut zext_owned_stream_supervisor_t,
+    slots: *mut zext_stream_slot_t,
     slot_count: usize,
     values: *mut u8,
     value_cell: usize,
     start_delay_ms: u32,
-    clock: Option<wz_ext_stream_clock_fn>,
+    clock: Option<zext_stream_clock_fn>,
     clock_context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        *this_ = wz_ext_owned_stream_supervisor_t::null_value();
+        *this_ = zext_owned_stream_supervisor_t::null_value();
         if slots.is_null() {
             return Z_ERR_NULL;
         }
@@ -386,7 +385,7 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_new(
 }
 
 /// Supervise a stream of `period_ms` that may miss `factor` periods, sent by `sender` (an opaque
-/// number of the program's, which `wz_ext_stream_supervisor_set_sender_present` names), and write
+/// number of the program's, which `zext_stream_supervisor_set_sender_present` names), and write
 /// its number to `out_stream` (which may be null). An `awaited` stream can time out before its
 /// first reception; one that is not is supervised from its first. A stream of a sender marked
 /// absent is absent with it.
@@ -398,8 +397,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_new(
 /// # Safety
 /// `this_` is null or a loaned supervisor; `out_stream` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_add(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_add(
+    this_: *const zext_loaned_stream_supervisor_t,
     period_ms: u32,
     factor: u16,
     sender: u32,
@@ -437,8 +436,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_add(
 /// # Safety
 /// `this_` is null or a loaned supervisor; `payload` is readable for `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_received(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_received(
+    this_: *const zext_loaned_stream_supervisor_t,
     stream: u32,
     payload: *const u8,
     len: usize,
@@ -472,8 +471,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_received(
 /// # Safety
 /// `this_` is null or a loaned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_set_condition(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_set_condition(
+    this_: *const zext_loaned_stream_supervisor_t,
     holds: bool,
 ) -> ZResult {
     guarded(|| {
@@ -495,8 +494,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_set_condition(
 /// # Safety
 /// `this_` is null or a loaned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_set_sender_present(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_set_sender_present(
+    this_: *const zext_loaned_stream_supervisor_t,
     sender: u32,
     present: bool,
 ) -> ZResult {
@@ -520,9 +519,9 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_set_sender_present(
 /// `this_` is null or a loaned supervisor; `call` is safe to call with `context` from any thread
 /// that polls, for as long as it is set.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_set_callback(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
-    call: Option<wz_ext_stream_loss_fn>,
+pub unsafe extern "C" fn zext_stream_supervisor_set_callback(
+    this_: *const zext_loaned_stream_supervisor_t,
+    call: Option<zext_stream_loss_fn>,
     context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
@@ -544,8 +543,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_set_callback(
 /// # Safety
 /// `this_` is null or a loaned supervisor; `out_told` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_poll(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_poll(
+    this_: *const zext_loaned_stream_supervisor_t,
     out_told: *mut usize,
 ) -> ZResult {
     guarded(|| {
@@ -567,8 +566,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_poll(
 /// # Safety
 /// `this_` is null or a loaned supervisor; `out` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_stream_errors(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_stream_errors(
+    this_: *const zext_loaned_stream_supervisor_t,
     stream: u32,
     out: *mut u8,
 ) -> ZResult {
@@ -598,8 +597,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_stream_errors(
 /// # Safety
 /// `this_` is null or a loaned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_node_errors(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_node_errors(
+    this_: *const zext_loaned_stream_supervisor_t,
 ) -> u8 {
     guard_val(|| match handle_of(this_) {
         Some(handle) => locked(&handle.state).supervisor.node_errors(),
@@ -607,52 +606,52 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_node_errors(
     })
 }
 
-/// Where the two gates stand: `WZ_EXT_STREAM_UNCLOCKED`, `_DELAYING`, `_INACTIVE` or `_ACTIVE`, or
-/// `WZ_EXT_STREAM_NO_SUPERVISOR`.
+/// Where the two gates stand: `ZEXT_STREAM_UNCLOCKED`, `_DELAYING`, `_INACTIVE` or `_ACTIVE`, or
+/// `ZEXT_STREAM_NO_SUPERVISOR`.
 ///
 /// # Safety
 /// `this_` is null or a loaned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_phase(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_phase(
+    this_: *const zext_loaned_stream_supervisor_t,
 ) -> u8 {
     guard_val(|| {
         let Some(handle) = handle_of(this_) else {
-            return WZ_EXT_STREAM_NO_SUPERVISOR;
+            return ZEXT_STREAM_NO_SUPERVISOR;
         };
         match locked(&handle.state).supervisor.phase() {
-            Phase::Unclocked => WZ_EXT_STREAM_UNCLOCKED,
-            Phase::Delaying => WZ_EXT_STREAM_DELAYING,
-            Phase::Inactive => WZ_EXT_STREAM_INACTIVE,
-            Phase::Active => WZ_EXT_STREAM_ACTIVE,
+            Phase::Unclocked => ZEXT_STREAM_UNCLOCKED,
+            Phase::Delaying => ZEXT_STREAM_DELAYING,
+            Phase::Inactive => ZEXT_STREAM_INACTIVE,
+            Phase::Active => ZEXT_STREAM_ACTIVE,
         }
     })
 }
 
-/// What a loss of this supervisor carries: `WZ_EXT_STREAM_NOTIFY_STATUS_ONLY` or
+/// What a loss of this supervisor carries: `ZEXT_STREAM_NOTIFY_STATUS_ONLY` or
 /// `_LAST_VALUE`, the build's `e2e-supervision-notify` policy when it was made, or
-/// `WZ_EXT_STREAM_NO_SUPERVISOR`.
+/// `ZEXT_STREAM_NO_SUPERVISOR`.
 ///
 /// # Safety
 /// `this_` is null or a loaned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_notify(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_notify(
+    this_: *const zext_loaned_stream_supervisor_t,
 ) -> u8 {
     guard_val(|| {
         let Some(handle) = handle_of(this_) else {
-            return WZ_EXT_STREAM_NO_SUPERVISOR;
+            return ZEXT_STREAM_NO_SUPERVISOR;
         };
         match locked(&handle.state).supervisor.notify() {
-            Notify::StatusOnly => WZ_EXT_STREAM_NOTIFY_STATUS_ONLY,
-            Notify::LastValue => WZ_EXT_STREAM_NOTIFY_LAST_VALUE,
+            Notify::StatusOnly => ZEXT_STREAM_NOTIFY_STATUS_ONLY,
+            Notify::LastValue => ZEXT_STREAM_NOTIFY_LAST_VALUE,
         }
     })
 }
 
 /// Have the library poll every `period_ms` on a task of its own, for a program that does not poll
 /// on its own cadence. The callback then runs on that task. It runs until
-/// `wz_ext_stream_supervisor_stop_task` or the drop.
+/// `zext_stream_supervisor_stop_task` or the drop.
 ///
 /// Returns `Z_ERR_NULL` for a null supervisor or the gravestone; `Z_ERR_INVALID` for a period of 0
 /// or when a task already polls this supervisor; `Z_ERR_GENERIC` when the host gave no thread;
@@ -662,8 +661,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_notify(
 /// `this_` is null or a loaned supervisor.
 #[cfg(feature = "multi-thread")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_start_task(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_start_task(
+    this_: *const zext_loaned_stream_supervisor_t,
     period_ms: u32,
 ) -> ZResult {
     guarded(|| {
@@ -706,8 +705,8 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_start_task(
 /// `this_` is null or a loaned supervisor.
 #[cfg(feature = "multi-thread")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_stop_task(
-    this_: *const wz_ext_loaned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_stream_supervisor_stop_task(
+    this_: *const zext_loaned_stream_supervisor_t,
 ) -> ZResult {
     guarded(|| {
         let Some(handle) = handle_of(this_) else {
@@ -743,22 +742,22 @@ fn stop_task(handle: &Handle) -> ZResult {
 /// # Safety
 /// `this_` is null or an owned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_loan(
-    this_: *const wz_ext_owned_stream_supervisor_t,
-) -> *const wz_ext_loaned_stream_supervisor_t {
-    this_.cast::<wz_ext_loaned_stream_supervisor_t>()
+pub unsafe extern "C" fn zext_stream_supervisor_loan(
+    this_: *const zext_owned_stream_supervisor_t,
+) -> *const zext_loaned_stream_supervisor_t {
+    this_.cast::<zext_loaned_stream_supervisor_t>()
 }
 
-/// The moved form of a supervisor, for `wz_ext_stream_supervisor_drop`: a cast, which nulls
+/// The moved form of a supervisor, for `zext_stream_supervisor_drop`: a cast, which nulls
 /// nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_move(
-    this_: *mut wz_ext_owned_stream_supervisor_t,
-) -> *mut wz_ext_moved_stream_supervisor_t {
-    this_.cast::<wz_ext_moved_stream_supervisor_t>()
+pub unsafe extern "C" fn zext_stream_supervisor_move(
+    this_: *mut zext_owned_stream_supervisor_t,
+) -> *mut zext_moved_stream_supervisor_t {
+    this_.cast::<zext_moved_stream_supervisor_t>()
 }
 
 /// Release a supervisor and leave the gravestone: its task, when one runs, is stopped first, and
@@ -768,15 +767,13 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_move(
 /// # Safety
 /// `this_` is null or a moved supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_stream_supervisor_drop(
-    this_: *mut wz_ext_moved_stream_supervisor_t,
-) {
+pub unsafe extern "C" fn zext_stream_supervisor_drop(this_: *mut zext_moved_stream_supervisor_t) {
     let _ = guarded(|| {
         if this_.is_null() {
             return Z_OK;
         }
         let handle = (*this_)._this.handle;
-        (*this_)._this = wz_ext_owned_stream_supervisor_t::null_value();
+        (*this_)._this = zext_owned_stream_supervisor_t::null_value();
         if handle.is_null() {
             return Z_OK;
         }
@@ -793,11 +790,11 @@ pub unsafe extern "C" fn wz_ext_stream_supervisor_drop(
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_stream_supervisor_null(
-    this_: *mut wz_ext_owned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_internal_stream_supervisor_null(
+    this_: *mut zext_owned_stream_supervisor_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_owned_stream_supervisor_t::null_value();
+        *this_ = zext_owned_stream_supervisor_t::null_value();
     }
 }
 
@@ -806,8 +803,8 @@ pub unsafe extern "C" fn wz_ext_internal_stream_supervisor_null(
 /// # Safety
 /// `this_` is null or an owned supervisor.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_stream_supervisor_check(
-    this_: *const wz_ext_owned_stream_supervisor_t,
+pub unsafe extern "C" fn zext_internal_stream_supervisor_check(
+    this_: *const zext_owned_stream_supervisor_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -840,21 +837,18 @@ mod tests {
 
     #[test]
     fn a_slot_has_the_layout_the_header_declares() {
-        assert_eq!(core::mem::size_of::<wz_ext_stream_slot_t>(), 20);
-        assert_eq!(core::mem::align_of::<wz_ext_stream_slot_t>(), 4);
+        assert_eq!(core::mem::size_of::<zext_stream_slot_t>(), 20);
+        assert_eq!(core::mem::align_of::<zext_stream_slot_t>(), 4);
         let pointer = core::mem::size_of::<usize>();
-        assert_eq!(
-            core::mem::size_of::<wz_ext_stream_loss_t>(),
-            16 + 2 * pointer
-        );
+        assert_eq!(core::mem::size_of::<zext_stream_loss_t>(), 16 + 2 * pointer);
     }
 
     #[test]
     fn a_null_supervisor_and_null_storage_are_refused_by_name() {
         unsafe {
-            let mut slots = [wz_ext_stream_slot_t { _opaque: [0; 5] }; 1];
+            let mut slots = [zext_stream_slot_t { _opaque: [0; 5] }; 1];
             assert_eq!(
-                wz_ext_stream_supervisor_new(
+                zext_stream_supervisor_new(
                     core::ptr::null_mut(),
                     slots.as_mut_ptr(),
                     1,
@@ -866,9 +860,9 @@ mod tests {
                 ),
                 Z_ERR_NULL
             );
-            let mut owned = wz_ext_owned_stream_supervisor_t::null_value();
+            let mut owned = zext_owned_stream_supervisor_t::null_value();
             assert_eq!(
-                wz_ext_stream_supervisor_new(
+                zext_stream_supervisor_new(
                     &mut owned,
                     core::ptr::null_mut(),
                     1,
@@ -881,7 +875,7 @@ mod tests {
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_stream_supervisor_new(
+                zext_stream_supervisor_new(
                     &mut owned,
                     slots.as_mut_ptr(),
                     0,
@@ -893,18 +887,18 @@ mod tests {
                 ),
                 Z_ERR_INVALID
             );
-            assert!(!wz_ext_internal_stream_supervisor_check(&owned));
-            let loaned = wz_ext_stream_supervisor_loan(&owned);
+            assert!(!zext_internal_stream_supervisor_check(&owned));
+            let loaned = zext_stream_supervisor_loan(&owned);
             assert_eq!(
-                wz_ext_stream_supervisor_poll(loaned, core::ptr::null_mut()),
+                zext_stream_supervisor_poll(loaned, core::ptr::null_mut()),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_stream_supervisor_phase(core::ptr::null()),
-                WZ_EXT_STREAM_NO_SUPERVISOR
+                zext_stream_supervisor_phase(core::ptr::null()),
+                ZEXT_STREAM_NO_SUPERVISOR
             );
-            assert_eq!(wz_ext_stream_supervisor_node_errors(loaned), 0);
-            wz_ext_stream_supervisor_drop(wz_ext_stream_supervisor_move(&mut owned));
+            assert_eq!(zext_stream_supervisor_node_errors(loaned), 0);
+            zext_stream_supervisor_drop(zext_stream_supervisor_move(&mut owned));
         }
     }
 }

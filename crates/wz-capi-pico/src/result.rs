@@ -141,7 +141,7 @@ pub const Z_ERR_SYSTEM_OUT_OF_MEMORY: ZResult = -78;
 /// A value the caller configured an object with is refused. Matches pico
 /// `_Z_ERR_CONFIG_INVALID_VALUE` (`utils/result.h`). Kept apart from
 /// [`Z_EINVAL`] where one door refuses both: the segment sender's
-/// `wz_ext_segment_sender_new` answers this for a profile or values text it
+/// `zext_segment_sender_new` answers this for a profile or values text it
 /// refuses, and `Z_EINVAL` for an argument it cannot read at all.
 pub const Z_ERR_CONFIG_INVALID_VALUE: ZResult = -89;
 
@@ -152,73 +152,73 @@ pub const Z_ERR_CONFIG_INVALID_VALUE: ZResult = -89;
 pub const Z_ERR_CONFIG_FAILED_INSERT: ZResult = -95;
 
 /// A wz door (`wz_ext.h`) was asked for something this build's policy does not
-/// allow: a get addressed to one node (`wz_ext_get_to_peer`) while the
+/// allow: a get addressed to one node (`zext_get_to_peer`) while the
 /// `targeted-query` policy is off. Nothing was sent. Not `Z_EINVAL`, which says
 /// the value is wrong: the same call is right in a build whose policy is on.
 /// wz's own code, outside pico's (which run from -128 to -65, beside the
 /// collapsed [`Z_ERR_INVALID`]), so a later pico code cannot take it.
-pub const WZ_EXT_ERR_POLICY_OFF: ZResult = -2;
+pub const ZEXT_ERR_POLICY_OFF: ZResult = -2;
 
 /// The engine the session runs on does not do what a wz door asked: the
 /// cooperative engine watches no peer's declarations and addresses no get to one
 /// node, and a build without a plane hears no declaration of it. Nothing was
-/// declared or sent. wz's own code, for the reason [`WZ_EXT_ERR_POLICY_OFF`] is.
-pub const WZ_EXT_ERR_UNSUPPORTED: ZResult = -3;
+/// declared or sent. wz's own code, for the reason [`ZEXT_ERR_POLICY_OFF`] is.
+pub const ZEXT_ERR_UNSUPPORTED: ZResult = -3;
 
-/// A call of the program's into its transport (`wz_ext_transport_*`) named a link the transport
+/// A call of the program's into its transport (`zext_transport_*`) named a link the transport
 /// does not hold: it never did, or the session has let it go. wz's own code, for the reason
-/// [`WZ_EXT_ERR_POLICY_OFF`] is, as are the three after it.
-pub const WZ_EXT_ERR_LINK_UNKNOWN: ZResult = -4;
+/// [`ZEXT_ERR_POLICY_OFF`] is, as are the three after it.
+pub const ZEXT_ERR_LINK_UNKNOWN: ZResult = -4;
 
 /// A call of the program's into its transport named a link that is not up yet: bytes or an accept
 /// before the program said the link is connected.
-pub const WZ_EXT_ERR_LINK_NOT_OPEN: ZResult = -5;
+pub const ZEXT_ERR_LINK_NOT_OPEN: ZResult = -5;
 
 /// A call of the program's into its transport named a link that is closing or closed: the bytes
 /// were not taken.
-pub const WZ_EXT_ERR_LINK_CLOSED: ZResult = -6;
+pub const ZEXT_ERR_LINK_CLOSED: ZResult = -6;
 
 /// A call of the program's into its transport does not apply to the link's kind: bytes handed to a
 /// listener, an accept on a link that is not one.
-pub const WZ_EXT_ERR_LINK_KIND: ZResult = -7;
+pub const ZEXT_ERR_LINK_KIND: ZResult = -7;
 
 /// A call of the program's into its transport handed bytes to a link that already queues its
 /// bound (`APP_LINK_QUEUE_BYTES`) of bytes the session has not read: nothing was taken. The
 /// program hands the same bytes in again after its `drained` call for the link.
-pub const WZ_EXT_ERR_LINK_FULL: ZResult = -8;
+pub const ZEXT_ERR_LINK_FULL: ZResult = -8;
 
-/// A message payload's door (`wz_ext_message_payload_*`) was given a field path that names no field
+/// A message payload's door (`zext_message_payload_*`) was given a field path that names no field
 /// it addresses: not a path, a name the message has not, an index on a field that is not repeated,
 /// a repeated field where an element is named or the other way round, a map or a group. Nothing
-/// changed. wz's own code, for the reason [`WZ_EXT_ERR_POLICY_OFF`] is, as are the four after it.
-pub const WZ_EXT_ERR_PAYLOAD_PATH: ZResult = -20;
+/// changed. wz's own code, for the reason [`ZEXT_ERR_POLICY_OFF`] is, as are the four after it.
+pub const ZEXT_ERR_PAYLOAD_PATH: ZResult = -20;
 
 /// The value given to a field is not of its type, or the field's value was asked for as another.
-pub const WZ_EXT_ERR_PAYLOAD_TYPE: ZResult = -21;
+pub const ZEXT_ERR_PAYLOAD_TYPE: ZResult = -21;
 
 /// The value does not fit its field (or what it was asked for as), or an index is past the end of
 /// its list.
-pub const WZ_EXT_ERR_PAYLOAD_RANGE: ZResult = -22;
+pub const ZEXT_ERR_PAYLOAD_RANGE: ZResult = -22;
 
 /// The field is not set: one with presence, a field of a message that is not there, or a required
 /// field of an encoding.
-pub const WZ_EXT_ERR_PAYLOAD_ABSENT: ZResult = -23;
+pub const ZEXT_ERR_PAYLOAD_ABSENT: ZResult = -23;
 
 /// The bytes handed to the decoding door are not a message of the schema; the payload is as it
 /// was.
-pub const WZ_EXT_ERR_PAYLOAD_WIRE: ZResult = -24;
+pub const ZEXT_ERR_PAYLOAD_WIRE: ZResult = -24;
 
 /// A scout (`z_scout`, or the lookup of a `z_open` whose config names no locator) was asked on a
 /// thread whose own scouting window is still delivering: from inside a scout's callback. The
 /// cooperative engine has one table of Hellos, which that window holds until its callbacks return,
 /// so the scout is refused at once rather than wait on itself. wz's own code, for the reason
-/// [`WZ_EXT_ERR_POLICY_OFF`] is.
-pub const WZ_EXT_ERR_SCOUT_REENTERED: ZResult = -25;
+/// [`ZEXT_ERR_POLICY_OFF`] is.
+pub const ZEXT_ERR_SCOUT_REENTERED: ZResult = -25;
 
-/// A step of a session the program runs on its own cycle (`wz_ext_session_step`) was asked while
+/// A step of a session the program runs on its own cycle (`zext_session_step`) was asked while
 /// the session's read task runs, which steps the session itself: nothing was read. wz's own code,
-/// for the reason [`WZ_EXT_ERR_POLICY_OFF`] is.
-pub const WZ_EXT_ERR_READ_TASK_RUNS: ZResult = -26;
+/// for the reason [`ZEXT_ERR_POLICY_OFF`] is.
+pub const ZEXT_ERR_READ_TASK_RUNS: ZResult = -26;
 
 #[cfg(test)]
 mod tests {
@@ -250,20 +250,20 @@ mod tests {
             Z_ERR_CONFIG_FAILED_INSERT,
         ];
         let wz = [
-            WZ_EXT_ERR_POLICY_OFF,
-            WZ_EXT_ERR_UNSUPPORTED,
-            WZ_EXT_ERR_LINK_UNKNOWN,
-            WZ_EXT_ERR_LINK_NOT_OPEN,
-            WZ_EXT_ERR_LINK_CLOSED,
-            WZ_EXT_ERR_LINK_KIND,
-            WZ_EXT_ERR_LINK_FULL,
-            WZ_EXT_ERR_PAYLOAD_PATH,
-            WZ_EXT_ERR_PAYLOAD_TYPE,
-            WZ_EXT_ERR_PAYLOAD_RANGE,
-            WZ_EXT_ERR_PAYLOAD_ABSENT,
-            WZ_EXT_ERR_PAYLOAD_WIRE,
-            WZ_EXT_ERR_SCOUT_REENTERED,
-            WZ_EXT_ERR_READ_TASK_RUNS,
+            ZEXT_ERR_POLICY_OFF,
+            ZEXT_ERR_UNSUPPORTED,
+            ZEXT_ERR_LINK_UNKNOWN,
+            ZEXT_ERR_LINK_NOT_OPEN,
+            ZEXT_ERR_LINK_CLOSED,
+            ZEXT_ERR_LINK_KIND,
+            ZEXT_ERR_LINK_FULL,
+            ZEXT_ERR_PAYLOAD_PATH,
+            ZEXT_ERR_PAYLOAD_TYPE,
+            ZEXT_ERR_PAYLOAD_RANGE,
+            ZEXT_ERR_PAYLOAD_ABSENT,
+            ZEXT_ERR_PAYLOAD_WIRE,
+            ZEXT_ERR_SCOUT_REENTERED,
+            ZEXT_ERR_READ_TASK_RUNS,
         ];
         for (at, code) in wz.iter().enumerate() {
             assert!(*code < 0, "{code} must read as a failure");

@@ -6,7 +6,7 @@ SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 # wz pico C ABI library for Windows
 
 This package holds `wz_capi_pico.dll`, a library that exports zenoh-pico's C API (`z_*`, `zp_*`)
-with watching-zenoh's session engine behind it, and wz's own extension doors (`wz_ext_*`). A
+with watching-zenoh's session engine behind it, and wz's own extension doors (`zext_*`). A
 program written for zenoh-pico compiles against the headers of this package and links this
 library in place of zenoh-pico's. The packaging script is `scripts/lib/pico_windows_package.py`
 in the watching-zenoh repository; this file is `crates/wz-capi-pico/package/README.md` there.
@@ -56,7 +56,7 @@ cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib
   its multi-threaded arm, its planes and sizes), which decide the size of every type a program
   allocates. A program compiled against another `config.h` allocates structs of another size, and
   the library writes past them.
-* A program that calls a `wz_ext_*` door includes `wz_ext.h` after `zenoh-pico.h`. A program that
+* A program that calls a `zext_*` door includes `wz_ext.h` after `zenoh-pico.h`. A program that
   does not include it is portable to zenoh-pico.
 
 ## One library or two
@@ -65,12 +65,12 @@ A package is in one of two forms, which its name and the `form` of its `manifest
 are built from the same sources and the same profile, and a program is written the same for both.
 
 * The one library (`form` `single`): `wz_capi_pico.dll` holds everything above, zenoh-pico's API,
-  the session engine and every `wz_ext_*` door.
+  the session engine and every `zext_*` door.
 * Two libraries (`form` `split`, `-split` in the package's name): `wz_capi_pico.dll` is the core
   (zenoh-pico's API, the engine, the doors of the core and the extension interface
-  `wz_ext_interface_*`), and `wz_capi_pico_ext.dll` holds the doors of the additional features
-  (`wz_ext_e2e_*`, `wz_ext_stream_supervisor_*`, the instance keys, the replay cache, the message
-  catalog and payloads, and `wz_ext_additional_interface`). The additional library needs the core
+  `zext_interface_*`), and `wz_capi_pico_ext.dll` holds the doors of the additional features
+  (`zext_e2e_*`, `zext_stream_supervisor_*`, the instance keys, the replay cache, the message
+  catalog and payloads, and `zext_additional_interface`). The additional library needs the core
   and reaches it only through its C API: `release\lib\` and `debug\lib\` hold both import libraries,
   and a program links both, the core's first:
 
@@ -82,9 +82,9 @@ are built from the same sources and the same profile, and a program is written t
   library that did not make it; each library frees what it allocated (a refusal string a door of
   the additional library writes is the core's, dropped with `z_string_drop`; storage the program
   hands a door stays the program's); no object of a C runtime crosses between them; and
-  `wz_ext_additional_interface` says which version of the extension interface the additional
+  `zext_additional_interface` says which version of the extension interface the additional
   library needs and whether the core answers it. The additional library is not loaded at all over
-  a core of another major version of the interface, whose `wz_ext_interface_major_<n>` it does not
+  a core of another major version of the interface, whose `zext_interface_major_<n>` it does not
   find.
 
 A release carries the one library only. The split form is built with Rust's standard library, to
@@ -145,32 +145,32 @@ this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its exte
 
 | Capability | Doors | What they do |
 |---|---|---|
-| app-transport | `wz_ext_transport_*`, `wz_ext_config_transport` | a network stack the program supplies, in place of the system's sockets |
-| config-document | `wz_ext_config_document` | a configuration document handed to a config: the profile, policies and limits a session opens under, chosen at run time |
-| e2e-sender | `wz_ext_e2e_sender_*` | end-to-end protection of a message: a frame built under a profile, a counter per stream |
-| e2e-receiver | `wz_ext_e2e_receiver_*` | the receiving judge of protected frames: a verdict per frame, the payload always handed on |
-| e2e-sender-demux | options of `wz_ext_e2e_receiver_new` | the judge kept one per sender, keyed by the frame's sender identity |
-| e2e-supervision | `wz_ext_stream_supervisor_*` | a deadline per periodic stream, a loss told once, error counts |
-| instance-key | `wz_ext_instance_keyer_*` | the instance of a message read from fields of its payload, a last value per instance |
-| message-catalog | `wz_ext_message_catalog_*` | a deployment's messages declared once as JSON5, and the senders, receivers and supervision rows made from it |
-| message-payload | `wz_ext_payload_schema_*`, `wz_ext_message_payload_*` | a catalog message's payload set and read by field path under `.proto` files read at run time, its protobuf bytes encoded and decoded |
-| replay-cache | `wz_ext_replay_publisher_*`, `wz_ext_replay_subscriber_*` | what each publisher last sent, replayed to a subscriber that arrives later |
-| replay-cache | `wz_ext_decl_watch_*` | the declarations a session's peers make and retract, told to the program |
-| shared-key-ids | `wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for` | key ids every node of a deployment shares, used with no declaration first |
-| conformance-digest | `wz_ext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
-| config-policy | `wz_ext_config_policy`, `wz_ext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
-| device-requires | `wz_ext_config_device_requires` | what an open of a config would ask of the operating system |
-| (every build) | `wz_ext_redeclare`, `wz_ext_get_to_peer` | declarations re-sent; a get addressed to one node |
-| (multi-threaded arm) | `wz_ext_session_step` | one step of a session opened without its read task, made on the program's own cycle |
+| app-transport | `zext_transport_*`, `zext_config_transport` | a network stack the program supplies, in place of the system's sockets |
+| config-document | `zext_config_document` | a configuration document handed to a config: the profile, policies and limits a session opens under, chosen at run time |
+| e2e-sender | `zext_e2e_sender_*` | end-to-end protection of a message: a frame built under a profile, a counter per stream |
+| e2e-receiver | `zext_e2e_receiver_*` | the receiving judge of protected frames: a verdict per frame, the payload always handed on |
+| e2e-sender-demux | options of `zext_e2e_receiver_new` | the judge kept one per sender, keyed by the frame's sender identity |
+| e2e-supervision | `zext_stream_supervisor_*` | a deadline per periodic stream, a loss told once, error counts |
+| instance-key | `zext_instance_keyer_*` | the instance of a message read from fields of its payload, a last value per instance |
+| message-catalog | `zext_message_catalog_*` | a deployment's messages declared once as JSON5, and the senders, receivers and supervision rows made from it |
+| message-payload | `zext_payload_schema_*`, `zext_message_payload_*` | a catalog message's payload set and read by field path under `.proto` files read at run time, its protobuf bytes encoded and decoded |
+| replay-cache | `zext_replay_publisher_*`, `zext_replay_subscriber_*` | what each publisher last sent, replayed to a subscriber that arrives later |
+| replay-cache | `zext_decl_watch_*` | the declarations a session's peers make and retract, told to the program |
+| shared-key-ids | `zext_config_key_ids`, `zext_config_key_wire_form_for` | key ids every node of a deployment shares, used with no declaration first |
+| conformance-digest | `zext_conformance_digest` | the digest of this build's configuration, equal to `build-statement.json`'s `digest` |
+| config-policy | `zext_config_policy`, `zext_config_profile` | one policy, or the profile, of the sessions a config opens, stated from code |
+| device-requires | `zext_config_device_requires` | what an open of a config would ask of the operating system |
+| (every build) | `zext_redeclare`, `zext_get_to_peer` | declarations re-sent; a get addressed to one node |
+| (multi-threaded arm) | `zext_session_step` | one step of a session opened without its read task, made on the program's own cycle |
 
 Each door returns zenoh-pico's result codes, and wz's own two outside their range:
-`WZ_EXT_ERR_POLICY_OFF` (-2), a call the build's policy does not allow, and
-`WZ_EXT_ERR_UNSUPPORTED` (-3), a call this engine or build does not do; `wz_ext_session_step`
-answers `WZ_EXT_ERR_READ_TASK_RUNS` (-26) while the session's read task runs. A door that refuses a text
+`ZEXT_ERR_POLICY_OFF` (-2), a call the build's policy does not allow, and
+`ZEXT_ERR_UNSUPPORTED` (-3), a call this engine or build does not do; `zext_session_step`
+answers `ZEXT_ERR_READ_TASK_RUNS` (-26) while the session's read task runs. A door that refuses a text
 it reads (a profile, a catalog) writes why into the `z_owned_string_t` it is handed, which the
-program drops. The message payload's doors answer a refused call with `WZ_EXT_ERR_PAYLOAD_PATH`
+program drops. The message payload's doors answer a refused call with `ZEXT_ERR_PAYLOAD_PATH`
 (-20), `_TYPE` (-21), `_RANGE` (-22), `_ABSENT` (-23) or `_WIRE` (-24), and
-`wz_ext_message_payload_refusal` gives the sentence of the last one.
+`zext_message_payload_refusal` gives the sentence of the last one.
 
 ## Configuration
 
@@ -181,7 +181,7 @@ What is wz's own is in `config\`:
 * `message-catalog.sample.json5`: a message catalog of two nodes, a protected and supervised
   periodic message and an event message with a replay depth and a segment profile. Every name and
   value in it is made up. It is the catalog the library's own tests read, and the package's test
-  reads it through `wz_ext_message_catalog_new` of the library it ships with. A program passes the
+  reads it through `zext_message_catalog_new` of the library it ships with. A program passes the
   text of its own catalog to that door.
 * `message-catalog.schema.json`: the shape of a catalog, with the words of each refusal.
 * `wz-config.schema.json`: the policies and limits a stage after the build may decide, the shape
@@ -198,7 +198,7 @@ z_owned_session_t session;
 z_owned_config_t config;
 z_config_default(&config);
 zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_CONNECT_KEY, "tcp/192.0.2.1:7447");
-z_result_t rc = wz_ext_config_document(z_config_loan_mut(&config),
+z_result_t rc = zext_config_document(z_config_loan_mut(&config),
     "{ wz: { profile: \"upstream\", policies: { \"entity-timestamp-opt-in\": \"on\" } } }");
 if (rc != Z_OK) { /* refused: the config is as it was */ }
 z_open(&session, z_config_move(&config), NULL);
@@ -206,7 +206,7 @@ z_open(&session, z_config_move(&config), NULL);
 
 The document is the zenoh JSON5 document a zenoh-c program opens with; this library reads only
 its `wz` member, so one file configures both. A program reads the file and hands its text to
-`wz_ext_config_document`; a second call replaces the first. The members of `wz`, whose every
+`zext_config_document`; a second call replaces the first. The members of `wz`, whose every
 name and value `config\wz-config.schema.json` lists:
 
 * `profile`: a named set of policy values the session starts from. `upstream` states every
@@ -216,8 +216,8 @@ name and value `config\wz-config.schema.json` lists:
 * `key-ids`: the key ids every node of the deployment shares (the shared-key-ids capability).
 
 A session's policies are composed lowest first: this build's defaults, the profile
-(`wz_ext_config_profile`'s, else the document's), the document's `policies`, then each
-`wz_ext_config_policy` statement. A config handed no document opens under this build's defaults.
+(`zext_config_profile`'s, else the document's), the document's `policies`, then each
+`zext_config_policy` statement. A config handed no document opens under this build's defaults.
 
 The door checks the document when it is handed, as the open will compose it, and answers
 `_Z_ERR_CONFIG_INVALID_VALUE` (-89), leaving the config with what it held before, for: text
@@ -239,9 +239,9 @@ exits 0 when every check held. Every example but `pico_app_transport.c` includes
 
 | File | What it shows |
 |---|---|
-| `profiles.c` | publication, subscription and a query under the build's defaults, then under two profiles chosen when the sessions open (`wz_ext_config_document`), and the documents the library refuses |
+| `profiles.c` | publication, subscription and a query under the build's defaults, then under two profiles chosen when the sessions open (`zext_config_document`), and the documents the library refuses |
 | `transports.c` | tcp, udp and a multicast group over the system's sockets; the group is joined only when `WZ_EXAMPLE_GROUP_IFACE` names an interface in `#iface=` form (on Windows, an adapter's interface GUID) |
-| `own_transport.c` | the same three over a network stack of the program's own, registered with `wz_ext_transport_*`: the guide to plugging in a TCP/IP stack that is not the system's, with partial sends, would-blocks, an asynchronous connect and a refused one |
+| `own_transport.c` | the same three over a network stack of the program's own, registered with `zext_transport_*`: the guide to plugging in a TCP/IP stack that is not the system's, with partial sends, would-blocks, an asynchronous connect and a refused one |
 | `pico_app_transport.c` | the same three over a transport the program supplies, with partial sends and would-blocks injected |
 | `batching.c` | batching on and off, and a flush |
 | `e2e.c` | end-to-end protection across a session: a sender, a receiver and its verdicts |

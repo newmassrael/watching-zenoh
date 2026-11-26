@@ -406,7 +406,7 @@ impl InCallback {
 /// threads inside one was full (`InCallback::enter` answered `None`); 0 in a build with `std`,
 /// which marks every thread and so runs every callback.
 #[no_mangle]
-pub extern "C" fn wz_ext_callbacks_refused() -> usize {
+pub extern "C" fn zext_callbacks_refused() -> usize {
     callback_depth::refused()
 }
 

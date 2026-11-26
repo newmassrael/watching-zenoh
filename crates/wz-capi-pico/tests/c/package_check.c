@@ -8,16 +8,16 @@
  *
  *   package_check <digest> <catalog>
  *
- * 1. The library is the build the package says it is: wz_ext_conformance_digest() equals the
+ * 1. The library is the build the package says it is: zext_conformance_digest() equals the
  *    digest of the package's build-statement.json, which the packager wrote from the same
  *    preset the library was built from. A library of another feature set, limit or policy
  *    answers another digest.
  * 2. The configuration sample the package ships is one the library accepts: the message catalog
- *    is read by wz_ext_message_catalog_new and declares at least one message. A catalog the
+ *    is read by zext_message_catalog_new and declares at least one message. A catalog the
  *    library refuses prints the refusal.
  * 3. The doors of the additional features run over the core they were built with: the version of
- *    the extension interface they need (wz_ext_additional_interface) is the core's
- *    (wz_ext_interface_version). In a package of one library both are that library's; in a package
+ *    the extension interface they need (zext_additional_interface) is the core's
+ *    (zext_interface_version). In a package of one library both are that library's; in a package
  *    of two the doors are the additional library's, and the core the other's, so this holds the
  *    pair a package ships.
  *
@@ -77,7 +77,7 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    const char *digest = wz_ext_conformance_digest();
+    const char *digest = zext_conformance_digest();
     CHECK(digest != NULL && strcmp(digest, argv[1]) == 0,
           "the library is not the build its statement names: the library says %s, the statement %s",
           digest == NULL ? "(null)" : digest, argv[1]);
@@ -85,29 +85,29 @@ int main(int argc, char **argv) {
     char *text = read_text(argv[2]);
     CHECK(text != NULL, "the catalog %s could not be read", argv[2]);
     if (text != NULL) {
-        wz_ext_owned_message_catalog_t catalog;
+        zext_owned_message_catalog_t catalog;
         z_owned_string_t refusal;
-        z_result_t rc = wz_ext_message_catalog_new(&catalog, text, &refusal);
+        z_result_t rc = zext_message_catalog_new(&catalog, text, &refusal);
         if (z_internal_string_check(&refusal)) {
             printf("package-check: the catalog was refused: %.*s\n", (int)z_string_len(z_string_loan(&refusal)),
                    z_string_data(z_string_loan(&refusal)));
             z_string_drop(z_string_move(&refusal));
         }
-        CHECK(rc == Z_OK, "wz_ext_message_catalog_new refused the sample (rc %d)", (int)rc);
+        CHECK(rc == Z_OK, "zext_message_catalog_new refused the sample (rc %d)", (int)rc);
         if (rc == Z_OK) {
-            size_t messages = wz_ext_message_catalog_len(wz_ext_message_catalog_loan(&catalog));
+            size_t messages = zext_message_catalog_len(zext_message_catalog_loan(&catalog));
             CHECK(messages > 0, "the sample catalog declares no message");
-            wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&catalog));
+            zext_message_catalog_drop(zext_message_catalog_move(&catalog));
         }
         free(text);
     }
 
-    wz_ext_interface_version_t core_version;
+    zext_interface_version_t core_version;
     core_version.struct_size = sizeof core_version;
-    CHECK(wz_ext_interface_version(&core_version) == Z_OK, "the core does not answer its interface version");
-    wz_ext_interface_version_t needed;
+    CHECK(zext_interface_version(&core_version) == Z_OK, "the core does not answer its interface version");
+    zext_interface_version_t needed;
     needed.struct_size = sizeof needed;
-    z_result_t bound = wz_ext_additional_interface(&needed);
+    z_result_t bound = zext_additional_interface(&needed);
     CHECK(bound == Z_OK && needed.major == core_version.major && needed.minor <= core_version.minor,
           "the doors need interface %u.%u and the core is %u.%u (rc %d)", (unsigned)needed.major,
           (unsigned)needed.minor, (unsigned)core_version.major, (unsigned)core_version.minor, (int)bound);

@@ -520,7 +520,7 @@ pub mod app_transport;
 pub mod bytes;
 // The width of pico's C enums in the structs a C program allocates, read from the target's C ABI.
 pub mod c_enum;
-// The conformance digest of this build (decision C15), handed out by `wz_ext_conformance_digest`:
+// The conformance digest of this build (decision C15), handed out by `zext_conformance_digest`:
 // a wz door (`wz_ext.h`) in a build with `conformance-digest`, which the zenoh-pico preset leaves out.
 #[cfg(feature = "conformance-digest")]
 pub mod conformance;
@@ -577,7 +577,7 @@ pub mod e2e_receiver;
 #[cfg(feature = "e2e-sender")]
 #[cfg(not(wz_additional_apart))]
 pub mod e2e_sender;
-// `wz_ext_redeclare`: tell a session's peers what it holds again.
+// `zext_redeclare`: tell a session's peers what it holds again.
 #[cfg(feature = "unstable-api")]
 pub mod redeclare;
 // The node's event log, written and read from C: wz doors (`wz_ext.h`) of the unstable surface
@@ -658,7 +658,7 @@ pub mod platform;
 // process: in every library without the tokio engine, and in one with it that has their doors.
 #[cfg(wz_process_pools)]
 mod process_pool;
-// One `.proto` file as a program hands it over (`wz_ext_proto_file_t`, `wz_ext.h`), for the doors
+// One `.proto` file as a program hands it over (`zext_proto_file_t`, `wz_ext.h`), for the doors
 // that read a schema from its text: the instance keys' and the message payloads', in a build that
 // links the text reader.
 #[cfg(all(

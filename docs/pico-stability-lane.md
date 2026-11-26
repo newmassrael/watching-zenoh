@@ -35,7 +35,7 @@ the process's allocations with a global allocator. Its three tests are `#[ignore
 runs them with `--ignored`.
 
 Two sessions of the pico ABI in one process, a listening one and a dialling one, are joined by a
-transport the program supplies (`app-transport`, the `wz_ext_transport_*` doors) whose other side
+transport the program supplies (`app-transport`, the `zext_transport_*` doors) whose other side
 is an in-memory pipe. No socket is opened.
 
 1. **The stream storm.** Over byte-stream links. Worker threads put (one in a hundred large enough

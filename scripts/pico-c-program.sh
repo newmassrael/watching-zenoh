@@ -108,7 +108,7 @@ case "$form" in
         ;;
 esac
 roles="${WZ_PICO_PROGRAM_ROLES:-}"
-# wz's extension header, for a program that uses a wz_ext_* door.
+# wz's extension header, for a program that uses a zext_* door.
 ext_inc="$PWD/crates/wz-capi-core/include"
 os="${RUNNER_OS:-$(uname -s)}"
 # Products of this checkout, under the artifact root (scripts/lib/artifact-root.sh).

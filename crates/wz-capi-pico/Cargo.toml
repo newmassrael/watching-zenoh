@@ -375,10 +375,10 @@ advanced = [
     # cooperative engine, and their caches keep their samples in the session's ring.
     "wz-capi-coop?/advanced",
 ]
-# `clock-source`: the clock a program registers (`wz_ext_clock_source_register`), which
+# `clock-source`: the clock a program registers (`zext_clock_source_register`), which
 # `z_timestamp_new` reads in place of the system clock, and the report of its standing
-# (`wz_ext_clock_report`). wz's own door, which zenoh-pico has not, so it is off as the reference
-# build is, and part of the unstable surface as the other `wz_ext_*` doors are: it implies
+# (`zext_clock_report`). wz's own door, which zenoh-pico has not, so it is off as the reference
+# build is, and part of the unstable surface as the other `zext_*` doors are: it implies
 # `unstable-api`. The registry and the clock are `wz-node-time`'s.
 clock-source = [
     "unstable-api",
@@ -387,8 +387,8 @@ clock-source = [
     "wz-capi-port/clock-source",
     "wz-capi-core?/clock-source",
 ]
-# `event-ring`: the node's event log and the doors that write and read it (`wz_ext_event_emit`,
-# `wz_ext_event_read`, `wz_ext_event_dropped`). wz's own, which zenoh-pico has not, so off as the
+# `event-ring`: the node's event log and the doors that write and read it (`zext_event_emit`,
+# `zext_event_read`, `zext_event_dropped`). wz's own, which zenoh-pico has not, so off as the
 # reference build is, and part of the unstable surface: it implies `unstable-api`. The ring is
 # `wz-node-time`'s.
 event-ring = [
@@ -399,7 +399,7 @@ event-ring = [
     "wz-capi-core?/event-ring",
     "wz-capi-coop?/event-ring",
 ]
-# `supervision`: the node's supervisor and the doors that drive it (`wz_ext_supervision_*`).
+# `supervision`: the node's supervisor and the doors that drive it (`zext_supervision_*`).
 # wz's own, which zenoh-pico has not, so off as the reference build is, and part of the unstable
 # surface: it implies `unstable-api`. The machine and the supervisor are `wz-session-core`'s.
 supervision = [
@@ -409,7 +409,7 @@ supervision = [
     "wz-capi-core?/supervision",
 ]
 # `resource-snapshot`: the node's resource snapshot and the doors that read it
-# (`wz_ext_snapshot_*`). wz's own, which zenoh-pico has not, so off as the reference build is, and
+# (`zext_snapshot_*`). wz's own, which zenoh-pico has not, so off as the reference build is, and
 # part of the unstable surface: it implies `unstable-api`. The record, the sampler and the message
 # meter are `wz-session-core`'s.
 resource-snapshot = [
@@ -420,13 +420,13 @@ resource-snapshot = [
     "wz-capi-coop?/resource-snapshot",
 ]
 # `session-memory`: the most memory a session holds, part by part, computed from the limits it
-# opened under (`wz_ext_session_memory`, `wz_ext_session_memory_row`). wz's own, which zenoh-pico
+# opened under (`zext_session_memory`, `zext_session_memory_row`). wz's own, which zenoh-pico
 # has not, so off as the reference build is, and part of the unstable surface. The tables' rows are
 # `wz-session-core`'s; the rows of the handle and of each link are this ABI's and read what either
 # engine is opened with, so it selects neither, and nothing of it is linked into a build without it.
 session-memory = ["unstable-api", "wz-capi-core?/session-memory"]
 # `segment-sender`: the sending side of a declared segment profile and the doors that drive it
-# (`wz_ext_segment_sender_*`): one message of the application's own cut into the pieces the
+# (`zext_segment_sender_*`): one message of the application's own cut into the pieces the
 # profile's header describes, put on a publisher or handed to a callback. wz's own, which zenoh-pico
 # has not, so off as the reference build is, and part of the unstable surface: it implies
 # `unstable-api`. The piece writer is `wz-app-frame`'s, the one the zenoh-c ABI's doors of the same
@@ -439,8 +439,8 @@ segment-sender = [
     "wz-capi-core?/segment-sender",
 ]
 # `shared-key-ids`: the key ids every node of a deployment shares and the doors that hand a config
-# its dictionary and the key-wire form of an endpoint (`wz_ext_config_key_ids`,
-# `wz_ext_config_key_wire_form_for`). wz's own, which zenoh-pico has not, so off as the reference
+# its dictionary and the key-wire form of an endpoint (`zext_config_key_ids`,
+# `zext_config_key_wire_form_for`). wz's own, which zenoh-pico has not, so off as the reference
 # build is, and part of the unstable surface: it implies `unstable-api`. Both engines hold the
 # dictionary: each reads an id only the dictionary names and names a key on each link as that
 # link's form says. The model is session-core's.
@@ -452,7 +452,7 @@ shared-key-ids = [
     "wz-capi-coop?/shared-key-ids",
 ]
 # `e2e-supervision`: reception supervision per stream and the doors that drive it
-# (`wz_ext_stream_supervisor_*`): a deadline per periodic stream over the program's storage, a loss
+# (`zext_stream_supervisor_*`): a deadline per periodic stream over the program's storage, a loss
 # told once, saturating error counts, a start delay, a condition the program supplies and senders
 # it marks absent. wz's own, which zenoh-pico has not, so off as the reference build is, and part
 # of the unstable surface: it implies `unstable-api`. The supervisor and its activation machine are
@@ -464,7 +464,7 @@ e2e-supervision = [
     "wz-session-core/e2e-supervision",
     "wz-capi-core?/e2e-supervision",
 ]
-# `e2e-sender`: the sending side of an end-to-end protected message (`wz_ext_e2e_sender_*`): a
+# `e2e-sender`: the sending side of an end-to-end protected message (`zext_e2e_sender_*`): a
 # payload protected by a profile and the program's values, the counter kept per stream. On in the
 # zenoh-c ABI's default and off in this one's (`default_off_abis` in the declaration): wz's own,
 # which zenoh-pico has not, and part of the unstable surface. The frame writer is `wz-app-frame`'s.
@@ -476,7 +476,7 @@ e2e-sender = [
     "dep:wz-app-frame",
     "wz-capi-core?/e2e-sender",
 ]
-# `e2e-receiver`: the receiving judge of end-to-end protected frames (`wz_ext_e2e_receiver_*`):
+# `e2e-receiver`: the receiving judge of end-to-end protected frames (`zext_e2e_receiver_*`):
 # per-stream state in storage the program sizes, the judging rules the profile states, and a
 # status beside every sample. wz's own, off as the reference build is, part of the unstable
 # surface. The judge is `wz-app-frame`'s; like the sender it selects no `std` and neither engine.
@@ -485,8 +485,8 @@ e2e-receiver = [
     "dep:wz-app-frame",
     "wz-capi-core?/e2e-receiver",
 ]
-# `replay-cache`: the replay cache of a message (`wz_ext_replay_publisher_*`,
-# `wz_ext_replay_subscriber_*`): a publisher's ring of the frames it sent, answered on the message's
+# `replay-cache`: the replay cache of a message (`zext_replay_publisher_*`,
+# `zext_replay_subscriber_*`): a publisher's ring of the frames it sent, answered on the message's
 # key plus a suffix the program states, and a subscriber that asks each publisher as its queryable
 # appears and orders the replies against its live samples. wz's own, off as the reference build is,
 # part of the unstable surface. The ring and the round are `wz-session-core`'s and the admission of
@@ -508,7 +508,7 @@ replay-cache = [
 # identity the frame's header carries, in at most `E2E_SENDER_SLOTS` slots.
 e2e-sender-demux = ["e2e-receiver", "wz-capi-core?/e2e-sender-demux"]
 # `message-catalog`: a deployment's messages read from one JSON5 declaration
-# (`wz_ext_message_catalog_*`): each message's entry, and the sender, the receiver and the
+# (`zext_message_catalog_*`): each message's entry, and the sender, the receiver and the
 # supervision rows made from it in a build that has those doors too. wz's own, off as the reference
 # build is, part of the unstable surface. The reader is `wz-app-frame`'s; a catalog is immutable
 # once read, so it needs no lock, and its text and refusals are `alloc`'s strings: it selects no
@@ -519,8 +519,8 @@ message-catalog = [
     "wz-capi-core?/message-catalog",
 ]
 # `message-payload`: the payload of a catalog message set and read field by field, by path, under
-# `.proto` files the program hands over when it runs (`wz_ext_payload_schema_*`,
-# `wz_ext_message_payload_*`): values set and read, the protobuf bytes encoded and decoded. wz's
+# `.proto` files the program hands over when it runs (`zext_payload_schema_*`,
+# `zext_message_payload_*`): values set and read, the protobuf bytes encoded and decoded. wz's
 # own, off as the reference build is, part of the unstable surface, and made for a message of the
 # catalog, so it implies `message-catalog`. The payload is `wz-app-frame`'s; a payload is held
 # under the doors' lock and its schema is shared by `alloc`'s reference count, so it selects no
@@ -533,7 +533,7 @@ message-payload = [
     "wz-capi-core?/message-payload",
 ]
 # `instance-key`: the instance a sample of a message is, read from fields of its payload through
-# the message's schema (`wz_ext_instance_keyer_*`), its last value per instance in the program's
+# the message's schema (`zext_instance_keyer_*`), its last value per instance in the program's
 # storage, and with `e2e-receiver` or `e2e-sender` the doors that judge or protect a frame in its
 # instance's stream. wz's own, off as the reference build is, part of the unstable surface. The
 # keyer is `wz-app-frame`'s; like the e2e doors it selects no `std` and neither engine. A sample of
@@ -545,16 +545,16 @@ instance-key = [
     "wz-capi-core?/instance-key",
 ]
 # `proto-text`: the doors that read a schema from the `.proto` text the program hands over when it
-# runs (`wz_ext_payload_schema_new`, `wz_ext_instance_keyer_new`, `wz_ext_proto_file_t`), over the
+# runs (`zext_payload_schema_new`, `zext_instance_keyer_new`, `zext_proto_file_t`), over the
 # text reader of `wz-app-frame` (its tokenizer, parser and linker). Without it a schema is read
 # only from the `FileDescriptorSet` `protoc` compiled the files into when the program was built
-# (`wz_ext_payload_schema_from_descriptor_set`, `wz_ext_instance_keyer_from_descriptor_set`) and
+# (`zext_payload_schema_from_descriptor_set`, `zext_instance_keyer_from_descriptor_set`) and
 # no text reader is linked, so it is off as the reference build is and in the release package; a
 # build that reads the text a person hands over turns it on. wz's own, part of the unstable
 # surface. It adds doors only beside `message-payload` or `instance-key` and turns neither on;
 # like them it selects no `std` and neither engine.
 proto-text = ["unstable-api", "wz-app-frame?/proto-text", "wz-capi-core?/proto-text"]
-# `app-transport`: a transport the program supplies (`wz_ext_transport_*`, `wz_ext_config_transport`),
+# `app-transport`: a transport the program supplies (`zext_transport_*`, `zext_config_transport`),
 # which carries every link of a session opened from the config that names it, over the program's
 # own network stack and over no socket of the system's. wz's own, which zenoh-pico has not, so off
 # as the reference build is, and part of the unstable surface as the other wz doors are. The
@@ -569,7 +569,7 @@ app-transport = [
     "wz-capi-core?/app-transport",
     "wz-capi-coop?/app-transport",
 ]
-# `time-base`: a time base the program supplies (`wz_ext_time_base_*`, `wz_ext_config_time_base`),
+# `time-base`: a time base the program supplies (`zext_time_base_*`, `zext_config_time_base`),
 # which the timers of a session opened from the config that names it run on in place of the
 # system's clock, for a program that runs its sessions on a time of its own (a simulation, paused,
 # or faster or slower than the wall clock). wz's own, which zenoh-pico has not, so off as the
@@ -587,7 +587,7 @@ time-base = [
 # `object-pool`: the doors through which a program reserves, with counts of its own, the fixed pools
 # the objects it holds outside a session are taken from (a session, a publisher, a subscriber, a
 # queryable, a liveliness token, an owned sample, reply or query, a payload, a config, a kept hello),
-# and reads what they hold (`wz_ext_object_pool_*`), each count held to the bound of the session
+# and reads what they hold (`zext_object_pool_*`), each count held to the bound of the session
 # limit that bounds the object. wz's own, off as the reference build is, and part of the unstable
 # surface. The pools are not the doors': a library without the tokio engine has them in every build,
 # reserved by its first object from the build's limits (`HELD_*` and the session limits), with no
@@ -597,11 +597,11 @@ time-base = [
 # neither.
 object-pool = ["unstable-api", "wz-capi-core?/object-pool"]
 # `object-pool-region`: the same pools over memory the program hands over
-# (`wz_ext_object_pool_place`), for a program that states where its memory lies.
+# (`zext_object_pool_place`), for a program that states where its memory lies.
 object-pool-region = ["object-pool", "wz-capi-core?/object-pool-region"]
 # `remote-declaration-watch` and `declarations-synced-event`: the declaration watch, the doors that
-# tell a program what a peer declares and retracts (`wz_ext_decl_watch_declare`,
-# `wz_ext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.
+# tell a program what a peer declares and retracts (`zext_decl_watch_declare`,
+# `zext_decl_watch_drop`). wz's own, which zenoh-pico has not, so off as the reference build is.
 # The doors are in a build that has either; the first names the peer of each event, the second
 # tells a watch once per establishment that the peer has sent everything it held. Both engines
 # watch, so they select neither: the tokio engine watches its faces, and the cooperative one the
@@ -648,7 +648,7 @@ local-queryable = ["wz-capi-core?/local-queryable", "wz-capi-coop?/local-queryab
 # only here (`wz-session-core/pubsub-source-info`): without it the option field is absent and
 # `z_sample_source_info` is not exported, so no program could set or read one.
 unstable-api = ["wz-capi-core?/unstable-api", "wz-session-core/pubsub-source-info"]
-# `config-policy`: `wz_ext_config_policy` and `wz_ext_config_profile`, the doors that state the
+# `config-policy`: `zext_config_policy` and `zext_config_profile`, the doors that state the
 # policies and the profile of the sessions a config opens, and the open's resolution of what they
 # state over the build's defaults (`src/config_policy.rs`). wz's own, which zenoh-pico has not: on
 # in a build that names nothing, and off in the zenoh-pico preset (`configs/zenoh-pico_defconfig`),
@@ -663,21 +663,21 @@ config-policy = [
     "wz-capi-coop?/runtime-plan",
     "wz-session-core/policy-selection",
 ]
-# `conformance-digest`: `wz_ext_conformance_digest`, the digest of the configuration the library
+# `conformance-digest`: `zext_conformance_digest`, the digest of the configuration the library
 # was built with (`src/conformance.rs`). wz's own: on in a build that names nothing and in a
 # package that ships a build statement (the host-peer-ext preset), off in the zenoh-pico preset.
 conformance-digest = ["wz-capi-core?/conformance-digest"]
-# `device-requires`: `wz_ext_config_device_requires`, the door that answers what an open of a
+# `device-requires`: `zext_config_device_requires`, the door that answers what an open of a
 # config would ask of the operating system (`src/device_requires.rs`). wz's own, which zenoh-pico
 # has not: on in a build that names nothing and in the host-peer-ext preset, off in the zenoh-pico
 # preset. Part of the unstable surface, so it implies `unstable-api`, which alone is pico's
 # unstable API and carries no door of wz's. Either engine's open is read by it, so it selects
 # neither.
 device-requires = ["unstable-api", "wz-capi-core?/device-requires"]
-# `config-document`: `wz_ext_config_document`, the door that hands a config the zenoh JSON5 document
+# `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a
-# build that states its policies through `wz_ext_config_policy` and `wz_ext_config_profile` does
+# build that states its policies through `zext_config_policy` and `zext_config_profile` does
 # not need. The open resolves the document's statements as it resolves the doors', so it implies
 # `config-policy`.
 config-document = ["config-policy", "wz-capi-core?/config-document"]

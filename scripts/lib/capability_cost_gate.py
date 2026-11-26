@@ -536,7 +536,7 @@ CASES: tuple[Case, ...] = (
     # against the step's tree): every pico case +15,795 to +17,955, `capic-router-node` +9,132,
     # `capic-default` +11,920, `capic-default-lean` +11,856. TAKEN APART by symbol (one host,
     # `nm -C -S` and section sizes). Step 5 on `pico-client-coop` (+16,359): the doors
-    # `wz_ext_config_policy` +1,359 and `wz_ext_config_profile` +862, the composition
+    # `zext_config_policy` +1,359 and `zext_config_profile` +862, the composition
     # `policy_document::compose` +1,315 and `resolve_under` +432, `session::resolve_policy` +408,
     # one `select_at` per policy (about 28 bytes each), and the policy and profile tables the
     # composition reads, whose string pointers a shared library relocates (`.rela.dyn` +5,712,
@@ -722,7 +722,7 @@ CASES: tuple[Case, ...] = (
     # budget less 5,500.
     #
     # The three cases that carry `unstable-api` (unstable, connectivity, admin-space) read about
-    # 109,800 bytes more on pc2 once `wz_ext_config_device_requires` (`device_requires.rs`, a
+    # 109,800 bytes more on pc2 once `zext_config_device_requires` (`device_requires.rs`, a
     # door of the unstable surface) joined: 934,049 to 1,043,866, 1,003,773 to 1,113,554 and
     # 1,159,421 to 1,269,025, and the five cases without `unstable-api` read about 1,100 more
     # (pico-client-coop 930,823 to 931,919), which the 5,500 holds. The attribution is by the
@@ -823,7 +823,7 @@ CASES: tuple[Case, ...] = (
          # HEAP_ABORT: the control of the form without std, which forbids it. The standard
          # library's own runtime allocates as it cannot fail, so a build with std links the abort.
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, STD_RUNTIME, HEAP_ABORT),
-         # 442 exports: `wz_ext_callbacks_refused` (d80d315d1), the callbacks a full thread table
+         # 442 exports: `zext_callbacks_refused` (d80d315d1), the callbacks a full thread table
          # leaves unrun.
          exports=442, cargo_configs=(PACKED_RELOCS_CONFIG,),
          note="Linked for a glibc 2.36 loader with its relative relocations packed "
@@ -832,8 +832,8 @@ CASES: tuple[Case, ...] = (
               "relocations (53,160 bytes of `.rela.dyn`) larger in the std form read on "
               "2026-11-22, where the packed table reads 632. "
               "441 exports: the config doors of the open's policies "
-              "(`wz_ext_config_policy`, `wz_ext_config_profile`) and the conformance digest's "
-              "door (`wz_ext_conformance_digest`, decision C15) are the `config-policy` and "
+              "(`zext_config_policy`, `zext_config_profile`) and the conformance digest's "
+              "door (`zext_conformance_digest`, decision C15) are the `config-policy` and "
               "`conformance-digest` capabilities, which this case's features leave out as the "
               "zenoh-pico preset does (444 with all three, which a build that names nothing and "
               "the host-peer-ext preset have). "
@@ -899,7 +899,7 @@ CASES: tuple[Case, ...] = (
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          forbid_undefined=(r"^rust_eh_personality$",),
          require_needed=(r"^libc\.so",),
-         # 443 exports: `wz_ext_callbacks_refused` (d80d315d1).
+         # 443 exports: `zext_callbacks_refused` (d80d315d1).
          exports=443, profile="capi-nostd",
          cargo_configs=(NOSTD_CONFIG, PACKED_RELOCS_CONFIG, DISCARD_UNWIND_CONFIG),
          note="Linked with its relative relocations packed, as pico-client-coop is, and so is "
@@ -1020,7 +1020,7 @@ CASES: tuple[Case, ...] = (
     # end, which is what the next case adds its loopback leg to.
     # 2026-11-19 -- step 3b (pico-client's note of this day): the targeted get folds on the
     # domain, so it is linked; +2,732 on pc2, by symbol `issue_get` +1,454 and
-    # `wz_ext_get_to_peer` +314, the leg reply moved out of `fan_get` (+2,934 / -2,917).
+    # `zext_get_to_peer` +314, the leg reply moved out of `fan_get` (+2,934 / -2,917).
     # 2026-11-21 -- step 4b rounds 2 to 4, as pico-client's note of this day says: +16,320 on
     # one machine.
     Case("pico-client-coop-query", "wz-capi-pico", "libwz_capi_pico.so",
@@ -1207,23 +1207,23 @@ CASES: tuple[Case, ...] = (
          # accept loop, responder and scouting glue) are not linked.
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN, STD_RUNTIME),
-         # 813 exports: `wz_ext_session_step`, the step of a session opened without its read task,
-         # which the multi-threaded arm has. 812 with `wz_ext_callbacks_refused` (d80d315d1).
+         # 813 exports: `zext_session_step`, the step of a session opened without its read task,
+         # which the multi-threaded arm has. 812 with `zext_callbacks_refused` (d80d315d1).
          exports=813,
          note="every capability on: the symbol count is the drop-in's. 811 with the three pico "
               "internals clang emits calls to into every program of the unstable arm "
               "(`header_internals`: `_z_cancellation_token_clear`, "
               "`_z_cancellation_token_remove_on_cancel_handler`, `_z_sync_group_notifier_drop`). "
               "808 with the config "
-              "doors of the open's policies (`wz_ext_config_policy`, `wz_ext_config_profile`; "
-              "`wz_ext_config_document` is behind `config-document`, off). 806 with the door that "
-              "tells a session's peers its declarations again (`wz_ext_redeclare`, unstable "
+              "doors of the open's policies (`zext_config_policy`, `zext_config_profile`; "
+              "`zext_config_document` is behind `config-document`, off). 806 with the door that "
+              "tells a session's peers its declarations again (`zext_redeclare`, unstable "
               "surface). 809 -> 802 when the "
               "seven single-threaded entry points left the multi-threaded arm; 804 with the "
-              "conformance digest's door (`wz_ext_conformance_digest`, decision C15); 803 with the "
+              "conformance digest's door (`zext_conformance_digest`, decision C15); 803 with the "
               "door that answers what a configuration asks of the operating system "
-              "(`wz_ext_config_device_requires`); 805 with the get addressed to one node "
-              "(`wz_ext_get_to_peer`, in every build with the query plane). 4,216,542 "
+              "(`zext_config_device_requires`); 805 with the get addressed to one node "
+              "(`zext_get_to_peer`, in every build with the query plane). 4,216,542 "
               "measured with the multicast transport pico's default has (open-debt item 913), "
               "3,790,610 without it. 4,301,320 measured locally on the head of the round that "
               "ends the queries pending on a face with it (1,320 over 4,300,000), the growth "
@@ -1722,7 +1722,7 @@ def stated_digest(case: Case | StatementCase, features: set[str],
                                    stated_values(decl, given), {})["digest"]
 
 
-#: The capability whose door answers the conformance digest (`wz_ext_conformance_digest`).
+#: The capability whose door answers the conformance digest (`zext_conformance_digest`).
 DIGEST_CAPABILITY = "conformance-digest"
 
 
@@ -2902,7 +2902,7 @@ def cmd_selftest() -> int:
                (HEAP_ABORT, "alloc::alloc::handle_alloc_error"))))
     expect("a module whose name ends in log is not the log facade",
            not any(re.search(LOG_FACADE, s) for s in (
-               "wz_capi_pico::event_log::wz_ext_event_emit",
+               "wz_capi_pico::event_log::zext_event_emit",
                "wz_session_core::action_log::count")))
     expect("the doors an open reads its config through are not the verdict's",
            not any(re.search(CONFIG_VERDICT, s) for s in (

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_config_device_requires`: what pico's open of a config would ask of the operating system
+//! `zext_config_device_requires`: what pico's open of a config would ask of the operating system
 //! (docs/target-build-contract.md T9), one JSON object with the manifest's keys.
 //!
-//! A door wz has and zenoh-pico does not, so it is `wz_ext_*` and declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so it is `zext_*` and declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `device-requires` (the zenoh-pico preset, the size-measured client builds)
 //! carries none of it, whether or not it has pico's unstable API.
@@ -33,7 +33,7 @@ use crate::session::{open_config, tls_files_named, OpenConfig};
 /// # Safety
 /// `config` must be null or a live loaned config; `out_requirement` must be valid and writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_device_requires(
+pub unsafe extern "C" fn zext_config_device_requires(
     config: *const z_loaned_config_t,
     out_requirement: *mut z_owned_string_t,
 ) -> ZResult {
@@ -466,7 +466,7 @@ mod tests {
 /// opens the door answers.
 #[cfg(all(test, not(feature = "engine-tokio")))]
 mod against_the_open {
-    use super::wz_ext_config_device_requires;
+    use super::zext_config_device_requires;
     use crate::abi::{z_owned_config_t, z_owned_string_t};
     use crate::bytes::{z_string_drop, z_string_move};
     use crate::config::{
@@ -500,7 +500,7 @@ mod against_the_open {
         unsafe {
             let mut config = config(entries);
             let mut out = z_owned_string_t::null_value();
-            let code = wz_ext_config_device_requires(z_config_loan(&config), &mut out);
+            let code = zext_config_device_requires(z_config_loan(&config), &mut out);
             z_string_drop(z_string_move(&mut out));
             z_config_drop(z_config_move(&mut config));
             code

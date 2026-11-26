@@ -40,19 +40,19 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use wz_capi_pico::app_transport::{
-    wz_ext_config_transport, wz_ext_link_event_t, wz_ext_link_kind_t, wz_ext_link_result_t,
-    wz_ext_link_t, wz_ext_loaned_transport_t, wz_ext_owned_transport_t, wz_ext_transport_accepted,
-    wz_ext_transport_drop, wz_ext_transport_event, wz_ext_transport_loan, wz_ext_transport_move,
-    wz_ext_transport_new, wz_ext_transport_received, wz_ext_transport_t, WZ_EXT_LINK_CLOSED,
-    WZ_EXT_LINK_DATAGRAM, WZ_EXT_LINK_DATAGRAM_LISTEN, WZ_EXT_LINK_EVENT_CLOSED,
-    WZ_EXT_LINK_EVENT_CONNECTED, WZ_EXT_LINK_EVENT_WRITABLE, WZ_EXT_LINK_OK,
-    WZ_EXT_LINK_STREAM_DIAL, WZ_EXT_LINK_STREAM_LISTEN, WZ_EXT_LINK_WOULD_BLOCK,
+    zext_config_transport, zext_link_event_t, zext_link_kind_t, zext_link_result_t, zext_link_t,
+    zext_loaned_transport_t, zext_owned_transport_t, zext_transport_accepted, zext_transport_drop,
+    zext_transport_event, zext_transport_loan, zext_transport_move, zext_transport_new,
+    zext_transport_received, zext_transport_t, ZEXT_LINK_CLOSED, ZEXT_LINK_DATAGRAM,
+    ZEXT_LINK_DATAGRAM_LISTEN, ZEXT_LINK_EVENT_CLOSED, ZEXT_LINK_EVENT_CONNECTED,
+    ZEXT_LINK_EVENT_WRITABLE, ZEXT_LINK_OK, ZEXT_LINK_STREAM_DIAL, ZEXT_LINK_STREAM_LISTEN,
+    ZEXT_LINK_WOULD_BLOCK,
 };
 use wz_capi_pico::liveliness::{
     z_liveliness_declare_token, z_liveliness_token_move, z_liveliness_undeclare_token,
     z_owned_liveliness_token_t,
 };
-use wz_capi_pico::result::WZ_EXT_ERR_LINK_FULL;
+use wz_capi_pico::result::ZEXT_ERR_LINK_FULL;
 use wz_capi_pico::{
     z_bytes_copy_from_buf, z_bytes_copy_from_str, z_bytes_move, z_bytes_to_slice, z_close,
     z_closure_query, z_closure_query_move, z_closure_reply, z_closure_reply_move, z_closure_sample,
@@ -556,7 +556,7 @@ struct Pending {
     at: Instant,
     side: Side,
     link: u64,
-    event: wz_ext_link_event_t,
+    event: zext_link_event_t,
 }
 
 /// The pipe between the two transports, and what it saw.
@@ -652,7 +652,7 @@ impl Pipe {
                 for pending in due {
                     // A link closed since is refused by name; the stack's event is then moot.
                     let _ = unsafe {
-                        wz_ext_transport_event(self.loan(pending.side), pending.link, pending.event)
+                        zext_transport_event(self.loan(pending.side), pending.link, pending.event)
                     };
                 }
                 queue = self.deferred.lock().unwrap();
@@ -667,7 +667,7 @@ impl Pipe {
         }
     }
 
-    fn defer(&self, after: Duration, side: Side, link: u64, event: wz_ext_link_event_t) {
+    fn defer(&self, after: Duration, side: Side, link: u64, event: zext_link_event_t) {
         self.deferred.lock().unwrap().push(Pending {
             at: Instant::now() + after,
             side,
@@ -679,21 +679,21 @@ impl Pipe {
 
     /// The loan of `side`'s transport, or null once the test has dropped it (every call on a null
     /// loan is refused by name).
-    fn loan(&self, side: Side) -> *const wz_ext_loaned_transport_t {
+    fn loan(&self, side: Side) -> *const zext_loaned_transport_t {
         match self.owned.lock().unwrap().get(&side) {
-            Some(&raw) => unsafe { wz_ext_transport_loan(raw as *const wz_ext_owned_transport_t) },
+            Some(&raw) => unsafe { zext_transport_loan(raw as *const zext_owned_transport_t) },
             None => std::ptr::null(),
         }
     }
 
-    fn owned(&self, side: Side) -> *mut wz_ext_owned_transport_t {
+    fn owned(&self, side: Side) -> *mut zext_owned_transport_t {
         let raw = *self
             .owned
             .lock()
             .unwrap()
             .get(&side)
             .expect("both transports are made before any session opens");
-        raw as *mut wz_ext_owned_transport_t
+        raw as *mut zext_owned_transport_t
     }
 
     fn peer_of(&self, side: Side, link: u64) -> Option<u64> {
@@ -757,7 +757,7 @@ impl Pipe {
         }
         if let Some(peer) = peer {
             let _ = unsafe {
-                wz_ext_transport_event(self.loan(side.other()), peer, WZ_EXT_LINK_EVENT_CLOSED)
+                zext_transport_event(self.loan(side.other()), peer, ZEXT_LINK_EVENT_CLOSED)
             };
         }
     }
@@ -776,8 +776,7 @@ impl Pipe {
         let cut = ends.len();
         for (side, link) in ends {
             self.cuts.fetch_add(1, Ordering::SeqCst);
-            let _ =
-                unsafe { wz_ext_transport_event(self.loan(side), link, WZ_EXT_LINK_EVENT_CLOSED) };
+            let _ = unsafe { zext_transport_event(self.loan(side), link, ZEXT_LINK_EVENT_CLOSED) };
         }
         cut
     }
@@ -814,44 +813,44 @@ unsafe fn ctx<'a>(context: *mut c_void) -> &'a SideCtx {
 
 unsafe extern "C" fn on_open(
     context: *mut c_void,
-    link: wz_ext_link_t,
-    kind: wz_ext_link_kind_t,
+    link: zext_link_t,
+    kind: zext_link_kind_t,
     locator: *const c_char,
-) -> wz_ext_link_result_t {
+) -> zext_link_result_t {
     let ctx = ctx(context);
     let pipe = &ctx.pipe;
     let locator = CStr::from_ptr(locator).to_str().unwrap_or("");
     if locator != pipe.shape.locator() {
-        return WZ_EXT_LINK_CLOSED;
+        return ZEXT_LINK_CLOSED;
     }
     match (ctx.side, kind, pipe.shape) {
-        (Side::Listening, WZ_EXT_LINK_STREAM_LISTEN, Shape::Stream)
-        | (Side::Listening, WZ_EXT_LINK_DATAGRAM_LISTEN, Shape::Datagram) => {
+        (Side::Listening, ZEXT_LINK_STREAM_LISTEN, Shape::Stream)
+        | (Side::Listening, ZEXT_LINK_DATAGRAM_LISTEN, Shape::Datagram) => {
             pipe.listener.store(link, Ordering::SeqCst);
-            WZ_EXT_LINK_OK
+            ZEXT_LINK_OK
         }
-        (Side::Dialling, WZ_EXT_LINK_STREAM_DIAL, Shape::Stream) => {
+        (Side::Dialling, ZEXT_LINK_STREAM_DIAL, Shape::Stream) => {
             if !accept_and_pair(pipe, link) {
-                return WZ_EXT_LINK_CLOSED;
+                return ZEXT_LINK_CLOSED;
             }
             // Reported up from the program's own thread, after open has answered.
             pipe.defer(
                 Duration::from_millis(1),
                 Side::Dialling,
                 link,
-                WZ_EXT_LINK_EVENT_CONNECTED,
+                ZEXT_LINK_EVENT_CONNECTED,
             );
-            WZ_EXT_LINK_WOULD_BLOCK
+            ZEXT_LINK_WOULD_BLOCK
         }
         // A datagram link is up at once: there is no connection to make.
-        (Side::Dialling, WZ_EXT_LINK_DATAGRAM, Shape::Datagram) => {
+        (Side::Dialling, ZEXT_LINK_DATAGRAM, Shape::Datagram) => {
             if accept_and_pair(pipe, link) {
-                WZ_EXT_LINK_OK
+                ZEXT_LINK_OK
             } else {
-                WZ_EXT_LINK_CLOSED
+                ZEXT_LINK_CLOSED
             }
         }
-        _ => WZ_EXT_LINK_CLOSED,
+        _ => ZEXT_LINK_CLOSED,
     }
 }
 
@@ -860,9 +859,9 @@ unsafe extern "C" fn on_open(
 unsafe fn accept_and_pair(pipe: &Arc<Pipe>, link: u64) -> bool {
     let n = pipe.dials.fetch_add(1, Ordering::SeqCst);
     let remote = CString::new(pipe.shape.remote(n)).unwrap();
-    let mut accepted: wz_ext_link_t = 0;
+    let mut accepted: zext_link_t = 0;
     let listener = pipe.listener.load(Ordering::SeqCst);
-    if wz_ext_transport_accepted(
+    if zext_transport_accepted(
         pipe.loan(Side::Listening),
         listener,
         remote.as_ptr(),
@@ -887,18 +886,18 @@ unsafe fn accept_and_pair(pipe: &Arc<Pipe>, link: u64) -> bool {
 
 unsafe extern "C" fn on_send(
     context: *mut c_void,
-    link: wz_ext_link_t,
+    link: zext_link_t,
     data: *const u8,
     len: usize,
     written: *mut usize,
-) -> wz_ext_link_result_t {
+) -> zext_link_result_t {
     let ctx = ctx(context);
     let pipe = &ctx.pipe;
     let side = ctx.side;
     pipe.sends.fetch_add(1, Ordering::SeqCst);
     let Some(peer) = pipe.peer_of(side, link) else {
         pipe.orphans.fetch_add(1, Ordering::SeqCst);
-        return WZ_EXT_LINK_CLOSED;
+        return ZEXT_LINK_CLOSED;
     };
     let datagram = pipe.shape == Shape::Datagram;
     let take = match pipe.draw(len) {
@@ -906,8 +905,8 @@ unsafe extern "C" fn on_send(
         Fault::WouldBlock => {
             pipe.blocks.fetch_add(1, Ordering::SeqCst);
             let after = Duration::from_millis(1 + pipe.rng.lock().unwrap().below(4));
-            pipe.defer(after, side, link, WZ_EXT_LINK_EVENT_WRITABLE);
-            return WZ_EXT_LINK_WOULD_BLOCK;
+            pipe.defer(after, side, link, ZEXT_LINK_EVENT_WRITABLE);
+            return ZEXT_LINK_WOULD_BLOCK;
         }
         Fault::Partial(take) => {
             pipe.partials.fetch_add(1, Ordering::SeqCst);
@@ -916,12 +915,12 @@ unsafe extern "C" fn on_send(
         Fault::Cut => {
             pipe.cuts.fetch_add(1, Ordering::SeqCst);
             pipe.unpair(side, link);
-            return WZ_EXT_LINK_CLOSED;
+            return ZEXT_LINK_CLOSED;
         }
         Fault::Loss => {
             pipe.losses.fetch_add(1, Ordering::SeqCst);
             *written = len;
-            return WZ_EXT_LINK_OK;
+            return ZEXT_LINK_OK;
         }
     };
     let source = if datagram {
@@ -935,7 +934,7 @@ unsafe extern "C" fn on_send(
         .lock()
         .unwrap()
         .insert((side.other(), peer), (side, link));
-    let rc = wz_ext_transport_received(
+    let rc = zext_transport_received(
         pipe.loan(side.other()),
         peer,
         data,
@@ -944,30 +943,30 @@ unsafe extern "C" fn on_send(
             .as_ref()
             .map_or(std::ptr::null(), |source| source.as_ptr()),
     );
-    if rc == WZ_EXT_ERR_LINK_FULL && !datagram {
+    if rc == ZEXT_ERR_LINK_FULL && !datagram {
         // Nothing was taken; the send waits for the other end to be read down.
         pipe.fulls.fetch_add(1, Ordering::SeqCst);
-        return WZ_EXT_LINK_WOULD_BLOCK;
+        return ZEXT_LINK_WOULD_BLOCK;
     }
     pipe.waiting.lock().unwrap().remove(&(side.other(), peer));
     match rc {
         Z_OK => {
             *written = take;
-            WZ_EXT_LINK_OK
+            ZEXT_LINK_OK
         }
         // A full receiver drops a datagram, as a socket's buffer does.
-        WZ_EXT_ERR_LINK_FULL => {
+        ZEXT_ERR_LINK_FULL => {
             pipe.fulls.fetch_add(1, Ordering::SeqCst);
             pipe.losses.fetch_add(1, Ordering::SeqCst);
             *written = len;
-            WZ_EXT_LINK_OK
+            ZEXT_LINK_OK
         }
         // The other end is closing or gone.
-        _ => WZ_EXT_LINK_CLOSED,
+        _ => ZEXT_LINK_CLOSED,
     }
 }
 
-unsafe extern "C" fn on_close(context: *mut c_void, link: wz_ext_link_t) {
+unsafe extern "C" fn on_close(context: *mut c_void, link: zext_link_t) {
     let ctx = ctx(context);
     let pipe = &ctx.pipe;
     pipe.closes.fetch_add(1, Ordering::SeqCst);
@@ -979,13 +978,13 @@ unsafe extern "C" fn on_close(context: *mut c_void, link: wz_ext_link_t) {
     pipe.unpair(ctx.side, link);
 }
 
-unsafe extern "C" fn on_drained(context: *mut c_void, link: wz_ext_link_t) {
+unsafe extern "C" fn on_drained(context: *mut c_void, link: zext_link_t) {
     let ctx = ctx(context);
     let pipe = &ctx.pipe;
     pipe.drains.fetch_add(1, Ordering::SeqCst);
     let waiter = pipe.waiting.lock().unwrap().remove(&(ctx.side, link));
     if let Some((side, sender)) = waiter {
-        let _ = wz_ext_transport_event(pipe.loan(side), sender, WZ_EXT_LINK_EVENT_WRITABLE);
+        let _ = zext_transport_event(pipe.loan(side), sender, ZEXT_LINK_EVENT_WRITABLE);
     }
 }
 
@@ -1000,7 +999,7 @@ fn make_transport(pipe: &Arc<Pipe>, side: Side) {
         pipe: Arc::clone(pipe),
         side,
     })) as *mut c_void;
-    let calls = wz_ext_transport_t {
+    let calls = zext_transport_t {
         context,
         open: Some(on_open),
         send: Some(on_send),
@@ -1008,9 +1007,8 @@ fn make_transport(pipe: &Arc<Pipe>, side: Side) {
         drained: Some(on_drained),
         drop: Some(on_drop),
     };
-    let owned: *mut wz_ext_owned_transport_t =
-        Box::into_raw(Box::new(unsafe { std::mem::zeroed() }));
-    assert_eq!(unsafe { wz_ext_transport_new(owned, &calls) }, Z_OK);
+    let owned: *mut zext_owned_transport_t = Box::into_raw(Box::new(unsafe { std::mem::zeroed() }));
+    assert_eq!(unsafe { zext_transport_new(owned, &calls) }, Z_OK);
     pipe.owned.lock().unwrap().insert(side, owned as usize);
 }
 
@@ -1023,9 +1021,9 @@ fn drop_transport(pipe: &Pipe, side: Side) {
         .unwrap()
         .remove(&side)
         .expect("the transport was made");
-    let owned = raw as *mut wz_ext_owned_transport_t;
+    let owned = raw as *mut zext_owned_transport_t;
     unsafe {
-        wz_ext_transport_drop(wz_ext_transport_move(owned));
+        zext_transport_drop(zext_transport_move(owned));
         drop(Box::from_raw(owned));
     }
 }
@@ -1188,7 +1186,7 @@ unsafe fn view(key: &CStr) -> z_view_keyexpr_t {
 unsafe fn config_over(
     key: u8,
     locator: &str,
-    transport: *mut wz_ext_owned_transport_t,
+    transport: *mut zext_owned_transport_t,
 ) -> z_owned_config_t {
     let locator = CString::new(locator).unwrap();
     let mut cfg: z_owned_config_t = std::mem::zeroed();
@@ -1198,10 +1196,7 @@ unsafe fn config_over(
         Z_OK
     );
     assert_eq!(
-        wz_ext_config_transport(
-            z_config_loan_mut(&mut cfg),
-            wz_ext_transport_loan(transport)
-        ),
+        zext_config_transport(z_config_loan_mut(&mut cfg), zext_transport_loan(transport)),
         Z_OK
     );
     cfg

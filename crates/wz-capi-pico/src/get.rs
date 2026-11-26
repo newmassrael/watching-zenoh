@@ -1299,7 +1299,7 @@ pub(crate) unsafe fn parameters_in<'a>(
 /// ([`GetMoved`]). There is no pico behaviour to mirror for a null callback (pico dereferences
 /// it and crashes); the standard is this function's own consume-on-every-path contract.
 ///
-/// `addressed` is the node the get is addressed to (`wz_ext_get_to_peer`), or
+/// `addressed` is the node the get is addressed to (`zext_get_to_peer`), or
 /// the code its refusal answers; `Ok(None)` for every `z_*` entry point.
 ///
 /// # Safety
@@ -1470,10 +1470,10 @@ impl PicoQueryQos {
 /// The caller has already adopted the C closure, so `closure` owns the
 /// `drop(context)` from here: every path below completes the get.
 ///
-/// `target_peer` is the node the get is addressed to (`wz_ext_get_to_peer`),
+/// `target_peer` is the node the get is addressed to (`zext_get_to_peer`),
 /// already admitted by the build's `targeted-query` policy; `None` is the get
 /// every `z_*` entry point asks. An engine that cannot address a get to one node
-/// asks no link and the get answers `WZ_EXT_ERR_UNSUPPORTED`, completed with no
+/// asks no link and the get answers `ZEXT_ERR_UNSUPPORTED`, completed with no
 /// reply.
 pub(crate) fn issue_get(
     engine: &EngineHold,
@@ -1503,7 +1503,7 @@ pub(crate) fn issue_get(
 
     let mut opts = get_options(ask, anyke);
 
-    // A target reaches here only from `wz_ext_get_to_peer`, which admitted it by the session's
+    // A target reaches here only from `zext_get_to_peer`, which admitted it by the session's
     // snapshot, so only a build whose domain allows the `targeted-query` policy on can be handed
     // one. Read as a `const` item, the domain is decided when the crate is compiled, so a build
     // that allows only off has no addressed path below: off costs nothing. (A plain call of a

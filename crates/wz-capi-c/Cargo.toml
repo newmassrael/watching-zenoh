@@ -329,7 +329,7 @@ config-verdict = ["wz-capi-core/config-verdict"]
 # The four instruments of the observation plane, and the `wz_capi_c_*` doors that drive them.
 # wz's own, which zenoh-c has not, so each is off as the reference build is: a build without one
 # links none of its doors. What each does is `wz-capi-port`'s `observation`, which the pico ABI's
-# `wz_ext_*` doors act on too, so the two ABIs hold one behaviour. A program registers a clock
+# `zext_*` doors act on too, so the two ABIs hold one behaviour. A program registers a clock
 # `z_timestamp_new` then reads (`clock-source`), writes and reads the node's event log
 # (`event-ring`), supervises checkpoints (`supervision`) and asks for a snapshot of the node's
 # resources (`resource-snapshot`).

@@ -1094,7 +1094,7 @@ bool wz_capi_c_internal_group_check(const wz_capi_c_owned_group_t *this_);
  * not built with fails to link, which is the report it is owed. They
  * are the node's own (one clock registry, one event log, one
  * supervisor, one resource sampler for the process), and the zenoh-pico
- * ABI's wz_ext_* doors drive the same four, so a program that moves
+ * ABI's zext_* doors drive the same four, so a program that moves
  * between the two ABIs finds the same behaviour under another prefix.
  *
  * The library holds no thread and no timer for any of them: the
@@ -1695,7 +1695,7 @@ z_result_t wz_capi_c_liveliness_get_ext(const z_loaned_session_t *session,
  * from a config given it times its lease, its keep-alive, its handshake,
  * its opens and its other deadlines by it. A deadline then passes when
  * the program's time passes it, however long the wall clock has run.
- * The pico ABI's wz_ext_time_base_* doors are the same time base under
+ * The pico ABI's zext_time_base_* doors are the same time base under
  * that ABI's names.
  *
  * THE READ. now_ns(context) answers the program's time in nanoseconds

@@ -65,7 +65,7 @@ pub(crate) struct PicoSessionExt {
     #[cfg(feature = "admin-space")]
     pub(crate) admin_space: crate::admin_space::AdminSpaceSlot,
     /// The policies the session runs under, as its open resolved them: what a door that takes a
-    /// statement a policy governs admits it by (`wz_ext_get_to_peer`, the one such door today).
+    /// statement a policy governs admits it by (`zext_get_to_peer`, the one such door today).
     #[cfg(feature = "query")]
     pub(crate) policy: SessionPolicy,
     /// The session limits the session runs under, as its open resolved them: what the door that

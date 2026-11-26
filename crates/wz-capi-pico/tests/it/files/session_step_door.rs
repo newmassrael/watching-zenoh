@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_session_step` driven through the exported symbols as a C program drives it: a dialer
+//! `zext_session_step` driven through the exported symbols as a C program drives it: a dialer
 //! opened without its read task receives what a listener publishes only through its own steps,
 //! a step is refused while the read task runs and steps again once it is stopped, and a closed
 //! session refuses it. The tokio engine, which runs every session on a thread of its own, answers
@@ -18,8 +18,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wz_capi_pico::result::{ZResult, WZ_EXT_ERR_READ_TASK_RUNS, Z_ERR_SESSION_CLOSED};
-use wz_capi_pico::session_step::wz_ext_session_step;
+use wz_capi_pico::result::{ZResult, ZEXT_ERR_READ_TASK_RUNS, Z_ERR_SESSION_CLOSED};
+use wz_capi_pico::session_step::zext_session_step;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_close, z_closure_sample, z_config_default, z_config_loan_mut,
     z_config_move, z_declare_subscriber, z_loaned_sample_t, z_open, z_open_options_default,
@@ -53,7 +53,7 @@ unsafe fn config_of(key: u8, locator: &std::ffi::CStr) -> z_owned_config_t {
 
 /// One step of `session`, waiting for input at most 10 ms.
 unsafe fn step(session: &z_owned_session_t) -> ZResult {
-    wz_ext_session_step(z_session_loan(session), 10)
+    zext_session_step(z_session_loan(session), 10)
 }
 
 /// Put `demo/a` on `session` once.
@@ -138,7 +138,7 @@ fn a_session_opened_without_its_read_task_is_stepped_by_the_program() {
             zp_start_read_task(z_session_loan_mut(&mut dialer), std::ptr::null()),
             Z_OK
         );
-        assert_eq!(step(&dialer), WZ_EXT_ERR_READ_TASK_RUNS);
+        assert_eq!(step(&dialer), ZEXT_ERR_READ_TASK_RUNS);
         assert_eq!(zp_stop_read_task(z_session_loan_mut(&mut dialer)), Z_OK);
         assert_eq!(
             step(&dialer),
@@ -149,7 +149,7 @@ fn a_session_opened_without_its_read_task_is_stepped_by_the_program() {
         wz_capi_pico::z_undeclare_subscriber(wz_capi_pico::z_subscriber_move(&mut subscriber));
         z_close(z_session_loan_mut(&mut dialer), std::ptr::null());
         assert_eq!(
-            wz_ext_session_step(z_session_loan(&dialer), 0),
+            zext_session_step(z_session_loan(&dialer), 0),
             Z_ERR_SESSION_CLOSED
         );
         z_session_drop(z_session_move(&mut dialer));

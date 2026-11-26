@@ -592,8 +592,8 @@ const E2E_FRAME_ROOM: usize = 64;
 /// A sender and a receiver of one profile, and the clock the receiver judges by.
 #[cfg(all(feature = "e2e-sender", feature = "e2e-receiver"))]
 struct E2e {
-    sender: wz_capi_pico::e2e_sender::wz_ext_owned_e2e_sender_t,
-    receiver: wz_capi_pico::e2e_receiver::wz_ext_owned_e2e_receiver_t,
+    sender: wz_capi_pico::e2e_sender::zext_owned_e2e_sender_t,
+    receiver: wz_capi_pico::e2e_receiver::zext_owned_e2e_receiver_t,
     now_ms: u64,
 }
 
@@ -609,12 +609,12 @@ impl E2e {
     #[cfg(feature = "e2e-sender-demux")]
     unsafe fn sender_keyed() -> Self {
         use wz_capi_pico::e2e_receiver::{
-            wz_ext_e2e_receiver_options_default, wz_ext_e2e_receiver_options_t,
-            WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL,
+            zext_e2e_receiver_options_default, zext_e2e_receiver_options_t,
+            ZEXT_E2E_KEYING_SENDERS_ARRIVAL,
         };
-        let mut options: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
-        wz_ext_e2e_receiver_options_default(&mut options);
-        options.keying = WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL;
+        let mut options: zext_e2e_receiver_options_t = std::mem::zeroed();
+        zext_e2e_receiver_options_default(&mut options);
+        options.keying = ZEXT_E2E_KEYING_SENDERS_ARRIVAL;
         options.streams = 1;
         Self::judged_under(&options)
     }
@@ -622,10 +622,10 @@ impl E2e {
     /// A sender and a receiver of the synthetic profile, the receiver made under `options` (null:
     /// the defaults).
     unsafe fn judged_under(
-        options: *const wz_capi_pico::e2e_receiver::wz_ext_e2e_receiver_options_t,
+        options: *const wz_capi_pico::e2e_receiver::zext_e2e_receiver_options_t,
     ) -> Self {
-        use wz_capi_pico::e2e_receiver::wz_ext_e2e_receiver_new;
-        use wz_capi_pico::e2e_sender::wz_ext_e2e_sender_new;
+        use wz_capi_pico::e2e_receiver::zext_e2e_receiver_new;
+        use wz_capi_pico::e2e_sender::zext_e2e_sender_new;
         let profile = std::ffi::CString::new(E2E_PROFILE).expect("no NUL in the profile");
         let values = std::ffi::CString::new(E2E_VALUES).expect("no NUL in the values");
         let mut e2e = Self {
@@ -634,7 +634,7 @@ impl E2e {
             now_ms: 0,
         };
         assert_eq!(
-            wz_ext_e2e_sender_new(
+            zext_e2e_sender_new(
                 &mut e2e.sender,
                 profile.as_ptr(),
                 values.as_ptr(),
@@ -645,7 +645,7 @@ impl E2e {
             "the sender of the synthetic profile is made"
         );
         assert_eq!(
-            wz_ext_e2e_receiver_new(
+            zext_e2e_receiver_new(
                 &mut e2e.receiver,
                 profile.as_ptr(),
                 values.as_ptr(),
@@ -661,16 +661,16 @@ impl E2e {
     /// Protect one payload and judge the frame.
     unsafe fn round(&mut self) {
         use wz_capi_pico::e2e_receiver::{
-            wz_ext_e2e_receiver_judge, wz_ext_e2e_receiver_loan, wz_ext_e2e_verdict_t,
-            WZ_EXT_E2E_FIRST, WZ_EXT_E2E_OK,
+            zext_e2e_receiver_judge, zext_e2e_receiver_loan, zext_e2e_verdict_t, ZEXT_E2E_FIRST,
+            ZEXT_E2E_OK,
         };
-        use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_loan, wz_ext_e2e_sender_protect};
+        use wz_capi_pico::e2e_sender::{zext_e2e_sender_loan, zext_e2e_sender_protect};
         let payload = [0xA5u8; 16];
         let mut frame = [0u8; E2E_FRAME_ROOM];
         let mut written = 0usize;
         assert_eq!(
-            wz_ext_e2e_sender_protect(
-                wz_ext_e2e_sender_loan(&self.sender),
+            zext_e2e_sender_protect(
+                zext_e2e_sender_loan(&self.sender),
                 0,
                 payload.as_ptr(),
                 payload.len(),
@@ -684,10 +684,10 @@ impl E2e {
             "a payload is protected"
         );
         self.now_ms += 1;
-        let mut verdict = wz_ext_e2e_verdict_t::default();
+        let mut verdict = zext_e2e_verdict_t::default();
         assert_eq!(
-            wz_ext_e2e_receiver_judge(
-                wz_ext_e2e_receiver_loan(&self.receiver),
+            zext_e2e_receiver_judge(
+                zext_e2e_receiver_loan(&self.receiver),
                 0,
                 frame.as_ptr(),
                 written,
@@ -698,16 +698,16 @@ impl E2e {
             "a frame is judged"
         );
         assert!(
-            verdict.status == WZ_EXT_E2E_OK || verdict.status == WZ_EXT_E2E_FIRST,
+            verdict.status == ZEXT_E2E_OK || verdict.status == ZEXT_E2E_FIRST,
             "a frame protected in order is judged in order: {verdict:?}"
         );
     }
 
     unsafe fn drop_both(mut self) {
-        use wz_capi_pico::e2e_receiver::{wz_ext_e2e_receiver_drop, wz_ext_e2e_receiver_move};
-        use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
-        wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
-        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
+        use wz_capi_pico::e2e_receiver::{zext_e2e_receiver_drop, zext_e2e_receiver_move};
+        use wz_capi_pico::e2e_sender::{zext_e2e_sender_drop, zext_e2e_sender_move};
+        zext_e2e_sender_drop(zext_e2e_sender_move(&mut self.sender));
+        zext_e2e_receiver_drop(zext_e2e_receiver_move(&mut self.receiver));
     }
 }
 
@@ -780,10 +780,10 @@ const INSTANCE_PAYLOAD: [u8; 7] = [0x08, 0x0C, 0x10, 0x05, 0x1A, 0x01, 0x61];
     feature = "e2e-receiver"
 ))]
 struct Keyed {
-    sending: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t,
-    receiving: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t,
-    sender: wz_capi_pico::e2e_sender::wz_ext_owned_e2e_sender_t,
-    receiver: wz_capi_pico::e2e_receiver::wz_ext_owned_e2e_receiver_t,
+    sending: wz_capi_pico::instance_key::zext_owned_instance_keyer_t,
+    receiving: wz_capi_pico::instance_key::zext_owned_instance_keyer_t,
+    sender: wz_capi_pico::e2e_sender::zext_owned_e2e_sender_t,
+    receiver: wz_capi_pico::e2e_receiver::zext_owned_e2e_receiver_t,
     now_ms: u64,
 }
 
@@ -795,11 +795,10 @@ struct Keyed {
 impl Keyed {
     unsafe fn new() -> Self {
         use wz_capi_pico::e2e_receiver::{
-            wz_ext_e2e_receiver_new, wz_ext_e2e_receiver_options_default,
-            wz_ext_e2e_receiver_options_t,
+            zext_e2e_receiver_new, zext_e2e_receiver_options_default, zext_e2e_receiver_options_t,
         };
         use wz_capi_pico::e2e_sender::{
-            wz_ext_e2e_sender_new, wz_ext_e2e_sender_options_default, wz_ext_e2e_sender_options_t,
+            zext_e2e_sender_new, zext_e2e_sender_options_default, zext_e2e_sender_options_t,
         };
         let profile = std::ffi::CString::new(E2E_PROFILE).expect("no NUL in the profile");
         let values = std::ffi::CString::new(E2E_VALUES).expect("no NUL in the values");
@@ -810,11 +809,11 @@ impl Keyed {
             receiver: std::mem::zeroed(),
             now_ms: 0,
         };
-        let mut sending: wz_ext_e2e_sender_options_t = std::mem::zeroed();
-        wz_ext_e2e_sender_options_default(&mut sending);
+        let mut sending: zext_e2e_sender_options_t = std::mem::zeroed();
+        zext_e2e_sender_options_default(&mut sending);
         sending.streams = INSTANCES;
         assert_eq!(
-            wz_ext_e2e_sender_new(
+            zext_e2e_sender_new(
                 &mut keyed.sender,
                 profile.as_ptr(),
                 values.as_ptr(),
@@ -824,11 +823,11 @@ impl Keyed {
             Z_OK,
             "a sender of a stream per instance is made"
         );
-        let mut receiving: wz_ext_e2e_receiver_options_t = std::mem::zeroed();
-        wz_ext_e2e_receiver_options_default(&mut receiving);
+        let mut receiving: zext_e2e_receiver_options_t = std::mem::zeroed();
+        zext_e2e_receiver_options_default(&mut receiving);
         receiving.streams = INSTANCES;
         assert_eq!(
-            wz_ext_e2e_receiver_new(
+            zext_e2e_receiver_new(
                 &mut keyed.receiver,
                 profile.as_ptr(),
                 values.as_ptr(),
@@ -842,12 +841,11 @@ impl Keyed {
     }
 
     /// A keyer of `INSTANCE_DESCRIPTION` over `INSTANCE_SET`, keeping no last values.
-    unsafe fn keyer() -> wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t {
-        use wz_capi_pico::instance_key::wz_ext_instance_keyer_from_descriptor_set;
-        let mut keyer: wz_capi_pico::instance_key::wz_ext_owned_instance_keyer_t =
-            std::mem::zeroed();
+    unsafe fn keyer() -> wz_capi_pico::instance_key::zext_owned_instance_keyer_t {
+        use wz_capi_pico::instance_key::zext_instance_keyer_from_descriptor_set;
+        let mut keyer: wz_capi_pico::instance_key::zext_owned_instance_keyer_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_instance_keyer_from_descriptor_set(
+            zext_instance_keyer_from_descriptor_set(
                 &mut keyer,
                 INSTANCE_SET.as_ptr(),
                 INSTANCE_SET.len(),
@@ -864,20 +862,20 @@ impl Keyed {
     /// Protect the payload on its instance's stream and judge the frame in the same instance's.
     unsafe fn round(&mut self) {
         use wz_capi_pico::e2e_receiver::{
-            wz_ext_e2e_receiver_loan, wz_ext_e2e_verdict_t, WZ_EXT_E2E_FIRST, WZ_EXT_E2E_OK,
+            zext_e2e_receiver_loan, zext_e2e_verdict_t, ZEXT_E2E_FIRST, ZEXT_E2E_OK,
         };
-        use wz_capi_pico::e2e_sender::wz_ext_e2e_sender_loan;
+        use wz_capi_pico::e2e_sender::zext_e2e_sender_loan;
         use wz_capi_pico::instance_key::{
-            wz_ext_instance_key_t, wz_ext_instance_keyer_judge, wz_ext_instance_keyer_loan,
-            wz_ext_instance_keyer_protect, WZ_EXT_INSTANCE_KEY_INDEXED,
+            zext_instance_key_t, zext_instance_keyer_judge, zext_instance_keyer_loan,
+            zext_instance_keyer_protect, ZEXT_INSTANCE_KEY_INDEXED,
         };
         let mut frame = [0u8; E2E_FRAME_ROOM];
         let mut written = 0usize;
-        let mut key = wz_ext_instance_key_t::default();
+        let mut key = zext_instance_key_t::default();
         assert_eq!(
-            wz_ext_instance_keyer_protect(
-                wz_ext_instance_keyer_loan(&self.sending),
-                wz_ext_e2e_sender_loan(&self.sender),
+            zext_instance_keyer_protect(
+                zext_instance_keyer_loan(&self.sending),
+                zext_e2e_sender_loan(&self.sender),
                 INSTANCE_PAYLOAD.as_ptr(),
                 INSTANCE_PAYLOAD.len(),
                 self.now_ms,
@@ -890,13 +888,13 @@ impl Keyed {
             Z_OK,
             "a payload is protected on its instance's stream"
         );
-        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
+        assert_eq!((key.status, key.instance), (ZEXT_INSTANCE_KEY_INDEXED, 0));
         self.now_ms += 1;
-        let mut verdict = wz_ext_e2e_verdict_t::default();
+        let mut verdict = zext_e2e_verdict_t::default();
         assert_eq!(
-            wz_ext_instance_keyer_judge(
-                wz_ext_instance_keyer_loan(&self.receiving),
-                wz_ext_e2e_receiver_loan(&self.receiver),
+            zext_instance_keyer_judge(
+                zext_instance_keyer_loan(&self.receiving),
+                zext_e2e_receiver_loan(&self.receiver),
                 frame.as_ptr(),
                 written,
                 self.now_ms,
@@ -906,21 +904,21 @@ impl Keyed {
             Z_OK,
             "a frame is judged in its instance's stream"
         );
-        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 0));
+        assert_eq!((key.status, key.instance), (ZEXT_INSTANCE_KEY_INDEXED, 0));
         assert!(
-            verdict.status == WZ_EXT_E2E_OK || verdict.status == WZ_EXT_E2E_FIRST,
+            verdict.status == ZEXT_E2E_OK || verdict.status == ZEXT_E2E_FIRST,
             "a frame protected in order is judged in order: {verdict:?}"
         );
     }
 
     unsafe fn drop_all(mut self) {
-        use wz_capi_pico::e2e_receiver::{wz_ext_e2e_receiver_drop, wz_ext_e2e_receiver_move};
-        use wz_capi_pico::e2e_sender::{wz_ext_e2e_sender_drop, wz_ext_e2e_sender_move};
-        use wz_capi_pico::instance_key::{wz_ext_instance_keyer_drop, wz_ext_instance_keyer_move};
-        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut self.sending));
-        wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut self.receiving));
-        wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut self.sender));
-        wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut self.receiver));
+        use wz_capi_pico::e2e_receiver::{zext_e2e_receiver_drop, zext_e2e_receiver_move};
+        use wz_capi_pico::e2e_sender::{zext_e2e_sender_drop, zext_e2e_sender_move};
+        use wz_capi_pico::instance_key::{zext_instance_keyer_drop, zext_instance_keyer_move};
+        zext_instance_keyer_drop(zext_instance_keyer_move(&mut self.sending));
+        zext_instance_keyer_drop(zext_instance_keyer_move(&mut self.receiving));
+        zext_e2e_sender_drop(zext_e2e_sender_move(&mut self.sender));
+        zext_e2e_receiver_drop(zext_e2e_receiver_move(&mut self.receiver));
     }
 }
 
@@ -971,8 +969,8 @@ const PAYLOAD_ROOM: usize = 64;
 /// program hold them: one set by path and encoded, the other decoded and read back.
 #[cfg(feature = "message-payload")]
 struct MessagePayload {
-    sending: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
-    receiving: wz_capi_pico::message_payload::wz_ext_owned_message_payload_t,
+    sending: wz_capi_pico::message_payload::zext_owned_message_payload_t,
+    receiving: wz_capi_pico::message_payload::zext_owned_message_payload_t,
     serial: u64,
     /// The storage each payload keeps its values in, the program's: taken before the rounds and
     /// let go after both payloads are dropped.
@@ -991,23 +989,23 @@ impl MessagePayload {
     /// its key expression and holds its schema.
     unsafe fn new() -> Self {
         use wz_capi_pico::message_catalog::{
-            wz_ext_message_catalog_drop, wz_ext_message_catalog_move, wz_ext_message_catalog_new,
-            wz_ext_owned_message_catalog_t,
+            zext_message_catalog_drop, zext_message_catalog_move, zext_message_catalog_new,
+            zext_owned_message_catalog_t,
         };
         use wz_capi_pico::message_payload::{
-            wz_ext_owned_payload_schema_t, wz_ext_payload_schema_drop,
-            wz_ext_payload_schema_from_descriptor_set, wz_ext_payload_schema_move,
+            zext_owned_payload_schema_t, zext_payload_schema_drop,
+            zext_payload_schema_from_descriptor_set, zext_payload_schema_move,
         };
         let text = std::ffi::CString::new(CATALOG).expect("no NUL in the catalog");
-        let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();
+        let mut catalog: zext_owned_message_catalog_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut()),
+            zext_message_catalog_new(&mut catalog, text.as_ptr(), std::ptr::null_mut()),
             Z_OK,
             "the synthetic catalog reads"
         );
-        let mut schema: wz_ext_owned_payload_schema_t = std::mem::zeroed();
+        let mut schema: zext_owned_payload_schema_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_payload_schema_from_descriptor_set(
+            zext_payload_schema_from_descriptor_set(
                 &mut schema,
                 PAYLOAD_SET.as_ptr(),
                 PAYLOAD_SET.len(),
@@ -1016,7 +1014,7 @@ impl MessagePayload {
             Z_OK,
             "the synthetic schema reads"
         );
-        let size = wz_capi_pico::message_payload::wz_ext_message_payload_storage_size(
+        let size = wz_capi_pico::message_payload::zext_message_payload_storage_size(
             PAYLOAD_FIELDS,
             PAYLOAD_BYTES,
         );
@@ -1028,36 +1026,36 @@ impl MessagePayload {
             serial: 0,
             _storage: storage,
         };
-        wz_ext_payload_schema_drop(wz_ext_payload_schema_move(&mut schema));
-        wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog));
+        zext_payload_schema_drop(zext_payload_schema_move(&mut schema));
+        zext_message_catalog_drop(zext_message_catalog_move(&mut catalog));
         payload
     }
 
     /// A payload of the catalog's first message, of type `syn.noheap.Pose`, keeping its values in
     /// `storage`, which outlives it.
     unsafe fn payload(
-        catalog: &wz_capi_pico::message_catalog::wz_ext_owned_message_catalog_t,
-        schema: &wz_capi_pico::message_payload::wz_ext_owned_payload_schema_t,
+        catalog: &wz_capi_pico::message_catalog::zext_owned_message_catalog_t,
+        schema: &wz_capi_pico::message_payload::zext_owned_payload_schema_t,
         storage: &mut [u8],
-    ) -> wz_capi_pico::message_payload::wz_ext_owned_message_payload_t {
-        use wz_capi_pico::message_catalog::wz_ext_message_catalog_loan;
+    ) -> wz_capi_pico::message_payload::zext_owned_message_payload_t {
+        use wz_capi_pico::message_catalog::zext_message_catalog_loan;
         use wz_capi_pico::message_payload::{
-            wz_ext_message_payload_new, wz_ext_message_payload_options_t,
-            wz_ext_owned_message_payload_t, wz_ext_payload_schema_loan,
+            zext_message_payload_new, zext_message_payload_options_t, zext_owned_message_payload_t,
+            zext_payload_schema_loan,
         };
-        let options = wz_ext_message_payload_options_t {
+        let options = zext_message_payload_options_t {
             storage: storage.as_mut_ptr(),
             storage_len: storage.len(),
             fields: PAYLOAD_FIELDS,
             bytes: PAYLOAD_BYTES,
         };
-        let mut payload: wz_ext_owned_message_payload_t = std::mem::zeroed();
+        let mut payload: zext_owned_message_payload_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_message_payload_new(
+            zext_message_payload_new(
                 &mut payload,
-                wz_ext_message_catalog_loan(catalog),
+                zext_message_catalog_loan(catalog),
                 0,
-                wz_ext_payload_schema_loan(schema),
+                zext_payload_schema_loan(schema),
                 c"syn.noheap.Pose".as_ptr(),
                 &options,
                 std::ptr::null_mut(),
@@ -1072,47 +1070,45 @@ impl MessagePayload {
     /// serial back.
     unsafe fn round(&mut self) {
         use wz_capi_pico::message_payload::{
-            wz_ext_message_payload_decode, wz_ext_message_payload_encode,
-            wz_ext_message_payload_get_uint, wz_ext_message_payload_loan,
-            wz_ext_message_payload_set_int, wz_ext_message_payload_set_uint,
+            zext_message_payload_decode, zext_message_payload_encode,
+            zext_message_payload_get_uint, zext_message_payload_loan, zext_message_payload_set_int,
+            zext_message_payload_set_uint,
         };
         self.serial += 1;
-        let sending = wz_ext_message_payload_loan(&self.sending);
+        let sending = zext_message_payload_loan(&self.sending);
         assert_eq!(
-            wz_ext_message_payload_set_uint(sending, c"serial".as_ptr(), self.serial),
+            zext_message_payload_set_uint(sending, c"serial".as_ptr(), self.serial),
             Z_OK
         );
         assert_eq!(
-            wz_ext_message_payload_set_int(sending, c"origin.x".as_ptr(), -3),
+            zext_message_payload_set_int(sending, c"origin.x".as_ptr(), -3),
             Z_OK
         );
         let mut bytes = [0u8; PAYLOAD_ROOM];
         let mut written = 0usize;
         assert_eq!(
-            wz_ext_message_payload_encode(sending, bytes.as_mut_ptr(), bytes.len(), &mut written),
+            zext_message_payload_encode(sending, bytes.as_mut_ptr(), bytes.len(), &mut written),
             Z_OK,
             "the payload encodes into the room"
         );
-        let receiving = wz_ext_message_payload_loan(&self.receiving);
+        let receiving = zext_message_payload_loan(&self.receiving);
         assert_eq!(
-            wz_ext_message_payload_decode(receiving, bytes.as_ptr(), written),
+            zext_message_payload_decode(receiving, bytes.as_ptr(), written),
             Z_OK,
             "the bytes decode"
         );
         let mut serial = 0u64;
         assert_eq!(
-            wz_ext_message_payload_get_uint(receiving, c"serial".as_ptr(), &mut serial),
+            zext_message_payload_get_uint(receiving, c"serial".as_ptr(), &mut serial),
             Z_OK
         );
         assert_eq!(serial, self.serial, "the serial set is the serial read");
     }
 
     unsafe fn drop_both(mut self) {
-        use wz_capi_pico::message_payload::{
-            wz_ext_message_payload_drop, wz_ext_message_payload_move,
-        };
-        wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut self.sending));
-        wz_ext_message_payload_drop(wz_ext_message_payload_move(&mut self.receiving));
+        use wz_capi_pico::message_payload::{zext_message_payload_drop, zext_message_payload_move};
+        zext_message_payload_drop(zext_message_payload_move(&mut self.sending));
+        zext_message_payload_drop(zext_message_payload_move(&mut self.receiving));
     }
 }
 
@@ -1126,9 +1122,9 @@ const SUPERVISED_CELL: usize = 16;
 /// periodic message holds one: each round is a reception of the stream and a poll.
 #[cfg(feature = "e2e-supervision")]
 struct Supervision {
-    supervisor: wz_capi_pico::stream_supervision::wz_ext_owned_stream_supervisor_t,
+    supervisor: wz_capi_pico::stream_supervision::zext_owned_stream_supervisor_t,
     /// The table and the value cells, which the supervisor owns until it is dropped.
-    slots: Vec<wz_capi_pico::stream_supervision::wz_ext_stream_slot_t>,
+    slots: Vec<wz_capi_pico::stream_supervision::zext_stream_slot_t>,
     values: Vec<u8>,
     stream: u32,
 }
@@ -1137,17 +1133,17 @@ struct Supervision {
 impl Supervision {
     unsafe fn new() -> Self {
         use wz_capi_pico::stream_supervision::{
-            wz_ext_stream_slot_t, wz_ext_stream_supervisor_add, wz_ext_stream_supervisor_loan,
-            wz_ext_stream_supervisor_new,
+            zext_stream_slot_t, zext_stream_supervisor_add, zext_stream_supervisor_loan,
+            zext_stream_supervisor_new,
         };
         let mut supervision = Self {
             supervisor: std::mem::zeroed(),
-            slots: vec![std::mem::zeroed::<wz_ext_stream_slot_t>(); SUPERVISED_STREAMS],
+            slots: vec![std::mem::zeroed::<zext_stream_slot_t>(); SUPERVISED_STREAMS],
             values: vec![0u8; SUPERVISED_STREAMS * SUPERVISED_CELL],
             stream: 0,
         };
         assert_eq!(
-            wz_ext_stream_supervisor_new(
+            zext_stream_supervisor_new(
                 &mut supervision.supervisor,
                 supervision.slots.as_mut_ptr(),
                 supervision.slots.len(),
@@ -1162,8 +1158,8 @@ impl Supervision {
         );
         // A deadline far past a window, so a round's poll judges the stream and tells no loss.
         assert_eq!(
-            wz_ext_stream_supervisor_add(
-                wz_ext_stream_supervisor_loan(&supervision.supervisor),
+            zext_stream_supervisor_add(
+                zext_stream_supervisor_loan(&supervision.supervisor),
                 1_000,
                 2,
                 1,
@@ -1179,13 +1175,13 @@ impl Supervision {
     /// Say the stream was received, with its payload, and poll.
     unsafe fn round(&self) {
         use wz_capi_pico::stream_supervision::{
-            wz_ext_stream_supervisor_loan, wz_ext_stream_supervisor_poll,
-            wz_ext_stream_supervisor_received,
+            zext_stream_supervisor_loan, zext_stream_supervisor_poll,
+            zext_stream_supervisor_received,
         };
-        let supervisor = wz_ext_stream_supervisor_loan(&self.supervisor);
+        let supervisor = zext_stream_supervisor_loan(&self.supervisor);
         let payload = [0xC3u8; 8];
         assert_eq!(
-            wz_ext_stream_supervisor_received(
+            zext_stream_supervisor_received(
                 supervisor,
                 self.stream,
                 payload.as_ptr(),
@@ -1195,15 +1191,15 @@ impl Supervision {
             "a reception is recorded"
         );
         let mut told = usize::MAX;
-        assert_eq!(wz_ext_stream_supervisor_poll(supervisor, &mut told), Z_OK);
+        assert_eq!(zext_stream_supervisor_poll(supervisor, &mut told), Z_OK);
         assert_eq!(told, 0, "a stream received within its deadline is not lost");
     }
 
     unsafe fn drop_all(mut self) {
         use wz_capi_pico::stream_supervision::{
-            wz_ext_stream_supervisor_drop, wz_ext_stream_supervisor_move,
+            zext_stream_supervisor_drop, zext_stream_supervisor_move,
         };
-        wz_ext_stream_supervisor_drop(wz_ext_stream_supervisor_move(&mut self.supervisor));
+        zext_stream_supervisor_drop(zext_stream_supervisor_move(&mut self.supervisor));
         drop(self.slots);
         drop(self.values);
     }
@@ -1213,7 +1209,7 @@ impl Supervision {
 #[cfg(feature = "replay-cache")]
 struct Replay {
     publisher: z_owned_publisher_t,
-    cache: wz_capi_pico::replay_publisher::wz_ext_owned_replay_publisher_t,
+    cache: wz_capi_pico::replay_publisher::zext_owned_replay_publisher_t,
     /// The cache's storage, which it holds until it is dropped.
     storage: Vec<u8>,
     time_ms: u64,
@@ -1223,8 +1219,7 @@ struct Replay {
 impl Replay {
     unsafe fn new(pair: &Pair) -> Self {
         use wz_capi_pico::replay_publisher::{
-            wz_ext_replay_publisher_new, wz_ext_replay_publisher_storage_size,
-            wz_ext_replay_shape_t,
+            zext_replay_publisher_new, zext_replay_publisher_storage_size, zext_replay_shape_t,
         };
         let ke = view(DATA_KEY);
         let mut publisher: z_owned_publisher_t = std::mem::zeroed();
@@ -1238,12 +1233,12 @@ impl Replay {
             Z_OK,
             "the replay cache's publisher is declared"
         );
-        let shape = wz_ext_replay_shape_t {
+        let shape = zext_replay_shape_t {
             frame_max: pipe_pair::PAYLOAD.len(),
             depth: 4,
             instances: 1,
         };
-        let size = wz_ext_replay_publisher_storage_size(&shape);
+        let size = zext_replay_publisher_storage_size(&shape);
         assert!(size > 0, "a cache of {shape:?} has a size");
         let mut replay = Self {
             publisher,
@@ -1252,7 +1247,7 @@ impl Replay {
             time_ms: 0,
         };
         assert_eq!(
-            wz_ext_replay_publisher_new(
+            zext_replay_publisher_new(
                 &mut replay.cache,
                 z_session_loan(pair.dialler()),
                 wz_capi_pico::z_publisher_loan(&replay.publisher),
@@ -1270,18 +1265,18 @@ impl Replay {
     /// Record one frame in the ring and put it, and wait for the listener to hear it.
     unsafe fn round(&mut self, counts: &pipe_pair::Counts) {
         use wz_capi_pico::replay_publisher::{
-            wz_ext_replay_publisher_loan, wz_ext_replay_publisher_put, WZ_EXT_REPLAY_SEND_PERIODIC,
+            zext_replay_publisher_loan, zext_replay_publisher_put, ZEXT_REPLAY_SEND_PERIODIC,
         };
         let heard = counts.heard.load(Ordering::SeqCst);
         self.time_ms += 1;
         assert_eq!(
-            wz_ext_replay_publisher_put(
-                wz_ext_replay_publisher_loan(&self.cache),
+            zext_replay_publisher_put(
+                zext_replay_publisher_loan(&self.cache),
                 0,
                 self.time_ms,
                 pipe_pair::PAYLOAD.as_ptr(),
                 pipe_pair::PAYLOAD.len(),
-                WZ_EXT_REPLAY_SEND_PERIODIC,
+                ZEXT_REPLAY_SEND_PERIODIC,
                 std::ptr::null_mut(),
             ),
             Z_OK,
@@ -1295,9 +1290,9 @@ impl Replay {
 
     unsafe fn drop_all(mut self) {
         use wz_capi_pico::replay_publisher::{
-            wz_ext_replay_publisher_drop, wz_ext_replay_publisher_move,
+            zext_replay_publisher_drop, zext_replay_publisher_move,
         };
-        wz_ext_replay_publisher_drop(wz_ext_replay_publisher_move(&mut self.cache));
+        zext_replay_publisher_drop(zext_replay_publisher_move(&mut self.cache));
         z_undeclare_publisher(z_publisher_move(&mut self.publisher));
         drop(self.storage);
     }
@@ -1771,18 +1766,18 @@ impl Bench {
     ))]
     unsafe fn decl_watch(&self) {
         use wz_capi_pico::decl_watch::{
-            wz_ext_decl_watch_declare, wz_ext_decl_watch_drop, wz_ext_owned_decl_watch_t,
-            WZ_EXT_DECL_SUBSCRIBER,
+            zext_decl_watch_declare, zext_decl_watch_drop, zext_owned_decl_watch_t,
+            ZEXT_DECL_SUBSCRIBER,
         };
         let declared = TOLD.declared.load(Ordering::SeqCst);
         let undeclared = TOLD.undeclared.load(Ordering::SeqCst);
         let dropped = TOLD.dropped.load(Ordering::SeqCst);
-        let mut watch: wz_ext_owned_decl_watch_t = std::mem::zeroed();
+        let mut watch: zext_owned_decl_watch_t = std::mem::zeroed();
         assert_eq!(
-            wz_ext_decl_watch_declare(
+            zext_decl_watch_declare(
                 z_session_loan(self.pair.listener()),
                 &mut watch,
-                WZ_EXT_DECL_SUBSCRIBER,
+                ZEXT_DECL_SUBSCRIBER,
                 Some(on_told),
                 Some(told_drop),
                 told_context(),
@@ -1817,7 +1812,7 @@ impl Bench {
                 > undeclared),
             "an undeclaration was not told to the watch within {WAIT_BOUND:?}"
         );
-        wz_ext_decl_watch_drop(&mut watch);
+        zext_decl_watch_drop(&mut watch);
         assert!(watch._val.is_null(), "a dropped watch holds none");
         assert_eq!(
             TOLD.dropped.load(Ordering::SeqCst),
@@ -2290,20 +2285,20 @@ fn told_context() -> *mut std::ffi::c_void {
 ))]
 unsafe extern "C" fn on_told(
     context: *mut std::ffi::c_void,
-    event: *const wz_capi_pico::decl_watch::wz_ext_decl_event_t,
+    event: *const wz_capi_pico::decl_watch::zext_decl_event_t,
 ) {
-    use wz_capi_pico::decl_watch::{WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_UNDECLARED};
+    use wz_capi_pico::decl_watch::{ZEXT_DECL_DECLARED, ZEXT_DECL_UNDECLARED};
     let told = &*(context as *const Told);
     let event = &*event;
     match event.kind {
-        WZ_EXT_DECL_DECLARED if !event.keyexpr.is_null() => {
+        ZEXT_DECL_DECLARED if !event.keyexpr.is_null() => {
             let key = std::slice::from_raw_parts(event.keyexpr.cast::<u8>(), event.keyexpr_len);
             if key == DECLARED.to_bytes() {
                 told.id.store(event.id, Ordering::SeqCst);
                 told.declared.fetch_add(1, Ordering::SeqCst);
             }
         }
-        WZ_EXT_DECL_UNDECLARED if event.id == told.id.load(Ordering::SeqCst) => {
+        ZEXT_DECL_UNDECLARED if event.id == told.id.load(Ordering::SeqCst) => {
             told.undeclared.fetch_add(1, Ordering::SeqCst);
         }
         _ => {}
@@ -2354,14 +2349,14 @@ const DOCUMENT: &CStr = c"{ mode: \"peer\" }";
 /// Make a config and hand it the document, as a program does before it opens another session.
 #[cfg(feature = "config-document")]
 unsafe fn config_document() {
-    use wz_capi_pico::config_policy::wz_ext_config_document;
+    use wz_capi_pico::config_policy::zext_config_document;
     use wz_capi_pico::{
         z_config_default, z_config_drop, z_config_loan_mut, z_config_move, z_owned_config_t,
     };
     let mut config: z_owned_config_t = std::mem::zeroed();
     assert_eq!(z_config_default(&mut config), Z_OK);
     assert_eq!(
-        wz_ext_config_document(z_config_loan_mut(&mut config), DOCUMENT.as_ptr()),
+        zext_config_document(z_config_loan_mut(&mut config), DOCUMENT.as_ptr()),
         Z_OK,
         "the document is taken"
     );
@@ -2513,11 +2508,11 @@ const SHARED_ID: u16 = 40;
 /// what either session sends over it names `DATA_KEY` by its id, with no declaration first.
 #[cfg(feature = "shared-key-ids")]
 unsafe fn state_key_ids(config: &mut wz_capi_pico::z_owned_config_t) {
-    use wz_capi_pico::key_ids::{wz_ext_config_key_ids, wz_ext_config_key_wire_form_for};
+    use wz_capi_pico::key_ids::{zext_config_key_ids, zext_config_key_wire_form_for};
     let ids = [SHARED_ID];
     let keys = [DATA_KEY.as_ptr()];
     assert_eq!(
-        wz_ext_config_key_ids(
+        zext_config_key_ids(
             wz_capi_pico::z_config_loan_mut(config),
             ids.as_ptr(),
             keys.as_ptr(),
@@ -2527,7 +2522,7 @@ unsafe fn state_key_ids(config: &mut wz_capi_pico::z_owned_config_t) {
         "the config holds the dictionary"
     );
     assert_eq!(
-        wz_ext_config_key_wire_form_for(
+        zext_config_key_wire_form_for(
             wz_capi_pico::z_config_loan_mut(config),
             pipe_pair::LISTEN.as_ptr(),
             c"shared".as_ptr()

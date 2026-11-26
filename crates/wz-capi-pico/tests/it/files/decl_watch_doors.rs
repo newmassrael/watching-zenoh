@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! The declaration watch driven through the C doors (`wz_ext_decl_watch_declare`,
-//! `wz_ext_decl_watch_drop`): two peers over loopback, one that listens and watches and one that
+//! The declaration watch driven through the C doors (`zext_decl_watch_declare`,
+//! `zext_decl_watch_drop`): two peers over loopback, one that listens and watches and one that
 //! dials it and declares.
 //!
 //! What is held: each watch is told the declaration of its own kind of entity with the key and
@@ -29,9 +29,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_pico::decl_watch::{
-    wz_ext_decl_event_t, wz_ext_decl_watch_declare, wz_ext_decl_watch_drop,
-    wz_ext_owned_decl_watch_t, WZ_EXT_DECL_DECLARED, WZ_EXT_DECL_QUERYABLE, WZ_EXT_DECL_SUBSCRIBER,
-    WZ_EXT_DECL_SYNCED, WZ_EXT_DECL_TOKEN, WZ_EXT_DECL_UNDECLARED,
+    zext_decl_event_t, zext_decl_watch_declare, zext_decl_watch_drop, zext_owned_decl_watch_t,
+    ZEXT_DECL_DECLARED, ZEXT_DECL_QUERYABLE, ZEXT_DECL_SUBSCRIBER, ZEXT_DECL_SYNCED,
+    ZEXT_DECL_TOKEN, ZEXT_DECL_UNDECLARED,
 };
 use wz_capi_pico::liveliness::{
     z_liveliness_declare_token, z_liveliness_token_move, z_liveliness_undeclare_token,
@@ -85,13 +85,13 @@ impl Log {
 
     /// The declaration of `key`, once one has been told.
     fn declared(&self, key: &str) -> Option<Seen> {
-        self.of_kind(WZ_EXT_DECL_DECLARED)
+        self.of_kind(ZEXT_DECL_DECLARED)
             .into_iter()
             .find(|e| e.key.as_deref() == Some(key))
     }
 
     fn undeclared(&self, id: u64) -> Option<Seen> {
-        self.of_kind(WZ_EXT_DECL_UNDECLARED)
+        self.of_kind(ZEXT_DECL_UNDECLARED)
             .into_iter()
             .find(|e| e.id == id)
     }
@@ -101,7 +101,7 @@ impl Log {
     }
 }
 
-unsafe extern "C" fn on_event(context: *mut c_void, event: *const wz_ext_decl_event_t) {
+unsafe extern "C" fn on_event(context: *mut c_void, event: *const zext_decl_event_t) {
     let log = &*(context as *const Log);
     let event = &*event;
     let key = if event.keyexpr.is_null() {
@@ -138,9 +138,9 @@ unsafe fn watch(
     session: &z_owned_session_t,
     entity: u8,
     log: &Log,
-) -> (wz_ext_owned_decl_watch_t, i8) {
-    let mut watch: wz_ext_owned_decl_watch_t = std::mem::zeroed();
-    let rc = wz_ext_decl_watch_declare(
+) -> (zext_owned_decl_watch_t, i8) {
+    let mut watch: zext_owned_decl_watch_t = std::mem::zeroed();
+    let rc = zext_decl_watch_declare(
         z_session_loan(session),
         &mut watch,
         entity,
@@ -283,9 +283,9 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
         let mut watcher = open(&[(Z_CONFIG_LISTEN_KEY, endpoint.as_c_str())]);
         let logs = [Log::default(), Log::default(), Log::default()];
         let kinds = [
-            (WZ_EXT_DECL_SUBSCRIBER, "demo/watch/sub"),
-            (WZ_EXT_DECL_QUERYABLE, "demo/watch/qbl"),
-            (WZ_EXT_DECL_TOKEN, "demo/watch/tok"),
+            (ZEXT_DECL_SUBSCRIBER, "demo/watch/sub"),
+            (ZEXT_DECL_QUERYABLE, "demo/watch/qbl"),
+            (ZEXT_DECL_TOKEN, "demo/watch/tok"),
         ];
         let mut watches = Vec::new();
         for ((entity, _), log) in kinds.iter().zip(&logs) {
@@ -301,7 +301,7 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
             for log in &logs {
                 until(
                     "each watch is told the peer's initial declarations are final",
-                    || !log.of_kind(WZ_EXT_DECL_SYNCED).is_empty(),
+                    || !log.of_kind(ZEXT_DECL_SYNCED).is_empty(),
                 );
             }
         }
@@ -368,13 +368,13 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
             for log in &logs {
                 until(
                     "each watch is told the second peer's declarations are final",
-                    || log.of_kind(WZ_EXT_DECL_SYNCED).len() >= 2,
+                    || log.of_kind(ZEXT_DECL_SYNCED).len() >= 2,
                 );
             }
             // Settle: a third would come only from a repeated final, which is not told.
             std::thread::sleep(Duration::from_millis(300));
             for log in &logs {
-                let synced = log.of_kind(WZ_EXT_DECL_SYNCED);
+                let synced = log.of_kind(ZEXT_DECL_SYNCED);
                 assert_eq!(synced.len(), 2, "once per establishment: {synced:?}");
                 assert!(synced.iter().all(|e| e.id == 0 && e.key.is_none()));
                 if peer_built {
@@ -386,7 +386,7 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
             std::thread::sleep(Duration::from_millis(300));
             for log in &logs {
                 assert!(
-                    log.of_kind(WZ_EXT_DECL_SYNCED).is_empty(),
+                    log.of_kind(ZEXT_DECL_SYNCED).is_empty(),
                     "a build without declarations-synced-event tells no sync"
                 );
             }
@@ -396,9 +396,9 @@ fn a_watch_hears_its_kind_declared_and_undeclared_by_the_peer_that_declared_it()
         // told nothing of what the peer declares after.
         for (handle, log) in watches.iter_mut().zip(&logs) {
             assert_eq!(log.drops(), 0);
-            wz_ext_decl_watch_drop(handle);
+            zext_decl_watch_drop(handle);
             assert_eq!(log.drops(), 1, "the drop ran before the door returned");
-            wz_ext_decl_watch_drop(handle);
+            zext_decl_watch_drop(handle);
             assert_eq!(
                 log.drops(),
                 1,
@@ -441,7 +441,7 @@ fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() 
         // The witness: a watch declared before the link, which says when the declarations have
         // arrived, so the watches declared after are declared after them.
         let witness = Log::default();
-        let (mut witness_watch, rc) = watch(&watcher, WZ_EXT_DECL_QUERYABLE, &witness);
+        let (mut witness_watch, rc) = watch(&watcher, ZEXT_DECL_QUERYABLE, &witness);
         assert_eq!(rc, Z_OK);
         let mut declarer = open_declarer(&endpoint);
         let declarer_zid = z_info_zid(z_session_loan(&declarer)).id;
@@ -452,8 +452,8 @@ fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() 
         // The subscriber travels the same link ahead of the queryable, so it has arrived too.
 
         let late = [
-            (WZ_EXT_DECL_SUBSCRIBER, "demo/watch/sub", Log::default()),
-            (WZ_EXT_DECL_QUERYABLE, "demo/watch/qbl", Log::default()),
+            (ZEXT_DECL_SUBSCRIBER, "demo/watch/sub", Log::default()),
+            (ZEXT_DECL_QUERYABLE, "demo/watch/qbl", Log::default()),
         ];
         let mut watches = Vec::new();
         for (entity, _, log) in &late {
@@ -490,10 +490,10 @@ fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() 
             let events = log.events();
             let at_declared = events
                 .iter()
-                .position(|e| e.kind == WZ_EXT_DECL_DECLARED && e.id == id);
+                .position(|e| e.kind == ZEXT_DECL_DECLARED && e.id == id);
             let at_undeclared = events
                 .iter()
-                .position(|e| e.kind == WZ_EXT_DECL_UNDECLARED && e.id == id);
+                .position(|e| e.kind == ZEXT_DECL_UNDECLARED && e.id == id);
             assert!(
                 at_declared < at_undeclared,
                 "held first, then live: {events:?}"
@@ -501,7 +501,7 @@ fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() 
             assert_eq!(
                 events
                     .iter()
-                    .filter(|e| e.kind == WZ_EXT_DECL_DECLARED && e.id == id)
+                    .filter(|e| e.kind == ZEXT_DECL_DECLARED && e.id == id)
                     .count(),
                 1,
                 "told once"
@@ -509,9 +509,9 @@ fn a_watch_declared_after_the_peer_declared_is_told_what_the_peer_holds_first() 
         }
 
         for handle in &mut watches {
-            wz_ext_decl_watch_drop(handle);
+            zext_decl_watch_drop(handle);
         }
-        wz_ext_decl_watch_drop(&mut witness_watch);
+        zext_decl_watch_drop(&mut witness_watch);
         close(&mut declarer);
         close(&mut watcher);
     }
@@ -542,13 +542,13 @@ fn a_refused_watch_and_a_closed_session_run_the_programs_drop_once() {
         );
 
         let held = Log::default();
-        let (mut live, rc) = watch(&session, WZ_EXT_DECL_SUBSCRIBER, &held);
+        let (mut live, rc) = watch(&session, ZEXT_DECL_SUBSCRIBER, &held);
         assert_eq!(rc, Z_OK);
         assert_eq!(held.drops(), 0, "a declared watch holds its context");
 
         z_close(z_session_loan_mut(&mut session), std::ptr::null());
         assert_eq!(held.drops(), 1, "the close let go of the watch's context");
-        wz_ext_decl_watch_drop(&mut live);
+        zext_decl_watch_drop(&mut live);
         assert_eq!(
             held.drops(),
             1,
@@ -556,7 +556,7 @@ fn a_refused_watch_and_a_closed_session_run_the_programs_drop_once() {
         );
 
         let late = Log::default();
-        let (_, rc) = watch(&session, WZ_EXT_DECL_TOKEN, &late);
+        let (_, rc) = watch(&session, ZEXT_DECL_TOKEN, &late);
         assert_eq!(rc, Z_ERR_SESSION_CLOSED, "a closed session takes no watch");
         assert_eq!(late.drops(), 1);
 

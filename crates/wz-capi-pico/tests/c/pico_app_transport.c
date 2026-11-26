@@ -4,7 +4,7 @@
  *
  * A zenoh-pico C program whose sessions open no socket: two sessions in one process
  * joined by an in-memory transport this program implements through the wz extension
- * doors (wz_ext_transport_*, wz_ext.h). Compiled against zenoh-pico's OWN headers for
+ * doors (zext_transport_*, wz_ext.h). Compiled against zenoh-pico's OWN headers for
  * this host plus wz_ext.h, linked against the wz cdylib built with the app-transport
  * capability.
  *
@@ -56,15 +56,15 @@ static const char *const MEMBER_SOURCE[2] = {"udp/192.0.2.1:7447", "udp/192.0.2.
  * the pipe saw. Every field is under `lock`: the sessions call in from their threads. */
 static struct {
     z_owned_mutex_t lock;
-    wz_ext_owned_transport_t transport[2];
+    zext_owned_transport_t transport[2];
     int side_id[2];
     int faults;
-    wz_ext_link_t listener;
-    wz_ext_link_t group[2];
+    zext_link_t listener;
+    zext_link_t group[2];
     struct {
         int used;
         int datagram;
-        wz_ext_link_t link[2];
+        zext_link_t link[2];
     } pairs[MAX_PAIRS];
     int dials;
     int dialler_sends;
@@ -77,12 +77,12 @@ static struct {
 static void pipe_lock(void) { z_mutex_lock(z_mutex_loan_mut(&pipe_state.lock)); }
 static void pipe_unlock(void) { z_mutex_unlock(z_mutex_loan_mut(&pipe_state.lock)); }
 
-static const wz_ext_loaned_transport_t *loan_of(int side) {
-    return wz_ext_transport_loan(&pipe_state.transport[side]);
+static const zext_loaned_transport_t *loan_of(int side) {
+    return zext_transport_loan(&pipe_state.transport[side]);
 }
 
 /* The pair `link` of `side` is in, or -1. Called with the lock held. */
-static int pair_of(int side, wz_ext_link_t link) {
+static int pair_of(int side, zext_link_t link) {
     for (int i = 0; i < MAX_PAIRS; i++) {
         if (pipe_state.pairs[i].used && pipe_state.pairs[i].link[side] == link) return i;
     }
@@ -98,12 +98,12 @@ static int read_counter(const int *counter) {
 
 /* The listening program accepts the dialled `link` on its listener, under `remote`, and
  * the two are paired before the dial is answered, so neither side sends into nothing. */
-static int accept_and_pair(wz_ext_link_t link, const char *remote, int datagram) {
+static int accept_and_pair(zext_link_t link, const char *remote, int datagram) {
     pipe_lock();
-    wz_ext_link_t listener = pipe_state.listener;
+    zext_link_t listener = pipe_state.listener;
     pipe_unlock();
-    wz_ext_link_t accepted = 0;
-    if (wz_ext_transport_accepted(loan_of(LISTENING), listener, remote, &accepted) != Z_OK) return 0;
+    zext_link_t accepted = 0;
+    if (zext_transport_accepted(loan_of(LISTENING), listener, remote, &accepted) != Z_OK) return 0;
     pipe_lock();
     pipe_state.dials++;
     for (int i = 0; i < MAX_PAIRS; i++) {
@@ -119,46 +119,46 @@ static int accept_and_pair(wz_ext_link_t link, const char *remote, int datagram)
     return 1;
 }
 
-static wz_ext_link_result_t on_open(void *context, wz_ext_link_t link, wz_ext_link_kind_t kind,
+static zext_link_result_t on_open(void *context, zext_link_t link, zext_link_kind_t kind,
                                     const char *locator) {
     int side = *(int *)context;
     (void)locator;
-    if (kind == WZ_EXT_LINK_STREAM_LISTEN || kind == WZ_EXT_LINK_DATAGRAM_LISTEN) {
+    if (kind == ZEXT_LINK_STREAM_LISTEN || kind == ZEXT_LINK_DATAGRAM_LISTEN) {
         pipe_lock();
         pipe_state.listener = link;
         pipe_unlock();
-        return WZ_EXT_LINK_OK;
+        return ZEXT_LINK_OK;
     }
-    if (kind == WZ_EXT_LINK_GROUP) {
+    if (kind == ZEXT_LINK_GROUP) {
         pipe_lock();
         pipe_state.group[side] = link;
         pipe_unlock();
-        return WZ_EXT_LINK_OK;
+        return ZEXT_LINK_OK;
     }
-    if (side == DIALLING && kind == WZ_EXT_LINK_STREAM_DIAL) {
-        return accept_and_pair(link, "tcp/192.0.2.200:41000", 0) ? WZ_EXT_LINK_OK : WZ_EXT_LINK_FAILED;
+    if (side == DIALLING && kind == ZEXT_LINK_STREAM_DIAL) {
+        return accept_and_pair(link, "tcp/192.0.2.200:41000", 0) ? ZEXT_LINK_OK : ZEXT_LINK_FAILED;
     }
-    if (side == DIALLING && kind == WZ_EXT_LINK_DATAGRAM) {
-        return accept_and_pair(link, DATAGRAM_SOURCE[DIALLING], 1) ? WZ_EXT_LINK_OK : WZ_EXT_LINK_FAILED;
+    if (side == DIALLING && kind == ZEXT_LINK_DATAGRAM) {
+        return accept_and_pair(link, DATAGRAM_SOURCE[DIALLING], 1) ? ZEXT_LINK_OK : ZEXT_LINK_FAILED;
     }
-    return WZ_EXT_LINK_FAILED;
+    return ZEXT_LINK_FAILED;
 }
 
-static wz_ext_link_result_t on_send(void *context, wz_ext_link_t link, const uint8_t *data, size_t len,
+static zext_link_result_t on_send(void *context, zext_link_t link, const uint8_t *data, size_t len,
                                     size_t *written) {
     int side = *(int *)context;
     size_t take = len;
     pipe_lock();
     /* A group member's datagram goes to the other member, with this member's address. */
     if (pipe_state.group[side] == link && link != 0) {
-        wz_ext_link_t other = pipe_state.group[1 - side];
+        zext_link_t other = pipe_state.group[1 - side];
         pipe_unlock();
-        if (other != 0) wz_ext_transport_received(loan_of(1 - side), other, data, len, MEMBER_SOURCE[side]);
+        if (other != 0) zext_transport_received(loan_of(1 - side), other, data, len, MEMBER_SOURCE[side]);
         *written = len;
-        return WZ_EXT_LINK_OK;
+        return ZEXT_LINK_OK;
     }
     int pair = pair_of(side, link);
-    wz_ext_link_t peer = pair < 0 ? 0 : pipe_state.pairs[pair].link[1 - side];
+    zext_link_t peer = pair < 0 ? 0 : pipe_state.pairs[pair].link[1 - side];
     int datagram = pair < 0 ? 0 : pipe_state.pairs[pair].datagram;
     int fault = 0; /* 1 would-block, 2 partial */
     if (peer != 0 && !datagram && side == DIALLING && pipe_state.faults) {
@@ -172,25 +172,25 @@ static wz_ext_link_result_t on_send(void *context, wz_ext_link_t link, const uin
         }
     }
     pipe_unlock();
-    if (peer == 0) return WZ_EXT_LINK_CLOSED;
+    if (peer == 0) return ZEXT_LINK_CLOSED;
     if (fault == 1) {
         /* Writable before the would-block is even answered: the session sends again. */
-        wz_ext_transport_event(loan_of(DIALLING), link, WZ_EXT_LINK_EVENT_WRITABLE);
-        return WZ_EXT_LINK_WOULD_BLOCK;
+        zext_transport_event(loan_of(DIALLING), link, ZEXT_LINK_EVENT_WRITABLE);
+        return ZEXT_LINK_WOULD_BLOCK;
     }
     if (fault == 2) take = len / 2;
     /* A datagram crosses whole, with the address the other side knows this one by. */
     const char *source = datagram ? DATAGRAM_SOURCE[side] : NULL;
-    if (wz_ext_transport_received(loan_of(1 - side), peer, data, take, source) != Z_OK) {
-        return WZ_EXT_LINK_CLOSED;
+    if (zext_transport_received(loan_of(1 - side), peer, data, take, source) != Z_OK) {
+        return ZEXT_LINK_CLOSED;
     }
     *written = take;
-    return WZ_EXT_LINK_OK;
+    return ZEXT_LINK_OK;
 }
 
-static void on_close(void *context, wz_ext_link_t link) {
+static void on_close(void *context, zext_link_t link) {
     int side = *(int *)context;
-    wz_ext_link_t peer = 0;
+    zext_link_t peer = 0;
     pipe_lock();
     pipe_state.closes++;
     if (pipe_state.group[side] == link) pipe_state.group[side] = 0;
@@ -201,10 +201,10 @@ static void on_close(void *context, wz_ext_link_t link) {
     }
     pipe_unlock();
     /* The other end hears the close, from inside this close. */
-    if (peer != 0) wz_ext_transport_event(loan_of(1 - side), peer, WZ_EXT_LINK_EVENT_CLOSED);
+    if (peer != 0) zext_transport_event(loan_of(1 - side), peer, ZEXT_LINK_EVENT_CLOSED);
 }
 
-static void on_drained(void *context, wz_ext_link_t link) {
+static void on_drained(void *context, zext_link_t link) {
     (void)context;
     (void)link;
 }
@@ -361,7 +361,7 @@ static void pipe_reset(int faults) {
     pipe_state.faults = faults;
     for (int side = 0; side < 2; side++) {
         pipe_state.side_id[side] = side;
-        wz_ext_transport_t calls;
+        zext_transport_t calls;
         memset(&calls, 0, sizeof calls);
         calls.context = &pipe_state.side_id[side];
         calls.open = on_open;
@@ -369,7 +369,7 @@ static void pipe_reset(int faults) {
         calls.close = on_close;
         calls.drained = on_drained;
         calls.drop = on_drop;
-        CHECK(wz_ext_transport_new(&pipe_state.transport[side], &calls) == Z_OK, "wz_ext_transport_new");
+        CHECK(zext_transport_new(&pipe_state.transport[side], &calls) == Z_OK, "zext_transport_new");
     }
 }
 
@@ -377,7 +377,7 @@ static int open_over(z_owned_session_t *session, uint8_t key, const char *locato
     z_owned_config_t config;
     z_config_default(&config);
     zp_config_insert(z_config_loan_mut(&config), key, locator);
-    CHECK(wz_ext_config_transport(z_config_loan_mut(&config), loan_of(side)) == Z_OK, "wz_ext_config_transport");
+    CHECK(zext_config_transport(z_config_loan_mut(&config), loan_of(side)) == Z_OK, "zext_config_transport");
     int rc = z_open(session, z_config_move(&config), NULL);
     CHECK(rc == Z_OK, "%s did not open over the program's transport (rc %d)", locator, rc);
     return rc == Z_OK;
@@ -463,7 +463,7 @@ static void run_join(const char *what, uint8_t first_key, const char *first, uin
     z_session_drop(z_session_move(&one));
 
 done:
-    for (int side = 0; side < 2; side++) wz_ext_transport_drop(wz_ext_transport_move(&pipe_state.transport[side]));
+    for (int side = 0; side < 2; side++) zext_transport_drop(zext_transport_move(&pipe_state.transport[side]));
     /* Each transport's drop runs once, when the sessions and the program have let go. */
     for (int i = 0; i < 1000 && read_counter(&pipe_state.drops) < 2; i++) z_sleep_ms(10);
     CHECK(read_counter(&pipe_state.drops) == 2, "%s: %d of the two transports dropped", what,

@@ -20,7 +20,7 @@ one library serves one arm. The wz library follows: the `multi-thread` feature o
   dispatches the callbacks, checks the lease and sends the keep-alives. The program starts and
   stops it; `zp_read`, `zp_send_keep_alive`, `zp_send_join` and `zp_spin_once` are not in this
   arm. On the cooperative engine the program may instead open a session without its read task
-  and step it itself, once a cycle, with wz's door `wz_ext_session_step` (`wz_ext.h`): one
+  and step it itself, once a cycle, with wz's door `zext_session_step` (`wz_ext.h`): one
   library carries both ways, and each open picks one.
 - **Single-threaded.** There is no task. The program steps the session from its own loop with
   `zp_spin_once` (or the older `zp_read`, `zp_send_keep_alive` and `zp_send_join`), and the
@@ -50,7 +50,7 @@ one library serves one arm. The wz library follows: the `multi-thread` feature o
       next cycle. A batch also leaves when it is full, when a message must leave at once, and
       when the session sends a keep-alive.
    2. *Step* (single-threaded arm, or a session opened without its read task). `zp_spin_once`
-      on the session; in the multi-threaded arm `wz_ext_session_step`, whose bound says how
+      on the session; in the multi-threaded arm `zext_session_step`, whose bound says how
       long it may wait for input (0: only what is ready).
    3. *Receive.* Try-receive on each channel until `Z_CHANNEL_NODATA`.
    4. *Wait.* Until the cycle's deadline, an absolute reading of the monotonic clock
@@ -71,7 +71,7 @@ one library serves one arm. The wz library follows: the `multi-thread` feature o
 | `zp_send_keep_alive` (single-threaded) | `Z_OK` for a live session; the engine keeps the lease on its own schedule | sends a keep-alive on every link that is up |
 | `zp_send_join` (single-threaded) | `Z_OK` for a live session; a session that joined a group sends its Join now | `Z_OK` for a live session; nothing to send (no group) |
 | `zp_spin_once` (single-threaded) | `true` while the session is open | one step, as `zp_read`; `false` once the session is closed |
-| `wz_ext_session_step` (multi-threaded) | `WZ_EXT_ERR_UNSUPPORTED`: the engine steps the session on a thread of its own | one step on the caller's thread, waiting for input no longer than its bound; `WZ_EXT_ERR_READ_TASK_RUNS` while the read task runs; `_Z_ERR_SESSION_CLOSED` once the session is closed |
+| `zext_session_step` (multi-threaded) | `ZEXT_ERR_UNSUPPORTED`: the engine steps the session on a thread of its own | one step on the caller's thread, waiting for input no longer than its bound; `ZEXT_ERR_READ_TASK_RUNS` while the read task runs; `_Z_ERR_SESSION_CLOSED` once the session is closed |
 | `zp_batch_start`, `_flush`, `_stop` | opens, flushes or closes the window on every face of the session | the same on the session's link |
 | `zp_read`, `zp_send_keep_alive`, `zp_send_join` on a closed or NULL session | `_Z_ERR_SESSION_CLOSED` | the same |
 | the batch calls on a NULL session | `_Z_ERR_SESSION_CLOSED` | the same |

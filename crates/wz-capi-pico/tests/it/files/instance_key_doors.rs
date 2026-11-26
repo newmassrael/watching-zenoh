@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! Instance keys through the `wz_ext_instance_keyer_*` doors, driven as a C program drives them: a
+//! Instance keys through the `zext_instance_keyer_*` doors, driven as a C program drives them: a
 //! keyer made over the descriptor set `protoc` compiled the program's `.proto` file into (and,
 //! with `proto-text`, over the file's text) and a description, payloads indexed, the last value
 //! of each instance copied back out of the program's storage, and, with the end-to-end doors, a
@@ -19,7 +19,7 @@ use std::ffi::CString;
 
 use wz_capi_pico::instance_key::*;
 #[cfg(feature = "proto-text")]
-use wz_capi_pico::proto_file::wz_ext_proto_file_t;
+use wz_capi_pico::proto_file::zext_proto_file_t;
 use wz_capi_pico::result::{
     ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
     Z_RES_CHANNEL_NODATA,
@@ -110,13 +110,13 @@ unsafe fn take(out: &mut z_owned_string_t) -> String {
 unsafe fn keyer(
     set: &[u8],
     description: &str,
-    options: Option<&wz_ext_instance_keyer_options_t>,
-) -> Result<wz_ext_owned_instance_keyer_t, (ZResult, String)> {
+    options: Option<&zext_instance_keyer_options_t>,
+) -> Result<zext_owned_instance_keyer_t, (ZResult, String)> {
     let description = CString::new(description).unwrap();
-    let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
+    let mut this: zext_owned_instance_keyer_t = std::mem::zeroed();
     let mut refusal: z_owned_string_t = std::mem::zeroed();
     let options = options.map_or(std::ptr::null(), |o| o as *const _);
-    let rc = wz_ext_instance_keyer_from_descriptor_set(
+    let rc = zext_instance_keyer_from_descriptor_set(
         &mut this,
         set.as_ptr(),
         set.len(),
@@ -132,17 +132,17 @@ unsafe fn keyer(
 unsafe fn keyer_text(
     schema: &str,
     description: &str,
-) -> Result<wz_ext_owned_instance_keyer_t, (ZResult, String)> {
+) -> Result<zext_owned_instance_keyer_t, (ZResult, String)> {
     let name = CString::new("door.proto").unwrap();
     let text = CString::new(schema).unwrap();
-    let files = [wz_ext_proto_file_t {
+    let files = [zext_proto_file_t {
         name: name.as_ptr(),
         text: text.as_ptr(),
     }];
     let description = CString::new(description).unwrap();
-    let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
+    let mut this: zext_owned_instance_keyer_t = std::mem::zeroed();
     let mut refusal: z_owned_string_t = std::mem::zeroed();
-    let rc = wz_ext_instance_keyer_new(
+    let rc = zext_instance_keyer_new(
         &mut this,
         files.as_ptr(),
         files.len(),
@@ -156,35 +156,31 @@ unsafe fn keyer_text(
 /// The keyer a door wrote with `rc`, held to the door's contract: a keyer and no refusal, or the
 /// gravestone and the code with its reason.
 unsafe fn made_keyer(
-    this: wz_ext_owned_instance_keyer_t,
+    this: zext_owned_instance_keyer_t,
     rc: ZResult,
     refusal: &mut z_owned_string_t,
-) -> Result<wz_ext_owned_instance_keyer_t, (ZResult, String)> {
+) -> Result<zext_owned_instance_keyer_t, (ZResult, String)> {
     let reason = take(refusal);
     if rc == Z_OK {
         assert!(
             reason.is_empty(),
             "a made keyer leaves no refusal: {reason}"
         );
-        assert!(wz_ext_internal_instance_keyer_check(&this));
+        assert!(zext_internal_instance_keyer_check(&this));
         Ok(this)
     } else {
         assert!(
-            !wz_ext_internal_instance_keyer_check(&this),
+            !zext_internal_instance_keyer_check(&this),
             "a refused keyer leaves the null state"
         );
         Err((rc, reason))
     }
 }
 
-unsafe fn index(
-    k: &wz_ext_owned_instance_keyer_t,
-    payload: &[u8],
-    now: u64,
-) -> wz_ext_instance_key_t {
-    let mut out = wz_ext_instance_key_t::default();
-    let rc = wz_ext_instance_keyer_index(
-        wz_ext_instance_keyer_loan(k),
+unsafe fn index(k: &zext_owned_instance_keyer_t, payload: &[u8], now: u64) -> zext_instance_key_t {
+    let mut out = zext_instance_key_t::default();
+    let rc = zext_instance_keyer_index(
+        zext_instance_keyer_loan(k),
         payload.as_ptr(),
         payload.len(),
         now,
@@ -195,14 +191,14 @@ unsafe fn index(
 }
 
 unsafe fn last(
-    k: &wz_ext_owned_instance_keyer_t,
+    k: &zext_owned_instance_keyer_t,
     instance: usize,
     capacity: usize,
 ) -> (ZResult, Vec<u8>) {
     let mut out = vec![0u8; capacity];
     let mut len = usize::MAX;
-    let rc = wz_ext_instance_keyer_last(
-        wz_ext_instance_keyer_loan(k),
+    let rc = zext_instance_keyer_last(
+        zext_instance_keyer_loan(k),
         instance,
         out.as_mut_ptr(),
         capacity,
@@ -212,25 +208,25 @@ unsafe fn last(
     (rc, out)
 }
 
-unsafe fn drop_keyer(mut k: wz_ext_owned_instance_keyer_t) {
-    wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut k));
-    assert!(!wz_ext_internal_instance_keyer_check(&k));
-    wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&mut k));
+unsafe fn drop_keyer(mut k: zext_owned_instance_keyer_t) {
+    zext_instance_keyer_drop(zext_instance_keyer_move(&mut k));
+    assert!(!zext_internal_instance_keyer_check(&k));
+    zext_instance_keyer_drop(zext_instance_keyer_move(&mut k));
 }
 
 #[test]
 fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_programs() {
     unsafe {
         let mut storage = vec![0u8; 6 * 16];
-        let mut options: wz_ext_instance_keyer_options_t = std::mem::zeroed();
-        wz_ext_instance_keyer_options_default(&mut options);
+        let mut options: zext_instance_keyer_options_t = std::mem::zeroed();
+        zext_instance_keyer_options_default(&mut options);
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = 16;
         let k = keyer(SCHEMA_SET, DESCRIPTION, Some(&options)).expect("made");
         let mut instances = 0usize;
         assert_eq!(
-            wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&k), &mut instances),
+            zext_instance_keyer_instances(zext_instance_keyer_loan(&k), &mut instances),
             Z_OK
         );
         assert_eq!(instances, 6);
@@ -243,9 +239,9 @@ fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_progr
             for (ti, tilt) in [-3i32, 5].into_iter().enumerate() {
                 let payload = reading(bay, tilt, &[bi as u8, ti as u8]);
                 let key = index(&k, &payload, 0);
-                assert_eq!(key.status, WZ_EXT_INSTANCE_KEY_INDEXED, "{bay} {tilt}");
+                assert_eq!(key.status, ZEXT_INSTANCE_KEY_INDEXED, "{bay} {tilt}");
                 assert_eq!(key.instance, bi * 2 + ti, "{bay} {tilt}");
-                assert_eq!(key.last, WZ_EXT_INSTANCE_KEY_LAST_RECORDED);
+                assert_eq!(key.last, ZEXT_INSTANCE_KEY_LAST_RECORDED);
                 assert_eq!(key.reported, 0);
                 let (rc, value) = last(&k, key.instance, 16);
                 assert_eq!(rc, Z_OK);
@@ -259,8 +255,8 @@ fn every_combination_is_its_place_in_the_product_and_its_last_value_is_the_progr
         let mut tiny = [0xAAu8; 2];
         let mut len = 0usize;
         assert_eq!(
-            wz_ext_instance_keyer_last(
-                wz_ext_instance_keyer_loan(&k),
+            zext_instance_keyer_last(
+                zext_instance_keyer_loan(&k),
                 0,
                 tiny.as_mut_ptr(),
                 2,
@@ -279,7 +275,7 @@ fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
     unsafe {
         let k = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
         let outside = index(&k, &reading(30, 4, b""), 5_000);
-        assert_eq!(outside.status, WZ_EXT_INSTANCE_KEY_NOT_LISTED);
+        assert_eq!(outside.status, ZEXT_INSTANCE_KEY_NOT_LISTED);
         assert_eq!(outside.field, 1, "the tilt");
         assert_eq!(
             (outside.reported, outside.dropped),
@@ -287,49 +283,40 @@ fn a_sample_of_no_instance_is_dropped_counted_and_reported_once_per_interval() {
             "the first is reported"
         );
         let held = index(&k, &reading(31, 5, b""), 5_100);
-        assert_eq!(
-            (held.status, held.field),
-            (WZ_EXT_INSTANCE_KEY_NOT_LISTED, 0)
-        );
+        assert_eq!((held.status, held.field), (ZEXT_INSTANCE_KEY_NOT_LISTED, 0));
         assert_eq!(held.reported, 0, "within the interval it is held");
         let mut no_bay = Vec::new();
         varint(2 << 3, &mut no_bay);
         varint(10, &mut no_bay);
         let absent = index(&k, &no_bay, 5_200);
-        assert_eq!(
-            (absent.status, absent.field),
-            (WZ_EXT_INSTANCE_KEY_ABSENT, 0)
-        );
+        assert_eq!((absent.status, absent.field), (ZEXT_INSTANCE_KEY_ABSENT, 0));
         let broken = index(&k, &[0x08], 5_300);
-        assert_eq!(broken.status, WZ_EXT_INSTANCE_KEY_UNDECODABLE);
+        assert_eq!(broken.status, ZEXT_INSTANCE_KEY_UNDECODABLE);
         // An indexed sample keeps no last value: the keyer was made without storage.
         let kept = index(&k, &reading(44, 5, b""), 5_400);
-        assert_eq!(
-            (kept.status, kept.instance),
-            (WZ_EXT_INSTANCE_KEY_INDEXED, 5)
-        );
-        assert_eq!(kept.last, WZ_EXT_INSTANCE_KEY_LAST_NOT_KEPT);
+        assert_eq!((kept.status, kept.instance), (ZEXT_INSTANCE_KEY_INDEXED, 5));
+        assert_eq!(kept.last, ZEXT_INSTANCE_KEY_LAST_NOT_KEPT);
 
-        let mut report = wz_ext_instance_key_t::default();
-        assert!(!wz_ext_instance_keyer_flush(
-            wz_ext_instance_keyer_loan(&k),
+        let mut report = zext_instance_key_t::default();
+        assert!(!zext_instance_keyer_flush(
+            zext_instance_keyer_loan(&k),
             5_999,
             &mut report
         ));
-        assert!(wz_ext_instance_keyer_flush(
-            wz_ext_instance_keyer_loan(&k),
+        assert!(zext_instance_keyer_flush(
+            zext_instance_keyer_loan(&k),
             6_000,
             &mut report
         ));
         assert_eq!(
             (report.status, report.reported, report.dropped),
-            (WZ_EXT_INSTANCE_KEY_UNDECODABLE, 1, 3),
+            (ZEXT_INSTANCE_KEY_UNDECODABLE, 1, 3),
             "the latest drop's reason and the three held"
         );
         let (mut undecodable, mut absent_n, mut not_listed) = (0u64, 0u64, 0u64);
         assert_eq!(
-            wz_ext_instance_keyer_counts(
-                wz_ext_instance_keyer_loan(&k),
+            zext_instance_keyer_counts(
+                zext_instance_keyer_loan(&k),
                 &mut undecodable,
                 &mut absent_n,
                 &mut not_listed
@@ -374,8 +361,8 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
         );
 
         let mut storage = vec![0u8; 6 * 4 - 1];
-        let mut options: wz_ext_instance_keyer_options_t = std::mem::zeroed();
-        wz_ext_instance_keyer_options_default(&mut options);
+        let mut options: zext_instance_keyer_options_t = std::mem::zeroed();
+        zext_instance_keyer_options_default(&mut options);
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = 4;
@@ -391,10 +378,10 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
             Z_ERR_NULL
         );
 
-        let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
+        let mut this: zext_owned_instance_keyer_t = std::mem::zeroed();
         let description = CString::new(DESCRIPTION).unwrap();
         assert_eq!(
-            wz_ext_instance_keyer_from_descriptor_set(
+            zext_instance_keyer_from_descriptor_set(
                 &mut this,
                 std::ptr::null(),
                 1,
@@ -406,7 +393,7 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
             "null bytes with a length"
         );
         assert_eq!(
-            wz_ext_instance_keyer_from_descriptor_set(
+            zext_instance_keyer_from_descriptor_set(
                 &mut this,
                 SCHEMA_SET.as_ptr(),
                 SCHEMA_SET.len(),
@@ -419,7 +406,7 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
         );
         let bad = [0xFFu8, 0];
         assert_eq!(
-            wz_ext_instance_keyer_from_descriptor_set(
+            zext_instance_keyer_from_descriptor_set(
                 &mut this,
                 SCHEMA_SET.as_ptr(),
                 SCHEMA_SET.len(),
@@ -430,23 +417,17 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
             Z_EINVAL,
             "a description that is not UTF-8"
         );
-        assert!(!wz_ext_internal_instance_keyer_check(&this));
+        assert!(!zext_internal_instance_keyer_check(&this));
 
         // The doors of the gravestone refuse it.
         let mut instances = 0usize;
         assert_eq!(
-            wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&this), &mut instances),
+            zext_instance_keyer_instances(zext_instance_keyer_loan(&this), &mut instances),
             Z_ERR_NULL
         );
-        let mut out = wz_ext_instance_key_t::default();
+        let mut out = zext_instance_key_t::default();
         assert_eq!(
-            wz_ext_instance_keyer_index(
-                wz_ext_instance_keyer_loan(&this),
-                [].as_ptr(),
-                0,
-                0,
-                &mut out
-            ),
+            zext_instance_keyer_index(zext_instance_keyer_loan(&this), [].as_ptr(), 0, 0, &mut out),
             Z_ERR_NULL
         );
     }
@@ -456,20 +437,20 @@ fn a_keyer_is_refused_by_a_code_and_a_reason() {
 fn the_last_value_of_an_instance_is_set_by_the_program() {
     unsafe {
         let mut storage = vec![0u8; 6 * 4];
-        let mut options: wz_ext_instance_keyer_options_t = std::mem::zeroed();
-        wz_ext_instance_keyer_options_default(&mut options);
+        let mut options: zext_instance_keyer_options_t = std::mem::zeroed();
+        zext_instance_keyer_options_default(&mut options);
         options.storage = storage.as_mut_ptr();
         options.storage_len = storage.len();
         options.value_capacity = 4;
         let k = keyer(SCHEMA_SET, DESCRIPTION, Some(&options)).expect("made");
-        let loan = wz_ext_instance_keyer_loan(&k);
+        let loan = zext_instance_keyer_loan(&k);
         assert_eq!(
-            wz_ext_instance_keyer_set_last(loan, 0, b"dflt".as_ptr(), 4),
+            zext_instance_keyer_set_last(loan, 0, b"dflt".as_ptr(), 4),
             Z_OK
         );
         assert_eq!(last(&k, 0, 4), (Z_OK, b"dflt".to_vec()));
         assert_eq!(
-            wz_ext_instance_keyer_set_last(loan, 0, b"toolong".as_ptr(), 7),
+            zext_instance_keyer_set_last(loan, 0, b"toolong".as_ptr(), 7),
             Z_ERR_OVERFLOW
         );
         assert_eq!(
@@ -478,19 +459,14 @@ fn the_last_value_of_an_instance_is_set_by_the_program() {
             "the value before is kept"
         );
         assert_eq!(
-            wz_ext_instance_keyer_set_last(loan, 6, b"x".as_ptr(), 1),
+            zext_instance_keyer_set_last(loan, 6, b"x".as_ptr(), 1),
             Z_EINVAL
         );
         drop_keyer(k);
 
         let without = keyer(SCHEMA_SET, DESCRIPTION, None).expect("made");
         assert_eq!(
-            wz_ext_instance_keyer_set_last(
-                wz_ext_instance_keyer_loan(&without),
-                0,
-                b"x".as_ptr(),
-                1
-            ),
+            zext_instance_keyer_set_last(zext_instance_keyer_loan(&without), 0, b"x".as_ptr(), 1),
             Z_EINVAL,
             "a keyer that keeps no last values"
         );
@@ -511,20 +487,20 @@ fn a_report_of_drops_is_an_event_of_the_nodes_log() {
         let mut cursor = 0u64;
         let mut found = false;
         for _ in 0..4096 {
-            let mut event = wz_ext_event_t::default();
+            let mut event = zext_event_t::default();
             let mut args = [0u64; 4];
             assert_eq!(
-                wz_ext_event_read(&mut cursor, &mut event, args.as_mut_ptr(), args.len()),
+                zext_event_read(&mut cursor, &mut event, args.as_mut_ptr(), args.len()),
                 Z_OK
             );
-            if event.kind == WZ_EXT_EVENT_EMPTY {
+            if event.kind == ZEXT_EVENT_EMPTY {
                 break;
             }
-            if event.kind == WZ_EXT_EVENT_RECORD
-                && event.source == WZ_EXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED
-                && args[..3] == [WZ_EXT_EVENT_INSTANCE_KEY_NOT_LISTED, 1, 1]
+            if event.kind == ZEXT_EVENT_RECORD
+                && event.source == ZEXT_EVENT_SOURCE_INSTANCE_KEY_DROPPED
+                && args[..3] == [ZEXT_EVENT_INSTANCE_KEY_NOT_LISTED, 1, 1]
             {
-                assert_eq!(event.level, WZ_EXT_EVENT_LEVEL_LIBRARY);
+                assert_eq!(event.level, ZEXT_EVENT_LEVEL_LIBRARY);
                 assert_eq!(event.arg_count, 3);
                 found = true;
             }
@@ -560,14 +536,14 @@ mod streams {
 
     const VALUES: &str = r#"{"cell": {"sender": 737}}"#;
 
-    unsafe fn sender(streams: usize) -> wz_ext_owned_e2e_sender_t {
-        let mut options: wz_ext_e2e_sender_options_t = std::mem::zeroed();
-        wz_ext_e2e_sender_options_default(&mut options);
+    unsafe fn sender(streams: usize) -> zext_owned_e2e_sender_t {
+        let mut options: zext_e2e_sender_options_t = std::mem::zeroed();
+        zext_e2e_sender_options_default(&mut options);
         options.streams = streams;
         let profile = CString::new(PROFILE).unwrap();
         let values = CString::new(VALUES).unwrap();
-        let mut this: wz_ext_owned_e2e_sender_t = std::mem::zeroed();
-        let rc = wz_ext_e2e_sender_new(
+        let mut this: zext_owned_e2e_sender_t = std::mem::zeroed();
+        let rc = zext_e2e_sender_new(
             &mut this,
             profile.as_ptr(),
             values.as_ptr(),
@@ -579,11 +555,11 @@ mod streams {
     }
 
     unsafe fn receiver(
-        options: &wz_ext_e2e_receiver_options_t,
-    ) -> Result<wz_ext_owned_e2e_receiver_t, ZResult> {
+        options: &zext_e2e_receiver_options_t,
+    ) -> Result<zext_owned_e2e_receiver_t, ZResult> {
         let profile = CString::new(PROFILE).unwrap();
-        let mut this: wz_ext_owned_e2e_receiver_t = std::mem::zeroed();
-        let rc = wz_ext_e2e_receiver_new(
+        let mut this: zext_owned_e2e_receiver_t = std::mem::zeroed();
+        let rc = zext_e2e_receiver_new(
             &mut this,
             profile.as_ptr(),
             std::ptr::null(),
@@ -597,26 +573,26 @@ mod streams {
         }
     }
 
-    fn indexed(streams: usize) -> wz_ext_e2e_receiver_options_t {
-        let mut options: wz_ext_e2e_receiver_options_t = unsafe { std::mem::zeroed() };
-        unsafe { wz_ext_e2e_receiver_options_default(&mut options) };
+    fn indexed(streams: usize) -> zext_e2e_receiver_options_t {
+        let mut options: zext_e2e_receiver_options_t = unsafe { std::mem::zeroed() };
+        unsafe { zext_e2e_receiver_options_default(&mut options) };
         options.streams = streams;
         options
     }
 
     /// Protect `payload` on the stream of its instance: the code, the frame and the key.
     unsafe fn protect(
-        k: &wz_ext_owned_instance_keyer_t,
-        tx: &wz_ext_owned_e2e_sender_t,
+        k: &zext_owned_instance_keyer_t,
+        tx: &zext_owned_e2e_sender_t,
         payload: &[u8],
-    ) -> (ZResult, Vec<u8>, u64, wz_ext_instance_key_t) {
+    ) -> (ZResult, Vec<u8>, u64, zext_instance_key_t) {
         let mut out = vec![0u8; 64];
         let mut written = usize::MAX;
         let mut counter = u64::MAX;
-        let mut key = wz_ext_instance_key_t::default();
-        let rc = wz_ext_instance_keyer_protect(
-            wz_ext_instance_keyer_loan(k),
-            wz_ext_e2e_sender_loan(tx),
+        let mut key = zext_instance_key_t::default();
+        let rc = zext_instance_keyer_protect(
+            zext_instance_keyer_loan(k),
+            zext_e2e_sender_loan(tx),
             payload.as_ptr(),
             payload.len(),
             0,
@@ -631,16 +607,16 @@ mod streams {
     }
 
     unsafe fn judge(
-        k: &wz_ext_owned_instance_keyer_t,
-        rx: &wz_ext_owned_e2e_receiver_t,
+        k: &zext_owned_instance_keyer_t,
+        rx: &zext_owned_e2e_receiver_t,
         frame: &[u8],
         now: u64,
-    ) -> (ZResult, wz_ext_instance_key_t, wz_ext_e2e_verdict_t) {
-        let mut key = wz_ext_instance_key_t::default();
-        let mut verdict = wz_ext_e2e_verdict_t::default();
-        let rc = wz_ext_instance_keyer_judge(
-            wz_ext_instance_keyer_loan(k),
-            wz_ext_e2e_receiver_loan(rx),
+    ) -> (ZResult, zext_instance_key_t, zext_e2e_verdict_t) {
+        let mut key = zext_instance_key_t::default();
+        let mut verdict = zext_e2e_verdict_t::default();
+        let rc = zext_instance_keyer_judge(
+            zext_instance_keyer_loan(k),
+            zext_e2e_receiver_loan(rx),
             frame.as_ptr(),
             frame.len(),
             now,
@@ -669,21 +645,16 @@ mod streams {
             assert_eq!(frames[1].1, 3);
             // Each instance's counter starts at 0: judged in one stream, the second instance's
             // first frame would repeat the first's.
-            let want = [
-                WZ_EXT_E2E_FIRST,
-                WZ_EXT_E2E_FIRST,
-                WZ_EXT_E2E_OK,
-                WZ_EXT_E2E_OK,
-            ];
+            let want = [ZEXT_E2E_FIRST, ZEXT_E2E_FIRST, ZEXT_E2E_OK, ZEXT_E2E_OK];
             for (i, ((frame, instance), status)) in frames.iter().zip(want).enumerate() {
                 let (rc, key, verdict) = judge(&rx_keyer, &rx, frame, i as u64);
                 assert_eq!(rc, Z_OK);
                 assert_eq!(
                     (key.status, key.instance),
-                    (WZ_EXT_INSTANCE_KEY_INDEXED, *instance)
+                    (ZEXT_INSTANCE_KEY_INDEXED, *instance)
                 );
                 assert_eq!(verdict.status, status, "frame {i}");
-                assert_eq!(verdict.has & WZ_EXT_E2E_HAS_STREAM, WZ_EXT_E2E_HAS_STREAM);
+                assert_eq!(verdict.has & ZEXT_E2E_HAS_STREAM, ZEXT_E2E_HAS_STREAM);
                 assert_eq!(verdict.stream, *instance);
             }
 
@@ -693,12 +664,12 @@ mod streams {
             let stray = reading(12, 9, b"c");
             let (rc, frame, _, key) = protect(&tx_keyer, &tx, &stray);
             assert_eq!((rc, frame.len()), (Z_EINVAL, 0));
-            assert_eq!((key.status, key.field), (WZ_EXT_INSTANCE_KEY_NOT_LISTED, 1));
+            assert_eq!((key.status, key.field), (ZEXT_INSTANCE_KEY_NOT_LISTED, 1));
             let mut out = vec![0u8; 64];
             let mut written = 0usize;
             assert_eq!(
-                wz_ext_e2e_sender_protect(
-                    wz_ext_e2e_sender_loan(&tx),
+                zext_e2e_sender_protect(
+                    zext_e2e_sender_loan(&tx),
                     0,
                     stray.as_ptr(),
                     stray.len(),
@@ -713,16 +684,16 @@ mod streams {
             out.truncate(written);
             let (rc, key, verdict) = judge(&rx_keyer, &rx, &out, 10);
             assert_eq!(rc, Z_OK);
-            assert_eq!(key.status, WZ_EXT_INSTANCE_KEY_NOT_LISTED);
+            assert_eq!(key.status, ZEXT_INSTANCE_KEY_NOT_LISTED);
             assert_eq!(
                 verdict,
-                wz_ext_e2e_verdict_t::default(),
+                zext_e2e_verdict_t::default(),
                 "a dropped frame is not judged"
             );
             // The next frame of the first instance is still the next one.
             let (_, next, _, _) = protect(&tx_keyer, &tx, &first);
             let (_, _, verdict) = judge(&rx_keyer, &rx, &next, 11);
-            assert_eq!(verdict.status, WZ_EXT_E2E_OK);
+            assert_eq!(verdict.status, ZEXT_E2E_OK);
 
             let mut narrow = receiver(&indexed(2)).expect("made");
             let (rc, _, _) = judge(&rx_keyer, &narrow, &next, 12);
@@ -731,9 +702,9 @@ mod streams {
                 "fewer streams than instances"
             );
 
-            wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut narrow));
-            wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut rx));
-            wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut tx));
+            zext_e2e_receiver_drop(zext_e2e_receiver_move(&mut narrow));
+            zext_e2e_receiver_drop(zext_e2e_receiver_move(&mut rx));
+            zext_e2e_sender_drop(zext_e2e_sender_move(&mut tx));
             drop_keyer(tx_keyer);
             drop_keyer(rx_keyer);
         }
@@ -747,15 +718,15 @@ mod streams {
             let mut tx = sender(6);
             let (_, frame, _, _) = protect(&k, &tx, &reading(44, 5, b""));
             let mut options = indexed(6);
-            options.keying = WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL;
+            options.keying = ZEXT_E2E_KEYING_SENDERS_ARRIVAL;
             let mut rx = receiver(&options).expect("made");
             let (rc, key, verdict) = judge(&k, &rx, &frame, 0);
             assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
-            assert_eq!(key, wz_ext_instance_key_t::default());
-            assert_eq!(verdict, wz_ext_e2e_verdict_t::default());
+            assert_eq!(key, zext_instance_key_t::default());
+            assert_eq!(verdict, zext_e2e_verdict_t::default());
             let (mut undecodable, mut absent, mut not_listed) = (9u64, 9u64, 9u64);
-            wz_ext_instance_keyer_counts(
-                wz_ext_instance_keyer_loan(&k),
+            zext_instance_keyer_counts(
+                zext_instance_keyer_loan(&k),
                 &mut undecodable,
                 &mut absent,
                 &mut not_listed,
@@ -765,8 +736,8 @@ mod streams {
                 (0, 0, 0),
                 "a refusal counts nothing"
             );
-            wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&mut rx));
-            wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&mut tx));
+            zext_e2e_receiver_drop(zext_e2e_receiver_move(&mut rx));
+            zext_e2e_sender_drop(zext_e2e_sender_move(&mut tx));
             drop_keyer(k);
         }
     }
@@ -781,22 +752,22 @@ fn a_keyer_made_from_the_schemas_text_is_the_compiled_ones() {
         let k = keyer_text(SCHEMA, DESCRIPTION).expect("made");
         let mut instances = 0usize;
         assert_eq!(
-            wz_ext_instance_keyer_instances(wz_ext_instance_keyer_loan(&k), &mut instances),
+            zext_instance_keyer_instances(zext_instance_keyer_loan(&k), &mut instances),
             Z_OK
         );
         assert_eq!(instances, 6);
         let key = index(&k, &reading(44, 5, b""), 0);
-        assert_eq!((key.status, key.instance), (WZ_EXT_INSTANCE_KEY_INDEXED, 5));
+        assert_eq!((key.status, key.instance), (ZEXT_INSTANCE_KEY_INDEXED, 5));
         drop_keyer(k);
 
         let (rc, reason) = keyer_text("message {", DESCRIPTION).unwrap_err();
         assert_eq!(rc, Z_ERR_CONFIG_INVALID_VALUE);
         assert!(reason.starts_with("schema"), "{reason}");
 
-        let mut this: wz_ext_owned_instance_keyer_t = std::mem::zeroed();
+        let mut this: zext_owned_instance_keyer_t = std::mem::zeroed();
         let description = CString::new(DESCRIPTION).unwrap();
         assert_eq!(
-            wz_ext_instance_keyer_new(
+            zext_instance_keyer_new(
                 &mut this,
                 std::ptr::null(),
                 1,
@@ -809,12 +780,12 @@ fn a_keyer_made_from_the_schemas_text_is_the_compiled_ones() {
         );
         let bad = [0xFFu8, 0];
         let name = CString::new("door.proto").unwrap();
-        let files = [wz_ext_proto_file_t {
+        let files = [zext_proto_file_t {
             name: name.as_ptr(),
             text: bad.as_ptr().cast(),
         }];
         assert_eq!(
-            wz_ext_instance_keyer_new(
+            zext_instance_keyer_new(
                 &mut this,
                 files.as_ptr(),
                 1,
@@ -825,6 +796,6 @@ fn a_keyer_made_from_the_schemas_text_is_the_compiled_ones() {
             Z_EINVAL,
             "a file that is not UTF-8"
         );
-        assert!(!wz_ext_internal_instance_keyer_check(&this));
+        assert!(!zext_internal_instance_keyer_check(&this));
     }
 }

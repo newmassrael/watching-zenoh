@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 //
-//! A get addressed to one node through the C door (`wz_ext_get_to_peer`): a session that listens,
+//! A get addressed to one node through the C door (`zext_get_to_peer`): a session that listens,
 //! and two peers that dial it and each answer on the same key.
 //!
 //! What is held, in the build the test runs in: a plain `z_get` reaches both answering peers (the
 //! control, without which a silent queryable would pass every arm below); with the
 //! `targeted-query` policy on, a get addressed to one of them asks that one and not the other, and
 //! one addressed to a node with no link asks nobody and completes; with the policy off, the door
-//! answers `WZ_EXT_ERR_POLICY_OFF`, sends nothing, and has completed the get (the callback's drop
+//! answers `ZEXT_ERR_POLICY_OFF`, sends nothing, and has completed the get (the callback's drop
 //! ran) before it returns.
 
 #![cfg(all(
@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use wz_capi_pico::get_to_peer::wz_ext_get_to_peer;
-use wz_capi_pico::result::WZ_EXT_ERR_POLICY_OFF;
+use wz_capi_pico::get_to_peer::zext_get_to_peer;
+use wz_capi_pico::result::ZEXT_ERR_POLICY_OFF;
 use wz_capi_pico::zid::{z_id_t, z_info_zid};
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_query, z_closure_query_move,
@@ -155,7 +155,7 @@ unsafe fn ask(session: &z_owned_session_t, peer: Option<&z_id_t>) -> (i8, Get) {
     let mut options: z_get_options_t = std::mem::zeroed();
     z_get_options_default(&mut options);
     let rc = match peer {
-        Some(peer) => wz_ext_get_to_peer(
+        Some(peer) => zext_get_to_peer(
             z_session_loan(session),
             z_view_keyexpr_loan(&view),
             std::ptr::null(),
@@ -246,7 +246,7 @@ fn a_get_addressed_to_one_peer_asks_that_peer_alone_or_is_refused_while_the_poli
             assert_eq!(asked_b.load(Ordering::SeqCst), before_b);
         } else {
             assert_eq!(
-                rc, WZ_EXT_ERR_POLICY_OFF,
+                rc, ZEXT_ERR_POLICY_OFF,
                 "refused by name with the policy off"
             );
             assert_eq!(
@@ -296,7 +296,7 @@ fn a_get_to_no_peer_is_refused_and_consumes_its_callback() {
         let mut view: z_view_keyexpr_t = std::mem::zeroed();
         assert_eq!(z_view_keyexpr_from_str(&mut view, KEY.as_ptr()), Z_OK);
         assert_eq!(
-            wz_ext_get_to_peer(
+            zext_get_to_peer(
                 z_session_loan(&asker),
                 z_view_keyexpr_loan(&view),
                 std::ptr::null(),

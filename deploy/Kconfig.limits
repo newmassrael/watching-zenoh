@@ -248,7 +248,7 @@ config WZ_LIMIT_CALLBACK_THREADS
 	  that marks each such thread, since the library has no thread-local storage.
 	  A thread delivers as a session's read task, or as a program thread whose
 	  call delivers in place. A callback a thread past it would run is not run
-	  and is counted (wz_ext_callbacks_refused). The single-threaded arm holds
+	  and is counted (zext_callbacks_refused). The single-threaded arm holds
 	  one entry whatever this says, as one thread calls the library at a time.
 
 config WZ_LIMIT_ENGINE_ROWS
@@ -439,7 +439,7 @@ config WZ_LIMIT_CONFIG_DOCUMENT_DEPTH
 	default 16
 	help
 	  How deep the zenoh JSON5 document a config of the pico C ABI is handed
-	  (wz_ext_config_document) may nest, the outermost object being 1: the reader
+	  (zext_config_document) may nest, the outermost object being 1: the reader
 	  walks the document keeping no tree, and this bounds the values it steps over.
 	  A deeper document is refused with _Z_ERR_CONFIG_INVALID_VALUE and the config
 	  keeps what it held. From 3, which the wz member's policies and limits take.

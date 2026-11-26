@@ -112,15 +112,15 @@ echo "$features" > "$out/features"
 # the core alone, and the doors' library exports nothing of the core's.
 exports() { nm -D --defined-only "$1" | awk '{print $NF}'; }
 has() { exports "$1" | grep -qx "$2"; }
-door=wz_ext_e2e_sender_new
+door=zext_e2e_sender_new
 has "$out/single/libwz_capi_pico.so" "$door" || fail "the one library does not export $door"
 has "$out/split/libwz_capi_pico_ext.so" "$door" || fail "the doors' library does not export $door"
-has "$out/split/libwz_capi_pico_ext.so" wz_ext_additional_interface \
-    || fail "the doors' library does not export wz_ext_additional_interface"
+has "$out/split/libwz_capi_pico_ext.so" zext_additional_interface \
+    || fail "the doors' library does not export zext_additional_interface"
 if has "$out/split/libwz_capi_pico.so" "$door"; then
     fail "the core alone exports $door: the doors were not left out"
 fi
-has "$out/split/libwz_capi_pico.so" wz_ext_interface_major_1 \
+has "$out/split/libwz_capi_pico.so" zext_interface_major_1 \
     || fail "the core alone does not export the extension interface"
 if has "$out/split/libwz_capi_pico_ext.so" z_open; then
     fail "the doors' library exports z_open: it carries the core"

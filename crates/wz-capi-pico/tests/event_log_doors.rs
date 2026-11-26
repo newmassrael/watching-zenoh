@@ -13,21 +13,21 @@
 #![cfg(feature = "event-ring")]
 
 use wz_capi_pico::event_log::{
-    wz_ext_event_dropped, wz_ext_event_emit, wz_ext_event_read, wz_ext_event_release,
-    wz_ext_event_t, WZ_EXT_EVENT_EMPTY, WZ_EXT_EVENT_LOST, WZ_EXT_EVENT_RECORD,
+    zext_event_dropped, zext_event_emit, zext_event_read, zext_event_release, zext_event_t,
+    ZEXT_EVENT_EMPTY, ZEXT_EVENT_LOST, ZEXT_EVENT_RECORD,
 };
 use wz_capi_pico::result::{Z_ERR_NULL, Z_OK};
 use wz_session_core::caps::EVENT_RING_SLOTS;
 
-unsafe fn read(cursor: &mut u64, args: &mut [u64]) -> wz_ext_event_t {
-    let mut out = wz_ext_event_t::default();
+unsafe fn read(cursor: &mut u64, args: &mut [u64]) -> zext_event_t {
+    let mut out = zext_event_t::default();
     let args_ptr = if args.is_empty() {
         std::ptr::null_mut()
     } else {
         args.as_mut_ptr()
     };
     assert_eq!(
-        wz_ext_event_read(cursor, &mut out, args_ptr, args.len()),
+        zext_event_read(cursor, &mut out, args_ptr, args.len()),
         Z_OK
     );
     out
@@ -38,21 +38,21 @@ fn an_event_written_through_the_door_is_read_back_whole_by_any_number_of_readers
     unsafe {
         // ARM 1: nothing written yet.
         let mut cursor = 0u64;
-        assert_eq!(read(&mut cursor, &mut []).kind, WZ_EXT_EVENT_EMPTY);
+        assert_eq!(read(&mut cursor, &mut []).kind, ZEXT_EVENT_EMPTY);
         assert_eq!(cursor, 0, "nothing read, nothing moved");
 
         // ARM 2: three events, each with its own integers.
         for index in 0..3u64 {
             let args = [index, index * 10, u64::MAX - index];
             assert_eq!(
-                wz_ext_event_emit(index as u8 + 1, 0x4200 + index as u16, args.as_ptr(), 3),
+                zext_event_emit(index as u8 + 1, 0x4200 + index as u16, args.as_ptr(), 3),
                 Z_OK
             );
         }
         let mut buffer = [0u64; 4];
         for index in 0..3u64 {
             let event = read(&mut cursor, &mut buffer);
-            assert_eq!(event.kind, WZ_EXT_EVENT_RECORD);
+            assert_eq!(event.kind, ZEXT_EVENT_RECORD);
             assert_eq!(event.sequence, index);
             assert_eq!(event.level, index as u8 + 1);
             assert_eq!(event.source, 0x4200 + index as u16);
@@ -61,7 +61,7 @@ fn an_event_written_through_the_door_is_read_back_whole_by_any_number_of_readers
             assert!(event.timestamp >> 32 > 1_700_000_000, "the clock's now");
             assert_eq!(cursor, index + 1);
         }
-        assert_eq!(read(&mut cursor, &mut buffer).kind, WZ_EXT_EVENT_EMPTY);
+        assert_eq!(read(&mut cursor, &mut buffer).kind, ZEXT_EVENT_EMPTY);
 
         // ARM 3: a second reader with a cursor of its own reads the same three.
         let mut other = 0u64;
@@ -78,35 +78,35 @@ fn an_event_written_through_the_door_is_read_back_whole_by_any_number_of_readers
         // gone, and then reads the oldest that are left.
         let total = EVENT_RING_SLOTS as u64 + 10;
         for _ in 3..total {
-            assert_eq!(wz_ext_event_emit(0, 1, std::ptr::null(), 0), Z_OK);
+            assert_eq!(zext_event_emit(0, 1, std::ptr::null(), 0), Z_OK);
         }
         let mut late = 0u64;
         let lost = read(&mut late, &mut buffer);
-        assert_eq!(lost.kind, WZ_EXT_EVENT_LOST);
+        assert_eq!(lost.kind, ZEXT_EVENT_LOST);
         assert_eq!(
             lost.sequence,
             total - EVENT_RING_SLOTS as u64,
             "how many are gone"
         );
         let first_left = read(&mut late, &mut buffer);
-        assert_eq!(first_left.kind, WZ_EXT_EVENT_RECORD);
+        assert_eq!(first_left.kind, ZEXT_EVENT_RECORD);
         assert_eq!(first_left.sequence, lost.sequence);
 
         // ARM 6: nothing was refused, and releasing changes nothing a reader sees.
-        assert_eq!(wz_ext_event_dropped(), 0);
-        assert_eq!(wz_ext_event_release(total), Z_OK);
+        assert_eq!(zext_event_dropped(), 0);
+        assert_eq!(zext_event_release(total), Z_OK);
         let mut reread = total - 1;
         assert_eq!(read(&mut reread, &mut buffer).sequence, total - 1);
 
         // ARM 7: the door refuses what it cannot use.
         assert_eq!(
-            wz_ext_event_emit(0, 0, std::ptr::null(), 2),
+            zext_event_emit(0, 0, std::ptr::null(), 2),
             Z_ERR_NULL,
             "a count with no integers"
         );
-        let mut out = wz_ext_event_t::default();
+        let mut out = zext_event_t::default();
         assert_eq!(
-            wz_ext_event_read(std::ptr::null_mut(), &mut out, std::ptr::null_mut(), 0),
+            zext_event_read(std::ptr::null_mut(), &mut out, std::ptr::null_mut(), 0),
             Z_ERR_NULL
         );
     }

@@ -518,7 +518,7 @@ pub(crate) fn resolve_tls_config(_cfg: &ConfigState) -> Result<CapiTlsConfig, ZR
 
 /// The files [`resolve_tls_config`] reads: each of its keys that names the PEM by path, the
 /// client certificate's two only when mTLS is on, as it reads them. Read by
-/// `wz_ext_config_device_requires` only, so it is in a build with `device-requires`.
+/// `zext_config_device_requires` only, so it is in a build with `device-requires`.
 #[cfg(all(
     feature = "device-requires",
     any(
@@ -1279,7 +1279,7 @@ unsafe fn open_request(
 }
 
 /// What a config tells pico's open, read once for [`z_open`] and for the door that describes the
-/// open (`wz_ext_config_device_requires`), so the two cannot read a config differently: the
+/// open (`zext_config_device_requires`), so the two cannot read a config differently: the
 /// locator it dials, the one it listens on, and the role it dials as. The texts are the config's
 /// own, read where it holds them.
 pub(crate) struct OpenConfig<'cfg> {

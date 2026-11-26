@@ -12,7 +12,7 @@
  *
  * The program carries that schema as protoc compiled it when the program was built, a
  * FileDescriptorSet (SCHEMA below), so the library reads no .proto text and the device links
- * no text reader. A KEYER (wz_ext_instance_keyer_*) is made over that schema and a
+ * no text reader. A KEYER (zext_instance_keyer_*) is made over that schema and a
  * description that names
  * `sensor` as the key field with the values 7 and 9: a reading of sensor 7 is instance 0 and
  * one of sensor 9 instance 1, though both are published on the one key expression
@@ -83,7 +83,7 @@ static const char *const WRONG_DESCRIPTION =
 static const uint32_t SENT_SENSOR[READINGS] = {7, 9, 7, 8, 9, 7};
 static const uint32_t SENT_LEVEL[READINGS] = {10, 20, 11, 99, 21, 12};
 
-static wz_ext_owned_instance_keyer_t keyer;
+static zext_owned_instance_keyer_t keyer;
 static uint8_t last_values[INSTANCES * VALUE_ROOM];
 static z_clock_t started;
 static ex_counter_t probes;
@@ -141,15 +141,15 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
     }
     /* Which instance the payload is, read through the schema; an indexed payload becomes its
      * instance's last value. The keyer has a lock of its own, so any thread may call it. */
-    wz_ext_instance_key_t key = {.struct_size = sizeof(wz_ext_instance_key_t)};
-    z_result_t rc = wz_ext_instance_keyer_index(wz_ext_instance_keyer_loan(&keyer), data, len,
+    zext_instance_key_t key = {.struct_size = sizeof(zext_instance_key_t)};
+    z_result_t rc = zext_instance_keyer_index(zext_instance_keyer_loan(&keyer), data, len,
                                                 (uint64_t)z_clock_elapsed_ms(&started), &key);
     z_mutex_lock(z_mutex_loan_mut(&keyed.lock));
     keyed.seen++;
     if (rc != Z_OK) {
         keyed.unexpected++;
-    } else if (key.status == WZ_EXT_INSTANCE_KEY_INDEXED) {
-        if (key.instance < (size_t)INSTANCES && key.last == WZ_EXT_INSTANCE_KEY_LAST_RECORDED) {
+    } else if (key.status == ZEXT_INSTANCE_KEY_INDEXED) {
+        if (key.instance < (size_t)INSTANCES && key.last == ZEXT_INSTANCE_KEY_LAST_RECORDED) {
             keyed.indexed[key.instance]++;
         } else {
             keyed.unexpected++;
@@ -182,12 +182,12 @@ static void publish(const z_loaned_session_t *session, uint32_t sensor, uint32_t
 }
 
 /* Whether instance `instance` holds the encoding of (sensor, level) as its last value. */
-static int last_is(const wz_ext_loaned_instance_keyer_t *k, size_t instance, uint32_t sensor, uint32_t level) {
+static int last_is(const zext_loaned_instance_keyer_t *k, size_t instance, uint32_t sensor, uint32_t level) {
     uint8_t expected[VALUE_ROOM];
     size_t expected_len = encode_reading(expected, sensor, level);
     uint8_t value[VALUE_ROOM];
     size_t value_len = 0;
-    if (wz_ext_instance_keyer_last(k, instance, value, sizeof value, &value_len) != Z_OK) return 0;
+    if (zext_instance_keyer_last(k, instance, value, sizeof value, &value_len) != Z_OK) return 0;
     return value_len == expected_len && memcmp(value, expected, expected_len) == 0;
 }
 
@@ -199,38 +199,38 @@ int main(void) {
     /* The keyer: the program's compiled schema (every file it imports is in the set too), the
      * description of the key, and the storage of the last values, VALUE_ROOM bytes for each
      * instance, which stays the program's memory. */
-    wz_ext_instance_keyer_options_t options;
-    wz_ext_instance_keyer_options_default(&options);
+    zext_instance_keyer_options_t options;
+    zext_instance_keyer_options_default(&options);
     options.storage = last_values;
     options.storage_len = sizeof last_values;
     options.value_capacity = VALUE_ROOM;
 
     /* Refused by name: a description that names a field the message does not have. */
-    wz_ext_owned_instance_keyer_t wrong;
+    zext_owned_instance_keyer_t wrong;
     z_owned_string_t refusal;
-    z_result_t rc = wz_ext_instance_keyer_from_descriptor_set(&wrong, SCHEMA, sizeof SCHEMA, WRONG_DESCRIPTION,
+    z_result_t rc = zext_instance_keyer_from_descriptor_set(&wrong, SCHEMA, sizeof SCHEMA, WRONG_DESCRIPTION,
                                                               &options, &refusal);
-    show_refusal("wz_ext_instance_keyer_from_descriptor_set", &refusal);
+    show_refusal("zext_instance_keyer_from_descriptor_set", &refusal);
     CHECK(rc == _Z_ERR_CONFIG_INVALID_VALUE, "a description of a field the schema lacks was not refused (rc %d)",
           (int)rc);
-    CHECK(!wz_ext_internal_instance_keyer_check(&wrong), "a refused keyer is not the null state");
+    CHECK(!zext_internal_instance_keyer_check(&wrong), "a refused keyer is not the null state");
 
-    rc = wz_ext_instance_keyer_from_descriptor_set(&keyer, SCHEMA, sizeof SCHEMA, DESCRIPTION, &options,
+    rc = zext_instance_keyer_from_descriptor_set(&keyer, SCHEMA, sizeof SCHEMA, DESCRIPTION, &options,
                                                    &refusal);
-    show_refusal("wz_ext_instance_keyer_from_descriptor_set", &refusal);
+    show_refusal("zext_instance_keyer_from_descriptor_set", &refusal);
     CHECK(rc == Z_OK, "the keyer was refused (rc %d)", (int)rc);
-    if (!wz_ext_internal_instance_keyer_check(&keyer)) return ex_finish();
-    const wz_ext_loaned_instance_keyer_t *k = wz_ext_instance_keyer_loan(&keyer);
+    if (!zext_internal_instance_keyer_check(&keyer)) return ex_finish();
+    const zext_loaned_instance_keyer_t *k = zext_instance_keyer_loan(&keyer);
     size_t instances = 0;
-    CHECK(wz_ext_instance_keyer_instances(k, &instances) == Z_OK && instances == INSTANCES,
+    CHECK(zext_instance_keyer_instances(k, &instances) == Z_OK && instances == INSTANCES,
           "the keyer makes %zu instances, not %d", instances, INSTANCES);
 
     /* Before anything arrived: no last value yet, and no instance past the lists. */
     uint8_t value[VALUE_ROOM];
     size_t value_len = 99;
-    CHECK(wz_ext_instance_keyer_last(k, 0, value, sizeof value, &value_len) == Z_CHANNEL_NODATA && value_len == 0,
+    CHECK(zext_instance_keyer_last(k, 0, value, sizeof value, &value_len) == Z_CHANNEL_NODATA && value_len == 0,
           "instance 0 had a last value before its first reading");
-    CHECK(wz_ext_instance_keyer_last(k, INSTANCES, value, sizeof value, &value_len) == Z_EINVAL,
+    CHECK(zext_instance_keyer_last(k, INSTANCES, value, sizeof value, &value_len) == Z_EINVAL,
           "an instance the keyer has not was not refused");
 
     char locator[64];
@@ -267,7 +267,7 @@ int main(void) {
             CHECK(keyed.indexed[0] == 3, "instance 0 (sensor 7) was handed %d readings, not 3", keyed.indexed[0]);
             CHECK(keyed.indexed[1] == 2, "instance 1 (sensor 9) was handed %d readings, not 2", keyed.indexed[1]);
             CHECK(keyed.dropped == 1, "%d readings were dropped, not the one of sensor 8", keyed.dropped);
-            CHECK(keyed.drop_status == WZ_EXT_INSTANCE_KEY_NOT_LISTED && keyed.drop_field == 0,
+            CHECK(keyed.drop_status == ZEXT_INSTANCE_KEY_NOT_LISTED && keyed.drop_field == 0,
                   "the reading of sensor 8 was dropped with status %u field %u, not as a value in no list of field 0",
                   (unsigned)keyed.drop_status, (unsigned)keyed.drop_field);
             CHECK(keyed.unexpected == 0, "%d readings were indexed in a way the example does not expect",
@@ -278,13 +278,13 @@ int main(void) {
             CHECK(last_is(k, 0, 7, 12), "the last value of instance 0 is not sensor 7 level 12");
             CHECK(last_is(k, 1, 9, 21), "the last value of instance 1 is not sensor 9 level 21");
             uint64_t undecodable = 99, absent = 99, not_listed = 99;
-            CHECK(wz_ext_instance_keyer_counts(k, &undecodable, &absent, &not_listed) == Z_OK, "counts");
+            CHECK(zext_instance_keyer_counts(k, &undecodable, &absent, &not_listed) == Z_OK, "counts");
             CHECK(undecodable == 0 && absent == 0 && not_listed == 1,
                   "the drops counted are %llu undecodable, %llu absent, %llu not listed, not 0, 0, 1",
                   (unsigned long long)undecodable, (unsigned long long)absent, (unsigned long long)not_listed);
             /* A copy into too little room says how long the value is. */
             value_len = 0;
-            CHECK(wz_ext_instance_keyer_last(k, 0, value, 1, &value_len) == _Z_ERR_OVERFLOW && value_len > 1,
+            CHECK(zext_instance_keyer_last(k, 0, value, 1, &value_len) == _Z_ERR_OVERFLOW && value_len > 1,
                   "a copy into one byte was not refused with the value's length");
             ex_close(&dialer);
         }
@@ -293,8 +293,8 @@ int main(void) {
     }
 
     /* The storage of the last values is the program's again once the keyer is dropped. */
-    wz_ext_instance_keyer_drop(wz_ext_instance_keyer_move(&keyer));
-    CHECK(!wz_ext_internal_instance_keyer_check(&keyer), "a dropped keyer is not the null state");
+    zext_instance_keyer_drop(zext_instance_keyer_move(&keyer));
+    CHECK(!zext_internal_instance_keyer_check(&keyer), "a dropped keyer is not the null state");
     ex_counter_drop(&probes);
     z_mutex_drop(z_mutex_move(&keyed.lock));
     return ex_finish();

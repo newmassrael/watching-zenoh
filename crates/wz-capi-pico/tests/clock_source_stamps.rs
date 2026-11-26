@@ -21,8 +21,8 @@ use std::ffi::{c_void, CString};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use wz_capi_pico::clock_source::{
-    wz_ext_clock_read_fn, wz_ext_clock_report, wz_ext_clock_source_register,
-    wz_ext_clock_source_unregister, WZ_EXT_CLOCK_SYNC_ACQUIRED,
+    zext_clock_read_fn, zext_clock_report, zext_clock_source_register,
+    zext_clock_source_unregister, ZEXT_CLOCK_SYNC_ACQUIRED,
 };
 use wz_capi_pico::pubsub::{z_timestamp_new, z_timestamp_ntp64_time, z_timestamp_t};
 use wz_capi_pico::result::{Z_ERR_GENERIC, Z_ERR_INVALID, Z_OK};
@@ -95,17 +95,17 @@ fn a_registered_clock_is_the_clock_z_timestamp_new_stamps_with() {
 
         // ARM 2
         CLOCK_SECS.store(AHEAD, Ordering::SeqCst);
-        let read: wz_ext_clock_read_fn = read_clock;
+        let read: zext_clock_read_fn = read_clock;
         let mut handle = 0u32;
         assert_eq!(
-            wz_ext_clock_source_register(Some(read), std::ptr::null_mut(), &mut handle),
+            zext_clock_source_register(Some(read), std::ptr::null_mut(), &mut handle),
             Z_OK
         );
         let first = stamp(&session).expect("the registered clock stamps");
         let second = stamp(&session).expect("and again");
         assert_eq!(first >> 32, AHEAD, "the registered clock's seconds");
         assert!(second > first, "a clock that stands still still counts up");
-        assert_eq!(wz_ext_clock_report(WZ_EXT_CLOCK_SYNC_ACQUIRED), Z_OK);
+        assert_eq!(zext_clock_report(ZEXT_CLOCK_SYNC_ACQUIRED), Z_OK);
 
         // ARM 3
         CLOCK_SECS.store(0, Ordering::SeqCst);
@@ -116,8 +116,8 @@ fn a_registered_clock_is_the_clock_z_timestamp_new_stamps_with() {
         );
 
         // ARM 4
-        assert_eq!(wz_ext_clock_source_unregister(handle), Z_OK);
-        assert_eq!(wz_ext_clock_source_unregister(handle), Z_ERR_INVALID);
+        assert_eq!(zext_clock_source_unregister(handle), Z_OK);
+        assert_eq!(zext_clock_source_unregister(handle), Z_ERR_INVALID);
         let back = stamp(&session).expect("the system clock again");
         assert_eq!(
             back,

@@ -41,7 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use wz_capi_pico::config_policy::wz_ext_config_document;
+use wz_capi_pico::config_policy::zext_config_document;
 use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_sample, z_closure_sample_move,
@@ -273,7 +273,7 @@ unsafe fn config(key: u8, endpoint: &str, stated: Option<usize>) -> z_owned_conf
     if let Some(batch) = stated {
         let text = CString::new(document(batch)).unwrap();
         assert_eq!(
-            wz_ext_config_document(z_config_loan_mut(&mut cfg), text.as_ptr()),
+            zext_config_document(z_config_loan_mut(&mut cfg), text.as_ptr()),
             Z_OK,
             "the document door takes a batch size of {batch}"
         );
@@ -492,7 +492,7 @@ fn each_session_frames_its_link_to_the_batch_its_document_states() {
             assert_eq!(z_config_default(&mut cfg), Z_OK);
             let text = CString::new(document(batch)).unwrap();
             assert_eq!(
-                wz_ext_config_document(z_config_loan_mut(&mut cfg), text.as_ptr()),
+                zext_config_document(z_config_loan_mut(&mut cfg), text.as_ptr()),
                 Z_ERR_CONFIG_INVALID_VALUE,
                 "the document door refuses a batch of {batch} against a ceiling of {ceiling}"
             );
@@ -555,7 +555,7 @@ fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
         let mut cfg = config(Z_CONFIG_CONNECT_KEY, &format!("tcp/127.0.0.1:{port}"), None);
         let refused = CString::new(text).unwrap();
         assert_eq!(
-            wz_ext_config_document(z_config_loan_mut(&mut cfg), refused.as_ptr()),
+            zext_config_document(z_config_loan_mut(&mut cfg), refused.as_ptr()),
             Z_ERR_CONFIG_INVALID_VALUE,
             "the document door refuses a batch size past the ceiling"
         );
