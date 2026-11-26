@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::config_policy::wz_ext_config_document;
 use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
 use wz_capi_pico::{
@@ -385,6 +386,15 @@ impl Pair {
         let endpoint = format!("tcp/127.0.0.1:{port}");
         let mut listener: z_owned_session_t = std::mem::zeroed();
         let mut cfg = config(Z_CONFIG_LISTEN_KEY, &endpoint, stated);
+        // The listening session holds two subscribers, past what a session opens with.
+        assert_eq!(
+            zp_config_insert(
+                z_config_loan_mut(&mut cfg),
+                WZ_EXT_CONFIG_LIMITS_KEY,
+                c"MAX_SUBSCRIPTIONS=2".as_ptr()
+            ),
+            Z_OK
+        );
         assert_eq!(
             z_open(&mut listener, z_config_move(&mut cfg), std::ptr::null()),
             Z_OK,
