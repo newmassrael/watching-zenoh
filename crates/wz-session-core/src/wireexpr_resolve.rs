@@ -482,6 +482,7 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
     /// The key the peer declared for `id`, found once: its text, and, when its table keeps it in
     /// the session's key arena (the lent policy's), the row's own key, whose block a holder may
     /// keep. `None` for an id the peer did not declare.
+    #[inline(always)]
     fn declared(
         &self,
         id: crate::wire_id::ExprId,
@@ -1110,7 +1111,7 @@ pub fn resolve_wireexpr_viewed_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: 
     own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
-    resolve_viewed_parts_held_over(ViewedParts::of(body), spaces, own, out)
+    resolve_viewed_parts_held_over(&ViewedParts::of(body), spaces, own, out)
 }
 
 /// What a wireexpr read as its view carries, read off it once: its id, its suffix, and whether
@@ -1162,19 +1163,28 @@ impl<'f> ViewedParts<'f> {
 /// [`resolve_wireexpr_viewed_held_over`] over the parts already read off the wireexpr: an id the
 /// sender declared, with no suffix, is its row's text, found by one lookup of the sender's table
 /// with nothing composed, and the row's key of the session's key arena when the table keeps it
-/// there; every other form is resolved by the one rule ([`resolve_wireexpr_view_over`]).
+/// there; the literal of id 0 is its suffix as it came; every other form is resolved by the one
+/// rule ([`resolve_wireexpr_view_over`]).
+///
+/// The two short forms are what a message on a key its publisher declared, or named in full,
+/// carries every time, so they are read in the caller; a suffix to join and our own space are
+/// resolved out of line.
 #[cfg(any(
     feature = "codec-request",
     feature = "codec-response",
     feature = "codec-push"
 ))]
+#[inline(always)]
 pub fn resolve_viewed_parts_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: Storage>(
-    parts: ViewedParts<'f>,
+    parts: &ViewedParts<'f>,
     spaces: MappingSpaces<'k, P, O>,
     own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
-    if parts.senders && parts.id != 0 && parts.suffix.is_none() {
+    if parts.id == 0 {
+        return Ok(parts.suffix.map(|text| (text, None)));
+    }
+    if parts.senders && parts.suffix.is_none() {
         if let Some(found) = spaces.peer.declared(parts.id) {
             return Ok(Some(found));
         }
@@ -1184,8 +1194,26 @@ pub fn resolve_viewed_parts_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: Sto
     } else {
         Space::Own
     };
-    resolve_parts(arm, parts.id, parts.suffix, spaces, own, out)
-        .map(|text| text.map(|text| (text, None)))
+    resolve_parts_apart(arm, parts.id, parts.suffix, spaces, own, out)
+}
+
+/// [`resolve_parts`] out of line, as an answer with no key of the key arena: the forms
+/// [`resolve_viewed_parts_held_over`] does not read in its caller.
+#[cfg(any(
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-push"
+))]
+#[inline(never)]
+fn resolve_parts_apart<'k, P: Storage, O: Storage, T: Storage>(
+    arm: Space,
+    id: crate::wire_id::ExprId,
+    suffix: Option<&'k str>,
+    spaces: MappingSpaces<'k, P, O>,
+    own: Option<OwnSpace<'_, T>>,
+    out: &'k mut dyn KeyexprOut,
+) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
+    resolve_parts(arm, id, suffix, spaces, own, out).map(|text| text.map(|text| (text, None)))
 }
 
 /// [`resolve_wireexpr_view`] over an OWNED wireexpr: what a declaration, an
@@ -1680,7 +1708,7 @@ mod bounded_space_tests {
         spaces: MappingSpaces<'k, Static>,
         out: &'k mut KeyexprBuf,
     ) -> Result<Option<(&'k str, bool)>, KeyexprPastBound> {
-        resolve_viewed_parts_held_over(parts, spaces, None::<OwnSpace<'_, Static>>, out)
+        resolve_viewed_parts_held_over(&parts, spaces, None::<OwnSpace<'_, Static>>, out)
             .map(|found| found.map(|(text, held)| (text, held.is_some())))
     }
 
@@ -1751,6 +1779,32 @@ mod bounded_space_tests {
         assert_eq!(
             resolved_parts(literal, spaces, &mut out),
             Ok(Some(("home/temp", false)))
+        );
+        // The literal is read in the caller: in our own space too, and none for no suffix.
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolved_parts(
+                ViewedParts {
+                    senders: false,
+                    ..literal
+                },
+                spaces,
+                &mut out
+            ),
+            Ok(Some(("home/temp", false)))
+        );
+        let mut out = KeyexprBuf::new();
+        assert_eq!(
+            resolved_parts(
+                ViewedParts {
+                    suffix: None,
+                    ..literal
+                },
+                spaces,
+                &mut out
+            ),
+            Ok(None),
+            "id 0 with no suffix names no key"
         );
         assert_eq!(
             declared.declared_by(3),

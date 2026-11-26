@@ -257,7 +257,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             compose,
             subs,
             push,
-            ViewedParts::of(&push.view.keyexpr.body),
+            &ViewedParts::of(&push.view.keyexpr.body),
             PushOrigin {
                 reliability,
                 sender: record.sender(),
@@ -322,7 +322,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
             compose,
             &*subs,
             push,
-            parts,
+            &parts,
             PushOrigin {
                 reliability,
                 sender,
@@ -377,7 +377,7 @@ impl<Q: Storage> SubscriberPeer<Q> {
         compose: &'s mut Q::Compose,
         subs: &L,
         push: &'s PushRead<'_>,
-        parts: ViewedParts<'s>,
+        parts: &ViewedParts<'s>,
         origin: PushOrigin,
         room: &'s mut LentRoom<Q>,
     ) -> Result<Option<SampleRef<'s>>, Fallback> {

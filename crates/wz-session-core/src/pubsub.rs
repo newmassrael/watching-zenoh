@@ -2704,6 +2704,10 @@ pub(crate) fn fire_into_memoized<R: SubscriberRows, P: Storage>(
 /// any other key is asked of `gate` for the peer of `class` ([`peer_admission`]), its refusal
 /// kept, and matched by [`scan_subscribers`], what it reached kept when every row it reached has a
 /// place in a set. A key the matcher cannot match is not kept.
+///
+/// The kept answer is what every message of a key but its first is handed, so it is all that is
+/// inlined into the caller; the rest is [`fire_into_marked_afresh`], out of line.
+#[inline(always)]
 pub(crate) fn fire_into_marked<R: SubscriberRows>(
     rows: &mut R,
     mark: &mut crate::match_set::MatchEntry,
@@ -2724,6 +2728,21 @@ pub(crate) fn fire_into_marked<R: SubscriberRows>(
         }
         return fired;
     }
+    fire_into_marked_afresh(rows, mark, epoch, key, gate, class, deliver)
+}
+
+/// [`fire_into_marked`] of a key whose places `mark` does not keep at `epoch`: a refusal kept
+/// there counted again, any other key asked of the gate and matched, and its answer kept.
+#[inline(never)]
+fn fire_into_marked_afresh<R: SubscriberRows>(
+    rows: &mut R,
+    mark: &mut crate::match_set::MatchEntry,
+    epoch: u64,
+    key: &str,
+    gate: &mut KeyGate<'_>,
+    class: Option<ClassId>,
+    deliver: impl FnMut(R::RowId, RowAccess<'_, R::Sink>),
+) -> usize {
     if let Some(counter) = mark.refusal(epoch) {
         gate.count_refusal(counter);
         return 0;
@@ -4859,9 +4878,10 @@ pub trait LocalSubscribers {
     /// side keeps in `mark` (a key the peer declared, named by its id with no suffix): a table
     /// that keeps answers by [`Self::epoch`] hands the message to the rows `mark` answers at
     /// this epoch with no pattern matched and no key gate asked, and otherwise gates and matches
-    /// it and keeps what it reached in `mark`. A refused key is not kept, so each of its
-    /// messages is refused and counted. A table that keeps no answer delivers as
-    /// `deliver_from_peer` delivers a message read in place and leaves `mark` as it was.
+    /// it and keeps what it reached in `mark`. A refused key keeps its refusal, so each later
+    /// message on it is counted refused with the gate not asked. A table that keeps no answer
+    /// delivers as `deliver_from_peer` delivers a message read in place and leaves `mark` as it
+    /// was.
     fn deliver_from_peer_marked<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
