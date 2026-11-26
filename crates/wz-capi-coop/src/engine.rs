@@ -4305,14 +4305,10 @@ struct LinkMaking<'a> {
     /// Where the registry is lent to each link's dispatch (`Core::registry_lend`).
     #[cfg(wz_round)]
     registry_lend: &'a RegistryLend,
-    /// The limits the session was opened with: what a link's gate and its shared key ids are
-    /// sized by.
-    #[cfg(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group",
-        feature = "shared-key-ids"
-    ))]
+    /// The limits the session was opened with: what a link's gate (the room of the round it
+    /// reads into) and its shared key ids are sized by. A read that hands each record out as it
+    /// is read gates nothing, so only its shared key ids read them.
+    #[cfg(any(wz_round, feature = "shared-key-ids"))]
     limits: &'a SessionLimits,
 }
 
@@ -5130,7 +5126,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             #[cfg(not(wz_round))]
             if let Some(held) = tx.held_wire(wire) {
                 if let Some(link) = held {
-                    settle(&*link.actions);
+                    settle(&link.actions);
                 }
                 continue;
             }

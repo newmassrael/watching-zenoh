@@ -1718,12 +1718,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // the read that makes it holds.
         let mut calls = LinkMaking {
             session: &mut core.session,
-            #[cfg(any(
-                feature = "threads",
-                feature = "listen",
-                feature = "group",
-                feature = "shared-key-ids"
-            ))]
+            #[cfg(feature = "shared-key-ids")]
             limits: resolve_limits(&core.config),
         };
         let placed = core

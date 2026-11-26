@@ -228,7 +228,8 @@ impl QueryableCall {
     }
 }
 
-#[cfg(test)]
+// Only the round's tests hand it a call; a read that hands each query out itself begins its own.
+#[cfg(all(test, feature = "std", wz_round))]
 impl QueryableCall {
     /// A call begun on `row`: what a test hands the round as the dispatch would.
     pub(crate) fn begun(row: &QueryableRow) -> Self {
