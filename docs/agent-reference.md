@@ -53,7 +53,7 @@ git config core.hooksPath .githooks
   has one writer, the bx landing queue (`bx --land`, bx RFC 0024; `[land]` in
   `bx.toml`). `land.sh` submits HEAD as `refs/bx-land/main/items/<id>` and
   waits; one integrator, a systemd user unit `bx-land@<key>.service` over its
-  own clone, cherry-picks it onto `main`, files the ledger round its descriptor
+  own clone, merges it onto `main`, files the ledger round its descriptor
   carries (`file-round`, placed on a machine that holds the pinned ledger CLI,
   with the number the store gives it on that tree), judges the result with
   this repository's pre-push hook and pushes. Once it landed, `land.sh` moves
@@ -65,6 +65,35 @@ git config core.hooksPath .githooks
   (`bx --land-queue`). Exit codes: 0 landed, 1 returned or a step refused,
   2 usage or a dirty tree, 3 not submitted, cancelled or not known, 4 landed but the move
   onto `origin/main` conflicted.
+
+  **The lane-gate** (2026-11-26) is the author stage of a landing, and the first
+  step of `land.sh`: `bash scripts/verify-once.sh` (planner and store
+  `scripts/lib/gate_ledger.py`) reads the lane set, each lane's class and its
+  digest D(L, t) from `scripts/lib/lane_digest.py`, which hashes the lane's
+  definition, its environment and every tracked file it can read. A lane is run
+  when the branch moved its digest from the merge base with `origin/main` and the
+  clone holds no pass at that digest; the units run in one `bx --checks ci` call,
+  and a lane with a pass is INHERITED, printed with the commit it was judged on.
+  Class S lanes (statistics) are never run or reused here. Each verdict is a
+  receipt in the clone's author receipt store,
+  `<git common dir>/wz-receipts/<lane>/<digest[0:2]>/<digest>/<sha256>.json`,
+  named by the hash of its bytes and published with link(2), so no receipt is
+  ever overwritten (the defect that removed the first receipts on 2026-10-19).
+  No receipt is written from a dirty or untracked checkout, a receipt whose bytes
+  or key do not match is ignored and reported, and a failure is never reused. An
+  item with a failed lane is not submitted; the round's verification gets one
+  bullet per judged lane (lane, digest, verdict, executor class). Receipts are
+  the author's: nothing that admits a candidate to `main` reads them, and the
+  integrator's judgment is unchanged.
+
+  `verify-once.sh` modes: the default (the lanes the branch moved, without a
+  pass), `--only-red` (the lanes whose latest verdict at their current digest
+  failed), `--all --reason '<why>'` (every lane; without a reason it is refused
+  when the store already holds a verdict at any of their digests, with a line
+  starting `verify-once: REFUSED --all:` and exit 3; the reason is kept in each
+  receipt), `--plan` and `--check` (run nothing), `--summary` (the round's
+  verification lines). Do not chain `run-ci.sh` lanes by hand to get the same
+  answer: a chain re-runs every lane the store already judged.
 
   Gate 0p refuses a push to `main` from any clone that is not the
   integrator's (`git config wz.land-integrator true`). Refs of the queue
