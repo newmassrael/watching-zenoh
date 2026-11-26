@@ -1926,13 +1926,16 @@ fn release_keyexpr<P: Storage>(
     Some(id)
 }
 
+/// A declaration found with its row: the handle the table knows it by and the row it reads.
+type FoundKeyexpr<'a, P> = Option<(
+    KeyexprHandle,
+    &'a KeyexprRow<<P as Storage>::Key, <P as Storage>::KeyLen>,
+)>;
+
 /// The declaration the wire names by `id` and its row: the one search of the declarations by id,
 /// which every lookup that knows only the id reads.
 #[inline(never)]
-fn keyexpr_row_by_id<P: Storage>(
-    keyexprs: &Keyexprs<P>,
-    id: ExprId,
-) -> Option<(KeyexprHandle, &KeyexprRow<P::Key, P::KeyLen>)> {
+fn keyexpr_row_by_id<P: Storage>(keyexprs: &Keyexprs<P>, id: ExprId) -> FoundKeyexpr<'_, P> {
     keyexprs.iter().find(|(_, row)| row.id() == id)
 }
 
@@ -2334,10 +2337,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// [`Self::keyexpr_at`] with the row it found: the one lookup of a declaration a holder names,
     /// which a reader of the row's key reads it in, with no second look at the handle.
     #[inline(never)]
-    fn keyexpr_row_at(
-        &self,
-        declared: KeyexprRef,
-    ) -> Option<(KeyexprHandle, &KeyexprRow<P::Key, P::KeyLen>)> {
+    fn keyexpr_row_at(&self, declared: KeyexprRef) -> FoundKeyexpr<'_, P> {
         if declared.id == 0 {
             return None;
         }
