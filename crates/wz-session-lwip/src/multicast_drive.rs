@@ -668,7 +668,9 @@ mod tests {
 
     /// A member of the group on `port` of this host, the port a node's group sends to so the
     /// member reads what it sent: its socket on that port (the node's socket joined the group
-    /// for the host), read through a driver of its own.
+    /// for the host), read through a driver of its own. Read by the tests that send a Push or a
+    /// token's reply to the group.
+    #[cfg(any(feature = "codec-push", feature = "liveliness-token"))]
     fn member_on(link: &LwipLink, group: u32, port: u16) -> LwipMulticastDriver {
         let socket: SessionMulticastRxSocket =
             wz_link_lwip::test_bind::bind(link, port).expect("bind the member's port");

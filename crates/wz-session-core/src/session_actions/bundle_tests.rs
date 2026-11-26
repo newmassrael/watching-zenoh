@@ -2128,7 +2128,7 @@ mod counted_gets {
 /// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
 mod facts_lock {
     use super::bundle;
-    // Only the Open's admissions count their holds here.
+    // The tests that count holds read an admitted Open (`codec-open-body`).
     #[cfg(feature = "codec-open-body")]
     use super::holds_in;
 

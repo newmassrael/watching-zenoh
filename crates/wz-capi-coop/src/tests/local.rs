@@ -342,7 +342,6 @@ fn subscribe_putting(
     for subscriber in 0..3usize {
         let handed = handed.clone();
         let inner = inner.clone();
-        let session = session.clone();
         let key = if subscriber == 0 {
             "demo/l/fan"
         } else {

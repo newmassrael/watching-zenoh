@@ -1,14 +1,9 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The link-state routing cores the region-hat forwarder
-//! ([`RouterForwarder`](crate::router_forward)) is built from, and the surface a
-//! deploy names them by.
-//!
-//! This module held the single-net peer forwarder until open-debt item 751 step 7
-//! (`docs/peer-region-hats.md`): a peer node is now the region-hat forwarder at node
-//! mode Peer, and what is left here is what that forwarder, and the code around it,
-//! reads without owning a forwarder's state:
+//! The link-state route cores the region-hat forwarder
+//! ([`RouterForwarder`](crate::router_forward)) is built from, and what that forwarder and the
+//! code around it read without owning a forwarder's state:
 //!
 //! - the pure ROUTE CORES over one link-state net and its interest tables (the data
 //!   route and the client leg of it, the query route and its target selection, the
@@ -16,20 +11,25 @@
 //!   and the tables as arguments and answer a route, so that a hat of any region
 //!   computes with them what a mesh node computes;
 //! - the SYNTHESIS of the messages a reaped or drained query owes its querier;
-//! - the read-only handle to a graph ([`NetHandle`], [`LinkstateNetView`]);
-//! - the re-exports a deploy builds its policy and its configuration from
-//!   (`wz::runtime_tokio::linkstate_forward::{AutoConnect, TransportWeight, AclPolicy, ..}`).
+//! - the read-only handle to a graph (`NetHandle`, `LinkstateNetView`);
+//! - the helpers the forwarder reads per message: the interceptor drop charge, the
+//!   source resolution, and the peer identity readers.
+//!
+//! Crate-private, because nothing outside this crate names a route core. The graph view a host
+//! renders is public as `router_forward::LinkstateNetView`, beside the forwarder methods that
+//! hand it out. The types a deploy states its routing policy and configuration in are the public
+//! module `routing_policy`.
+//!
+//! Those two concerns shared one module, named for the single-net peer forwarder it held until
+//! open-debt item 751 step 7 (`docs/peer-region-hats.md`) made a peer node the region-hat
+//! forwarder at node mode Peer. That forwarder no longer exists, and what was left was a public
+//! surface a deploy names and route cores the crate keeps to itself under a name that said
+//! neither, so each has its own module, named for what it holds and carrying the visibility its
+//! users need.
 //!
 //! `routing-router-hat`-gated: the cores have no caller without the forwarder.
-//!
-//! The name stays. What is here is still the forwarding cores over a link-state net, and
-//! `wz::runtime_tokio::linkstate_forward::{..}` is the path a deploy names its policy and its
-//! configuration by, so a rename would move a public path to say what the module's doc already
-//! says (item 751 step 7c-2 left the name for that reason).
 
-use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::rc::Rc;
 use std::sync::Arc;
 
 use sce_forge_runtime::codec::CodecError;
@@ -46,95 +46,15 @@ use wz_session_core::transport_profile::owned::DeclareOwned;
 use wz_session_core::wire::PushOwned;
 use wz_session_core::wireexpr_resolve::wireexpr_names_a_declaration;
 
-use wz_routing_graph::{LinkId, LinkstateNetwork};
+use wz_routing_graph::{LinkId, LinkstateNetwork, WhatAmI, Zid};
 
 use crate::accept_loop::FaceId;
 use crate::client_store::{ClientStore, Held};
-use crate::interceptor::InterceptorKind;
+use crate::interceptor::{InterceptorFlow, InterceptorKind};
 use crate::linkstate_interest::LinkstatepeerInterest;
 use crate::linkstate_pending::{ExpiredQuery, QueryReturn};
 use crate::route_cache::{RouteCache, RouteInputs};
 use crate::session_glue::SessionLinkActions;
-
-/// Re-export `Zid`, the typed [`WhatAmI`] role, and the gossip
-/// [`AutoConnect`] policy so the peer-loop caller (the demo) names them by the
-/// same SSOT type (defined in `wz-codecs` / the graph), not a bare byte. A deploy
-/// opting into autoconnect builds its policy from [`default_autoconnect_matcher`]
-/// (this module) + these re-exports, so the `router|peer` matcher is never
-/// re-typed at the call site.
-/// R2141 — [`AutoConnectStrategies`] and [`WhatAmIMatcher`] join them, because
-/// the multicast plane's policy is built from a CONFIG rather than from a fixed
-/// per-role default: `scouting/multicast/autoconnect` names its own matcher and
-/// `_strategy` its own per-target table, and a caller that could not name those
-/// two types would have to re-type them at the call site — which is the drift
-/// this re-export exists to prevent.
-pub use wz_codecs::whatami::WhatAmIMatcher;
-pub use wz_routing_graph::{AutoConnect, AutoConnectStrategies, AutoConnectStrategy, WhatAmI, Zid};
-// R2633 — the CONFIGURED link-weight surface, re-exported for the same reason
-// and gated by the same feature: `wz-routing-graph` is an OPTIONAL dependency
-// pulled by `routing-peer`, so these types exist exactly where this module does.
-// A deploy that weights its router links names them on one path
-// (`wz::runtime_tokio::linkstate_forward::{TransportWeight, link_weights_from_config}`)
-// rather than re-typing the row shape at the call site. `zenoh_config`
-// re-exports the same three for the CONFIG-FILE half, which needs its own
-// feature; a build with the router hat and no config reader reaches them here.
-pub use wz_routing_graph::{link_weights_from_config, DuplicateLinkWeight, TransportWeight};
-// R311tt — re-export the §5.16 access-control policy-construction surface
-// beside `set_interceptors`, so a deploy builds an `AclPolicy` from one facade
-// path (`wz::runtime_tokio::linkstate_forward::{AclPolicy, ..}`) — the same
-// convenience the AutoConnect re-export above gives the autoconnect opt-in.
-// Gated on `access-acl` (the enforcer + its engine compile only with it).
-#[cfg(feature = "access-acl")]
-pub use wz_access_control::{
-    AclConfig, AclFlow, AclMessage, AclPolicy, AclRule, Permission, SubjectSelector,
-};
-// R311tw — the downsampling rule type, re-exported beside the other rule types
-// so a deploy builds it from the same facade path as the ACL types above.
-// R311y452 adds `DownsamplingMessage` (a rule now names the message KINDS it
-// throttles) and `interval_from_freq` (zenoh configures the rate as a FREQUENCY
-// in Hertz, so a deploy speaking upstream's unit needs the mapping from the same
-// facade path rather than re-deriving `1/freq` at the call site).
-#[cfg(feature = "access-downsampling")]
-pub use crate::interceptor::downsampling::{
-    interval_from_freq, DownsamplingMessage, DownsamplingRule,
-};
-// R311tx — the low-pass (per-key message-size limit) rule type, re-exported
-// beside the other rule types (the §5.16 access-quota realization). R311y451
-// adds `LowPassMessage`: a rule now names the message KINDS it sizes, so a
-// deploy needs the kind vocabulary from the same facade path as the rule.
-#[cfg(feature = "access-quota")]
-pub use crate::interceptor::low_pass::{LowPassMessage, LowPassRule};
-// R311ty — the combined interceptor configuration, the single funnel a deploy
-// fills and installs via `set_interceptors` (the wz mirror of zenoh's
-// interceptor_factories(config)). Re-exported beside the rule types above so a
-// deploy builds the whole pipeline from one facade path.
-pub use crate::interceptor::InterceptorConfig;
-// R311y451 — the flow descriptor, re-exported beside the config it is now part
-// OF: a low-pass rule names the flows it applies to, so a deploy that builds a
-// rule needs the flow vocabulary from the same facade path. Unconditional (the
-// seam lives under `routing-peer`, not under an `access-*` knob).
-pub use crate::interceptor::InterceptorFlow;
-// R311y453 — the §5.16 SUBJECT vocabulary, re-exported beside the rule types: a
-// deploy that narrows a rule by `link_protocols` needs the link-protocol names,
-// and it must spell them the way upstream's config does (`from_config_str`).
-pub use wz_session_core::link::{InterceptorLink, LinkSubject};
-
-/// The default gossip-AUTOCONNECT matcher for a node of role `whatami` — zenoh's
-/// `scouting.gossip.autoconnect` per-local default
-/// (`commons/zenoh-config/src/defaults.rs`), DELIBERATELY a different profile from
-/// the gossip target: a PEER autoconnects to discovered routers and peers
-/// (`router|peer`), but a ROUTER autoconnects to NOBODY (the empty set — routers
-/// are reached via configured links, not gossip-dialed), as does a CLIENT. The
-/// role-correct matcher a deploy passes to [`AutoConnect::new`] when it opts a
-/// node into autoconnect, so the `router|peer` literal is never re-hardcoded at
-/// the (role-blind) call site — a router that hardcoded `router|peer` would
-/// wrongly dial discovered peers.
-pub const fn default_autoconnect_matcher(whatami: WhatAmI) -> WhatAmIMatcher {
-    match whatami {
-        WhatAmI::Peer => WhatAmIMatcher::empty().router().peer(),
-        WhatAmI::Router | WhatAmI::Client => WhatAmIMatcher::empty(),
-    }
-}
 
 /// A read-only, `Rc`-backed handle to a link-state graph, exposing ONLY the
 /// adminspace render seam (§5.23 `adminspace-router-linkstate`): the GraphViz
@@ -143,12 +63,9 @@ pub const fn default_autoconnect_matcher(whatami: WhatAmI) -> WhatAmIMatcher {
 /// handler so it renders LIVE per GET (no per-tick snapshot buffer) WITHOUT
 /// leaking a `borrow_mut` handle that could mutate routing state.
 ///
-/// R2684 — it lives HERE, with `routing-peer`, rather than in the router hat
-/// where it was written. The graph it views belongs to the peer tier, so a
-/// plain linkstate peer owned the data while the handle that renders it sat
-/// behind `routing-router-hat` — which is the whole of why a peer's
-/// `linkstate/<region>` leg could be served only from a router. `router_forward` re-exports it, so every
-/// path that already named it is unchanged.
+/// Public as `router_forward::LinkstateNetView`, the one path a host names it by, beside the
+/// forwarder methods that hand it out (`routers_net_view`, `peers_net_view`); it is defined
+/// here, with the graph handle it reads through, and this module is crate-private.
 ///
 /// Gated on `adminspace-router-linkstate` because that is what the seam IS —
 /// the render half of the admin linkstate legs, with no other consumer. Left
@@ -166,29 +83,92 @@ pub struct LinkstateNetView<N = Arc<dyn NetHandle + Send + Sync>>(N);
 /// region. What a view or a node-locator reads a graph through, so that neither knows how it is
 /// held. The method takes a closure and not a guard because a guard would have to name the
 /// holder's lock type.
+///
+/// Declared `pub` in a crate-private module: it is in the signature of public items
+/// (`LinkstateNetView`'s default parameter, `session_lifecycle_open::LinkstateOpener::new`), and
+/// the private-interface check reads a trait's declared visibility. Nothing outside the crate
+/// names it.
+///
+/// Gated as `read_net` is, on the two readers of a graph through a handle: the admin graph view
+/// and the lifecycle open's node locators. A build with neither holds no handle.
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-peer",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile",
+        feature = "transport-link-tcp",
+        feature = "transport-unicast"
+    )
+))]
 pub trait NetHandle {
     /// Run `f` over the graph, holding it for as long as `f` runs.
     fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork));
 }
 
-impl NetHandle for RefCell<LinkstateNetwork> {
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-peer",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile",
+        feature = "transport-link-tcp",
+        feature = "transport-unicast"
+    )
+))]
+impl NetHandle for std::cell::RefCell<LinkstateNetwork> {
     fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
         f(&self.borrow())
     }
 }
 
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-peer",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile",
+        feature = "transport-link-tcp",
+        feature = "transport-unicast"
+    )
+))]
 impl NetHandle for crate::sync::PlainRwLock<LinkstateNetwork> {
     fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
         f(&self.read())
     }
 }
 
-impl<T: NetHandle + ?Sized> NetHandle for Rc<T> {
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-peer",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile",
+        feature = "transport-link-tcp",
+        feature = "transport-unicast"
+    )
+))]
+impl<T: NetHandle + ?Sized> NetHandle for std::rc::Rc<T> {
     fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
         (**self).with_net(f)
     }
 }
 
+#[cfg(any(
+    feature = "adminspace-router-linkstate",
+    all(
+        feature = "session-close-ingress",
+        feature = "routing-peer",
+        feature = "routing-accept",
+        feature = "router-connect-reconcile",
+        feature = "transport-link-tcp",
+        feature = "transport-unicast"
+    )
+))]
 impl<T: NetHandle + ?Sized> NetHandle for Arc<T> {
     fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
         (**self).with_net(f)

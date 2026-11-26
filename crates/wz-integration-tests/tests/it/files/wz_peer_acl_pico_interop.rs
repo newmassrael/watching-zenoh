@@ -11,7 +11,7 @@
 //!
 //! `access-acl`'s `F=` is not "a peer runs" — it is the §5.16 ACL INTERCEPTOR
 //! consulted at the inbound relay-admission point (`admit_inbound`,
-//! `linkstate_forward.rs`), which for `--acl-deny secret/**` builds an ingress
+//! `router_forward.rs`), which for `--acl-deny secret/**` builds an ingress
 //! Deny rule over `secret/**` and drops any inbound Push whose keyexpr matches
 //! (dropped = not counted in `data_seen`, not relayed, not dispatched). A test
 //! that only showed `secret/x` NOT arriving could pass on a dead session; a test

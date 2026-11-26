@@ -41,9 +41,10 @@ use wz_session_core::byte_cells::ByteCells;
 use wz_session_core::entropy::EntropySource;
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::policy::SessionPolicy;
-use wz_session_core::session_init_params::{cookie_bytes, zid_bytes, SessionInitParams};
+use wz_session_core::session_init_params::{cookie_bytes, SessionInitParams};
 use wz_session_core::session_slot::SessionSlots;
 use wz_session_core::session_timeouts::SessionTimeouts;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::slot_observer::{ObserverCell, Requesters};
 use wz_session_core::text_out::FixedText;
@@ -286,14 +287,15 @@ impl SessionFactory<Clock, Driver> for Factory {
     fn params(&mut self) -> SessionInitParams {
         SessionInitParams {
             whatami: WhatAmI::Peer,
-            zid: zid_bytes(&ZID),
+            zid: SessionZid::from_array(ZID),
             seq_num_res: wz_session_core::policy::SnResolution::Bits32,
             req_id_res: 2,
             batch_size: BATCH_SIZE,
             lease_ms: 10_000,
             keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
             initial_sn: 0,
-            cookie: cookie_bytes(&[]),
+            cookie: cookie_bytes([]),
+            region: None,
             tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(
                 &self.policy,
                 &self.limits,
@@ -327,13 +329,18 @@ fn install_observer(
         .map_err(|_| "the node's identity does not fit its fixed fields")?;
     let installed = STORAGE.app.install_with(|observer| {
         observer.limit_to(&limits);
-        if host_connect_writes_fixed(&mut observer.subscribers, zid_hex, "peer", &CONTROL.control)
-            .is_err()
+        if host_connect_writes_fixed(
+            &mut observer.tables.subscribers,
+            zid_hex,
+            "peer",
+            &CONTROL.control,
+        )
+        .is_err()
         {
             return Err("the node's observer refused its config subscriber");
         }
         if host_admin_queryable_fixed_with_open(
-            &mut observer.queryables,
+            &mut observer.tables.queryables,
             identity,
             &CONTROL.status,
             &STORAGE.admin,
