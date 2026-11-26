@@ -3096,15 +3096,43 @@ def camel_limit(lid: str) -> str:
     return "".join(part.capitalize() for part in lid.lower().split("_"))
 
 
+def preset_snapshot_rust(name: str, lims: list[dict], values: dict[str, int]) -> list[str]:
+    """`pub const <name>: Self`, the build defaults with each limit of `lims` that `values` names
+    kept at that value where the build's domain holds it, in the order of `lims`: a snapshot of the
+    pico preset (`PICO_PRESET`, `PICO_PRESET_BOUND`)."""
+    kept = []
+    for lim in lims:
+        value = values.get(lim["id"])
+        if value is None:
+            continue
+        held_name = camel_limit(lim["id"])
+        held = f"Quota::at_most({value})" if lim["kind"] == "bound" else f"{value}"
+        arg = f"&{held_name}Held::preset_or_build({held}, LimitValue::Integer({value}))"
+        one = f"        limits.keep({arg});"
+        if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
+            kept.append(one)
+        else:
+            # rustfmt overflows the one argument: the preset's call opens on the line and its
+            # arguments go one a line.
+            kept += [f"        limits.keep(&{held_name}Held::preset_or_build(", f"            {held},",
+                     f"            LimitValue::Integer({value}),", "        ));"]
+    if not kept:
+        return [f"    pub const {name}: Self = Self::BUILD;"]
+    return ([f"    pub const {name}: Self = {{", "        let mut limits = Self::BUILD;"]
+            + kept + ["        limits", "    };"])
+
+
 def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
-                        presets: dict[str, int] | None = None) -> list[str]:
+                        presets: dict[str, int] | None = None,
+                        bounds: dict[str, int] | None = None) -> list[str]:
     """The snapshot `snapshot` of `lims`: one array of words, a word for each limit whose domain
     is more than one value, so two snapshots compare as one slice; its build defaults, an accessor
     and a `select_*` per limit, the `LimitField` impl that states which word keeps each limit,
     and the table a reader that names a limit by its id dispatches on, which its `Debug` reads
     the limits' names from. With `presets` (`pico_opening_values`), the snapshot of the pico
     preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the
-    build's environment states."""
+    build's environment states; with `bounds` (`limit_presets`), its bound, `PICO_PRESET_BOUND`:
+    the preset without the open values, what a config raises an open value to."""
     table = {"SessionLimits": "SESSION_LIMITS", "RuntimeLimits": "RUNTIME_LIMITS"}[snapshot]
     prefix = table[:-len('LIMITS')]
     count = f"{prefix}LIMIT_COUNT"
@@ -3160,27 +3188,16 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
                 "    /// it, and the rest at the build's. What an ABI that follows zenoh-pico opens a session",
                 "    /// under before its config states otherwise; laid out when the build is compiled, from the",
                 "    /// declaration and not from the build's environment."]
-        kept = []
-        for lim in lims:
-            value = presets.get(lim["id"])
-            if value is None:
-                continue
-            name = camel_limit(lim["id"])
-            held = f"Quota::at_most({value})" if lim["kind"] == "bound" else f"{value}"
-            arg = f"&{name}Held::preset_or_build({held}, LimitValue::Integer({value}))"
-            one = f"        limits.keep({arg});"
-            if len(arg) <= RUST_FN_CALL_WIDTH and len(one) <= RUST_MAX_WIDTH:
-                kept.append(one)
-            else:
-                # rustfmt overflows the one argument: the preset's call opens on the line and its
-                # arguments go one a line.
-                kept += [f"        limits.keep(&{name}Held::preset_or_build(", f"            {held},",
-                         f"            LimitValue::Integer({value}),", "        ));"]
-        if kept:
-            out += ["    pub const PICO_PRESET: Self = {", "        let mut limits = Self::BUILD;"]
-            out += kept + ["        limits", "    };"]
-        else:
-            out.append("    pub const PICO_PRESET: Self = Self::BUILD;")
+        out += preset_snapshot_rust("PICO_PRESET", lims, presets)
+    if bounds is not None and lims:
+        out += ["",
+                "    /// The bound of the pico preset: each limit `[limit.pico_preset]` states at the preset's",
+                "    /// value, where the build's domain holds it, and the rest at the build's, no open value of",
+                "    /// `[limit.pico_open]` among them. What a config raises an open value to, and what a",
+                "    /// session opens under where its tables are a region the build laid out when it was",
+                "    /// compiled, which no config resizes; laid out from the declaration and not from the",
+                "    /// build's environment."]
+        out += preset_snapshot_rust("PICO_PRESET_BOUND", lims, bounds)
     if lims:
         out += ["",
                 "    /// The limit `L` as the snapshot's words keep it ([`LimitField::WORD`]).",
@@ -3309,7 +3326,8 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
     for lim in lims:
         out += [""] + limit_spec_rust(lim)
     out += [""] + limit_snapshot_rust("SessionLimits", session, "a session holds",
-                                      pico_opening_values(decl["limits"]))
+                                      pico_opening_values(decl["limits"]),
+                                      limit_presets(decl["limits"]))
     out += [""] + limit_snapshot_rust("RuntimeLimits", runtime, "a node or runtime holds")
     out += [""] + capacity_limits_rust(decl)
     return "\n".join(out) + "\n"
@@ -6296,6 +6314,11 @@ def cmd_selftest() -> int:
     expect("a session opens under the open value and the Kconfig keeps the preset as its bound",
            pico_opening_values([opened_limit]) == {sample["limit"][0]["id"]: 1}
            and "\tdefault 2 if " + LIMIT_PRESET_SWITCH in emit_kconfig_limits({"limits": [opened_limit]}))
+    bound_of_opened = preset_snapshot_rust("PICO_PRESET_BOUND", [opened_limit],
+                                           limit_presets([opened_limit]))
+    expect("the bound of the pico preset keeps the preset's value that the open value lowers",
+           any("LimitValue::Integer(2)" in line for line in bound_of_opened)
+           and not any("LimitValue::Integer(1)" in line for line in bound_of_opened))
     expect("a pico preset of a limit a pico value switch anchors to is refused",
            any("anchors to it" in p for p in validate_limit_presets({
                "limit": [{**sample["limit"][0], "pico_preset": {"value": 2, "reason": "r"}}],
