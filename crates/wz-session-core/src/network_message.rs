@@ -4228,6 +4228,7 @@ impl<'k> RecordClass<'k> {
     /// The key expression the record addresses, an alias resolved through no space, as
     /// [`stats_keyexpr`] resolves the owned message's: what the session's `stats/filters` are
     /// matched against.
+    #[cfg(any(feature = "session-unicast", all(test, feature = "codec-push")))]
     pub(crate) fn keyexpr(&self) -> Option<alloc::string::String> {
         let (id, suffix) = self.key?;
         stats_keyexpr_of_key(id, suffix, &|_id| None)
