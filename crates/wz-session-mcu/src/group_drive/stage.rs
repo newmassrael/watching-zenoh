@@ -1888,8 +1888,9 @@ mod tests {
             "a push that wrote through leaves nothing to write"
         );
 
+        // A payload the wire tells apart (`PAYLOADS`), so the fourth datagram is named by it.
         assert_eq!(
-            push_through(&link, &stage, Put::of("fourth")),
+            push_through(&link, &stage, Put::of("first")),
             PushOutcome::Pushed
         );
         assert!(stage.holds(), "a socket with no room: the datagram is held");
@@ -1899,7 +1900,7 @@ mod tests {
         );
         wire.borrow_mut().room = 1;
         link.write_staged(&stage);
-        assert_eq!(taken(&wire), ["first", "second", "third", "fourth"]);
+        assert_eq!(taken(&wire), ["first", "second", "third", "first"]);
         assert!(stage.has_nothing_to_write() && !stage.holds());
     }
 
