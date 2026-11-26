@@ -215,6 +215,7 @@ RELEASE_DOORS = (
     "app-transport", "config-document", "config-policy", "conformance-digest", "device-requires",
     "e2e-receiver", "e2e-sender", "e2e-sender-demux", "e2e-supervision", "instance-key",
     "message-catalog", "message-payload", "remote-declaration-watch", "replay-cache", "shared-key-ids",
+    "time-base",
 )
 # The like-for-like library of each width and each door over it, each held under the release
 # reading's zenoh-pico by its row of `deploy/pico_host_ceiling.json`: the case -> (its width, its
