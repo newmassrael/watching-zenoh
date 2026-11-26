@@ -2412,15 +2412,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // A host's session arena is the system's fresh pages, zero as handed, so the open writes no
     // row it does not use and a page no row uses is never resident; an image's is its heap's,
     // written where a row must read empty.
-    #[cfg(all(
-        any(feature = "std", feature = "os-posix", feature = "os-windows"),
-        any(unix, windows)
-    ))]
+    #[cfg(all(feature = "os-host", any(unix, windows)))]
     let memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
-    #[cfg(not(all(
-        any(feature = "std", feature = "os-posix", feature = "os-windows"),
-        any(unix, windows)
-    )))]
+    #[cfg(not(all(feature = "os-host", any(unix, windows))))]
     let memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
         &wz_capi_coop::arena::AllocatorMemory;
     let opened = wz_capi_coop::CoopEngine::open_made_in(

@@ -83,17 +83,9 @@ pub(crate) use windows::*;
 
 // The arena of a session on the cooperative engine, on a host: the system's fresh pages. An image's
 // is its heap's (`wz_capi_coop::arena::AllocatorMemory`).
-#[cfg(all(
-    not(feature = "engine-tokio"),
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    any(unix, windows)
-))]
+#[cfg(all(not(feature = "engine-tokio"), feature = "os-host", any(unix, windows)))]
 mod pages;
-#[cfg(all(
-    not(feature = "engine-tokio"),
-    any(feature = "std", feature = "os-posix", feature = "os-windows"),
-    any(unix, windows)
-))]
+#[cfg(all(not(feature = "engine-tokio"), feature = "os-host", any(unix, windows)))]
 pub(crate) use pages::HostPages;
 
 // What a host build without `std` links in its place: the host's heap as the global allocator,
