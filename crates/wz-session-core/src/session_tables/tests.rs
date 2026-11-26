@@ -4193,7 +4193,9 @@ fn one_pin_of_every_row_begins_the_calls_the_walk_would_in_its_order() {
             .declare_subscriber(key, origin, KeyForm::default(), latched(n))
             .unwrap();
     }
-    let fans: [(fn() -> PinnedFanOut<'static>, Vec<u32>); 2] = [
+    // What makes a fresh fan-out of the message, beside the rows the walk reaches with it.
+    type FanOf = fn() -> PinnedFanOut<'static>;
+    let fans: [(FanOf, Vec<u32>); 2] = [
         (|| PinnedFanOut::new("a/b", None), std::vec![1, 2, 5]),
         (|| PinnedFanOut::local("a/b"), std::vec![1, 4, 5]),
     ];
