@@ -11907,6 +11907,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         .unwrap_or(FilteredPut::Sent(Ok(0)))
     }
 
+    /// Whether every link that is up names `named` as the session does, by its declaration alone,
+    /// each asked through `tx` (`key_on_link`): what the plan of a write filter's plain way at
+    /// the send epoch stands for. Out of line and cold: a way is planned once an epoch, and each
+    /// put of it after that at the same epoch is sent as planned.
+    #[cold]
+    #[inline(never)]
+    fn links_name_as_the_session(
+        core: &Core<L, C>,
+        tx: LinkTx<'_, C>,
+        named: wz_session_core::named_key::NamedKey<'_>,
+    ) -> bool {
+        core.up_wires_at().all(|(_, wire)| {
+            send_through(wire, tx, &|actions: &LinkActions<C>| {
+                key_on_link(actions, named).wire() == named.wire()
+            }) == Some(true)
+        })
+    }
+
     /// [`Self::put_through_filter`] on what the caller holds (`on`). A leg the first face's leg
     /// decided (`Holding::decided`) asks neither the filter, nor a subscriber of the session,
     /// nor a group again, so every face of one put is sent it as the first was, and keeps no
@@ -11971,11 +11989,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if let (true, Some(row), FilteredPut::Sent(_)) = (planning, row, sent) {
             if row.plane() == Plane::Subscribers && params.destination.allows_remote() {
                 if let Some(named) = tables(registry).named_at(row.key(), key) {
-                    if core.up_wires_at().all(|(_, wire)| {
-                        send_through(wire, tx, &|actions: &LinkActions<C>| {
-                            key_on_link(actions, named).wire() == named.wire()
-                        }) == Some(true)
-                    }) {
+                    if Self::links_name_as_the_session(core, tx, named) {
                         row.keep_plan(epoch, named);
                     }
                 }
