@@ -627,6 +627,32 @@ callgrind_window() {
     echo "${files[0]}"
 }
 
+# callgrind_calls <callgrind file> <function>: how many times the run called the function of that exact name, the
+# calls of every caller summed: the `calls=` lines under each `cfn=` that names it, where callgrind writes a name
+# once with its number and the number alone after that.
+callgrind_calls() {
+    python3 -I - "$1" "$2" <<'PY'
+import re
+import sys
+
+names, total, into = {}, 0, False
+line_of_fn = re.compile(r"^(c?fn)=(?:\((\d+)\)(?: (.*))?|(.*))$")
+with open(sys.argv[1], encoding="utf-8", errors="replace") as lines:
+    for line in lines:
+        line = line.rstrip("\n")
+        found = line_of_fn.match(line)
+        if found:
+            kind, number, given, plain = found.groups()
+            if number is not None and given is not None:
+                names[number] = given
+            name = names.get(number) if number is not None else plain
+            into = kind == "cfn" and name == sys.argv[2]
+        elif into and line.startswith("calls="):
+            total += int(line[len("calls="):].split()[0])
+print(total)
+PY
+}
+
 # subprofile_trial <tool> <variant> <count> <seconds> <size> <listen> <lead> <slack> <guard> <stem>: one run of the
 # subscriber of <variant> under <tool> (strace, perfstat, perfrecord or callgrind) for <listen> seconds, and of the
 # publisher, started <lead> seconds after it and putting <count> messages over <seconds>; under callgrind the
@@ -974,7 +1000,10 @@ subprofile() {
 # PICO_CMP_OPPROF_GUARD_MS (1000) before the instant to as long past the end of the span, inside the time the
 # querier, which stays connected twice that past the span, is connected; and it runs a third time with no query in
 # the same window (the idle run, count 0), so that its line has a net figure as the op role has one: the larger run
-# past the idle one over its queries, beside the difference of the two counts. The op role counts its whole
+# past the idle one over its queries, beside the difference of the two counts. Beside them the line counts the
+# executor's turns and link reads in each window (opprofile_turns): while the querier is connected the read task
+# waits in the socket, so a turn a query is the library's own and a turn count far past the reads is a poll
+# that the window did not keep out. The op role counts its whole
 # process, which is connected from its start to its end. Both arms are built as subprofile's are (the wz arm in the
 # form a release ships). Left under target/pico-compare/opprofile-runs/host-<time>/ (report.txt, record.txt,
 # per-op.tsv, each run's files); exit 0 when every operation of both arms was measured, 2 when one was not.
@@ -1068,6 +1097,41 @@ opprofile_role() {
     return 0
 }
 
+# opprofile_executor_fn <turn|read> <variant>: the function each turn of the arm's executor calls once, and the task
+# a turn runs when its link has bytes: zenoh-pico's background executor calls _z_executor_spin once a turn and the
+# unicast read task from it; wz's cooperative executor makes one pass over its task table a turn, and no read
+# function is named for it unless PICO_CMP_OPPROF_READ_W names one. PICO_CMP_OPPROF_TURN_<P|W> and
+# PICO_CMP_OPPROF_READ_P name others.
+opprofile_executor_fn() {
+    case "$1-$2" in
+        turn-P) echo "${PICO_CMP_OPPROF_TURN_P:-_z_executor_spin}" ;;
+        read-P) echo "${PICO_CMP_OPPROF_READ_P:-_zp_unicast_read_task_fn}" ;;
+        turn-W) echo "${PICO_CMP_OPPROF_TURN_W:-<wz_runtime_coop::executor::ExecutorState>::run_among}" ;;
+        *) echo "${PICO_CMP_OPPROF_READ_W:-}" ;;
+    esac
+}
+
+# opprofile_turns <variant> <idle file> <lo file> <hi file> <in idle> <in hi> <base> <count>: the lines of the
+# queryable's executor turns and link reads in each window, and each per query, the larger run past the idle run
+# over the queries it answered past it. A turn per read is a turn of work; turns well past the reads are an
+# executor that polled the clock in the window (bench_window.h), which counts as the host turned it.
+opprofile_turns() {
+    local variant="$1" cg_0="$2" cg_lo="$3" cg_hi="$4" in_0="$5" in_hi="$6" base="$7" count="$8"
+    local what fn n_0 n_lo n_hi
+    for what in turn read; do
+        fn="$(opprofile_executor_fn "$what" "$variant")"
+        [ -n "$fn" ] || continue
+        n_0="$(callgrind_calls "$cg_0" "$fn")"
+        n_lo="$(callgrind_calls "$cg_lo" "$fn")"
+        n_hi="$(callgrind_calls "$cg_hi" "$fn")"
+        if [ -z "$n_0" ] || [ -z "$n_lo" ] || [ -z "$n_hi" ] || [ "$n_hi" = 0 ]; then
+            echo "  op=get arm=$variant role=peer: no call of $fn in the window (PICO_CMP_OPPROF_${what^^}_$variant names the $what function)"
+            continue
+        fi
+        echo "  op=get arm=$variant role=peer: $what calls ($fn) in the window n=0 $n_0, n=$base $n_lo, n=$count $n_hi; per query $(awk -v a="$n_0" -v b="$n_hi" -v m="$((in_hi - in_0))" 'BEGIN { printf "%.2f", (b - a) / m }') (n=$count past the idle run)"
+    done
+}
+
 # opprofile_peer <variant> <idle stem> <lo stem> <hi stem> <base> <count> <guard> <run>: the queryable's line of one
 # arm, from the windows of its three runs: per query the larger run past the smaller over the queries it answered
 # past them, and net the larger past the idle run over its own; both appended to <run>/per-op.tsv, with the top
@@ -1101,6 +1165,7 @@ opprofile_peer() {
     net="$(awk -v a="$ir_0" -v b="$ir_hi" -v m="$((in_hi - in_0))" 'BEGIN { printf "%.1f", (b - a) / m }')"
     echo "  op=get arm=$variant role=peer: Ir in the window n=0 $ir_0, n=$base $ir_lo, n=$count $ir_hi; per query $per (over $((in_hi - in_lo))); net $net (n=$count past the idle run, over $((in_hi - in_0)))"
     printf '%s\t%s\t%s\t%s\t%s\n' get "$variant" peer "$per" "$net" >>"$run/per-op.tsv"
+    opprofile_turns "$variant" "$cg_0" "$cg_lo" "$cg_hi" "$in_0" "$in_hi" "$base" "$count"
     echo "  op=get arm=$variant role=peer: top 20 functions by Ir per query, self (inclusive=no):"
     opprofile_tables "$((in_hi - in_lo))" "$lo.peer" "$hi.peer" "$cg_lo" "$cg_hi"
     for listing in no yes; do
@@ -1843,6 +1908,10 @@ selftest() {
     kill "$p" 2>/dev/null
     wait "$p" 2>/dev/null
     selftest_check "peer_alive: a peer that runs is alive" "$held" alive
+    printf '%s\n' 'fn=(1) main' 'cfn=(2) _z_executor_spin' 'calls=3 0' '0 30' 'fn=(3) other' 'cfn=(2)' 'calls=4 0' \
+        '0 40' 'cfn=(4) _z_executor_spin_once' 'calls=100 0' '0 1' 'fn=(2)' '0 5' >"$dir/calls.callgrind"
+    selftest_check "callgrind_calls sums the calls of one name, given once and then by its number" \
+        "$(callgrind_calls "$dir/calls.callgrind" _z_executor_spin)" 7
     rm -rf "$dir"
     if [ "$selftest_failed" = 0 ]; then
         echo "pico-compare: selftest passed"
