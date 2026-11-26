@@ -668,19 +668,30 @@ impl PutHead {
         } else {
             crate::sample::QosLevel::DEFAULT
         };
+        // Written by the one Push writer every send writes through, a sink of the build's encoder
+        // buffer, into a room of the head and the empty payload's length: a head of a sink of its
+        // own would be a second compiled body of that writer. A build whose encoders write a
+        // vector has no buffer of a room of its own, and writes the head where the writer gathers
+        // its fields.
+        #[cfg(feature = "transport-tx-lend")]
+        let mut room = [0u8; PUT_HEAD_ROOM + 1];
+        #[cfg(feature = "transport-tx-lend")]
+        let mut written = crate::tx_buf::SliceTxBuf::new(&mut room);
+        #[cfg(not(feature = "transport-tx-lend"))]
         let mut written = Head::default();
-        write_push(
-            &mut written,
-            mapping_id,
-            None,
-            true,
-            &[],
-            qos,
-            &BodyParts::NONE,
-        )
-        .ok()?;
+        {
+            #[cfg(feature = "transport-tx-lend")]
+            let sink = &mut crate::tx_buf::TxSink::new(&mut written);
+            #[cfg(not(feature = "transport-tx-lend"))]
+            let sink = &mut written;
+            write_push(sink, mapping_id, None, true, &[], qos, &BodyParts::NONE).ok()?;
+        }
+        #[cfg(feature = "transport-tx-lend")]
+        let written = crate::tx_buf::TxBuf::as_slice(&written);
+        #[cfg(not(feature = "transport-tx-lend"))]
+        let written = &written.0[..];
         // The empty payload's length closes what the writer wrote, one zero byte.
-        let (&length, head) = written.0.split_last()?;
+        let (&length, head) = written.split_last()?;
         if length != 0 {
             return None;
         }
