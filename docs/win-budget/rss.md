@@ -228,7 +228,7 @@ share.
 | row | KiB (two processes) | structure | state |
 |---|---:|---|---|
 | A1 arena pages the listener's open writes | 112 + 48 | the sets of the faces not yet accepted built when a face first takes their place, not at the open: `RegistryOf::new` builds the dial face's set and reserves one span for the rows of every other place (`SpareSets::reserved`, `Arena::split_off`), which nothing writes; `add_face` builds the set of the place it takes from that span (`engine/registry/adding.rs`), passing a place a tomb kept on the way, and rebuilds the index of the gets' deadlines over the sets built (`DueIndex::rebuild`). The arena is still reserved to its ceiling, so a face that comes is never refused for memory; what moves is which pages are written. The rows judged one by one, largest first, are in section 5.1.1 | **landed in this lane**; R5's page map reads it |
-| A2 the open's stack | 28 | `assemble` and `lend_session` build `SessionLent` and the plan in their frames and return them by value. The plan's list of rows (`ArenaPlan::rows`, `ARENA_ROWS` rows of 24 bytes), which only a report reads, is left out of the open's plan: `OpenPlan` is `ArenaPlan<0>`, which lays out every sum and every layer's rows and lists none, so `lend_session`'s frame holds no table of rows and its walk writes none (text falls with the stores); a region's plan is taken on without its list (`ArenaPlan::take_on`). The values the open builds in its frames and moves (`Core` in `assemble`, `SessionLent` out of `lend_session`) stay: writing them field by field where they live cost text in the sessions lane, so only a value whose bytes are measured to dominate a frame is a candidate | the list **landed in this lane**, the frames read again on the merged build (`objdump -d`, as section 5.1 counted them) |
+| A2 the open's stack | 28 | `assemble` and `lend_session` build `SessionLent` and the plan in their frames and return them by value. The plan's list of rows (`ArenaPlan::rows`, `ARENA_ROWS` rows of 24 bytes), which only a report reads, is left out of the open's plan: `OpenPlan` is `ArenaPlan<0>`, which lays out every sum and every layer's rows and lists none, so `lend_session`'s frame holds no table of rows and its walk writes none (text falls with the stores); a region's plan is taken on without its list (`ArenaPlan::take_on`). A build without `runtime-plan` lists no rows in any plan, so it has none of this and opens by int206's path (section 5.1.1). The values the open builds in its frames and moves (`Core` in `assemble`, `SessionLent` out of `lend_session`) stay: writing them field by field where they live cost text in the sessions lane, so only a value whose bytes are measured to dominate a frame is a candidate | the list **landed in this lane**, the frames read again on the merged build (`objdump -d`, as section 5.1 counted them) |
 | A3 `.bss` | 16 | the words every critical section writes laid beside the first thread record, the one the read thread's spawn takes: `wz_host_sync::process_section`, a reentrant lock in one 128-byte-aligned static with the records (`ProcessWords`), which `wz_runtime_coop::cs::host_sys` enters, so the two writes lie on one page; the scout window's buffer and the callback table stay where the linker puts them, and R0 reads whether either is written | **landed in this lane**, R0 reads it |
 | A4 the read thread's malloc arena | -12 | none | a win |
 
@@ -256,7 +256,7 @@ it. The rows the count leaves written (the engine, runtime and plane places, the
 pools' heads, the dial face's set) are the open's own and stay.
 
 **Whether A2's `ROWS` default made a second copy of the plan's walk.** By the code it does not: an open
-lays out `OpenPlan`, which is `ArenaPlan<0>` in a build with `runtime-plan` and the listed plan without it,
+with `runtime-plan` lays out `OpenPlan`, `ArenaPlan<0>`, and an open without it the listed plan,
 and no other path of the library reaches the generic walk (`count`, `lay_out`, `put`, `lay_out_open`,
 `SessionArena::reserve`) with the other `ROWS`: `ArenaPlan::planned` of the listed plan is reached by
 `ArenaRegion::of`, a constant evaluated when a build without `runtime-plan` is compiled, and the region
@@ -268,8 +268,14 @@ symbol of that build (its sets are a listener's), and no base difference shows: 
 lane merged. In that build the open's plan is the listed one, which lists no rows there, so A2 gained it
 nothing: `take_on` stored the region's plan field by field, the blank plan the open made stayed live and
 its making was kept, where int206's `clone_from` stored the plan whole and the making was dropped.
-`take_on` now builds the plan apart and stores it whole, so the open of that build is int206's again; the
-ledger reads whether it is.
+Storing `take_on`'s plan whole did not change that: the ledger's next reading (rss-6) kept the +422.
+A build without `runtime-plan` has no list for A2 to take out, so A2 now exists only in a build with
+`runtime-plan`: `OpenPlan`, its blank plan (`ArenaPlan::blank`) and `take_on` are compiled there alone,
+and an open without it makes its plan as int206 did, `ArenaPlan::vacant` out of line and the region's
+plan stored over it with `clone_from` (`ArenaRegion::lay_out_on` has one body for each kind of build).
+The code of that open is int206's again, but for the names of the walk's generic steps; the ledger reads
+it, and the aim is the case's `sessions` at or below int206's. If it is not, A2 is taken back whole and
+the reading recorded here.
 
 ### 5.2 The acceptor's cookie MAC: a smaller one that keeps its guarantee (design; the owner's decision)
 
