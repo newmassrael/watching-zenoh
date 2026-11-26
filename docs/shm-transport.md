@@ -109,7 +109,7 @@ and it is the one `Session::get_shm_provider` hands out.
 | the reader of the process | `wz_runtime_tokio::shm_reader` (`ShmReaderResolver`) | `zenoh-shm`'s `ShmReader` over a `ShmClientStorage`, as the engine's `ShmResolver`: what every session reads a descriptor with, the engine's, the C ABI's (whose client storages are `ShmClientStorage`s of `ShmClient`s, as zenoh-c's are) and the top crate's |
 | the router's relay pass | `wz_runtime_tokio::shm_relay` | holds the chunks of a message while it is routed and re-expresses them per face |
 | `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the segments, metadata, watchdog, providers (the Rust API's and the C ABI's `z_shm_provider_*`), buffers, and the reader and client storage of the process |
-| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, and `Promoter`, the implicit optimisation of a put, a query value and a reply, copying into the family crate's provider; its sessions read with the reader of the process, and a received buffer is handed to the application as the `ZShm` it is |
+| the top crate's holder | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the holder of the engine's `ShmBuffer`, handed back to a receiver of the session as itself, and `Promoter`, which asks for the engine's `transport_copy` of a put, a query value and a reply into the session's provider; its sessions read with the reader of the process, and a received buffer is handed to the application as the `ZShm` it is |
 | what a session applies itself | `wz_capi_core::session_defaults` | `ShmInit` (the subsystem made at the end of every open, a node's as well, `init_shared_memory`) and `ShmPromotion` (which payloads are copied, the one decision the top crate and the C ABI take) |
 
 What crosses a link without a copy, by path (registry = the registry of faces, node = a router node):
@@ -193,8 +193,8 @@ wz promotes per session and not per link: `Promoter` copies a put, the value of 
 into the provider when some peer of the session could read it (`has_shm_peer`), and the engine then
 sends the descriptor to each face that negotiated shared memory and the bytes to the others, which is
 upstream's result per link. A reply to a query of the session itself is not copied. The copy is the
-transport's and not the application's (`Holder::Transport` in the adapter): its
-`ShmSendBuffer::receiver_view` answers none, and every place the engine hands a receiver of the
+transport's and not the application's (`transport_copy`, a `ShmBuffer` whose `ReceiverView` is
+the bytes): its `ShmSendBuffer::receiver_view` answers none, and every place the engine hands a receiver of the
 sending session a buffer (its own subscribers, queryables and getters, on the registry and on a
 node) hands the bytes instead, which is rule 6 by one mechanism. What per session costs is a copy
 that a face without shared memory is then sent the bytes of, where upstream would not have copied
@@ -232,9 +232,9 @@ reply each decide through `SessionShm::promote` (`crate::shm::Promotion` for the
 are used without the session handle). Neither API copies an error reply: upstream's transport
 copies one under `reply` (`io/zenoh-transport/src/common/shm/interop.rs` @
 `ResponseBody::Err(b) => {`), and its codec then writes the payload in line, so the receiver reads
-the same bytes (section 4, rule 7). The top crate's copy goes into its family crate's provider
-(`Promoter`). The two providers are the two systems of section 6, and the decision they copy by is
-one.
+the same bytes (section 4, rule 7). The top crate's copy goes into the provider of its session
+(`Promoter`). Both are `zenoh-shm`'s providers, both copies are the engine's one `transport_copy`,
+and the decision they copy by is one.
 
 ## 6. One shared-memory system per process
 
@@ -306,6 +306,12 @@ The order, each step landing whole with its tests:
    in another process. A provider kept for a receiver in this process goes the moment that
    receiver lets go, without the reactor.
 5. The adapter of the top crate folds into the engine's implementation.
+   Landed: the engine's `ShmBuffer` is the one `ShmSendBuffer` (and its reservation the one
+   `ShmReservation`) and `ShmReaderResolver` the one `ShmResolver`. The top crate keeps the
+   holder of an application's buffer (its slice of a `ZBytes`, handed back to a receiver of the
+   session as itself through the engine's `SharedView`) and asks for the engine's
+   `transport_copy` for the implicit optimisation; its own send buffer, reservation, view storage
+   and copy went. S6 is landed.
 
 `wz-runtime-tokio` then depends on `crates/wz-zenoh-shm`, which the layer gates allow (it is a crate
 below the top crate, not the top crate), and the capability-cost budgets of the C images with shared
@@ -320,7 +326,7 @@ memory are measured again in the step that moves them.
 | S3 | a reply of a queryable a node hosts as the buffer (`send_hosted_replies`): the chunk is adopted into the relay pass and the response names its descriptor (`QueryReply::into_response_naming`), as `publish_shm_with` does for a put, so that each face is sent the descriptor or the bytes; the node's own get is handed the buffer (`ReplyRead`) | landed |
 | S4 | the implicit optimisation of a query's value and of a reply, by `messages` (`Promoter::lists`), with the copy the transport's so that a receiver of the session itself is handed the bytes (section 4); a put takes the same path, in one publication where it took two | landed |
 | S5 | an error reply in shared memory | decided: its bytes, section 4, rule 7 |
-| S6 | one shared-memory system per process (section 6) | owed: step 2, the reader, landed |
+| S6 | one shared-memory system per process (section 6) | landed: steps 2 to 5 |
 | S7 | the cross-implementation differential over TCP (`conformance/differential-shm/tests/zenoh_transport_shm.rs`): sessions of both crates in one process, each pair of crates with either one listening, as a peer and as a router (a wz listener is a node, a wz dialler the registry), each direction, for a put, the value of a get and a reply, held equal to what two upstream sessions hand each other, with shared memory off on the dialler as the control (the bytes) | landed |
 | S7g | the same differential over a multicast group, for a put between two members that join it, two peers and a router with a peer each way (a wz router there is a node, a wz peer the registry): each pair of crates held equal to two upstream members with the sender's shared memory on and off, and the member without shared memory (section 1.2) held by name, upstream's handed no data and wz's handed nothing | landed |
 | S8 | a session in router mode with shared memory: it offers shared memory and reads a descriptor as its configuration says, as every other session of the top crate does (`Engine::open`), since upstream's transport manager makes its shared-memory context whatever the mode (`io/zenoh-transport/src/manager.rs` @ `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`) | landed |
