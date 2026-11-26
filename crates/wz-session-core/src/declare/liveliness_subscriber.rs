@@ -118,9 +118,9 @@ use crate::wireexpr_resolve::resolve_wireexpr_into;
     feature = "rx-lent-control"
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
-#[cfg(feature = "storage-profile")]
-#[cfg(all(feature = "codec-declare", feature = "alloc"))]
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
 use crate::wireexpr_resolve::KeyexprBuf;
+#[cfg(feature = "storage-profile")]
 use crate::wireexpr_resolve::{KeyexprOut, KeyexprRow};
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
 // `dispatch_iteration_event` name it in their signatures under that gate alone,
