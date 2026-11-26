@@ -5974,15 +5974,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The waits for room a publish that finds the session held asks. Compiled where its
-    /// readers are: the group tests over the program's transport (`tests::group`).
-    #[cfg(all(test, feature = "group", feature = "app-transport"))]
+    /// readers are: the group tests over the program's transport, each member stepped by its read
+    /// task (`tests::group`).
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads"
+    ))]
     pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
-    #[cfg(all(test, feature = "group", feature = "app-transport"))]
+    #[cfg(all(
+        test,
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads"
+    ))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
             core.0
@@ -6271,8 +6282,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// How many turns of an answer held their link's replies to leave with the Final in one send,
-    /// each counted where it let them go ([`Self::answer`]).
-    #[cfg(all(test, feature = "std", feature = "queryable"))]
+    /// each counted where it let them go ([`Self::answer`]). Compiled where its reader is: a build
+    /// whose links a task or a listener reads (`tests::queryable`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "queryable",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
     pub(crate) fn answers_held(&self) -> usize {
         self.takes.held_answers.load(Ordering::Relaxed)
     }
