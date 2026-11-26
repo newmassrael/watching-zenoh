@@ -261,6 +261,16 @@ The order, each step landing whole with its tests:
 
 1. Measure what each system holds in a process (threads, segments created, lines, the C images'
    sizes with shared memory), so that the result can be compared.
+   Measured on 2026-11-26 at the tree before step 2 (one build host, `cargo build --profile ship -p
+   wz-capi-c` with and without `zenoh-c-shared-memory`, `size -A`): the C library's `.text` is
+   8,790,752 bytes and 9,131,760 with the shared-memory arm (total 11,556,494 and 11,998,520). The
+   engine's half is 5,196 lines (`shm_provider` 3,538, `shm_posix_backend` 497, `shm_backend` 447,
+   `shm_clients` 330, `shm_watchdog` 304, `posix_shm` 80), `zenoh-shm` 6,970. A process that uses
+   both APIs runs three threads for them: the engine's watchdog, one thread that confirms and
+   validates (`shm_watchdog`), and `zenoh-shm`'s confirmator and validator, a periodic task each;
+   each system creates its own metadata segments. After step 2, by the same command, the arm's
+   `.text` is 9,267,456 (+135,696): `zenoh-shm`'s reader is linked beside the engine's provider,
+   allocator and watchdog until steps 3 and 4 take those out.
 2. The reader: the engine's resolver becomes `ShmReader` over `ShmClientStorage`; `shm_clients` goes.
    Landed: `wz_runtime_tokio::shm_reader` is the one `ShmResolver`, the engine's, the C ABI's and the
    top crate's, and a session not given a storage reads through the process's global one. The
