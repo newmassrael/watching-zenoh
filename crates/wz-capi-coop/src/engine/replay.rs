@@ -57,6 +57,8 @@ use wz_session_core::extbound::INITIAL_INTEREST_ID;
 use wz_session_core::link_life::LinkPhase;
 use wz_session_core::replay_cursor::{Insertion, Removal, ReplayCursor};
 use wz_session_core::replay_pacing::{RefusalStep, ReplayPacing};
+// The trait of the one send that reads it, the initial interest's Final.
+#[cfg(feature = "interest-answer")]
 use wz_session_core::response_sink::DeclareReplySink;
 use wz_session_core::session_tables::{DeclaredRow, DeclaredTable};
 use wz_session_core::slot_map::Handle;
