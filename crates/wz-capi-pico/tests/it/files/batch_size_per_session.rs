@@ -640,6 +640,7 @@ fn a_document_stating_a_batch_past_the_builds_ceiling_is_refused_by_name() {
 /// turns this red by the clock, not by a run that never ends.
 #[test]
 fn a_refused_document_and_an_open_nobody_answers_return_within_the_bound() {
+    let _program = crate::programs::admit();
     let text = document(ceiling() + 1);
     let (tx, rx) = channel();
     let opener = std::thread::spawn(move || unsafe {
