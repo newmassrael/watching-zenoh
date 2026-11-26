@@ -202,16 +202,21 @@ a run's resident text is what the layout changes, and only the run's own page ma
 - **R3, the run's resident text.** Which pages of the library's text a run holds: with
   `PERF_SMAPS=1` the probe also prints, for each executable mapping of a file, the pages of it
   present in its page table (`/proc/self/pagemap`, `perf_probe smaps pages ... map=`), which the
-  runner keeps on the region (`page_map`, `present_pages`). Each present page named by the
-  symbols it holds (`nm -S` of the run's `lib-W`) says how much of R1 is pages a run executes
-  and how much fault-around brought in, and so how much (b) can take; that naming is the next step
-  of this lane.
+  runner keeps on the region (`page_map`, `present_pages`). `perf_matrix.py resident-text
+  <run>/perf.json <perf>/lib-W/libwz_capi_pico.so` names each present page by the text symbols on
+  it (`nm -S -C` of the run's own copy, its pages placed by the library's executable segment):
+  for each role of the arm, the resident bytes of each crate and of each plane a run never calls
+  (section 2.1's groups), of the bytes it has (`lib-P` and arm `P` read zenoh-pico the same way).
+  Resident bytes of a plane the run never calls are fault-around's, which is what (b) can take; the
+  page map does not tell a page the run executed from one fault-around brought in beside it, so the
+  bytes of the planes it does call bound the rest from above.
 
 ## 7. What this lane landed
 
 - This design.
 - R0's probe and runner (`PERF_SMAPS`; `perf_probe.c`, `perf_matrix.py` with its selftest), and
   R3's page map of each executable mapping.
+- R3's naming of the present pages (`perf_matrix.py resident-text`, with its selftest).
 - R1 (a0): the perf matrix builds both arms as zenoh-pico's preset (`wz_config.preset_named_features`,
   section 2.2), from the declaration the parity matrix and the instruction counts read.
 - R4: `_Unwind_Resume` defined in the library, `libgcc_s` no longer mapped by its programs,

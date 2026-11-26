@@ -42,6 +42,11 @@ committed rows.
         DIR/lib-W, its log to DIR/build-wz.log, and two lines naming the build printed for the run's record
     perf_matrix.py pico-sys-include REPORT
         the include directory of the one zenoh-pico-sys build cargo's JSON REPORT names
+    perf_matrix.py resident-text RESULT LIBRARY [ARM]
+        the code of LIBRARY (the run's lib-W or lib-P copy) each role of arm ARM (W by default) held
+        resident in the run whose perf.json is RESULT, made with PERF_SMAPS=1: the present pages of its
+        executable mapping, named by the crate of each text symbol on them and by the planes a perf run
+        never calls (docs/win-budget/rss.md, R3); exit 3 when the run printed no page map of it
     perf_matrix.py external-record OUT [WHY]
         the record of arm X written to OUT: with WHY, not measured for that reason; without, built from
         the library and the headers WZ_PERF_EXTERNAL_LIB and WZ_PERF_EXTERNAL_INCLUDE name (its label,
@@ -174,6 +179,7 @@ import re
 import shutil
 import socket
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -425,6 +431,145 @@ def smaps_figures(client: dict | None, server: dict | None) -> dict:
     figures["smaps_client"] = client
     figures["smaps_server"] = server
     return figures
+
+
+# -- which code of a library a run holds resident (docs/win-budget/rss.md, R3) ------------------------------
+
+#: A demangled name with no path is one of the pico ABI's C doors when it carries a door's prefix.
+C_DOOR_PREFIXES = ("z_", "ze_", "zp_", "wz_", "_z_")
+#: The planes a perf run never calls, by a word their symbols' names carry (rss.md section 2.1); the groups
+#: overlap the crates.
+UNCALLED_NAME_GROUPS = (("advanced", ("advanced",)), ("liveliness", ("liveliness", "token")),
+                        ("scouting", ("scout",)), ("connectivity", ("connectivity",)),
+                        ("float formatting", ("flt2dec", "float")), ("digest", ("sha2", "digest")))
+#: The page the probe's page map counts in (perf_probe.c, print_pages, on the hosts the matrix runs on).
+PAGE_BYTES = 4096
+ELF_PT_LOAD = 1
+ELF_PF_X = 1
+ELF_PHDR = struct.Struct("<IIQQQQQQ")
+
+
+def exec_segment(data: bytes) -> tuple[int, int]:
+    """The address and memory size of the one executable loaded segment of a 64-bit little-endian ELF file,
+    which the probe's page map of the library's executable mapping covers from its first page. Another file,
+    or one with no or several such segments, is refused (Refused)."""
+    if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
+        raise Refused("not a 64-bit little-endian ELF file")
+    (phoff,) = struct.unpack_from("<Q", data, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", data, 0x36)
+    if phentsize < ELF_PHDR.size or phoff + phnum * phentsize > len(data):
+        raise Refused("its program headers do not fit the file")
+    found = []
+    for index in range(phnum):
+        p_type, p_flags, _, p_vaddr, _, _, p_memsz, _ = ELF_PHDR.unpack_from(data, phoff + index * phentsize)
+        if p_type == ELF_PT_LOAD and p_flags & ELF_PF_X:
+            found.append((p_vaddr, p_memsz))
+    if len(found) != 1:
+        raise Refused(f"it has {len(found)} executable loaded segments, and a page map covers one")
+    return found[0]
+
+
+def present_pages(page_map: str, pages: int) -> set[int]:
+    """The pages a probe's `page_map` says were present (perf_probe.c, print_pages): a hex digit for four
+    pages, the lowest page in the lowest bit of the first digit; none at or past `pages`."""
+    out: set[int] = set()
+    for at, digit in enumerate(page_map):
+        value = int(digit, 16)
+        out.update(at * 4 + bit for bit in range(4) if value >> bit & 1 and at * 4 + bit < pages)
+    return out
+
+
+def text_symbols(listing: str) -> list[tuple[int, int, str]]:
+    """The text symbols that have a size in `nm --defined-only -S -C` output, as (address, size, name); a
+    demangled name may hold spaces, so it is the rest of its line."""
+    out = []
+    for line in listing.splitlines():
+        words = line.split(maxsplit=3)
+        if len(words) == 4 and words[2] in ("t", "T"):
+            with contextlib.suppress(ValueError):
+                out.append((int(words[0], 16), int(words[1], 16), words[3]))
+    return out
+
+
+def symbol_crate(name: str) -> str:
+    """The crate a demangled text symbol is counted at: the first segment of its path (a generic at the
+    crate that defines it, an impl at its type's), `C doors` for an unmangled door, `other` for the rest."""
+    path = name.lstrip("<&*")
+    if "::" not in path:
+        return "C doors" if path.startswith(C_DOOR_PREFIXES) else "other"
+    crate = path.split("::", 1)[0]
+    return crate if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", crate) else "other"
+
+
+def resident_text(symbols: list[tuple[int, int, str]], base: int, pages: set[int]) -> dict:
+    """For each crate (`crates`) and each group of UNCALLED_NAME_GROUPS (`groups`): the bytes of its text
+    symbols (`text`) and the bytes of them on `pages` (`resident`), the present pages of a mapping whose
+    first page starts at the address `base`. A resident byte is one a fault brought in, by the run's own
+    execution or by fault-around; the page map does not tell the two apart."""
+    out: dict = {"crates": {}, "groups": {}}
+    for addr, size, name in symbols:
+        on = 0
+        if size:
+            for page in range((addr - base) // PAGE_BYTES, (addr + size - 1 - base) // PAGE_BYTES + 1):
+                if page in pages:
+                    on += (min(addr + size, base + (page + 1) * PAGE_BYTES)
+                           - max(addr, base + page * PAGE_BYTES))
+        lower = name.lower()
+        rows = [out["crates"].setdefault(symbol_crate(name), {"text": 0, "resident": 0})]
+        rows += [out["groups"].setdefault(group, {"text": 0, "resident": 0})
+                 for group, words in UNCALLED_NAME_GROUPS if any(word in lower for word in words)]
+        for row in rows:
+            row["text"] += size
+            row["resident"] += on
+    return out
+
+
+def role_pages(doc: dict, arm: str, library: str) -> dict[str, tuple[set[int], int]]:
+    """The present pages of `library`'s executable mapping (its file name) in each role of arm `arm` of a
+    run's result, by `<transport> <workload> <client|server>`, the union over that role's cells, with the
+    pages of the mapping; a role whose probes printed no page map is absent."""
+    out: dict[str, tuple[set[int], int]] = {}
+    for cell in doc.get("cells", []):
+        if cell.get("arm") != arm:
+            continue
+        for side in ("client", "server"):
+            reading = (cell.get("figures") or {}).get(f"smaps_{side}") or {}
+            for region in reading.get("regions", []):
+                if pathlib.Path(region.get("name", "")).name != library or not region.get("page_map"):
+                    continue
+                key = f"{cell.get('transport')} {cell.get('workload')} {side}"
+                pages, count = out.get(key, (set(), 0))
+                pages |= present_pages(region["page_map"], region.get("pages", 0))
+                out[key] = (pages, max(count, region.get("pages", 0)))
+    return out
+
+
+def cmd_resident_text(result: pathlib.Path, library: pathlib.Path, arm: str) -> int:
+    """Each role's resident code of `library` in a run made with PERF_SMAPS=1, named by crate and by the planes
+    a run never calls (rss.md R3): exit 0 when it named some, 2 when an input was refused, 3 when the run
+    printed no page map of that library for arm `arm`."""
+    try:
+        doc = json.loads(result.read_text(encoding="utf-8"))
+        vaddr, _ = exec_segment(library.read_bytes())
+        listing = subprocess.run(["nm", "--defined-only", "-S", "-C", str(library)], capture_output=True,
+                                 text=True, check=True).stdout
+    except (OSError, ValueError, struct.error, subprocess.CalledProcessError, Refused) as why:
+        print(f"perf-matrix: resident-text refused: {why}", file=sys.stderr, flush=True)
+        return 2
+    roles = role_pages(doc, arm, library.resolve().name)
+    if not roles:
+        print(f"perf-matrix: resident-text NOT-MEASURED, {result} holds no page map of {library.name} for arm "
+              f"{arm} (a run with PERF_SMAPS=1 prints one)", flush=True)
+        return 3
+    symbols = text_symbols(listing)
+    base = vaddr - vaddr % PAGE_BYTES
+    for role, (pages, mapped) in sorted(roles.items()):
+        named = resident_text(symbols, base, pages)
+        print(f"resident-text {arm} {role}: {len(pages)} of {mapped} page(s) present", flush=True)
+        for kind in ("crates", "groups"):
+            for key, row in sorted(named[kind].items(), key=lambda item: (-item[1]["resident"], item[0])):
+                print(f"  {kind[:-1]} {key}: {row['resident']} of {row['text']} byte(s) resident", flush=True)
+    return 0
 
 
 def usage_of(proc: Process) -> Usage:
@@ -2143,6 +2288,59 @@ def cmd_selftest() -> int:
                                      "/x/bin/perf_probe_W", "/usr/lib/libm.so.6", "[anon:x]")]
            == ["anonymous", "heap", "stack", "kernel", "libc", "loader", "library", "program",
                "other_libraries", "other"])
+    # A library of two loaded segments, the second executable at 0x1000 for 0x3000 bytes.
+    elf = bytearray(64 + 2 * ELF_PHDR.size)
+    elf[:6] = b"\x7fELF\x02\x01"
+    struct.pack_into("<Q", elf, 0x20, 64)
+    struct.pack_into("<HH", elf, 0x36, ELF_PHDR.size, 2)
+    ELF_PHDR.pack_into(elf, 64, ELF_PT_LOAD, 4, 0, 0, 0, 0x800, 0x800, 0x1000)
+    ELF_PHDR.pack_into(elf, 64 + ELF_PHDR.size, ELF_PT_LOAD, 5, 0x1000, 0x1000, 0x1000, 0x3000, 0x3000, 0x1000)
+    expect("a library's executable segment is its one loaded segment with the execute flag",
+           exec_segment(bytes(elf)) == (0x1000, 0x3000))
+    two = bytearray(elf)
+    ELF_PHDR.pack_into(two, 64, ELF_PT_LOAD, 5, 0, 0, 0, 0x800, 0x800, 0x1000)
+    expect("a file that is no ELF, or a library of two executable segments, is refused",
+           refused_call(lambda: exec_segment(b"MZ" + bytes(80))) and refused_call(lambda: exec_segment(bytes(two))))
+    expect("a page map is read four pages a digit, the lowest page in the lowest bit, none past its pages",
+           present_pages("f2", 6) == {0, 1, 2, 3, 5} and present_pages("f2", 5) == {0, 1, 2, 3}
+           and present_pages("", 0) == set())
+    listing = ("0000000000001000 0000000000000100 T wz_session_core::session::open\n"
+               "0000000000004000 D data_only\n"
+               "0000000000002ff0 0000000000000020 t wz_capi_pico::advanced::put\n"
+               "0000000000003000 0000000000000010 T z_put\n"
+               "0000000000003010 0000000000000010 t <wz_codecs::Frame as core::fmt::Debug>::fmt\n"
+               "0000000000003020 W weak_without_size\n")
+    symbols = text_symbols(listing)
+    expect("nm's text symbols with a size are read, a demangled name with its spaces",
+           [s[2] for s in symbols] == ["wz_session_core::session::open", "wz_capi_pico::advanced::put", "z_put",
+                                       "<wz_codecs::Frame as core::fmt::Debug>::fmt"]
+           and symbols[1][:2] == (0x2ff0, 0x20))
+    expect("a symbol is counted at its path's first crate, an unmangled door as a door",
+           [symbol_crate(s[2]) for s in symbols] == ["wz_session_core", "wz_capi_pico", "C doors", "wz_codecs"]
+           and symbol_crate("main") == "other")
+    named = resident_text(symbols, 0x1000, {0, 2})
+    expect("a symbol's bytes on the present pages are resident, a symbol across a page counted in part",
+           named["crates"]["wz_session_core"] == {"text": 0x100, "resident": 0x100}
+           and named["crates"]["wz_capi_pico"] == {"text": 0x20, "resident": 0x10}
+           and named["crates"]["C doors"] == {"text": 0x10, "resident": 0x10}
+           and named["groups"] == {"advanced": {"text": 0x20, "resident": 0x10}})
+    expect("no present page leaves nothing resident",
+           all(row["resident"] == 0 for row in resident_text(symbols, 0x1000, set())["crates"].values()))
+    run_doc = {"cells": [
+        {"arm": "W", "transport": "tcp", "workload": "thr", "figures": {
+            "smaps_client": {"regions": [{"name": "/r/lib-W/libwz_capi_pico.so", "pages": 6, "page_map": "12"},
+                                         {"name": "/lib/libc.so.6", "pages": 4, "page_map": "f"}]},
+            "smaps_server": {"regions": [{"name": "/r/lib-W/libwz_capi_pico.so", "pages": 6, "page_map": "1"}]}}},
+        {"arm": "W", "transport": "tcp", "workload": "thr", "figures": {
+            "smaps_client": {"regions": [{"name": "/r/lib-W/libwz_capi_pico.so", "pages": 6, "page_map": "4"}]}}},
+        {"arm": "P", "transport": "tcp", "workload": "thr", "figures": {
+            "smaps_client": {"regions": [{"name": "/r/lib-P/libzenohpico.so.1", "pages": 2, "page_map": "3"}]}}},
+        {"arm": "W", "transport": "udp", "workload": "rtt", "figures": {}}]}
+    expect("a role's pages are the union over its cells of the library's own mapping, by arm",
+           role_pages(run_doc, "W", "libwz_capi_pico.so") == {"tcp thr client": ({0, 2, 5}, 6),
+                                                              "tcp thr server": ({0}, 6)}
+           and role_pages(run_doc, "P", "libzenohpico.so.1") == {"tcp thr client": ({0, 1}, 2)}
+           and role_pages(run_doc, "X", "libwz_capi_pico.so") == {})
     expect("a program that printed no rollup has no resident set by part",
            smaps_of("perf_probe usage peak_rss_kib=3100\n") is None)
     by_part = process_figures(Usage(1.0, 0.5, 4000, read_smaps), Usage(0.25, 0.125, 6000, read_smaps))
@@ -2813,6 +3011,8 @@ def main(argv: list[str]) -> int:
         preset.add_argument("--stdlib", required=True, choices=STDLIBS)
         asked = preset.parse_args(argv[2:])
         return cmd_preset_arm(pathlib.Path(asked.out), asked.original, asked.stdlib)
+    if len(argv) in (4, 5) and argv[1] == "resident-text":
+        return cmd_resident_text(pathlib.Path(argv[2]), pathlib.Path(argv[3]), argv[4] if len(argv) == 5 else "W")
     if len(argv) == 4 and argv[1] == "pin-sides":
         return cmd_pin_sides(argv[2:])
     if 2 <= len(argv) <= 4 and argv[1] == "idle-cpus":
