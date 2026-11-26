@@ -201,7 +201,17 @@ pub(crate) fn admits_reply(gate: Option<&str>, reply: &dyn ReplyView) -> bool {
     if reply.kind() == ReplyKind::Err {
         return true;
     }
-    reply_keyexpr_intersects(keyexpr, reply.keyexpr())
+    reply_key_admitted(keyexpr, reply.keyexpr())
+}
+
+/// Whether a reply keyed `reply` belongs to a get asked under `gate`: a reply keyed with the
+/// get's own text is covered with nothing split, as zenoh-pico compares the two texts before it
+/// walks them (`vendor/zenoh-pico/src/session/keyexpr.c` @
+/// `if ((left_len == right_len) && (strncmp(left_start, right_start, left_len) == 0)) {`): the
+/// get's key was judged canon where it was asked, and a key in canon form intersects itself. Any
+/// other is walked as [`reply_keyexpr_intersects`] walks it.
+fn reply_key_admitted(gate: &str, reply: &str) -> bool {
+    reply == gate || reply_keyexpr_intersects(gate, reply)
 }
 
 /// Does a reply keyed `reply` belong to a query asked under `query_keyexpr`?
@@ -235,7 +245,7 @@ pub fn canon_reply_intersects(
     query_keyexpr: &str,
     reply: crate::keyexpr_canon::CanonKey<'_>,
 ) -> bool {
-    reply.as_str() == query_keyexpr || reply_keyexpr_intersects(query_keyexpr, reply.as_str())
+    reply_key_admitted(query_keyexpr, reply.as_str())
 }
 
 #[cfg(test)]
@@ -271,6 +281,24 @@ mod tests {
             );
         }
         assert!(walks() > before, "a reply keyed otherwise is walked");
+    }
+
+    /// A get admits a reply keyed with its own text before any walk, and judges every other key
+    /// as the walk does: a wildcard covers a key it matches, and a key one chunk shorter or longer
+    /// than the get's, or with another last chunk, is refused. Turned red by the shortcut left
+    /// out (the wildcard key is walked), or by one that compares the shorter length only.
+    #[test]
+    fn a_get_admits_a_reply_keyed_with_its_own_text_before_the_walk() {
+        use crate::keyexpr_match::INTERSECT_WALKS;
+        let walks = || INTERSECT_WALKS.with(|count| count.get());
+        let before = walks();
+        assert!(reply_key_admitted("a/b", "a/b"));
+        assert!(reply_key_admitted("demo/**", "demo/**"));
+        assert_eq!(walks(), before, "the get's own text is not walked");
+        assert!(reply_key_admitted("a/*", "a/b"));
+        assert!(!reply_key_admitted("a/b", "a/c"));
+        assert!(!reply_key_admitted("a/b", "a"));
+        assert!(!reply_key_admitted("a/b", "a/b/c"));
     }
 
     #[test]

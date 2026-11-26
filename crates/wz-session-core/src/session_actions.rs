@@ -222,13 +222,9 @@ use crate::parse_error::InboundParseError;
 #[cfg(feature = "alloc")]
 use crate::metadata::{PushMetadata, QueryMetadata};
 
-// outbound zenoh-pico-safety gate for the declare-* action methods
-#[cfg(any(
-    feature = "declare-keyexpr",
-    feature = "declare-subscriber",
-    feature = "declare-queryable",
-    feature = "declare-token",
-))]
+// outbound zenoh-pico-safety gate for a keyexpr declaration; an entity's key is judged by its
+// `NamedKey` (`NamedKey::check_outbound`)
+#[cfg(feature = "declare-keyexpr")]
 use crate::keyexpr_canon::check_outbound_keyexpr_pico_safe;
 
 // handshake encoders consumed by the wire-emit action bodies
@@ -17213,7 +17209,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // does not exist in this profile.
         #[cfg(all(feature = "declare-subscriber", not(feature = "alloc")))]
         {
-            check_outbound_keyexpr_pico_safe(key.text())?;
+            key.check_outbound()?;
             self.dispatch_declare_lent(&LentDeclaration::Subscriber {
                 id: u64::from(subscriber_id),
                 mapping_id: keyexpr_mapping_id,
@@ -17229,7 +17225,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            check_outbound_keyexpr_pico_safe(key.text())?;
+            key.check_outbound()?;
             self.declare_subscriber_recorded(
                 subscriber_id,
                 keyexpr_mapping_id,
@@ -17308,7 +17304,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // local `QueryableInfo` the owned form stamps (omitted when it is the default).
         #[cfg(all(feature = "declare-queryable", not(feature = "alloc")))]
         {
-            check_outbound_keyexpr_pico_safe(key.text())?;
+            key.check_outbound()?;
             self.dispatch_declare_lent(&LentDeclaration::Queryable {
                 id: u64::from(queryable_id),
                 mapping_id: keyexpr_mapping_id,
@@ -17324,7 +17320,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             feature = "tx-lend-only"
         ))]
         {
-            check_outbound_keyexpr_pico_safe(key.text())?;
+            key.check_outbound()?;
             self.declare_queryable_recorded(
                 queryable_id,
                 keyexpr_mapping_id,
@@ -17413,7 +17409,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // lent slot, and there is no reconnect cache to copy the keyexpr into.
         #[cfg(all(feature = "declare-token", not(feature = "alloc")))]
         {
-            check_outbound_keyexpr_pico_safe(key.text())?;
+            key.check_outbound()?;
             self.dispatch_declare_lent(&LentDeclaration::Token {
                 id: u64::from(token_id),
                 mapping_id: keyexpr_mapping_id,
@@ -17424,7 +17420,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // A lend-only session: see `send_declare_subscriber`.
         #[cfg(all(feature = "declare-token", feature = "alloc", feature = "tx-lend-only"))]
         {
-            check_outbound_keyexpr_pico_safe(key.text())?;
+            key.check_outbound()?;
             self.declare_token_recorded(token_id, keyexpr_mapping_id, keyexpr_suffix, || {
                 self.dispatch_declare_lent(&LentDeclaration::Token {
                     id: u64::from(token_id),
@@ -17478,7 +17474,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // `dispatch_declare` — the module-level `use` is `liveliness-token`-gated but this
         // build half is reachable under bare `declare-token` (the `send_declare_token` wrapper
         // path).
-        check_outbound_keyexpr_pico_safe(key.text())?;
+        key.check_outbound()?;
         Ok(build_declare_token(
             u64::from(token_id),
             key.wire().id(),
@@ -17506,7 +17502,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         subscriber_id: crate::wire_id::EntityId,
         key: crate::named_key::NamedKey<'_>,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        check_outbound_keyexpr_pico_safe(key.text())?;
+        key.check_outbound()?;
         Ok(build_declare_subscriber(
             u64::from(subscriber_id),
             key.wire().id(),
@@ -17629,7 +17625,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         key: crate::named_key::NamedKey<'_>,
         complete: bool,
     ) -> Result<crate::transport_profile::owned::DeclareOwned, SendDeclareError> {
-        check_outbound_keyexpr_pico_safe(key.text())?;
+        key.check_outbound()?;
         let mut declare = build_declare_queryable(
             u64::from(queryable_id),
             key.wire().id(),
@@ -18169,7 +18165,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// R300 — reconstruct the full literal keyexpr that the peer
     /// will canonize on the receive side from the wire's
     /// `(mapping_id, suffix)` carrier shape. The reconstruction
-    /// feeds [`check_outbound_keyexpr_pico_safe`]: the SIGABRT-
+    /// feeds [`crate::keyexpr_canon::check_outbound_keyexpr_pico_safe`]: the SIGABRT-
     /// prone shape (`**` + literal + `*`-shape) can straddle the
     /// prefix / suffix boundary (e.g. prefix=`"**"` registered via
     /// an earlier [`Self::send_declare_keyexpr`], suffix=`"/c/*"`

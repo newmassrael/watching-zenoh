@@ -216,6 +216,8 @@ impl<O, P: Storage> HeldReply<O, P> {
         let payload = if whole { reply.payload() } else { &[] };
         let attachment = if whole { reply.attachment() } else { None };
         self.bytes.clear();
+        // The row holds no key until the key is copied whole, so a refused fill leaves none.
+        self.key_len = 0;
         for part in [
             key,
             payload,
@@ -261,7 +263,10 @@ impl<O, P: Storage> HeldReply<O, P> {
     }
 
     fn key(&self) -> &str {
-        core::str::from_utf8(self.part(0, self.key_len)).unwrap_or("")
+        // SAFETY: the row's first `key_len` bytes are a key's text copied whole from a `&str`
+        // (`Self::fill`, which keeps `key_len` at zero until the copy is made), and `part`
+        // answers those bytes or none, so they are UTF-8 and were checked when they were decoded.
+        unsafe { core::str::from_utf8_unchecked(self.part(0, self.key_len)) }
     }
 
     fn after_key(&self) -> usize {
@@ -754,6 +759,25 @@ mod tests {
         );
         assert!(hold.is_empty(), "a row half written is let go of");
         assert_eq!(hold.refused(), 3);
+    }
+
+    /// A row reads back the key it was filled with, and a fill refused part way leaves the row
+    /// with no key rather than the part of one. Turned red by a fill that leaves the earlier
+    /// key's length in place while the new key's bytes are written.
+    #[test]
+    fn a_refused_fill_leaves_the_row_no_key() {
+        let mut row = HeldReply::<u32, Static>::empty(1);
+        assert_eq!(row.fill(&put("a", b"x", 1), true), Ok(()));
+        assert_eq!(row.key(), "a");
+        let big = std::vec![0u8; HOLD_ROW_BYTES];
+        let too_large = Stated {
+            key: "bb",
+            kind: ReplyKind::Put,
+            payload: &big,
+            time: Some(1),
+        };
+        assert_eq!(row.fill(&too_large, true), Err(HoldRefused::TooLarge));
+        assert_eq!(row.key(), "", "no part of a key is read");
     }
 
     /// The stamp order: a stamped reply displaces an unstamped one and not the other way round,

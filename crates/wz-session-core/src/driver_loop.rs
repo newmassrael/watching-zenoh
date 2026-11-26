@@ -1650,6 +1650,20 @@ impl<'a, 'f> InPlaceRecord<'a, 'f> {
         None
     }
 
+    /// Whether the record is a Response or a ResponseFinal: what the pending gets alone read, so
+    /// a dispatch that tells the record's kind hands it to them and to no other plane.
+    pub fn is_reply(&self) -> bool {
+        #[cfg(feature = "codec-response")]
+        if self.response().is_some() {
+            return true;
+        }
+        #[cfg(all(feature = "codec-frame", feature = "codec-response-final"))]
+        if self.response_final().is_some() {
+            return true;
+        }
+        false
+    }
+
     /// The Interest, as it is decoded, its keyexpr and extensions ranges of the
     /// frame. `None` when the record is of another kind, and always in a build that
     /// does not lend its control records (`rx-lent-control`) or reads none off the

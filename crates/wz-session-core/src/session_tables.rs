@@ -560,6 +560,10 @@ pub struct EntityKey<Key> {
     /// names after every other holder may have let it go.
     named: Option<KeyexprHandle>,
     retraction: Retraction,
+    /// Whether the key passed the wire's pre-emit gate when the row was made: judged once there,
+    /// so the key is not walked again at each link it is announced or replayed on
+    /// (`NamedKey::check_outbound`).
+    proven: bool,
 }
 
 impl<Key: KeyBacking> EntityKey<Key> {
@@ -2021,11 +2025,18 @@ impl<P: Storage> Declaring<'_, P> {
             }
         }))?;
         let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
+        // A key the gate refuses is kept unproven, and each send of it judges it and refuses it
+        // as before.
+        #[cfg(feature = "storage-profile")]
+        let proven = crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(text).is_ok();
+        #[cfg(not(feature = "storage-profile"))]
+        let proven = false;
         Ok(EntityKey {
             key,
             prefix,
             named,
             retraction: form.retraction,
+            proven,
         })
     }
 
@@ -2474,7 +2485,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .prefix
             .and_then(|prefix| self.keyexprs.get(prefix))
             .and_then(|row| Some(Prefix::of(MappedId::new(row.id())?, text(&row.key))));
-        NamedKey::under_or_whole(whole, declared)
+        let named = NamedKey::under_or_whole(whole, declared)?;
+        Some(if key.proven { named.proven() } else { named })
     }
 
     /// `key`, which the program names by the declaration the wire calls `id` (`0` for none), as
