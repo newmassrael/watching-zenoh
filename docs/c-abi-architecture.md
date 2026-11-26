@@ -593,3 +593,61 @@ What remains of the driving once a receive, and the handing out's own costs (eac
 for each message where the round read the cached match set, the fan-out zeroed for each sample, the
 drain and its lock once a frame), are the next steps of the lane, each judged by the same
 measurement.
+
+#### After the fix of the step
+
+Measured with the fix (the main session's `r5a-5`, the same subprofile): 5,687.1 a message, where
+the run before it read 5,663.5, and zenoh-pico in the same run 2,723.2. The fix did not move it,
+so in this harness a receive brings about one batch under callgrind (the `strace` run, whose
+subscriber is slowed by every system call, is where ten came together). Each read is then paid
+once a message, and the driving is what must fall below zenoh-pico's own, not be spread over a
+burst.
+
+Where a message's 5,687 go, from the inclusive costs of the frames of the read (each row the frame
+less the one inside it):
+
+| part | a message | what it is |
+|---|---|---|
+| the records: decode, dispatch, hand out, callback (`take_input`) | 2,512 | the work itself |
+| the receive outside the records (`recv_with`, the framing's front) | 268 | once a receive |
+| the step outside the receive (`face_turn` of the pump: lend, service checks, deadlines, facts) | 461 | once a step |
+| the looks at the faces' lives (`CoopEngine::face_turn` less the step) | 1,110 | two faces turned |
+| the wait (`wait_on_faces`: the session's lock, the faces' held input, `idle_wait`, `poll_on`) | 782 | once a read |
+| the read's own lines and the task's loop (the rest of `run_body` and `entry`) | 554 | once a read |
+| total | 5,687 | |
+
+The records alone (2,512) are under zenoh-pico's whole message (2,723) by 211; everything else is
+the driving, 3,175 a message, which zenoh-pico pays as a `select` and its read task's loop (its own
+costs: `_zp_unicast_read_task_fn` 129, `_z_socket_wait_readable` 127, `select` 91,
+`_z_unicast_wait_iter_next` 52). wz at or under zenoh-pico needs the driving cut to a few hundred and the
+records trimmed by as much again. The driving's own costs a message, and the structure that pays
+each:
+
+| function (own cost) | a message | paid because |
+|---|---|---|
+| `CoopEngine::face_turn` and the slice walk, `NonNull`, `Option` lines inlined in it | 521 | each read turns the dial role's face too, which holds no link in a listening peer: a whole look (the lock, the clock, `next_input`, the ledger, the jobs) for nothing |
+| `PosixClock::now_us`, `clock_gettime` | 145 | once a face turned: twice a read |
+| `wait_on_faces` and its slice walk | 135 | the session's lock and a walk of every face's held input before each wait |
+| `poll_on` | 84 | the `pollfd` set written for the link, the port and the wake, each wait |
+| `CoopEngine::live` | 75 | the session's lock taken by the wait, each look, the push's dispatch and the drain: about five a message |
+| `run_body` (`read_faces` inlined): the slice walk, its own lines, the atomics | 174 | three walks of every row of the face table a read (the slots tried, the turned faces, the faces' due), ten rows where one face holds a link |
+| `Deliveries::within`, `deliver`'s closure | 141 | the deliveries entered after each face's turn and after each drain |
+
+The structure that removes them, largest first, each a step of the lane judged by the same
+measurement:
+
+1. **A face at rest is not turned.** A face whose slot holds no pump, no dial and no opened link,
+   whose life stands idle or closed with no wake, and whose Router holds no chain, has nothing a
+   look would move: its read passes it over while another face is turned, whose look serves the
+   session's own bookkeeping (the ledger, the gets, the jobs, the ports), and turns it all the same
+   when no face is. The rest is noted by the face's own look, under the session's lock, and ends
+   when the slot is given a link. The dial role's face of a listening peer is such a face. Expected:
+   about half of the 1,110 of the looks, and one of the two readings of the clock (about 500).
+2. **The walks of the face table stop at the last row that holds a face.** The rows past it hold
+   none, and a read walks the table three times; the bound is kept where the rows are held and let
+   go of, under the session's lock. Expected: most of the 174 of the walks in `run_body`.
+3. **The wait taken without the session where a link holds input**, and the deliveries entered
+   once a read rather than once a face and once a drain, after the two above are measured.
+
+This is not the fast path of one face 8.12 rejects: every face is in the one walk, and a face is
+passed over by what its own slot says, whatever the session's preset.
