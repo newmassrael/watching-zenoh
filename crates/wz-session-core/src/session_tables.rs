@@ -63,8 +63,8 @@ use core::sync::atomic::AtomicU32;
 use portable_atomic::AtomicU32;
 
 use crate::bounded::{
-    Arena, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept, LendRefused, Lent, Profile,
-    Region, RegionLines, Storage, TableLender, ZeroEmpty,
+    Arena, BoundedVec, CapacityFull, KeyBacking, KeyLength, KeyMaker, KeyUnkept, LendRefused, Lent,
+    Profile, Region, RegionLines, Static, Storage, TableLender, ZeroEmpty,
 };
 use crate::caps;
 use crate::declare_form::RetractionKey;
@@ -3466,6 +3466,68 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         const {
             assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
         }
+        if !self.fan_admitted(fan) {
+            return None;
+        }
+        // Taken up at the place after the last row reached: the rows before it are not read again.
+        let mut cursor = fan.next;
+        while let Some((_, row)) = self.subscribers.next_from(&mut cursor) {
+            if !fan_reaches(fan, row) {
+                continue;
+            }
+            if let Some(call) = row.callback.begin() {
+                fan.next = cursor;
+                return Some(call);
+            }
+        }
+        None
+    }
+
+    /// Every subscriber `fan` reaches from its place on, each with a call begun on its row, in one
+    /// hold of the tables: the calls pushed to `calls` in the table's order, matched and gated as
+    /// [`Self::pin_next_subscriber`] matches and gates one. Whether the walk reached the table's
+    /// end; `false` only when `calls` had no room for a row reached, where `fan` is left so that
+    /// the next pin begins with that row. The calls are what the message is handed to once the
+    /// tables are let go: a row declared after this pin is not among them, and a row undeclared
+    /// after it keeps its slot until its call here has ended. End each call with
+    /// [`RowCallback::end`]; when it was the last call of a row undeclared meanwhile, let the row
+    /// go with [`Self::release_drained_subscriber`].
+    pub fn pin_subscribers<const N: usize>(
+        &mut self,
+        fan: &mut PinnedFanOut<'_>,
+        calls: &mut BoundedVec<<F::Subscriber as RowCallback>::Call, N, Static>,
+    ) -> bool {
+        const {
+            assert!(row_may_lie_in::<F::Subscriber, P>(), "a callback whose calls read its row in place, on another thread, needs its row out of every &mut of the tables: in the arena, on the lent policy");
+        }
+        if !self.fan_admitted(fan) {
+            return true;
+        }
+        let mut cursor = fan.next;
+        loop {
+            let place = cursor;
+            let Some((_, row)) = self.subscribers.next_from(&mut cursor) else {
+                fan.next = cursor;
+                return true;
+            };
+            if !fan_reaches(fan, row) {
+                continue;
+            }
+            if calls.free_slots() == 0 {
+                fan.next = place;
+                return false;
+            }
+            if let Some(call) = row.callback.begin() {
+                let kept = calls.push(call).is_ok();
+                debug_assert!(kept, "room for the call was found before it began");
+            }
+        }
+    }
+
+    /// Put a peer's message `fan` walks to the key gate, once, at its walk's first pin, by the
+    /// rule [`crate::pubsub::LocalSubscribers::deliver_from_peer`] keeps: whether the message may
+    /// reach a row. A refused one, or one deeper than the matcher's bound, reaches none.
+    fn fan_admitted(&mut self, fan: &mut PinnedFanOut<'_>) -> bool {
         if fan.ungated {
             fan.ungated = false;
             if matches!(
@@ -3475,26 +3537,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
                 fan.reaches_none = true;
             }
         }
-        if fan.reaches_none {
-            return None;
-        }
-        // Taken up at the place after the last row reached: the rows before it are not read again.
-        let mut cursor = fan.next;
-        while let Some((_, row)) = self.subscribers.next_from(&mut cursor) {
-            let found = RowRef {
-                pattern: text(&row.key.key),
-                facts: row.facts,
-                origin: row.origin,
-            };
-            if !row_reaches(&found, fan.key, fan.facts, fan.remote) {
-                continue;
-            }
-            if let Some(call) = row.callback.begin() {
-                fan.next = cursor;
-                return Some(call);
-            }
-        }
-        None
+        !fan.reaches_none
     }
 
     /// Let go of the subscriber `handle` named, undeclared while a call of it ran, once that call
@@ -4295,6 +4338,21 @@ pub struct PinnedFanOut<'k> {
     next: usize,
 }
 
+/// The calls of the subscribers one message reaches, pinned in one hold of the tables
+/// ([`SessionTables::pin_subscribers`]), in the table's order: room for a call on every row the
+/// table can hold, so one pin takes them all.
+///
+/// A fixed array the delivery holds in its own frame while it makes the calls with the tables let
+/// go of, so it takes no heap; its cost is stack: `MAX_SUBSCRIPTIONS` calls of a row's address
+/// each and a length, at the build's default of 100 subscribers 808 bytes on a 64-bit target and
+/// 404 on a 32-bit one. A callback that puts on its own session from inside the call holds a second
+/// one in a frame above the first, as a put holds the calls the round captured for it.
+pub type PinnedSubscribers<F> = BoundedVec<
+    <<F as RowCallbacks>::Subscriber as RowCallback>::Call,
+    { caps::MAX_SUBSCRIPTIONS },
+    Static,
+>;
+
 /// A peer token's walk of the liveliness subscribers it reaches, one row pinned at a time
 /// ([`SessionTables::pin_next_liveliness_subscriber`]): its key, whether it is historical (an
 /// answer to a CURRENT interest), and the place the next row is looked for from. Held by whoever
@@ -4325,6 +4383,17 @@ fn token_reaches<Key: KeyBacking, Cb>(
     historical: bool,
 ) -> bool {
     (!historical || row.history) && keyexpr_intersects(text(&row.key.key), key)
+}
+
+/// Whether the message `fan` walks reaches the subscriber `row`, by the rule every walk of the
+/// subscribers keeps (`row_reaches`).
+fn fan_reaches<Key: KeyBacking, Cb>(fan: &PinnedFanOut<'_>, row: &SubscriberRow<Key, Cb>) -> bool {
+    let found = RowRef {
+        pattern: text(&row.key.key),
+        facts: row.facts,
+        origin: row.origin,
+    };
+    row_reaches(&found, fan.key, fan.facts, fan.remote)
 }
 
 impl<'k> PinnedFanOut<'k> {

@@ -237,8 +237,8 @@ impl<Q: Storage> SubscriberPeer<Q> {
     }
 
     /// Lend a Push the in-place receive path read: the sample its subscribers are handed, over the
-    /// frame, this side's table and `room`, for a caller that walks the subscribers itself, one
-    /// row at a time (`SessionTables::pin_next_subscriber`). `subs` are the subscriptions the
+    /// frame, this side's table and `room`, for a caller that hands it to the subscribers itself
+    /// (`SessionTables::pin_subscribers`). `subs` are the subscriptions the
     /// sample is delivered to, read for our own id space alone. What the sample borrows of this
     /// side (the peer's literal, the room a key is composed in) is written only by the reading of
     /// this peer's records, so it holds for as long as the caller reads no other.
