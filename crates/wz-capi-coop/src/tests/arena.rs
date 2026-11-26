@@ -701,8 +701,8 @@ fn the_link_buffers_a_report_reads_are_the_plans_rows() {
     for config in configs {
         let plan = ArenaPlan::of(&config, &limits).expect("lays an arena out");
         let links = links_of(&config).expect("within the address space");
-        let buffers =
-            link_buffers(links, config.batch_size, &limits).expect("the plan's batch and pools");
+        let buffers = link_buffers(links, config.max_faces, config.batch_size, &limits)
+            .expect("the plan's batch and pools");
         let receive = row(&plan, "link receive buffers");
         let transmit = row(&plan, "link transmit slots");
         assert_eq!(
@@ -714,12 +714,36 @@ fn the_link_buffers_a_report_reads_are_the_plans_rows() {
             (buffers.transmit, buffers.bytes)
         );
         assert_eq!(buffers.bytes, usize::from(config.batch_size));
-        assert_eq!(plan.reassembly().1, buffers.chains * chain_shares(&plan));
+        assert_eq!(plan.reassembly().1, buffers.chains);
         if LINKS_SHARE_POOLS {
             assert!(buffers.receive <= caps::RX_POOL_BUFFERS.min(links));
         } else {
             assert_eq!(buffers.receive, links);
         }
+    }
+}
+
+/// A report's table of chains is the session's share for each face read where it lies, the dial
+/// role's place and one for each face besides it where the session listens and reads each face
+/// where it lies, and the share alone otherwise; a count past the address space is refused as the
+/// plan is. Turned red by a report that reads the share alone where the plan multiplies it.
+#[test]
+fn a_reports_table_of_chains_is_a_share_for_each_face_read_where_it_lies() {
+    let limits = SessionLimits::defaults();
+    let batch = client_config().batch_size;
+    let report = |beside: usize| {
+        crate::arena::link_buffers(1, beside, batch, &limits).map(|buffers| buffers.chains)
+    };
+    let apart = cfg!(feature = "listen") && !cfg!(wz_round);
+    let places = |beside: usize| if apart { beside + 1 } else { 1 };
+    assert_eq!(report(0), Ok(caps::REASSEMBLY_CHAINS));
+    assert_eq!(report(3), Ok(caps::REASSEMBLY_CHAINS * places(3)));
+    if apart && caps::REASSEMBLY_CHAINS > 1 {
+        assert_eq!(
+            report(usize::MAX),
+            Err(ArenaRefused::TooLarge),
+            "a table past the address space"
+        );
     }
 }
 
@@ -1545,9 +1569,10 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_an
     assert_eq!(row(&plan, "reassembly buffers").count, stated);
     assert_eq!(row(&plan, "reassembly flags").count, stated);
     assert_eq!(
-        crate::arena::link_buffers(1, config.batch_size, &one).map(|buffers| buffers.chains),
-        Ok(1),
-        "a report reads the count the session states"
+        crate::arena::link_buffers(1, config.max_faces, config.batch_size, &one)
+            .map(|buffers| buffers.chains),
+        Ok(stated),
+        "a report reads the plan's count"
     );
     let none = lowered(|l| l.select_reassembly_chains(Quota::at_most(0)));
     let plan = ArenaPlan::of(&config, &none).expect("lays an arena out");
@@ -1588,7 +1613,8 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_an
         };
         assert_eq!(ArenaPlan::of(&config, &raised), Err(refused));
         assert_eq!(
-            crate::arena::link_buffers(1, config.batch_size, &raised).map(|buffers| buffers.chains),
+            crate::arena::link_buffers(1, 0, config.batch_size, &raised)
+                .map(|buffers| buffers.chains),
             Err(refused),
             "a report is refused as the plan is"
         );

@@ -129,9 +129,7 @@ use wz_runtime_coop::faces::{
     LinkSupervisor, DIAL_LOOK_MS,
 };
 use wz_runtime_coop::link_cells::CellRc;
-use wz_runtime_coop::reassembly_rx::{
-    session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
-};
+use wz_runtime_coop::reassembly_rx::{session_reassembly, SessionChains, SessionReassembly};
 #[cfg(wz_round)]
 use wz_runtime_coop::session_drive::router_session_task_bytes;
 #[cfg(feature = "time-base")]
@@ -988,7 +986,7 @@ fn lend_session(
     } = claimed;
     let router = session_reassembly(
         policy,
-        SessionChains::over(&transport.reassembly, LENT_CHAINS),
+        SessionChains::over(&transport.reassembly, transport.face_chains),
     );
     #[cfg(all(wz_round, feature = "runtime-plan"))]
     let round_rows =
@@ -6384,6 +6382,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 lent.taken_faces,
                 &policy,
                 &lent.transport.reassembly,
+                lent.transport.face_chains,
                 &lend,
             )
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
