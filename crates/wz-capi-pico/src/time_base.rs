@@ -292,21 +292,69 @@ impl wz_capi_coop::ClockMoves for TimeBaseMoves {
     }
 }
 
-/// What bounds an open over the program's transport for a cooperative session on `clock`: a sleep
-/// of its time base, for a session on one; none for one on the host's clock, whose open waits the
-/// wall clock's bound.
+/// The sleep of its time base that the opens of a cooperative session over the program's
+/// transport wait on: one wait, in the slot the session set aside in the time base when it opened,
+/// armed again in this one place by each open, so an open after the session's (a dial again, a
+/// group joined again) takes no memory.
 #[cfg(all(feature = "app-transport", not(feature = "engine-tokio")))]
-pub(crate) fn open_bound(clock: &SessionClock) -> Option<wz_capi_coop::app_link::OpenBound> {
+struct TimeBaseOpenSleep {
+    /// The armed wait, none between two opens. Declared before `room`, so that it leaves the time
+    /// base before the room gives its slot back.
+    sleep: wz_capi_port::sync::Lock<Option<wz_node_time::time_base::ProgramSleep>>,
+    room: wz_node_time::time_base::TimeBaseRoom,
+    time: wz_node_time::time_base::TimeBaseRef,
+}
+
+#[cfg(all(feature = "app-transport", not(feature = "engine-tokio")))]
+impl wz_capi_coop::app_link::OpenSleep for TimeBaseOpenSleep {
+    fn arm(&self, ms: u64) {
+        let deadline_ns = self
+            .time
+            .now_ns()
+            .saturating_add(ms.saturating_mul(1_000_000));
+        let armed = self.room.sleep_until(deadline_ns);
+        // The wait this takes the place of goes after the lock: its drop takes the time base's.
+        let earlier = self.sleep.with(|sleep| sleep.replace(armed));
+        drop(earlier);
+    }
+
+    fn poll_armed(&self, cx: &mut core::task::Context<'_>) -> core::task::Poll<()> {
+        // Polled out of its place and put back, so that the time base's lock, which a poll takes,
+        // is never taken under this one.
+        let Some(mut sleep) = self.sleep.with(Option::take) else {
+            return core::task::Poll::Ready(());
+        };
+        let polled = core::future::Future::poll(core::pin::Pin::new(&mut sleep), cx);
+        let displaced = self.sleep.with(|place| place.replace(sleep));
+        drop(displaced);
+        polled
+    }
+
+    fn disarm(&self) {
+        let armed = self.sleep.with(Option::take);
+        drop(armed);
+    }
+}
+
+/// What bounds an open over the program's transport for a cooperative session on `clock`: the one
+/// sleep of its time base its opens arm, for a session on one; none for one on the host's clock,
+/// whose open waits the wall clock's bound.
+///
+/// The slot of that sleep is set aside in the time base here, at the open, as the watch of
+/// [`clock_moves`] is; `NoMemory` when the heap refuses it, which refuses the open.
+#[cfg(all(feature = "app-transport", not(feature = "engine-tokio")))]
+pub(crate) fn open_bound(
+    clock: &SessionClock,
+) -> Result<Option<wz_capi_coop::app_link::OpenBound>, wz_node_time::time_base::RoomRefused> {
     let SessionClock::Program(time_base) = clock else {
-        return None;
+        return Ok(None);
     };
-    let time = time_base.time();
-    Some(alloc::sync::Arc::new(
-        move |ms: u64| -> wz_capi_coop::app_link::BoundSleep {
-            let deadline_ns = time.now_ns().saturating_add(ms.saturating_mul(1_000_000));
-            Box::pin(time.sleep_until(deadline_ns))
-        },
-    ))
+    let bound: wz_capi_coop::app_link::OpenBound = alloc::sync::Arc::new(TimeBaseOpenSleep {
+        sleep: wz_capi_port::sync::Lock::new(None),
+        room: time_base.reserve(1, 0)?,
+        time: time_base.time(),
+    });
+    Ok(Some(bound))
 }
 
 /// What tells a read of a cooperative session on `clock` that its clock moved on: the program's
@@ -604,6 +652,87 @@ mod tests {
             host.now_us() >= before + 20_000,
             "CONTROL: without a time base the host's clock runs"
         );
+    }
+
+    /// The opens of a cooperative session on a time base wait on the one sleep its open set aside:
+    /// armed, armed again in place of an earlier, waited out and let go of again and again, as a
+    /// session that dials again does, it takes no memory and is never refused a slot. CONTROL: a
+    /// sleep of the time base made for an open, as an open bound that made one each time would,
+    /// takes memory. Turned red by an open bound that makes its sleep when armed, or whose sleep
+    /// lies in no slot the open set aside.
+    #[cfg(all(feature = "app-transport", not(feature = "engine-tokio")))]
+    #[test]
+    fn the_opens_of_a_session_on_a_time_base_wait_on_one_sleep_with_no_memory_taken() {
+        const OPENS: usize = 16;
+        const STEP_NS: u64 = 1_000_000;
+        struct Woken(AtomicUsize);
+        impl std::task::Wake for Woken {
+            fn wake(self: std::sync::Arc<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        let program = Program::default();
+        let context = &program as *const Program as *mut c_void;
+        // SAFETY: `program` outlives the clock and every hold of its time base.
+        let time_base = unsafe { wz_capi_port::time_base::over_calls(context, read, None) };
+        let clock = session_clock(Some(time_base.clone()));
+        let bound = open_bound(&clock)
+            .expect("the heap gives the slot of the sleep")
+            .expect("a session on a time base bounds its opens by it");
+        let woken = std::sync::Arc::new(Woken(AtomicUsize::new(0)));
+        let waker = core::task::Waker::from(woken.clone());
+        let mut cx = core::task::Context::from_waker(&waker);
+
+        // One open's wait on its bound, as a dial over the program's transport waits.
+        let mut one_open = || {
+            bound.arm(1);
+            assert!(bound.poll_armed(&mut cx).is_pending());
+            // An open given up and made again before its sleep ended: armed in its place.
+            bound.arm(1);
+            assert!(
+                bound.poll_armed(&mut cx).is_pending(),
+                "the sleep waits while the program's time stands"
+            );
+            program.now_ns.fetch_add(STEP_NS, Ordering::SeqCst);
+            time_base.advanced();
+            assert!(
+                bound.poll_armed(&mut cx).is_ready(),
+                "the program's word ends the sleep"
+            );
+            bound.disarm();
+        };
+        // Once before counting, so what a first call makes of the thread's own is not counted.
+        one_open();
+        let made = crate::test_heap::allocations(|| {
+            for _ in 0..OPENS {
+                one_open();
+            }
+        });
+        assert_eq!(
+            made, 0,
+            "an open's sleep after the session's open took memory"
+        );
+        assert_eq!(
+            time_base.refused(),
+            0,
+            "the one slot the open set aside held each sleep"
+        );
+        assert_eq!(
+            woken.0.load(Ordering::SeqCst),
+            OPENS + 1,
+            "each word woke the open waiting, once"
+        );
+        assert!(
+            bound.poll_armed(&mut cx).is_ready(),
+            "a sleep let go of bounds nothing"
+        );
+
+        let time = time_base.time();
+        let boxed = crate::test_heap::allocations(|| {
+            let mut sleep = Box::pin(time.sleep_until(u64::MAX));
+            assert!(core::future::Future::poll(sleep.as_mut(), &mut cx).is_pending());
+        });
+        assert!(boxed > 0, "CONTROL: a sleep made for an open takes memory");
     }
 
     /// The word of a cooperative session on a time base wakes the one waker its engine watches

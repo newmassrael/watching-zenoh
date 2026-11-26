@@ -50,7 +50,9 @@
 //! long as its session is. The time base itself is never freed: when its last hold goes it returns
 //! to a pool a later one is taken from, so a reference never dangles, and a reference that
 //! outlives the holds it was taken under reads the time base as past every deadline. Whatever
-//! still waits on it then ends, and nothing reads another program's time through it.
+//! still waits on it then ends, and nothing reads another program's time through it. Each time
+//! base has its place in the pool from when it is made, so the last hold's going takes no memory,
+//! whichever hold that is.
 
 use core::fmt;
 use core::future::Future;
@@ -391,8 +393,37 @@ struct TimeBase {
     sleepers: Mutex<Sleepers>,
 }
 
-/// The time bases no hold has, which the next one made is taken from.
-static POOL: Mutex<Vec<&'static TimeBase>> = Mutex::new(Vec::new());
+/// The time bases no hold has, which the next one made is taken from, and how many were ever made.
+struct Pool {
+    free: Vec<&'static TimeBase>,
+    made: usize,
+}
+
+impl Pool {
+    /// A time base no hold has: a pooled one, or one made now with its place in the pool taken
+    /// with it, so that its return ([`Self::give_back`]) never grows the pool.
+    fn take(&mut self) -> &'static TimeBase {
+        if let Some(base) = self.free.pop() {
+            return base;
+        }
+        self.made += 1;
+        // The pool is empty when nothing is popped, so this is a place for every base made.
+        self.free.reserve(self.made);
+        Box::leak(Box::new(TimeBase::new()))
+    }
+
+    /// Take back `base`, whose last hold went, into the place it was given when it was made: no
+    /// memory is taken, though that hold may be a session's that took none once it opened.
+    fn give_back(&mut self, base: &'static TimeBase) {
+        self.free.push(base);
+    }
+}
+
+/// The pool of every time base made.
+static POOL: Mutex<Pool> = Mutex::new(Pool {
+    free: Vec::new(),
+    made: 0,
+});
 
 fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock()
@@ -536,9 +567,7 @@ pub struct TimeBaseHold {
 impl TimeBaseHold {
     /// A time base that reads `program`, and the first hold of it.
     pub fn new(program: Box<dyn ProgramTime>) -> Self {
-        let base = locked(&POOL)
-            .pop()
-            .unwrap_or_else(|| &*Box::leak(Box::new(TimeBase::new())));
+        let base = locked(&POOL).take();
         let lease = base.install(program);
         Self { base, lease }
     }
@@ -684,7 +713,7 @@ impl Drop for TimeBaseHold {
     fn drop(&mut self) {
         if self.base.holders.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.base.retire();
-            locked(&POOL).push(self.base);
+            locked(&POOL).give_back(self.base);
         }
     }
 }
@@ -1194,6 +1223,28 @@ mod tests {
         hold.advanced();
         assert_eq!(watched.0.load(Ordering::SeqCst), many, "every watch, once");
         assert_eq!(ended.0.load(Ordering::SeqCst), many, "every wait due, once");
+    }
+
+    /// The last hold of a time base goes with no memory taken, however many go at once: each base
+    /// has its place in the pool from when it was made. Turned red by a pool that grows as a base
+    /// comes back to it.
+    #[test]
+    fn the_last_holds_go_back_to_the_pool_with_no_memory_taken() {
+        // More bases than every other test of the binary holds, so a pool that grew as they came
+        // back would grow here whatever ran before.
+        const BASES: u64 = 64;
+        let holds: Vec<TimeBaseHold> = (0..BASES).map(|ns| time_at(ns).1).collect();
+        assert!(
+            holds.iter().all(|hold| hold.now_ns() < BASES),
+            "CONTROL: every hold reads its own program"
+        );
+        let before = allocations();
+        drop(holds);
+        assert_eq!(
+            allocations() - before,
+            0,
+            "a base's return to the pool took memory"
+        );
     }
 
     #[test]

@@ -2120,7 +2120,8 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 
 /// `links` whose opens wait on the clock of the session they are for: its time base's, for a
 /// session on one, so an open the program has not reported up is given up when the program's time
-/// passes its bound.
+/// passes its bound. `Z_ERR_SYSTEM_OUT_OF_MEMORY` when the heap refuses the slot of the sleep the
+/// opens wait on, which the open sets aside in the time base.
 #[cfg(all(
     feature = "app-transport",
     feature = "time-base",
@@ -2129,10 +2130,11 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
 fn app_links_on(
     links: wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>,
     clock: &crate::time_base::SessionClock,
-) -> wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount> {
+) -> Result<wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>, ZResult> {
     match crate::time_base::open_bound(clock) {
-        Some(bound) => links.with_open_bound(bound),
-        None => links,
+        Ok(Some(bound)) => Ok(links.with_open_bound(bound)),
+        Ok(None) => Ok(links),
+        Err(_) => Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY),
     }
 }
 
@@ -2145,8 +2147,8 @@ fn app_links_on(
 fn app_links_on<C>(
     links: wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>,
     _clock: &C,
-) -> wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount> {
-    links
+) -> Result<wz_capi_coop::app_link::AppLinks<wz_capi_coop::LinkCount>, ZResult> {
+    Ok(links)
 }
 
 /// The faces a session holds besides the one it dials: none for one that listens on nothing
@@ -2563,7 +2565,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let links = crate::coop_host::with_unixpipe(links).waited_by_owner();
     #[cfg(feature = "app-transport")]
     let links = match request.app_transport {
-        Some(transport) => PicoLinks::Right(app_links_on(
+        Some(transport) => match app_links_on(
             wz_capi_coop::app_link::AppLinks::new(
                 wz_session_core::app_transport::SessionTransport::new(transport, &limits),
             )
@@ -2571,7 +2573,10 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             .with_rx_capacity(limits.pico_unicast_batch_bytes())
             .waited_by_owner(),
             &clock,
-        )),
+        ) {
+            Ok(app_links) => PicoLinks::Right(app_links),
+            Err(refused) => return refused,
+        },
         None => PicoLinks::Left(links),
     };
     // A build that may state a policy, listen or join a group lays out each session's rows from

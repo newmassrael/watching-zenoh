@@ -732,7 +732,11 @@ suites (C1co, Layer Z) unchanged.
       the `e2e` row reads are not traced by this note.
     - Observation: the doors copy to the caller's buffer; the program time base's wait is the
       session's one wait, made with its open, which each read borrows and whose mark each look
-      at the clock moves (`time_base.rs` `TimeBaseMoves::moved`), so a read makes none. What
+      at the clock moves (`time_base.rs` `TimeBaseMoves::moved`), so a read makes none. An open
+      over the program's transport after the session's (a dial again, a group joined again) waits
+      on the one sleep set aside in the time base at the open, armed again in its place
+      (`time_base.rs` `TimeBaseOpenSleep`), and a time base whose last hold goes returns to the
+      place in its pool it took when it was made (`wz-node-time` `Pool::give_back`). What
       allocates after the open is the snapshot's JSON for the admin space (`latest_json`, a
       `String`, the admin space's row).
 17. **U16. The flip.** `allocation_faults.rs`: `MEMORY_TAKEN_AT_OPEN` set from the build, so a
