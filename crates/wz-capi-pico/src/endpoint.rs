@@ -194,7 +194,19 @@ fn link_built(scheme: &str) -> bool {
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn with_engine_text<R>(endpoint: &str, use_text: impl FnOnce(&str) -> R) -> R {
     let mut kept = wz_session_core::locator_directory::LocatorText::new();
-    use_text(kept_text(endpoint, &mut kept).unwrap_or(endpoint))
+    use_text(engine_text(endpoint, &mut kept))
+}
+
+/// The text a session of the cooperative engine dials or listens on for `endpoint`, as
+/// [`with_engine_text`] hands it, made in `kept`: the reading the open hands the engine, which
+/// reads each endpoint by it as it writes the endpoint's row
+/// (`wz_capi_coop::open_source::EndpointReading`).
+#[cfg(not(feature = "engine-tokio"))]
+pub(crate) fn engine_text<'t>(
+    endpoint: &'t str,
+    kept: &'t mut wz_session_core::locator_directory::LocatorText,
+) -> &'t str {
+    kept_text(endpoint, kept).unwrap_or(endpoint)
 }
 
 /// What pico's link for the scheme of `endpoint` keeps of it, made in `kept`, or `endpoint`

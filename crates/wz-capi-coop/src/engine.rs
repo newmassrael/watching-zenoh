@@ -160,7 +160,7 @@ use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as Hands
 use wz_session_core::link_life::{LinkRole, LinkTimes, UnicastLink};
 use wz_session_core::locality::Locality;
 
-use crate::open_source::{Counted, EndpointList, OpenEndpoints, OpenInput, OpenSource};
+use crate::open_source::{Counted, EndpointList, OpenInput, OpenSource};
 use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
@@ -5234,13 +5234,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         key_ids: OpenKeyIds,
         storage: OpenStorage,
     ) -> Result<EngineHold<Self>, OpenError> {
-        let mut endpoints = OpenEndpoints::new();
-        let config = source.into_input(&mut endpoints);
-        let input = OpenInput {
-            config,
-            endpoints: &mut endpoints,
-        };
-        Self::assemble(links, clock, entropy, input, policy, key_ids, storage)
+        source.open_with(|input| {
+            Self::assemble(links, clock, entropy, input, policy, key_ids, storage)
+        })
     }
 
     /// Open the links of `engine`, which [`Self::assemble`] built: an open that fails here ends
@@ -5262,8 +5258,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// once, into the engine's place (`Self::engine_of`).
     ///
     /// The input is a value of no type of the ABI's ([`OpenInput`]): its config is moved into
-    /// the session and its texts copied into the rows the arena lends for them, so the body is
-    /// one for every ABI and source that opens this engine.
+    /// the session and its texts read and written into the rows the arena lends for them by one
+    /// body of no type parameter, so no line of the ABI's is in this body.
     #[inline(never)]
     pub fn assemble(
         mut links: L,
@@ -5308,10 +5304,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
-        // The texts of the endpoints, each copied once into the row the plan laid out for it: the
-        // session names an endpoint by its row from here, and a text the input could not hold is
-        // refused here, before anything is bound or dialled.
-        let written = endpoints.copy_into(&mut lent.transport.endpoints);
+        // The texts of the endpoints, each read and written once into the row the plan laid out
+        // for it: the session names an endpoint by its row from here, and a text that has no row
+        // is refused here, before anything is bound or dialled.
+        let written = endpoints.write_into(&mut lent.transport.endpoints);
         // One refusal for the three, so what the arena lent is let go of on one path. The rooms
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.

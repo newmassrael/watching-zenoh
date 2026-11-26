@@ -2,23 +2,22 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! What an open reads its session's config from: the config, which counts the endpoints the
-//! session dials and listens on, and their texts, written by the ABI in its own frame and copied
-//! once into the rows the open lent for them in the session's arena
+//! session dials and listens on, and their texts where the ABI keeps them, each read as the ABI's
+//! form says and written once into the row the open lent for it in the session's arena
 //! (`wz_runtime_coop::faces::EndpointTexts`), before anything is dialled or bound.
 //!
 //! A host hands the open a config that holds the texts (`CoopConfig`, whose lists are
-//! `Vec<String>`): the open counts them and writes them ([`OpenSource`]). An ABI that keeps the
-//! texts in a form of its own hands an input of its own: its config counts them and holds none
-//! (`CoopConfig<Counted>`, a type that has no texts to hold), and it writes them from where it
-//! keeps them into its [`OpenEndpoints`], so no text is a value of the heap at the open either.
-//! Either way the rows are the one place the session reads an endpoint from once it is open.
+//! `Vec<String>`): the open counts them and reads them as written ([`OpenSource`]). An ABI that
+//! keeps the texts in a form of its own hands an input of its own: its config counts them and
+//! holds none (`CoopConfig<Counted>`, a type that has no texts to hold), and its
+//! [`OpenEndpoints`] name where it keeps them and how one is read, so no text is a value of the
+//! heap at the open either. Either way the one body that writes the rows is the engine's, and the
+//! rows are the one place the session reads an endpoint from once it is open.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use wz_runtime_coop::faces::{EndpointTextRefused, EndpointTexts};
-use wz_session_core::bounded::push_text;
-use wz_session_core::caps;
 use wz_session_core::locator_directory::LocatorText;
 
 use crate::arena::ArenaRefused;
@@ -57,7 +56,7 @@ impl EndpointList for Vec<String> {
 }
 
 /// A list of endpoints of which a config holds only how many there are and how many of them are
-/// `udp/` ones: the texts are written by the ABI into its [`OpenEndpoints`].
+/// `udp/` ones: the texts are where the ABI keeps them, which its [`OpenEndpoints`] name.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Counted {
     /// How many endpoints the list names.
@@ -88,108 +87,82 @@ impl EndpointList for Counted {
     }
 }
 
-/// The most endpoints an open's input holds: every row a session may dial and listen on.
-pub const OPEN_ENDPOINT_ROWS: usize = caps::MAX_STATIC_CONNECT + caps::MAX_ADMIN_LOCATORS;
+/// How an ABI reads one of its endpoints' texts into the text the session dials or listens on:
+/// the answer is `endpoint` itself, or a text the reading made in `kept`, a row of the open's
+/// stack. A text the reading refuses is answered as written, for the open to refuse by name.
+pub type EndpointReading = for<'t> fn(&'t str, &'t mut LocatorText) -> &'t str;
 
-/// The texts of a session's endpoints as the ABI wrote them for its open, in its own frame and
-/// in the order it wrote them: the endpoints to dial first, in the order the session dials them,
-/// then those to listen on. The open copies them into the rows it lends for them
-/// ([`OpenInput`]), so no text of the ABI's form is read inside the engine. A text that has no
-/// row is not written: the first such is kept as the refusal the open answers once it has lent
-/// its rows, by the role it was written as.
-pub struct OpenEndpoints {
-    texts: [LocatorText; OPEN_ENDPOINT_ROWS],
-    roles: [EndpointRole; OPEN_ENDPOINT_ROWS],
-    len: usize,
-    refused: Option<OpenError>,
+/// The reading of a text that is the session's as written: a host's.
+pub fn as_written<'t>(endpoint: &'t str, _kept: &'t mut LocatorText) -> &'t str {
+    endpoint
 }
 
-impl Default for OpenEndpoints {
-    fn default() -> Self {
-        Self::new()
+/// The texts of one list of an open's endpoints where the ABI keeps them: those it holds as
+/// views, then those it holds as strings, read in that order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EndpointTextList<'a> {
+    /// The texts held as views, read first.
+    pub views: &'a [&'a str],
+    /// The texts held as strings, read after the views.
+    pub strings: &'a [String],
+}
+
+impl<'a> EndpointTextList<'a> {
+    /// A list that names no endpoint.
+    pub const NONE: Self = Self {
+        views: &[],
+        strings: &[],
+    };
+
+    /// The texts in the order the open writes them.
+    fn texts(self) -> impl Iterator<Item = &'a str> {
+        self.views
+            .iter()
+            .copied()
+            .chain(self.strings.iter().map(String::as_str))
     }
 }
 
-impl OpenEndpoints {
-    /// No endpoint written yet.
-    pub const fn new() -> Self {
-        Self {
-            texts: [const { LocatorText::new() }; OPEN_ENDPOINT_ROWS],
-            roles: [EndpointRole::Dial; OPEN_ENDPOINT_ROWS],
-            len: 0,
-            refused: None,
-        }
-    }
+/// The texts of a session's endpoints where the ABI keeps them, and how one is read: the
+/// endpoints to dial, in the order the session dials them, then those to listen on. A value of no
+/// type of the ABI's, so the open writes the rows in one body for every ABI.
+#[derive(Clone, Copy)]
+pub struct OpenEndpoints<'a> {
+    /// The endpoints to dial.
+    pub dial: EndpointTextList<'a>,
+    /// The endpoints to listen on.
+    pub listen: EndpointTextList<'a>,
+    /// How each text is read into the one the session dials or listens on.
+    pub reading: EndpointReading,
+}
 
-    /// Write the text of the next endpoint to dial; a text longer than a row,
-    /// `MAX_LOCATOR_LEN` bytes, is kept as [`OpenError::Unreachable`], naming it.
-    pub fn dial(&mut self, text: &str) {
-        self.write(text, EndpointRole::Dial);
-    }
+impl OpenEndpoints<'static> {
+    /// A session that dials and listens on nothing, as one that joins a group only.
+    pub const NONE: Self = Self {
+        dial: EndpointTextList::NONE,
+        listen: EndpointTextList::NONE,
+        reading: as_written,
+    };
+}
 
-    /// Write the text of the next endpoint to listen on; a text longer than a row is kept as
-    /// [`OpenError::Listen`], naming it.
-    pub fn listen(&mut self, text: &str) {
-        self.write(text, EndpointRole::Listen);
-    }
-
-    /// Write `text` in the next row as an endpoint of `role`: the one body of both. Past the
-    /// first refusal nothing is written, so the open answers the first.
+impl OpenEndpoints<'_> {
+    /// Read each text and write it into `rows`, the rows the open lent, every one to dial and
+    /// then every one to listen on, or answer the refusal of the first that has no row, by the
+    /// role it is written as. Out of line and generic over nothing: the one body of every ABI
+    /// and every engine the open is made over, its reading's row in this frame alone.
     #[inline(never)]
-    fn write(&mut self, text: &str, role: EndpointRole) {
-        if self.refused.is_some() {
-            return;
-        }
-        let why = match (self.texts.get_mut(self.len), self.roles.get_mut(self.len)) {
-            (Some(row), Some(at)) => match push_text(row, text) {
-                Ok(()) => {
-                    *at = role;
-                    self.len += 1;
-                    return;
-                }
-                Err(_) => EndpointTextRefused::TooLong { len: text.len() },
-            },
-            _ => EndpointTextRefused::Full,
-        };
-        self.refused = Some(unwritten(text, why, role));
-    }
-
-    /// How many endpoints are written.
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    /// Whether none is.
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
-    /// The endpoint written `at`-th, with its role; `None` past the last.
-    pub fn row(&self, at: usize) -> Option<(EndpointRole, &str)> {
-        if at >= self.len {
-            return None;
-        }
-        Some((*self.roles.get(at)?, self.texts.get(at)?.as_str()))
-    }
-
-    /// The refusal of the first text that has no row, `None` when every one has.
-    pub fn refused(&self) -> Option<&OpenError> {
-        self.refused.as_ref()
-    }
-
-    /// Copy the texts into `rows`, the rows the open lent, in the order they were written, or
-    /// answer the refusal of the first that had none, handed over rather than copied. Every text
-    /// written fits a row, as the one that did not was refused when it was written, so a row
-    /// refused here is one past the rows the open lent, which its config counted. Out of line:
-    /// one copy body for every engine the open is made over.
-    #[inline(never)]
-    pub(crate) fn copy_into(&mut self, rows: &mut EndpointTexts) -> Result<(), OpenError> {
-        if let Some(refused) = self.refused.take() {
-            return Err(refused);
-        }
-        for (text, role) in self.texts.iter().zip(&self.roles).take(self.len) {
-            rows.write(*role, text.as_str())
-                .map_err(|_| OpenError::Arena(ArenaRefused::TooLarge))?;
+    pub(crate) fn write_into(&self, rows: &mut EndpointTexts) -> Result<(), OpenError> {
+        let lists = [
+            (EndpointRole::Dial, self.dial),
+            (EndpointRole::Listen, self.listen),
+        ];
+        for (role, list) in lists {
+            for endpoint in list.texts() {
+                let mut kept = LocatorText::new();
+                let text = (self.reading)(endpoint, &mut kept);
+                rows.write(role, text)
+                    .map_err(|why| unwritten(text, why, role))?;
+            }
         }
         Ok(())
     }
@@ -197,7 +170,7 @@ impl OpenEndpoints {
 
 /// The open's refusal of the endpoint `text` of `role` that has no row: one longer than a row is
 /// refused as an endpoint to listen on or to dial, as its role is; one past the rows the open
-/// lent, which its config counted, as an arena that does not hold what the source wrote.
+/// lent, which its config counted, as an arena that does not hold what the input names.
 fn unwritten(text: &str, why: EndpointTextRefused, role: EndpointRole) -> OpenError {
     match why {
         EndpointTextRefused::TooLong { .. } => {
@@ -212,121 +185,196 @@ fn unwritten(text: &str, why: EndpointTextRefused, role: EndpointRole) -> OpenEr
 }
 
 /// What an engine is opened from, a value of no type of the ABI's: the config, which counts the
-/// endpoints and holds none of their texts, and the texts, which the ABI wrote in its own frame.
-/// The open moves the config into the session and copies the texts into the rows it lends for
-/// them before it dials or binds anything.
+/// endpoints and holds none of their texts, and where the texts are kept. The open moves the
+/// config into the session and writes the texts into the rows it lends for them before it dials
+/// or binds anything.
 pub struct OpenInput<'a> {
     /// The session's config.
     pub config: CoopConfig<Counted>,
-    /// Its endpoints' texts, which the open copies, and whose refusal it hands on.
-    pub endpoints: &'a mut OpenEndpoints,
+    /// Its endpoints' texts, which the open reads and writes into its rows.
+    pub endpoints: OpenEndpoints<'a>,
 }
 
-/// What a host's open reads its session's config from, once: the config, which counts the
-/// endpoints and holds none of their texts, made with the texts written into `endpoints`.
+/// What a host's open reads its session's config from, once: the input, handed to `open`, whose
+/// texts are the source's until `open` returns.
 pub trait OpenSource {
-    /// The config, its endpoints' texts written into `endpoints`.
-    fn into_input(self, endpoints: &mut OpenEndpoints) -> CoopConfig<Counted>;
+    /// `open` of the input: the config, which counts the endpoints, and where their texts are.
+    fn open_with<R>(self, open: impl FnOnce(OpenInput<'_>) -> R) -> R;
 }
 
-/// A host's maker of a config that holds the texts: the open counts them, and writes them from
-/// the config's lists, which are let go of here.
+/// A host's maker of a config that holds the texts: the open counts them and reads them as
+/// written from the config's lists, which are let go of once the open has written them.
 impl<F: FnOnce() -> CoopConfig> OpenSource for F {
-    fn into_input(self, endpoints: &mut OpenEndpoints) -> CoopConfig<Counted> {
+    fn open_with<R>(self, open: impl FnOnce(OpenInput<'_>) -> R) -> R {
         let (config, dial, listen) = self().counted();
-        for text in &dial {
-            endpoints.dial(text);
-        }
-        for text in &listen {
-            endpoints.listen(text);
-        }
-        config
+        open(OpenInput {
+            config,
+            endpoints: OpenEndpoints {
+                dial: EndpointTextList {
+                    views: &[],
+                    strings: &dial,
+                },
+                listen: EndpointTextList {
+                    views: &[],
+                    strings: &listen,
+                },
+                reading: as_written,
+            },
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::EndpointRole;
-    use super::{OpenEndpoints, OPEN_ENDPOINT_ROWS};
+    use super::{as_written, EndpointRole, EndpointTextList, OpenEndpoints};
     use crate::arena::ArenaRefused;
     use crate::engine::{EndpointRefusal, OpenError, Refusal};
+    use alloc::boxed::Box;
     use alloc::format;
+    use alloc::string::String;
+    use core::ptr::NonNull;
+    use wz_runtime_coop::faces::EndpointTexts;
+    use wz_session_core::bounded::Arena;
     use wz_session_core::caps::MAX_LOCATOR_LEN;
+    use wz_session_core::locator_directory::LocatorText;
 
-    /// The endpoints read back in the order they were written, each with the role it was written
-    /// as. Turned red by a write that keeps a role of its own or reorders the rows.
-    #[test]
-    fn the_endpoints_read_in_the_order_and_role_they_were_written() {
-        let mut endpoints = OpenEndpoints::new();
-        endpoints.dial("tcp/10.0.0.1:7447");
-        endpoints.listen("tcp/0.0.0.0:7447");
-        assert_eq!(endpoints.len(), 2);
-        assert_eq!(
-            endpoints.row(0),
-            Some((EndpointRole::Dial, "tcp/10.0.0.1:7447"))
-        );
-        assert_eq!(
-            endpoints.row(1),
-            Some((EndpointRole::Listen, "tcp/0.0.0.0:7447"))
-        );
-        assert_eq!(endpoints.row(2), None, "nothing past the last");
-        assert!(endpoints.refused().is_none());
+    /// The rows of a session lent `dials` rows to dial and `listens` to listen on, in a test's
+    /// own memory, none written.
+    fn lent_rows(dials: usize, listens: usize) -> EndpointTexts {
+        const BYTES: usize = 4096;
+        #[repr(C, align(16))]
+        struct Memory([u8; BYTES]);
+
+        let memory: &'static mut Memory = Box::leak(Box::new(Memory([0; BYTES])));
+        // SAFETY: the memory is leaked, so it outlives the arena and every row it lends; it is
+        // aligned as an arena's spans start, BYTES long, and used by nothing else.
+        let mut arena = unsafe { Arena::over(NonNull::from(memory).cast::<u8>(), BYTES) };
+        EndpointTexts::over(
+            arena.lend(dials).expect("the memory holds the dial rows"),
+            arena
+                .lend(listens)
+                .expect("the memory holds the listen rows"),
+        )
     }
 
-    /// A text longer than a row is refused as the role it was written as: a dial's as an endpoint
+    /// A reading that keeps a text up to its first `#`, made in `kept`: an ABI's form.
+    fn up_to_hash<'t>(endpoint: &'t str, kept: &'t mut LocatorText) -> &'t str {
+        let bare = endpoint.split('#').next().unwrap_or(endpoint);
+        match wz_session_core::bounded::push_text(kept, bare) {
+            Ok(()) => kept.as_str(),
+            Err(_) => endpoint,
+        }
+    }
+
+    /// Endpoints whose texts are `dial` and `listen`, read as written.
+    fn written<'a>(dial: &'a [&'a str], listen: &'a [&'a str]) -> OpenEndpoints<'a> {
+        OpenEndpoints {
+            dial: EndpointTextList {
+                views: dial,
+                strings: &[],
+            },
+            listen: EndpointTextList {
+                views: listen,
+                strings: &[],
+            },
+            reading: as_written,
+        }
+    }
+
+    /// The views of a list are written before its strings, every endpoint to dial before any to
+    /// listen on, each in the rows of its role. Turned red by the strings written first, or a
+    /// list written into the other role's rows.
+    #[test]
+    fn the_views_then_the_strings_are_written_in_the_rows_of_their_role() {
+        let found = [
+            String::from("tcp/10.0.0.2:7447"),
+            String::from("tcp/10.0.0.3:7447"),
+        ];
+        let endpoints = OpenEndpoints {
+            dial: EndpointTextList {
+                views: &["tcp/10.0.0.1:7447"],
+                strings: &found,
+            },
+            listen: EndpointTextList {
+                views: &["tcp/0.0.0.0:7448"],
+                strings: &[],
+            },
+            reading: as_written,
+        };
+        let mut rows = lent_rows(3, 1);
+        assert_eq!(endpoints.write_into(&mut rows), Ok(()));
+        assert_eq!(rows.text(EndpointRole::Dial, 0), "tcp/10.0.0.1:7447");
+        assert_eq!(rows.text(EndpointRole::Dial, 1), "tcp/10.0.0.2:7447");
+        assert_eq!(rows.text(EndpointRole::Dial, 2), "tcp/10.0.0.3:7447");
+        assert_eq!(rows.text(EndpointRole::Listen, 0), "tcp/0.0.0.0:7448");
+    }
+
+    /// Each text is written as the input's reading reads it. Turned red by the text written as
+    /// the ABI holds it.
+    #[test]
+    fn each_text_is_written_as_the_reading_reads_it() {
+        let endpoints = OpenEndpoints {
+            reading: up_to_hash,
+            ..written(&["tcp/10.0.0.1:7447#iface=lo"], &[])
+        };
+        let mut rows = lent_rows(1, 0);
+        assert_eq!(endpoints.write_into(&mut rows), Ok(()));
+        assert_eq!(rows.text(EndpointRole::Dial, 0), "tcp/10.0.0.1:7447");
+    }
+
+    /// Endpoints that name none write nothing and are not refused.
+    #[test]
+    fn no_endpoint_writes_nothing() {
+        let mut rows = lent_rows(1, 1);
+        assert_eq!(OpenEndpoints::NONE.write_into(&mut rows), Ok(()));
+        assert_eq!(rows.text(EndpointRole::Dial, 0), "");
+        assert_eq!(rows.text(EndpointRole::Listen, 0), "");
+    }
+
+    /// A text longer than a row is refused as the role it is written as: a dial's as an endpoint
     /// the session cannot reach, a listen's as one it cannot listen on. Turned red by the roles
     /// swapped in the refusal.
     #[test]
     fn a_text_longer_than_a_row_is_refused_naming_its_role() {
         let long = format!("tcp/127.0.0.1:{}", "7".repeat(MAX_LOCATOR_LEN));
-        let mut dialled = OpenEndpoints::new();
-        dialled.dial(&long);
+        let dial = [long.as_str()];
         assert_eq!(
-            dialled.refused(),
-            Some(&OpenError::Unreachable(EndpointRefusal::new(
+            written(&dial, &[]).write_into(&mut lent_rows(1, 1)),
+            Err(OpenError::Unreachable(EndpointRefusal::new(
                 &long,
                 Refusal::TextTooLong
             )))
         );
-        assert!(dialled.is_empty(), "a refused text takes no row");
-        let mut listened = OpenEndpoints::new();
-        listened.listen(&long);
         assert_eq!(
-            listened.refused(),
-            Some(&OpenError::Listen(EndpointRefusal::new(
+            written(&[], &dial).write_into(&mut lent_rows(1, 1)),
+            Err(OpenError::Listen(EndpointRefusal::new(
                 &long,
                 Refusal::TextTooLong
             )))
         );
     }
 
-    /// The first refusal is the one kept: what follows it is not written. Turned red by a later
-    /// refusal replacing the first, or a row written past it.
+    /// The first refusal ends the writing: nothing past it is written. Turned red by a text
+    /// written past a refused one.
     #[test]
-    fn the_first_refusal_is_kept_and_nothing_is_written_past_it() {
+    fn nothing_is_written_past_the_first_refusal() {
         let long = format!("tcp/127.0.0.1:{}", "7".repeat(MAX_LOCATOR_LEN));
-        let mut endpoints = OpenEndpoints::new();
-        endpoints.listen(&long);
-        endpoints.dial(&long);
-        endpoints.dial("tcp/10.0.0.1:7447");
-        assert!(matches!(endpoints.refused(), Some(OpenError::Listen(_))));
-        assert!(endpoints.is_empty());
+        let dial = [long.as_str(), "tcp/10.0.0.1:7447"];
+        let mut rows = lent_rows(2, 1);
+        let refused = written(&dial, &["tcp/0.0.0.0:7447"]).write_into(&mut rows);
+        assert!(matches!(refused, Err(OpenError::Unreachable(_))));
+        assert_eq!(rows.text(EndpointRole::Dial, 0), "");
+        assert_eq!(rows.text(EndpointRole::Listen, 0), "");
     }
 
-    /// A text past the last row is refused as an arena that does not hold what was written.
-    /// Turned red by a write past the rows, or a refusal of another kind.
+    /// A text past the rows the open lent is refused as an arena that does not hold what the
+    /// input names. Turned red by a write past the rows, or a refusal of another kind.
     #[test]
     fn a_text_past_the_last_row_is_refused_as_too_large() {
-        let mut endpoints = OpenEndpoints::new();
-        for _ in 0..OPEN_ENDPOINT_ROWS {
-            endpoints.dial("tcp/10.0.0.1:7447");
-        }
-        assert!(endpoints.refused().is_none());
-        endpoints.listen("tcp/0.0.0.0:7447");
-        assert_eq!(endpoints.len(), OPEN_ENDPOINT_ROWS);
-        assert_eq!(
-            endpoints.refused(),
-            Some(&OpenError::Arena(ArenaRefused::TooLarge))
-        );
+        let mut rows = lent_rows(1, 0);
+        let refused =
+            written(&["tcp/10.0.0.1:7447", "tcp/10.0.0.2:7447"], &[]).write_into(&mut rows);
+        assert_eq!(refused, Err(OpenError::Arena(ArenaRefused::TooLarge)));
+        assert_eq!(rows.text(EndpointRole::Dial, 0), "tcp/10.0.0.1:7447");
     }
 }

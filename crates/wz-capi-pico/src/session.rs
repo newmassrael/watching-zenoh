@@ -2031,125 +2031,90 @@ mod faces_besides_dial_tests {
     }
 }
 
-/// Write the unicast endpoints of `config` into `endpoints`, each as pico's link of its scheme
-/// reads it: the one it states to connect to, then those the scout found (`scouted`), then the
-/// one it states to listen on. A text that has no row is kept by `endpoints` as the refusal the
-/// open answers.
+/// The unicast endpoints the open writes, where the door keeps them: `stated`, the endpoint the
+/// config states to connect to and the one it states to listen on, and `scouted`, those the
+/// scout found, dialled after the stated one. Each is read as pico's link of its scheme reads it
+/// (`crate::endpoint::engine_text`, judged at `open_request`) by the engine as it writes it.
 #[cfg(not(feature = "engine-tokio"))]
-fn write_unicast_endpoints(
-    endpoints: &mut wz_capi_coop::open_source::OpenEndpoints,
-    config: &ConfigState,
-    scouted: &[String],
-) {
-    let dialled = config
-        .get(Z_CONFIG_CONNECT_KEY)
-        .into_iter()
-        .chain(scouted.iter().map(String::as_str));
-    for endpoint in dialled {
-        crate::endpoint::with_engine_text(endpoint, |text| endpoints.dial(text));
-    }
-    if let Some(endpoint) = config.get(Z_CONFIG_LISTEN_KEY) {
-        crate::endpoint::with_engine_text(endpoint, |text| endpoints.listen(text));
-    }
-}
-
-/// The cooperative engine of a pico config, assembled and not yet bound or dialled: the engine's
-/// config made by `make_config`, and the unicast endpoints' texts converted here, as pico's link
-/// of each scheme reads them, unless the session joins a group. Never inlined: the texts, the
-/// moved config and the scout's answers are this frame's, let go of when it returns, before the
-/// open's first link is opened (`CoopEngine::open_assembled`), which runs under the caller's.
-#[cfg(not(feature = "engine-tokio"))]
-#[allow(clippy::too_many_arguments)]
-#[inline(never)]
-fn assemble_on_coop<L, C>(
-    links: L,
-    clock: C,
-    make_config: impl FnOnce() -> wz_capi_coop::CoopConfig<wz_capi_coop::open_source::Counted>,
-    config: crate::object_slot::Placed<ConfigState>,
-    scouted: ScoutedLocators,
-    joins_a_group: bool,
-    policy: SessionPolicy,
-    key_ids: wz_capi_coop::OpenKeyIds,
-    storage: wz_capi_coop::arena::OpenStorage,
-) -> Result<wz_capi_coop::EngineHold<wz_capi_coop::CoopEngine<L, C>>, wz_capi_coop::OpenError>
-where
-    L: wz_capi_coop::CoopLinks + 'static,
-    C: wz_capi_coop::ClockSource + Clone + 'static,
-{
-    let mut endpoints = wz_capi_coop::open_source::OpenEndpoints::new();
-    if !joins_a_group {
-        write_unicast_endpoints(&mut endpoints, &config, &scouted);
-    }
-    // The config's place goes back once its texts are converted, before the engine is built.
-    drop((config, scouted));
-    wz_capi_coop::CoopEngine::assemble(
-        links,
-        clock,
-        crate::coop_host::entropy(),
-        wz_capi_coop::open_source::OpenInput {
-            config: make_config(),
-            endpoints: &mut endpoints,
+fn unicast_endpoints<'a>(
+    stated: &'a [Option<&'a str>; 2],
+    scouted: &'a [String],
+) -> wz_capi_coop::open_source::OpenEndpoints<'a> {
+    use wz_capi_coop::open_source::{EndpointTextList, OpenEndpoints};
+    let [connect, listen] = stated;
+    OpenEndpoints {
+        dial: EndpointTextList {
+            views: connect.as_slice(),
+            strings: scouted,
         },
-        policy,
-        key_ids,
-        storage,
-    )
+        listen: EndpointTextList {
+            views: listen.as_slice(),
+            strings: &[],
+        },
+        reading: crate::endpoint::engine_text,
+    }
 }
 
 #[cfg(all(test, not(feature = "engine-tokio")))]
 mod unicast_endpoint_tests {
-    use super::write_unicast_endpoints;
-    use crate::config::{ConfigState, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY};
+    use super::unicast_endpoints;
     use crate::prelude::*;
-    use wz_capi_coop::open_source::{EndpointRole, OpenEndpoints};
+    use wz_capi_coop::open_source::EndpointTextList;
+    use wz_session_core::locator_directory::LocatorText;
 
-    /// A config that states `connect` and `listen`.
-    fn config(connect: &str, listen: &str) -> ConfigState {
-        let mut config = ConfigState::default();
-        config.insert(Z_CONFIG_CONNECT_KEY, connect);
-        config.insert(Z_CONFIG_LISTEN_KEY, listen);
-        config
-    }
-
-    /// The endpoint the config states to connect to is written first, then every one the scout
-    /// found in the order it found them, then the one to listen on, each with its role. Turned
-    /// red by the listen row written first, or a scouted one dropped.
+    /// The endpoint the config states to connect to is dialled first, then every one the scout
+    /// found in the order it found them, and the one it states to listen on is listened on.
+    /// Turned red by the listen endpoint handed as one to dial, or the scouted ones dropped.
     #[test]
-    fn the_stated_dial_then_the_scouted_then_the_listen_endpoint_are_written_in_order() {
-        let config = config("tcp/10.0.0.1:7447", "tcp/0.0.0.0:7448");
+    fn the_stated_dial_then_the_scouted_are_dialled_and_the_listen_one_listened_on() {
+        let stated = [Some("tcp/10.0.0.1:7447"), Some("tcp/0.0.0.0:7448")];
         let scouted = [
             String::from("tcp/10.0.0.2:7447"),
             String::from("tcp/10.0.0.3:7447"),
         ];
-        let mut endpoints = OpenEndpoints::new();
-        write_unicast_endpoints(&mut endpoints, &config, &scouted);
-        let rows: Vec<_> = (0..endpoints.len())
-            .filter_map(|at| endpoints.row(at))
-            .collect();
+        let endpoints = unicast_endpoints(&stated, &scouted);
         assert_eq!(
-            rows,
-            [
-                (EndpointRole::Dial, "tcp/10.0.0.1:7447"),
-                (EndpointRole::Dial, "tcp/10.0.0.2:7447"),
-                (EndpointRole::Dial, "tcp/10.0.0.3:7447"),
-                (EndpointRole::Listen, "tcp/0.0.0.0:7448"),
-            ]
+            endpoints.dial,
+            EndpointTextList {
+                views: &["tcp/10.0.0.1:7447"],
+                strings: &scouted,
+            }
         );
-        assert!(endpoints.refused().is_none());
+        assert_eq!(
+            endpoints.listen,
+            EndpointTextList {
+                views: &["tcp/0.0.0.0:7448"],
+                strings: &[],
+            }
+        );
     }
 
-    /// A config that states nothing to connect to dials what the scout found, and listens on
-    /// nothing it does not state.
+    /// A config that states nothing names nothing but what the scout found.
     #[test]
-    fn a_config_without_a_connect_endpoint_dials_the_scouted_ones() {
-        let config = ConfigState::default();
+    fn a_config_that_states_nothing_dials_the_scouted_ones() {
+        let stated = [None, None];
         let scouted = [String::from("tcp/10.0.0.2:7447")];
-        let mut endpoints = OpenEndpoints::new();
-        write_unicast_endpoints(&mut endpoints, &config, &scouted);
-        assert_eq!(endpoints.len(), 1);
+        let endpoints = unicast_endpoints(&stated, &scouted);
         assert_eq!(
-            endpoints.row(0),
-            Some((EndpointRole::Dial, "tcp/10.0.0.2:7447"))
+            endpoints.dial,
+            EndpointTextList {
+                views: &[],
+                strings: &scouted,
+            }
+        );
+        assert_eq!(endpoints.listen, EndpointTextList::NONE);
+    }
+
+    /// The engine reads each text as pico's link reads it: a key pico's TCP link does not know is
+    /// left out. Turned red by the texts handed to the engine as written.
+    #[test]
+    fn the_engine_reads_each_text_as_picos_link_does() {
+        let stated = [Some("tcp/127.0.0.1:7447#iface=lo"), None];
+        let endpoints = unicast_endpoints(&stated, &[]);
+        let mut kept = LocatorText::new();
+        assert_eq!(
+            (endpoints.reading)("tcp/127.0.0.1:7447#iface=lo", &mut kept),
+            "tcp/127.0.0.1:7447"
         );
     }
 }
@@ -2226,8 +2191,8 @@ static PRESET_REGION: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::are
 /// `zs` is a valid, null-initialised `z_owned_session_t`.
 #[cfg(not(feature = "engine-tokio"))]
 unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZResult {
-    // What the config names, read where it lies; the texts themselves are written into the
-    // engine's rows by the open (`write_unicast_endpoints` below), the config going with them.
+    // What the config names, read where it lies; the texts themselves are read and written into
+    // the engine's rows by the open (`unicast_endpoints` below), from where the config keeps them.
     // The keys `open_config` reads them by: `open_request` read the config so and took its mode,
     // which is not judged again.
     let (stated, listen) = (
@@ -2361,10 +2326,8 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let clock_moves = crate::time_base::clock_moves(&clock);
     #[cfg(not(feature = "time-base"))]
     let clock_moves: Option<wz_capi_coop::ClockMovesWord> = None;
-    // The engine's config, made in the frame that assembles the engine (`assemble_on_coop`):
-    // this frame, which the open's handshake runs under, holds the maker and what it reads, and
-    // never the config.
-    let make_config = || wz_capi_coop::CoopConfig {
+    // The engine's config, which the open moves into the session.
+    let engine_config = wz_capi_coop::CoopConfig {
         endpoints: dial_list,
         whatami: dial_whatami,
         zid,
@@ -2463,17 +2426,19 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(not(all(feature = "os-host", any(unix, windows))))]
     let memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
         &wz_capi_coop::arena::AllocatorMemory;
-    // Each unicast endpoint's text is converted as pico's link of the scheme reads it
-    // (`crate::endpoint::with_engine_text`, judged at `open_request`), from the config's text
-    // where it lies or the scout's answer, in the frame that assembles the engine, which has
-    // returned, the config with it, before anything is dialled or bound.
-    let opened = assemble_on_coop(
+    // The unicast endpoints where the config and the scout's answers keep them, none beside a
+    // group: the engine reads and writes each into its row as it assembles the session.
+    let stated_texts = [Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY]
+        .map(|key| config.get(key).filter(|_| !joins_a_group));
+    let found: &[String] = if joins_a_group { &[] } else { &scouted[..] };
+    let assembled = wz_capi_coop::CoopEngine::assemble(
         links,
         clock,
-        make_config,
-        config,
-        scouted,
-        joins_a_group,
+        crate::coop_host::entropy(),
+        wz_capi_coop::open_source::OpenInput {
+            config: engine_config,
+            endpoints: unicast_endpoints(&stated_texts, found),
+        },
         policy,
         request.key_ids,
         wz_capi_coop::arena::OpenStorage {
@@ -2481,9 +2446,13 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
             plan,
         },
-    )
-    .and_then(wz_capi_coop::CoopEngine::open_assembled)
-    .map(wz_capi_coop::CoopEngine::into_drive);
+    );
+    // The config's place and the scout's answers go back once the texts are in the session's
+    // rows, before the first link is opened.
+    drop((config, scouted));
+    let opened = assembled
+        .and_then(wz_capi_coop::CoopEngine::open_assembled)
+        .map(wz_capi_coop::CoopEngine::into_drive);
     let drive = match opened {
         Ok(drive) => drive,
         Err(refused) => return coop_open_refusal(&refused),
