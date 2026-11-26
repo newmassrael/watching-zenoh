@@ -9,6 +9,9 @@ use core::sync::atomic::AtomicU32;
 
 use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
 use windows_sys::Win32::System::Environment::{FreeEnvironmentStringsA, GetEnvironmentStrings};
+use windows_sys::Win32::System::Memory::{
+    VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+};
 use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_sys::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime;
 use windows_sys::Win32::System::Threading::{
@@ -194,6 +197,31 @@ pub(crate) fn sleep_ms(ms: u64) {
 /// was asked.
 pub(crate) fn sleep_us(us: u64) {
     sleep_ms(us.div_ceil(1_000));
+}
+
+/// `bytes` bytes reserved and committed in one call, which the system hands zero and makes
+/// resident a page at a time as each is first touched; `None` when it has none to give.
+pub(crate) fn map_pages(bytes: usize) -> Option<core::ptr::NonNull<u8>> {
+    // SAFETY: a fresh reservation names no address, so it overlays nothing this process holds.
+    let at = unsafe {
+        VirtualAlloc(
+            core::ptr::null(),
+            bytes,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    };
+    core::ptr::NonNull::new(at.cast::<u8>())
+}
+
+/// Release what [`map_pages`] reserved, whole (a release names no length); its pages go back to
+/// the system at once.
+///
+/// # Safety
+/// `base` is what one [`map_pages`] gave, released once, and nothing uses it after.
+pub(crate) unsafe fn unmap_pages(base: core::ptr::NonNull<u8>, _bytes: usize) {
+    // A whole reservation of this process is never refused, so the call's answer says nothing.
+    unsafe { VirtualFree(base.as_ptr().cast::<c_void>(), 0, MEM_RELEASE) };
 }
 
 #[cfg(test)]

@@ -13,9 +13,9 @@
 //!
 //! `bytes` is every allocation of the phase, `peak_rise` the most the live heap rose over
 //! what it was when the phase began, and `live_rise` what it rose by at its end: what the phase
-//! left reserved. The sizes name the reservations (an arena is one allocation of its plan's bytes,
-//! the process pools one of theirs), which is what a measurement of the library's memory against
-//! zenoh-pico's is read from.
+//! left reserved. The sizes name the reservations (the process pools are one allocation of theirs),
+//! which is what a measurement of the library's memory against zenoh-pico's is read from. A
+//! session's arena is not among them: on a host it is the system's fresh pages, not the heap's.
 //!
 //! The allocator is installed as this executable's own (`#[global_allocator]`), which is why the
 //! file is an executable of its own, and its one test is `#[ignore]`d: a MEASUREMENT, it asserts

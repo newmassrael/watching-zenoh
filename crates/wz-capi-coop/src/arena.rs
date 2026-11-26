@@ -109,9 +109,10 @@
 //!
 //! # Where the memory comes from
 //!
-//! An [`ArenaMemory`]: on a host the allocator, asked once for the whole arena, whose answer of
-//! none refuses the open rather than ending the process ([`AllocatorMemory`], as the ABI's object
-//! pools reserve theirs); a region an image places is another implementation of it.
+//! An [`ArenaMemory`], asked once for the whole arena, whose answer of none refuses the open rather
+//! than ending the process: the allocator ([`AllocatorMemory`], as the ABI's object pools reserve
+//! theirs), the system's fresh pages, zero as handed, that a host ABI reserves its sessions' arenas
+//! in (`ArenaMemory::reserves_zeroed`), or a region an image places.
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -3312,6 +3313,17 @@ pub trait ArenaMemory: Sync {
     /// Never asked for zero bytes.
     fn reserve(&self, layout: Layout) -> Option<NonNull<u8>>;
 
+    /// Whether every block [`Self::reserve`] gives is zero in every byte as it is given, written
+    /// by nothing: the system's fresh pages (an anonymous `mmap`, `VirtualAlloc`) or a region
+    /// of `.bss` no one used before. The arena of such a memory is laid over its block as it lies
+    /// (`Arena::over_zeroed`): its rows are empty as all-zero bytes, so the open writes none of
+    /// them, and a page no row of the session uses is never written, nor on a host with paging
+    /// resident. Any other memory's block is written where a row must read empty (the head of a
+    /// region, the tables of buffers) and nowhere else. `false` unless the memory says so.
+    fn reserves_zeroed(&self) -> bool {
+        false
+    }
+
     /// Give back what [`Self::reserve`] gave.
     ///
     /// # Safety
@@ -3323,7 +3335,9 @@ pub trait ArenaMemory: Sync {
 /// The allocator, asked once for the whole arena and given it back when the session is let go:
 /// the memory of a host library until the operating system's layer reserves it
 /// (`docs/c-abi-engine-and-memory.md`, phase P4). An allocator with none to give is an answer,
-/// not the end of the process.
+/// not the end of the process. Not said to give zeroed blocks (`ArenaMemory::reserves_zeroed`):
+/// a block it hands from memory given back to it before is not zero, and its zeroed allocation
+/// (`calloc`) writes all of such a block where the open writes only the rows that need it.
 pub struct AllocatorMemory;
 
 impl ArenaMemory for AllocatorMemory {
@@ -3438,8 +3452,8 @@ fn claimed(cells: LentByteCells) -> Option<(NonNull<u8>, usize)> {
 }
 
 /// The span of a session's arena its advanced publishers' caches keep their ring in
-/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life and zeroed then, so
-/// it holds an empty ring, and lent under the engine's lock of its own
+/// ([`SessionRows::cache_bytes`]): claimed at the open for the session's life, zero as its table
+/// was lent, so it holds an empty ring, and lent under the engine's lock of its own
 /// (`wz_capi_port::CacheBytes`).
 #[cfg(feature = "advanced-cache")]
 #[derive(Clone, Copy, Debug)]
@@ -3455,15 +3469,15 @@ unsafe impl Send for CacheSpan {}
 
 #[cfg(feature = "advanced-cache")]
 impl CacheSpan {
-    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back,
-    /// and zeroed. Refused as an arena with no room for a table lent no buffer.
+    /// The one buffer of `cells`, a table of one buffer of `bytes`, claimed and never given back.
+    /// Its bytes are as the table was lent them, zero (`Arena::lend_byte_cells`), and the open
+    /// claims it before anything writes it, so the claim writes none of them and a ring the caches
+    /// never fill is never written. Refused as an arena with no room for a table lent no buffer.
     pub(crate) fn claimed(cells: LentByteCells, bytes: usize) -> Result<Self, ArenaRefused> {
         let (base, len) = claimed(cells).ok_or(ArenaRefused::Lend(LendRefused::Exhausted {
             asked: Some(bytes),
             left: 0,
         }))?;
-        // SAFETY: the buffer is the arena's, claimed by this span alone, and `len` bytes long.
-        unsafe { core::ptr::write_bytes(base.as_ptr(), 0, len) };
         Ok(Self { base, len })
     }
 
@@ -3561,8 +3575,11 @@ impl SessionArena {
 
     /// An arena of `bytes` reserved from `memory` after a head of `head`'s layout, every byte of
     /// the head zero, and where the block starts: the head's place. One body for an arena alone
-    /// (a head of no bytes) and for one beside a region. Refused, having taken nothing, when the
-    /// block is past the address space or the memory has none to give.
+    /// (a head of no bytes) and for one beside a region. A memory that gives its blocks zero
+    /// ([`ArenaMemory::reserves_zeroed`]) has its block written by none of this, so its pages
+    /// are written only by the rows the session uses; any other has its head written zero and its
+    /// arena's tables written as they are lent. Refused, having taken nothing, when the block is
+    /// past the address space or the memory has none to give.
     fn of_bytes_after(
         head: Layout,
         bytes: usize,
@@ -3575,13 +3592,19 @@ impl SessionArena {
         let base = memory.reserve(layout).ok_or(ArenaRefused::NoMemory {
             bytes: offset.saturating_add(bytes),
         })?;
-        // SAFETY: the memory gave `layout` to this call alone: the head's `head.size()` bytes at
-        // its start are inside it, and its arena starts `offset` bytes in, aligned to
-        // `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long, used by nothing else until the
-        // block is given back (`Drop`, or the last count of `Self::keep`).
+        // SAFETY: the memory gave `layout` to this call alone, every byte of it zero where it says
+        // so: the head's `head.size()` bytes at its start are inside it, and its arena starts
+        // `offset` bytes in, aligned to `ARENA_ALIGN` (`Layout::extend`), at least `bytes` long,
+        // used by nothing else until the block is given back (`Drop`, or the last count of
+        // `Self::keep`).
         let arena = unsafe {
-            base.as_ptr().write_bytes(0, head.size());
-            Arena::over(NonNull::new_unchecked(base.as_ptr().add(offset)), bytes)
+            let at = NonNull::new_unchecked(base.as_ptr().add(offset));
+            if memory.reserves_zeroed() {
+                Arena::over_zeroed(at, bytes)
+            } else {
+                base.as_ptr().write_bytes(0, head.size());
+                Arena::over(at, bytes)
+            }
         };
         Ok((
             Self {
@@ -3717,6 +3740,133 @@ mod tests {
             // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
             unsafe { AllocatorMemory.release(base, layout) }
         }
+    }
+
+    /// The byte [`Marked`] and [`Plain`] write over what they reserve.
+    const MARK: u8 = 0x5a;
+
+    /// A memory that says its blocks are zero and breaks that on purpose: each is written over
+    /// with [`MARK`], so a byte the arena's owner writes after the reservation is a byte that is
+    /// no longer the mark. Only the raw bytes of what it gives are read, never a value laid over
+    /// them.
+    struct Marked;
+
+    impl ArenaMemory for Marked {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            Plain.reserve(layout)
+        }
+
+        fn reserves_zeroed(&self) -> bool {
+            true
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract, handed on to the memory that reserved it.
+            unsafe { Plain.release(base, layout) }
+        }
+    }
+
+    /// [`Marked`]'s blocks from a memory that does not say they are zero, as the allocator's.
+    struct Plain;
+
+    impl ArenaMemory for Plain {
+        fn reserve(&self, layout: Layout) -> Option<NonNull<u8>> {
+            let base = AllocatorMemory.reserve(layout)?;
+            // SAFETY: the allocator gave `layout.size()` bytes at `base` to this call alone.
+            unsafe { core::ptr::write_bytes(base.as_ptr(), MARK, layout.size()) };
+            Some(base)
+        }
+
+        unsafe fn release(&self, base: NonNull<u8>, layout: Layout) {
+            // SAFETY: the caller's contract: the allocator gave `base` for `layout`.
+            unsafe { AllocatorMemory.release(base, layout) }
+        }
+    }
+
+    /// The bytes of the block `arena` was reserved in.
+    fn block_of(arena: &SessionArena) -> &[u8] {
+        // SAFETY: the block is the arena's, `layout.size()` bytes from `base`, read while the
+        // arena holds it and lends nothing.
+        unsafe { core::slice::from_raw_parts(arena.base.as_ptr(), arena.layout.size()) }
+    }
+
+    /// Whether every byte of the block `arena` was reserved in is still [`MARK`].
+    fn still_marked(arena: &SessionArena) -> bool {
+        block_of(arena).iter().all(|byte| *byte == MARK)
+    }
+
+    /// The block of a region's head and its arena, from a memory that says its blocks are zero, is
+    /// laid out as it lies and written by none of the reservation: every byte is as the memory
+    /// gave it. The CONTROL is the same reservation from a memory that does not say so, whose head
+    /// is written zero and whose arena after it is not. Turned red by a reservation that writes
+    /// the block of a zeroed memory, or by one that leaves the head of any other as it lay.
+    #[test]
+    fn an_arena_of_zeroed_memory_is_written_by_none_of_its_reservation() {
+        let head = Layout::new::<[u8; 41]>();
+        let (arena, base) =
+            SessionArena::of_bytes_after(head, 256, &Marked).expect("the memory answers");
+        assert_eq!(base, arena.base, "the head is the block's start");
+        assert!(still_marked(&arena), "the reservation wrote a byte");
+        drop(arena);
+
+        let (control, _) =
+            SessionArena::of_bytes_after(head, 256, &Plain).expect("the allocator answers");
+        let block = block_of(&control);
+        assert!(
+            block[..head.size()].iter().all(|byte| *byte == 0),
+            "CONTROL: the head of a memory not said zero is written zero"
+        );
+        let arena_start = block.len() - 256_usize.max(ARENA_ALIGN);
+        assert!(
+            block[arena_start..].iter().all(|byte| *byte == MARK),
+            "the reservation wrote the arena of a memory not said zero"
+        );
+    }
+
+    /// The allocator is not said to give zeroed blocks: a block it hands from memory given back
+    /// before is not zero, and its `calloc` would write all of it where the open writes only the
+    /// rows that need it. Turned red by `AllocatorMemory` said zeroed.
+    #[test]
+    fn the_allocator_is_not_said_to_give_zeroed_blocks() {
+        assert!(!AllocatorMemory.reserves_zeroed());
+        assert!(Marked.reserves_zeroed(), "CONTROL: a memory can say so");
+    }
+
+    /// A session's arena over zeroed memory lends its tables of buffers as the block lies: the
+    /// lend writes none of their flags or bytes, so a buffer no link claims is never written.
+    /// Turned red by the arena made over its block as memory not said to be zero (`Arena::over`),
+    /// whose lend writes them.
+    #[test]
+    fn a_session_arena_lends_its_buffers_without_writing_them() {
+        let (mut arena, _) = SessionArena::of_bytes_after(Layout::new::<()>(), 4096, &Marked)
+            .expect("the memory answers");
+        let mut lend = arena.lender();
+        let _cells = lend.byte_cells(1024, 3);
+        lend.finish().expect("the arena holds the table");
+        assert!(arena.arena.high_water() > 3 * 1024, "the table was lent");
+        assert!(still_marked(&arena), "the lend wrote the table");
+    }
+
+    /// The caches' span is claimed as its table lent it and written by nothing more: bytes put in
+    /// the table's one buffer before the claim are still there after it (a buffer of a fresh table
+    /// is lent zero, which the claim then keeps). Turned red by a claim that writes the span over.
+    #[cfg(feature = "advanced-cache")]
+    #[test]
+    fn the_caches_span_is_claimed_as_its_table_lent_it() {
+        let mut arena = SessionArena::of_bytes(4096, &AllocatorMemory).expect("the host has it");
+        let mut lend = arena.lender();
+        let cells = lend.byte_cells(64, 1);
+        lend.finish().expect("the arena holds the table");
+        {
+            let mut buffer = cells.claim().expect("the table's one buffer");
+            assert!(buffer.as_mut_slice().iter().all(|b| *b == 0), "lent zero");
+            buffer.as_mut_slice().fill(MARK);
+        }
+        let span = CacheSpan::claimed(cells, 64).expect("the buffer is free again");
+        // SAFETY: the span is this test's alone, and the arena it lies in stands past its use.
+        let bytes = unsafe { span.bytes() };
+        assert_eq!(bytes.len(), 64, "the table's one buffer");
+        assert!(bytes.iter().all(|b| *b == MARK), "the claim wrote the span");
     }
 
     /// A plan lays out `ARENA_ROWS` rows and refuses the one past them, keeping those it holds.

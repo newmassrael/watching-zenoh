@@ -32,6 +32,9 @@
 //!
 //! [`env_var`] reads the text the process's environment holds for a name, from the host's own copy
 //! of it, so a setting stated there means the same to a library without `std` as to one with it.
+//!
+//! [`pages`] maps a block of the system's fresh pages, zero as handed and resident only once
+//! written, for memory whose untouched bytes must read zero without being written.
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -393,6 +396,7 @@ use std_lock as chosen;
 
 pub mod in_place;
 mod once;
+pub mod pages;
 
 pub use chosen::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use once::OnceLock;

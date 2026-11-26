@@ -43,13 +43,15 @@ use core::ptr::NonNull;
 use core::sync::atomic::AtomicBool;
 use core::sync::atomic::Ordering;
 
+use crate::bounded::ZeroEmpty;
 use crate::runtime_cell::FlagCell;
 
 /// The flag that says a cell of a [`LentByteCells`] table is lent, in the form the table's
 /// holders need: `Cell<bool>` where one task claims and releases, `AtomicBool` where a release
 /// may come from any thread while a claim is made, so a claim takes the flag in one step and a
-/// release is ordered after every use of the bytes it gives back.
-pub trait CellFlag: FlagCell + 'static {
+/// release is ordered after every use of the bytes it gives back. Its all-zero byte is `false`
+/// ([`ZeroEmpty`]), so a table lent from zeroed memory is free as the memory lies.
+pub trait CellFlag: FlagCell + ZeroEmpty + 'static {
     /// Take the flag when it is free: `true` when this call took it, `false` when it was taken.
     fn take(&self) -> bool;
 }

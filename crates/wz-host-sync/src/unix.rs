@@ -535,3 +535,35 @@ pub(crate) fn sleep_us(us: u64) {
         ask = left;
     }
 }
+
+/// `bytes` bytes of an anonymous private mapping, which the system hands zero and makes resident a
+/// page at a time as each is first touched; `None` when it has none to map.
+pub(crate) fn map_pages(bytes: usize) -> Option<core::ptr::NonNull<u8>> {
+    // SAFETY: an anonymous mapping names no file and no address, so it overlays nothing this
+    // process holds; the system picks where it lies.
+    let at = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            bytes,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        )
+    };
+    if at == libc::MAP_FAILED {
+        None
+    } else {
+        core::ptr::NonNull::new(at.cast::<u8>())
+    }
+}
+
+/// Unmap what [`map_pages`] mapped; its pages go back to the system at once.
+///
+/// # Safety
+/// `base` and `bytes` are what one [`map_pages`] mapped, unmapped once, and nothing uses them
+/// after.
+pub(crate) unsafe fn unmap_pages(base: core::ptr::NonNull<u8>, bytes: usize) {
+    // A whole mapping of this process is never refused, so the call's answer says nothing.
+    unsafe { libc::munmap(base.as_ptr().cast::<c_void>(), bytes) };
+}
