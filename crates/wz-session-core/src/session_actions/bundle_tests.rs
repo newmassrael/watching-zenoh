@@ -1683,6 +1683,182 @@ mod lent_window {
     }
 }
 
+#[cfg(all(
+    not(feature = "tx-lend-only"),
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    feature = "codec-push",
+    feature = "alloc"
+))]
+mod heap_window {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link that lends one slot far shorter than the batch, and keeps each frame written to it
+    /// from the heap and each slot it was handed.
+    struct ShortSlotLink {
+        lent: AtomicBool,
+        slot: Mutex<Vec<u8>>,
+        written: Mutex<Vec<Vec<u8>>>,
+        slots_sent: Mutex<usize>,
+    }
+
+    impl BoxedLinkDriver for ShortSlotLink {
+        fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            self.written
+                .lock()
+                .expect("the writes")
+                .push(bytes.to_vec());
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            if self.lent.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            Some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            _start: usize,
+            _len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            *self.slots_sent.lock().expect("the slot sends") += 1;
+            self.lent.store(false, Ordering::SeqCst);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {
+            self.lent.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// A plain put of `value` on `actions`, reliable or best effort.
+    fn put(
+        actions: &SessionLinkActions<PlainRuntime, StillClock>,
+        value: &[u8],
+        reliable: bool,
+    ) -> Option<Result<(), SendWireError>> {
+        let key = crate::named_key::NamedKey::literal("home/heap").expect("a key");
+        actions.send_plain_put_qos(
+            key,
+            value,
+            None,
+            super::super::SendAs {
+                reliable,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        )
+    }
+
+    /// A window's frame the link lends no whole-batch slot for is staged on the heap, counted as
+    /// a short slot, and the next put of its reliability joins it there without a slot asked; a
+    /// best-effort put sends it once and opens its own. Turned red by `write_n_msg`'s heap arm not
+    /// comparing the open frame's R flag (the best-effort put joins the reliable frame and
+    /// nothing is written before the flush), by that arm skipped (the second put opens a frame of
+    /// its own and the first leaves alone), or by the short slot counted as no slot (its
+    /// `heap_why = HeapStage::ShortSlot` taken out).
+    #[test]
+    fn a_window_frame_no_whole_slot_holds_is_staged_and_joined_on_the_heap() {
+        let link = Arc::new(ShortSlotLink {
+            lent: AtomicBool::new(false),
+            slot: Mutex::new(alloc::vec![0; 16]),
+            written: Mutex::new(Vec::new()),
+            slots_sent: Mutex::new(0),
+        });
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        assert_eq!(actions.batch_start(), Ok(()));
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert!(
+            link.written.lock().expect("the writes").is_empty(),
+            "both wait in the window's heap frame"
+        );
+        let counts = actions.batch_lend_counts();
+        assert_eq!(
+            (
+                counts.heap_short_slot,
+                counts.heap_no_slot,
+                counts.slot_frames
+            ),
+            (1, 0, 0),
+            "one frame opened, on the heap, for a short slot"
+        );
+        assert_eq!(put(&actions, b"v", false), Some(Ok(())));
+        assert_eq!(
+            link.written.lock().expect("the writes").len(),
+            1,
+            "the reliable frame left when the best-effort put came"
+        );
+        assert_eq!(actions.batch_flush(), Ok(()));
+        let written = link.written.lock().expect("the writes");
+        assert_eq!(written.len(), 2, "the two frames of the window");
+        assert_eq!(
+            crate::frame_encode::frame_wire_reliability(&written[0]),
+            Reliability::Reliable
+        );
+        assert_eq!(
+            crate::frame_encode::frame_wire_reliability(&written[1]),
+            Reliability::BestEffort
+        );
+        drop(written);
+        // A frame of one reliable put, for its length.
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(actions.batch_flush(), Ok(()));
+        let written = link.written.lock().expect("the writes");
+        assert_eq!(written.len(), 3, "and the frame of one put");
+        assert_eq!(
+            written[1].len(),
+            written[2].len(),
+            "a frame of one put is as long whatever its reliability"
+        );
+        assert!(
+            written[0].len() > written[2].len(),
+            "the window's reliable frame holds more than one put"
+        );
+        assert_eq!(
+            *link.slots_sent.lock().expect("the slot sends"),
+            0,
+            "no slot was sent"
+        );
+        assert!(
+            !link.lent.load(Ordering::SeqCst),
+            "every short slot went back"
+        );
+        assert_eq!(actions.batch_lend_counts().heap_short_slot, 3);
+    }
+}
+
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
 /// path, and nothing reaches the link: the vector refuses no write, but the body refuses its
 /// message, and the send answers that as a value.
