@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -92,10 +92,10 @@ impl<S: LocatorStorage> LocatorIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor
-    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
-    /// is left untouched so the caller can resume after appending more
-    /// bytes (RFC §synth-5-B L494-519).
+    /// Decode the next frame from `cursor`. On success the cursor advances
+    /// past the consumed bytes; on a refusal it does not move, so a caller that
+    /// receives `NeedMoreBytes` reads the frame again from the same place once
+    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: LocatorFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
@@ -119,42 +119,61 @@ impl<S: LocatorStorage> LocatorIn<S> {
     /// `_out` holds the fields decoded so far and is not to be read; each of
     /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: LocatorFrom<'f> {
-        // A field past what the profile holds is read on and not held; the
-        // frame says so once it is read whole (docs/adr/0077 §7).
-        let mut _over = false;
-        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        cursor.read_frame(|cursor| Self::read_into(cursor, _out))
+    }
+
+    /// Read the frame through `cursor`, the frame's reader, into `_out`: every
+    /// read total, each refusal recorded in the reader and the first of them
+    /// the frame's verdict, which the reader says once the frame is read
+    /// (docs/adr/0128). A codec that embeds or dispatches to this one reads it
+    /// through its own reader, so one frame has one verdict, and through this
+    /// one function, out of line where the set reads it from two sites or more
+    /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    #[inline(never)]
+    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: LocatorFrom<'f> {
+        // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the cursor and
-        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let locator_len = cursor.read_vle_u64()?;
+        let locator_len = cursor.read_vle_u64();
         let locator = {
             let _len = locator_len;
             if _len > 255 {
-                return Err(CodecError::LengthOutOfRange);
+                cursor.fail(CodecError::LengthOutOfRange);
             }
             let _n = _len as usize;
-            let raw = cursor.peek_slice(_n)?;
-            let _v = core::str::from_utf8(raw)
-                .map_err(|_| CodecError::InvalidUtf8)?;
-            cursor.advance(_n)?;
-            _v
+            let raw = cursor.take_slice(_n);
+            cursor.settle(core::str::from_utf8(raw).map_err(|_| CodecError::InvalidUtf8))
         };
-        let locator = ::sce_forge_runtime::codec::Bounded::new(locator).ok_or(CodecError::LengthOutOfRange)?;
-        let locator = ::sce_forge_runtime::codec::note_held(locator.store::<S, LocatorLocatorField>(), &mut _over)?;
+        let locator = cursor.settle(::sce_forge_runtime::codec::Bounded::new(locator).ok_or(CodecError::LengthOutOfRange));
+        let locator = cursor.hold(locator.store::<S, LocatorLocatorField>());
         _out.locator_len = locator_len;
         _out.locator = locator;
-        if _over {
-            return Err(CodecError::CapacityExceeded);
-        }
-        Ok(())
+
+    }
+
+    /// [`Self::read_into`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: LocatorFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into(cursor, &mut _out);
+        _out
+    }
+
+    /// [`Self::read`], under the name every view reads with a chain hook
+    /// (docs/adr/0130): `Locator` is its own view and holds no chain,
+    /// so `_hook` is shown nothing.
+    #[inline(always)]
+    pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: LocatorFrom<'f> {
+        Self::read(cursor)
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -319,8 +338,9 @@ pub struct LocatorWalk;
 impl ::sce_forge_runtime::codec::ListWalk<0> for LocatorWalk {
     type Entry<'b> = LocatorView<'b>;
 
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        LocatorView::decode(_c)
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        LocatorView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
