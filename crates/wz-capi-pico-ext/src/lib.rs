@@ -3,9 +3,9 @@
 
 //! # wz-capi-pico-ext
 //!
-//! The doors of the additional features of the pico C ABI (`wz_ext_e2e_*`,
-//! `wz_ext_stream_supervisor_*`, `wz_ext_instance_keyer_*`, `wz_ext_replay_*`,
-//! `wz_ext_message_catalog_*`, `wz_ext_message_payload_*` and `wz_ext_additional_interface`) as a
+//! The doors of the additional features of the pico C ABI (`zext_e2e_*`,
+//! `zext_stream_supervisor_*`, `zext_instance_keyer_*`, `zext_replay_*`,
+//! `zext_message_catalog_*`, `zext_message_payload_*` and `zext_additional_interface`) as a
 //! library of their own, which runs over the core library (`wz-capi-pico` built with
 //! `--cfg wz_additional_apart`) and reaches it through C only.
 //!
@@ -21,7 +21,7 @@
 //! (`crates/wz-capi-pico/src/ext_interface.rs`, `docs/capi-pico-additional-library.md`): handles
 //! are opaque, each library frees what it allocated, no object of a language runtime crosses, and
 //! the interface's version is asked, at load time by the function named by its major version and at
-//! run time by `wz_ext_additional_interface`.
+//! run time by `zext_additional_interface`.
 
 // pico's and wz's C type names are snake_case; the doors keep them verbatim, as the core does.
 #![allow(non_camel_case_types)]

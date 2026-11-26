@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_config_policy`, `wz_ext_config_profile` and `wz_ext_config_document`: the policies
+//! `zext_config_policy`, `zext_config_profile` and `zext_config_document`: the policies
 //! and the limits a config states for the session [`z_open`](crate::session::z_open) opens from
 //! it.
 //!
 //! pico's config is a set of numbered keys and has none for wz's policies, so these are doors wz
-//! has and zenoh-pico does not: `wz_ext_*`, declared in `wz_ext.h`. The first two are in a build
+//! has and zenoh-pico does not: `zext_*`, declared in `wz_ext.h`. The first two are in a build
 //! with the `config-policy` capability, which a build that names nothing has and the zenoh-pico
-//! preset leaves out; `wz_ext_config_document` is in a build with the `config-document` capability,
+//! preset leaves out; `zext_config_document` is in a build with the `config-document` capability,
 //! since it links a JSON5 reader. An MCU image whose domain of a policy holds one value refuses
 //! every other value of it by name.
 //!
@@ -21,10 +21,10 @@
 //! through [`policy_document::resolve_under`], which answers the same without reading one:
 //!
 //! 1. the build defaults;
-//! 2. the profile `wz_ext_config_profile` named, else the one the document names;
-//! 3. the `wz/policies` of the document `wz_ext_config_document` was handed
+//! 2. the profile `zext_config_profile` named, else the one the document names;
+//! 3. the `wz/policies` of the document `zext_config_document` was handed
 //!    ([`policy_document::Origin::Document`]);
-//! 4. the statements of `wz_ext_config_policy` ([`policy_document::Origin::Api`]).
+//! 4. the statements of `zext_config_policy` ([`policy_document::Origin::Api`]).
 //!
 //! The `wz/limits` of the document are resolved in the same resolution, over the limits a session
 //! of this ABI opens under (`crate::session::opening_limits`, zenoh-pico's): a pico session holds
@@ -32,7 +32,7 @@
 //! does not have is.
 //!
 //! The runtime is the process's (`wz_capi_port::runtime_limits`): its limits are stated by
-//! `wz_ext_runtime_limits_document`, from the `wz/limits` of a document of their own, before the
+//! `zext_runtime_limits_document`, from the `wz/limits` of a document of their own, before the
 //! first machine of the process that reads them is made.
 //!
 //! Each door checks its change the way the open will compose it, so a change the build would
@@ -136,13 +136,13 @@ impl PolicyStatements {
 #[cfg(feature = "config-policy")]
 #[derive(Clone, Default)]
 pub(crate) struct PolicyStatements {
-    /// The id of the profile `wz_ext_config_profile` named; it replaces the profile the document
+    /// The id of the profile `zext_config_profile` named; it replaces the profile the document
     /// names.
     profile: Option<&'static str>,
-    /// What the `wz` member of the document `wz_ext_config_document` was handed states.
+    /// What the `wz` member of the document `zext_config_document` was handed states.
     #[cfg(feature = "config-document")]
     document: DocumentRows,
-    /// The statements of `wz_ext_config_policy`, by the build's table.
+    /// The statements of `zext_config_policy`, by the build's table.
     api: PolicySet,
 }
 
@@ -214,7 +214,7 @@ impl PolicyStatements {
         policy_document::resolve_under(base, overrides).map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)
     }
 
-    /// The key ids the `wz/key-ids` of the document `wz_ext_config_document` was handed states,
+    /// The key ids the `wz/key-ids` of the document `zext_config_document` was handed states,
     /// which its door read, or none when the config was handed no document.
     #[cfg(feature = "shared-key-ids")]
     pub(crate) fn document_key_ids(
@@ -270,7 +270,7 @@ impl PolicyStatements {
     }
 }
 
-/// What the `wz` member of the document `wz_ext_config_document` was handed states, read by the
+/// What the `wz` member of the document `zext_config_document` was handed states, read by the
 /// door into the build's own ids with no tree kept: the profile, the statements of `wz/policies`
 /// and those of `wz/limits`, each held by the build's table, and the key ids of `wz/key-ids`. `Default` is a document with no `wz` member, which states nothing.
 #[cfg(feature = "config-document")]
@@ -288,7 +288,7 @@ struct DocumentRows {
 struct Refused;
 
 /// The limits of a runtime the `wz/limits` of a runtime's document states, each once, in the
-/// document's order: what `wz_ext_runtime_limits_document` resolves over the build's. Each id is
+/// document's order: what `zext_runtime_limits_document` resolves over the build's. Each id is
 /// the build's own, from its table, so the rows keep no text of the document, and the table has a
 /// row for each, so they never run out.
 #[cfg(feature = "config-document")]
@@ -686,7 +686,7 @@ unsafe fn text_of<'a>(text: *const c_char) -> Result<&'a str, ZResult> {
 /// NUL-terminated strings.
 #[cfg(feature = "config-policy")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_policy(
+pub unsafe extern "C" fn zext_config_policy(
     config: *mut z_loaned_config_t,
     policy: *const c_char,
     value: *const c_char,
@@ -709,7 +709,7 @@ pub unsafe extern "C" fn wz_ext_config_policy(
 /// string.
 #[cfg(feature = "config-policy")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_profile(
+pub unsafe extern "C" fn zext_config_profile(
     config: *mut z_loaned_config_t,
     profile: *const c_char,
 ) -> ZResult {
@@ -723,7 +723,7 @@ pub unsafe extern "C" fn wz_ext_config_profile(
 /// Hands `config` a zenoh JSON5 document, of which the `wz` member is read: the profile it names,
 /// its `wz/policies`, its `wz/limits`, the limits of a session it states, and, in a build with
 /// the `shared-key-ids` capability, its `wz/key-ids`, the key ids every node shares, under what
-/// `wz_ext_config_key_ids` and `wz_ext_config_key_wire_form_for` state. The rest of the document
+/// `zext_config_key_ids` and `zext_config_key_wire_form_for` state. The rest of the document
 /// is not read, so the document a zenoh-c program opens with configures these sessions alike. A
 /// second call replaces the first. Text that is no JSON5 object, a `wz` member whose shape is
 /// refused (one that is not an object, a value that is not a string, a limit's value that is
@@ -738,14 +738,14 @@ pub unsafe extern "C" fn wz_ext_config_profile(
 /// object being 1) is refused with `Z_ERR_CONFIG_INVALID_VALUE`.
 ///
 /// In a build with the `config-document` capability alone: the door links a JSON5 reader that a
-/// build stating its policies through [`wz_ext_config_policy`] and [`wz_ext_config_profile`] does
+/// build stating its policies through [`zext_config_policy`] and [`zext_config_profile`] does
 /// not need.
 ///
 /// # Safety
 /// `config` must be null or a live loaned config; `json5` must be null or a NUL-terminated string.
 #[cfg(feature = "config-document")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_document(
+pub unsafe extern "C" fn zext_config_document(
     config: *mut z_loaned_config_t,
     json5: *const c_char,
 ) -> ZResult {
@@ -761,7 +761,7 @@ pub unsafe extern "C" fn wz_ext_config_document(
 /// session: a profile, a policy, key ids and a limit of a session are its config's to state, and
 /// are refused here with everything the reader of a node's document refuses.
 ///
-/// Read by the walker of `wz_ext_config_document`, with no tree and at most
+/// Read by the walker of `zext_config_document`, with no tree and at most
 /// `CONFIG_DOCUMENT_DEPTH` deep, so the two doors read one document by one set of rules and the
 /// build links one reader of it.
 #[cfg(feature = "config-document")]
@@ -783,7 +783,7 @@ fn runtime_limits_of(text: &str) -> Result<RuntimeLimits, ZResult> {
 /// second call replaces the first.
 ///
 /// The process's first machine of those takes the limits: the first call of a
-/// `wz_ext_supervision_*` door, `wz_ext_stream_supervisor_new` or `wz_ext_message_catalog_new`.
+/// `zext_supervision_*` door, `zext_stream_supervisor_new` or `zext_message_catalog_new`.
 /// A call after it is refused with `Z_EINVAL` and the process keeps the limits it took.
 ///
 /// Text that is no JSON5 object, a document nested deeper than `CONFIG_DOCUMENT_DEPTH` (the
@@ -793,13 +793,13 @@ fn runtime_limits_of(text: &str) -> Result<RuntimeLimits, ZResult> {
 /// `Z_ERR_CONFIG_INVALID_VALUE`, whenever the call comes, and the process keeps what it held. A
 /// null `json5` is `Z_ERR_NULL`.
 ///
-/// In a build with the `config-document` capability alone, as `wz_ext_config_document` is.
+/// In a build with the `config-document` capability alone, as `zext_config_document` is.
 ///
 /// # Safety
 /// `json5` must be null or a NUL-terminated string.
 #[cfg(feature = "config-document")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_runtime_limits_document(json5: *const c_char) -> ZResult {
+pub unsafe extern "C" fn zext_runtime_limits_document(json5: *const c_char) -> ZResult {
     use wz_capi_port::runtime_limits::{self, StateRefused};
 
     guarded(|| {
@@ -848,20 +848,20 @@ mod tests {
         fn policy(&mut self, policy: &str, value: &str) -> ZResult {
             let (policy, value) = (CString::new(policy).unwrap(), CString::new(value).unwrap());
             // SAFETY: a live config and two live strings.
-            unsafe { wz_ext_config_policy(self.loaned(), policy.as_ptr(), value.as_ptr()) }
+            unsafe { zext_config_policy(self.loaned(), policy.as_ptr(), value.as_ptr()) }
         }
 
         fn profile(&mut self, profile: &str) -> ZResult {
             let profile = CString::new(profile).unwrap();
             // SAFETY: a live config and a live string.
-            unsafe { wz_ext_config_profile(self.loaned(), profile.as_ptr()) }
+            unsafe { zext_config_profile(self.loaned(), profile.as_ptr()) }
         }
 
         #[cfg(feature = "config-document")]
         fn document(&mut self, text: &str) -> ZResult {
             let text = CString::new(text).unwrap();
             // SAFETY: a live config and a live string.
-            unsafe { wz_ext_config_document(self.loaned(), text.as_ptr()) }
+            unsafe { zext_config_document(self.loaned(), text.as_ptr()) }
         }
 
         fn state(&self) -> &ConfigState {
@@ -1093,28 +1093,28 @@ mod tests {
         // SAFETY: each pointer is null or live.
         unsafe {
             assert_eq!(
-                wz_ext_config_policy(core::ptr::null_mut(), policy.as_ptr(), value.as_ptr()),
+                zext_config_policy(core::ptr::null_mut(), policy.as_ptr(), value.as_ptr()),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_config_policy(config.loaned(), core::ptr::null(), value.as_ptr()),
+                zext_config_policy(config.loaned(), core::ptr::null(), value.as_ptr()),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_config_policy(config.loaned(), policy.as_ptr(), core::ptr::null()),
+                zext_config_policy(config.loaned(), policy.as_ptr(), core::ptr::null()),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_config_profile(core::ptr::null_mut(), policy.as_ptr()),
+                zext_config_profile(core::ptr::null_mut(), policy.as_ptr()),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_config_profile(config.loaned(), core::ptr::null()),
+                zext_config_profile(config.loaned(), core::ptr::null()),
                 Z_ERR_NULL
             );
             #[cfg(feature = "config-document")]
             assert_eq!(
-                wz_ext_config_document(config.loaned(), core::ptr::null()),
+                zext_config_document(config.loaned(), core::ptr::null()),
                 Z_ERR_NULL
             );
         }
@@ -1577,7 +1577,7 @@ mod tests {
         let door = |text: &str| {
             let text = CString::new(text).unwrap();
             // SAFETY: a live string.
-            unsafe { wz_ext_runtime_limits_document(text.as_ptr()) }
+            unsafe { zext_runtime_limits_document(text.as_ptr()) }
         };
         let held = wz_capi_port::runtime_limits::held();
         for text in [
@@ -1595,7 +1595,7 @@ mod tests {
         );
         // SAFETY: a null pointer, which the door refuses.
         assert_eq!(
-            unsafe { wz_ext_runtime_limits_document(core::ptr::null()) },
+            unsafe { zext_runtime_limits_document(core::ptr::null()) },
             Z_ERR_NULL
         );
         assert_eq!(wz_capi_port::runtime_limits::held(), held);
@@ -1734,7 +1734,7 @@ mod tests {
             }
             let text = CString::new(text).unwrap();
             // SAFETY: a live string.
-            let code = unsafe { wz_ext_runtime_limits_document(text.as_ptr()) };
+            let code = unsafe { zext_runtime_limits_document(text.as_ptr()) };
             assert_eq!(code, Z_ERR_CONFIG_INVALID_VALUE, "{limit}");
         }
         assert_eq!(wz_capi_port::runtime_limits::held(), held);

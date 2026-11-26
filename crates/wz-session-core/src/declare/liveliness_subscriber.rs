@@ -118,8 +118,10 @@ use crate::wireexpr_resolve::resolve_wireexpr_into;
     feature = "rx-lent-control"
 ))]
 use crate::wireexpr_resolve::resolve_wireexpr_view;
+#[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
+use crate::wireexpr_resolve::KeyexprBuf;
 #[cfg(feature = "storage-profile")]
-use crate::wireexpr_resolve::{KeyexprBuf, KeyexprOut};
+use crate::wireexpr_resolve::{KeyexprOut, KeyexprRow};
 // R311y739 — the two-space PAIR is `alloc`-only: `dispatch_messages` /
 // `dispatch_iteration_event` name it in their signatures under that gate alone,
 // while only the `Declare` arm inside them resolves and so carries `codec-declare`.
@@ -216,7 +218,9 @@ pub struct TokenNews {
     kind: LivelinessSampleKind,
     token_id: u64,
     historical: bool,
-    key: KeyexprBuf,
+    /// Of the static policy whatever the build's profile: the news is written for each token a
+    /// peer declares or retracts after the open, which takes no heap.
+    key: KeyexprRow,
 }
 
 #[cfg(feature = "storage-profile")]
@@ -226,7 +230,7 @@ impl Default for TokenNews {
             kind: LivelinessSampleKind::Put,
             token_id: 0,
             historical: false,
-            key: KeyexprBuf::new(),
+            key: KeyexprRow::new_static(),
         }
     }
 }
@@ -1893,7 +1897,8 @@ impl<P: Storage> PeerTokens<P> {
         let peer_keyexpr_table = peer_keyexpr_table.into();
         match body {
             DeclareVariant::CodecZenohDeclToken(decl) => {
-                let mut composed = KeyexprBuf::new();
+                // Composed in the frame on every profile: a token read where it lies takes no heap.
+                let mut composed = KeyexprRow::new_static();
                 match resolve_wireexpr_view(&decl.keyexpr.body, peer_keyexpr_table, &mut composed) {
                     Ok(Some(resolved)) => self.news_declared(decl.id, resolved, historical, news),
                     Ok(None) => false,
@@ -3278,6 +3283,27 @@ mod tests {
         );
         assert!(!peer.take_lost(&mut news), "none left");
         assert_eq!(peer.count(), 0);
+    }
+
+    /// A token's news holds its key in a buffer of the static policy on every profile, so writing
+    /// it takes no heap: a key at the bound is held whole, and one past it is refused. Turned red
+    /// by a news whose key is the profile's growable text, which takes a key past the bound.
+    #[cfg(feature = "storage-profile")]
+    #[test]
+    fn a_token_news_holds_its_key_to_the_bound_on_every_profile() {
+        let mut news = TokenNews::default();
+        let at_bound = "k".repeat(caps::MAX_KEYEXPR_BYTES);
+        assert!(news.write(LivelinessSampleKind::Put, &at_bound, 3, false));
+        let sample = news.sample();
+        assert_eq!(
+            (sample.kind, sample.keyexpr, sample.token_id),
+            (LivelinessSampleKind::Put, at_bound.as_str(), 3)
+        );
+        let past = "k".repeat(caps::MAX_KEYEXPR_BYTES + 1);
+        assert!(
+            !news.write(LivelinessSampleKind::Delete, &past, 4, false),
+            "a key past the bound was held"
+        );
     }
 
     #[test]

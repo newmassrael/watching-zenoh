@@ -300,19 +300,19 @@ pub(crate) use entries::ConfigEntries;
 pub(crate) struct ConfigState {
     pub(crate) entries: ConfigEntries,
     /// What wz's own doors state about the session's policies, which no numbered key carries
-    /// (`wz_ext_config_policy`, `wz_ext_config_profile`, `wz_ext_config_document`); nothing in a
+    /// (`zext_config_policy`, `zext_config_profile`, `zext_config_document`); nothing in a
     /// build without `config-policy`.
     pub(crate) policies: crate::config_policy::PolicyStatements,
-    /// The transport the program supplies (`wz_ext_config_transport`), which the session opened
+    /// The transport the program supplies (`zext_config_transport`), which the session opened
     /// from this config uses for every link in place of the system's sockets.
     #[cfg(feature = "app-transport")]
     pub(crate) transport: Option<alloc::sync::Arc<wz_session_core::app_transport::AppTransport>>,
-    /// The key ids every node of the deployment shares (`wz_ext_config_key_ids`) and the
-    /// endpoints whose key-wire form is stated apart (`wz_ext_config_key_wire_form_for`), which
+    /// The key ids every node of the deployment shares (`zext_config_key_ids`) and the
+    /// endpoints whose key-wire form is stated apart (`zext_config_key_wire_form_for`), which
     /// the open hands the engine.
     #[cfg(feature = "shared-key-ids")]
     pub(crate) key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
-    /// The time base the program supplies (`wz_ext_config_time_base`), which the session opened
+    /// The time base the program supplies (`zext_config_time_base`), which the session opened
     /// from this config times its deadlines by in place of the system's clock.
     #[cfg(feature = "time-base")]
     pub(crate) time_base: Option<wz_node_time::time_base::TimeBaseHold>,
@@ -330,7 +330,7 @@ impl ConfigState {
     /// `Z_ERR_CONFIG_INVALID_VALUE`, and the config keeps its earlier value: the one place a value
     /// enters a config, so no door records one unjudged.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
-        if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
+        if key == crate::config_limits::ZEXT_CONFIG_LIMITS_KEY {
             // Judged over a copy of what an open composes from, which the judgement drops.
             let mut probe = crate::config_limits::Stated::OPENING;
             if let Err(code) = crate::config_limits::state_over(Some(value), &mut probe) {
@@ -578,7 +578,7 @@ mod tests {
     /// build takes is recorded. Turned red by an insert that records the key unjudged.
     #[test]
     fn a_limits_value_the_build_refuses_is_not_recorded() {
-        use crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY as LIMITS;
+        use crate::config_limits::ZEXT_CONFIG_LIMITS_KEY as LIMITS;
         use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
         let mut config = Config::new();
         assert_eq!(config.insert(LIMITS, ""), Z_OK);
@@ -601,7 +601,7 @@ mod tests {
     /// without a policy. Turned red by an open that answers the statement it was handed unwritten.
     #[test]
     fn an_open_writes_the_limits_keys_counts_over_its_statement() {
-        use crate::config_limits::{state_over, Stated, WZ_EXT_CONFIG_LIMITS_KEY as LIMITS};
+        use crate::config_limits::{state_over, Stated, ZEXT_CONFIG_LIMITS_KEY as LIMITS};
         use wz_session_core::policy::SessionPolicy;
         let Some(fewer) = Stated::OPENING
             .limits

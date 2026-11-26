@@ -106,7 +106,7 @@ use wz_capi_port::{
     BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
     FilteredPut, HeldKey, HoldRefused, KeyAnchor, KeyAsk, KeyHold, KeyNotHeld, KeyView, MatchId,
     MatchingSink, PeerIdentity, PlaceLender, ReadTaskStartRefused, SessionClosed, SessionDrive,
-    SessionEngine, SessionKeys, StatementNotHonoured, SubId, SubscriberSink, WireKey,
+    SessionEngine, SessionKeys, StatementNotHonoured, StepRefused, SubId, SubscriberSink, WireKey,
 };
 // The port's refusal of a declaration, named apart from this crate's refusal of an endpoint.
 use wz_capi_port::Refusal as Declined;
@@ -169,7 +169,7 @@ use wz_session_core::link_life::{Effects, LinkInput, LinkPhase, Refused as Hands
 use wz_session_core::link_life::{LinkRole, LinkTimes, UnicastLink};
 use wz_session_core::locality::Locality;
 
-use crate::open_source::{Counted, EndpointList, EndpointWriter, OpenSource};
+use crate::open_source::{Counted, EndpointList, OpenInput, OpenSource};
 use wz_runtime_coop::locator_text::parse_listen_locator;
 use wz_session_core::metadata::PushMetadata;
 use wz_session_core::named_key::NamedKey;
@@ -1377,6 +1377,10 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     reach: ReachEngine<Self>,
 }
 
+/// The bound of a read's wait for input that leaves the config's (`CoopConfig::idle_wait_ms`) the
+/// only one: the read task's and `zp_read`'s, which the program bounds by no step of its own.
+const NO_STEP_BOUND_MS: u32 = u32::MAX;
+
 /// What a step of the session came to ([`CoopEngine::step`]).
 #[cfg(wz_round)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1439,6 +1443,10 @@ pub(crate) struct Takes {
     /// its pump (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) face_turns: core::sync::atomic::AtomicUsize,
+    /// The turns of a face whose look held every face's send place for a turn of its replay
+    /// (`direct`).
+    #[cfg(not(wz_round))]
+    pub(crate) replay_holds: core::sync::atomic::AtomicUsize,
     /// The deliveries entered (`CoopEngine::deliver`): a read enters one, after every face and
     /// group it stepped (`direct`).
     #[cfg(not(wz_round))]
@@ -1585,7 +1593,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
     /// # Safety
     /// As for [`LockForm::init_at`], of a `Self`.
     unsafe fn init_at(at: NonNull<Self>, core: Core<L, C>) {
-        core.session.keys.guard_by_owner_lock();
+        // Named by the address each hold marks its thread with (`Self::lock`): the lock lies here
+        // from now on.
+        core.session
+            .keys
+            .guard_by_owner_lock(at.as_ptr().cast_const().cast(), session_held_here);
         // SAFETY: the caller's contract, for the one field.
         unsafe {
             <CoopForm as LockForm>::init_at(
@@ -1608,13 +1620,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> CoreLock<L, C> {
         Some(CoreGuard::taken(guard, held))
     }
 
-    /// The state with no lock, the engine being let go of: the key arena is marked held for the
-    /// rest of the engine's drop, which drops every row that keeps a key.
+    /// The state with no lock, the engine being let go of: the key arena is its owner's alone for
+    /// the rest of the engine's drop, which drops every row that keeps a key on whichever thread
+    /// let go of the engine last.
     fn dropping(&mut self) -> &mut Core<L, C> {
         let core = &mut <CoopForm as LockForm>::get_mut(&mut self.0).0;
-        core.session.keys.owner_lock_taken();
+        core.session.keys.owner_alone();
         core
     }
+}
+
+/// Whether the calling thread holds the session lock that lies at `lock`, as the key arena's check
+/// asks it ([`KeySpace::guard_by_owner_lock`]): by the marks each hold leaves on its thread, and
+/// `true` where they cannot tell, which leaves the arena's own mark to answer.
+fn session_held_here(lock: *const ()) -> bool {
+    wz_capi_port::sync::SessionHeld::held_on_this_thread(lock).unwrap_or(true)
 }
 
 /// A hold of [`CoreLock`]: the key arena is marked held from its taking to its drop.
@@ -6039,10 +6059,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
     }
 
     /// What a read waits for before it steps the session: the link's next input, for at most
-    /// [`CoopConfig::idle_wait_ms`], unless the link already holds some or waits in its own loop;
+    /// [`CoopConfig::idle_wait_ms`] and at most `most_ms`, unless the link already holds some or
+    /// waits in its own loop;
     /// and while no link is open, the next dial, for no longer either. zenoh-pico's read waits
     /// the same way, on a socket whose receive timeout is that long (`Z_CONFIG_SOCKET_TIMEOUT`).
-    fn idle_wait(&mut self) -> IdleWait {
+    fn idle_wait(&mut self, most_ms: u32) -> IdleWait {
         // What is due other than input, the earliest of it in milliseconds of the session's clock:
         // a get whose deadline comes first is swept when it is due, not up to a whole wait late
         // (read at the root of the index of the gets' deadlines, so no table is walked and a get
@@ -6080,13 +6101,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // The clock is read when something is due, and that reading serves every bound after it:
         // a wait with nothing due reads it not at all.
         let mut clock_now: Option<u64> = None;
+        let bound = self.config.idle_wait_ms.min(most_ms);
         let most = match due_ms {
             Some(due_ms) => Self::wait_until(
-                self.config.idle_wait_ms,
+                bound,
                 due_ms,
                 *clock_now.get_or_insert_with(|| self.now_us()),
             ),
-            None => self.config.idle_wait_ms,
+            None => bound,
         };
         // A group whose stack gives no wait for its input is looked at on its tick.
         #[cfg(feature = "group")]
@@ -6297,10 +6319,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// `Self::open_in` (a build with `runtime-plan`), its config read from `source` inside the
-    /// open, once, before anything else: an ABI that builds the config from its own values hands
-    /// the source (a maker of the config is one), so the config is never a value of its frame,
-    /// which the open's handshake runs under. The source writes the endpoints' texts into the rows the open lends for them, and is
-    /// let go of before anything is bound or dialled ([`OpenSource`]).
+    /// open, once, before anything else: a host that builds the config from its own values hands
+    /// the source (a maker of the config is one), so neither the config nor its endpoints' texts
+    /// are values of a frame the open's handshake runs under ([`OpenSource`]). An ABI that writes
+    /// the texts in its own form opens with [`Self::assemble`] and [`Self::open_assembled`].
     ///
     /// The open is two frames that never lie on the stack together. The first builds the engine
     /// where it is kept (the session's state and its arena's tables, in the engine's place in the
@@ -6324,7 +6346,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         key_ids: OpenKeyIds,
         storage: OpenStorage,
     ) -> Result<EngineHold<Self>, OpenError> {
-        let engine = Self::assemble(links, clock, entropy, source, policy, key_ids, storage)?;
+        let engine = Self::assemble_from(links, clock, entropy, source, policy, key_ids, storage)?;
+        Self::open_assembled(engine)
+    }
+
+    /// [`Self::assemble`] of the input `source` makes, made in this frame, which has returned
+    /// before the first link is opened.
+    #[inline(never)]
+    fn assemble_from(
+        links: L,
+        clock: C,
+        entropy: impl EntropySource + Send + 'static,
+        source: impl OpenSource,
+        policy: SessionPolicy,
+        key_ids: OpenKeyIds,
+        storage: OpenStorage,
+    ) -> Result<EngineHold<Self>, OpenError> {
+        source.open_with(|input| {
+            Self::assemble(links, clock, entropy, input, policy, key_ids, storage)
+        })
+    }
+
+    /// Open the links of `engine`, which [`Self::assemble`] built: an open that fails here ends
+    /// what it began as a dropped session does.
+    pub fn open_assembled(engine: EngineHold<Self>) -> Result<EngineHold<Self>, OpenError> {
         engine.open_links()?;
         Ok(engine)
     }
@@ -6338,13 +6383,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// One frame from the config to the state: the links, the config, the entropy and what the
     /// arena lent are each borrowed while the open decides, and a value borrowed once is copied
     /// when it is handed on by value. Made here, each is moved only into the state, which is moved
-    /// once, into the engine's place ([`Self::engine_of`]).
+    /// once, into the engine's place (`Self::engine_of`).
+    ///
+    /// The input is a value of no type of the ABI's ([`OpenInput`]): its config is moved into
+    /// the session and its texts read and written into the rows the arena lends for them by one
+    /// body of no type parameter, so no line of the ABI's is in this body.
     #[inline(never)]
-    fn assemble(
+    pub fn assemble(
         mut links: L,
         clock: C,
         entropy: impl EntropySource + Send + 'static,
-        source: impl OpenSource,
+        input: OpenInput<'_>,
         policy: SessionPolicy,
         key_ids: OpenKeyIds,
         storage: OpenStorage,
@@ -6354,7 +6403,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             held,
             plan: from,
         } = storage;
-        let (config, write_endpoints) = source.into_parts();
+        let OpenInput { config, endpoints } = input;
         admit_sn_widths(&config)?;
         #[cfg(feature = "shared-key-ids")]
         let key_forms = key_ids.admit(&policy, resolve_limits(&config))?;
@@ -6385,10 +6434,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut lent =
             lend_session(&holds, from, memory, &config, &policy).map_err(OpenError::Arena)?;
-        // The texts of the endpoints, each written once by the source into the row the plan laid
-        // out for it: the session names an endpoint by its row from here, and what the source
-        // held goes with its writer, here, before anything is bound or dialled.
-        let written = write_endpoints(&mut EndpointWriter::over(&mut lent.transport.endpoints));
+        // The texts of the endpoints, each read and written once into the row the plan laid out
+        // for it: the session names an endpoint by its row from here, and a text that has no row
+        // is refused here, before anything is bound or dialled.
+        let written = endpoints.write_into(&mut lent.transport.endpoints);
         // One refusal for the three, so what the arena lent is let go of on one path. The rooms
         // lie in the row the plan laid out for them, a handle at each place a face may hold, the
         // dial role's and each group's among them.
@@ -6913,7 +6962,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // Open once the dial's link is up, or once the node it reached is held by a face that
             // came first (a peer that listens and dials its own listener's peer).
             while !core.transport.dial_settled() {
-                let mut wait = core.idle_wait();
+                let mut wait = core.idle_wait(NO_STEP_BOUND_MS);
                 wait.wait(core.rooms.waits(), sleep_ms);
                 core.transport.links.waited(wait);
                 core.run_tasks();
@@ -7046,28 +7095,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The waits for room a publish that finds the session held asks. Compiled where its
-    /// readers are: the group tests over the program's transport, each member stepped by its read
-    /// task (`tests::group`).
-    #[cfg(all(
-        test,
-        feature = "std",
-        feature = "group",
-        feature = "app-transport",
-        feature = "threads"
-    ))]
+    /// readers are: the tests of a full group's stage over the program's transport, in both forms
+    /// of the engine's calls (`tests::group_congested`).
+    #[cfg(all(test, feature = "std", feature = "group", feature = "app-transport"))]
     pub(crate) fn rooms(&self) -> &LinkRooms<L::Waits> {
         &self.rooms
     }
 
     /// How many messages of `priority` the session put on its groups were dropped for want of
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
-    #[cfg(all(
-        test,
-        feature = "std",
-        feature = "group",
-        feature = "app-transport",
-        feature = "threads"
-    ))]
+    #[cfg(all(test, feature = "std", feature = "group", feature = "app-transport"))]
     pub(crate) fn group_congestion_drops(&self, priority: wz_session_core::qos::Priority) -> u32 {
         self.live().map_or(0, |core| {
             core.0
@@ -11805,6 +11842,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         // close finds it closed whatever still holds the engine.
         self.reach.clear();
         let core = &mut guard.0;
+        // A key the program keeps past the close copies and gives back its hold at its row, with
+        // no reach of the session: the row's word is what tells it the session is gone.
+        tables(&core.session.registry).close_keyexpr_counts();
         core.end_links();
         // The rows of the session's own declarations, and the callbacks they hold, go after the
         // lock is let go of, one row at a time (`Self::let_go_of_rows`).
@@ -11921,14 +11961,89 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         false
     }
 
-    // The read steps the one link itself (`direct`).
-    #[cfg(not(wz_round))]
     fn read(&self, _single: bool) -> Result<(), SessionClosed> {
-        self.read_direct()
+        self.read_within(NO_STEP_BOUND_MS)
     }
 
+    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
+        // The one link's place is taken before the session, as every send on it takes them.
+        self.live_on_link(|core, tx| {
+            // A link that is down has no lease to keep; the session is not closed.
+            for (_, wire) in core.up_wires_at() {
+                send_through(wire, tx, &|actions: &LinkActions<C>| {
+                    actions.send_keep_alive();
+                    true
+                });
+            }
+        })
+        .ok_or(SessionClosed)
+    }
+
+    fn spin_once(&self) -> bool {
+        self.read(false).is_ok()
+    }
+
+    fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        // The task steps the session itself; a step of the program's beside it would be a second
+        // reader the program did not choose at the open. A start made while this step runs reads
+        // beside it, as two reads may (`HandBack`).
+        #[cfg(feature = "threads")]
+        if SessionDrive::read_task_is_running(self) {
+            return Err(StepRefused::ReadTaskRuns);
+        }
+        self.read_within(most_ms).map_err(StepRefused::from)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
+#[cfg(feature = "query")]
+struct FanCancelled;
+
+/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
+/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
+/// that waits for the callbacks returns whether or not the session is stepped.
+#[cfg(feature = "query")]
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
+    fn cancel_fan(&self, key: FanKey) {
+        loop {
+            let leg = self.live().and_then(|mut core| {
+                let core = &mut core.0;
+                let at = core
+                    .session
+                    .pending_gets
+                    .iter()
+                    .position(|pending| pending.fan == Some(key))?;
+                let pending = core.session.pending_gets.remove(at);
+                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
+                Some(pending.leg)
+            });
+            let Some(leg) = leg else {
+                break;
+            };
+            self.end_leg_now(leg);
+        }
+    }
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+    /// [`SessionDrive::read`] with its wait for input bounded by `most_ms` as well as by the
+    /// config's ([`CoopConfig::idle_wait_ms`]): the read task and `zp_read` read with no bound of
+    /// their own ([`NO_STEP_BOUND_MS`]), and a step the program makes with the one it gives
+    /// ([`SessionDrive::step_once`]).
+    // The read steps its faces itself (`direct`).
+    #[cfg(not(wz_round))]
+    fn read_within(&self, most_ms: u32) -> Result<(), SessionClosed> {
+        self.read_direct(most_ms)
+    }
+
+    /// [`SessionDrive::read`] with its wait for input bounded by `most_ms` as well as by the
+    /// config's ([`CoopConfig::idle_wait_ms`]), as in a build whose read steps its faces itself.
     #[cfg(wz_round)]
-    fn read(&self, _single: bool) -> Result<(), SessionClosed> {
+    fn read_within(&self, most_ms: u32) -> Result<(), SessionClosed> {
         // The wait comes first and holds nothing of the session, so what arrives during it is
         // read by this call and a publisher on another thread is not held up by it. Input the last
         // step left held makes it none, which it is then without the session taken to say so:
@@ -11946,7 +12061,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
             // before the session is.
             self.live().map_or(IdleWait::None, |mut core| {
                 let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-                let wait = core.0.idle_wait();
+                let wait = core.0.idle_wait(most_ms);
                 #[cfg(feature = "threads")]
                 if matches!(wait, IdleWait::Behind(_)) {
                     seen = Some(self.hand_back.enter());
@@ -11993,60 +12108,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionDrive for 
         }
     }
 
-    fn send_keep_alive(&self) -> Result<(), SessionClosed> {
-        // The one link's place is taken before the session, as every send on it takes them.
-        self.live_on_link(|core, tx| {
-            // A link that is down has no lease to keep; the session is not closed.
-            for (_, wire) in core.up_wires_at() {
-                send_through(wire, tx, &|actions: &LinkActions<C>| {
-                    actions.send_keep_alive();
-                    true
-                });
-            }
-        })
-        .ok_or(SessionClosed)
-    }
-
-    fn spin_once(&self) -> bool {
-        self.read(false).is_ok()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-/// A get's fan cancelled before the engine issued a leg of it ([`CoopEngine::tag_of`]).
-#[cfg(feature = "query")]
-struct FanCancelled;
-
-/// The legs a cancelled fan tagged are ended one at a time: each pending entry is taken out under
-/// the session's lock and its callback dropped after it, with no lock held, so a token's `cancel`
-/// that waits for the callbacks returns whether or not the session is stepped.
-#[cfg(feature = "query")]
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> FanCanceller for CoopEngine<L, C> {
-    fn cancel_fan(&self, key: FanKey) {
-        loop {
-            let leg = self.live().and_then(|mut core| {
-                let core = &mut core.0;
-                let at = core
-                    .session
-                    .pending_gets
-                    .iter()
-                    .position(|pending| pending.fan == Some(key))?;
-                let pending = core.session.pending_gets.remove(at);
-                pending.unregister(CoopSession::faces_mut(&mut core.session.registry));
-                Some(pending.leg)
-            });
-            let Some(leg) = leg else {
-                break;
-            };
-            self.end_leg_now(leg);
-        }
-    }
-}
-
-impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The one body of a plain put through write filter `filter`: the filter's answer, the plain
     /// form (`given`, or the one the filter's row keeps when none is given) and the sends, under
     /// one take of the session for each face, as zenoh-pico's put reads its filter's state and takes only its
@@ -12278,6 +12339,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopDrive<L, C> {
     /// [`SessionDrive::spin_once`].
     pub fn spin_once(&self) -> bool {
         SessionDrive::spin_once(self.engine_ref())
+    }
+
+    /// [`SessionDrive::step_once`].
+    pub fn step_once(&self, most_ms: u32) -> Result<(), StepRefused> {
+        SessionDrive::step_once(self.engine_ref(), most_ms)
     }
 }
 

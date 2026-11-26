@@ -8097,6 +8097,46 @@
       "carry_forward_bullets": [
         "unicast receive still loses to zenoh-pico at about 1.06x (4,277 vs 4,049 Ir per message)."
       ]
+    },
+    "Round 4668": {
+      "decision_summary": "Land deliv: the delivery lanes reviewed with the Windows peer session, the\ntime-base profile and the program's bounded step of a session (step_once with\na wait of at most most_ms, refused while the read task runs). The Vtsan lane\nstays advisory until it has two green runs. The whole-test-target legs of the\nnon-default tests gate are admitted only when the package declares the target.",
+      "changes_bullets": [
+        "capi-coop: step_once(most_ms) bounds the read's wait on the face-table read path.",
+        "capi-pico/cdylib-build/msvc-runtime: delivery lanes for the C library and its Windows package.",
+        "gates: a --test-target leg passes the shape check only for a declared test target.",
+        "tests: the stepped session test opens with its permit; a queryable watch flips by its reevaluation."
+      ],
+      "verification_bullets": [
+        "nondefault-features: wz-capi-coop, wz-capi-pico, wz-cdylib-build, wz-capi-c, wz-capi-pico-ext, wz-runtime-coop clippy-clean.",
+        "wz-capi-coop lib tests 274 (default), 274 (threads), 323 (threads,listen,group); wz-capi-pico encoding 24, it session_step_door, programs 3; wz-session-core declare::queryable 29.",
+        "non-default tests gate: the legs red only on this branch are fixed; the legs red on main are paid by lane ndt-reds."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "Windows x64/x86 tests and the DLL import table on the landed build, by the Windows peer session.",
+        "Vtsan stays advisory until two green runs."
+      ]
+    },
+    "Round 4669": {
+      "decision_summary": "Land round-5a's remainder with the two reds main carries since deliv: a peer\ntoken's key is written into a static row, so liveliness tokens and gets\nallocate nothing after open again; a face's send place is not held for a\nreplay turn that is not due; the key buffers are gated by what reads them. The\ntime base's advanced family is locked at no allocation and the archive test's\ntypes are named, which Layers C1nh and C1bf asked for.",
+      "changes_bullets": [
+        "session-core: a peer token's key is written into a static KeyexprRow; key buffers gated by their readers.",
+        "capi-coop: no face's send place is held for a replay turn not due; readers compiled where their callers are.",
+        "no-heap ratchet: time-base-advanced locked at 0 allocations a round.",
+        "cdylib-build: the archive test names its member and symbol types."
+      ],
+      "verification_bullets": [
+        "Layer C1nh passes (liveliness-get and liveliness-token back at 0 allocations a round; time-base-advanced held).",
+        "Layers C1co and C1bf pass; nondefault-features clean for wz-capi-coop, wz-session-core, wz-capi-pico."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "a cooperative build without object-pool does not refuse a session past HELD_SESSIONS at its open."
+      ]
     }
   },
   "inventory_entries": {

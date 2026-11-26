@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_interface_*`: what the doors of the additional features ask of the core beyond the
+//! `zext_interface_*`: what the doors of the additional features ask of the core beyond the
 //! pico ABI, as a versioned C interface.
 //!
 //! The additional features are the end-to-end protection, the reception supervision, the instance
@@ -21,17 +21,17 @@
 //!
 //! # Versions
 //!
-//! `wz_ext_interface_version` answers a major and a minor number. The major moves when a door or a
+//! `zext_interface_version` answers a major and a minor number. The major moves when a door or a
 //! field changes meaning or goes; the minor when one is added, a field always at the end of its
 //! struct. A library written against major M and minor N runs over a core of major M and minor N
 //! or later.
 //!
-//! The major version is also the name of a function the core exports, `wz_ext_interface_major_1`
+//! The major version is also the name of a function the core exports, `zext_interface_major_1`
 //! for major 1. The doors of the additional features call it, so a library of them built apart
 //! from the core (`docs/capi-pico-additional-library.md`) names it among its imports, and the
 //! system's loader refuses to load that library over a core of another major version before any
 //! door runs. A minor version adds functions, which that library imports by name too, so a core
-//! older than its minor version is refused the same way. `wz_ext_additional_interface` asks both
+//! older than its minor version is refused the same way. `zext_additional_interface` asks both
 //! at run time.
 
 use core::ffi::c_void;
@@ -47,23 +47,23 @@ use crate::session::{session_handle, z_loaned_session_t};
 use wz_session_core::limit_binding::Quota;
 
 /// The major version of this interface.
-pub const WZ_EXT_INTERFACE_MAJOR: u16 = 1;
+pub const ZEXT_INTERFACE_MAJOR: u16 = 1;
 /// The minor version of this interface.
-pub const WZ_EXT_INTERFACE_MINOR: u16 = 3;
+pub const ZEXT_INTERFACE_MINOR: u16 = 3;
 
 /// `replay_reply_shape` of the session facts: one reply per frame, as it was sent.
-pub const WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
+pub const ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE: u8 = 0;
 /// `replay_reply_shape` of the session facts: each frame as the pieces of its segment profile.
-pub const WZ_EXT_REPLAY_SHAPE_SEGMENTED: u8 = 1;
+pub const ZEXT_REPLAY_SHAPE_SEGMENTED: u8 = 1;
 /// `replay_live_before_answer` of the session facts: a live sample is handed on as it arrives.
-pub const WZ_EXT_REPLAY_LIVE_DELIVER: u8 = 0;
+pub const ZEXT_REPLAY_LIVE_DELIVER: u8 = 0;
 /// `replay_live_before_answer` of the session facts: live samples wait for the first round.
-pub const WZ_EXT_REPLAY_LIVE_HOLD_BACK: u8 = 1;
+pub const ZEXT_REPLAY_LIVE_HOLD_BACK: u8 = 1;
 
 /// The version of this interface. 8 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_interface_version_t {
+pub struct zext_interface_version_t {
     /// In: the size of this struct as the caller was compiled with it. Out: the bytes written.
     pub struct_size: u32,
     pub major: u16,
@@ -74,18 +74,18 @@ pub struct wz_ext_interface_version_t {
 /// 64-bit target, 24 on a 32-bit one.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_session_facts_t {
+pub struct zext_session_facts_t {
     /// In: the size of this struct as the caller was compiled with it. Out: the bytes written.
     pub struct_size: u32,
     /// 1 once the session has been closed, 0 while it is open.
     pub closed: u8,
-    /// The session's `replay-reply-shape`: `WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE` or `_SEGMENTED`.
+    /// The session's `replay-reply-shape`: `ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE` or `_SEGMENTED`.
     pub replay_reply_shape: u8,
     /// The session's `replay-serve-holds-sends`: 1 on, 0 off.
     pub replay_serve_holds_sends: u8,
-    /// The session's `replay-live-before-answer`: `WZ_EXT_REPLAY_LIVE_DELIVER` or `_HOLD_BACK`.
+    /// The session's `replay-live-before-answer`: `ZEXT_REPLAY_LIVE_DELIVER` or `_HOLD_BACK`.
     pub replay_live_before_answer: u8,
-    /// 1 when a get the session asks may be addressed to one node (`wz_ext_get_to_peer`): the
+    /// 1 when a get the session asks may be addressed to one node (`zext_get_to_peer`): the
     /// session's `targeted-query` is on, in a build whose domain of it holds on.
     pub targeted_query: u8,
     pub reserved: [u8; 7],
@@ -101,7 +101,7 @@ pub struct wz_ext_session_facts_t {
 /// target, 16 on a 32-bit one. Added in minor version 2.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_runtime_facts_t {
+pub struct zext_runtime_facts_t {
     /// In: the size of this struct as the caller was compiled with it. Out: the bytes written.
     pub struct_size: u32,
     pub reserved: u32,
@@ -139,18 +139,18 @@ fn written<T>() -> u32 {
 /// # Safety
 /// `out` is null or valid and writable for `struct_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_interface_version(out: *mut wz_ext_interface_version_t) -> ZResult {
+pub unsafe extern "C" fn zext_interface_version(out: *mut zext_interface_version_t) -> ZResult {
     guarded(|| {
         if out.is_null() {
             return Z_ERR_NULL;
         }
-        if !holds::<wz_ext_interface_version_t>((*out).struct_size) {
+        if !holds::<zext_interface_version_t>((*out).struct_size) {
             return Z_EINVAL;
         }
-        *out = wz_ext_interface_version_t {
-            struct_size: written::<wz_ext_interface_version_t>(),
-            major: WZ_EXT_INTERFACE_MAJOR,
-            minor: WZ_EXT_INTERFACE_MINOR,
+        *out = zext_interface_version_t {
+            struct_size: written::<zext_interface_version_t>(),
+            major: ZEXT_INTERFACE_MAJOR,
+            minor: ZEXT_INTERFACE_MINOR,
         };
         Z_OK
     })
@@ -159,8 +159,8 @@ pub unsafe extern "C" fn wz_ext_interface_version(out: *mut wz_ext_interface_ver
 /// The major version of this interface, exported under a name that carries it: a library that calls
 /// it cannot be loaded over a core of another major version, whose function has another name.
 #[no_mangle]
-pub extern "C" fn wz_ext_interface_major_1() -> u16 {
-    WZ_EXT_INTERFACE_MAJOR
+pub extern "C" fn zext_interface_major_1() -> u16 {
+    ZEXT_INTERFACE_MAJOR
 }
 
 /// Write what the core says of `session` into `out`, whose `struct_size` the caller has set. A
@@ -176,9 +176,9 @@ pub extern "C" fn wz_ext_interface_major_1() -> u16 {
 /// `struct_size` bytes.
 #[cfg(feature = "query")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_interface_session_facts(
+pub unsafe extern "C" fn zext_interface_session_facts(
     session: *const z_loaned_session_t,
-    out: *mut wz_ext_session_facts_t,
+    out: *mut zext_session_facts_t,
 ) -> ZResult {
     use wz_session_core::policy::{ReplayLiveBeforeAnswer, ReplayReplyShape};
 
@@ -186,24 +186,24 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
         if out.is_null() {
             return Z_ERR_NULL;
         }
-        if !holds::<wz_ext_session_facts_t>((*out).struct_size) {
+        if !holds::<zext_session_facts_t>((*out).struct_size) {
             return Z_EINVAL;
         }
         let Some(handle) = session_handle(session) else {
             return Z_ERR_NULL;
         };
         let policy = &handle.ext.policy;
-        *out = wz_ext_session_facts_t {
-            struct_size: written::<wz_ext_session_facts_t>(),
+        *out = zext_session_facts_t {
+            struct_size: written::<zext_session_facts_t>(),
             closed: u8::from(handle.is_closed()),
             replay_reply_shape: match policy.replay_reply_shape() {
-                ReplayReplyShape::FramePerSample => WZ_EXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
-                ReplayReplyShape::Segmented => WZ_EXT_REPLAY_SHAPE_SEGMENTED,
+                ReplayReplyShape::FramePerSample => ZEXT_REPLAY_SHAPE_FRAME_PER_SAMPLE,
+                ReplayReplyShape::Segmented => ZEXT_REPLAY_SHAPE_SEGMENTED,
             },
             replay_serve_holds_sends: u8::from(policy.replay_serve_holds_sends()),
             replay_live_before_answer: match policy.replay_live_before_answer() {
-                ReplayLiveBeforeAnswer::Deliver => WZ_EXT_REPLAY_LIVE_DELIVER,
-                ReplayLiveBeforeAnswer::HoldBack => WZ_EXT_REPLAY_LIVE_HOLD_BACK,
+                ReplayLiveBeforeAnswer::Deliver => ZEXT_REPLAY_LIVE_DELIVER,
+                ReplayLiveBeforeAnswer::HoldBack => ZEXT_REPLAY_LIVE_HOLD_BACK,
             },
             targeted_query: u8::from(crate::get_to_peer::targeted_by(policy)),
             reserved: [0; 7],
@@ -218,7 +218,7 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
 
 /// Write what the core says of the process's runtime into `out`, whose `struct_size` the caller has
 /// set. A door asks it when it makes a machine, so the process's limits are taken from then on: the
-/// door that states them (`wz_ext_runtime_limits_document`) refuses a statement after it.
+/// door that states them (`zext_runtime_limits_document`) refuses a statement after it.
 ///
 /// Returns `Z_OK`; `Z_ERR_NULL` for a null `out`; `Z_EINVAL` when `struct_size` is smaller than
 /// the struct of this version. Nothing is written, and nothing taken, on a refusal.
@@ -226,19 +226,17 @@ pub unsafe extern "C" fn wz_ext_interface_session_facts(
 /// # Safety
 /// `out` is null or valid and writable for `struct_size` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_interface_runtime_facts(
-    out: *mut wz_ext_runtime_facts_t,
-) -> ZResult {
+pub unsafe extern "C" fn zext_interface_runtime_facts(out: *mut zext_runtime_facts_t) -> ZResult {
     guarded(|| {
         if out.is_null() {
             return Z_ERR_NULL;
         }
-        if !holds::<wz_ext_runtime_facts_t>((*out).struct_size) {
+        if !holds::<zext_runtime_facts_t>((*out).struct_size) {
             return Z_EINVAL;
         }
         let rows = wz_capi_port::runtime_limits::take();
-        *out = wz_ext_runtime_facts_t {
-            struct_size: written::<wz_ext_runtime_facts_t>(),
+        *out = zext_runtime_facts_t {
+            struct_size: written::<zext_runtime_facts_t>(),
             reserved: 0,
             message_catalog_entries: rows.message_catalog_entries,
             e2e_supervised_streams: rows.e2e_supervised_streams,
@@ -257,7 +255,7 @@ pub unsafe extern "C" fn wz_ext_interface_runtime_facts(
 /// # Safety
 /// `bytes` is null or a loaned payload of this library; `data` and `len` are null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_interface_bytes_view(
+pub unsafe extern "C" fn zext_interface_bytes_view(
     bytes: *const z_loaned_bytes_t,
     data: *mut *const u8,
     len: *mut usize,
@@ -285,12 +283,12 @@ pub unsafe extern "C" fn wz_ext_interface_bytes_view(
 ///
 /// Returns `Z_OK` once `body` has returned; `Z_ERR_NULL` for no `body`, which runs nothing;
 /// `_Z_ERR_SYSTEM_OUT_OF_MEMORY`, running nothing, when the build marks the threads in callbacks
-/// in a table of fixed room (no `std`) and other threads fill it (`wz_ext_callbacks_refused`).
+/// in a table of fixed room (no `std`) and other threads fill it (`zext_callbacks_refused`).
 ///
 /// # Safety
 /// `body` is null or safe to call with `context`.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_interface_run_in_callback(
+pub unsafe extern "C" fn zext_interface_run_in_callback(
     body: Option<unsafe extern "C" fn(context: *mut c_void)>,
     context: *mut c_void,
 ) -> ZResult {
@@ -311,34 +309,34 @@ mod tests {
 
     #[test]
     fn the_structs_have_the_layout_the_header_declares() {
-        assert_eq!(size_of::<wz_ext_interface_version_t>(), 8);
-        assert_eq!(core::mem::offset_of!(wz_ext_session_facts_t, closed), 4);
+        assert_eq!(size_of::<zext_interface_version_t>(), 8);
+        assert_eq!(core::mem::offset_of!(zext_session_facts_t, closed), 4);
         assert_eq!(
-            core::mem::offset_of!(wz_ext_session_facts_t, targeted_query),
+            core::mem::offset_of!(zext_session_facts_t, targeted_query),
             8
         );
         assert_eq!(
-            core::mem::offset_of!(wz_ext_session_facts_t, querier_max_pending_queries),
+            core::mem::offset_of!(zext_session_facts_t, querier_max_pending_queries),
             16
         );
         assert_eq!(
-            core::mem::offset_of!(wz_ext_session_facts_t, replay_depth_max),
+            core::mem::offset_of!(zext_session_facts_t, replay_depth_max),
             16 + size_of::<usize>()
         );
         assert_eq!(
-            size_of::<wz_ext_session_facts_t>(),
+            size_of::<zext_session_facts_t>(),
             16 + 2 * size_of::<usize>()
         );
         assert_eq!(
-            core::mem::offset_of!(wz_ext_runtime_facts_t, message_catalog_entries),
+            core::mem::offset_of!(zext_runtime_facts_t, message_catalog_entries),
             8
         );
         assert_eq!(
-            core::mem::offset_of!(wz_ext_runtime_facts_t, e2e_supervised_streams),
+            core::mem::offset_of!(zext_runtime_facts_t, e2e_supervised_streams),
             8 + size_of::<usize>()
         );
         assert_eq!(
-            size_of::<wz_ext_runtime_facts_t>(),
+            size_of::<zext_runtime_facts_t>(),
             8 + 2 * size_of::<usize>()
         );
     }
@@ -347,7 +345,7 @@ mod tests {
     /// than this version's.
     #[test]
     fn the_runtime_facts_are_refused_for_a_struct_this_version_does_not_fill() {
-        let blank = wz_ext_runtime_facts_t {
+        let blank = zext_runtime_facts_t {
             struct_size: 4,
             reserved: 7,
             message_catalog_entries: 7,
@@ -356,9 +354,9 @@ mod tests {
         let mut facts = blank;
         // SAFETY: a local the door may write, and a null pointer.
         unsafe {
-            assert_eq!(wz_ext_interface_runtime_facts(&mut facts), Z_EINVAL);
+            assert_eq!(zext_interface_runtime_facts(&mut facts), Z_EINVAL);
             assert_eq!(
-                wz_ext_interface_runtime_facts(core::ptr::null_mut()),
+                zext_interface_runtime_facts(core::ptr::null_mut()),
                 Z_ERR_NULL
             );
         }
@@ -368,14 +366,14 @@ mod tests {
     /// The facts are the rows the process lends its machines.
     #[test]
     fn the_runtime_facts_are_the_rows_the_process_lends() {
-        let mut facts = wz_ext_runtime_facts_t {
-            struct_size: size_of::<wz_ext_runtime_facts_t>() as u32,
+        let mut facts = zext_runtime_facts_t {
+            struct_size: size_of::<zext_runtime_facts_t>() as u32,
             reserved: 7,
             message_catalog_entries: 0,
             e2e_supervised_streams: 0,
         };
         // SAFETY: a local the door may write.
-        assert_eq!(unsafe { wz_ext_interface_runtime_facts(&mut facts) }, Z_OK);
+        assert_eq!(unsafe { zext_interface_runtime_facts(&mut facts) }, Z_OK);
         let rows = wz_capi_port::runtime_limits::held();
         assert_eq!(
             (
@@ -385,7 +383,7 @@ mod tests {
                 facts.e2e_supervised_streams
             ),
             (
-                size_of::<wz_ext_runtime_facts_t>(),
+                size_of::<zext_runtime_facts_t>(),
                 0,
                 rows.message_catalog_entries,
                 rows.e2e_supervised_streams
@@ -395,35 +393,35 @@ mod tests {
 
     #[test]
     fn the_function_named_by_the_major_version_answers_it() {
-        assert_eq!(wz_ext_interface_major_1(), WZ_EXT_INTERFACE_MAJOR);
+        assert_eq!(zext_interface_major_1(), ZEXT_INTERFACE_MAJOR);
         assert_eq!(
-            WZ_EXT_INTERFACE_MAJOR, 1,
-            "a new major version renames wz_ext_interface_major_1 with its number"
+            ZEXT_INTERFACE_MAJOR, 1,
+            "a new major version renames zext_interface_major_1 with its number"
         );
     }
 
     #[test]
     fn the_version_is_written_for_a_caller_that_states_its_size() {
-        let mut version = wz_ext_interface_version_t {
+        let mut version = zext_interface_version_t {
             struct_size: 8,
             major: 0,
             minor: 0,
         };
         // SAFETY: a local the door may write.
-        assert_eq!(unsafe { wz_ext_interface_version(&mut version) }, Z_OK);
+        assert_eq!(unsafe { zext_interface_version(&mut version) }, Z_OK);
         assert_eq!(
             version,
-            wz_ext_interface_version_t {
+            zext_interface_version_t {
                 struct_size: 8,
-                major: WZ_EXT_INTERFACE_MAJOR,
-                minor: WZ_EXT_INTERFACE_MINOR,
+                major: ZEXT_INTERFACE_MAJOR,
+                minor: ZEXT_INTERFACE_MINOR,
             }
         );
     }
 
     #[test]
     fn a_struct_smaller_than_this_version_s_is_refused_and_left_as_it_was() {
-        let stale = wz_ext_interface_version_t {
+        let stale = zext_interface_version_t {
             struct_size: 7,
             major: 9,
             minor: 9,
@@ -431,8 +429,8 @@ mod tests {
         let mut version = stale;
         // SAFETY: a local the door may write, and a null pointer.
         unsafe {
-            assert_eq!(wz_ext_interface_version(&mut version), Z_EINVAL);
-            assert_eq!(wz_ext_interface_version(core::ptr::null_mut()), Z_ERR_NULL);
+            assert_eq!(zext_interface_version(&mut version), Z_EINVAL);
+            assert_eq!(zext_interface_version(core::ptr::null_mut()), Z_ERR_NULL);
         }
         assert_eq!(version, stale);
     }
@@ -441,11 +439,11 @@ mod tests {
     fn a_later_caller_s_larger_struct_is_told_how_much_was_written() {
         #[repr(C)]
         struct Later {
-            version: wz_ext_interface_version_t,
+            version: zext_interface_version_t,
             added: u32,
         }
         let mut later = Later {
-            version: wz_ext_interface_version_t {
+            version: zext_interface_version_t {
                 struct_size: size_of::<Later>() as u32,
                 major: 0,
                 minor: 0,
@@ -453,12 +451,9 @@ mod tests {
             added: 0xdead_beef,
         };
         // SAFETY: the caller's struct is writable for the size it states.
-        assert_eq!(
-            unsafe { wz_ext_interface_version(&mut later.version) },
-            Z_OK
-        );
+        assert_eq!(unsafe { zext_interface_version(&mut later.version) }, Z_OK);
         assert_eq!(later.version.struct_size, 8);
-        assert_eq!(later.version.major, WZ_EXT_INTERFACE_MAJOR);
+        assert_eq!(later.version.major, ZEXT_INTERFACE_MAJOR);
         assert_eq!(
             later.added, 0xdead_beef,
             "a field this version has not is untouched"
@@ -468,8 +463,8 @@ mod tests {
     #[cfg(feature = "query")]
     #[test]
     fn the_facts_of_no_session_are_refused_and_nothing_is_written() {
-        let blank = wz_ext_session_facts_t {
-            struct_size: size_of::<wz_ext_session_facts_t>() as u32,
+        let blank = zext_session_facts_t {
+            struct_size: size_of::<zext_session_facts_t>() as u32,
             closed: 7,
             replay_reply_shape: 7,
             replay_serve_holds_sends: 7,
@@ -485,30 +480,30 @@ mod tests {
             let mut gravestone: crate::session::z_owned_session_t = core::mem::zeroed();
             crate::session::z_internal_session_null(&mut gravestone);
             assert_eq!(
-                wz_ext_interface_session_facts(core::ptr::null(), &mut facts),
+                zext_interface_session_facts(core::ptr::null(), &mut facts),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_interface_session_facts(
+                zext_interface_session_facts(
                     crate::session::z_session_loan(&gravestone),
                     &mut facts
                 ),
                 Z_ERR_NULL
             );
             assert_eq!(
-                wz_ext_interface_session_facts(core::ptr::null(), core::ptr::null_mut()),
+                zext_interface_session_facts(core::ptr::null(), core::ptr::null_mut()),
                 Z_ERR_NULL
             );
             facts.struct_size = 4;
             assert_eq!(
-                wz_ext_interface_session_facts(core::ptr::null(), &mut facts),
+                zext_interface_session_facts(core::ptr::null(), &mut facts),
                 Z_EINVAL,
                 "the size is judged before the session"
             );
         }
         assert_eq!(
             facts,
-            wz_ext_session_facts_t {
+            zext_session_facts_t {
                 struct_size: 4,
                 ..blank
             }
@@ -536,10 +531,7 @@ mod tests {
                 Z_OK
             );
             let loaned = crate::bytes::z_bytes_loan(&payload);
-            assert_eq!(
-                wz_ext_interface_bytes_view(loaned, &mut data, &mut len),
-                Z_OK
-            );
+            assert_eq!(zext_interface_bytes_view(loaned, &mut data, &mut len), Z_OK);
             assert_eq!(core::slice::from_raw_parts(data, len), text);
             assert_eq!(
                 data,
@@ -558,13 +550,13 @@ mod tests {
         // SAFETY: locals the door may write, and null pointers.
         unsafe {
             assert_eq!(
-                wz_ext_interface_bytes_view(core::ptr::null(), &mut data, &mut len),
+                zext_interface_bytes_view(core::ptr::null(), &mut data, &mut len),
                 Z_ERR_NULL
             );
             assert!(data.is_null());
             assert_eq!(len, 0);
             assert_eq!(
-                wz_ext_interface_bytes_view(core::ptr::null(), core::ptr::null_mut(), &mut len),
+                zext_interface_bytes_view(core::ptr::null(), core::ptr::null_mut(), &mut len),
                 Z_ERR_NULL
             );
         }
@@ -579,7 +571,7 @@ mod tests {
         assert!(!InCallback::here());
         // SAFETY: the probe writes the local it is handed, for the call.
         let code = unsafe {
-            wz_ext_interface_run_in_callback(
+            zext_interface_run_in_callback(
                 Some(probe),
                 core::ptr::addr_of_mut!(inside).cast::<c_void>(),
             )
@@ -589,7 +581,7 @@ mod tests {
         assert!(!InCallback::here(), "the mark ends with the body");
         // SAFETY: no body is named.
         assert_eq!(
-            unsafe { wz_ext_interface_run_in_callback(None, core::ptr::null_mut()) },
+            unsafe { zext_interface_run_in_callback(None, core::ptr::null_mut()) },
             Z_ERR_NULL
         );
     }

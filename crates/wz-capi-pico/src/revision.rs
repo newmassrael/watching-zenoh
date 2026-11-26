@@ -27,7 +27,7 @@
 /// The revision the stamp carries.
 ///
 /// It moved to 2 when the meaning of a wz-only behaviour changed: with a registered clock
-/// (`wz_ext_clock_source_register`), `z_timestamp_new` gives a program the clock's time whatever
+/// (`zext_clock_source_register`), `z_timestamp_new` gives a program the clock's time whatever
 /// the clock's standing, and the `clock-quality-stamping` policy holds back only the data the node
 /// stamps; at 1 a `trusted-only` build gave a program no time until the clock was reported trusted.
 /// Also at 2, every time one session gives strictly increases, whichever clock it is read from and
@@ -42,28 +42,28 @@
 /// is not yet reported synchronised; at 1 the second sent the sample stamped with the system clock.
 ///
 /// It moved to 3 when a process pool's slot became its object's own size: the report of a size
-/// class (`wz_ext_object_pool_class_t`) grew a `bytes` field, the bytes its slots take, and its
+/// class (`zext_object_pool_class_t`) grew a `bytes` field, the bytes its slots take, and its
 /// `slot_bytes` became the class's largest slot rather than the size of each of its slots, so a
 /// program built against 2 hands the door a report too small and reads the slots' bytes wrongly.
 ///
 /// It moved to 4 when a querier and a declared key expression took a slot of a pool of their own:
-/// the counts a program states (`wz_ext_object_pool_counts_t`) grew `queriers` and `keyexprs`
+/// the counts a program states (`zext_object_pool_counts_t`) grew `queriers` and `keyexprs`
 /// after `payload_bytes`, so a program built against 3 hands the door counts too small.
 ///
 /// It moved to 5 when the structs a door reads from or writes into the program's memory took their
 /// own size (`crate::sized`): `struct_size` is now the first field of
-/// `wz_ext_object_pool_counts_t`, `wz_ext_object_pool_class_t`, `wz_ext_session_memory_t`,
-/// `wz_ext_session_memory_row_t`, `wz_ext_replay_publisher_counts_t`,
-/// `wz_ext_replay_subscriber_counts_t`, `wz_ext_e2e_verdict_t` (and so of the verdict a
-/// `wz_ext_replay_sample_t` carries), `wz_ext_instance_key_t`, `wz_ext_message_entry_t`,
-/// `wz_ext_event_t` and `wz_ext_segment_result_t`, so a program built against 4 hands structs whose
+/// `zext_object_pool_counts_t`, `zext_object_pool_class_t`, `zext_session_memory_t`,
+/// `zext_session_memory_row_t`, `zext_replay_publisher_counts_t`,
+/// `zext_replay_subscriber_counts_t`, `zext_e2e_verdict_t` (and so of the verdict a
+/// `zext_replay_sample_t` carries), `zext_instance_key_t`, `zext_message_entry_t`,
+/// `zext_event_t` and `zext_segment_result_t`, so a program built against 4 hands structs whose
 /// first field the library reads as their size. The reading a program's resource source writes
-/// (`wz_ext_resource_reading_t`) took one too, which the library sets before it calls the source.
+/// (`zext_resource_reading_t`) took one too, which the library sets before it calls the source.
 /// From 5 on a field is added at the end, read or written only in a struct whose `struct_size`
 /// holds it, so adding one does not move the revision.
 ///
 /// It moved to 6 when the bytes of payload became three pools of fixed blocks: the counts a
-/// program states (`wz_ext_object_pool_counts_t`) gave `payload_bytes` up, refusing one not zero
+/// program states (`zext_object_pool_counts_t`) gave `payload_bytes` up, refusing one not zero
 /// with `Z_EINVAL`, and took `small_payload_blocks`, `medium_payload_blocks` and
 /// `large_payload_blocks` at the end; and the report of a size class counts the payload blocks of
 /// its size among its slots. So a program built against 5 that states payload bytes has its

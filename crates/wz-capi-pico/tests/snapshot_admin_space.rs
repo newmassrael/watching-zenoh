@@ -23,8 +23,8 @@ use std::time::Duration;
 
 use wz_capi_pico::admin_space::zp_start_admin_space;
 use wz_capi_pico::snapshot::{
-    wz_ext_resource_reading_t, wz_ext_snapshot_poll, wz_ext_snapshot_set_source,
-    WZ_EXT_SNAPSHOT_HAS_CPU, WZ_EXT_SNAPSHOT_HAS_HEAP, WZ_EXT_SNAPSHOT_HAS_TASKS,
+    zext_resource_reading_t, zext_snapshot_poll, zext_snapshot_set_source, ZEXT_SNAPSHOT_HAS_CPU,
+    ZEXT_SNAPSHOT_HAS_HEAP, ZEXT_SNAPSHOT_HAS_TASKS,
 };
 use wz_capi_pico::zid::{z_id_to_string, z_info_zid};
 use wz_capi_pico::{
@@ -169,14 +169,14 @@ unsafe fn ask_until(
     );
 }
 
-unsafe extern "C" fn platform(_context: *mut c_void, out: *mut wz_ext_resource_reading_t) -> i8 {
+unsafe extern "C" fn platform(_context: *mut c_void, out: *mut zext_resource_reading_t) -> i8 {
     // A source writes no byte past the size the library hands it; one too short to hold the
     // readings answers nothing.
-    if (*out).struct_size < std::mem::size_of::<wz_ext_resource_reading_t>() {
+    if (*out).struct_size < std::mem::size_of::<zext_resource_reading_t>() {
         return -1;
     }
-    *out = wz_ext_resource_reading_t {
-        available: WZ_EXT_SNAPSHOT_HAS_CPU | WZ_EXT_SNAPSHOT_HAS_HEAP | WZ_EXT_SNAPSHOT_HAS_TASKS,
+    *out = zext_resource_reading_t {
+        available: ZEXT_SNAPSHOT_HAS_CPU | ZEXT_SNAPSHOT_HAS_HEAP | ZEXT_SNAPSHOT_HAS_TASKS,
         cpu_permille: 420,
         tasks: 7,
         heap_in_use: 10_000,
@@ -222,10 +222,10 @@ fn a_peer_reads_the_snapshot_once_the_program_has_taken_one() {
 
         // After: the document is the snapshot, as JSON, with what the source answered.
         assert_eq!(
-            wz_ext_snapshot_set_source(Some(platform), std::ptr::null_mut()),
+            zext_snapshot_set_source(Some(platform), std::ptr::null_mut()),
             Z_OK
         );
-        assert_eq!(wz_ext_snapshot_poll(z_session_loan(&listener)), 1);
+        assert_eq!(zext_snapshot_poll(z_session_loan(&listener)), 1);
         let replies = ask_until(&dialer, &after_key, &probe, &key);
         assert!(probe.errors.lock().unwrap().is_empty());
         let (_, document, encoding) = replies

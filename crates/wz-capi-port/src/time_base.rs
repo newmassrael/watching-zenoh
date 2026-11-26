@@ -3,7 +3,7 @@
 
 //! A time base the program supplies, made from the calls a C ABI's door is handed: the read of
 //! the program's time and the program's drop of its context. Both C ABIs make theirs here (the
-//! pico ABI's `wz_ext_time_base_new`, the zenoh-c ABI's `wz_capi_c_time_base_new`) and name only
+//! pico ABI's `zext_time_base_new`, the zenoh-c ABI's `wz_capi_c_time_base_new`) and name only
 //! their types and result codes; what a time base is and how a session runs on it are
 //! `wz_node_time::time_base`'s.
 

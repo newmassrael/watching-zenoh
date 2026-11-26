@@ -123,7 +123,7 @@ cells, and the gate records that (section 5).
 | program | listens on a `tcp/` locator over the program's own transport | dials it over the same |
 
 The program transport is the wz door through which a program gives a session its own network stack
-(`wz_ext_transport_*`, declared in `crates/wz-capi-core/include/wz_ext.h`). In the probe it is an
+(`zext_transport_*`, declared in `crates/wz-capi-core/include/wz_ext.h`). In the probe it is an
 AF_UNIX stream in the abstract namespace, one reading thread per link, and a send that never blocks
 (it answers would-block and reports the link writable when the socket has room again). zenoh-pico has
 no such door, so arm P's program cells are recorded as not applicable, with that reason, and arm X's

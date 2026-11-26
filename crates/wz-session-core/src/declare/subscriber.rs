@@ -246,6 +246,9 @@ pub struct RemoteSubscriberPeer<P: Storage = Profile> {
     /// on the fixed backing). Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// `UndeclSubscriber`s that named an id the table does not hold ([`Self::unknown_undeclares`]).
+    #[cfg(feature = "storage-profile")]
+    unknown_undeclares: u32,
     /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
     /// policy, handed over with the session's other tables ([`Self::keep_keys_in`]). A
     /// `DeclSubscriber` whose key finds no room there is dropped and counted with the table's
@@ -289,6 +292,8 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
             #[cfg(feature = "storage-profile")]
             oversize: 0,
             #[cfg(feature = "storage-profile")]
+            unknown_undeclares: 0,
+            #[cfg(feature = "storage-profile")]
             keys: Default::default(),
             #[cfg(feature = "storage-profile")]
             initial_final: false,
@@ -330,6 +335,8 @@ impl RemoteSubscriberPeer<Static> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            unknown_undeclares: 0,
             #[cfg(feature = "storage-profile")]
             keys: crate::bounded::InlineKeys,
             #[cfg(feature = "storage-profile")]
@@ -510,6 +517,15 @@ impl<P: Storage> RemoteSubscriberPeer<P> {
         Self::declared_ref(&self.declared, &self.keys)
             .refusals()
             .saturating_add(self.oversize)
+    }
+
+    /// How many `UndeclSubscriber` named an id this peer's table does not hold: one the peer
+    /// never declared, one it already withdrew, or one the table refused when it was declared.
+    /// Each changed nothing and was told to no observer, as upstream drops it
+    /// (`zenoh/src/api/session.rs` @ `Undeclare Subscriber for unknown id`; `vendor/zenoh-pico/src/session/interest.c` @ `z_result_t _z_interest_process_undeclares(`). Kept when the table is forgotten.
+    #[cfg(feature = "storage-profile")]
+    pub fn unknown_undeclares(&self) -> u32 {
+        self.unknown_undeclares
     }
 
     /// Backbone for `Publisher::get_matching_status` (R290 surfaced
@@ -1435,7 +1451,15 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteSubscriber
                     .any(|(other, held)| other != id && held.as_ref() == key.as_ref())
             })
         };
-        RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys).unbind(id);
+        // An id the table does not hold changes nothing, so neither the observers nor the
+        // matching watches hear of it and the counter stands.
+        if RemoteSubscriberPeer::<Q>::declared_mut(&mut peer.declared, &peer.keys)
+            .unbind(id)
+            .is_none()
+        {
+            peer.unknown_undeclares = peer.unknown_undeclares.saturating_add(1);
+            return;
+        }
         peer.changed();
         // The application is told a keyexpr is gone when its last declaration goes, under the
         // id it was told it by ([`RemoteSubscriberPeer::aliases`]).
@@ -1827,8 +1851,12 @@ mod tests {
         );
     }
 
+    /// An undeclaration of an id the table does not hold is counted and told to no one, as
+    /// upstream drops it; the same undeclaration once the id is held is told (the CONTROL), and a
+    /// second one of it is counted again. Turned red by an `apply_undeclared` that dispatches
+    /// whatever `unbind` returned, or one that does not count the miss.
     #[test]
-    fn undeclare_callback_fires_on_undecl_subscriber() {
+    fn an_undeclaration_of_an_id_not_held_is_counted_and_told_to_no_one() {
         let mut reg = RemoteSubscriberRegistry::new();
         let captured: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
@@ -1837,11 +1865,36 @@ mod tests {
         })
         .expect("no quota is stated on this table");
 
-        let body = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(42));
-        reg.dispatch_declare(&body, &HashMap::new());
+        let undeclare = DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(42));
+        reg.dispatch_declare(&undeclare, &HashMap::new());
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "an id never declared is told to no one"
+        );
+        assert_eq!(reg.peer().unknown_undeclares(), 1);
+        assert_eq!(
+            reg.peer().refusals(),
+            0,
+            "a miss is not a refused declaration"
+        );
 
-        let captured = captured.lock().unwrap();
-        assert_eq!(*captured, vec![42]);
+        let declare = DeclareOwnedVariant::CodecZenohDeclSubscriber(decl_subscriber(
+            42,
+            0,
+            Some("home/temp"),
+        ));
+        reg.dispatch_declare(&declare, &HashMap::new());
+        reg.dispatch_declare(&undeclare, &HashMap::new());
+        assert_eq!(*captured.lock().unwrap(), vec![42], "a held id is told");
+        assert_eq!(reg.peer().unknown_undeclares(), 1, "and not counted");
+
+        reg.dispatch_declare(&undeclare, &HashMap::new());
+        assert_eq!(
+            *captured.lock().unwrap(),
+            vec![42],
+            "an id already withdrawn is told to no one"
+        );
+        assert_eq!(reg.peer().unknown_undeclares(), 2);
     }
 
     /// A peer says one keyexpr twice when it announces a subscriber and then answers an
@@ -2330,8 +2383,8 @@ mod tests {
     /// The counter a reader without the lock keeps its answers by moves after EVERY change
     /// to what the peer has declared (a declaration, a replacement under the same id, an
     /// undeclaration, the whole table forgotten) and stands still when nothing changed: an
-    /// undeclaration of an id nobody declared still moves it (a missed move would keep a
-    /// stale answer, an extra one only costs a recomputation), and reading does not.
+    /// undeclaration of an id the table does not hold changes nothing and does not move it, and
+    /// reading does not.
     #[cfg(all(
         feature = "storage-profile",
         feature = "alloc",
@@ -2370,6 +2423,16 @@ mod tests {
         );
         let after_undeclare = at(&counter);
         assert!(after_undeclare > after_replace, "an undeclaration moves it");
+
+        reg.dispatch_declare(
+            &DeclareOwnedVariant::CodecZenohUndeclSubscriber(undecl_subscriber(1)),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            at(&counter),
+            after_undeclare,
+            "an undeclaration of an id not held moves nothing"
+        );
 
         reg.dispatch_declare(&declare(2, "home/a"), &HashMap::new());
         let before_forget = at(&counter);

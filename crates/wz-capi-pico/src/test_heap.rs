@@ -19,8 +19,9 @@ std::thread_local! {
 }
 
 /// Every allocation of the calling thread while `run` runs, counted: read by the tests of a
-/// session's doors, through the connectivity tests on the tokio engine and by the kept query's
-/// tests on the cooperative one with threads, each built with the module it reads.
+/// session's doors, through the connectivity tests on the tokio engine, by the kept query's tests
+/// on the cooperative one with threads, and by the time base's tests of the sleep the opens of a
+/// cooperative session over the program's transport wait on, each built with the module it reads.
 #[cfg(any(
     all(feature = "engine-tokio", feature = "connectivity"),
     all(
@@ -29,6 +30,11 @@ std::thread_local! {
         feature = "peer",
         feature = "query",
         feature = "multi-thread"
+    ),
+    all(
+        not(feature = "engine-tokio"),
+        feature = "time-base",
+        feature = "app-transport"
     )
 ))]
 pub(crate) fn allocations(run: impl FnOnce()) -> usize {

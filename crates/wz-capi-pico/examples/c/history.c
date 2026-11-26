@@ -3,8 +3,8 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * History for a subscriber that arrives late: the publisher keeps the last frames it sent of a
- * message in a replay cache (wz_ext_replay_publisher_*), and a subscriber made after them
- * (wz_ext_replay_subscriber_*) is handed that history, oldest first, and then the live frames,
+ * message in a replay cache (zext_replay_publisher_*), and a subscriber made after them
+ * (zext_replay_subscriber_*) is handed that history, oldest first, and then the live frames,
  * in one order.
  *
  * The publishing side, a session that listens on the host's loopback:
@@ -18,14 +18,14 @@
  *   - a replay subscriber of the key: it subscribes, watches the session's peers for the
  *     cache's queryable, asks it once it appears, and hands the program every frame, the
  *     replies flagged as history, each judged by one receiver of the same profile;
- *   - once the subscriber's round is over (WZ_EXT_REPLAY_ROUND_LIVE), the publisher puts LIVE
+ *   - once the subscriber's round is over (ZEXT_REPLAY_ROUND_LIVE), the publisher puts LIVE
  *     more frames.
  *
  * The subscriber is handed the last DEPTH of the frames sent before it came (the cache keeps no
  * more than that), then the live ones: counters SENT_BEFORE - DEPTH to SENT_BEFORE + LIVE - 1,
  * each the next one, the first judged FIRST (the stream's baseline) and every later one OK.
  *
- * Both sessions state the replay-reply-shape policy in their configs (wz_ext_config_policy):
+ * Both sessions state the replay-reply-shape policy in their configs (zext_config_policy):
  * frame-per-sample, one reply for each frame the cache holds. It is the build's default and is
  * stated so that a library built with another default runs this example alike. The profile is
  * made up for this example and unlike any deployed one.
@@ -85,7 +85,7 @@ static int payload_of(unsigned long long n, char *out, size_t cap) { return snpr
 /* The subscriber's callback: one frame at a time, in the order its receiver judged them, inside
  * the subscriber's lock, so it calls no door of its own subscriber. The frame is valid only for
  * the call. */
-static void on_frame(void *context, const wz_ext_replay_sample_t *sample) {
+static void on_frame(void *context, const zext_replay_sample_t *sample) {
     (void)context;
     z_mutex_lock(z_mutex_loan_mut(&handed.lock));
     if (handed.count < HANDED) {
@@ -142,7 +142,7 @@ static z_result_t open_session(z_owned_session_t *session, int dial, const char 
             zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_LISTEN_KEY, locator);
         }
         z_result_t stated =
-            wz_ext_config_policy(z_config_loan_mut(&config), "replay-reply-shape", "frame-per-sample");
+            zext_config_policy(z_config_loan_mut(&config), "replay-reply-shape", "frame-per-sample");
         if (stated != Z_OK) {
             z_config_drop(z_config_move(&config));
             return stated;
@@ -155,7 +155,7 @@ static z_result_t open_session(z_owned_session_t *session, int dial, const char 
 
 /* Protect frame `n`'s payload and put it through the cache, which records it first: 1 when the
  * frame carried counter `n` and went out. */
-static int publish(const wz_ext_loaned_replay_publisher_t *cache, const wz_ext_loaned_e2e_sender_t *tx,
+static int publish(const zext_loaned_replay_publisher_t *cache, const zext_loaned_e2e_sender_t *tx,
                    unsigned n) {
     char payload[16];
     int len = payload_of(n, payload, sizeof payload);
@@ -163,22 +163,22 @@ static int publish(const wz_ext_loaned_replay_publisher_t *cache, const wz_ext_l
     size_t written = 0;
     uint64_t counter = 0;
     z_owned_string_t refusal;
-    z_result_t rc = wz_ext_e2e_sender_protect(tx, 0, (const uint8_t *)payload, (size_t)len, frame, sizeof frame,
+    z_result_t rc = zext_e2e_sender_protect(tx, 0, (const uint8_t *)payload, (size_t)len, frame, sizeof frame,
                                               &written, &counter, &refusal);
-    show_refusal("wz_ext_e2e_sender_protect", &refusal);
+    show_refusal("zext_e2e_sender_protect", &refusal);
     if (rc != Z_OK || counter != n) return 0;
     uint8_t dispatch = 0xFF;
-    rc = wz_ext_replay_publisher_put(cache, 0, (uint64_t)z_clock_elapsed_ms(&started), frame, written,
-                                     WZ_EXT_REPLAY_SEND_PERIODIC, &dispatch);
-    return rc == Z_OK && dispatch == WZ_EXT_REPLAY_SENT;
+    rc = zext_replay_publisher_put(cache, 0, (uint64_t)z_clock_elapsed_ms(&started), frame, written,
+                                     ZEXT_REPLAY_SEND_PERIODIC, &dispatch);
+    return rc == Z_OK && dispatch == ZEXT_REPLAY_SENT;
 }
 
 /* Poll `subscriber`, which judges its deadlines, until its round is in `phase` (any, when it is
  * negative) and `count` frames were handed on, or about 10 s pass; whether that came. */
-static int poll_until(const wz_ext_loaned_replay_subscriber_t *subscriber, int phase, int count) {
+static int poll_until(const zext_loaned_replay_subscriber_t *subscriber, int phase, int count) {
     for (int i = 0; i < 1000; i++) {
-        wz_ext_replay_subscriber_poll(subscriber);
-        if ((phase < 0 || wz_ext_replay_subscriber_phase(subscriber) == phase) && handed_count() >= count) return 1;
+        zext_replay_subscriber_poll(subscriber);
+        if ((phase < 0 || zext_replay_subscriber_phase(subscriber) == phase) && handed_count() >= count) return 1;
         z_sleep_ms(10);
     }
     return 0;
@@ -208,47 +208,47 @@ int main(void) {
 
     /* The sender has no header value of its own to state: the profile's fields are the CRC,
      * the length and the counter, which it fills in. */
-    wz_ext_owned_e2e_sender_t sender;
-    rc = wz_ext_e2e_sender_new(&sender, PROFILE, "{}", NULL, &refusal);
-    show_refusal("wz_ext_e2e_sender_new", &refusal);
+    zext_owned_e2e_sender_t sender;
+    rc = zext_e2e_sender_new(&sender, PROFILE, "{}", NULL, &refusal);
+    show_refusal("zext_e2e_sender_new", &refusal);
     CHECK(rc == Z_OK, "the sender was refused (rc %d)", (int)rc);
 
     /* The cache: DEPTH frames of one instance, each at most FRAME_MAX bytes, over storage the
      * program allocates at the size the library states for that shape. */
-    wz_ext_replay_shape_t shape;
+    zext_replay_shape_t shape;
     shape.frame_max = FRAME_MAX;
     shape.depth = DEPTH;
     shape.instances = 1;
-    size_t storage_len = wz_ext_replay_publisher_storage_size(&shape);
+    size_t storage_len = zext_replay_publisher_storage_size(&shape);
     CHECK(storage_len > 0, "the library states no storage size for the cache's shape");
     uint8_t *storage = storage_len > 0 ? (uint8_t *)malloc(storage_len) : NULL;
-    wz_ext_owned_replay_publisher_t cache;
-    wz_ext_internal_replay_publisher_null(&cache);
+    zext_owned_replay_publisher_t cache;
+    zext_internal_replay_publisher_null(&cache);
     if (storage != NULL) {
         /* Refused by name: storage one byte short of what the shape needs. */
-        wz_ext_owned_replay_publisher_t short_cache;
-        rc = wz_ext_replay_publisher_new(&short_cache, z_session_loan(&pub_session), z_publisher_loan(&publisher),
+        zext_owned_replay_publisher_t short_cache;
+        rc = zext_replay_publisher_new(&short_cache, z_session_loan(&pub_session), z_publisher_loan(&publisher),
                                          storage, storage_len - 1, &shape, &refusal);
-        show_refusal("wz_ext_replay_publisher_new", &refusal);
-        CHECK(rc == _Z_ERR_CONFIG_INVALID_VALUE && !wz_ext_internal_replay_publisher_check(&short_cache),
+        show_refusal("zext_replay_publisher_new", &refusal);
+        CHECK(rc == _Z_ERR_CONFIG_INVALID_VALUE && !zext_internal_replay_publisher_check(&short_cache),
               "a cache over storage one byte short was not refused (rc %d)", (int)rc);
-        wz_ext_replay_publisher_drop(wz_ext_replay_publisher_move(&short_cache));
+        zext_replay_publisher_drop(zext_replay_publisher_move(&short_cache));
 
-        rc = wz_ext_replay_publisher_new(&cache, z_session_loan(&pub_session), z_publisher_loan(&publisher), storage,
+        rc = zext_replay_publisher_new(&cache, z_session_loan(&pub_session), z_publisher_loan(&publisher), storage,
                                          storage_len, &shape, &refusal);
-        show_refusal("wz_ext_replay_publisher_new", &refusal);
+        show_refusal("zext_replay_publisher_new", &refusal);
         CHECK(rc == Z_OK, "the cache was refused (rc %d)", (int)rc);
     }
 
-    if (wz_ext_internal_e2e_sender_check(&sender) && wz_ext_internal_replay_publisher_check(&cache)) {
-        const wz_ext_loaned_e2e_sender_t *tx = wz_ext_e2e_sender_loan(&sender);
-        const wz_ext_loaned_replay_publisher_t *pub_cache = wz_ext_replay_publisher_loan(&cache);
+    if (zext_internal_e2e_sender_check(&sender) && zext_internal_replay_publisher_check(&cache)) {
+        const zext_loaned_e2e_sender_t *tx = zext_e2e_sender_loan(&sender);
+        const zext_loaned_replay_publisher_t *pub_cache = zext_replay_publisher_loan(&cache);
 
         /* The frames sent before anyone subscribed: nobody hears them, the cache keeps the last
          * DEPTH. */
         for (unsigned n = 0; n < SENT_BEFORE; n++) CHECK(publish(pub_cache, tx, n), "frame %u was not put", n);
-        rc = wz_ext_replay_publisher_serve(pub_cache, z_view_keyexpr_loan(&ke), SUFFIX, NULL, &refusal);
-        show_refusal("wz_ext_replay_publisher_serve", &refusal);
+        rc = zext_replay_publisher_serve(pub_cache, z_view_keyexpr_loan(&ke), SUFFIX, NULL, &refusal);
+        show_refusal("zext_replay_publisher_serve", &refusal);
         CHECK(rc == Z_OK, "the cache does not serve (rc %d)", (int)rc);
 
         /* ---- The subscribing side, which comes later. */
@@ -256,18 +256,18 @@ int main(void) {
         rc = open_session(&sub_session, 1, locator);
         CHECK(rc == Z_OK, "the subscribing session did not open to %s (rc %d)", locator, (int)rc);
         if (rc == Z_OK) {
-            wz_ext_owned_e2e_receiver_t receiver;
-            rc = wz_ext_e2e_receiver_new(&receiver, PROFILE, NULL, NULL, &refusal);
-            show_refusal("wz_ext_e2e_receiver_new", &refusal);
+            zext_owned_e2e_receiver_t receiver;
+            rc = zext_e2e_receiver_new(&receiver, PROFILE, NULL, NULL, &refusal);
+            show_refusal("zext_e2e_receiver_new", &refusal);
             CHECK(rc == Z_OK, "the receiver was refused (rc %d)", (int)rc);
 
             /* The subscriber's table of publishers, and a store for live frames that arrive
              * while history is still coming, read only under the replay-live-before-answer
              * policy hold-back: both the program's, left to the subscriber while it lives. */
-            static wz_ext_replay_publisher_slot_t rows[PUBLISHER_ROWS];
+            static zext_replay_publisher_slot_t rows[PUBLISHER_ROWS];
             static uint8_t held[8 * (4 + FRAME_MAX)];
-            wz_ext_replay_subscriber_options_t options;
-            wz_ext_replay_subscriber_options_default(&options);
+            zext_replay_subscriber_options_t options;
+            zext_replay_subscriber_options_default(&options);
             options.slots = rows;
             options.slot_count = PUBLISHER_ROWS;
             options.held = held;
@@ -278,18 +278,18 @@ int main(void) {
             options.round_ms = 9000;
             /* The receiver is taken on every path, and so is the context: on a refusal the
              * receiver is dropped and on_context_drop has run before this returns. */
-            wz_ext_owned_replay_subscriber_t subscriber;
-            rc = wz_ext_replay_subscriber_new(&subscriber, z_session_loan(&sub_session), z_view_keyexpr_loan(&ke),
-                                              SUFFIX, wz_ext_e2e_receiver_move(&receiver), &options, on_frame,
+            zext_owned_replay_subscriber_t subscriber;
+            rc = zext_replay_subscriber_new(&subscriber, z_session_loan(&sub_session), z_view_keyexpr_loan(&ke),
+                                              SUFFIX, zext_e2e_receiver_move(&receiver), &options, on_frame,
                                               on_context_drop, NULL);
             CHECK(rc == Z_OK, "the replay subscriber was refused (rc %d)", (int)rc);
             if (rc == Z_OK) {
-                const wz_ext_loaned_replay_subscriber_t *sub = wz_ext_replay_subscriber_loan(&subscriber);
+                const zext_loaned_replay_subscriber_t *sub = zext_replay_subscriber_loan(&subscriber);
                 /* The round: the cache's queryable appears, it is asked, and its frames are
                  * handed on; then the subscriber is live. */
-                CHECK(poll_until(sub, WZ_EXT_REPLAY_ROUND_LIVE, DEPTH),
+                CHECK(poll_until(sub, ZEXT_REPLAY_ROUND_LIVE, DEPTH),
                       "the round did not end with the history handed on (phase %u, %d frames)",
-                      (unsigned)wz_ext_replay_subscriber_phase(sub), handed_count());
+                      (unsigned)zext_replay_subscriber_phase(sub), handed_count());
                 CHECK(handed_count() == DEPTH, "%d frames of history were handed on, not %d", handed_count(),
                       DEPTH);
 
@@ -307,16 +307,16 @@ int main(void) {
                           (unsigned long long)handed.counter[n], (unsigned long long)expected);
                     CHECK(handed.from_replay[n] == (n < DEPTH), "frame %d is flagged %s", n,
                           handed.from_replay[n] ? "history" : "live");
-                    CHECK(handed.judged[n] && handed.status[n] == (n == 0 ? WZ_EXT_E2E_FIRST : WZ_EXT_E2E_OK),
+                    CHECK(handed.judged[n] && handed.status[n] == (n == 0 ? ZEXT_E2E_FIRST : ZEXT_E2E_OK),
                           "frame %d was judged %u", n, (unsigned)handed.status[n]);
                     CHECK(handed.payload_ok[n], "frame %d does not carry its payload", n);
                 }
                 z_mutex_unlock(z_mutex_loan_mut(&handed.lock));
 
-                wz_ext_replay_subscriber_counts_t counts;
+                zext_replay_subscriber_counts_t counts;
                 memset(&counts, 0, sizeof counts);
                 counts.struct_size = sizeof counts;
-                CHECK(wz_ext_replay_subscriber_counts(sub, &counts) == Z_OK, "the subscriber's counts");
+                CHECK(zext_replay_subscriber_counts(sub, &counts) == Z_OK, "the subscriber's counts");
                 CHECK(counts.duplicates == 0 && counts.stale == 0 && counts.abandoned == 0 &&
                           counts.late_replies == 0,
                       "the subscriber dropped %llu duplicate, %llu stale, %llu late replies and abandoned %llu rounds",
@@ -324,7 +324,7 @@ int main(void) {
                       (unsigned long long)counts.late_replies, (unsigned long long)counts.abandoned);
 
                 /* Nothing is handed on after the drop returns, and the context's drop has run. */
-                wz_ext_replay_subscriber_drop(wz_ext_replay_subscriber_move(&subscriber));
+                zext_replay_subscriber_drop(zext_replay_subscriber_move(&subscriber));
             }
             z_mutex_lock(z_mutex_loan_mut(&handed.lock));
             CHECK(handed.context_dropped == 1, "the subscriber let go of its context %d times, not once",
@@ -333,10 +333,10 @@ int main(void) {
             ex_close(&sub_session);
         }
 
-        wz_ext_replay_publisher_counts_t served;
+        zext_replay_publisher_counts_t served;
         memset(&served, 0, sizeof served);
         served.struct_size = sizeof served;
-        CHECK(wz_ext_replay_publisher_counts(pub_cache, &served) == Z_OK, "the cache's counts");
+        CHECK(zext_replay_publisher_counts(pub_cache, &served) == Z_OK, "the cache's counts");
         CHECK(served.recorded == SENT_BEFORE + LIVE && served.answers >= 1,
               "the cache recorded %llu frames and answered %llu queries",
               (unsigned long long)served.recorded, (unsigned long long)served.answers);
@@ -344,9 +344,9 @@ int main(void) {
 
     /* The cache before its publisher and its session; its storage is the program's again once
      * the drop returns. */
-    wz_ext_replay_publisher_drop(wz_ext_replay_publisher_move(&cache));
+    zext_replay_publisher_drop(zext_replay_publisher_move(&cache));
     free(storage);
-    wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&sender));
+    zext_e2e_sender_drop(zext_e2e_sender_move(&sender));
     z_undeclare_publisher(z_publisher_move(&publisher));
     ex_close(&pub_session);
     z_mutex_drop(z_mutex_move(&handed.lock));

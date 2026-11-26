@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+# SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+#
+# The C runtime an MSVC-target library without `std` links in Visual Studio's place: the memory
+# functions, the stack probe, the floating-point marker, the DLL entry, the frame handler the
+# prebuilt `core` names and x86's 64-bit division helpers, each an assembly label so a `cdylib`
+# exports none of them (`src/lib.rs`). Linked by `wz-capi-pico-lib` on the MSVC targets in a build
+# that does not unwind. No dependency: it is the floor the rest of that library stands on.
+
+[package]
+name = "wz-msvc-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "The C runtime symbols an MSVC-target library without std links in place of Visual Studio's, so it links with the toolchain's own linker and imports no C runtime DLL."
+
+[lib]
+name = "wz_msvc_runtime"
+path = "src/lib.rs"
+doctest = false
+
+[lints]
+workspace = true

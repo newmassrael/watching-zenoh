@@ -30,7 +30,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread::ThreadId;
 
-use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
+use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::get::{
     z_closure_reply, z_closure_reply_move, z_get, z_loaned_reply_t, z_owned_closure_reply_t,
 };
@@ -76,7 +76,7 @@ unsafe fn open_alone() -> z_owned_session_t {
     assert_eq!(
         zp_config_insert(
             z_config_loan_mut(&mut cfg),
-            WZ_EXT_CONFIG_LIMITS_KEY,
+            ZEXT_CONFIG_LIMITS_KEY,
             c"MAX_SUBSCRIPTIONS=2,MAX_PUBLISHERS=2,MAX_DECLARED_KEYEXPRS=4".as_ptr()
         ),
         Z_OK

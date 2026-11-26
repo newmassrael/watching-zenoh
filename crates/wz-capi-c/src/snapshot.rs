@@ -22,7 +22,7 @@
 //! are for a program that wants the bytes, or that wants a node with no admin space to have them.
 //!
 //! What the sampler does is [`wz_capi_port::observation::snapshot`]'s, which the pico ABI's
-//! `wz_ext_snapshot_*` doors act on too; this file is this ABI's names and result codes for it,
+//! `zext_snapshot_*` doors act on too; this file is this ABI's names and result codes for it,
 //! and the session whose received messages the snapshot counts.
 
 use std::ffi::c_void;

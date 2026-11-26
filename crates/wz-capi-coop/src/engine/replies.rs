@@ -25,7 +25,7 @@ use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::reply::{InboundReply, LentReply, ReplyRoom};
 use wz_session_core::reply_sink::ReplyView;
 #[cfg(feature = "liveliness-get")]
-use wz_session_core::wireexpr_resolve::{KeyexprBuf, KeyexprOut};
+use wz_session_core::wireexpr_resolve::{KeyexprOut, KeyexprRow};
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the reply of the Response `record` of face `face` lends to the get it answers, with
@@ -84,7 +84,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         face: HeldFace,
         record: &InPlaceRecord<'_, '_>,
     ) -> Option<LiveCore<'_, L, C>> {
-        let mut room = KeyexprBuf::new();
+        // Of the static policy whatever the build's profile: a token claimed after the open takes no
+        // heap.
+        let mut room = KeyexprRow::new_static();
         let mut held = self.live()?;
         let Some(interest_id) = held
             .0

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_object_pool_*`: the doors through which a program reserves the process pools itself, and
+//! `zext_object_pool_*`: the doors through which a program reserves the process pools itself, and
 //! reads what they hold (`crate::process_pool`, where the pools and their counts are described).
 //!
-//! Doors wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! Doors wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `object-pool` capability implies `unstable-api`. The pools
 //! themselves are not the doors': a library without the tokio engine has them whether or not it has
 //! the doors, reserved by its first object from the build's limits, so a build without the unstable
@@ -13,8 +13,8 @@
 //! # Reserving
 //!
 //! A program that states its own counts reserves the pools before its first object: from the heap
-//! in one allocation (`wz_ext_object_pool_reserve`) or, with the `object-pool-region` capability,
-//! over memory it hands over (`wz_ext_object_pool_place`), whose size `wz_ext_object_pool_bytes`
+//! in one allocation (`zext_object_pool_reserve`) or, with the `object-pool-region` capability,
+//! over memory it hands over (`zext_object_pool_place`), whose size `zext_object_pool_bytes`
 //! answers. A reservation is all or nothing: a refused one leaves no pool and touches no memory.
 //! The counts are read as the pools' module says: the entity counts per session, bounded by the
 //! limits a session opens under; every other count as stated, zero being none, so a program that
@@ -29,7 +29,7 @@
 //!
 //! # Reading
 //!
-//! The pools are reported by size class (`wz_ext_object_pool_class`), the pools whose slots a
+//! The pools are reported by size class (`zext_object_pool_class`), the pools whose slots a
 //! class holds together, the kinds' and the payload blocks': the class's largest slot, their slots
 //! and the bytes those take (a slot is its object's own size, so the slots of one class differ),
 //! those in use, the most in use at once and the objects refused for want of a free slot. A
@@ -49,7 +49,7 @@
 //!
 //! # Releasing
 //!
-//! `wz_ext_object_pool_release` gives the pools up when no object is held in them: the heap's
+//! `zext_object_pool_release` gives the pools up when no object is held in them: the heap's
 //! memory is freed and the program's is the program's again. The next object reserves the build's
 //! pools again, unless the program reserves its own first.
 
@@ -69,7 +69,7 @@ use crate::sized::{Out, SizedOut};
 
 /// How many size classes the pools are reported by, the largest slot of the smallest 16 bytes and
 /// each one's twice the one before's, up to 16 KiB.
-pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
+pub const ZEXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
 
 /// How many of each object the program holds at once, as it states them to reserve the pools.
 ///
@@ -80,7 +80,7 @@ pub const WZ_EXT_OBJECT_POOL_CLASSES: usize = process_pool::CLASSES;
 /// count lies whole before `struct_size` or past it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_object_pool_counts_t {
+pub struct zext_object_pool_counts_t {
     /// The bytes of the struct the program was compiled with, `sizeof` of it: the counts past them
     /// are read as zero, and a size short of the counts up to `encodings` is refused.
     pub struct_size: usize,
@@ -154,12 +154,12 @@ pub struct wz_ext_object_pool_counts_t {
 
 /// The bytes of the counts every program states, `struct_size` to `encodings`: the struct as it was
 /// when it took its size, so a `struct_size` under it is no struct of this door.
-const COUNTS_BASE_BYTES: usize = offset_of!(wz_ext_object_pool_counts_t, gets);
+const COUNTS_BASE_BYTES: usize = offset_of!(zext_object_pool_counts_t, gets);
 
 /// The bytes of one count of the struct: a word of the host.
 const WORD_BYTES: usize = size_of::<usize>();
 
-impl Default for wz_ext_object_pool_counts_t {
+impl Default for zext_object_pool_counts_t {
     /// No count stated, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -193,7 +193,7 @@ impl Default for wz_ext_object_pool_counts_t {
     }
 }
 
-impl wz_ext_object_pool_counts_t {
+impl zext_object_pool_counts_t {
     /// The counts as the pools read them.
     fn counts(&self) -> Counts {
         Counts {
@@ -231,10 +231,10 @@ impl wz_ext_object_pool_counts_t {
 }
 
 /// The pools of one size class, the kinds whose slots it holds together, as
-/// `wz_ext_object_pool_class` reports them, into a struct the program sized (`crate::sized`).
+/// `zext_object_pool_class` reports them, into a struct the program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_object_pool_class_t {
+pub struct zext_object_pool_class_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
@@ -252,7 +252,7 @@ pub struct wz_ext_object_pool_class_t {
     pub bytes: usize,
 }
 
-impl Default for wz_ext_object_pool_class_t {
+impl Default for zext_object_pool_class_t {
     /// Nothing reported, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -268,7 +268,7 @@ impl Default for wz_ext_object_pool_class_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_object_pool_class_t {
+unsafe impl SizedOut for zext_object_pool_class_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -296,8 +296,8 @@ fn refused_code(refused: Refused) -> ZResult {
 /// `counts` is null or points at a struct of at least `struct_size` readable bytes, `struct_size`
 /// its first field.
 unsafe fn stated(
-    counts: *const wz_ext_object_pool_counts_t,
-) -> Result<wz_ext_object_pool_counts_t, ZResult> {
+    counts: *const zext_object_pool_counts_t,
+) -> Result<zext_object_pool_counts_t, ZResult> {
     if counts.is_null() {
         return Err(Z_ERR_NULL);
     }
@@ -309,8 +309,8 @@ unsafe fn stated(
     }
     // A count the struct holds only in part is not read: the bytes of the whole words that fit, a
     // word's bytes being a power of two.
-    let bytes = declared.min(size_of::<wz_ext_object_pool_counts_t>()) & !(WORD_BYTES - 1);
-    let mut read = wz_ext_object_pool_counts_t::default();
+    let bytes = declared.min(size_of::<zext_object_pool_counts_t>()) & !(WORD_BYTES - 1);
+    let mut read = zext_object_pool_counts_t::default();
     // Copied as bytes, which need no alignment of the program's struct.
     ptr::copy_nonoverlapping(
         counts.cast::<u8>(),
@@ -324,7 +324,7 @@ unsafe fn stated(
 ///
 /// # Safety
 /// As [`stated`].
-unsafe fn planned(counts: *const wz_ext_object_pool_counts_t) -> Result<Plan, ZResult> {
+unsafe fn planned(counts: *const zext_object_pool_counts_t) -> Result<Plan, ZResult> {
     let stated = stated(counts)?;
     if stated.payload_bytes != 0 {
         return Err(Z_EINVAL);
@@ -333,14 +333,14 @@ unsafe fn planned(counts: *const wz_ext_object_pool_counts_t) -> Result<Plan, ZR
 }
 
 /// The bytes the pools of `counts` take, in `out_bytes` (zero on every error): what memory a
-/// program hands `wz_ext_object_pool_place`. `Z_OK`; `Z_ERR_NULL` for a NULL argument;
+/// program hands `zext_object_pool_place`. `Z_OK`; `Z_ERR_NULL` for a NULL argument;
 /// `_Z_ERR_CONFIG_INVALID_VALUE` for counts that make no pool (a count left at zero whose limit
 /// holds no bound, or no slot at all); `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for more than the address
 /// space holds; `Z_EINVAL` for a `struct_size` short of the counts up to `encodings`, or for a
 /// `payload_bytes` not zero.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_object_pool_bytes(
-    counts: *const wz_ext_object_pool_counts_t,
+pub unsafe extern "C" fn zext_object_pool_bytes(
+    counts: *const zext_object_pool_counts_t,
     out_bytes: *mut usize,
 ) -> ZResult {
     guarded(|| {
@@ -365,8 +365,8 @@ pub unsafe extern "C" fn wz_ext_object_pool_bytes(
 /// `payload_bytes` not zero. Every refusal
 /// leaves the heap as it was.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_object_pool_reserve(
-    counts: *const wz_ext_object_pool_counts_t,
+pub unsafe extern "C" fn zext_object_pool_reserve(
+    counts: *const zext_object_pool_counts_t,
 ) -> ZResult {
     guarded(|| match planned(counts) {
         Ok(plan) => process_pool::reserve(&plan).map_or_else(refused_code, |()| Z_OK),
@@ -375,18 +375,18 @@ pub unsafe extern "C" fn wz_ext_object_pool_reserve(
 }
 
 /// Reserve the pools of `counts` over the `len` bytes the program hands over at `base`, which
-/// the library uses until `wz_ext_object_pool_release` and the program must not touch meanwhile.
+/// the library uses until `zext_object_pool_release` and the program must not touch meanwhile.
 /// `Z_OK`; `Z_ERR_NULL` for a NULL argument; `_Z_ERR_CONFIG_INVALID_VALUE` for counts that make
 /// no pool; `Z_EINVAL` for a `base` not aligned to 16 bytes, when pools are reserved already, or
 /// for a `struct_size` short of the counts up to `encodings` or a `payload_bytes` not zero;
-/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for a `len` under what `wz_ext_object_pool_bytes` answers. A
+/// `_Z_ERR_SYSTEM_OUT_OF_MEMORY` for a `len` under what `zext_object_pool_bytes` answers. A
 /// refused call writes nothing at `base`.
 #[cfg(feature = "object-pool-region")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_object_pool_place(
+pub unsafe extern "C" fn zext_object_pool_place(
     base: *mut c_void,
     len: usize,
-    counts: *const wz_ext_object_pool_counts_t,
+    counts: *const zext_object_pool_counts_t,
 ) -> ZResult {
     guarded(|| {
         let Some(base) = NonNull::new(base.cast::<u8>()) else {
@@ -408,27 +408,27 @@ pub unsafe extern "C" fn wz_ext_object_pool_place(
     })
 }
 
-/// The pools of size class `class` together (`0` to `WZ_EXT_OBJECT_POOL_CLASSES - 1`, the largest
+/// The pools of size class `class` together (`0` to `ZEXT_OBJECT_POOL_CLASSES - 1`, the largest
 /// slot of each twice the one before's), in `out`: its largest slot, and while pools are reserved
 /// their slots and the bytes those take, those in use, the most in use at once and the objects they
 /// refused. `Z_OK`;
 /// `Z_ERR_NULL` for a NULL `out`; `Z_EINVAL` for a `class` past the last, or for a `struct_size`
 /// short of the struct, nothing written then.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_object_pool_class(
+pub unsafe extern "C" fn zext_object_pool_class(
     class: usize,
-    out: *mut wz_ext_object_pool_class_t,
+    out: *mut zext_object_pool_class_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
             Ok(out) => out,
             Err(code) => return code,
         };
-        if class >= WZ_EXT_OBJECT_POOL_CLASSES {
+        if class >= ZEXT_OBJECT_POOL_CLASSES {
             return Z_EINVAL;
         }
         let report = process_pool::report(class);
-        out.put(&wz_ext_object_pool_class_t {
+        out.put(&zext_object_pool_class_t {
             struct_size: 0,
             slot_bytes: report.slot_bytes,
             slots: report.slots,
@@ -445,7 +445,7 @@ pub unsafe extern "C" fn wz_ext_object_pool_class(
 /// freed, a program's is the program's again. `Z_OK`, also when none are reserved; `Z_EINVAL`
 /// while an object is held in them, which keeps them.
 #[no_mangle]
-pub extern "C" fn wz_ext_object_pool_release() -> ZResult {
+pub extern "C" fn zext_object_pool_release() -> ZResult {
     guarded(|| {
         if process_pool::release() {
             Z_OK
@@ -463,8 +463,8 @@ mod tests {
     /// payloads, which take no slot, into none.
     #[test]
     fn every_count_the_program_states_is_read() {
-        let stated = wz_ext_object_pool_counts_t {
-            struct_size: size_of::<wz_ext_object_pool_counts_t>(),
+        let stated = zext_object_pool_counts_t {
+            struct_size: size_of::<zext_object_pool_counts_t>(),
             sessions: 1,
             publishers: 2,
             subscribers: 3,
@@ -525,11 +525,11 @@ mod tests {
     /// payload takes no slot. Turned red by a `counts` that reads `bytes` into any count.
     #[test]
     fn the_count_of_payloads_changes_nothing() {
-        let none = wz_ext_object_pool_counts_t {
+        let none = zext_object_pool_counts_t {
             bytes: 0,
-            ..every_count(size_of::<wz_ext_object_pool_counts_t>())
+            ..every_count(size_of::<zext_object_pool_counts_t>())
         };
-        let most = wz_ext_object_pool_counts_t {
+        let most = zext_object_pool_counts_t {
             bytes: usize::MAX,
             ..none
         };
@@ -538,8 +538,8 @@ mod tests {
 
     /// Counts with every field stated and a nonzero sentinel in each, as a program compiled with
     /// this build's struct would hand them; `struct_size` set by the caller.
-    fn every_count(struct_size: usize) -> wz_ext_object_pool_counts_t {
-        wz_ext_object_pool_counts_t {
+    fn every_count(struct_size: usize) -> zext_object_pool_counts_t {
+        zext_object_pool_counts_t {
             struct_size,
             sessions: 1,
             publishers: 2,
@@ -574,12 +574,12 @@ mod tests {
     fn the_base_ends_where_the_counts_added_later_begin() {
         assert_eq!(COUNTS_BASE_BYTES, 17 * size_of::<usize>());
         assert_eq!(
-            size_of::<wz_ext_object_pool_counts_t>(),
+            size_of::<zext_object_pool_counts_t>(),
             COUNTS_BASE_BYTES + 9 * size_of::<usize>()
         );
         assert_eq!(
-            wz_ext_object_pool_counts_t::default().struct_size,
-            size_of::<wz_ext_object_pool_counts_t>()
+            zext_object_pool_counts_t::default().struct_size,
+            size_of::<zext_object_pool_counts_t>()
         );
     }
 
@@ -593,7 +593,7 @@ mod tests {
         let read = unsafe { stated(&older) }.expect("a struct of the base size is read");
         assert_eq!(
             read,
-            wz_ext_object_pool_counts_t {
+            zext_object_pool_counts_t {
                 gets: 0,
                 liveliness_gets: 0,
                 matching_listeners: 0,
@@ -622,14 +622,14 @@ mod tests {
     /// knows read, and nothing past this build's struct.
     #[test]
     fn a_struct_of_this_size_or_larger_has_every_count_read() {
-        let full = size_of::<wz_ext_object_pool_counts_t>();
+        let full = size_of::<zext_object_pool_counts_t>();
         // SAFETY: `every_count` is a live struct of this build's size.
         let read = unsafe { stated(&every_count(full)) }.expect("read");
         assert_eq!(read, every_count(full));
 
         #[repr(C)]
         struct Later {
-            counts: wz_ext_object_pool_counts_t,
+            counts: zext_object_pool_counts_t,
             added: usize,
         }
         let later = Later {
@@ -658,7 +658,7 @@ mod tests {
             assert_eq!(unsafe { stated(&counts) }, Err(Z_EINVAL), "{short}");
             let mut bytes = 7usize;
             // SAFETY: both arguments are live locals.
-            let code = unsafe { wz_ext_object_pool_bytes(&counts, &mut bytes) };
+            let code = unsafe { zext_object_pool_bytes(&counts, &mut bytes) };
             assert_eq!((code, bytes), (Z_EINVAL, 0), "{short}");
         }
         // SAFETY: a null pointer is the case under test.
@@ -669,10 +669,10 @@ mod tests {
     /// Turned red by a write before the size is read.
     #[test]
     fn a_class_report_short_of_the_struct_is_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_object_pool_class_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_object_pool_class_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size.
-                unsafe { wz_ext_object_pool_class(0, out) }
+                unsafe { zext_object_pool_class(0, out) }
             },
             Z_EINVAL,
         );
@@ -695,21 +695,21 @@ mod tests {
     /// door that reads the bytes, or ignores them, or by a plan that leaves the blocks out.
     #[test]
     fn counts_that_state_payload_bytes_are_refused() {
-        let full = size_of::<wz_ext_object_pool_counts_t>();
+        let full = size_of::<zext_object_pool_counts_t>();
         let stating = every_count(full);
         assert_ne!(stating.payload_bytes, 0);
         let mut bytes = 7usize;
         // SAFETY: both arguments are live locals.
-        let code = unsafe { wz_ext_object_pool_bytes(&stating, &mut bytes) };
+        let code = unsafe { zext_object_pool_bytes(&stating, &mut bytes) };
         assert_eq!((code, bytes), (Z_EINVAL, 0));
         // SAFETY: a live local; refused before anything is reserved.
-        assert_eq!(unsafe { wz_ext_object_pool_reserve(&stating) }, Z_EINVAL);
+        assert_eq!(unsafe { zext_object_pool_reserve(&stating) }, Z_EINVAL);
 
-        let blocks = wz_ext_object_pool_counts_t {
+        let blocks = zext_object_pool_counts_t {
             payload_bytes: 0,
             ..stating
         };
-        let none = wz_ext_object_pool_counts_t {
+        let none = zext_object_pool_counts_t {
             small_payload_blocks: 0,
             medium_payload_blocks: 0,
             large_payload_blocks: 0,
@@ -726,10 +726,10 @@ mod tests {
     /// Counts of nothing are refused by the door that sizes them, which writes zero.
     #[test]
     fn counts_of_nothing_are_refused_and_size_nothing() {
-        let nothing = wz_ext_object_pool_counts_t::default();
+        let nothing = zext_object_pool_counts_t::default();
         let mut bytes = 7usize;
         // SAFETY: both arguments are live locals.
-        let code = unsafe { wz_ext_object_pool_bytes(&nothing, &mut bytes) };
+        let code = unsafe { zext_object_pool_bytes(&nothing, &mut bytes) };
         assert_eq!(code, Z_ERR_CONFIG_INVALID_VALUE);
         assert_eq!(bytes, 0);
     }

@@ -142,7 +142,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // its callback as a reply is.
             #[cfg(feature = "liveliness-get")]
             if let wz_session_core::network_message::NetworkMessage::Declare(declare) = message {
-                let mut room = wz_session_core::wireexpr_resolve::KeyexprBuf::new();
+                let mut room = wz_session_core::wireexpr_resolve::KeyexprRow::new_static();
                 if let Some(interest_id) = held
                     .0
                     .session

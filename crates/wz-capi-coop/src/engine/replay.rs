@@ -194,6 +194,14 @@ impl Replay {
     pub(super) fn next_turn_ms(&self) -> Option<u64> {
         (ReplayPacing::REACHABLE && !self.cursor.finished()).then_some(self.next_turn_ms)
     }
+
+    /// Whether a turn is owed and due at `now_ms` (`Self::next_turn_ms`): never, in a build that
+    /// reaches no pace. Asked by the read that steps each face itself (`direct`), which a build
+    /// that keeps the round has not.
+    #[cfg(any(test, not(wz_round)))]
+    pub(super) fn turn_due(&self, now_ms: u64) -> bool {
+        self.next_turn_ms().is_some_and(|due_ms| now_ms >= due_ms)
+    }
 }
 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
@@ -828,6 +836,33 @@ mod tests {
         let _ = cursor.turn(usize::MAX);
         assert_eq!(paced.settle(cursor, true, false, 110, pace), TurnEnd::Kept);
         assert!(paced.finished());
+    }
+
+    /// A turn is due only while the replay owes one and its time has come: never for a replay
+    /// that owes nothing, before its interval, or once it is finished.
+    #[test]
+    fn a_turn_is_due_only_while_owed_and_at_its_time() {
+        let mut replay = Replay::idle();
+        assert!(!replay.turn_due(u64::MAX), "an idle replay owes no turn");
+        // A build that reaches no pace has no turn to time (`Replay::next_turn_ms`).
+        if !ReplayPacing::REACHABLE {
+            replay.begin(3, 100);
+            assert!(!replay.turn_due(u64::MAX));
+            return;
+        }
+        let pace = ReplayPacing::new(2, 10);
+        replay.begin(5, 100);
+        assert!(!replay.turn_due(99));
+        assert!(replay.turn_due(100), "the first turn is due at once");
+        let mut cursor = replay.cursor;
+        let _ = cursor.turn(2);
+        assert_eq!(replay.settle(cursor, true, false, 100, pace), TurnEnd::Kept);
+        assert!(!replay.turn_due(109), "the next turn waits the interval");
+        assert!(replay.turn_due(110));
+        let mut cursor = replay.cursor;
+        let _ = cursor.turn(usize::MAX);
+        assert_eq!(replay.settle(cursor, true, false, 110, pace), TurnEnd::Kept);
+        assert!(!replay.turn_due(u64::MAX), "a finished replay owes no turn");
     }
 
     /// A session that is not paced gives its replay up on the first send the link refuses, even

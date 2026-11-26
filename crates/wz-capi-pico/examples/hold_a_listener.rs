@@ -25,7 +25,7 @@ use std::ffi::{c_void, CStr, CString};
 use std::io::BufRead;
 use std::time::Duration;
 
-use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
+use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::liveliness::{
     z_liveliness_declare_subscriber, z_liveliness_declare_token, z_liveliness_token_drop,
     z_liveliness_token_move, z_owned_liveliness_token_t,
@@ -215,7 +215,7 @@ fn main() {
         assert_eq!(
             zp_config_insert(
                 z_config_loan_mut(&mut cfg),
-                WZ_EXT_CONFIG_LIMITS_KEY,
+                ZEXT_CONFIG_LIMITS_KEY,
                 c"MAX_DECLARED_KEYEXPRS=5,MAX_LOCAL_TOKENS=2".as_ptr()
             ),
             Z_OK

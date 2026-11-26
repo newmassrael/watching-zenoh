@@ -198,6 +198,11 @@
       "locked": true,
       "debt": null
     },
+    "time-base-advanced": {
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
+    },
     "transport-events-listener": {
       "allocs_per_round": 0,
       "locked": true,
@@ -331,6 +336,11 @@
     "shared-key-ids": {
       "families": [
         "shared-key-ids"
+      ]
+    },
+    "time-base": {
+      "families": [
+        "time-base-advanced"
       ]
     },
     "unstable-api": {
