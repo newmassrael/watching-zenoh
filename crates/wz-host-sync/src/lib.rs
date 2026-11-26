@@ -29,6 +29,9 @@
 //!
 //! [`OnceLock`] is a process-wide value made by its first caller at run time, in the shape of
 //! `std`'s, filled and read without memory of the heap.
+//!
+//! [`pages`] maps a block of the system's fresh pages, zero as handed and resident only once
+//! written, for memory whose untouched bytes must read zero without being written.
 
 #![no_std]
 #![cfg(any(unix, windows))]
@@ -372,6 +375,7 @@ use std_lock as chosen;
 
 pub mod in_place;
 mod once;
+pub mod pages;
 
 pub use chosen::{Condvar, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 pub use once::OnceLock;
