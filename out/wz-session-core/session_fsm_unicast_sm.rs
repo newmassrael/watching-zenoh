@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 262fc888f4dbe9ddc96b448c18fb962c0cd5eacc0c702f4dee5ebd55dae7051e
+// source-hash: ddf88db59b1f31da7bf884fe79b35db2cde2ef8cbb4f181bab5c170dea2383d4
 // source: session_fsm_unicast.scxml
 
 
@@ -785,6 +785,80 @@ impl<A: SessionFsmUnicastActions + 'static> StatePolicy for SessionFsmUnicastPol
 
     fn event_id(event: Self::Event) -> ::sce_rust_runtime::EventId {
         ::sce_rust_runtime::EventId(event as u16)
+    }
+
+    // docs/adr/0144: a number is its value by the discriminant each variant is
+    // written with, so the way back is a match of each number to its variant,
+    // which the compiler reads as the identity with one bound and not as a
+    // read of `STATES`: a comparison of the value against a variant is a
+    // comparison of the number.
+    fn state_of(id: ::sce_rust_runtime::StateId) -> Self::State {
+        match id.0 {
+            0 => SessionFsmUnicastState::Init,
+            1 => SessionFsmUnicastState::LinkOpening,
+            2 => SessionFsmUnicastState::Opening,
+            3 => SessionFsmUnicastState::SentInitSyn,
+            4 => SessionFsmUnicastState::GotInitAck,
+            #[cfg(not(feature = "session-unicast-accept"))] 5 => SessionFsmUnicastState::Established,
+            #[cfg(not(feature = "session-unicast-accept"))] 6 => SessionFsmUnicastState::Closing,
+            #[cfg(not(feature = "session-unicast-accept"))] 7 => SessionFsmUnicastState::Closed,
+            #[cfg(feature = "session-unicast-accept")] 5 => SessionFsmUnicastState::Accepting,
+            #[cfg(feature = "session-unicast-accept")] 6 => SessionFsmUnicastState::AwaitingInitSyn,
+            #[cfg(feature = "session-unicast-accept")] 7 => SessionFsmUnicastState::SentInitAck,
+            #[cfg(feature = "session-unicast-accept")] 8 => SessionFsmUnicastState::SentOpenAck,
+            #[cfg(feature = "session-unicast-accept")] 9 => SessionFsmUnicastState::Established,
+            #[cfg(feature = "session-unicast-accept")] 10 => SessionFsmUnicastState::Closing,
+            #[cfg(feature = "session-unicast-accept")] 11 => SessionFsmUnicastState::Closed,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
+    fn history_of(id: ::sce_rust_runtime::HistoryId) -> Self::History {
+        // No `<history>`, so no number names one.
+        let _ = id;
+        ::sce_rust_runtime::helpers::tables::row_missing()
+    }
+
+    fn event_of(id: ::sce_rust_runtime::EventId) -> Self::Event {
+        match id.0 {
+            #[cfg(not(feature = "session-unicast-accept"))] 0 => SessionFsmUnicastEvent::ClosingTimeout,
+            #[cfg(not(feature = "session-unicast-accept"))] 1 => SessionFsmUnicastEvent::EstablishmentExtRejected,
+            #[cfg(not(feature = "session-unicast-accept"))] 2 => SessionFsmUnicastEvent::FramingError,
+            #[cfg(not(feature = "session-unicast-accept"))] 3 => SessionFsmUnicastEvent::InitAckReceived,
+            #[cfg(not(feature = "session-unicast-accept"))] 4 => SessionFsmUnicastEvent::InitAckTimeout,
+            #[cfg(not(feature = "session-unicast-accept"))] 5 => SessionFsmUnicastEvent::LeaseExpired,
+            #[cfg(not(feature = "session-unicast-accept"))] 6 => SessionFsmUnicastEvent::LinkLost,
+            #[cfg(not(feature = "session-unicast-accept"))] 7 => SessionFsmUnicastEvent::LinkOpenTimeout,
+            #[cfg(not(feature = "session-unicast-accept"))] 8 => SessionFsmUnicastEvent::LinkOpened,
+            #[cfg(not(feature = "session-unicast-accept"))] 9 => SessionFsmUnicastEvent::OpenAckReceived,
+            #[cfg(not(feature = "session-unicast-accept"))] 10 => SessionFsmUnicastEvent::OpenAckTimeout,
+            #[cfg(not(feature = "session-unicast-accept"))] 11 => SessionFsmUnicastEvent::OutboundStart,
+            #[cfg(not(feature = "session-unicast-accept"))] 12 => SessionFsmUnicastEvent::PeerClose,
+            #[cfg(not(feature = "session-unicast-accept"))] 13 => SessionFsmUnicastEvent::SessionClose,
+            #[cfg(not(feature = "session-unicast-accept"))] 14 => SessionFsmUnicastEvent::TxCongestionExhaust,
+            #[cfg(not(feature = "session-unicast-accept"))] 15 => SessionFsmUnicastEvent::Null,
+            #[cfg(feature = "session-unicast-accept")] 0 => SessionFsmUnicastEvent::AcceptingInactivityTimeout,
+            #[cfg(feature = "session-unicast-accept")] 1 => SessionFsmUnicastEvent::ClosingTimeout,
+            #[cfg(feature = "session-unicast-accept")] 2 => SessionFsmUnicastEvent::EstablishmentExtRejected,
+            #[cfg(feature = "session-unicast-accept")] 3 => SessionFsmUnicastEvent::FramingError,
+            #[cfg(feature = "session-unicast-accept")] 4 => SessionFsmUnicastEvent::InboundStart,
+            #[cfg(feature = "session-unicast-accept")] 5 => SessionFsmUnicastEvent::InitAckReceived,
+            #[cfg(feature = "session-unicast-accept")] 6 => SessionFsmUnicastEvent::InitAckTimeout,
+            #[cfg(feature = "session-unicast-accept")] 7 => SessionFsmUnicastEvent::InitSynReceived,
+            #[cfg(feature = "session-unicast-accept")] 8 => SessionFsmUnicastEvent::LeaseExpired,
+            #[cfg(feature = "session-unicast-accept")] 9 => SessionFsmUnicastEvent::LinkLost,
+            #[cfg(feature = "session-unicast-accept")] 10 => SessionFsmUnicastEvent::LinkOpenTimeout,
+            #[cfg(feature = "session-unicast-accept")] 11 => SessionFsmUnicastEvent::LinkOpened,
+            #[cfg(feature = "session-unicast-accept")] 12 => SessionFsmUnicastEvent::OpenAckReceived,
+            #[cfg(feature = "session-unicast-accept")] 13 => SessionFsmUnicastEvent::OpenAckTimeout,
+            #[cfg(feature = "session-unicast-accept")] 14 => SessionFsmUnicastEvent::OpenSynReceived,
+            #[cfg(feature = "session-unicast-accept")] 15 => SessionFsmUnicastEvent::OutboundStart,
+            #[cfg(feature = "session-unicast-accept")] 16 => SessionFsmUnicastEvent::PeerClose,
+            #[cfg(feature = "session-unicast-accept")] 17 => SessionFsmUnicastEvent::SessionClose,
+            #[cfg(feature = "session-unicast-accept")] 18 => SessionFsmUnicastEvent::TxCongestionExhaust,
+            #[cfg(feature = "session-unicast-accept")] 19 => SessionFsmUnicastEvent::Null,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
     }
 
     // W3C SCXML 3.4: what this document's state tree bounds, read by the

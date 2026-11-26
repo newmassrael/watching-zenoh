@@ -565,6 +565,43 @@ impl<A: ReassemblySlotActions + 'static> StatePolicy for ReassemblySlotPolicy<A>
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0144: a number is its value by the discriminant each variant is
+    // written with, so the way back is a match of each number to its variant,
+    // which the compiler reads as the identity with one bound and not as a
+    // read of `STATES`: a comparison of the value against a variant is a
+    // comparison of the number.
+    fn state_of(id: ::sce_rust_runtime::StateId) -> Self::State {
+        match id.0 {
+            0 => ReassemblySlotState::Empty,
+            1 => ReassemblySlotState::Receiving,
+            2 => ReassemblySlotState::Complete,
+            3 => ReassemblySlotState::TimedOut,
+            4 => ReassemblySlotState::Aborted,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
+    fn history_of(id: ::sce_rust_runtime::HistoryId) -> Self::History {
+        // No `<history>`, so no number names one.
+        let _ = id;
+        ::sce_rust_runtime::helpers::tables::row_missing()
+    }
+
+    fn event_of(id: ::sce_rust_runtime::EventId) -> Self::Event {
+        match id.0 {
+            0 => ReassemblySlotEvent::CodecError,
+            1 => ReassemblySlotEvent::FragmentDrop,
+            2 => ReassemblySlotEvent::FragmentLast,
+            3 => ReassemblySlotEvent::FragmentMore,
+            4 => ReassemblySlotEvent::FragmentOoo,
+            5 => ReassemblySlotEvent::ReassemblyTimeout,
+            6 => ReassemblySlotEvent::SlotEvict,
+            7 => ReassemblySlotEvent::SlotRelease,
+            8 => ReassemblySlotEvent::Null,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states

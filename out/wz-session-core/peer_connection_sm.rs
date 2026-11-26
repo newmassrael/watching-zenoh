@@ -646,6 +646,55 @@ impl<A: PeerConnectionActions + 'static> StatePolicy for PeerConnectionPolicy<A>
         ::sce_rust_runtime::EventId(event as u16)
     }
 
+    // docs/adr/0144: a number is its value by the discriminant each variant is
+    // written with, so the way back is a match of each number to its variant,
+    // which the compiler reads as the identity with one bound and not as a
+    // read of `STATES`: a comparison of the value against a variant is a
+    // comparison of the number.
+    fn state_of(id: ::sce_rust_runtime::StateId) -> Self::State {
+        match id.0 {
+            0 => PeerConnectionState::Idle,
+            1 => PeerConnectionState::Passive,
+            2 => PeerConnectionState::PassiveUp,
+            3 => PeerConnectionState::Resolving,
+            4 => PeerConnectionState::Connecting,
+            5 => PeerConnectionState::Established,
+            6 => PeerConnectionState::Backoff,
+            7 => PeerConnectionState::Refused,
+            8 => PeerConnectionState::NoLocator,
+            9 => PeerConnectionState::NoSlot,
+            10 => PeerConnectionState::IdentityMismatch,
+            11 => PeerConnectionState::AuthorityRefused,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
+    fn history_of(id: ::sce_rust_runtime::HistoryId) -> Self::History {
+        // No `<history>`, so no number names one.
+        let _ = id;
+        ::sce_rust_runtime::helpers::tables::row_missing()
+    }
+
+    fn event_of(id: ::sce_rust_runtime::EventId) -> Self::Event {
+        match id.0 {
+            0 => PeerConnectionEvent::DialEstablished,
+            1 => PeerConnectionEvent::DialFailed,
+            2 => PeerConnectionEvent::DialMismatch,
+            3 => PeerConnectionEvent::DialNoSlot,
+            4 => PeerConnectionEvent::InboundEstablished,
+            5 => PeerConnectionEvent::ManualRefused,
+            6 => PeerConnectionEvent::ManualStart,
+            7 => PeerConnectionEvent::ManualStartPassive,
+            8 => PeerConnectionEvent::ManualStop,
+            9 => PeerConnectionEvent::ResolveEmpty,
+            10 => PeerConnectionEvent::ResolveFound,
+            11 => PeerConnectionEvent::RetryDue,
+            12 => PeerConnectionEvent::SessionLost,
+            13 => PeerConnectionEvent::Null,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
     // generator and written here so every buffer of the runtime's microstep is
     // this document's size and no larger, in both profiles. Every set of states

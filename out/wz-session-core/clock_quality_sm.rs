@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: 68ba255fb183b505673e63ae2abf2c9817e643fe189d8acd733df3b3ce96bdfc
+// source-hash: afd791373979311a37f0fe2b3e15b8aaf46f575ee34b3ecacf707733bfff4db2
 // source: clock_quality.scxml
 
 
@@ -518,6 +518,40 @@ impl<A: ClockQualityActions + 'static> StatePolicy for ClockQualityPolicy<A> {
 
     fn event_id(event: Self::Event) -> ::sce_rust_runtime::EventId {
         ::sce_rust_runtime::EventId(event as u16)
+    }
+
+    // docs/adr/0144: a number is its value by the discriminant each variant is
+    // written with, so the way back is a match of each number to its variant,
+    // which the compiler reads as the identity with one bound and not as a
+    // read of `STATES`: a comparison of the value against a variant is a
+    // comparison of the number.
+    fn state_of(id: ::sce_rust_runtime::StateId) -> Self::State {
+        match id.0 {
+            0 => ClockQualityState::Unsynchronized,
+            1 => ClockQualityState::Synchronized,
+            #[cfg(feature = "clock-source")] 2 => ClockQualityState::Holdover,
+            #[cfg(feature = "clock-source")] 3 => ClockQualityState::FreeRunning,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
+    }
+
+    fn history_of(id: ::sce_rust_runtime::HistoryId) -> Self::History {
+        // No `<history>`, so no number names one.
+        let _ = id;
+        ::sce_rust_runtime::helpers::tables::row_missing()
+    }
+
+    fn event_of(id: ::sce_rust_runtime::EventId) -> Self::Event {
+        match id.0 {
+            #[cfg(not(feature = "clock-source"))] 0 => ClockQualityEvent::SyncAcquired,
+            #[cfg(not(feature = "clock-source"))] 1 => ClockQualityEvent::SyncLost,
+            #[cfg(not(feature = "clock-source"))] 2 => ClockQualityEvent::Null,
+            #[cfg(feature = "clock-source")] 0 => ClockQualityEvent::HoldoverExpired,
+            #[cfg(feature = "clock-source")] 1 => ClockQualityEvent::SyncAcquired,
+            #[cfg(feature = "clock-source")] 2 => ClockQualityEvent::SyncLost,
+            #[cfg(feature = "clock-source")] 3 => ClockQualityEvent::Null,
+            _ => ::sce_rust_runtime::helpers::tables::row_missing(),
+        }
     }
 
     // W3C SCXML 3.4: what this document's state tree bounds, read by the
