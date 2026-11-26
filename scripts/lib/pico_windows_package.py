@@ -88,7 +88,9 @@ then compiles `crates/wz-capi-pico/csrc/pico_layout_pins.c` (whose static assert
 the library writes into each type a program allocates to what the package's headers give it), every
 example and `crates/wz-capi-pico/tests/c/package_check.c` against the package's own `include/` and
 import library with MSVC's `cl` of the package's width (its manifest's `target`), for the debug and
-the release build, and runs each with the package's `bin/` on the path. It holds each build's DLL to
+the release build, and runs each with the package's `bin/` on the path; a run passes when it exits 0
+and prints every line its source states it prints (`expect-line:`, `expected_lines`, as
+`scripts/pico-c-program.sh` reads them). It holds each build's DLL to
 the imports and exports `--build` holds it to (`library_findings`). The check program holds the
 DLL to the conformance digest of the package's `build-statement.json` and reads the configuration
 sample through it.
@@ -1586,6 +1588,40 @@ def vs_root() -> pathlib.Path:
     return pathlib.Path(found)
 
 
+# A line a program's source states its run prints: ` * expect-line: <line>` in its comment, as
+# `scripts/pico-c-program.sh` reads it (crates/wz-capi-pico/examples/c/example_common.h).
+EXPECT_LINE_RE = re.compile(r"^[ \t]*\*[ \t]*expect-line: (.*\S)\s*$", re.M)
+
+
+def expected_lines(source: str) -> list[str]:
+    """The lines a program's source states its run prints, in the order it states them."""
+    return EXPECT_LINE_RE.findall(source)
+
+
+def missing_lines(expected: list[str], output: str) -> list[str]:
+    """The lines of `expected` that are not a whole line of `output`, a CR before a line's end
+    apart (a Windows program's text output)."""
+    printed = {line.rstrip("\r") for line in output.split("\n")}
+    return [line for line in expected if line not in printed]
+
+
+def run_verdict(src: pathlib.Path, exe: pathlib.Path, args: list[str], env: dict[str, str]) -> str:
+    """The verdict of one run of `exe`, the program of `src`: PASS when it exits 0 and prints every
+    line its source states; its output is printed once the run ends."""
+    try:
+        proc = subprocess.run([str(exe), *args], env=env, timeout=600, stdout=subprocess.PIPE,
+                              encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return "no answer within 600 s: FAIL"
+    print(proc.stdout, end="", flush=True)
+    if proc.returncode != 0:
+        return f"exit {proc.returncode}: FAIL"
+    missing = missing_lines(expected_lines(src.read_text(encoding="utf-8")), proc.stdout)
+    if missing:
+        return "printed no line " + ", ".join(f"`{line}`" for line in missing) + ": FAIL"
+    return "PASS"
+
+
 def run_cl(vs: pathlib.Path, vcvars: str, work: pathlib.Path, name: str, args: str) -> bool:
     """Whether `cl` with `args`, in the environment of `vcvars`, succeeded (`cl_script`)."""
     bat = work / f"cl-{name}.bat"
@@ -1656,11 +1692,7 @@ def test(archive: pathlib.Path) -> int:
                 if exe is None:
                     verdict = "did not compile or link: FAIL"
                 else:
-                    try:
-                        proc = subprocess.run([str(exe), *args], env=env, timeout=600)
-                        verdict = "PASS" if proc.returncode == 0 else f"exit {proc.returncode}: FAIL"
-                    except subprocess.TimeoutExpired:
-                        verdict = "no answer within 600 s: FAIL"
+                    verdict = run_verdict(src, exe, args, env)
                 failed += not verdict.startswith("PASS")
                 say(f"pico-package-test on Windows {arch}: {where} {src.name}: {verdict}")
         return 1 if failed else 0
@@ -2420,6 +2452,17 @@ def selftest() -> int:
         expect("an empty directory names every width and released form", release_findings(
             pathlib.Path(tempfile.mkdtemp(dir=tmp)), commit, "v0.1.0")[0]
             == ["no package of " + ", ".join(f"{arch} {form}" for arch in ARCHES for form in RELEASE_FORMS)])
+
+    stated = " * what\n * expect-line: a: 1 cycles  \r\n *expect-line: b\nexpect-line: c\n// expect-line: d\n"
+    expect("a source states the lines of its comment that say expect-line, trailing space and CR apart",
+           expected_lines(stated) == ["a: 1 cycles", "b"])
+    expect("a source with no expect-line states nothing", expected_lines("int main(void) { return 0; }\n") == [])
+    expect("a stated line is printed only as a whole line, a CR before its end apart",
+           missing_lines(["a", "b", "c"], "a\r\nx b\nc") == ["b"])
+    expect("nothing stated is nothing missing", missing_lines([], "") == [])
+    expect("the example of a stepped session states its cycles and its samples",
+           expected_lines((EXAMPLES_DIR / "periodic_step.c").read_text(encoding="utf-8"))
+           == ["example-periodic-step: 25 cycles, 25 samples received"])
 
     # A pipe read as text without a stated encoding is decoded with the host's code page, which on a
     # Windows runner is not the UTF-8 the tools write: every read of a tool here names its encoding.

@@ -1097,10 +1097,11 @@ jobs:
   # document chooses when the session opens, the three transport configs over
   # the system's sockets and over a transport the program supplies (the program's own stack,
   # and the test program with injected faults), batching, end-to-end protection, stream
-  # supervision, a program's own periodic task, a keyed topic and history for a late
-  # subscriber. Each is compiled against zenoh-pico's own headers for the host and linked
-  # against the wz library by scripts/pico-c-program.sh, as the programs of the `capi` job
-  # are, and exits 0 when it ran its exchange.
+  # supervision, a program's own periodic task (beside the read task, and stepping its session
+  # on a time base of its own), a keyed topic and history for a late subscriber. Each is
+  # compiled against zenoh-pico's own headers for the host and linked against the wz library by
+  # scripts/pico-c-program.sh, as the programs of the `capi` job are, and exits 0 when it ran
+  # its exchange, printing the lines its source states (`expect-line:`).
   #
   # A job of its own and not steps of `capi`: that job's budget is spent by what it gates,
   # and Linux is not one of its hosts. The examples are the program set of the release package
@@ -1273,6 +1274,12 @@ jobs:
         timeout-minutes: 15
         shell: bash
         run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic.c "example of a program's own periodic task" "$WZ_EXAMPLE_FEATURES"
+
+      - name: example, a session the program steps on its own cycle and time base (gated)
+        if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
+        timeout-minutes: 15
+        shell: bash
+        run: bash scripts/pico-c-program.sh crates/wz-capi-pico/examples/c/periodic_step.c "example of a session the program steps on its own cycle and time base" "$WZ_EXAMPLE_FEATURES"
 
       - name: example, a keyed topic with a last value per instance (gated)
         if: ${{ !cancelled() && env.WZ_HOST_SELECTED == 'true' }}
