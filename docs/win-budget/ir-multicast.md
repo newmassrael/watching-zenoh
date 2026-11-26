@@ -581,3 +581,46 @@ Unit test: `wz-capi-coop` `tests::group::woken::a_bare_put_through_its_filter_re
 (the put answered `Sent`, one take of the session, no naming, the datagram written before the
 put returns; the CONTROL a row with no plain way, `NotPlain`):
 `cargo test -p wz-capi-coop --features group,app-transport,threads --lib a_bare_put_through_its_filter_reaches_the_group`.
+
+### 7.11 The groups' publish, function by function
+
+What the groups' leg of a put does once the session is held, read from the code in the order it
+runs (the fourth reading's `publish_to_groups` 1,961.0 against zenoh-pico's `_z_write` 1,670.0),
+with zenoh-pico's counterpart. Each row names the part of section 2's S1 to S4 it belongs to.
+
+| # | function (wz) | what it does each put | zenoh-pico |
+|---|---|---|---|
+| S1a | `GroupFace::publish` (`engine/group.rs`) | the group's end read, the key named as the group's declarations say (`GroupDeclarations::key`, `WireKey::names_in`) | the key resolved for the transport inside `_z_write` |
+| S1b | `multicast_tx_publication` (`multicast_tx.rs`) | the Push's size bound and encoder written from its parts, lent to the push | `_z_network_message_encode` |
+| S2a | `GroupLink::push_encoded`, `push_encoded_through` (`group_drive/stage.rs`) | the `Through` of the socket and the writer, the conduits borrowed, the conduit read off the message | the transmit lock |
+| S2b | `push_on` | the conduit's window found, the window's open mark read, an empty window's `flush` (its `open.take()` finds none) | none: pico's batch is the one buffer |
+| S2c | `multicast_tx_push_encoded`, `StageQueue::wait_for_room` | the push's deadline, the lane's room asked at once (`at_once`: a borrow of the lanes, the bound, the storage's run), the SN minted | `_z_transport_tx_get_sn` |
+| S2d | `StageQueue::enqueue_lent`, `Lanes::queue` | the lane's run found, the frame encoded into it, offered through (`Through::offer`: the writer's held mark, the socket) | the frame encoded into `_wbuf` |
+| S2e | `push_deferred`, `count_entered` | the conduits borrowed again and the kept messages looked at, which hold none; the counters where `transport-stats` is built | none |
+| S3 | `GroupLink::write_staged` after the push | the link's open mark, the transport borrowed, `offer_held` (the writer borrowed, nothing held), `write` (`holds`, `take_front` that finds the lanes' count zero) | none: nothing is left unsent |
+| S4 | `LinkCell::send_now` through `&dyn SendNow`, `Watched::try_send_to_group` through `Box<dyn GroupTransport>`, `HostGroupTransport::try_send_to_group` | the link's open mark, the transport borrowed, two indirect calls, the destination in the kernel's form, one `sendto` | one `sendto` to an address resolved at open |
+
+What wz does past zenoh-pico on a put that finds the lanes empty and writes through (T3): S3,
+the write after the push, which finds nothing, since a datagram that left from where it was
+written put nothing on a lane; S2b and S2e, two looks that find nothing outside a batch window and
+outside a nested push; and S4's two indirect calls.
+
+The design, row by row:
+
+| row | change | takes | files | state |
+|---|---|---|---|---|
+| G1 | the write after a push runs only where a lane holds a datagram (`GroupTxStage::has_nothing_to_write`): a datagram the writer holds stays on its lane until it is let go, so an empty lane count is a write that would offer nothing | S3 | `group_drive/stage.rs` | this lane |
+| G2 | the kept messages counted in a `Cell` beside `Staged`, read before the conduits are borrowed again: `push_deferred` returns on a count of zero | S2e's second borrow | `group_drive/stage.rs` | design |
+| G3 | the window's flush asked only of a window that holds a frame: `MulticastBatch`'s open frame read inline in `push_on` before the flush is called | S2b | `group_drive/stage.rs`, `multicast_tx.rs` | design |
+| T4 | the send half named by the joiner: `GroupJoiner::join` answers its own transport type (`type Transport: GroupTransport`), `Watched` is generic over it, and the group's link cell holds it by value, so `LinkCell::send_now` is called on the concrete transport with no `Box<dyn GroupTransport>`; a build that composes joiners (`RawethJoiner` beside `HostGroups`) names an enum of their transports, as `either_links` composes links. `&dyn SendNow` in `push_encoded_through` goes with it: `Through` is generic over the socket, which is the group's one link cell | S4's two indirect calls | `wz-runtime-coop/src/group_transport.rs` (the trait, `NoGroups`), `raweth_group.rs`, `ip_stack.rs`'s test joiners, `wz-capi-coop/src/host_group.rs`, `engine/group.rs` (`Watched`, `ThroughCell`), `group_drive/stage.rs` (`Through`) | design; after D7a, which is in |
+
+G1 keeps every property the write gives: a push whose datagram went on its lane (a link not open,
+a socket with no room, a datagram queued or held ahead of it) is followed by the write as before,
+and a push kept while another push holds the conduits is framed and written by that push.
+
+Expected: G1 takes S3 from every put that writes through, G2 and G3 the two empty looks, T4 the
+two indirect calls; with the write filter's W8 (section 7.10) these are what lies between the put
+and zenoh-pico's `_z_write` by the reading of the code, to be judged on the arm (M4).
+
+Unit test of G1: `wz-session-mcu` `group_drive::stage::tests::the_write_after_a_push_runs_only_where_a_lane_holds_a_datagram`:
+`cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib the_write_after_a_push_runs_only`.
