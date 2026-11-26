@@ -1705,6 +1705,11 @@ impl<
         self.session.runtime()
     }
 
+    /// The link the pump reads ([`LinkSession::link`]).
+    pub fn link(&self) -> &L {
+        self.session.link()
+    }
+
     /// `rx-in-place` — the units this session dispatched so far, by the path
     /// they took ([`RxPathCounts`]).
     #[cfg(feature = "rx-in-place")]
@@ -1827,6 +1832,12 @@ impl<
     /// Borrow the runtime this session was built against.
     pub fn runtime(&self) -> &CoopRuntime<C, D, K> {
         &self.runtime
+    }
+
+    /// The link the session reads: what its owner reads the link's own facts off (its held
+    /// input, what it owes its stack) after a step, with no other handle on it.
+    pub fn link(&self) -> &L {
+        &self.link
     }
 
     /// How long the loop may wait for a datagram before something of this session's, its

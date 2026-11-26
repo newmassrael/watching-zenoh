@@ -1632,12 +1632,14 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
 }
 
 /// A Push and, after it in the same batch, the retraction of the router's subscriber that opened a
-/// write filter. In a build of one thread the retraction is applied after the Push's callback
-/// returned, so the callback sees the filter still open, as zenoh-pico calls each callback while
-/// it reads the batch (`vendor/zenoh-pico/src/transport/unicast/rx.c` @
-/// `_z_handle_network_message`); a build of threads reads the batch whole before its callbacks,
+/// write filter. A read that hands each record out where it lies, a read task's among them, and a
+/// round of one thread apply the retraction after the Push's callback returned, so the callback
+/// sees the filter still open, as zenoh-pico calls each callback while it reads the batch
+/// (`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `_z_handle_network_message`); only a round
+/// beside other threads (`wz_round` with a read task) reads the batch whole before its callbacks,
 /// which see the filter shut. Turned red by a round of one thread that takes the next record while
-/// it has room (`Round::has_room`).
+/// it has room (`Round::has_room`), or a direct read that applies a record before the callbacks
+/// of the one before it returned.
 #[test]
 fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() {
     use wz_session_core::row_callback::ThreadForm;
@@ -1688,10 +1690,10 @@ fn a_retraction_after_a_push_in_one_batch_is_applied_after_the_pushs_callback() 
     until(&engine, "the push and the retraction after it", || {
         !seen.lock().unwrap().is_empty() && engine.write_filter_active(filter)
     });
-    let threads = <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
+    let read_whole_first = cfg!(wz_round) && <crate::form::CoopForm as ThreadForm>::OTHER_THREADS;
     assert_eq!(
         *seen.lock().unwrap(),
-        [threads],
+        [read_whole_first],
         "the callback saw the filter shut only where the batch is read whole before it"
     );
 }
@@ -2679,6 +2681,72 @@ fn a_quiet_session_waits_on_its_link_and_wakes_for_a_push() {
         took < Duration::from_millis(60),
         "a waiting read task wakes for the push, not at the end of its wait: {took:?}"
     );
+    SessionDrive::close(&*engine);
+}
+
+/// A record the read task hands out reaches its callback with nothing of the session held but the
+/// face's read slot: a put another thread makes while the callback runs, and that the callback
+/// waits for, is sent and returns, and the callback returns after it. Turned red by a read that
+/// holds the session's lock or the face's send place across a record's callbacks (the put would
+/// wait for the callback, which waits for the put), and, as it does not build, by `threads` kept
+/// among the features that keep the round where each value has a lock of its own (`build.rs`):
+/// the face count read below is the direct read's.
+#[cfg(all(
+    feature = "threads",
+    any(feature = "std", feature = "host-sys"),
+    target_has_atomic = "8",
+    target_has_atomic = "64",
+    not(feature = "group")
+))]
+#[test]
+fn a_put_another_thread_makes_inside_a_read_tasks_callback_is_sent_and_both_return() {
+    let router = Router::start(CatchAll::Held);
+    let engine = open(&router);
+    let (_, turned) = engine.direct_faces();
+    assert!(turned >= 1, "the read steps the faces itself");
+    let (entered, inside) = channel::<()>();
+    let (put_done, put_seen) = channel::<bool>();
+    let put_seen = Mutex::new(put_seen);
+    let returned = Arc::new(AtomicUsize::new(0));
+    let after = returned.clone();
+    engine
+        .declare_subscriber_on_wire(
+            "demo/in/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_: &dyn SampleView| {
+                let _ = entered.send(());
+                let sent = put_seen
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5));
+                if sent == Ok(true) {
+                    after.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        )
+        .expect("the session declares the subscriber");
+    SessionDrive::start_read_task(&*engine).expect("a read task");
+    router.send(Command::Push("demo/in/a", b"in"));
+    inside
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the read task calls the callback");
+    let sent = engine.publish_on_wire_all(
+        "demo/out",
+        &WireKey::literal(),
+        b"out",
+        &PublishOptions::put().with_locality(Locality::Remote),
+    );
+    put_done
+        .send(sent.is_ok())
+        .expect("the callback waits for the put");
+    until(&engine, "the callback to return after the put", || {
+        returned.load(Ordering::SeqCst) == 1
+    });
+    until(&engine, "the router to receive the put", || {
+        router.seen(|s| s.samples.iter().any(|(k, _)| k == "demo/out"))
+    });
     SessionDrive::close(&*engine);
 }
 
@@ -3816,12 +3884,21 @@ mod timestamps;
 mod tx_pool;
 
 /// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
-/// build script): a build whose read runs beside the program's calls. The read that hands each
-/// record out as it is read queues none, a get's reply included. A build that keeps none compiles
-/// no `crate::round`, so this is read here, where every build reads it. A feature added to one
-/// list and not the other turns this red.
+/// build script): a build whose read task runs beside the program's calls and either joins a
+/// group, whose read is one thread's, or has no lock of each value's own (`wz_value_locks`: a
+/// host lock on a target with 8- and 64-bit atomics). The read that hands each record out as it
+/// is read queues none, a get's reply included. A build that keeps none compiles no
+/// `crate::round`, so this is read here, where every build reads it. Turned red by `group`
+/// dropped from the script's predicate: the shipped host preset (`threads` and `group`) would
+/// leave the round with a group read only one thread may make.
 #[test]
 fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
-    let queues = cfg!(wz_round);
+    let value_locks = cfg!(all(
+        any(feature = "std", feature = "host-sys"),
+        target_has_atomic = "8",
+        target_has_atomic = "64"
+    ));
+    assert_eq!(cfg!(wz_value_locks), value_locks);
+    let queues = cfg!(feature = "threads") && (cfg!(feature = "group") || !value_locks);
     assert_eq!(cfg!(wz_round), queues);
 }

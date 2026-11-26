@@ -34,7 +34,7 @@ use wz_session_core::wireexpr_resolve::KeyexprBuf;
 use super::direct::{FaceRecords, RecordActions};
 use super::query::QueryableCall;
 
-impl<L: SessionLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the query of the Request `record`, the record `event` of the face `records` reads,
     /// to each queryable it reaches, one call at a time with the session let go of, then owe its
     /// Final; a Request the lent form does not represent by its owned projection. A Request no

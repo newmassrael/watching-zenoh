@@ -621,6 +621,12 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         K::with(&self.place, Option::take)
     }
 
+    /// `f` on the place itself, waiting for whatever holds it now: a change of the transport
+    /// made together with what lies beside the place, with no holder of the transport between.
+    pub fn with_place<U>(&self, f: impl FnOnce(&mut Option<X>) -> U) -> U {
+        K::with(&self.place, f)
+    }
+
     /// Lend the transport to `f` when no other thread holds the face now, and wait for nothing:
     /// a droppable send that finds the face held is dropped on this face alone, as zenoh-pico
     /// drops one that finds its transmit lock held
@@ -641,6 +647,21 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
             Some(None) => Lend::Empty,
             Some(Some(answer)) => Lend::Lent(answer),
         }
+    }
+
+    /// Run `f` on what the place holds, a transport or none, when no other thread holds the face
+    /// now, and wait for nothing: `None`, with `f` not run, while another thread holds it or the
+    /// calling thread is inside a hold of it, as [`Self::try_lend`] finds it. What a holder that
+    /// must not wait for the face (one that holds the session's lock) puts in the place or takes
+    /// out of it goes through here.
+    pub fn try_with_place<U>(&self, f: impl FnOnce(&mut Option<X>) -> U) -> Option<U> {
+        if !K::WAITS && self.lent.load(core::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        K::try_with(&self.place, |place| {
+            let _lent = LentMark::enter::<K>(&self.lent);
+            f(place)
+        })
     }
 
     /// Lend the transport to `f`, waiting for whatever holds the face now; `None`, with `f` not

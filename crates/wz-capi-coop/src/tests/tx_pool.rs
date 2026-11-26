@@ -246,8 +246,9 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
 }
 
 /// The same pool in the form of one thread, each session opened, called and read on a thread of its
-/// own ([`OwnThread`]): the slow peer's thread is held in a call, so its session reads nothing,
-/// and its stream is filled until its link holds the one slot for a frame it has not finished.
+/// own ([`OwnThread`]): the slow peer's thread is held in a call, so its session reads nothing but
+/// the one message it is told to read when its stream filled with nothing owed, and its stream is
+/// filled until its link holds the one slot for a frame it has not finished.
 /// Then a droppable publish is dropped at once; once the slow peer reads again and the
 /// publisher's reads finish the frame, a blocking publish is sent, and the good peer hears it and
 /// never the dropped one.
@@ -308,55 +309,69 @@ fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot
     eventually("the good peer's face", || faces_up() == 1);
     let slow = peer(0xc2);
     eventually("the slow peer's face", || faces_up() == 2);
-    // The slow peer's thread is held in one call, which reads one message of its session each
-    // time it is asked (`true`) and nothing else, and ends when told (`false`), after which the
-    // thread reads on its own again.
-    let (step, steps) = std::sync::mpsc::channel::<bool>();
+    // The slow peer's thread waits in a call, reading nothing but the one message it is told to.
+    enum SlowStep {
+        ReadOne,
+        Resume,
+    }
+    let (steps, told) = std::sync::mpsc::channel::<SlowStep>();
+    let (read, reads) = std::sync::mpsc::channel::<bool>();
     let paused = slow.hand(move |engine| {
-        while let Ok(true) = steps.recv() {
-            let _ = SessionDrive::read(engine, true);
+        while let Ok(SlowStep::ReadOne) = told.recv() {
+            let _ = read.send(SessionDrive::read(engine, true).is_ok());
         }
     });
 
-    // Filled as the twin of `threads` fills it: two publishes a round on the publisher's thread,
-    // whose reads between the rounds write the rest of a frame owed as the twin's read task does.
-    // A stream can fill at a frame's end with nothing owed, every droppable publish after it
-    // refused before a byte of it is written for as long as its peer reads nothing; so each round
-    // that leaves nothing owed has the slow peer read one message, which gives the stream room
-    // again, and the stream fills by at least one publish a round.
-    let payload = Arc::new(vec![0x5a; PAYLOAD]);
-    let mut owing_since: Option<Instant> = None;
-    for _ in 0..FILL_AT_MOST {
-        let round = Arc::clone(&payload);
-        let owing = publisher.call(move |engine| {
+    // Filled as the twin of `threads` fills it, on the publisher's own thread. A stream can fill
+    // with nothing of it owed here too: a send's look for room writes the rest of the frame owed
+    // first, and the room that leaves may be under what the stack reports as writable, so every
+    // droppable publish after it is refused before a byte of it is written. A round that leaves
+    // nothing owed has the slow peer read one message, as the twin's does.
+    let slow_steps = steps.clone();
+    let (filled, up, owing, nudged) = publisher.call(move |engine| {
+        let payload = vec![0x5a; PAYLOAD];
+        let mut owing_since: Option<Instant> = None;
+        let mut nudged = 0usize;
+        for _ in 0..FILL_AT_MOST {
             for _ in 0..2 {
                 let _ = engine.publish_on_wire_all(
                     "demo/pool/fill",
                     &WireKey::literal(),
-                    &round,
+                    &payload,
                     &publish(CongestionControl::Drop),
                 );
             }
-            engine.links_owing()
-        });
-        if owing == 0 {
-            owing_since = None;
-            step.send(true)
-                .expect("the slow peer's thread waits to read a message");
-            continue;
+            if engine.links_owing() == 0 {
+                owing_since = None;
+                slow_steps
+                    .send(SlowStep::ReadOne)
+                    .expect("the slow peer's thread waits in its call");
+                assert!(
+                    reads.recv().expect("the slow peer's thread read"),
+                    "the slow peer's session is open"
+                );
+                nudged += 1;
+                continue;
+            }
+            let since = *owing_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= STILL {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
         }
-        let since = *owing_since.get_or_insert_with(Instant::now);
-        if since.elapsed() >= STILL {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
+        (
+            owing_since.is_some_and(|since| since.elapsed() >= STILL),
+            engine.faces_up(),
+            engine.links_owing(),
+            nudged,
+        )
+    });
+    // What the publisher holds when the stream never held a frame tells a lost slow face from a
+    // stream that kept taking what it was given.
     assert!(
-        owing_since.is_some_and(|since| since.elapsed() >= STILL),
+        filled,
         "the slow peer's link never held a frame its stream had not finished for {STILL:?}: \
-         {} faces up, {} links owing",
-        publisher.call(|engine| engine.faces_up()),
-        publisher.call(|engine| engine.links_owing())
+         {up} faces up, {owing} links owing, the slow peer told to read {nudged} times"
     );
 
     let dropped_in = publisher.call(|engine| {
@@ -374,7 +389,8 @@ fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot
         "a droppable publish waited {dropped_in:?} for a slot"
     );
 
-    step.send(false)
+    steps
+        .send(SlowStep::Resume)
         .expect("the slow peer's thread waits to read again");
     paused.recv().expect("the slow peer's thread reads again");
     eventually("the slow link to finish its frame", || {
