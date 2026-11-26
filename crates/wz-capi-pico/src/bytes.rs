@@ -280,6 +280,7 @@ impl Block {
     /// A block holding a copy of `bytes` and where the copy starts in it, for a holder that only
     /// reads them by start and length and needs none of a payload's segment ends: an encoding's
     /// kept schema. `None` when there is no room for one.
+    #[cfg(any(test, feature = "queryable"))]
     pub(crate) fn kept_copy(bytes: &[u8]) -> Option<(Self, NonNull<u8>)> {
         let block = Self::copy_of(bytes)?;
         let start = block_start(&block);
@@ -2431,6 +2432,14 @@ pub unsafe extern "C" fn z_view_string_loan_mut(
     str_in: *mut z_view_string_t,
 ) -> *mut z_loaned_string_t {
     str_in as *mut z_loaned_string_t
+}
+
+#[cfg(test)]
+impl Block {
+    /// How many hold this block.
+    pub(crate) fn holders(&self) -> usize {
+        self.head().refs.load(Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]

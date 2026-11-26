@@ -399,11 +399,9 @@ pub(crate) struct SampleParts {
     /// A kept sample's source identity, which `sample` reads once bound
     /// ([`SampleMarshal::bind_over`]); none for lent parts, whose sample reads their lender's.
     source_info: Option<wz_session_core::sample::SourceInfo>,
-    /// The block a kept sample's key was copied into; none for lent parts.
-    key_block: Option<Block>,
-    /// Held for its drop alone: the block a kept sample's payload, attachment, schema and timestamp
-    /// id were copied into.
-    _block: Option<Block>,
+    /// The one block a kept sample's key, payload, attachment, schema and timestamp id were copied
+    /// into, which its sample reads; none for lent parts.
+    block: Option<Block>,
 }
 
 impl SampleParts {
@@ -418,25 +416,25 @@ impl SampleParts {
         Self {
             sample: core::ptr::read(core::ptr::from_ref(&sample).cast::<SampleRef<'static>>()),
             source_info: None,
-            key_block: None,
-            _block: None,
+            block: None,
         }
     }
 
     /// Whether these are a kept sample's own.
     fn is_kept(&self) -> bool {
-        self.key_block.is_some()
+        self.block.is_some()
     }
 
     /// The parts of a sample kept past its callback: what `marshal` views, its timestamp as it
-    /// shows it, with the bytes it reads copied once: its payload, its attachment, its encoding's
-    /// schema and its timestamp's id into one block, one after another, and its key, which the
-    /// session may have resolved from a declaration outside the message, into a block of its own.
-    /// Refused room for either, nothing is held.
+    /// shows it, with the bytes it reads copied once into one block, one after another: its key,
+    /// its payload, its attachment, its encoding's schema and its timestamp's id. The largest block
+    /// holds the longest key and the largest message together (`crate::process_pool`). Refused
+    /// room, nothing is held.
     pub(crate) fn kept(marshal: &SampleMarshal) -> Result<Self, NoRoom> {
         let sample = marshal.parts();
         let timestamp = marshal.timestamp_parts();
-        let lent: [&[u8]; 4] = [
+        let lent: [&[u8]; 5] = [
+            sample.keyexpr.as_bytes(),
             sample.payload,
             sample.attachment.unwrap_or_default(),
             sample
@@ -445,21 +443,17 @@ impl SampleParts {
                 .unwrap_or_default(),
             timestamp.map_or(&[][..], |(_, zid)| zid),
         ];
-        let mut starts = [core::ptr::null::<u8>(); 4];
+        let mut starts = [core::ptr::null::<u8>(); 5];
         let block = Block::kept_parts(&lent, &mut starts).ok_or(NoRoom)?;
-        let (key_block, key_at) = Block::kept_copy(sample.keyexpr.as_bytes()).ok_or(NoRoom)?;
-        let [payload_at, attachment_at, schema_at, zid_at] = starts;
-        // SAFETY: `kept_parts` wrote each part's bytes at its start of `block`, and `kept_copy` the
-        // key's, valid UTF-8 as they were, at `key_at`. The parts hold both blocks, so the bytes read
-        // here live as long as the parts do.
+        let [key_at, payload_at, attachment_at, schema_at, zid_at] = starts;
+        // SAFETY: `kept_parts` wrote each part's bytes at its start of `block`, the key's valid
+        // UTF-8 as they were. The parts hold the block, so the bytes read here live as long as the
+        // parts do.
         unsafe {
             let at = |start: *const u8, len: usize| -> &'static [u8] {
                 core::slice::from_raw_parts(start, len)
             };
-            let key = core::str::from_utf8_unchecked(at(
-                key_at.as_ptr().cast_const(),
-                sample.keyexpr.len(),
-            ));
+            let key = core::str::from_utf8_unchecked(at(key_at, sample.keyexpr.len()));
             let mut kept = SampleRef::new(
                 key,
                 at(payload_at, sample.payload.len()),
@@ -477,8 +471,7 @@ impl SampleParts {
             Ok(Self {
                 sample: kept,
                 source_info: sample.source_info.cloned(),
-                key_block: Some(key_block),
-                _block: Some(block),
+                block: Some(block),
             })
         }
     }
@@ -4519,10 +4512,10 @@ mod tests {
         assert_ne!(clone.as_slice().as_ptr(), view.payload.as_ptr());
     }
 
-    /// A sample kept past its callback copies the bytes its view reads once: its payload, its
-    /// attachment, its schema and its timestamp's id into one block, one after another, and its
-    /// key into a block of its own. Turned red by a copy that takes a block of its own for a part,
-    /// or one that leaves a part where the message lent it (`SampleParts::kept`).
+    /// A sample kept past its callback copies the bytes its view reads once, into one block, one
+    /// after another: its key, its payload, its attachment, its schema and its timestamp's id.
+    /// Turned red by a copy that takes a block of its own for a part, or one that leaves a part
+    /// where the message lent it (`SampleParts::kept`).
     #[test]
     fn a_kept_sample_copies_what_was_lent_into_one_block() {
         let zid = [0x33u8; 16];
@@ -4547,24 +4540,27 @@ mod tests {
             .expect("carried")
             .as_ptr();
         let (time, id) = kept.sample.timestamp.expect("shown");
+        assert_eq!(kept.sample.keyexpr, "demo/one");
+        let key = kept.sample.keyexpr.as_ptr();
+        assert_ne!(key, sample.keyexpr.as_ptr(), "the key is the copy's own");
+        assert_eq!(
+            payload,
+            key.wrapping_add("demo/one".len()),
+            "the payload follows the key"
+        );
         assert_eq!(attachment, payload.wrapping_add(b"payload".len()));
         assert_eq!(schema, attachment.wrapping_add(b"attachment".len()));
         assert_eq!(id.as_ptr(), schema.wrapping_add(b"utf8".len()));
         assert_eq!((time, id), (3, &zid[..]));
         assert_ne!(id.as_ptr(), zid.as_ptr(), "the id is the copy's own");
-        assert_eq!(kept.sample.keyexpr, "demo/one");
-        let key = kept.sample.keyexpr.as_ptr();
-        assert!(
-            !(payload..id.as_ptr().wrapping_add(zid.len())).contains(&key),
-            "the key lies in a block of its own"
-        );
+        assert_eq!(kept.block.as_ref().map(Block::holders), Some(1));
     }
 
     /// The largest sample a session hands a program is kept whole: the longest schema, an
-    /// attachment and a payload that together fill the largest message are copied into one block,
-    /// and the longest key the session holds into one of its own. The CONTROL, where the process
-    /// pools hold the blocks, is a message one byte past the largest block, refused. Turned red by
-    /// a key copied into the message's block (`SampleParts::kept`).
+    /// attachment and a payload that together fill the largest message are copied with the
+    /// longest key the session holds into one block. The CONTROL, where the process pools hold the
+    /// blocks, is a sample one byte past the largest block, refused. Turned red by a largest block
+    /// sized for the message alone (`crate::process_pool::LARGEST_BLOCK`).
     #[test]
     fn the_largest_sample_a_session_hands_is_kept_whole() {
         use wz_session_core::caps;
@@ -4594,7 +4590,7 @@ mod tests {
         #[cfg(wz_process_pools)]
         {
             let room = crate::process_pool::LARGEST_BLOCK - crate::bytes::HEAD;
-            let past = room + 1 - (schema.len() + attachment.len());
+            let past = room + 1 - (key.len() + schema.len() + attachment.len());
             let refused = kept_whole(&alloc::vec![b'p'; past]);
             assert!(
                 matches!(refused, Err(crate::bytes::NoRoom)),
@@ -4802,6 +4798,91 @@ mod tests {
             );
             let hint = crate::encoding::encoding_view(encoding).expect("bound");
             assert_eq!(hint.schema, Some(&b"utf8"[..]));
+            free_sample_marshal(second.cast::<c_void>());
+        }
+    }
+
+    /// A sample kept past its callback outlives its delivery: once the bytes the session lent are
+    /// written over, as the next message's are, the clone still reads the key, the payload, the
+    /// attachment, the schema and the timestamp it was delivered with. Turned red by a clone that
+    /// still points at the lent bytes for any of them.
+    #[test]
+    fn a_clone_outlives_its_delivery_and_reads_what_was_delivered() {
+        let mut key = *b"demo/over";
+        let mut payload = *b"payload";
+        let mut attachment = *b"attachment";
+        let mut schema = *b"utf8";
+        let mut zid = [0x55u8; 16];
+        let owned = {
+            let text = core::str::from_utf8(&key).expect("an ASCII key");
+            let mut sample = SampleRef::new(text, &payload, SampleKind::Put, Reliability::Reliable);
+            sample.attachment = Some(&attachment[..]);
+            sample.encoding = Some((7, Some(&schema[..])));
+            sample.timestamp = Some((11, &zid[..]));
+            // SAFETY: the marshal is let go at the end of this block, before `sample`.
+            let marshal = unsafe { SampleMarshal::lent(&sample, true) };
+            // SAFETY: a marshal this crate made.
+            unsafe { clone_sample_marshal(marshal.as_loaned()) }.expect("a place and room")
+        };
+        key.fill(b'x');
+        payload.fill(0);
+        attachment.fill(0);
+        schema.fill(0);
+        zid.fill(0);
+        let kept = owned.cast::<KeptSample>();
+        // SAFETY: the place the clone filled, live until it is let go of below.
+        unsafe {
+            let loaned = (*kept).marshal.as_loaned();
+            assert_eq!(keyexpr_str(z_sample_keyexpr(loaned)), Some("demo/over"));
+            assert_eq!(bytes_at(z_sample_payload(loaned)), Some(&b"payload"[..]));
+            assert_eq!(
+                bytes_at(z_sample_attachment(loaned)),
+                Some(&b"attachment"[..])
+            );
+            let hint = crate::encoding::encoding_view(z_sample_encoding(loaned)).expect("kept");
+            assert_eq!(hint.schema, Some(&b"utf8"[..]));
+            let stamp = z_sample_timestamp(loaned);
+            assert_eq!(z_timestamp_ntp64_time(stamp), 11);
+            assert_eq!(z_timestamp_id(stamp).id, [0x55u8; 16]);
+            free_sample_marshal(owned);
+        }
+    }
+
+    /// A kept sample is its block's one holder, which its views take no share of, so letting the
+    /// sample go gives the block back once; a clone of it holds a block of its own. Turned red by
+    /// a view or a part that holds a share of the block besides the parts, whose drop would give
+    /// it back a second time.
+    #[test]
+    fn a_kept_sample_is_its_blocks_one_holder() {
+        let view = HeldView {
+            key: "demo/held",
+            payload: b"payload",
+            attachment: b"attachment",
+        };
+        let sample = SampleRef::of(&view);
+        // SAFETY: the marshal is let go before `sample` and `view`.
+        let marshal = unsafe { SampleMarshal::lent(&sample, true) };
+        // SAFETY: a marshal this crate made.
+        let first = unsafe { clone_sample_marshal(marshal.as_loaned()) }
+            .expect("a place and room")
+            .cast::<KeptSample>();
+        // SAFETY: the places the clones filled, live until they are let go of below.
+        unsafe {
+            let holders = |kept: *mut KeptSample| (*kept).parts.block.as_ref().map(Block::holders);
+            assert_eq!(holders(first), Some(1), "the parts alone hold it");
+            let loaned = (*first).marshal.as_loaned();
+            let _ = (z_sample_attachment(loaned), z_sample_encoding(loaned));
+            assert_eq!(holders(first), Some(1), "its views take no share");
+            let second = clone_sample_marshal(loaned)
+                .expect("a second copy")
+                .cast::<KeptSample>();
+            assert_eq!(holders(first), Some(1), "a clone takes no share of it");
+            assert_eq!(holders(second), Some(1), "a clone holds a block of its own");
+            free_sample_marshal(first.cast::<c_void>());
+            assert_eq!(
+                bytes_at(z_sample_payload((*second).marshal.as_loaned())),
+                Some(&b"payload"[..])
+            );
             free_sample_marshal(second.cast::<c_void>());
         }
     }
