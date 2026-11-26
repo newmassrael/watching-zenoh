@@ -237,6 +237,9 @@ struct Lanes {
     /// The run a push is let on a lane by: a record and a batch for its frame, and a record and a
     /// drop marker behind it, which a chain that runs out of room ends with.
     reserve: usize,
+    /// How many datagrams the lanes hold together, so that a writer with nothing queued is
+    /// answered without a look at each lane.
+    held: usize,
 }
 
 /// The most bytes a fragment chain's drop marker takes: its header, a sequence number of at most
@@ -344,6 +347,7 @@ impl Lanes {
             rings,
             order: 0,
             reserve,
+            held: 0,
         }
     }
 
@@ -379,6 +383,7 @@ impl Lanes {
             }
         }
         ring.commit(at, Record::BYTES.saturating_add(len), wraps);
+        self.held = self.held.saturating_add(1);
         self.order = self.order.wrapping_add(1);
         self.bound.taken(record.priority, len);
         true
@@ -400,6 +405,7 @@ impl Lanes {
     fn pop(&mut self, lane: usize, len: usize) {
         if let Some(ring) = self.rings.get_mut(lane) {
             ring.pop(Record::BYTES.saturating_add(len));
+            self.held = self.held.saturating_sub(1);
         }
     }
 
@@ -421,7 +427,12 @@ impl Lanes {
 
     /// Whether no lane holds a datagram.
     fn is_empty(&self) -> bool {
-        self.rings.iter().all(LaneRing::is_empty)
+        debug_assert_eq!(
+            self.held == 0,
+            self.rings.iter().all(LaneRing::is_empty),
+            "the count of what the lanes hold is what their storage holds"
+        );
+        self.held == 0
     }
 }
 
@@ -848,8 +859,7 @@ impl GroupTxStage {
     /// storage until the writer lets them go ([`Self::finish`]).
     fn take_front(&self) -> Option<Taken> {
         let mut lanes = self.inner.lanes.borrow_mut();
-        let lane = next_out(&lanes)?;
-        let record = lanes.front(lane)?;
+        let (lane, record) = next_out(&lanes)?;
         lanes.bound.written(record.priority, record.len);
         if record.reply {
             self.inner
@@ -1102,19 +1112,29 @@ impl MulticastReplyEnqueue for GroupTxStage {
 /// control datagram behind the data queued ahead of it, so a declaration never passes a put it was
 /// queued after. A group that runs no QoS puts every datagram on one lane, and is written in the
 /// order it was queued.
-fn next_out(lanes: &Lanes) -> Option<usize> {
-    let fronts = || (0..Priority::NUM).filter_map(|lane| Some((lane, lanes.front(lane)?)));
-    let (lane, first) = fronts().min_by_key(|(_, record)| record.priority.wire_byte())?;
-    if first.priority == Priority::Control && fronts().any(|(_, record)| record.order < first.order)
-    {
+///
+/// The datagram is answered with its record, each lane's front record read once: the writer takes
+/// it by that record and reads none again.
+fn next_out(lanes: &Lanes) -> Option<(usize, Record)> {
+    if lanes.held == 0 {
+        return None;
+    }
+    let fronts: [Option<Record>; Priority::NUM] = core::array::from_fn(|lane| lanes.front(lane));
+    let held = || {
+        fronts
+            .iter()
+            .enumerate()
+            .filter_map(|(lane, front)| Some((lane, (*front)?)))
+    };
+    let (lane, first) = held().min_by_key(|(_, record)| record.priority.wire_byte())?;
+    if first.priority == Priority::Control && held().any(|(_, record)| record.order < first.order) {
         // Something of another lane was queued before it, so the fence holds: the other lanes are
         // served, highest first, until what they queued before it has left.
-        return fronts()
+        return held()
             .filter(|(_, record)| record.priority != Priority::Control)
-            .min_by_key(|(_, record)| record.priority.wire_byte())
-            .map(|(lane, _)| lane);
+            .min_by_key(|(_, record)| record.priority.wire_byte());
     }
-    Some(lane)
+    Some((lane, first))
 }
 
 /// The stage's lanes as one push asks them for room and enqueues on them.
@@ -1657,6 +1677,7 @@ mod tests {
         };
         ring.buf[..Record::BYTES].copy_from_slice(&record.bytes());
         ring.commit(0, len, false);
+        lanes.held += 1;
     }
 
     /// A push its lane's bound lets on and its lane's storage has no room for follows its
@@ -2437,8 +2458,12 @@ mod tests {
                 }));
             }
             let mut out = Vec::new();
-            while let Some(lane) = next_out(&lanes) {
-                let record = lanes.front(lane).expect("the datagram chosen");
+            while let Some((lane, record)) = next_out(&lanes) {
+                assert_eq!(
+                    lanes.front(lane),
+                    Some(record),
+                    "the record answered is the chosen lane's front"
+                );
                 out.push(record.priority);
                 lanes.pop(lane, record.len);
             }
@@ -2460,6 +2485,68 @@ mod tests {
             [Data, Data, Data],
             "CONTROL: one lane"
         );
+    }
+
+    /// The writer is answered the chosen lane's front record with the lane, and takes the
+    /// datagram by it.
+    #[test]
+    fn next_out_answers_the_front_record_it_chose() {
+        let mut params = params();
+        params.is_qos = true;
+        let mut lanes = Lanes::of_group(&params, MaxMulticastRepliesHeld::default());
+        for (sn, priority) in [Priority::Data, Priority::RealTime].into_iter().enumerate() {
+            let record = Record {
+                order: 0,
+                priority,
+                reliable: true,
+                sn: sn as u64,
+                reply: false,
+                len: 0,
+            };
+            assert!(lanes.queue(record, 2, &mut |slot| {
+                slot[..2].copy_from_slice(&[7, 7]);
+                Some(2)
+            }));
+        }
+        let (lane, record) = next_out(&lanes).expect("a datagram is queued");
+        assert_eq!(record.priority, Priority::RealTime);
+        assert_eq!(record.sn, 1);
+        assert_eq!(record.order, 1, "queued second");
+        assert_eq!(record.len, 2);
+        assert_eq!(lanes.front(lane), Some(record));
+        assert_eq!(lanes.front_bytes(lane, record.len), &[7, 7]);
+    }
+
+    /// The lanes count what they hold: a writer with nothing queued is answered by the count, not
+    /// by a look at each lane, and the count follows each datagram queued and let go.
+    #[test]
+    fn an_empty_stage_has_nothing_out_without_a_lane_read() {
+        let mut lanes = Lanes::of_group(&params(), MaxMulticastRepliesHeld::default());
+        assert!(lanes.is_empty());
+        assert!(next_out(&lanes).is_none());
+        let record = Record {
+            order: 0,
+            priority: Priority::DEFAULT,
+            reliable: true,
+            sn: 0,
+            reply: false,
+            len: 0,
+        };
+        assert!(lanes.queue(record, 1, &mut |slot| {
+            slot[0] = 1;
+            Some(1)
+        }));
+        assert!(!lanes.is_empty());
+        let (lane, taken) = next_out(&lanes).expect("the datagram queued");
+        lanes.pop(lane, taken.len);
+        assert!(lanes.is_empty());
+        assert!(next_out(&lanes).is_none());
+        // A run put in a lane's storage past the count is not looked for: the count answers.
+        let lane = lanes.bound.lane_index(Priority::DEFAULT);
+        let ring = &mut lanes.rings[lane];
+        ring.buf[..Record::BYTES].copy_from_slice(&record.bytes());
+        ring.commit(0, Record::BYTES, false);
+        assert!(next_out(&lanes).is_none());
     }
 
     /// The stage holds at most `MAX_MULTICAST_REPLIES` replies, whatever room their lanes have:
