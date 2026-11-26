@@ -8,7 +8,7 @@ header declares, and a door wz has and upstream does not is `zext_*`, declared i
 Then "drop-in" is a claim a compiler can check: a program that includes the drop-in header and
 not `wz_ext.h` is portable to the upstream library, and one that needs `wz_ext.h` says so.
 
-    (no argument)   check
+    --check         check (also with no argument, the spelling the hook and run-ci.sh use)
     --selftest      every refusal on a fixture
 
 ## What is compared
@@ -249,7 +249,7 @@ def cmd_selftest() -> int:
 def main(argv: list[str]) -> int:
     if argv == ["--selftest"]:
         return cmd_selftest()
-    if not argv:
+    if argv in ([], ["--check"]):
         return cmd_check()
     print(__doc__, file=sys.stderr)
     return 2
