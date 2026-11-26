@@ -7220,7 +7220,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Where the link of the face at row `at` stands, as the life of its record says: what a test
     /// of a face beside the dial role's reads. `None` for a row no face holds. Read under the
     /// lock, uncounted as a take.
-    #[cfg(all(test, feature = "std", feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "listen", not(wz_round)))]
     pub(crate) fn face_phase(&self, at: usize) -> Option<wz_session_core::link_life::LinkPhase> {
         self.core
             .lock()
