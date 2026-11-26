@@ -1679,6 +1679,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         );
         let mut read = Ok(());
         let mut jobs_due_ms = None;
+        // The last face's reading of the clock, which the groups are stepped at.
+        #[cfg(feature = "group")]
+        let mut read_us = None;
         #[cfg(feature = "listen")]
         let mut accepts = false;
         // Whether the read goes on to the next face.
@@ -1692,6 +1695,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 return false;
             }
             jobs_due_ms = turn.jobs_due_ms;
+            #[cfg(feature = "group")]
+            {
+                read_us = Some(turn.now_us);
+            }
             #[cfg(feature = "listen")]
             {
                 accepts |= turn.accepts;
@@ -1727,7 +1734,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // role's held (`Self::read_groups`).
         #[cfg(feature = "group")]
         if read.is_ok() {
-            self.read_groups();
+            self.read_groups(read_us);
         }
         // What the faces' and the groups' records left to hand out, handed out once for the read
         // rather than once a face and once a run of Pushes: no slot is held, and a callback's read
@@ -1762,18 +1769,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         read
     }
 
-    /// Step each group's session once (`Self::step_groups`) and read what the steps left
+    /// Step each group's session once (`Self::step_groups`) at `now_us`, the read's reading of
+    /// the session's clock when it took one, and read what the steps left
     /// (`Self::poll_groups`), the dial role's read slot held across them, so a read from a
     /// callback of a group's record finds the faces held and reads nothing. A slot found held is
     /// a read under way on this thread, whose callback this is called from: nothing is stepped.
     /// A session that joined no group steps none and takes nothing for them.
     #[cfg(feature = "group")]
-    pub(super) fn read_groups(&self) {
+    pub(super) fn read_groups(&self, now_us: Option<u64>) {
         if !self.joins_groups {
             return;
         }
         if let Some(_reading) = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot) {
-            self.step_groups();
+            self.step_groups(now_us);
             self.poll_groups();
         }
     }
@@ -1781,22 +1789,29 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Step each group's session, its read slot taken out of the session for its steps and put
     /// back after them (`Core::group_pumps`): each record a step reads is dispatched under the
     /// session's lock, which is let go of before it is handed out (`DirectSink`), as a face's
-    /// are. A step takes one datagram of the group's socket, and one that took one is followed by
-    /// another at once, up to `GROUP_READS_PER_MOVE` steps in a row, so a burst is read by one
-    /// read and the links are moved once, after it, as a link's one receive is read. A session
+    /// are. A step reads the datagrams of the group's socket up to `GROUP_READS_PER_MOVE` of them,
+    /// each datagram's records handed out before the next is received, so a burst is read by one
+    /// step of one read, its fixed part (the stop, the carrier, the beacon, the writes) taken
+    /// once, and the links are moved once, after it, as a link's one receive is read. The step is
+    /// made at `now_us`, the read's reading of the session's clock, or at a reading of its own
+    /// where the read took none. What a burst holds past a callback that closed the session is
+    /// read and taken by nothing, a closed session's state being reached by no record. A session
     /// that ended at its step is let go of, its place put back for the group's next join and its
     /// end left for the session to read (`Self::poll_groups`); a slot whose session ended is not
     /// stepped. One a read finds the session closed after is stepped once more, which tells the
     /// group it leaves.
     #[cfg(feature = "group")]
-    fn step_groups(&self) {
+    fn step_groups(&self, now_us: Option<u64>) {
         let mut at = 0;
         loop {
-            let (pump, reads_per_move) = {
+            let (pump, most) = {
                 let Some(mut held) = self.live() else {
                     return;
                 };
-                let reads_per_move = held.0.config.limits.group_reads_per_move();
+                // The deploy's domain of the bound starts at one.
+                let most =
+                    core::num::NonZeroUsize::new(held.0.config.limits.group_reads_per_move())
+                        .unwrap_or(core::num::NonZeroUsize::MIN);
                 let Some(slot) = held.0.group_pumps.get_mut(at) else {
                     return;
                 };
@@ -1808,31 +1823,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 } else {
                     None
                 };
-                (pump, reads_per_move)
+                (pump, most)
             };
             let Some(mut pump) = pump else {
                 at = at.saturating_add(1);
                 continue;
             };
-            let mut steps: usize = 0;
-            let ended = loop {
-                let ended = self.step_group(&mut pump);
-                steps = steps.saturating_add(1);
-                // The mark of a datagram taken is left for the next read's wait once the bound
-                // is reached, so that read does not wait for what the socket already gave.
-                let again = !ended
-                    && steps < reads_per_move
-                    && self.live().is_some_and(|held| {
-                        held.0
-                            .transport
-                            .groups
-                            .get(at)
-                            .is_some_and(|group| group.took_input())
-                    });
-                if !again {
-                    break ended;
-                }
-            };
+            // A burst read to its bound leaves the group's mark of input for the next read's
+            // wait, so that read does not wait for what the socket already holds.
+            let now_us = now_us.unwrap_or_else(|| pump.now_us());
+            let ended = self.step_group(&mut pump, most, now_us);
             // What the slot shares with the group's face is let go of, stepped or put back under
             // the session's lock, closed or not: a close let go of the face's handles under it.
             let mut core = self.core.lock();
@@ -1858,11 +1858,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// One step of a group's session, `pump` its read slot taken out of the session: what it
-    /// reads handed out as it is read, and the drains its Pushes put off made after it. Whether
-    /// the session ended at it.
+    /// One step of a group's session, `pump` its read slot taken out of the session, reading up
+    /// to `most` datagrams at `now_us`: what it reads handed out as it is read, and the drains its
+    /// Pushes put off made after it. Whether the session ended at it.
     #[cfg(feature = "group")]
-    fn step_group(&self, pump: &mut super::group::GroupPump<C>) -> bool {
+    fn step_group(
+        &self,
+        pump: &mut super::group::GroupPump<C>,
+        most: core::num::NonZeroUsize,
+        now_us: u64,
+    ) -> bool {
         // A group's session is of one thread's types, which it shares with the group's face in
         // the session's state (the stage, the link, the members' rows, the end): with other
         // threads (`threads`) it is stepped with the session's lock held, as every reach of
@@ -1872,19 +1877,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // go of. With no other thread nothing else reaches them meanwhile, and nothing is held.
         #[cfg(feature = "threads")]
         let mut held = Some(self.core.lock());
-        let ended = pump.step(&mut |records, event| {
-            #[cfg(feature = "threads")]
-            drop(held.take());
-            DirectSink {
-                engine: self,
-                records,
-            }
-            .event(event);
-            #[cfg(feature = "threads")]
-            {
-                held = Some(self.core.lock());
-            }
-        });
+        let ended = pump.step(
+            &mut |records, event| {
+                #[cfg(feature = "threads")]
+                drop(held.take());
+                DirectSink {
+                    engine: self,
+                    records,
+                }
+                .event(event);
+                #[cfg(feature = "threads")]
+                {
+                    held = Some(self.core.lock());
+                }
+            },
+            most,
+            now_us,
+        );
         #[cfg(feature = "threads")]
         drop(held);
         DirectSink {
@@ -1916,7 +1925,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !self.joins_groups {
             return Ok(());
         }
-        self.step_groups();
+        self.step_groups(None);
         let held = self.live().ok_or(OpenError::NoEndpoint)?;
         match held
             .0

@@ -1890,12 +1890,13 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
-    /// A burst of a member's datagrams is read by one read, each a step of the group's session of
-    /// its own, and the links are moved once at most for it, as one receive of a link's is read:
-    /// a step of a group moves no face's link, and the read looks at the faces' lives once, which
-    /// moves a link only where one is due or brought something. Turned red by a read that leaves
-    /// the datagrams after the first to the next read (the step after a datagram taken cut out of
-    /// `CoopEngine::step_groups`), or by one that moves the links once a datagram.
+    /// A burst of a member's datagrams is read by one read, in one step of the group's session
+    /// that reads up to the deploy's bound of them, and the links are moved once at most for it,
+    /// as one receive of a link's is read: a step of a group moves no face's link, and the read
+    /// looks at the faces' lives once, which moves a link only where one is due or brought
+    /// something. Turned red by a read that leaves the datagrams after the first to the next read
+    /// (a bound of one handed to the group's step in `CoopEngine::step_groups`), or by one that
+    /// moves the links once a datagram.
     #[test]
     fn a_burst_of_a_members_datagrams_moves_the_links_once() {
         const FRAMES: u64 = 8;

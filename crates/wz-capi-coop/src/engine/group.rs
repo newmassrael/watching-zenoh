@@ -389,14 +389,18 @@ impl MemberEvents {
     }
 }
 
-/// The stack's group transport as the group's task holds it, marked each time it hands the task
-/// a datagram: the task takes one datagram a step, as the group's loop always has, so a group
-/// that took one may hold more, and the session's read steps it again at once rather than after
-/// a tick. A transport that leaves what it lends where it lies until its next receive lends it to
-/// the session's round of deliveries, whose records read it there, and the buffer it gives back
-/// as the group is left goes back through the round ([`Round::keep_rx`]).
+/// The stack's group transport as the group's session holds it. Where the group's session is a
+/// task (`wz_round`) it is marked each time it hands the task a datagram: the task takes one
+/// datagram a step, as the group's loop always has, so a group that took one may hold more, and
+/// the session's read steps it again at once rather than after a tick; a transport that leaves
+/// what it lends where it lies until its next receive lends it to the session's round of
+/// deliveries, whose records read it there, and the buffer it gives back as the group is left
+/// goes back through the round ([`Round::keep_rx`]). Where the read steps the session itself,
+/// the step says whether the socket may hold more (`GroupPump::step`), and the receive is the
+/// stack's own.
 struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
+    #[cfg(wz_round)]
     took: Rc<Cell<bool>>,
     /// The session's round of deliveries.
     #[cfg(wz_round)]
@@ -453,10 +457,14 @@ impl GroupTransport for Watched {
         self.inner.input_wait()
     }
 
+    #[cfg(not(wz_round))]
+    #[inline]
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        #[cfg(not(wz_round))]
-        let took = self.inner.recv_with(f);
-        #[cfg(wz_round)]
+        self.inner.recv_with(f)
+    }
+
+    #[cfg(wz_round)]
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         let took = if self.inner.lends_until_next_receive() {
             let lane = &self.lane;
             self.inner.recv_with(&mut |datagram, from| {
@@ -709,6 +717,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let end = Rc::new(GroupEnd::default());
         face.end = Some(Rc::clone(&end));
         let reads = GroupReads {
+            took: Rc::clone(&face.took),
             members: Rc::clone(&face.members),
             keyexprs: Rc::clone(&face.keyexprs),
             join_ask: face.join_ask.clone(),
@@ -793,6 +802,7 @@ impl<W: LinkWaits> GroupFace<W> {
         // what the session pushes.
         let link = GroupLink::new(Watched {
             inner: transport,
+            #[cfg(wz_round)]
             took: Rc::clone(&took),
             #[cfg(wz_round)]
             lane,
@@ -1127,7 +1137,8 @@ impl<W: LinkWaits> GroupFace<W> {
         self.rejoin_at_us.is_some_and(|at_us| now_us >= at_us)
     }
 
-    /// Whether the group's task took a datagram since this was last asked.
+    /// Whether the group's socket may hold a datagram not yet read, since this was last asked:
+    /// its task took one (`wz_round`), or the read's last step of it read to its bound.
     pub(super) fn took_input(&self) -> bool {
         self.took.replace(false)
     }
@@ -1532,10 +1543,12 @@ pub(super) struct GroupEnd {
     outcome: RefCell<Option<MulticastOutcome>>,
 }
 
-/// What the read of a group shares with the group's face: the members, the keyexpr asks, the JOIN
-/// ask, the stage, its stop, and where its end is left.
+/// What the read of a group shares with the group's face: the mark of input the socket may still
+/// hold, the members, the keyexpr asks, the JOIN ask, the stage, its stop, and where its end is
+/// left.
 #[cfg(not(wz_round))]
 struct GroupReads {
+    took: Rc<Cell<bool>>,
     members: Rc<RefCell<MemberRows>>,
     keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
     join_ask: JoinAsk,
@@ -1619,12 +1632,24 @@ impl<C: ClockSource + 'static> GroupPump<C> {
         &mut self.records
     }
 
-    /// One step of the group's session: each event it yields noted against the group (its
-    /// members, the asks of its members) and then handed to `hand` with the group's records, as
-    /// it is read. Whether the session ended at this step, its end left for the session to read.
+    /// A reading of the session's clock, for a step with none at hand.
+    pub(super) fn now_us(&self) -> u64 {
+        self.place.now_us()
+    }
+
+    /// One step of the group's session at the read's reading `now_us` of the session's clock,
+    /// reading up to `most` of the group's datagrams: each event it yields noted against the
+    /// group (its members, the asks of its members) and then handed to `hand` with the group's
+    /// records, as it is read, so each datagram's records are handed out before the next is
+    /// received. The group's mark of input (`GroupFace::took_input`) is left where the reads
+    /// ended on `most`, the socket then maybe holding more, and cleared where they ended on a
+    /// receive that found none. Whether the session ended at this step, its end left for the
+    /// session to read.
     pub(super) fn step(
         &mut self,
         hand: &mut dyn FnMut(&mut FaceRecords<GroupReplies>, IterationEvent<'_, '_>),
+        most: core::num::NonZeroUsize,
+        now_us: u64,
     ) -> bool {
         let reads = &self.reads;
         let records = &mut self.records;
@@ -1641,12 +1666,15 @@ impl<C: ClockSource + 'static> GroupPump<C> {
         let mut should_stop = || reads.stop.get();
         // Everything the group sends is pushed onto its stage, which the face and the session
         // write from: the session's pull seam yields nothing.
-        let outcome = self.place.step(
+        let outcome = self.place.step_reading(
             &mut on_event,
             &mut || None,
             Some(&mut should_stop as &mut dyn FnMut() -> bool),
+            most,
+            now_us,
         );
         let Some(outcome) = outcome else {
+            reads.took.set(self.place.read_to_bound());
             return false;
         };
         *reads.end.outcome.borrow_mut() = Some(outcome);
@@ -1662,7 +1690,12 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             return;
         }
         self.reads.stop.set(true);
-        let _ = self.step(&mut |_records, _event| {});
+        let now_us = self.now_us();
+        let _ = self.step(
+            &mut |_records, _event| {},
+            core::num::NonZeroUsize::MIN,
+            now_us,
+        );
     }
 }
 

@@ -6014,8 +6014,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // that ended bounds the wait no longer), and so is the next turn of a replay a link owes
         // its peer, a periodic job the program started, and a group's session when it is next due
         // with nothing arriving (its beacon, its sweep, what the session pushed onto it, its join
-        // again). A group that took a datagram is stepped again at once, its task taking one a
-        // step, so its own time is not asked.
+        // again). A group whose socket may hold a datagram not yet read is stepped again at once
+        // (its task took one, or the read's step of it read to its bound), so its own time is
+        // not asked.
         #[cfg(feature = "group")]
         let group_took = self.transport.group_took_input();
         let due_ms = [
@@ -9912,7 +9913,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // the session let go of as a read makes it; one asked from a callback's call leaves the
         // JOIN to the next read.
         #[cfg(not(wz_round))]
-        self.read_groups();
+        self.read_groups(None);
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();
         Ok(asked)
