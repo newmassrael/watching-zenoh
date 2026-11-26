@@ -8806,9 +8806,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let lent = lent_key(tables(&core.session.registry), declared.key);
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
-        // So is each group.
+        // So is each group, from the same row, when the session joined one.
         #[cfg(feature = "group")]
-        {
+        if !core.transport.groups.is_empty() {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.subscribers().get(declared.handle) {
                 let wire = group::wire_key_of(tables.wire_of(row.key()));
@@ -8838,48 +8838,56 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     #[inline(never)]
     fn undeclare_subscriber(&self, id: SubId) {
+        // The session is held once, whichever table the id's row is in.
+        let held = self.live();
         // A liveliness subscriber's id is one of these too (the port's one id space): its row goes
         // and its Interest ends.
         #[cfg(feature = "liveliness")]
-        let live = self.live().and_then(|mut core| {
-            let core = &mut core.0;
-            let (rank, handle, prefix) = tables(&core.session.registry)
-                .liveliness_subscribers()
-                .iter()
-                .enumerate()
-                .find(|(_, (_, row))| row.id() == id)
-                .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()))?;
-            // The links are asked while the rows stand, which are their places in the replay's
-            // order: the subscriber's, ranked by the walk that found it, then the declaration's
-            // its key is named by.
-            let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
-            let keyexpr_place = core.prefix_retraction(prefix);
-            // The groups asked for it are told the asking ended.
-            #[cfg(feature = "group")]
-            for group in &core.transport.groups {
-                group.end_liveliness_ask(id);
+        let held = {
+            let mut held = held;
+            if let Some(guard) = held.as_mut() {
+                let core = &mut guard.0;
+                let found = tables(&core.session.registry)
+                    .liveliness_subscribers()
+                    .iter()
+                    .enumerate()
+                    .find(|(_, (_, row))| row.id() == id)
+                    .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()));
+                if let Some((rank, handle, prefix)) = found {
+                    // The links are asked while the rows stand, which are their places in the
+                    // replay's order: the subscriber's, ranked by the walk that found it, then the
+                    // declaration's its key is named by.
+                    let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
+                    let keyexpr_place = core.prefix_retraction(prefix);
+                    // The groups asked for it are told the asking ended.
+                    #[cfg(feature = "group")]
+                    for group in &core.transport.groups {
+                        group.end_liveliness_ask(id);
+                    }
+                    if let Some(undeclared) = tables_mut(&mut core.session.registry)
+                        .undeclare_liveliness_subscriber(handle)
+                    {
+                        // The rows went before the links are told: a send never finds the tables
+                        // borrowed.
+                        core.retract_at(place, &interest_final::<C>(u64::from(id)));
+                        core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
+                        drop(held);
+                        // The row, and its callback with it, is let go of here with no lock held;
+                        // one a call of which runs is let go of by the call that ends last.
+                        match undeclared.taken {
+                            Some(row) => drop(row),
+                            None => self.wait_for_liveliness_release(handle),
+                        }
+                        return;
+                    }
+                }
             }
-            let undeclared =
-                tables_mut(&mut core.session.registry).undeclare_liveliness_subscriber(handle)?;
-            // The rows went before the links are told: a send never finds the tables borrowed.
-            core.retract_at(place, &interest_final::<C>(u64::from(id)));
-            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr);
-            Some((handle, undeclared.taken))
-        });
-        // The row, and its callback with it, is let go of here with no lock held; one a call of
-        // which runs is let go of by the call that ends last.
-        #[cfg(feature = "liveliness")]
-        if let Some(undeclared) = live {
-            match undeclared {
-                (_, Some(row)) => drop(row),
-                (handle, None) => self.wait_for_liveliness_release(handle),
-            }
-            return;
-        }
+            held
+        };
         // The row is taken out of the tables under the lock and let go of after it: what its key
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which runs is
         // let go of once that call ends (`Self::wait_for_release`).
-        let undeclared = self.live().and_then(|mut core| {
+        let undeclared = held.and_then(|mut core| {
             let core = &mut core.0;
             // The declaration its key is named by goes with it when it is the last that holds it;
             // what the links are told is read while the row stands.
@@ -9366,9 +9374,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let lent = lent_key(tables(&core.session.registry), declared.key);
         // Each link is told it from the row, which names the key as the tables keep it.
         core.announce(DeclaredRow::of(declared.handle));
-        // So is each group.
+        // So is each group, from the same row, when the session joined one.
         #[cfg(feature = "group")]
-        {
+        if !core.transport.groups.is_empty() {
             let tables = tables(&core.session.registry);
             if let Some(row) = tables.queryables().get(declared.handle) {
                 let wire = group::wire_key_of(tables.wire_of(row.key()));

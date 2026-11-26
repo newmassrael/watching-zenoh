@@ -17,7 +17,7 @@ use crate::prelude::*;
 use wz_capi_port::{HeldKey, KeyAsk, KeyHold, KeyNotHeld, KeyView, OwnKey, SessionKeys, WireKey};
 use wz_session_core::declare_form::RetractionKey;
 use wz_session_core::keyexpr_canon::{
-    canonize_parts_as, KeyexprCanonError, KeyexprDialect, PartsForm, PartsRefusal,
+    canonize_parts_as, CanonKey, KeyexprCanonError, KeyexprDialect, PartsForm, PartsRefusal,
 };
 use wz_session_core::WhatAmI;
 
@@ -111,15 +111,16 @@ pub(crate) fn outbound_key(key: &str) -> Result<(), ZResult> {
 /// constructor and copies the text of its owned one as given; wz does not follow that gap. A
 /// program whose text needs rewriting asks an `_autocanonize` door, or the join, which rewrite it as
 /// both originals do.
+///
+/// The key it takes is handed back judged, so a door that keeps the judgement with the text judges
+/// it once.
 #[inline(never)]
-pub(crate) fn canon_key(text: &str) -> Result<(), ZResult> {
+pub(crate) fn canon_key(text: &str) -> Result<CanonKey<'_>, ZResult> {
     // The bound first: whether a text past it is judged canon depends on the profile's scratch.
     if !fits(text) {
         Err(crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY)
-    } else if is_pico_canon(text) {
-        Ok(())
     } else {
-        Err(Z_EINVAL)
+        CanonKey::judge(text, KeyexprDialect::Pico).ok_or(Z_EINVAL)
     }
 }
 
@@ -2855,8 +2856,15 @@ mod bound_tests {
     /// folded onto the other's code, or by the bound judged after the form.
     #[test]
     fn the_key_judgement_answers_each_cause_with_its_code() {
-        assert_eq!(canon_key("demo/a/**"), Ok(()));
-        assert_eq!(canon_key(&key_of(MAX_KEYEXPR_BYTES)), Ok(()));
+        assert_eq!(
+            canon_key("demo/a/**").map(CanonKey::as_str),
+            Ok("demo/a/**")
+        );
+        let longest = key_of(MAX_KEYEXPR_BYTES);
+        assert_eq!(
+            canon_key(&longest).map(CanonKey::as_str),
+            Ok(longest.as_str())
+        );
         for refused in ["demo//a", "demo/a/", "demo/$*", "demo/**/*", "demo/**/**"] {
             assert_eq!(canon_key(refused), Err(Z_EINVAL), "{refused}");
         }

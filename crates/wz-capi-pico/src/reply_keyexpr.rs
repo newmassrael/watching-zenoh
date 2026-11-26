@@ -73,9 +73,31 @@ pub(crate) fn parameters_has_anyke(parameters: &[u8]) -> bool {
 /// structurally unreachable from `Session::query`. It stays as the RESPONDER
 /// gate pico spells at `vendor/zenoh-pico/src/net/primitives.c:438` — a
 /// different seam from the requester gate, kept because pico enforces both.
-pub(crate) fn reply_keyexpr_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
+///
+/// The reply's key comes judged canon, as every door judges a key before it is sent, so a reply
+/// keyed with the query's own text is covered with nothing split
+/// ([`wz_session_core::reply_acceptance::canon_reply_intersects`]).
+#[cfg(feature = "queryable")]
+pub(crate) fn reply_keyexpr_is_covered(
+    query_keyexpr: &str,
+    reply: wz_session_core::keyexpr_canon::CanonKey<'_>,
+    anyke: bool,
+) -> bool {
     if anyke {
         return true;
     }
-    wz_session_core::reply_acceptance::reply_keyexpr_intersects(query_keyexpr, reply)
+    wz_session_core::reply_acceptance::canon_reply_intersects(query_keyexpr, reply)
+}
+
+/// Whether a reply a get received is covered by the get's query: the requester's gate, pico's
+/// `!pen_qry->_anyke && !_z_keyexpr_intersects(&pen_qry->_key, keyexpr)` -> the reply dropped
+/// (`~/zenoh-pico/src/session/query.c:121-127`), through the intersection the responder's gate
+/// takes too ([`wz_session_core::reply_acceptance::reply_keyexpr_intersects`]).
+///
+/// The reply's key is the answering peer's text, which the receive path resolves and does not
+/// judge, and pico judges none there either. So it is taken as text: judging it here would walk
+/// every reply's key once more and drop a reply keyed off canon form that pico delivers.
+#[cfg(feature = "query")]
+pub(crate) fn received_reply_is_covered(query_keyexpr: &str, reply: &str, anyke: bool) -> bool {
+    anyke || wz_session_core::reply_acceptance::reply_keyexpr_intersects(query_keyexpr, reply)
 }
