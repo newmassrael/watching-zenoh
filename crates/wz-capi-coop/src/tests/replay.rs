@@ -561,6 +561,67 @@ fn no_initial_final_goes_to_a_face_that_is_not_a_peer_or_when_the_switch_is_off(
     }
 }
 
+/// A session that listens tells a face it took off its port, whose peer dialled it as a peer,
+/// the Final of the initial interest once, after the declaration its replay owed it, and a
+/// declaration it makes later is followed by no second Final: what a zenoh peer that dials a
+/// listener waits for before its open returns. A client that dials it is told the declarations
+/// and no Final. The CONTROL is the peer. Turned red by an accepted face whose replay is not
+/// ended with the Final (`owe_link_initial_final` not reached from `bring_up_with` for a link
+/// taken off a port, or its peer's role not read off that link), or ended with it twice.
+#[cfg(feature = "listen")]
+#[test]
+fn a_face_taken_off_a_port_is_sent_the_initial_final_once_after_its_replay() {
+    use super::{client_config, config_zid};
+
+    let cases = [
+        ("a client that dials the listener", WhatAmI::Client),
+        ("CONTROL: a peer that dials the listener", WhatAmI::Peer),
+    ];
+    for (what, remote) in cases {
+        let engine = open_with(CoopConfig {
+            whatami: WhatAmI::Peer,
+            zid: config_zid(0xa4),
+            listen: vec!["tcp/127.0.0.1:0".to_owned()],
+            initial_interest: true,
+            ..client_config()
+        });
+        subscribe(&engine, "j/1");
+        let endpoint = engine.listening().pop().expect("one port is bound");
+        let at: std::net::SocketAddr = endpoint
+            .strip_prefix("tcp/")
+            .and_then(|at| at.parse().ok())
+            .expect("a tcp/ endpoint of an address and a port");
+        let dialler = Router::dial_announcing(at, remote);
+        until(&engine, "the taken face to be told the subscriber", || {
+            told(&dialler) >= 1
+        });
+        step_for(&engine, Duration::from_millis(100));
+        let owed = remote == WhatAmI::Peer;
+        let finals = if owed { vec![2] } else { Vec::new() };
+        assert_eq!(
+            initial_finals(&dialler),
+            finals,
+            "{what}: the Final follows the subscriber where the two meet as peers, and only there"
+        );
+        subscribe(&engine, "j/2");
+        until(&engine, "the later subscriber", || {
+            told(&dialler) == 2 + usize::from(owed)
+        });
+        step_for(&engine, Duration::from_millis(100));
+        assert_eq!(
+            initial_finals(&dialler),
+            finals,
+            "{what}: a later declaration is followed by no second Final"
+        );
+        assert_eq!(
+            told(&dialler),
+            2 + usize::from(owed),
+            "{what}: both subscribers, and the Final where it is owed"
+        );
+        SessionDrive::close(&*engine);
+    }
+}
+
 /// A declaration made after the look that brought a new link up and before the replay's first
 /// lap, the window an operation of another thread falls into once the read lets go of the
 /// session's lock, is told to the new peer once, by the replay: the announce leaves alone a link
