@@ -626,7 +626,8 @@ wz-auth = { path = "../wz-auth", optional = true }
 # The vocabulary a C ABI and its engine both name (the subscriber and matching factories, the ids,
 # a key's wire form, the write filter's plane and answer), which `faces` re-exports: this crate is
 # one engine of that port, and a C ABI over another engine names the same types without it.
-wz-capi-port = { path = "../wz-capi-port" }
+# `shared-sinks`: the group node hands the engine its own closure as a subscriber's callback.
+wz-capi-port = { path = "../wz-capi-port", features = ["shared-sinks"] }
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "sync", "time"] }
 
 [dev-dependencies]
