@@ -2541,7 +2541,7 @@ mod tests {
             Box::new(Unanswered),
         ));
         let until = Arc::new(Until::default());
-        let bound: OpenBound = Arc::clone(&until);
+        let bound = Arc::clone(&until) as OpenBound;
         let opening = std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let opened = AppDatagramSocket::dial_bounded(
@@ -2578,7 +2578,7 @@ mod tests {
                 Box::new(Unanswered),
             ));
             let until = Arc::new(Until::default());
-            let bound: OpenBound = Arc::clone(&until);
+            let bound = Arc::clone(&until) as OpenBound;
             // The links stay on the thread that opens them, as a session's links stay behind its
             // engine's lock: the buffers a session lends them are not `Send`. The clock is moved
             // from another thread, as a program's time base moves it.
