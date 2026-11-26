@@ -48,7 +48,7 @@ use wz_runtime_coop::faces::MessageCount;
 #[cfg(not(any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::SiteSend;
 use wz_runtime_coop::faces::{
-    FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
+    Dial, FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
 };
 use wz_runtime_coop::link_cells::{FaceHeld, FaceParts};
 use wz_runtime_coop::session_drive::LinkOpenError;
@@ -1111,8 +1111,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         }
     }
 
-    /// Dial the session's endpoint at `row`, as the life asked: what the dial came to at once. A
-    /// dial the network has not answered lies in the face's record, as every dial under way does.
+    /// Dial the session's endpoint at `row`, as the life asked: what the dial came to at once. The
+    /// dial lies in the face's record, as every dial under way does, and is asked there.
     fn dial_row(&mut self, core: &mut Core<L, C>, row: usize) -> LinkInput {
         let transport = &core.transport;
         let begun = match transport.begin_dial(transport.endpoints.dial_text(row)) {
@@ -1122,22 +1122,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
                 return LinkInput::DialRefused;
             }
         };
-        let at = self.at();
-        match core
-            .transport
-            .links
-            .ask_dial(at, DialEndpoint::Listed(row), begun)
-        {
-            Some(answer) => self.answered(core, DialEndpoint::Listed(row), answer),
-            None => LinkInput::DialPending,
-        }
+        core.transport.links.put_link(
+            self.at(),
+            Link::Dialing(Dial::begun(DialEndpoint::Listed(row), begun)),
+        );
+        self.take_dial_answer(core)
+            .unwrap_or(LinkInput::DialPending)
     }
 
     /// Ask the dial under way in the face's record once over the session's links: what its answer
     /// makes of it, the link kept or why the network refused it, or `None` while the network has
     /// not answered (or no dial is under way). A dial that answered has handed out all it held for
-    /// its link, so it is let go of before the link is opened. Out of line and cold: no look once
-    /// a link is made reaches it.
+    /// its link, so it is let go of before the link is opened. Out of line and cold: a dial begun
+    /// and a dial under way at a look at the life take their answer in this one body, so the
+    /// answer's handling is held once, and no look once a link is made reaches it.
     #[cold]
     #[inline(never)]
     fn take_dial_answer(&mut self, core: &mut Core<L, C>) -> Option<LinkInput> {
