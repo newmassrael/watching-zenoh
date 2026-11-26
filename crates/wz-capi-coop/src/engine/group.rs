@@ -753,12 +753,15 @@ impl<W: LinkWaits> GroupFace<W> {
     ///
     /// The face writes what the push put on the stage on the caller's thread, before this returns,
     /// as zenoh-pico's put writes it (`vendor/zenoh-pico/src/transport/common/tx.c` @
-    /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a batch window that holds the
-    /// message puts nothing on a lane, and its flush writes it.
+    /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a datagram of it that finds nothing
+    /// queued or held ahead of it is offered to the socket from where it was written and put on no
+    /// lane ([`GroupLink::push_encoded`]). A batch window that holds the message puts nothing on a
+    /// lane, and its flush writes it.
     fn push_lent(&self, message: &MulticastTxEncoded<'_>) -> PushOutcome {
-        let outcome = self.tx.push_encoded(message, self);
-        self.write_staged();
-        outcome
+        match &self.link {
+            Some(link) => link.push_encoded(&self.tx, message, self),
+            None => self.tx.push_encoded(message, self),
+        }
     }
 
     /// Write what the group's stage holds on the group's socket, on this thread, until the stage

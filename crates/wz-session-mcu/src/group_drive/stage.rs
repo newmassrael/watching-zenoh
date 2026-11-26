@@ -144,6 +144,62 @@ struct Writer {
     stats: Option<Rc<TransportStats>>,
 }
 
+impl Writer {
+    /// Note a datagram of `record` that the socket took, or whose send failed: counted as sent or
+    /// lost, and its conduit advertised past it either way, since a sequence number whose send
+    /// failed will never arrive and a member must not wait for it. One the socket had no room for
+    /// is not written, and is not noted here.
+    fn wrote(&mut self, sent: GroupSend, record: &Record) {
+        debug_assert_ne!(
+            sent,
+            GroupSend::Full,
+            "a refused datagram was noted as written"
+        );
+        if sent == GroupSend::Failed {
+            self.lost = self.lost.saturating_add(1);
+        }
+        #[cfg(feature = "transport-stats")]
+        if let (GroupSend::Sent, Some(stats)) = (sent, self.stats.as_deref()) {
+            stats.datagram_sent(record.len, 1);
+        }
+        self.on_wire
+            .written(record.priority, record.reliable, sn::from_wire(record.sn));
+    }
+}
+
+/// A group's socket a push may offer its datagram to at once ([`GroupLink::push_encoded`]): what
+/// the socket made of it, or `None` where nothing may be written now, on a link the session does
+/// not hold open or whose transport the session's task has in hand.
+trait SendNow {
+    fn send_now(&self, datagram: &[u8]) -> Option<GroupSend>;
+}
+
+/// What a push offers a datagram to at once, rather than put it on its lane and take it off again:
+/// the socket, and the writer, whose held datagram goes first and which notes what was written.
+#[derive(Clone, Copy)]
+struct Through<'a> {
+    socket: &'a dyn SendNow,
+    writer: &'a RefCell<Writer>,
+}
+
+impl Through<'_> {
+    /// Offer `datagram`, of `record`, to the socket: whether it is done with, taken or lost. One
+    /// the socket has no room for, or one offered while the writer holds a datagram, is not, and
+    /// goes on its lane.
+    fn offer(&self, record: &Record, datagram: &[u8]) -> bool {
+        if self.writer.borrow().held.is_some() {
+            return false;
+        }
+        match self.socket.send_now(datagram) {
+            None | Some(GroupSend::Full) => false,
+            Some(sent) => {
+                self.writer.borrow_mut().wrote(sent, record);
+                true
+            }
+        }
+    }
+}
+
 /// What was pushed while another push held the conduits, kept until they are let go, in the order
 /// it was pushed: each message's body encoded into storage taken when the group opens, beside how
 /// it is framed, so that it is framed when its sequence number can be minted, into the frame it
@@ -353,12 +409,15 @@ impl Lanes {
 
     /// Queue a datagram of `record`'s conduit whose bytes `fill` writes into the slice it is
     /// handed, of up to `want` bytes, and answers the length of: whether its lane had room for it
-    /// (`fill` answering `None` queues nothing).
+    /// (`fill` answering `None` queues nothing). With `through`, a datagram that finds every lane
+    /// empty is offered to the socket from where it was written, and kept on its lane only when it
+    /// is not done with ([`Through::offer`]).
     fn queue(
         &mut self,
         mut record: Record,
         want: usize,
         fill: &mut dyn FnMut(&mut [u8]) -> Option<usize>,
+        through: Option<Through<'_>>,
     ) -> bool {
         let lane = self.bound.lane_index(record.priority);
         let Some(ring) = self.rings.get_mut(lane) else {
@@ -377,6 +436,17 @@ impl Lanes {
         };
         record.order = self.order;
         record.len = len;
+        // Nothing queued goes ahead of it, so it leaves as zenoh-pico's put leaves, from the buffer
+        // it was encoded into, with no record written and nothing of the lane taken.
+        if let Some(through) = through.filter(|_| self.held == 0) {
+            let done = ring
+                .buf
+                .get(body..body.saturating_add(len))
+                .is_some_and(|datagram| through.offer(&record, datagram));
+            if done {
+                return true;
+            }
+        }
         if let Some(head) = ring.buf.get_mut(at..body) {
             for (to, from) in head.iter_mut().zip(record.bytes()) {
                 *to = from;
@@ -632,7 +702,23 @@ impl GroupTxStage {
         message: &MulticastTxEncoded<'_>,
         pace: &dyn GroupTxPace,
     ) -> PushOutcome {
+        self.push_encoded_through(message, pace, None)
+    }
+
+    /// [`Self::push_encoded`], where each datagram of the message that finds the lanes empty and
+    /// the writer holding nothing is offered to `socket` from where it was written, and put on its
+    /// lane only when the socket refuses it ([`GroupLink::push_encoded`]).
+    fn push_encoded_through(
+        &self,
+        message: &MulticastTxEncoded<'_>,
+        pace: &dyn GroupTxPace,
+        socket: Option<&dyn SendNow>,
+    ) -> PushOutcome {
         let inner = &*self.inner;
+        let through = socket.map(|socket| Through {
+            socket,
+            writer: &inner.writer,
+        });
         let outcome = match inner.conduits.try_borrow_mut() {
             Err(_) => {
                 let meta = MulticastTxMeta::of_encoded(message, &inner.params);
@@ -646,6 +732,7 @@ impl GroupTxStage {
                     conduit,
                     Some(pace),
                     false,
+                    through,
                     |minted, queue, window| {
                         multicast_tx_push_encoded(
                             message,
@@ -728,6 +815,7 @@ impl GroupTxStage {
                     meta.conduit(),
                     None,
                     true,
+                    None,
                     |minted, queue, window| {
                         multicast_tx_push_meta(meta, size, body, minted, params, queue, window)
                     },
@@ -772,13 +860,15 @@ impl GroupTxStage {
     /// put on the lanes the way every message of the stage goes onto them. `push` is handed the
     /// minter, the lanes and, inside a batch window, the conduit's open frame. `pace` is `None`
     /// for a push that does not wait; `reply` is a reply whose slot is taken already, which its
-    /// first datagram holds.
+    /// first datagram holds; `through` is the socket a datagram that finds the lanes empty is
+    /// offered to at once.
     fn push_on(
         &self,
         conduits: &mut Conduits,
         conduit: Priority,
         pace: Option<&dyn GroupTxPace>,
         reply: bool,
+        through: Option<Through<'_>>,
         push: impl FnOnce(
             &mut MulticastTxConduits,
             &mut StageQueue<'_>,
@@ -802,6 +892,7 @@ impl GroupTxStage {
                     lanes: &inner.lanes,
                     pace: None,
                     reply: false,
+                    through: None,
                 },
             );
         }
@@ -809,6 +900,7 @@ impl GroupTxStage {
             lanes: &inner.lanes,
             pace,
             reply,
+            through,
         };
         let outcome = push(minted, &mut queue, windowed.then_some(window));
         // A reply that put no datagram on a lane (one its codec could not frame) holds no slot.
@@ -843,6 +935,7 @@ impl GroupTxStage {
                     next.meta.conduit(),
                     None,
                     next.reply,
+                    None,
                     |minted, queue, window| {
                         multicast_tx_push_staged(next.meta, body, minted, params, queue, window)
                     },
@@ -949,6 +1042,7 @@ impl GroupTxStage {
             lanes: &inner.lanes,
             pace: None,
             reply: false,
+            through: None,
         };
         for (wire, window) in conduits.windows.iter_mut().enumerate() {
             window.flush(Priority::from_wire(wire as u8), &inner.params, &mut queue);
@@ -1019,31 +1113,11 @@ impl GroupTxStage {
             transport.try_send_to_group(lanes.front_bytes(taken.lane, taken.record.len))
         };
         let mut writer = self.inner.writer.borrow_mut();
-        match sent {
-            GroupSend::Full => {
-                writer.held = Some(taken);
-                return true;
-            }
-            GroupSend::Failed => writer.lost = writer.lost.saturating_add(1),
-            GroupSend::Sent =>
-            {
-                #[cfg(feature = "transport-stats")]
-                if let Some(stats) = writer.stats.as_deref() {
-                    stats.datagram_sent(taken.record.len, 1);
-                }
-            }
+        if sent == GroupSend::Full {
+            writer.held = Some(taken);
+            return true;
         }
-        // A datagram whose send failed is done with too: its sequence number will never arrive,
-        // and advertising past it keeps a member from waiting for it.
-        let Record {
-            priority,
-            reliable,
-            sn,
-            ..
-        } = taken.record;
-        writer
-            .on_wire
-            .written(priority, reliable, sn::from_wire(sn));
+        writer.wrote(sent, &taken.record);
         drop(writer);
         self.finish(taken);
         false
@@ -1144,6 +1218,9 @@ struct StageQueue<'a> {
     pace: Option<&'a dyn GroupTxPace>,
     /// Whether the push is a reply whose slot no datagram holds yet: its first datagram takes it.
     reply: bool,
+    /// The socket a datagram that finds the lanes empty is offered to at once; `None` for a push
+    /// that puts every datagram on its lane.
+    through: Option<Through<'a>>,
 }
 
 impl StageQueue<'_> {
@@ -1237,13 +1314,15 @@ impl MulticastTxQueue for StageQueue<'_> {
             len: 0,
         };
         let bytes = &datagram.bytes;
-        let queued = self
-            .lanes
-            .borrow_mut()
-            .queue(record, bytes.len(), &mut |slot| {
+        let queued = self.lanes.borrow_mut().queue(
+            record,
+            bytes.len(),
+            &mut |slot| {
                 slot.copy_from_slice(bytes);
                 Some(bytes.len())
-            });
+            },
+            None,
+        );
         // Every datagram was let on by a push's run free in its lane's storage, and a reply by
         // the runs of its datagrams (`GroupTxStage::admit_reply`): one finds room by the sizing.
         debug_assert!(
@@ -1272,10 +1351,15 @@ impl MulticastTxQueue for StageQueue<'_> {
             reply,
             len: 0,
         };
-        let queued = self.lanes.borrow_mut().queue(record, want, &mut |slot| {
-            let mut slot = wz_session_core::tx_buf::SliceTxBuf::new(slot);
-            fill(&mut slot).then(|| wz_session_core::tx_buf::TxBuf::len(&slot))
-        });
+        let queued = self.lanes.borrow_mut().queue(
+            record,
+            want,
+            &mut |slot| {
+                let mut slot = wz_session_core::tx_buf::SliceTxBuf::new(slot);
+                fill(&mut slot).then(|| wz_session_core::tx_buf::TxBuf::len(&slot))
+            },
+            self.through,
+        );
         if !queued {
             // No room in the lane's storage: the push builds the frame on the heap and offers it
             // to `enqueue`, still the reply's first datagram.
@@ -1332,6 +1416,33 @@ impl<T: GroupTransport> GroupLink<T> {
         if !stage.offer_held(&mut *transport) {
             stage.write(&mut *transport);
         }
+    }
+
+    /// Push `message` onto `stage` as [`GroupTxStage::push_encoded`] does, then write what the
+    /// stage holds ([`Self::write_staged`]). A datagram of it that finds nothing queued ahead of
+    /// it and nothing held is offered to the socket from where it was written, as zenoh-pico's put
+    /// sends from the buffer it encoded into
+    /// (`vendor/zenoh-pico/src/transport/common/tx.c` @ `return _z_transport_tx_flush_or_incr_batch(ztc, peers);`),
+    /// and goes on its lane only when the socket has no room for it or may not be written now.
+    pub fn push_encoded(
+        &self,
+        stage: &GroupTxStage,
+        message: &MulticastTxEncoded<'_>,
+        pace: &dyn GroupTxPace,
+    ) -> PushOutcome {
+        let outcome = stage.push_encoded_through(message, pace, Some(&*self.0 as &dyn SendNow));
+        self.write_staged(stage);
+        outcome
+    }
+}
+
+impl<T: GroupTransport> SendNow for LinkCell<T> {
+    fn send_now(&self, datagram: &[u8]) -> Option<GroupSend> {
+        if !self.open.get() {
+            return None;
+        }
+        let mut transport = self.transport.try_borrow_mut().ok()?;
+        Some(transport.try_send_to_group(datagram))
     }
 }
 
@@ -1645,6 +1756,79 @@ mod tests {
             |message| stage.push_encoded(message, pace),
         )
         .expect("a put")
+    }
+
+    /// Push `put` onto `stage` through `link`, as the group's face pushes a message of the session
+    /// ([`GroupLink::push_encoded`]), on a host whose lanes have room.
+    fn push_through(link: &GroupLink<Socket>, stage: &GroupTxStage, put: Put) -> PushOutcome {
+        let nothing = || {};
+        let host = FullHost::new(&nothing);
+        wz_session_core::multicast_tx::multicast_tx_publication(
+            wz_session_core::declare_form::GroupKey::literal("demo/stage"),
+            wz_session_core::sample::SampleKind::Put,
+            put.payload.as_bytes(),
+            &wz_session_core::metadata::PushMetadata::default(),
+            put.reliable,
+            Priority::DEFAULT,
+            |message| link.push_encoded(stage, message, &host),
+        )
+        .expect("a put")
+    }
+
+    /// A message pushed through the session's open link onto empty lanes leaves from where it was
+    /// written: the socket takes it in the push and nothing is put on a lane. On a link not open,
+    /// or a socket with no room, it goes on its lane, and a push while a datagram is held goes on
+    /// its lane behind it; each leaves in the order it was pushed. Turned red by a datagram
+    /// offered at once with one queued or held ahead of it (`Lanes::queue`, `Through::offer`), or
+    /// by one the socket took that is put on its lane too.
+    #[test]
+    fn a_push_onto_empty_lanes_leaves_from_where_it_was_written() {
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let link = GroupLink::new(Socket(Rc::clone(&wire)));
+        let stage = GroupTxStage::new(&params());
+        let queued = |stage: &GroupTxStage| stage.inner.lanes.borrow().order;
+
+        assert_eq!(
+            push_through(&link, &stage, Put::of("first")),
+            PushOutcome::Pushed
+        );
+        assert!(taken(&wire).is_empty(), "a link not open is not written");
+        assert_eq!(queued(&stage), 1, "so the message went on its lane");
+
+        let mut session_side = link.clone();
+        assert!(session_side.open());
+        wire.borrow_mut().room = 1;
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["first"]);
+        assert!(stage.is_empty());
+
+        wire.borrow_mut().room = 1;
+        assert_eq!(
+            push_through(&link, &stage, Put::of("second")),
+            PushOutcome::Pushed
+        );
+        assert_eq!(taken(&wire), ["first", "second"], "taken in the push");
+        assert_eq!(queued(&stage), 1, "with nothing put on a lane");
+        assert!(stage.is_empty() && !stage.holds());
+
+        assert_eq!(
+            push_through(&link, &stage, Put::of("third")),
+            PushOutcome::Pushed
+        );
+        assert_eq!(queued(&stage), 2, "a socket with no room: on its lane");
+        assert!(stage.holds(), "and held by the write after the push");
+
+        wire.borrow_mut().room = 1;
+        assert_eq!(
+            push_through(&link, &stage, Put::of("first")),
+            PushOutcome::Pushed
+        );
+        assert_eq!(queued(&stage), 3, "behind the held datagram, on its lane");
+        assert_eq!(taken(&wire), ["first", "second", "third"]);
+        wire.borrow_mut().room = 1;
+        link.write_staged(&stage);
+        assert_eq!(taken(&wire), ["first", "second", "third", "first"]);
+        assert!(stage.is_empty() && !stage.holds());
     }
 
     /// Push `put` onto `stage` as a message of the session whose lane has room: it is queued
@@ -2452,10 +2636,15 @@ mod tests {
                     reply: false,
                     len: 0,
                 };
-                assert!(lanes.queue(record, 1, &mut |slot| {
-                    slot[0] = 0;
-                    Some(1)
-                }));
+                assert!(lanes.queue(
+                    record,
+                    1,
+                    &mut |slot| {
+                        slot[0] = 0;
+                        Some(1)
+                    },
+                    None
+                ));
             }
             let mut out = Vec::new();
             while let Some((lane, record)) = next_out(&lanes) {
@@ -2503,10 +2692,15 @@ mod tests {
                 reply: false,
                 len: 0,
             };
-            assert!(lanes.queue(record, 2, &mut |slot| {
-                slot[..2].copy_from_slice(&[7, 7]);
-                Some(2)
-            }));
+            assert!(lanes.queue(
+                record,
+                2,
+                &mut |slot| {
+                    slot[..2].copy_from_slice(&[7, 7]);
+                    Some(2)
+                },
+                None
+            ));
         }
         let (lane, record) = next_out(&lanes).expect("a datagram is queued");
         assert_eq!(record.priority, Priority::RealTime);
@@ -2532,10 +2726,15 @@ mod tests {
             reply: false,
             len: 0,
         };
-        assert!(lanes.queue(record, 1, &mut |slot| {
-            slot[0] = 1;
-            Some(1)
-        }));
+        assert!(lanes.queue(
+            record,
+            1,
+            &mut |slot| {
+                slot[0] = 1;
+                Some(1)
+            },
+            None
+        ));
         assert!(!lanes.is_empty());
         let (lane, taken) = next_out(&lanes).expect("the datagram queued");
         lanes.pop(lane, taken.len);
