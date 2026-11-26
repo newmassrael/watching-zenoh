@@ -1997,7 +1997,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // The turn goes through the link's wire, its place taken before the session's lock as
             // every operation's send takes it, so the look's lock is let go of first. A turn that
             // ended the link has the life looked at by the next read, at once.
-            if turn.replays && self.replay_on_link(slot.at(), turn.now_us) {
+            let at = slot.at();
+            if turn.replays
+                && self.live_on_link(|core, tx| self.turn_replay(core, at, turn.now_us, tx))
+                    == Some(TurnEnd::EndsLink)
+            {
                 slot.life_due_us = turn.now_us;
             }
             self.pump_turn(face, slot, &turn);
@@ -2122,14 +2126,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             match moved {
                 // A link the look brought up is owed the replay's first turn, and a paced
-                // replay the turn that is due, on the epoch its turns are timed on.
+                // replay the turn that may be due.
                 Ok(()) => {
-                    replays = slot.brought_up
-                        || core
-                            .transport
-                            .links
-                            .face(slot.at())
-                            .is_some_and(|row| row.replay.turn_due(now_us / 1000));
+                    replays = slot.brought_up || ReplayPacing::REACHABLE;
                     #[cfg(all(test, feature = "std"))]
                     {
                         brought_up = slot.brought_up;
@@ -2539,17 +2538,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let wire = wire.counted_by(count);
         core.transport.links.put_link(slot.at(), Link::Wire(wire));
         Ok(())
-    }
-
-    /// The turn of the replay a look at the life owed the face at `at` (`LinkTurn::replays`),
-    /// told with the face's place held before the session's lock, as every send on it is
-    /// (`Self::live_on_link`): whether the turn ended the link. Out of line: a look owes it only
-    /// as a link comes up or a paced replay's turn falls due, so a face's turn keeps inline only
-    /// its look at whether one is owed.
-    #[inline(never)]
-    fn replay_on_link(&self, at: usize, now_us: u64) -> bool {
-        self.live_on_link(|core, tx| self.turn_replay(core, at, now_us, tx))
-            == Some(TurnEnd::EndsLink)
     }
 
     /// The turn of the replay a look at the life owed the link of the face at `at` that is up
