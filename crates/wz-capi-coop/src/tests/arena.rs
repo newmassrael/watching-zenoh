@@ -1378,18 +1378,23 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
         ..client_config()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
-    assert_eq!(
-        row(&built, "reassembly buffers").count,
-        SESSION_CHAIN_BUFFERS
-    );
+    // Where the links are tasks they share the one table's chains; where each face's read stages
+    // its chains in a Router of its own (`direct`), the table holds a share for each set of
+    // tables, so the chains of one face never take another's buffers.
+    let shares = |plan: &ArenaPlan| {
+        if cfg!(wz_round) {
+            1
+        } else {
+            plan.peers().sets()
+        }
+    };
+    let chains = SESSION_CHAIN_BUFFERS * shares(&built);
+    assert_eq!(row(&built, "reassembly buffers").count, chains);
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
         caps::PICO_FRAG_MAX_BYTES
     );
-    assert_eq!(
-        built.reassembly(),
-        (caps::PICO_FRAG_MAX_BYTES, SESSION_CHAIN_BUFFERS)
-    );
+    assert_eq!(built.reassembly(), (caps::PICO_FRAG_MAX_BYTES, chains));
     let one_link = ArenaPlan::of(
         &CoopConfig {
             max_faces: 0,
@@ -1400,8 +1405,11 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     .expect("lays an arena out");
     assert_eq!(
         one_link.reassembly(),
-        built.reassembly(),
-        "the table does not grow with the links"
+        (
+            caps::PICO_FRAG_MAX_BYTES,
+            SESSION_CHAIN_BUFFERS * shares(&one_link)
+        ),
+        "the table grows with the faces' sets alone, and not at all where the links are tasks"
     );
     let lowered = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
     let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
@@ -2511,6 +2519,12 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         } else if FACE_PARTS.contains(&theirs.part()) {
             // The gets' tables, and the ends of their legs, hold the session's own once.
             ours.count / (1 + own) * (faces + own)
+        } else if !cfg!(wz_round)
+            && ["reassembly flags", "reassembly buffers"].contains(&theirs.part())
+        {
+            // Each face's read stages its chains in a Router of its own (`direct`): the table
+            // holds a share for each set of tables.
+            ours.count / client.peers().sets() * peer.peers().sets()
         } else {
             ours.count
         };
