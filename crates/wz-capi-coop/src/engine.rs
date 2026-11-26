@@ -2605,13 +2605,13 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     #[cfg(all(feature = "group", not(wz_round)))]
     group_pumps: Vec<Option<group::GroupPump<C>>>,
     /// How many places for a group's session the session made (`Self::seat_group`), which a
-    /// test of a group joined again counts.
+    /// test of a group of one thread joined again counts.
     #[cfg(all(
         test,
         feature = "std",
         feature = "group",
         feature = "app-transport",
-        not(wz_round)
+        not(feature = "threads")
     ))]
     group_places_made: usize,
     /// How often a pass of the session's tasks read the clock to wake its timers
@@ -2954,8 +2954,10 @@ struct LinkSession<C: ClockSource + 'static> {
     /// each wait found in the link's stack (`input_seen`).
     #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
     gate: CellRc<LinkGate<C>, LinkCount>,
-    /// The link's generation, which the queries it carries are answered under (`query`).
-    #[cfg(feature = "queryable")]
+    /// The link's generation, which the queries it carries are answered under (`query`). Read
+    /// where the link's session is read in place (`UpFacts::of`); the read that steps it itself
+    /// reads its records' (`direct`).
+    #[cfg(all(feature = "queryable", wz_round))]
     generation: u64,
 }
 
@@ -4547,7 +4549,7 @@ impl<C: ClockSource + 'static> LinkCalls<C, SessionLock> for LinkMaking<'_> {
                 actions,
                 #[cfg(all(any(feature = "listen", feature = "group"), wz_round))]
                 gate: gate.clone(),
-                #[cfg(feature = "queryable")]
+                #[cfg(all(feature = "queryable", wz_round))]
                 generation,
             },
         )
@@ -5521,7 +5523,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             pump.rejoin(seat);
             return;
         }
-        #[cfg(all(test, feature = "std", feature = "app-transport"))]
+        #[cfg(all(
+            test,
+            feature = "std",
+            feature = "app-transport",
+            not(feature = "threads")
+        ))]
         {
             self.group_places_made += 1;
         }
@@ -6498,7 +6505,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 feature = "std",
                 feature = "group",
                 feature = "app-transport",
-                not(wz_round)
+                not(feature = "threads")
             ))]
             group_places_made: 0,
             #[cfg(all(test, feature = "std"))]
@@ -7159,7 +7166,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         feature = "std",
         feature = "group",
         feature = "app-transport",
-        not(wz_round)
+        not(feature = "threads")
     ))]
     pub(crate) fn group_places_made(&self) -> usize {
         self.core.lock().0.group_places_made
