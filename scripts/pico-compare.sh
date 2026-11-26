@@ -594,7 +594,7 @@ subprofile_trial() {
     pace="$(awk -v c="$count" -v s="$seconds" 'BEGIN { printf "%.6f", c / s }')"
     case "$tool" in
         strace) tool_words=(strace -f -c -o "$stem.strace") ;;
-        perfstat) tool_words=(perf stat -x , -o "$stem.perfstat" -e "$SUBPROF_EVENTS" --) ;;
+        perfstat) tool_words=(perf stat -x "," -o "$stem.perfstat" -e "$SUBPROF_EVENTS" --) ;;
         perfrecord)
             tool_words=(perf record -g --call-graph "${PICO_CMP_SUBPROF_CALLGRAPH:-dwarf}" -o "$stem.perf.data" --)
             ;;
