@@ -14,6 +14,7 @@ use crate::proto_types::{FieldOption, FileOptions, Fld, LinkedTypes, ProtoDiagno
 
 /// A stand-in for `google/protobuf/descriptor.proto`: the three options messages the schema
 /// below extends or sets, so the fixture is the same files for `protoc` and for the text reader.
+#[cfg(feature = "proto-text")]
 const DESCRIPTOR_PROTO: &str = r#"syntax = "proto2";
 package google.protobuf;
 message FileOptions {
@@ -31,6 +32,7 @@ message FieldOptions {
 
 /// A stand-in for nanopb's `nanopb.proto`, with nanopb's numbers for the options the readers
 /// act on.
+#[cfg(feature = "proto-text")]
 const NANOPB_PROTO: &str = r#"syntax = "proto2";
 import "google/protobuf/descriptor.proto";
 enum FieldType {
@@ -69,6 +71,7 @@ extend google.protobuf.FieldOptions {
 }
 "#;
 
+#[cfg(feature = "proto-text")]
 const COMMON_PROTO: &str = r#"syntax = "proto2";
 package wz.common;
 import "nanopb.proto";
@@ -92,6 +95,7 @@ enum Quality {
 }
 "#;
 
+#[cfg(feature = "proto-text")]
 const FIXTURE_PROTO: &str = r#"syntax = "proto3";
 package wz.fixture;
 import "wz/common.proto";
