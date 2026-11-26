@@ -264,9 +264,15 @@ share.
   bytes of the planes it does call bound the rest from above.
 - **R5, the arena's written rows.** Which rows of the session arena a run writes (section 5.1, A1): the
   page map R3 reads of each executable mapping read of the arena's mapping too, against the row report of
-  the same open (`cargo test -p wz-capi-pico --lib --no-default-features --features <the preset's list>
-  the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture` under the preset's
-  limits, `WZ_LIMITS_ZENOH_PICO`), each present page named by the rows that lie on it.
+  the same open, built as the preset is, at its limits (`WZ_LIMITS_ZENOH_PICO`), each present page named by
+  the rows that lie on it. The report, one command from the one resolver:
+
+  ```
+  env $(python3 -I scripts/lib/wz_config.py --original-env zenoh-pico) \
+    cargo test -p wz-capi-pico --lib --no-default-features \
+    --features "$(python3 -I scripts/lib/wz_config.py --print-preset-features coop)" \
+    the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture
+  ```
 
 ## 7. What this lane landed
 
