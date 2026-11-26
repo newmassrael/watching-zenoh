@@ -1382,3 +1382,113 @@ fn the_row_releases_take_a_mark_once_and_count_each_drop() {
     drop(two);
     assert!(releases.settled());
 }
+
+/// What [`At`] calls note of each sample they are handed: the row, the payload's first byte and
+/// where the payload lies.
+type Seen = Arc<Mutex<Vec<(u32, u8, usize)>>>;
+
+/// A call of subscriber row `row` that notes in `seen` where the payload it is handed lies.
+struct At {
+    row: u32,
+    seen: Seen,
+}
+
+impl RoundCall for At {
+    fn end(self) -> bool {
+        false
+    }
+}
+
+impl SampleCall for At {
+    fn hand(&self, sample: &SampleRef<'_>) {
+        self.seen.lock().unwrap().push((
+            self.row,
+            sample.payload.first().copied().unwrap_or(0),
+            sample.payload.as_ptr() as usize,
+        ));
+    }
+}
+
+/// A round that reads a group's datagrams and keeps samples alone, its subscribers' calls noting
+/// where each payload lies.
+enum Grouped {}
+
+impl RoundCalls for Grouped {
+    type Subscriber = At;
+    type Liveliness = Call;
+    type Queryable = Call;
+    type Watch = Call;
+    type Leg = u32;
+    type ReplyCallback = ();
+    type Tokens = Absent;
+    type Replies = Absent;
+    type Queries = Absent;
+    type Watches = Absent;
+    type Capture = Absent;
+    type Group = Present;
+    type Locks = StdLocks;
+    type Tally = ();
+    type Form = crate::row_callback::Threads;
+}
+
+/// A group's receive buffer given back while a record of the round reads a datagram in it is
+/// kept, the round sealed and handed out meanwhile, and goes back to its table once the lock
+/// holder settles the round after the delivery; one in which no record reads goes back at once.
+/// Turned red by a round that lets go of the buffer a delivery reads, or keeps one it reads
+/// nothing in.
+#[test]
+fn a_given_back_group_buffer_is_kept_while_a_record_reads_in_it() {
+    use crate::byte_cells::{ByteCells, ByteSource};
+    use crate::sink::BorrowedSample;
+
+    static RX: ByteCells<16, 2> = ByteCells::new();
+    let round = round::<Grouped>();
+    let seen: Seen = Arc::default();
+    let mut buf = RX.claim().expect("a group's buffer");
+    buf.as_mut_slice()[..2].copy_from_slice(&[7, 7]);
+    let (base, _) = buf.raw();
+    // SAFETY: the first two bytes of the buffer, which the claim holds until it is given back and
+    // the round, which keeps it, lets go of it after the delivery read them.
+    let datagram = unsafe { core::slice::from_raw_parts(base.cast_const(), 2) };
+    let sample = BorrowedSample {
+        keyexpr: "demo/round",
+        payload: datagram,
+        kind: SampleKind::Put,
+        reliability: Reliability::BestEffort,
+    };
+    let call = At {
+        row: 1,
+        seen: seen.clone(),
+    };
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe {
+        round.set_lending(Some(datagram));
+        round.offer_sample(call, &sample, true);
+        round.set_lending(None);
+        round.seal();
+        round.keep_rx(buf);
+    }
+    assert_eq!(RX.in_use(), 1, "a sealed record reads in it, so it is kept");
+    let other = RX.claim().expect("the other buffer");
+    // SAFETY: as above.
+    unsafe { round.keep_rx(other) };
+    assert_eq!(
+        RX.in_use(),
+        1,
+        "CONTROL: nothing reads in the other, so it went back"
+    );
+    assert!(round.deliver());
+    assert_eq!(
+        *seen.lock().unwrap(),
+        [(1, 7, base as usize)],
+        "read where it lies"
+    );
+    assert_eq!(
+        RX.in_use(),
+        1,
+        "handed out with no lock held, it waits for the lock holder"
+    );
+    // SAFETY: as above.
+    unsafe { round.settle() };
+    assert_eq!(RX.in_use(), 0, "settled, the buffer is its table's again");
+}
