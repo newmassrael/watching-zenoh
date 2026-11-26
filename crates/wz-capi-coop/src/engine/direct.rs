@@ -854,8 +854,6 @@ pub(super) struct DirectSlot<L: CoopLinks + 'static, C: ClockSource + 'static> {
     router: SessionReassembly,
     /// Where the Router is lent to the pump's receive.
     lend: RouterLend<SessionReassembly, RouterPlace>,
-    /// The dial the life asked for, while the network has not answered it.
-    dial: Option<Dial<L::Dial>>,
     /// The link a dial made, and the endpoint it reached, until its handshake is begun.
     opened: Option<(OpenedLink<L::Pump, LinkCount>, DialEndpoint)>,
     /// Why the last endpoint tried came to no link: what the session ends with when the life
@@ -1017,10 +1015,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
         }
     }
 
-    /// Let go of the link: the dial and the link it made are let go of, and the pump goes. The
-    /// life of the face's record was closed by the session's end of its links (`end_links`).
+    /// Let go of the link: the link a dial made is let go of, and the pump goes. The life of the
+    /// face's record was closed, and a dial under way in it let go of, by the session's end of
+    /// its links (`end_links`).
     fn let_go(&mut self) {
-        self.dial = None;
         self.opened = None;
         self.drop_pump();
         #[cfg(feature = "threads")]
@@ -1071,7 +1069,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
     /// What the link brings to its life at this look, at `now_us`: a handshake completed, a pump
     /// that ended or was asked to, a dial the network answered, or only the time. With `listen`
     /// the dial role's face reads the node its link reached too (`Self::read_node`), and a dial an
-    /// attach left in the face's record is taken into the slot first (`Self::take_owed_dial`).
+    /// attach began has its life looked at in this turn (`Self::wake_for_record_dial`).
     fn next_input(&mut self, core: &mut Core<L, C>, end: &EndFlags, now_us: u64) -> LinkInput {
         // The face's record holds the link exactly while its parts hold the pump.
         let linked = core
@@ -1107,12 +1105,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
         }
         #[cfg(not(feature = "listen"))]
         let _ = now_us;
-        #[cfg(feature = "listen")]
-        self.take_owed_dial(core);
         match self.take_dial_answer(core) {
             Some(input) => input,
             #[cfg(feature = "listen")]
-            None => self.read_node(core, LinkInput::Tick, false),
+            None => {
+                self.wake_for_record_dial(core);
+                self.read_node(core, LinkInput::Tick, false)
+            }
             #[cfg(not(feature = "listen"))]
             None => LinkInput::Tick,
         }
@@ -1139,60 +1138,53 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectSlot<L, C> 
             .read_dial_node(at, id, phase, input, over)
     }
 
-    /// Take into the slot the dial an attach left in the face's record
-    /// (`CoopEngine::attach_face`), which holds the session's lock and not the face's place: a
-    /// change of the face's site it owes the face's read, which looks at the life in this turn.
+    /// Have the life looked at in this turn when the face's record holds a dial the slot keeps no
+    /// time for: one an attach began (`CoopEngine::attach_face`), holding the session's lock and
+    /// not this slot, so only a look here notes when the dial is next looked at and given up. A
+    /// dial the slot began has that time from the look that began it.
     #[cfg(feature = "listen")]
-    fn take_owed_dial(&mut self, core: &mut Core<L, C>) {
-        let at = self.at();
-        let owed = core
-            .transport
-            .links
-            .face(at)
-            .is_some_and(|face| matches!(face.link, Link::Dialing(_)));
-        if !owed {
-            return;
-        }
-        let Some(face) = core.transport.links.face_mut(at) else {
-            return;
-        };
-        if let Link::Dialing(dial) = core::mem::replace(&mut face.link, Link::Idle) {
-            self.dial = Some(dial);
+    fn wake_for_record_dial(&mut self, core: &Core<L, C>) {
+        if self.life_due_us == u64::MAX
+            && core
+                .transport
+                .links
+                .face(self.at())
+                .is_some_and(|face| matches!(face.link, Link::Dialing(_)))
+        {
             self.life_due_us = 0;
         }
     }
 
-    /// Dial the session's endpoint at `row`, as the life asked: what the dial came to at once.
-    fn dial_row(&mut self, core: &Core<L, C>, row: usize) -> LinkInput {
-        self.dial = None;
+    /// Dial the session's endpoint at `row`, as the life asked: what the dial came to at once. The
+    /// dial lies in the face's record, as every dial under way does, and is asked there.
+    fn dial_row(&mut self, core: &mut Core<L, C>, row: usize) -> LinkInput {
         let transport = &core.transport;
-        match transport.begin_dial(transport.endpoints.dial_text(row)) {
-            Ok(begun) => self.dial = Some(Dial::begun(DialEndpoint::Listed(row), begun)),
+        let begun = match transport.begin_dial(transport.endpoints.dial_text(row)) {
+            Ok(begun) => begun,
             Err(refused) => {
                 self.last = Some(OpenError::from(refused));
                 return LinkInput::DialRefused;
             }
-        }
+        };
+        core.transport.links.put_link(
+            self.at(),
+            Link::Dialing(Dial::begun(DialEndpoint::Listed(row), begun)),
+        );
         self.take_dial_answer(core)
             .unwrap_or(LinkInput::DialPending)
     }
 
-    /// Ask the dial under way once over the session's links: what its answer makes of it, the
-    /// link kept or why the network refused it, or `None` while the network has not answered (or
-    /// no dial is under way). A dial that answered has handed out all it held for its link, so it
-    /// is let go of before the link is opened. Out of line and cold: a dial begun and a dial under
-    /// way at a look at the life take their answer in this one body, and no look once a link is
-    /// made reaches it.
+    /// Ask the dial under way in the face's record once over the session's links: what its answer
+    /// makes of it, the link kept or why the network refused it, or `None` while the network has
+    /// not answered (or no dial is under way). A dial that answered has handed out all it held for
+    /// its link, so it is let go of before the link is opened. Out of line and cold: a dial begun
+    /// and a dial under way at a look at the life take their answer in this one body, so the
+    /// answer's handling is held once, and no look once a link is made reaches it.
     #[cold]
     #[inline(never)]
-    fn take_dial_answer(&mut self, core: &Core<L, C>) -> Option<LinkInput> {
-        let links = &core.transport.links;
-        let answer = self
-            .dial
-            .as_mut()
-            .and_then(|dial| links.answer_dial(dial))?;
-        let dial = self.dial.take()?;
-        Some(self.answered(core, dial.into_endpoint(), answer))
+    fn take_dial_answer(&mut self, core: &mut Core<L, C>) -> Option<LinkInput> {
+        let (answer, endpoint) = core.transport.links.answer_face_dial(self.at())?;
+        Some(self.answered(core, endpoint, answer))
     }
 
     /// Keep why the endpoint `text` came to no link, `why`: what the session ends with when its
@@ -1252,8 +1244,8 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// while it turns another (`CoopEngine::read_faces`). Written under the session's lock: set
     /// by the face's own look and by the open of a dial role that dials nothing, and ended where
     /// the slot is given a link and where the row is given a face (`DirectFaces::hold_face`),
-    /// whose attached dial only the face's look takes into its slot. Outside the slot, as an
-    /// attach holds the session's lock and not the face's slot.
+    /// whose attached dial only the face's look asks. Outside the slot, as an attach holds the
+    /// session's lock and not the face's slot.
     #[cfg(any(feature = "listen", feature = "group"))]
     rests: AtomicBool,
 }
@@ -1284,7 +1276,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                         records: None,
                         router,
                         lend,
-                        dial: None,
                         opened: None,
                         last: None,
                         life_due_us: u64::MAX,
@@ -1358,19 +1349,20 @@ pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> 
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C> {
     /// The faces past the dial role's, `rows` of them lent from `arena`: the face of the face
     /// table's place `n` in the table's row `n - 1`, each with a Router of its own under
-    /// `policy`, staging its chains in `chains`, lent through `lend`. Refused past what the
-    /// arena has left.
+    /// `policy`, staging at most `open` chains at once in `chains`, lent through `lend`.
+    /// Refused past what the arena has left.
     #[cfg(feature = "listen")]
     pub(super) fn taken_in(
         arena: &mut Arena,
         rows: usize,
         policy: &SessionPolicy,
         chains: &LentByteCells,
+        open: usize,
         lend: &RouterLend<SessionReassembly, RouterPlace>,
     ) -> Result<TakenFaces<L, C>, LendRefused> {
         let mut taken = arena.lend::<DirectFace<L, C>, { usize::MAX }>(rows)?;
         for at in 1..=rows {
-            let router = session_reassembly(policy, SessionChains::over(chains, LENT_CHAINS));
+            let router = session_reassembly(policy, SessionChains::over(chains, open));
             let lend = lend.clone();
             let write = move |row: &mut MaybeUninit<DirectFace<L, C>>| {
                 // SAFETY: the row is aligned and valid for writes of a face, holds none, and is
@@ -2290,9 +2282,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             if core.session.matching.moved(written) {
                 self.read_matching(core);
             }
-            let life = core.transport.links.face(slot.at()).map(|face| &face.life);
-            slot.life_due_us = life
-                .and_then(|life| life.wake_at(now_us))
+            let record = core.transport.links.face(slot.at());
+            slot.life_due_us = record
+                .and_then(|row| row.life.wake_at(now_us))
                 .unwrap_or(u64::MAX);
             // A life standing by is not at rest: it dials again once no other face holds its
             // node, which only a look at it reads.
@@ -2300,11 +2292,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             face.rests.store(
                 slot.life_due_us == u64::MAX
                     && slot.records.is_none()
-                    && slot.dial.is_none()
                     && slot.opened.is_none()
                     && slot.router.due_ms() == u64::MAX
-                    && life.is_none_or(|life| {
-                        matches!(life.phase(), LinkPhase::Idle | LinkPhase::Closed)
+                    && record.is_none_or(|row| {
+                        matches!(row.life.phase(), LinkPhase::Idle | LinkPhase::Closed)
+                            && !matches!(row.link, Link::Dialing(_))
                     }),
                 Ordering::Release,
             );
@@ -2456,8 +2448,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // A dial the life gave up on before the network answered it is its endpoint's refusal
             // for want of an answer in time, as a build whose links are tasks names it.
             if effects.dial().is_some() || effects.backs_off() || effects.ends_session() {
-                if let Some(dial) = slot.dial.take() {
-                    let endpoint = dial.into_endpoint();
+                if let Some(endpoint) = core.transport.links.end_dial(slot.at()) {
                     slot.keep_refusal(
                         core.transport.endpoint_text(Some(&endpoint)),
                         Refusal::NoAnswerInTime,

@@ -129,9 +129,7 @@ use wz_runtime_coop::faces::{
     LinkSupervisor, DIAL_LOOK_MS,
 };
 use wz_runtime_coop::link_cells::CellRc;
-use wz_runtime_coop::reassembly_rx::{
-    session_reassembly, SessionChains, SessionReassembly, LENT_CHAINS,
-};
+use wz_runtime_coop::reassembly_rx::{session_reassembly, SessionChains, SessionReassembly};
 #[cfg(wz_round)]
 use wz_runtime_coop::session_drive::router_session_task_bytes;
 #[cfg(feature = "time-base")]
@@ -988,7 +986,7 @@ fn lend_session(
     } = claimed;
     let router = session_reassembly(
         policy,
-        SessionChains::over(&transport.reassembly, LENT_CHAINS),
+        SessionChains::over(&transport.reassembly, transport.face_chains),
     );
     #[cfg(all(wz_round, feature = "runtime-plan"))]
     let round_rows =
@@ -1451,8 +1449,9 @@ pub(crate) struct Takes {
     /// queryable a query reached.
     #[cfg(all(feature = "queryable", not(wz_round)))]
     pub(crate) pinned_queries: core::sync::atomic::AtomicUsize,
-    /// The turns of an answer that held their link's replies from the first reply and let them go
-    /// after the Final (`CoopEngine::answer`).
+    /// The turns of an answer that held their link's replies and let them go after the Final: from
+    /// the first reply (`CoopEngine::answer`), or across the callbacks of a query the read hands
+    /// out itself (`queries`).
     #[cfg(feature = "queryable")]
     pub(crate) held_answers: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
@@ -6388,6 +6387,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 lent.taken_faces,
                 &policy,
                 &lent.transport.reassembly,
+                lent.transport.face_chains,
                 &lend,
             )
             .map_err(|refused| OpenError::Arena(ArenaRefused::Lend(refused)))?
@@ -7232,6 +7232,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .transport
             .links
             .face(0)
+            .map(|face| face.life.phase())
+    }
+
+    /// Where the link of the face at row `at` stands, as the life of its record says: what a test
+    /// of a face beside the dial role's reads. `None` for a row no face holds. Read under the
+    /// lock, uncounted as a take.
+    #[cfg(all(test, feature = "std", feature = "listen", not(wz_round)))]
+    pub(crate) fn face_phase(&self, at: usize) -> Option<wz_session_core::link_life::LinkPhase> {
+        self.core
+            .lock()
+            .0
+            .transport
+            .links
+            .face(at)
             .map(|face| face.life.phase())
     }
 

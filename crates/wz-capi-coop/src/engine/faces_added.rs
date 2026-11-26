@@ -184,7 +184,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Link::Dialing(Dial::begun(DialEndpoint::Named(named), begun)),
             1,
         ) {
-            // The read turns the face from its next turn on, which takes the dial into its place.
+            // The read turns the face from its next turn on, which asks the dial where it lies.
             #[cfg(not(wz_round))]
             self.direct.hold_face(at, true);
             let now_us = core.now_us();

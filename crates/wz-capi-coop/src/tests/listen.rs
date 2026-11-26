@@ -317,9 +317,26 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
     let standing = client(&endpoint, 0xc2);
     eventually("the listener to be full", || full.faces_up() == 2);
     let mut expected = vec![put(&silent, 0x10, 0), put(&standing, 0x20, 0)];
-    eventually("CONTROL: both faces heard", || {
-        heard.lock().unwrap().len() == 2
-    });
+    // Which sample is missing, and whether its client stood on its link, tells a put its client
+    // sent before its link was up from one the listener did not read.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while heard.lock().unwrap().len() < 2 {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for CONTROL: both faces heard: heard the samples tagged {:?}, \
+             the listener holds {} faces up, the silent client {} and the standing one {}",
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|sample| sample.first().copied())
+                .collect::<Vec<_>>(),
+            full.faces_up(),
+            silent.faces_up(),
+            standing.faces_up()
+        );
+        std::thread::sleep(Duration::from_millis(2));
+    }
 
     // The face goes silent: its socket stays open and nothing of its session is stepped, so the
     // listener learns of it only when the lease it advertised ends.
@@ -756,8 +773,8 @@ fn a_listeners_walk_ends_at_its_last_held_row() {
 }
 
 /// A row a face left is noted at rest by that face's last look, and the face an attach gives it
-/// next wakes it: the attached dial lies in the face's record until the face's own look takes it
-/// into the slot, so a read that passed the row over would never dial. CONTROL: the row's first
+/// next wakes it: the attached dial lies in the face's record, asked only by the face's own look,
+/// so a read that passed the row over would never dial. CONTROL: the row's first
 /// face, taken off the port, comes up and goes. Turned red by a row given a face and left at rest
 /// (`DirectFaces::hold_face` not ending `DirectFace::rests`).
 #[cfg(not(wz_round))]
@@ -873,7 +890,12 @@ fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
         .acquire_keyexpr(&long)
         .expect("room for a declaration")
         .mapping_id();
-    let remote = PublishOptions::put().with_locality(Locality::Remote);
+    // Blocking: under the client's pico profile a droppable put that finds its link's send held
+    // by the client's own read task (a reply to the listener's interest as the face comes up) is
+    // dropped and told, and every put is what the listener's counts are read for here.
+    let remote = PublishOptions::put()
+        .with_locality(Locality::Remote)
+        .with_congestion_control(CongestionControl::Block);
     let long_key = format!("{long}/x");
     for (id, key) in [(fits, "demo/c/x"), (past, long_key.as_str())] {
         peer.publish_on_wire_all(

@@ -53,9 +53,10 @@
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
 //!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
-//!   table for the session, as many as its `REASSEMBLY_CHAINS` (under the build's; by default one
-//!   for each reliability a peer has a chain open in and one for the rejoined message the round
-//!   reads where its chain lay, `SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`), a
+//!   table for the session, as many as its `REASSEMBLY_CHAINS` for each face read where it lies
+//!   (under the build's; by default one for each reliability a peer has a chain open in and one for
+//!   the rejoined message the round reads where its chain lay, `SESSION_CHAIN_BUFFERS` of
+//!   `wz_runtime_coop::reassembly_rx`), a face's chains open at once held to that share, a
 //!   first fragment that finds none free refused and counted (`LentStaging::refused` of
 //!   `wz_session_core::chain_staging`), each buffer claimed when a chain's first fragment arrives and
 //!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
@@ -122,6 +123,7 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
+use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
@@ -1228,6 +1230,8 @@ pub struct TransportRows {
     reassembly_bytes: usize,
     /// How many such buffers, in the one table the session's links share (`REASSEMBLY_CHAINS`).
     reassembly_chains: usize,
+    /// The most chains one face's Router holds open at once (`face_chains`).
+    face_chains: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
     /// The bytes of the cell each link's driver, its gates and its actions are placed in, none
@@ -1265,6 +1269,8 @@ pub(crate) struct TransportTables {
     pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
     /// The reassembly buffers the links share.
     pub(crate) reassembly: LentByteCells,
+    /// The most chains one face's Router holds open at once in `reassembly`.
+    pub(crate) face_chains: usize,
     /// The rows of the endpoints' texts, none written.
     pub(crate) endpoints: EndpointTexts,
     /// The places of the publishes the session keeps for its other faces.
@@ -1284,6 +1290,7 @@ impl TransportRows {
         link_bytes: 0,
         reassembly_bytes: 0,
         reassembly_chains: 0,
+        face_chains: 0,
         endpoint_rows: (0, 0),
         cell_bytes: NO_CELLS,
         cells_held: HeldBits(0),
@@ -1307,6 +1314,7 @@ impl TransportRows {
             // A chain's buffer is claimed when its first fragment arrives and given back when it
             // ends; the session holds the table for its life.
             reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
+            face_chains: self.face_chains,
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::over(
@@ -1742,6 +1750,7 @@ impl ArenaPlan {
             link_bytes,
             reassembly_bytes: 0,
             reassembly_chains: 0,
+            face_chains: 0,
             endpoint_rows: (shape.dials, shape.listens),
             cell_bytes: NO_CELLS,
             cells_held: HeldBits(0),
@@ -1760,12 +1769,16 @@ impl ArenaPlan {
             ArenaLimit::PicoFragMaxBytes,
             limits.pico_frag_max_bytes(),
         );
-        // The buffers of the session's one table of chains, as a report reads them
-        // (`link_buffers`).
-        match reassembly_chains(limits) {
-            Ok(chains) => self.transport.reassembly_chains = chains,
-            Err(refused) => self.refuse(refused),
-        }
+        // A face's share of the session's one table of chains, which bounds the chains its Router
+        // holds open; the table is laid out once the faces are counted.
+        let share = match reassembly_chains(limits) {
+            Ok(share) => share,
+            Err(refused) => {
+                self.refuse(refused);
+                0
+            }
+        };
+        self.transport.face_chains = face_chains(share);
         // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
         match pooled_buffers(links, limits) {
             Ok((rx_buffers, tx_slots)) => {
@@ -1796,21 +1809,10 @@ impl ArenaPlan {
             Quota::at_most(limits.key_arena_bytes()),
         );
         let faces = self.sized(shape.faces());
-        // Each face's read stages its chains in a Router of its own (`crate::engine::direct`),
-        // which holds at most its share of them open and keeps one rejoined message: the table
-        // holds the session's `REASSEMBLY_CHAINS` for every face read where it lies, so the
-        // chains of one face never take another's buffers.
-        #[cfg(not(wz_round))]
-        {
-            let shares = read_faces(FacePeers::sets_of(faces, shape.dial_role()));
-            let share = self.transport.reassembly_chains;
-            self.transport.reassembly_chains = match share.checked_mul(shares) {
-                Some(chains) => chains,
-                None => {
-                    self.refuse(ArenaRefused::TooLarge);
-                    0
-                }
-            };
+        // The table of chains, as a report reads it (`link_buffers`).
+        match chain_table(share, FacePeers::sets_of(faces, shape.dial_role())) {
+            Some(chains) => self.transport.reassembly_chains = chains,
+            None => self.refuse(ArenaRefused::TooLarge),
         }
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
@@ -2670,22 +2672,30 @@ pub struct LinkBuffers {
     pub transmit: usize,
     /// The bytes of each receive buffer and of each slot: the batch the session advertises.
     pub bytes: usize,
-    /// The reassembly buffers of the session's one table, which its links share.
+    /// The reassembly buffers of the session's one table, which its links share: its stated
+    /// share for each face read where it lies.
     pub chains: usize,
 }
 
-/// The buffers of the links of a session that holds `links` links at most and advertises `batch`
-/// under `limits`: what its plan lays out for them, from the same reckoning
+/// The buffers of the links of a session that holds `links` links at most, admits `beside` faces
+/// besides its dial role's (its [`CoopConfig::max_faces`] and the groups it joins) and
+/// advertises `batch` under `limits`: what its plan lays out for them, from the same reckoning
 /// ([`ArenaPlan::lay_out`]), so a report of the session's memory reads what its open reserves.
-/// Refused as the plan refuses the batch or a pool's limit.
+/// Refused as the plan refuses the batch, a pool's limit or the table of chains.
 pub const fn link_buffers(
     links: usize,
+    beside: usize,
     batch: u16,
     limits: &SessionLimits,
 ) -> Result<LinkBuffers, ArenaRefused> {
     let bytes = tried!(link_batch(batch, limits));
     let (receive, transmit) = tried!(pooled_buffers(links, limits));
-    let chains = tried!(reassembly_chains(limits));
+    let share = tried!(reassembly_chains(limits));
+    // The face table's places: the dial role's, whether or not it dials, and one for each face
+    // besides (`FacePeers::sets`).
+    let Some(chains) = chain_table(share, beside.saturating_add(1)) else {
+        return Err(ArenaRefused::TooLarge);
+    };
     Ok(LinkBuffers {
         receive,
         transmit,
@@ -2694,10 +2704,10 @@ pub const fn link_buffers(
     })
 }
 
-/// The buffers of a session's one table of chains under `limits`, which its links share: its
-/// `REASSEMBLY_CHAINS`, held under the build's value, which a session lowers and never raises, so
-/// a value over it is refused under its own name. However many links the session holds, as a
-/// chain is claimed from the table and not from a link's own buffers.
+/// A face's share of the session's one table of chains under `limits`: its `REASSEMBLY_CHAINS`,
+/// held under the build's value, which a session lowers and never raises, so a value over it is
+/// refused under its own name. However many links the face holds, as a chain is claimed from the
+/// table and not from a link's own buffers.
 const fn reassembly_chains(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
     lent::<{ caps::REASSEMBLY_CHAINS }>(ArenaLimit::ReassemblyChains, limits.reassembly_chains())
 }
@@ -3106,14 +3116,32 @@ pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "gro
 /// slot, a send place and a share of the chain buffers of its own (`crate::engine::direct`):
 /// every place where the session listens, whose ports' connections and attaches take the places
 /// past the dial role's, and the dial role's alone otherwise. A group's place is read through the
-/// group's own session, which stages its chains itself, so it is lent neither.
-#[cfg(not(wz_round))]
+/// group's own session, which stages its chains itself, so it is lent neither. Where the links
+/// are tasks (`wz_round`) they stage into the session's one Router, which reads them all.
 const fn read_faces(sets: usize) -> usize {
-    if cfg!(feature = "listen") {
+    if cfg!(feature = "listen") && !cfg!(wz_round) {
         sets
     } else {
         1
     }
+}
+
+/// The buffers of the session's one table of chains: `share` for each face read where it lies
+/// among the face table's `sets` places (`read_faces`), so the chains of one face never take
+/// another's buffers. `None` past the address space. The one reckoning of the plan's table and of
+/// a report's (`link_buffers`).
+const fn chain_table(share: usize, sets: usize) -> Option<usize> {
+    share.checked_mul(read_faces(sets))
+}
+
+/// The most chains one face's Router holds open at once where its share of the session's one
+/// table is `share` buffers: the share, up to the chains a Router stages at once
+/// (`LENT_CHAINS`). The build's share is one more than those, for the rejoined message a face's
+/// read keeps out of the table while it reads it where it lies (`SESSION_CHAIN_BUFFERS` of
+/// `wz_runtime_coop::reassembly_rx`); a share a session lowers bounds the chains themselves, so
+/// a session that states one rejoins one chain at a time.
+const fn face_chains(share: usize) -> usize {
+    least(share, LENT_CHAINS)
 }
 
 /// The inbound links in their handshake at once that `limits` admit: the session's

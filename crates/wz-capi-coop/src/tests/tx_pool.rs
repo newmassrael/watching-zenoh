@@ -139,6 +139,10 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     // and one that took neither is moved on by the read.
     let payload = vec![0x5a; PAYLOAD];
     let mut owing_since: Option<Instant> = None;
+    // How many rounds found the link owing, and how many had the slow peer read: a stream that
+    // never owed tells a host whose stack took every frame whole from one whose stream owed and
+    // was moved on again by the reads.
+    let (mut owed_rounds, mut nudged) = (0usize, 0usize);
     for _ in 0..FILL_AT_MOST {
         for _ in 0..2 {
             let _ = publisher.publish_on_wire_all(
@@ -151,8 +155,10 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
         if publisher.links_owing() == 0 {
             owing_since = None;
             SessionDrive::read(&*slow, true).expect("the slow peer's session is open");
+            nudged += 1;
             continue;
         }
+        owed_rounds += 1;
         let since = *owing_since.get_or_insert_with(Instant::now);
         if since.elapsed() >= STILL {
             break;
@@ -164,7 +170,8 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     assert!(
         owing_since.is_some_and(|since| since.elapsed() >= STILL),
         "the slow peer's link never held a frame its stream had not finished for {STILL:?}: \
-         {} faces up, {} links owing",
+         {} faces up, {} links owing, {owed_rounds} rounds owing, the slow peer told to read \
+         {nudged} times",
         publisher.faces_up(),
         publisher.links_owing()
     );
