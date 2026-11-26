@@ -153,14 +153,25 @@ def _key(p: dict) -> str:
 
 
 def _dep_target(dep: str, by_name: dict[str, list[dict]], where: str) -> dict:
-    """The lock package a dependency string ("name", "name ver", "name ver (source)") names."""
+    """The lock package a dependency string ("name", "name ver", "name ver (source)") names, read
+    the way cargo decodes it (`resolver/encode.rs`, `lookup_id`): cargo writes the version only
+    when the name has more than one, and the source only when the name and version have more
+    than one, except that a path package never carries a source. So a string without a source
+    names the one path (sourceless) package of its name and version, or else the only package."""
     m = re.fullmatch(r"(\S+)(?: (\S+))?(?: \((.+)\))?", dep)
     if m is None:
         raise GraphError(f"{where}: dependency {dep!r} is not `name [version [(source)]]`")
     name, version, source = m.groups()
-    cands = [p for p in by_name.get(name, []) if version is None or p["version"] == version]
+    cands = by_name.get(name, [])
+    if version is None:
+        if len({p["version"] for p in cands}) != 1:
+            raise GraphError(f"{where}: dependency {dep!r} names no single version of the lock")
+    else:
+        cands = [p for p in cands if p["version"] == version]
     if source is not None:
         cands = [p for p in cands if p.get("source", "") == source]
+    elif len(cands) > 1:
+        cands = [p for p in cands if not p.get("source")]
     if len(cands) != 1:
         raise GraphError(f"{where}: dependency {dep!r} names {len(cands)} package(s) of the lock")
     return cands[0]
@@ -600,6 +611,26 @@ def selftest() -> int:
     else:
         raise AssertionError("lane_graph selftest: an ambiguous dependency was resolved")
     expect("a versioned dependency picks its version", _dep_target("a 2", by, "fixture")["version"] == "2")
+    reg = "registry+https://github.com/rust-lang/crates.io-index"
+    git_src = "git+https://example.invalid/b?branch=main#0123"
+    twins = {"b": [{"name": "b", "version": "1"}, {"name": "b", "version": "1", "source": reg}]}
+    # Red if a sourceless string between a path and a registry twin is called ambiguous: cargo
+    # never writes a path package's source.
+    expect("a sourceless dependency of a path and a registry twin is the path one",
+           "source" not in _dep_target("b 1", twins, "fixture"))
+    expect("a sourced dependency picks its source", _dep_target(f"b 1 ({reg})", twins, "fixture").get("source") == reg)
+    sourced = {"b": [{"name": "b", "version": "1", "source": git_src}, {"name": "b", "version": "1", "source": reg}]}
+    expect("a git and a registry twin are told apart by source",
+           _dep_target(f"b 1 ({git_src})", sourced, "fixture").get("source") == git_src)
+    for dep, space, what in (("b 1", sourced, "a sourceless dependency of two sourced twins"),
+                             ("b", {"b": by["a"]}, "a versionless dependency of two versions"),
+                             (f"b 1 ({reg})", {"b": [twins["b"][0]]}, "a source the lock does not have")):
+        try:
+            _dep_target(dep, space, "fixture")
+        except GraphError:
+            cases += 1
+        else:
+            raise AssertionError(f"lane_graph selftest: {what} was resolved")
     # The conservative kind reading: a name seen outside the dev table is normal.
     manifest = '[dependencies]\nx = { path = "x" }\n\n[dev-dependencies]\nx = { path = "x" }\ny = "1"\nz2 = { package = "zed", version = "1" }\n'
     expect("dev-only names are read conservatively", dev_only_names(manifest) == {"y", "zed"}, dev_only_names(manifest))
