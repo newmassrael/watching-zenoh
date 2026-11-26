@@ -802,6 +802,27 @@ transport-link-ws,object-pool|--test-target=it"
     # its keyexprs with it. The group still reads its records where the datagram lies, each under
     # its member's tag, so the module's other tests, a get and its answer among them, run there too.
     "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::group::"
+    # The engine's own tests of a group, each in a build a row above makes: the members a
+    # connectivity watcher is told of, kept as tombs until their departure is told
+    # (`engine::group::told_tests::`, `connectivity`); a member's key, its group above its place
+    # (`engine::member_key_tests::`); the receive buffer each group is lent and the one a record
+    # still reads in kept past its return (`group`); and the aliases of every member a group's face
+    # holds, in the pool and in the face's set (`multicast-declarations`).
+    "wz-capi-coop|hook|app-transport,group,connectivity|engine::group::told_tests::"
+    "wz-capi-coop|hook|app-transport,group|engine::member_key_tests::"
+    "wz-capi-coop|hook|app-transport,group|tests::arena::a_session_that_joins_groups_is_lent_a_receive_buffer_for_each"
+    "wz-capi-coop|hook|app-transport,group|tests::round::a_given_back_group_buffer_is_kept_while_a_record_reads_in_it"
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|tests::arena::a_groups_face_counts_every_members_aliases_in_the_pool"
+    "wz-capi-coop|hook|app-transport,group,multicast-declarations,query,queryable|engine::registry::tests::a_groups_face_holds_its_members_aliases_until_its_set_is_given_back"
+    # The node's message reading (`resource-snapshot`): what a link received, and what a group
+    # received, kept across a join again and the close. One build for both rows.
+    "wz-capi-coop|hook|app-transport,group,resource-snapshot|tests::congestion::the_sessions_message_reading_counts_what_its_link_received"
+    "wz-capi-coop|hook|app-transport,group,resource-snapshot|tests::group::what_a_group_received_stays_in_the_message_reading_across_a_join_again_and_the_close"
+    # A listener over the program's transport opened at the build's limits (`tests::app_listen::`,
+    # compiled with `app-transport` and `listen`), and the program's links of the count the
+    # session's lock takes, a stack the engine opens over (`form::tests::`). One build.
+    "wz-capi-coop|hook|app-transport,listen|tests::app_listen::"
+    "wz-capi-coop|hook|app-transport,listen|form::tests::a_stack_of_the_session_locks_count_is_an_engines_stack"
     # The groups joined on the host's own sockets (`host_group::`, compiled with `group-host`):
     # only a `udp/` endpoint that names a multicast group is joined, and the session's two link
     # policies reach its sockets. The group a real host joins is `#[ignore]`d and Layer M's.
@@ -822,6 +843,9 @@ transport-link-ws,object-pool|--test-target=it"
     # One build for the two rows.
     "wz-capi-coop|hook|advanced|tests::arena::"
     "wz-capi-coop|hook|advanced|tests::an_open_keeps_a_zeroed_ring_of_its_own_for_its_caches"
+    # The arena's own claim of that ring's span, as the table it was lent from lent it, in the same
+    # build (`arena::tests::`, compiled with `advanced-cache`).
+    "wz-capi-coop|hook|advanced|arena::tests::the_caches_span_is_claimed_as_its_table_lent_it"
     # The declaration watch (`decl_watch`, compiled with `remote-declaration-watch` or
     # `declarations-synced-event`): the router's declarations told to the watches of their kind,
     # what it held told first to a watch that came after, the end of its initial declarations told
@@ -831,6 +855,11 @@ transport-link-ws,object-pool|--test-target=it"
     # module is claimed and a test merely named alike is not.
     "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|engine::decl_watch::"
     "wz-capi-coop|hook|declarations-synced-event,liveliness,remote-declaration-watch|tests::decl_watch::"
+    # The engine's own module again with the queryables' plane and the plan laid out at the open
+    # (`query`, `queryable`, `runtime-plan`): a link's event held for the watches of its kind
+    # and none of a group's, and the observers going into and out of the application tables an
+    # arena lent. The row above keeps the build without the plane, whose refusal it runs.
+    "wz-capi-coop|hook|declarations-synced-event,liveliness,query,queryable,remote-declaration-watch,runtime-plan|engine::decl_watch::"
     # The receive in place on the cooperative engine (`tests::in_place::`, 2; the engine's one
     # receive): a Push and a get's reply read where the link's buffer holds them reach the
     # subscriber and the get. `query` is the get's.

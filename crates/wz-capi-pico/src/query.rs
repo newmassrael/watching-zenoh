@@ -1531,7 +1531,7 @@ unsafe fn declare_queryable_in(
     };
     let session = crate::write_filter::PicoSession::of(handle);
     let state = slot
-        .fill(crate::object_slot::Answering::keeping(
+        .fill_answering(
             QueryableState {
                 engine: crate::session::EngineHold::clone(&session.engine),
                 declared: None,
@@ -1542,7 +1542,7 @@ unsafe fn declare_queryable_in(
                 _session: background.then(|| crate::session::session_count(zs).hold()),
                 engine: crate::session::EngineHold::downgrade(&session.engine),
             },
-        ))
+        )
         .cast::<QueryableState>();
     // The closure lies in the place now, counted there before the row can call it or let it go.
     let kept = crate::object_slot::kept_at::<QueryableState, QueryableKept>(state);
