@@ -2210,15 +2210,30 @@ impl MulticastBatch {
     /// slot takes a copy of the frame and the batch keeps its storage; otherwise the frame is
     /// handed over: as a copy of exactly the frame when the storage is the batch the window
     /// writes into, which the batch keeps, and as the storage itself when that is the frame.
+    ///
+    /// Inline, so a push outside a window, which finds no frame open, reads the open mark where it
+    /// stands and calls nothing.
+    #[inline]
     pub fn flush<Q: MulticastTxQueue + ?Sized>(
         &mut self,
         priority: Priority,
         params: &crate::multicast_params::MulticastParams,
         queue: &mut Q,
     ) {
-        let Some(open) = self.open.take() else {
-            return;
-        };
+        if let Some(open) = self.open.take() {
+            self.flush_open(open, priority, params, queue);
+        }
+    }
+
+    /// [`Self::flush`] of `open`, the frame taken out of the batch.
+    #[inline(never)]
+    fn flush_open<Q: MulticastTxQueue + ?Sized>(
+        &mut self,
+        open: OpenFrame,
+        priority: Priority,
+        params: &crate::multicast_params::MulticastParams,
+        queue: &mut Q,
+    ) {
         // A compressing group's frame is compressed on its way to the queue, which only the
         // datagram handed over is.
         if !params.compression {
@@ -3945,6 +3960,38 @@ mod lend_tests {
             queue.past_want.first(),
             Some(&0),
             "the whole frame was refused at the batch: nothing written past it"
+        );
+    }
+
+    /// A window with no frame open puts nothing on the queue when it is flushed, and one with a
+    /// frame open puts that frame on it once and holds none after. Turned red by a flush that reads
+    /// the open frame without taking it (`MulticastBatch::flush`), which would put it on twice.
+    #[test]
+    fn a_window_flushes_its_open_frame_once_and_an_empty_one_nothing() {
+        use sce_forge_runtime::codec::SceSink;
+        let budget = 64;
+        let params = params(64, false);
+        let mut queue = Lending::new(1_472, 65_600);
+        let mut window = MulticastBatch::with_budget(budget);
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(
+            (queue.offers, queue.lent.len(), queue.heap.len()),
+            (0, 0, 0),
+            "no frame open, nothing offered"
+        );
+        assert!(window.open_with(true, 3, budget, |buf| {
+            crate::tx_buf::TxSink::new(buf)
+                .write_bytes(&[9u8; 10])
+                .is_ok()
+        }));
+        assert!(!window.is_empty());
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert!(window.is_empty());
+        window.flush(Priority::DEFAULT, &params, &mut queue);
+        assert_eq!(
+            queue.lent.len() + queue.heap.len(),
+            1,
+            "the frame went on the queue once"
         );
     }
 
