@@ -1429,7 +1429,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
             };
             let Some(mut pump) = pump else {
-                at += 1;
+                at = at.saturating_add(1);
                 continue;
             };
             let ended = pump.step(&mut |records, event| {
@@ -1463,17 +1463,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 }
             };
             drop(unplaced);
-            at += 1;
+            at = at.saturating_add(1);
         }
     }
 
-    /// Read the end of each group's session a step left, and join again each group whose time
-    /// came (`Core::poll_groups`), under the session's lock.
+    /// Read the end of each group's session a step left, join again each group whose time came
+    /// (`Core::poll_groups`), and ask each join that came up for its members' keyexprs
+    /// (`Core::ask_groups_for_keyexprs`), under the session's lock: the ask is staged on the
+    /// group's stage, which the group's next step writes.
     #[cfg(feature = "group")]
     fn poll_groups(&self) {
         if let Some(mut held) = self.live() {
             let redial_ms = held.0.config.redial_ms;
             held.0.poll_groups(redial_ms);
+            held.0.ask_groups_for_keyexprs();
         }
     }
 

@@ -5617,6 +5617,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         }
     }
 
+    /// Each group told the session's keyexprs that came up, at the open or joined again, asks for
+    /// its members' with the session's next entity id, as the tokio engine's group asks when it
+    /// comes up. Best effort: a member's own declarations reach the group later all the same, so
+    /// a session with no entity id left does not ask. Both forms run it with the groups' poll: the
+    /// round's bookkeeping, and the read that steps each group's session itself.
+    #[cfg(feature = "group")]
+    fn ask_groups_for_keyexprs(&mut self) {
+        for group in &self.transport.groups {
+            if group.owes_keyexpr_ask() {
+                if let Some(interest_id) = self.session.take_entity_id() {
+                    group.ask_keyexprs(u64::from(interest_id));
+                }
+            }
+        }
+    }
+
     /// Join the group at place `at` again at `at_us`, on the session's clock; a place no group
     /// stands at waits for nothing.
     #[cfg(feature = "group")]
@@ -8761,18 +8777,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.closed.store(true, Ordering::Release);
             return Stepped::Closed;
         }
-        // A group told the session's keyexprs that came up, at the open or joined again, asks
-        // for its members' with the session's next entity id, as the tokio engine's group asks
-        // when it comes up. Best effort: a member's own declarations reach the group later all
-        // the same, so a session with no entity id left does not ask.
         #[cfg(feature = "group")]
-        for group in &core.transport.groups {
-            if group.owes_keyexpr_ask() {
-                if let Some(interest_id) = core.session.take_entity_id() {
-                    group.ask_keyexprs(u64::from(interest_id));
-                }
-            }
-        }
+        core.ask_groups_for_keyexprs();
         // What the peers declared moved only where a face's tables were written since the
         // listeners were last read.
         let written = core.session.registry.faces_written();

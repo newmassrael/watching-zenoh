@@ -497,7 +497,10 @@ mod group {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
-    use wz_capi_port::PeerLists;
+    use wz_capi_port::group::GroupDeclarations;
+    use wz_capi_port::{PeerLists, SessionEngine, WireKey};
+    use wz_session_core::locality::Locality;
+    use wz_session_core::publish_options::PublishOptions;
 
     use super::super::group_stack::{member_config, open_member, Network, GROUP};
     use super::{eventually, hearing, payload, put, OwnThread};
@@ -569,6 +572,55 @@ mod group {
         eventually("the first member to lose the second", || {
             first.call(|engine| engine.group_member_zids()).is_empty()
         });
+    }
+
+    /// A member of one thread that joins a group after another declared a keyexpr on it asks the
+    /// group for its members' keyexprs as it comes up, from its own reads, and so takes a put named
+    /// by that declaration, which it never heard declared. Turned red by a read that leaves a
+    /// join's ask owed (`Core::ask_groups_for_keyexprs`). Twin of
+    /// `group::mapped::a_put_by_a_declared_keyexpr_reaches_a_member_that_asked_for_it`.
+    #[test]
+    fn a_member_of_one_thread_that_joins_late_asks_the_group_for_its_keyexprs() {
+        let network = Arc::new(Network::default());
+        let mapped = |id: u8| {
+            let network = Arc::clone(&network);
+            OwnThread::open(move || {
+                let mut config = member_config(id, GROUP);
+                config.groups[0].declarations = GroupDeclarations::Mapped;
+                open_member(&network, id, config).expect("the member joins")
+            })
+        };
+        let first = mapped(1);
+        let held = first.call(|engine| {
+            engine
+                .acquire_keyexpr("demo/mapped/b")
+                .expect("a session with ids left declares a keyexpr")
+        });
+        let id = held.mapping_id();
+        let second = mapped(2);
+        eventually("each member to list the other", || {
+            first.call(|engine| engine.group_member_zids()) == [vec![2u8; 4]]
+                && second.call(|engine| engine.group_member_zids()) == [vec![1u8; 4]]
+        });
+        let heard = hearing(&second, "demo/mapped/**", payload);
+        eventually("a put by the declaration to reach the second", || {
+            first.call(move |engine| {
+                engine
+                    .publish_on_wire_all(
+                        "demo/mapped/b",
+                        &WireKey::aliased(id, None),
+                        b"by-its-declaration",
+                        &PublishOptions::put().with_locality(Locality::Remote),
+                    )
+                    .expect("a put the group carries");
+            });
+            heard
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|got| got == b"by-its-declaration")
+        });
+        first.call(move |engine| held.release(engine));
     }
 
     /// A member of one thread whose stack loses its group link joins the group again a redial
