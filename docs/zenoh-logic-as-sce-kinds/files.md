@@ -326,6 +326,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/os/arith.rs` | S12 | |
 | `crates/wz-capi-pico/src/os/mod.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/no_std_host.rs` | S7 | |
+| `crates/wz-capi-pico/src/os/pages.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/unix.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/windows.rs` | S7 | |
 | `crates/wz-capi-pico/src/os/zephyr.rs` | S7 | |
@@ -439,6 +440,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-host-sync/src/in_place.rs` | S9 | |
 | `crates/wz-host-sync/src/lib.rs` | S9 | |
 | `crates/wz-host-sync/src/once.rs` | S9 | |
+| `crates/wz-host-sync/src/pages.rs` | S9 | |
 | `crates/wz-host-sync/src/std_lock.rs` | S9 | |
 | `crates/wz-host-sync/src/unix.rs` | S9 | |
 | `crates/wz-host-sync/src/windows.rs` | S9 | |
