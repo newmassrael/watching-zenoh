@@ -1701,10 +1701,9 @@ impl ArenaPlan {
             shape.max_faces,
             tried!(admitted_faces(limits)),
         ));
-        tried!(hold(
+        tried!(hold_under::<{ caps::MAX_STATIC_CONNECT }>(
             ArenaLimit::MaxStaticConnect,
             shape.dials,
-            caps::MAX_STATIC_CONNECT,
         ));
         tried!(hold(
             ArenaLimit::MaxAdminLocators,
@@ -1745,10 +1744,9 @@ impl ArenaPlan {
         };
         // The largest message a link rejoins is decided before the lane that hands it on, so a
         // value over the build's is refused under its own name.
-        self.transport.reassembly_bytes = self.lent(
+        self.transport.reassembly_bytes = self.lent_to::<{ caps::PICO_FRAG_MAX_BYTES }>(
             ArenaLimit::PicoFragMaxBytes,
             limits.pico_frag_max_bytes(),
-            caps::PICO_FRAG_MAX_BYTES,
         );
         // The buffers of the session's one table of chains, as a report reads them
         // (`link_buffers`).
@@ -1767,20 +1765,17 @@ impl ArenaPlan {
         #[cfg(wz_round)]
         {
             self.session.round = RoundRowCounts {
-                records: self.lent(
+                records: self.lent_to::<{ caps::DELIVERY_LANE_EVENTS }>(
                     ArenaLimit::DeliveryLaneEvents,
                     limits.delivery_lane_events(),
-                    caps::DELIVERY_LANE_EVENTS,
                 ),
-                callbacks: self.lent(
+                callbacks: self.lent_to::<{ caps::DELIVERY_LANE_CALLBACKS }>(
                     ArenaLimit::DeliveryLaneCallbacks,
                     limits.delivery_lane_callbacks(),
-                    caps::DELIVERY_LANE_CALLBACKS,
                 ),
-                longest_key: self.lent(
+                longest_key: self.lent_to::<{ caps::MAX_KEYEXPR_BYTES }>(
                     ArenaLimit::MaxKeyexprBytes,
                     limits.max_keyexpr_bytes(),
-                    caps::MAX_KEYEXPR_BYTES,
                 ),
             };
         }
@@ -2365,6 +2360,13 @@ impl ArenaPlan {
                 0
             }
         }
+    }
+
+    /// [`Self::lent`] under `CEILING`, the build's value of the limit: the most rows the build
+    /// sizes the table's storage for, a const of the caller's as every ceiling of storage is
+    /// ([`lent`]), so the build's value is read as that and nothing else.
+    const fn lent_to<const CEILING: usize>(&mut self, limit: ArenaLimit, value: Quota) -> usize {
+        self.lent(limit, value, CEILING)
     }
 
     /// `bytes`, a size `None` past the address space, which is then kept as the plan's refusal
@@ -3094,6 +3096,16 @@ const fn hold(limit: ArenaLimit, asked: usize, admitted: usize) -> Result<(), Ar
         });
     }
     Ok(())
+}
+
+/// [`hold`] under `CEILING`, the build's value of the limit: the most rows the build sizes the
+/// table for, where no session's value of it is in reach, a const of the caller's as a ceiling of
+/// storage is ([`lent`]).
+const fn hold_under<const CEILING: usize>(
+    limit: ArenaLimit,
+    asked: usize,
+) -> Result<(), ArenaRefused> {
+    hold(limit, asked, CEILING)
 }
 
 /// Whether a session `config` opens gives its dial role's face a link: it does when it lists an

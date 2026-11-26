@@ -1582,6 +1582,7 @@ fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
         engine.with_chain_router(|reassembly, _| reassembly.staging().refused())
     }
 
+    // A router stand-in serves one session, so each session below dials one of its own.
     let router = Router::start(CatchAll::None);
     let one = open_under(
         &router,
@@ -1602,7 +1603,9 @@ fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
     );
     assert_eq!(refused(&one), 1, "a chain served counts nothing");
     drop(one);
+    drop(router);
     if caps::REASSEMBLY_CHAINS >= 2 {
+        let router = Router::start(CatchAll::None);
         let built = open(&router);
         assert_eq!(ingest(&built, true, 1, 1), IngestOutcome::Begun);
         assert_eq!(
