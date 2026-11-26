@@ -2037,6 +2037,11 @@ pub trait SessionRuntime: Runtime + Sized {
     /// it (the cooperative profile, one per link), or the exclusive reference to it that a
     /// session's own slot hands out once (the fixed-memory profile). Present where the
     /// session's handshake is, as [`ActionsHandle`](Self::ActionsHandle) is.
+    ///
+    /// An implementor in another crate binds it where this crate's build-script metadata key
+    /// `unicast_runtime_items` is `1` (`DEP_WZ_SESSION_CORE_UNICAST_RUNTIME_ITEMS`), not under
+    /// a feature of its own: Cargo unifies this crate's features across the graph, so a crate
+    /// that does not enable the implementor's feature can still turn this item on.
     #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
     type EntropyDraw: crate::entropy::EntropySource;
 
@@ -2062,6 +2067,10 @@ pub trait SessionRuntime: Runtime + Sized {
     /// action methods, [`new_session_engine`](crate::drive::new_session_engine))
     /// reach the bundle through the opaque handle without naming `Arc` / `Rc`.
     ///
+    /// An implementor in another crate binds it where the metadata key `unicast_runtime_items`
+    /// is `1` (`DEP_WZ_SESSION_CORE_UNICAST_RUNTIME_ITEMS`), as it binds
+    /// [`EntropyDraw`](Self::EntropyDraw).
+    ///
     /// [`LinkSink`]: SessionRuntime::LinkSink
     #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
     type ActionsHandle<T: TimeSource>: Clone + Deref<Target = SessionLinkActions<Self, T>>;
@@ -2077,6 +2086,10 @@ pub trait SessionRuntime: Runtime + Sized {
     /// make a handle out of a bundle by value: the bundle is placed in a slot of
     /// storage somebody owns (`crate::session_slot::SessionSlots`), and the slot
     /// hands the handle out.
+    ///
+    /// An implementor in another crate binds it where this crate's build-script metadata key
+    /// `wrap_actions` is `1` (`DEP_WZ_SESSION_CORE_WRAP_ACTIONS`), not under a feature of its
+    /// own.
     #[cfg(all(
         feature = "alloc",
         feature = "session-unicast",

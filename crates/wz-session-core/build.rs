@@ -3,6 +3,12 @@
 
 //! The one statement of which builds hold the staged handshake extension chains, as the cfg
 //! `wz_ext_chains` every use reads. The rule and its tests are `src/ext_chains_cfg.rs`.
+//!
+//! It also states which items of `link::SessionRuntime` this build declares, as the metadata
+//! keys of `links = "wz_session_core"`: a crate that implements the trait reads them as
+//! `DEP_WZ_SESSION_CORE_<KEY>` (`1` declared, `0` not) and binds the items on what they say.
+//! A feature of the implementing crate cannot say it: Cargo unifies this crate's features across
+//! the graph, so any crate in it can turn on what declares the items.
 
 #[path = "src/ext_chains_cfg.rs"]
 mod ext_chains_cfg;
@@ -31,4 +37,18 @@ fn main() {
     if build.holds_chains() {
         println!("cargo:rustc-cfg=wz_ext_chains");
     }
+
+    // `SessionRuntime::EntropyDraw` and `SessionRuntime::ActionsHandle`: the same cfg as the
+    // two items carry in `src/link.rs`.
+    let session_unicast = on("CARGO_FEATURE_SESSION_UNICAST");
+    let unicast_runtime_items = on("CARGO_FEATURE_STORAGE_PROFILE") && session_unicast;
+    // `SessionRuntime::wrap_actions`: absent under `session-slot`, where a slot hands the
+    // handle out and no runtime makes one of a bundle by value.
+    let wrap_actions =
+        on("CARGO_FEATURE_ALLOC") && session_unicast && !on("CARGO_FEATURE_SESSION_SLOT");
+    println!(
+        "cargo:unicast_runtime_items={}",
+        u8::from(unicast_runtime_items)
+    );
+    println!("cargo:wrap_actions={}", u8::from(wrap_actions));
 }

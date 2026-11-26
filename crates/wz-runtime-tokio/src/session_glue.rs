@@ -207,35 +207,10 @@ pub fn nonce_from_os_entropy() -> Result<u64, getrandom::Error> {
     Ok(u64::from_le_bytes(buf))
 }
 
-/// R311y819 — the AP profile's implementation of the §2.5 plugin-tier entropy
-/// port ([`wz_session_core::entropy::EntropySource`]): OS-backed
-/// cryptographic entropy via `getrandom`.
-///
-/// A unit struct because the source is a syscall, not a peripheral — there is
-/// no handle a board would own. It exists so the port has an implementor on
-/// BOTH profiles rather than only the one that needed it: the MCU construction
-/// seam takes an `EntropySource`, and a port with a single implementor is a
-/// shape nobody has checked composes. It is also what lets an MCU board's own
-/// source be diffed against the AP one, since the trait fixes the byte order
-/// of `try_next_u64`.
-///
-/// The AP's own `new_session_actions` draws through this, so the two profiles'
-/// construction seams differ in their SOURCE and in nothing else — which is
-/// the asymmetry that produced the MCU constant in the first place.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OsEntropy;
-
-impl wz_session_core::entropy::EntropySource for OsEntropy {
-    /// Delegates to `getrandom`, which fills completely or fails — the
-    /// no-partial-fill half of the port's contract, satisfied by the source
-    /// rather than re-checked here.
-    fn try_fill_bytes(
-        &mut self,
-        buf: &mut [u8],
-    ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
-        getrandom::getrandom(buf).map_err(|_| wz_session_core::entropy::EntropyUnavailable)
-    }
-}
+// The AP profile's entropy source is defined beside the profile's `SessionRuntime` binding,
+// which names it as the session's `EntropyDraw` in every build whose session core declares
+// that item, `transport-unicast` or not; this module is `transport-unicast`'s.
+pub use crate::runtime_impl::OsEntropy;
 
 // R311dl — the wire_const re-import moved into the test module: after the
 // outbound builders (push/declare/interest/handshake) hoisted to
