@@ -5924,14 +5924,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The plane the session's faces are told through, for a test that tells it rows itself.
-    #[cfg(all(test, feature = "connectivity"))]
+    #[cfg(all(test, feature = "std", feature = "connectivity"))]
     pub(crate) fn face_plane(&self) -> &FacePlane {
         &self.faces
     }
 
     /// The session's say on a second link to a node, the one its links' handshakes ask, for a
     /// test that asks it as they do.
-    #[cfg(all(test, feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "listen"))]
     pub(crate) fn link_admission(&self) -> PlacedRef<dyn LinkAdmission> {
         self.core.lock().0.transport.admission
     }
@@ -5939,7 +5939,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Run `f` on the session's local set under the session's lock, for a test that spawns a
     /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
     /// is used under it and a handle of it taken out is used only once the engine has gone.
-    #[cfg(all(test, feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "listen"))]
     pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
         f(&self.core.lock().0.local)
     }
@@ -5993,6 +5993,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// task (`tests::group`).
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
         feature = "threads"
@@ -6005,6 +6006,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
         feature = "threads"
@@ -6025,8 +6027,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// where its readers are: the tests of a group's drops (`tests::group`, `transport-stats`).
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
+        feature = "threads",
         feature = "transport-stats"
     ))]
     pub(crate) fn stage_group_replies(
@@ -8157,7 +8161,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Spend every interest id of the session of each face whose link is up, as a session that
     /// has asked `u32::MAX` Interests has.
-    #[cfg(all(test, feature = "liveliness-get"))]
+    #[cfg(all(test, feature = "std", feature = "liveliness-get"))]
     pub(crate) fn spend_interest_ids(&self) {
         let Some(guard) = self.live() else {
             return;

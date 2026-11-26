@@ -584,7 +584,10 @@ mod tests {
         let view =
             wz_codecs::lent::Declare::decode(&mut sce_forge_runtime::codec::SceCursor::new(&wire))
                 .expect("it decodes");
-        match member.scope_lent(&view) {
+        // Bound first: as the tail of the block the result would be dropped after `wire`, which
+        // the view it may hold borrows.
+        let scoped = member.scope_lent(&view);
+        match scoped {
             Ok(None) => "as sent",
             Ok(Some(_)) => "scoped",
             Err(PastBound) => "past bound",

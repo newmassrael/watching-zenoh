@@ -33,9 +33,12 @@
 //! only inside the builder, and is consumed by `into_owned`. The
 //! `Undecl*` bodies carry no borrowed field, so SCE emits no `*Owned`
 //! mirror for them — they are already lifetime-free and used directly.
-//! `DeclareOwned` has no `Default`, so the envelope builders set its
-//! inert framing fields (`header`/`interest_id`/`extensions`)
-//! explicitly; the registries dispatch on `body` and never inspect them.
+//! `DeclareOwned` has no `Default`, so every envelope builder goes through
+//! [`envelope`], which writes the header a peer writes (`N_MID_DECLARE`, and
+//! `I` when the Declare answers an interest) with no extension chain: a test
+//! of a build that lends its records encodes the message and walks the bytes
+//! (`driver_loop::deliver_frame`), and a header of no MID is a record that
+//! walk never hands on.
 
 use wz_codecs::declare::DeclareOwnedVariant;
 use wz_codecs::interest::InterestHeaderCOrF;
@@ -58,6 +61,22 @@ type UndeclKexprOwned = wz_codecs::undecl_kexpr::UndeclKexprOwned<Heap>;
 type UndeclQueryableOwned = wz_codecs::undecl_queryable::UndeclQueryableOwned<Heap>;
 type UndeclSubscriberOwned = wz_codecs::undecl_subscriber::UndeclSubscriberOwned<Heap>;
 type UndeclTokenOwned = wz_codecs::undecl_token::UndeclTokenOwned<Heap>;
+
+/// A `Declare` envelope around `body` with the header a peer writes for it:
+/// `N_MID_DECLARE`, with `I` when it answers the interest `interest_id`, and no
+/// `Z` since it carries no extension chain.
+fn envelope(interest_id: Option<u64>, body: DeclareOwnedVariant<Heap>) -> DeclareOwned {
+    let mut header = wz_codecs::wire_const::N_MID_DECLARE;
+    if interest_id.is_some() {
+        header |= wz_codecs::wire_const::FLAG_N_DECLARE_I;
+    }
+    DeclareOwned {
+        header,
+        interest_id,
+        extensions: None,
+        body,
+    }
+}
 
 /// `suffix` as a wire expression's suffix field, which the protocol bounds at a
 /// `u16` length. A fixture's key expression is far shorter.
@@ -287,75 +306,35 @@ pub fn undecl_token(id: u64) -> UndeclTokenOwned {
 }
 
 pub fn declare_envelope_decl_kexpr(d: DeclKexprOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclKexpr(d),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohDeclKexpr(d))
 }
 
 pub fn declare_envelope_undecl_kexpr(u: UndeclKexprOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclKexpr(u),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohUndeclKexpr(u))
 }
 
 pub fn declare_envelope_decl_subscriber(d: DeclSubscriberOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclSubscriber(d),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohDeclSubscriber(d))
 }
 
 pub fn declare_envelope_undecl_subscriber(u: UndeclSubscriberOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclSubscriber(u),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohUndeclSubscriber(u))
 }
 
 pub fn declare_envelope_decl_queryable(d: DeclQueryableOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclQueryable(d),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohDeclQueryable(d))
 }
 
 pub fn declare_envelope_undecl_queryable(u: UndeclQueryableOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclQueryable(u),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohUndeclQueryable(u))
 }
 
 pub fn declare_envelope_decl_token(d: DeclTokenOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclToken(d),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohDeclToken(d))
 }
 
 pub fn declare_envelope_undecl_token(u: UndeclTokenOwned) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: None,
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohUndeclToken(u),
-    }
+    envelope(None, DeclareOwnedVariant::CodecZenohUndeclToken(u))
 }
 
 /// A `Declare(DeclToken)` envelope tagged with an outer `interest_id`
@@ -367,26 +346,22 @@ pub fn declare_envelope_decl_token_with_interest(
     d: DeclTokenOwned,
     interest_id: u64,
 ) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: Some(interest_id),
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclToken(d),
-    }
+    envelope(
+        Some(interest_id),
+        DeclareOwnedVariant::CodecZenohDeclToken(d),
+    )
 }
 
 /// A `Declare(DeclFinal)` envelope tagged with an outer `interest_id` —
 /// the terminator a peer emits after replying to a CURRENT liveliness
 /// Interest (consumed by `LivelinessGetRegistry` to fire `on_final`).
 pub fn declare_envelope_decl_final_with_interest(interest_id: u64) -> DeclareOwned {
-    DeclareOwned {
-        header: 0,
-        interest_id: Some(interest_id),
-        extensions: None,
-        body: DeclareOwnedVariant::CodecZenohDeclFinal(
+    envelope(
+        Some(interest_id),
+        DeclareOwnedVariant::CodecZenohDeclFinal(
             DeclFinal::default()
                 .try_into_owned_in::<Heap>()
                 .expect("DeclFinal::default owns no borrowed data"),
         ),
-    }
+    )
 }

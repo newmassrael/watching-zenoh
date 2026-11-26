@@ -4020,6 +4020,13 @@ fn region_tables_of_zero_bytes_placed_by_their_description_declare_and_undeclare
 }
 
 /// Every row `fan` pins, each call ended at once: the number each row's closure was given.
+#[cfg(any(
+    all(
+        feature = "keyexpr-wildcard-single",
+        feature = "keyexpr-wildcard-double"
+    ),
+    feature = "key-set-closed"
+))]
 fn pinned_in_turn(tables: &mut LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec<u32> {
     let mut seen = Vec::new();
     while let Some(call) = tables.pin_next_subscriber(fan) {
@@ -4035,6 +4042,11 @@ fn pinned_in_turn(tables: &mut LatchedTables, fan: &mut PinnedFanOut<'_>) -> Vec
 /// The walk that pins one row at a time reaches the rows a peer's fan-out reaches, in its order: a
 /// row whose locality hears no peer, or whose pattern does not meet the key, is passed. Turned red
 /// by a walk that skips a row, repeats one, or matches by another rule than the fan-out's.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
     use crate::pubsub::{LocalSubscribers, PeerDelivery};
@@ -4074,6 +4086,11 @@ fn the_pinned_walk_reaches_the_rows_a_peers_fan_out_reaches_in_its_order() {
 /// in its order: a row whose locality hears only peers is passed, and one that hears only the
 /// session is reached. Turned red by a walk of the session's own message that matches the rows by
 /// a peer's origin.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn the_pinned_walk_of_the_sessions_own_message_reaches_the_rows_its_loopback_reaches() {
     use crate::pubsub::LocalSubscribers;
@@ -4333,6 +4350,10 @@ fn a_closed_key_set_drops_from_the_pinned_walk_what_the_peers_row_does_not_allow
 
 /// Every liveliness subscriber `fan` pins, each call ended at once: the number each row's
 /// closure was given.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 fn tokens_pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedTokenFan<'_>) -> Vec<u32> {
     let mut seen = Vec::new();
     while let Some(call) = tables.pin_next_liveliness_subscriber(fan) {
@@ -4350,6 +4371,11 @@ fn tokens_pinned_in_turn(tables: &LatchedTables, fan: &mut PinnedTokenFan<'_>) -
 /// undeclared before the walk reaches it begins no call. The CONTROL is the live token, which
 /// reaches the row that asked no history too. Turned red by a walk that matches by another rule
 /// than the token fan's (`token_reaches`), repeats a row, or pins a row undeclared.
+// Its rows' patterns read `*` and `**` as wildcards, which a build without them matches as text.
+#[cfg(all(
+    feature = "keyexpr-wildcard-single",
+    feature = "keyexpr-wildcard-double"
+))]
 #[test]
 fn a_tokens_walk_pins_each_liveliness_subscriber_it_reaches_in_turn() {
     let mut tables = latched_tables();

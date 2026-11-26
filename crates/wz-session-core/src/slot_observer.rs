@@ -3320,10 +3320,13 @@ mod tests {
     /// dispatch of the one `Declare` tells it as the frame's would have. The CONTROL is the same
     /// frame with nothing taken, which tells it in the frame's pass. Turned red by a frame pass that
     /// tells a Declare its caller took, which a watch would be told twice, or a message dispatch
-    /// that tells nothing.
+    /// that tells nothing. A build that lends every record (`OWNED_RECORDS` false) delivers the
+    /// frame as records lent one at a time, each one message already, which the planes tell
+    /// whatever the caller says it took: there the frame's pass tells it in both rounds.
     #[cfg(feature = "declare-subscriber")]
     #[test]
     fn a_caller_that_takes_the_declares_tells_each_once_by_its_message() {
+        let owned = crate::driver_loop::OWNED_RECORDS;
         for taken in [false, true] {
             let mut f = fixture(true);
             let outcome = own_alias_frame();
@@ -3340,13 +3343,13 @@ mod tests {
                     },
                 )
             });
-            let told: Vec<String> = if taken {
+            let told: Vec<String> = if taken && owned {
                 Vec::new()
             } else {
                 vec!["ours/x".to_string()]
             };
             assert_eq!(*f.declared.lock().unwrap(), told, "the frame's pass");
-            if taken {
+            if taken && owned {
                 let declare = NetworkMessage::Declare(Box::new(
                     fx::declare_envelope_decl_subscriber(fx::decl_subscriber_nonlocal(1, 7, None)),
                 ));
