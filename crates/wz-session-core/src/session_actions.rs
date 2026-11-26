@@ -568,8 +568,8 @@ enum Lend<E> {
 
 /// What writes one message into the slot a lend is given (`SessionLinkActions::send_lent_on`),
 /// handed over as a trait object so the lend is one body whatever the message. A trait of its
-/// own and not `dyn Fn`, as `AdmitFrame` is not, so the table holds no second copy of the
-/// writer's body.
+/// own and not `dyn Fn`: a closure's `dyn Fn` table also holds its `FnOnce` shim, which
+/// carries a second copy of the writer's body.
 #[cfg(any(
     all(
         feature = "transport-tx-lend",
@@ -4783,6 +4783,44 @@ enum FrameSnAt {
     },
 }
 
+#[cfg(all(
+    feature = "transport-tx-lend",
+    any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    )
+))]
+impl FrameSnAt {
+    /// The frame's SN: the one taken, or the one `mint` takes for the conduit and ring named,
+    /// which is then held as taken.
+    #[inline(always)]
+    fn take(
+        &mut self,
+        mint: impl FnOnce(Priority, crate::sn::Sn) -> crate::sn::Sn,
+    ) -> crate::sn::Sn {
+        // Only a lend-only build mints where the frame is written.
+        #[cfg(not(feature = "tx-lend-only"))]
+        let _ = mint;
+        match *self {
+            Self::Taken(sn) => sn,
+            #[cfg(feature = "tx-lend-only")]
+            Self::Mint { priority, mask } => {
+                let sn = mint(priority, mask);
+                *self = Self::Taken(sn);
+                sn
+            }
+        }
+    }
+}
+
 // R2928 — the outcome and the deadline moved to `crate::tx_deadline`, which
 // the multicast transmission pipeline shares.
 #[cfg(any(
@@ -6600,18 +6638,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             }
             // The SN is taken once the frame has a slot to be written in: a link that lent none
             // leaves the conduit's next SN untaken.
-            let wire_sn = match *sn {
-                FrameSnAt::Taken(taken) => taken,
-                #[cfg(feature = "tx-lend-only")]
-                FrameSnAt::Mint {
-                    priority: conduit,
-                    mask,
-                } => {
-                    let taken = self.next_outbound_frame_sn(conduit, reliable, mask);
-                    *sn = FrameSnAt::Taken(taken);
-                    taken
-                }
-            };
+            let wire_sn =
+                sn.take(|conduit, mask| self.next_outbound_frame_sn(conduit, reliable, mask));
             let filled = fill_lent_frame(
                 slot,
                 mtu,
@@ -13448,9 +13476,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         #[cfg(any(feature = "alloc", not(feature = "tx-lend-only")))]
         let congested = || {
             let mut left = deadline.get();
-            let congested = self.congested_within(wire_reliability, priority, reserved, &mut left);
+            let full = self.congested_within(wire_reliability, priority, reserved, &mut left);
             deadline.set(left);
-            congested
+            full
         };
         // A control-plane message (a declaration, an OAM) is a BARRIER between the data staged
         // before it and the data staged after. With the link's writer pulling what the conduits
@@ -21450,6 +21478,38 @@ mod held_answer_tests {
         assert_eq!(holds_answer(ExtChainRole::OpenSyn), replays);
         assert!(!holds_answer(ExtChainRole::InitSyn));
         assert!(!holds_answer(ExtChainRole::OpenAck));
+    }
+}
+
+#[cfg(all(test, feature = "tx-lend-only", feature = "codec-push"))]
+mod frame_sn_at_tests {
+    use super::FrameSnAt;
+    use crate::qos::Priority;
+
+    /// A frame's SN still to be minted is minted once, on the conduit and ring it names, and then
+    /// held as taken; one taken already is never minted. Turned red by `FrameSnAt::take` not
+    /// holding what it minted (its `*self = Self::Taken(sn)` removed), whose second read mints
+    /// again, or by a taken SN handed to the mint.
+    #[test]
+    fn a_frame_sn_is_minted_once_and_then_held() {
+        let calls = core::cell::Cell::new(0u32);
+        let mint = |priority: Priority, mask: crate::sn::Sn| {
+            assert_eq!(priority, Priority::Control, "the conduit named");
+            assert_eq!(mask, 0xff, "the ring named");
+            calls.set(calls.get() + 1);
+            7
+        };
+        let mut sn = FrameSnAt::Mint {
+            priority: Priority::Control,
+            mask: 0xff,
+        };
+        assert_eq!(sn.take(mint), 7);
+        assert!(matches!(sn, FrameSnAt::Taken(7)), "held as taken");
+        assert_eq!(sn.take(mint), 7, "the second read is the SN held");
+        assert_eq!(calls.get(), 1, "minted once");
+        let mut taken = FrameSnAt::Taken(3);
+        assert_eq!(taken.take(mint), 3);
+        assert_eq!(calls.get(), 1, "a taken SN is not minted");
     }
 }
 
