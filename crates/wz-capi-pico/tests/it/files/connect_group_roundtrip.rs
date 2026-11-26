@@ -209,6 +209,7 @@ unsafe fn exchange(members: &[&Member]) {
 #[test]
 #[ignore = "environment-dependent: needs a multicast route on this host (Layer M runs it)"]
 fn a_client_connecting_to_a_group_and_a_peer_listening_on_it_exchange_puts() {
+    let _program = crate::programs::admit();
     let group = loopback_group();
     unsafe {
         let peer = Member::open(
@@ -238,6 +239,7 @@ fn a_client_connecting_to_a_group_and_a_peer_listening_on_it_exchange_puts() {
 #[test]
 #[ignore = "environment-dependent: needs a multicast route on this host (Layer M runs it)"]
 fn two_clients_connecting_to_one_group_exchange_puts() {
+    let _program = crate::programs::admit();
     let group = loopback_group();
     unsafe {
         let first = Member::open(

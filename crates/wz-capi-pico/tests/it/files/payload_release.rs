@@ -225,6 +225,7 @@ unsafe fn close_both(mut listener: z_owned_session_t, mut dialer: z_owned_sessio
 
 #[test]
 fn z_put_releases_the_callers_buffer_when_it_returns_and_after_sending() {
+    let _program = crate::programs::admit();
     unsafe {
         let (listener, dialer) = connected_pair();
         let delivered: Delivered = Arc::new(Mutex::new(Vec::new()));
@@ -256,6 +257,7 @@ fn z_put_releases_the_callers_buffer_when_it_returns_and_after_sending() {
 
 #[test]
 fn z_publisher_put_releases_the_callers_buffer_whether_or_not_the_filter_sends() {
+    let _program = crate::programs::admit();
     unsafe {
         let (listener, dialer) = connected_pair();
 

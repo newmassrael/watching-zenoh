@@ -36,7 +36,7 @@ use wz_session_core::qos::Priority;
 use wz_session_core::wire::{PushOwned, PushOwnedVariant};
 
 use crate::session_glue::SessionLinkActions;
-use crate::shm_provider::PosixShmResolver;
+use crate::shm_reader::ShmReaderResolver;
 
 /// A message a forwarder routes whose payload may be a buffer of shared memory: the payload of a
 /// Push, the value of a Request's query and the payload of a Response's reply. Upstream maps all
@@ -111,9 +111,10 @@ impl ShmRelay {
         }
     }
 
-    /// A relay over the built-in POSIX reader: the one a node that maps POSIX chunks runs.
+    /// A relay over the process's reader, whose storage holds the default client set (the
+    /// POSIX client) unless the application replaced it: the one a node runs.
     pub fn posix() -> Self {
-        Self::new(Arc::new(PosixShmResolver))
+        Self::new(Arc::new(ShmReaderResolver::global()))
     }
 
     /// The serialized descriptor of every shared-memory slice of `push`'s payload, in order. Empty
@@ -464,10 +465,10 @@ mod tests {
             "the pass gave back the reference the message arrived with; each receiver owns one"
         );
 
-        assert!(crate::shm_provider::PosixShmResolver
+        assert!(crate::shm_reader::ShmReaderResolver::of_default_set()
             .resolve(&descriptor)
             .is_some());
-        assert!(crate::shm_provider::PosixShmResolver
+        assert!(crate::shm_reader::ShmReaderResolver::of_default_set()
             .resolve(&descriptor)
             .is_some());
         assert_eq!(held_count(&descriptor), 0, "both receivers released theirs");
@@ -584,7 +585,7 @@ mod tests {
         }
         drop(pass);
         assert_eq!(held_count(&descriptor), 1, "the group's reference stays");
-        assert!(crate::shm_provider::PosixShmResolver
+        assert!(crate::shm_reader::ShmReaderResolver::of_default_set()
             .resolve(&descriptor)
             .is_some());
         assert_eq!(held_count(&descriptor), 0, "a member released it");
@@ -733,7 +734,7 @@ mod tests {
             "the pass gave back the reference the message arrived with; each receiver owns one"
         );
         for _ in 0..2 {
-            assert!(crate::shm_provider::PosixShmResolver
+            assert!(crate::shm_reader::ShmReaderResolver::of_default_set()
                 .resolve(&descriptor)
                 .is_some());
         }

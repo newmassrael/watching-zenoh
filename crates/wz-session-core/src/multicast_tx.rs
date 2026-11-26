@@ -683,7 +683,7 @@ where
         FramedBody {
             meta: message.framing.meta(params),
             worst_case: message.size,
-            body: message.body,
+            body: crate::tx_buf::wire_body(message.body),
         },
         tx_sn,
         params,
@@ -900,7 +900,8 @@ pub fn multicast_tx_encode_into(
     #[cfg(feature = "transport-tx-lend")]
     {
         let mut slot = crate::tx_buf::SliceTxBuf::new(out);
-        body(&mut crate::tx_buf::TxSink::new(&mut slot)).ok()?;
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut slot))
+            .ok()?;
         Some(crate::tx_buf::TxBuf::len(&slot))
     }
     // A build whose encoders write a vector has no other buffer to write into: the bytes are
@@ -908,7 +909,8 @@ pub fn multicast_tx_encode_into(
     #[cfg(not(feature = "transport-tx-lend"))]
     {
         let mut bytes = Vec::new();
-        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).ok()?;
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+            .ok()?;
         out.get_mut(..bytes.len())?.copy_from_slice(&bytes);
         Some(bytes.len())
     }
@@ -936,7 +938,7 @@ where
         FramedBody {
             meta: meta.0,
             worst_case: size,
-            body,
+            body: crate::tx_buf::wire_body(body),
         },
         tx_sn,
         params,
@@ -986,7 +988,7 @@ fn encoded_size(body: &crate::frame_encode::BodyEncoder<'_>) -> Option<usize> {
     #[cfg(not(feature = "transport-tx-lend"))]
     let size = {
         let mut bytes = Vec::new();
-        match body(&mut crate::tx_buf::TxSink::new(&mut bytes)) {
+        match body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes)) {
             Ok(()) => bytes.len(),
             Err(_) => 0,
         }
@@ -1649,6 +1651,45 @@ pub fn multicast_tx_bytes(item: &MulticastTxItem) -> usize {
         MulticastTxItem::Interest { interest } => {
             wz_codecs::interest::InterestWire::measure(&**interest).len()
         }
+    }
+}
+
+/// How many datagrams a push of `item` can take on a group of `params`, never fewer than it
+/// takes: one for a message that fits one frame, its fragment count for one that does not,
+/// measured over the body the push encodes and the frame budget it cuts by
+/// ([`chain_frames`](crate::frame_encode::chain_frames)). Without `transport-fragmentation` no
+/// message is cut, so every message counts one. What a sender that reserves the room of a whole
+/// chain on a group's lanes before it pushes asks for, as the unicast send asks its link for the
+/// room of every frame of a chain.
+#[cfg(all(feature = "alloc", feature = "codec-push"))]
+pub fn multicast_tx_frames(
+    item: &MulticastTxItem,
+    params: &crate::multicast_params::MulticastParams,
+) -> usize {
+    #[cfg(feature = "transport-fragmentation")]
+    {
+        multicast_tx_item_body(item, |encode| {
+            #[cfg(feature = "transport-tx-lend")]
+            let body_len = crate::tx_buf::try_encoded_len(encode);
+            #[cfg(not(feature = "transport-tx-lend"))]
+            let body_len = {
+                let mut buf = Vec::new();
+                let written = {
+                    let mut sink = crate::tx_buf::TxSink::new(&mut buf);
+                    encode.write_body(&mut sink)
+                };
+                written.map(|()| buf.len())
+            };
+            // A body the codec cannot write is refused by the push itself; one frame is asked.
+            body_len.map_or(1, |len| {
+                crate::frame_encode::chain_frames(len, params.frame_budget())
+            })
+        })
+    }
+    #[cfg(not(feature = "transport-fragmentation"))]
+    {
+        let _ = (item, params);
+        1
     }
 }
 
@@ -3003,6 +3044,49 @@ mod push_tests {
         }
     }
 
+    /// What a sender that reserves the room of a whole chain on a group asks for: one datagram
+    /// for a message that fits a frame, and for one past the group's batch no fewer datagrams
+    /// than its push puts on the queue or asks room for. Turned red by a count of one for every
+    /// message, which leaves each fragment after the first to ask for room no reservation holds.
+    #[cfg(feature = "transport-fragmentation")]
+    #[test]
+    fn a_push_is_counted_no_fewer_datagrams_than_it_puts_on_the_queue() {
+        assert_eq!(multicast_tx_frames(&put(true, b"x"), &params(2_048)), 1);
+
+        let narrow = params(64);
+        let item = put(true, &[0x5a; 400]);
+        let counted = multicast_tx_frames(&item, &narrow);
+        let mut queue = Scripted::default();
+        let mut tx_sn = MulticastTxConduits::new(mask_from_res(narrow.seq_num_res));
+        assert_eq!(
+            multicast_tx_push(item, &mut tx_sn, &narrow, &narrow.tx_queue, &mut queue),
+            PushOutcome::Pushed
+        );
+        let pushed = queue.enqueued.len();
+        assert!(
+            pushed >= 2,
+            "400 bytes at a batch of 64 is a chain: {pushed}"
+        );
+        assert!(counted >= pushed, "counted {counted}, pushed {pushed}");
+        assert!(
+            counted >= queue.asks.len(),
+            "counted {counted}, asked {}",
+            queue.asks.len()
+        );
+    }
+
+    /// A build that cuts no chain sends every message as one frame, so one datagram is all a
+    /// reservation of it holds, however long the message.
+    #[cfg(not(feature = "transport-fragmentation"))]
+    #[test]
+    fn without_fragmentation_every_push_is_counted_one_datagram() {
+        assert_eq!(multicast_tx_frames(&put(true, b"x"), &params(2_048)), 1);
+        assert_eq!(
+            multicast_tx_frames(&put(true, &[0x5a; 400]), &params(64)),
+            1
+        );
+    }
+
     /// A lane lets messages on while it holds less than its bound, `sizes` batches of the group's
     /// batch, and none past it; what is written makes room and lowers the mark a drop raised. A
     /// group that runs no QoS bounds every priority by its one DEFAULT lane, and a drop is
@@ -4243,7 +4327,8 @@ mod group_declarations_written_from_parts {
     /// The bytes `body` writes.
     fn written(body: &crate::frame_encode::BodyEncoder<'_>) -> Vec<u8> {
         let mut bytes = Vec::new();
-        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).expect("written");
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+            .expect("written");
         bytes
     }
 
@@ -4438,7 +4523,8 @@ mod group_publications_written_from_parts {
     /// The bytes `body` writes.
     fn written(body: &crate::frame_encode::BodyEncoder<'_>) -> Vec<u8> {
         let mut bytes = Vec::new();
-        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).expect("written");
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+            .expect("written");
         bytes
     }
 

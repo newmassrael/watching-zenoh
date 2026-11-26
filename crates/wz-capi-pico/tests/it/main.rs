@@ -10,6 +10,9 @@
 //! files that must be their own process (a global allocator, a test table that sets more than the
 //! features a file requires) stay in `tests/`. A file that required features carries them as an
 //! inner `cfg` attribute at its top. See `scripts/lib/merge_tests.py`.
+//!
+//! Every test of `files/` opens with its program's permit (`programs::admit`), which holds the
+//! tests running at once to the share of the process pools the harness reserved for them.
 
 mod files;
 mod programs;

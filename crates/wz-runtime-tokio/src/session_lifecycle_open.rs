@@ -49,14 +49,14 @@ use wz_session_core::lifecycle_query::{OpenMode, OpenOutcome, PeerOpener};
 use wz_session_core::zid_hex::zenoh_hex_to_zid;
 
 use crate::accept_loop::{ConnectReconcile, ReconcileSender};
-use crate::linkstate_forward::{read_net, NetHandle};
+use crate::linkstate_routes::{read_net, NetHandle};
 use crate::session_open::plan_endpoint;
 
 /// The link-state graphs a node learns where its peers can be reached from: one
 /// for a peer, and one per region for a router. Read-only: all it answers is the
 /// locators a node advertised.
 ///
-/// Holds each graph by a [`NetHandle`] because that is how the router holds
+/// Holds each graph by a `NetHandle` because that is how the router holds
 /// them (as fields of the hats in its tables, shared between the threads that
 /// drive its faces), so this shares the graphs the floods populate rather than
 /// a copy that could disagree with them. A forwarder mints one for its own

@@ -2574,6 +2574,48 @@ mod tests {
         );
     }
 
+    /// A lent staging counts each chain it refuses a buffer to, for every reason it refuses one:
+    /// its table's buffers all held, its own chains at their count, no table at all. A chain it
+    /// serves counts nothing, and a buffer given back serves the next chain uncounted. Turned red
+    /// by an `acquire` that refuses without counting, or that counts a chain it served.
+    #[test]
+    fn a_lent_staging_counts_the_chains_it_refuses() {
+        use crate::chain_staging::{ChainStaging, LentStaging};
+
+        let one = lent_cells(8, 1);
+        let mut staging = LentStaging::<4, 64>::over(&one, 2);
+        let held = staging.acquire().expect("the table's one buffer");
+        assert_eq!(staging.refused(), 0, "a chain served counts nothing");
+        assert!(
+            staging.acquire().is_none(),
+            "the table's one buffer is held"
+        );
+        assert_eq!(staging.refused(), 1, "refused for a held table");
+        staging.release(held);
+        let again = staging.acquire().expect("the buffer given back");
+        assert_eq!(
+            staging.refused(),
+            1,
+            "served again, nothing more is counted"
+        );
+        staging.release(again);
+
+        let four = lent_cells(8, 4);
+        let mut at_count = LentStaging::<4, 64>::over(&four, 1);
+        let _open = at_count.acquire().expect("a buffer");
+        assert!(at_count.acquire().is_none(), "one chain open, its count");
+        assert_eq!(
+            (at_count.refused(), four.in_use()),
+            (1, 1),
+            "refused at its count, with buffers free in the table"
+        );
+
+        let mut none = LentStaging::<4, 64>::none();
+        assert!(none.acquire().is_none());
+        assert!(none.acquire().is_none());
+        assert_eq!(none.refused(), 2, "a staging of no table counts each chain");
+    }
+
     /// The stagings of two links over their session's one table share its buffers: a chain of one
     /// link that finds every buffer held by the other's is refused, and the buffer the other's
     /// chain gives back when it ends serves it.

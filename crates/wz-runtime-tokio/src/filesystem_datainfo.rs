@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn a_timestamp_upstream_cannot_hold_is_refused_on_write() {
-        for zid in [&[][..], &[0u8, 0][..], &[1u8; 17][..]] {
+        for zid in [&[][..], &[0u8, 0][..]] {
             assert!(
                 matches!(
                     encode(&info(zid, None)),
@@ -432,6 +432,9 @@ mod tests {
                 "zid {zid:?} must be refused"
             );
         }
+        // An id past the sixteen bytes a zenoh id has is refused before a row can hold it: the
+        // timestamp's own type bounds it, so no write is ever asked to refuse one.
+        assert!(TimestampHint::new(0x0102_0304_0506_0708, &[1u8; 17]).is_none());
     }
 
     #[test]

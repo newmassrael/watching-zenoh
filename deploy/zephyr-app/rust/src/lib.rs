@@ -129,7 +129,10 @@ pub extern "C" fn wz_app_main() -> i32 {
         return 1;
     };
     // Built with NO peer, as an acceptor is: it learns it from the InitSyn.
-    let driver = CellRc::boxed(ZephyrUdpDriver::acceptor(link));
+    let Some(driver) = CellRc::try_boxed(ZephyrUdpDriver::acceptor(link)) else {
+        log(c"wz: FAIL - the heap has no room for the session link's cell");
+        return 1;
+    };
     let topology = ZephyrTopology {
         driver: driver.clone(),
         peer,

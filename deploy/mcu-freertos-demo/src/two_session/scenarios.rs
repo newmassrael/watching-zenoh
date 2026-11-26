@@ -56,6 +56,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
+use wz_session_core::session_zid::SessionZid;
 use wz_session_core::signing_key::SigningKey;
 use wz_session_core::sn::{self, MulticastTxConduits};
 use wz_session_core::WhatAmI;
@@ -98,6 +99,7 @@ fn unicast_params(
         keep_alive: wz_session_core::session_init_params::KeepAliveConf::PICO,
         initial_sn: 0,
         cookie: vec![],
+        region: None,
         tx_queue: wz_session_core::session_init_params::TxQueueConf::of_snapshot(policy, limits),
         link_rx: wz_session_core::session_init_params::LinkRxConf::default(),
         policy: *policy,
@@ -123,14 +125,14 @@ fn resolve_limits() -> SessionLimits {
 
 /// The group parameters: the group session's own, and the member's.
 fn group_params(
-    zid: &[u8],
+    zid: SessionZid,
     lease_ms: u64,
     policy: &SessionPolicy,
     limits: &SessionLimits,
 ) -> MulticastParams {
     MulticastParams {
         whatami: WhatAmI::Peer,
-        zid: wz_session_core::multicast_params::zid_vec(zid),
+        zid,
         lease_ms,
         join_interval_ms: GROUP_JOIN_INTERVAL_MS,
         seq_num_res: 0x02,
@@ -149,8 +151,8 @@ fn group_params(
     }
 }
 
-const GROUP_ZID: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD];
-const MEMBER_ZID: &[u8] = &[0x01, 0x02, 0x03, 0x04];
+const GROUP_ZID: SessionZid = SessionZid::from_array([0xAA, 0xBB, 0xCC, 0xDD]);
+const MEMBER_ZID: SessionZid = SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
 
 /// The payloads of every Put a drive event carries, in order.
 fn put_payloads(event: &IterationEvent<'_, '_>) -> Vec<Vec<u8>> {

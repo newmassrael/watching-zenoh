@@ -407,6 +407,7 @@ unsafe fn list_transports(session: &z_owned_session_t, sink: &'static Sink) -> i
 /// say what pico's do, in pico's order.
 #[test]
 fn a_peer_arriving_and_leaving_is_reported_the_way_pico_reports_it() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listener_locator = format!("tcp/127.0.0.1:{port}");
     let mut peer_zid = [0u8; 16];
@@ -644,6 +645,7 @@ fn a_peer_arriving_and_leaving_is_reported_the_way_pico_reports_it() {
 /// the closure and a closed one after.
 #[test]
 fn a_listener_refused_for_want_of_a_session_is_refused_the_way_pico_refuses_it() {
+    let _program = crate::programs::admit();
     unsafe {
         let untouched = sink();
         let mut closure: z_owned_closure_transport_event_t = std::mem::zeroed();

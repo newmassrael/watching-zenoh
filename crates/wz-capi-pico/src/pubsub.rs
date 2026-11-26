@@ -49,7 +49,8 @@ use crate::keyexpr::{declared_of, keyexpr_str, wire_key_of, DeclaredKeyexpr};
 use crate::option_fields::unstable_option_fields;
 use crate::result::{
     ZResult, Z_ERR_GENERIC, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_SESSION_CLOSED,
-    Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
+    Z_ERR_SYSTEM_OUT_OF_MEMORY, Z_ERR_TIMESTAMP_GENERATION_FAILED, Z_ERR_TRANSPORT_NOT_AVAILABLE,
+    Z_ERR_TRANSPORT_TX_FAILED, Z_OK,
 };
 use crate::session::{engine_held, engine_ref, session_handle, z_loaned_session_t, Engine};
 use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
@@ -3035,6 +3036,14 @@ unsafe fn session_publish(
         return code;
     }
     let engine = engine_ref(state);
+    // A session closed by `z_close` or by the loss of its link sends nothing and hands its own
+    // subscribers nothing: zenoh-pico's `_z_write` finds the transport cleared and answers
+    // `_Z_ERR_TRANSPORT_NOT_AVAILABLE` (`vendor/zenoh-pico/src/transport/common/tx.c` @
+    // `ret = _Z_ERR_TRANSPORT_NOT_AVAILABLE;`), and delivers locally only after a send that
+    // succeeded. A put meant for this session's subscribers alone sends nothing there either.
+    if opts.allowed_destination.allows_remote() && engine.is_closed() {
+        return Z_ERR_TRANSPORT_NOT_AVAILABLE;
+    }
     let wire = wire_key_of(keyexpr, engine);
     publish_code(engine.publish_on_wire_all(ke, &wire, payload, opts))
 }

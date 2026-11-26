@@ -232,6 +232,7 @@ unsafe fn warm_up(publisher: &z_owned_publisher_t, seen: &Arc<Mutex<Vec<Seen>>>)
 
 #[test]
 fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_with() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -466,6 +467,7 @@ fn a_declared_publisher_sends_every_put_and_delete_with_the_qos_it_was_declared_
 /// and nothing saw it while the declare ignored the field.
 #[test]
 fn the_default_publisher_options_are_the_values_pico_writes() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut options: z_publisher_options_t = std::mem::zeroed();
         options.priority = -1;

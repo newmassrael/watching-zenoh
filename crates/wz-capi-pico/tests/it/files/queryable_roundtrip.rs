@@ -234,6 +234,7 @@ fn native_querier(endpoint: String, replies_tx: mpsc::Sender<Vec<String>>) {
 
 #[test]
 fn c_queryable_answers_a_native_wz_querier_over_loopback_tcp() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let endpoint = format!("tcp/127.0.0.1:{port}");
@@ -342,6 +343,7 @@ unsafe extern "C" fn counting_on_drop(ctx: *mut c_void) {
 /// face AND per entry). No networking needed beyond the bind.
 #[test]
 fn c_query_closure_drop_runs_exactly_once() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let drops = Arc::new(AtomicUsize::new(0));

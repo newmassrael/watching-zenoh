@@ -302,6 +302,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # `LinkKeyexprs::Held` out, and appears in public only as `cfg!` in the constant
             # `declared_keyexprs::SESSION_KEEPS_KEYEXPRS`, which exists in every build.
             "session-keeps-keyexprs",
+            # `sha256-compact` turns on a feature of the `sha2` dependency alone and appears in no
+            # `cfg` of this package: the digest's path and value are the same either way.
+            "sha256-compact",
             # `pubsub-delete` and `pubsub-put` LEFT this list, by the R2386
             # route: the round that delivered a Push read in place to its
             # subscriber lent made the claim false. `pubsub` (a `pub mod`) now
@@ -376,8 +379,9 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             # route R2571 records above and R2454 before it: the claim was true
             # when written and THIS round falsified it. Serving `linkstate/peers`
             # from a plain peer needed the render seam to be reachable from the
-            # peer tier, so `LinkstateForwarder` gained
-            # `#[cfg(feature = "adminspace-router-linkstate")] pub fn net_view`
+            # peer tier, so the peer forwarder gained a `net_view` method, and
+            # `RouterForwarder` carries the same shape today:
+            # `#[cfg(feature = "adminspace-router-linkstate")] pub fn peers_net_view`
             # — a `#[cfg]` in this package attaching the feature to a publicly
             # visible item, which is exactly what this list denies.
             #
@@ -501,6 +505,10 @@ NO_PUBLIC_PATH: dict[str, dict[str, str]] = {
             "session-slot",
         )
     },
+    # Every non-default feature of the application frame gates a public module a consumer types
+    # the path of, probed off the module tree: the empty entry the table-agreement check asks of
+    # a package on the axis, saying that no feature of it is declared to gate nothing.
+    "wz-app-frame": {},
 }
 
 # package -> feature -> why it is not probed YET, though it does gate a public
@@ -618,8 +626,8 @@ DEFERRED: dict[str, dict[str, str]] = {
                 # the adopting round paying a ratchet it did not feed.
                 # R2684 — `adminspace-router-linkstate` is NOT here, and the
                 # round that nearly put it here records why. It left this
-                # package's `NO_PUBLIC_PATH` when `LinkstateForwarder::net_view`
-                # falsified that claim, and `@defer impl-method` was the obvious
+                # package's `NO_PUBLIC_PATH` when a forwarder's `net_view` (today
+                # `RouterForwarder::peers_net_view`) falsified that claim, and `@defer impl-method` was the obvious
                 # next home: a `pub fn` in an `impl` has no `module::name` path.
                 # Then gating the view TYPE on this feature — the repair for the
                 # dead-code the diagnostic's own probe build found — gave it two

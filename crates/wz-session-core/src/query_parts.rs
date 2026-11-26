@@ -61,6 +61,14 @@ impl<'a> QueryParts<'a> {
         #[cfg(feature = "pubsub-ts-stack")]
         ts_stack: None,
     };
+
+    /// The mode the asker's sink consolidates the replies with: the one the Request states, and
+    /// [`ConsolidationMode::None`], which passes every reply, where it states none, as a build
+    /// with no consolidation capability writes it. Read from the parts the Request is written
+    /// from, so the parameters are read once and the sink and the wire cannot be told two modes.
+    pub fn sink_consolidation(&self) -> ConsolidationMode {
+        self.consolidation.unwrap_or(ConsolidationMode::None)
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -141,8 +149,8 @@ pub struct GetParts<'a> {
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 impl GetParts<'_> {
     /// The owned `Request` of this description: what a session sends where it does not write the
-    /// query from its parts (a key it rewrites, counters that read the owned message, a timestamp
-    /// stack). Refused as the owned builder refuses, and parameters past
+    /// query from its parts (a key it rewrites, a timestamp stack). Refused as the owned builder
+    /// refuses, and parameters past
     /// [`crate::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN`] are `LengthOutOfRange` here
     /// where the builder would stop.
     pub fn owned_request(

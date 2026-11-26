@@ -942,12 +942,15 @@ fn decide_admitted<R: SessionRuntime, T: TimeSource, C: crate::inbound::ExtChain
     actions: &SessionLinkActions<R, T>,
     engine: &SessionEngine<R, T>,
 ) -> DriverLoopOutcome {
-    // Every event this function hands the engine is a handshake's or an accepting side's; a build
-    // with neither body nor the accepting role names none.
+    // Every event this function hands the engine is a handshake's, an accepting side's or an
+    // establishment extension's refusal (the auth and multilink stages, which name it even where no
+    // handshake body is built); a build with none of these names none.
     #[cfg(any(
         feature = "codec-init-body",
         feature = "codec-open-body",
-        feature = "session-unicast-accept"
+        feature = "session-unicast-accept",
+        feature = "session-extauth",
+        feature = "transport-multilink"
     ))]
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     // A handshake message out of its step is judged first, before any admission,
@@ -3204,7 +3207,11 @@ fn walk_records_in_place<
 
 /// The admissible `Fragment` at the front of a unit, staged into its chain's
 /// slot from where it lies ([`dispatch_datagram_reassembling`]).
+// Cold and out of line: a datagram's unit is a Frame on the traffic's path, and inlined the stage
+// of a fragment and the read of the message it completes were part of that path's body.
 #[cfg(feature = "reassembly")]
+#[cold]
+#[inline(never)]
 fn fragment_in_place<
     R,
     T,

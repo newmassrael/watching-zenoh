@@ -36,6 +36,7 @@ use wz_runtime_tokio_test_support::localhost_cert_key_pem;
 
 #[test]
 fn z_open_listen_quic_with_cert_config_binds() {
+    let _program = crate::programs::admit();
     // Self-signed `localhost` cert -> pid-unique temp files (the config values are
     // FILE PATHS, mirroring zenoh-pico's native listen-cert keys).
     let (cert_pem, key_pem) = localhost_cert_key_pem();

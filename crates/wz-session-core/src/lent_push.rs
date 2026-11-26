@@ -481,25 +481,14 @@ where
     }
     let with_qos = qos_rides(qos);
     let with_stack = body.has_stack();
-    let header = wz_codecs::wire_const::N_MID_PUSH
-        | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
-        // `M`: the id is in the sender's space, which the codec derives from its
-        // `WireexprLocal` arm at encode time.
-        | FLAG_PUSH_M
-        // The header says an outer extension chain follows.
-        | if with_qos || with_stack { 0x80 } else { 0 };
     let mut head = Head::default();
-    head.write_u8(header)?;
-    head.write_vle_u64(u64::from(mapping_id))?;
+    head.push_key(mapping_id, suffix, with_qos || with_stack)?;
     if let Some(text) = suffix {
-        head.write_vle_u64(text.len() as u64)?;
         head.flush_into(sink)?;
         sink.write_bytes(text.as_bytes())?;
     }
     if with_qos {
-        // ENC_ZINT(0x20) | id_qos(0x01), with `Z` when the timestamp stack follows it.
-        head.write_u8(0x21 | if with_stack { 0x80 } else { 0 })?;
-        head.write_vle_u64(u64::from(qos.raw))?;
+        head.qos_extension(qos, with_stack)?;
     }
     #[cfg(feature = "pubsub-ts-stack")]
     if let Some(stack) = body.stack {
@@ -509,13 +498,7 @@ where
         sink.write_vle_u64(stack.encoded_len() as u64)?;
         stack.write(sink)?;
     }
-    let extended = body.source_info.is_some() || body.attachment.is_some();
-    head.write_u8(
-        if put { PUT_HEADER } else { DEL_HEADER }
-            | if body.timestamp.is_some() { 0x20 } else { 0 }
-            | if body.encoding.is_some() { 0x40 } else { 0 }
-            | if extended { 0x80 } else { 0 },
-    )?;
+    head.body_header(put, body)?;
     // The straight path: no body field, so the payload's length closes the tail.
     if body.is_plain() {
         if put {
@@ -588,8 +571,54 @@ std::thread_local! {
 #[derive(Default)]
 struct Head(sce_forge_runtime::heapless::Vec<u8, 24>);
 
+// The fixed fields, each one body for every sink: the Push writer gathers them, and so does a
+// publisher's head (`PutHead::new`), which then needs no writer of a sink of its own.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
 impl Head {
+    /// The Push's header and the id of its key, with the length of the suffix when the key has
+    /// one; `outer` says an outer extension chain follows the key.
+    fn push_key(
+        &mut self,
+        mapping_id: crate::wire_id::ExprId,
+        suffix: Option<&str>,
+        outer: bool,
+    ) -> Result<(), CodecError> {
+        let header = wz_codecs::wire_const::N_MID_PUSH
+            | if suffix.is_some() { FLAG_PUSH_N } else { 0 }
+            // `M`: the id is in the sender's space, which the codec derives from its
+            // `WireexprLocal` arm at encode time.
+            | FLAG_PUSH_M
+            | if outer { 0x80 } else { 0 };
+        self.write_u8(header)?;
+        self.write_vle_u64(u64::from(mapping_id))?;
+        if let Some(text) = suffix {
+            self.write_vle_u64(text.len() as u64)?;
+        }
+        Ok(())
+    }
+
+    /// The QoS extension of `qos`, ENC_ZINT(0x20) | id_qos(0x01), with `Z` when `more` (the
+    /// timestamp stack) follows it.
+    fn qos_extension(
+        &mut self,
+        qos: crate::sample::QosLevel,
+        more: bool,
+    ) -> Result<(), CodecError> {
+        self.write_u8(0x21 | if more { 0x80 } else { 0 })?;
+        self.write_vle_u64(u64::from(qos.raw))
+    }
+
+    /// The header of the Put (`put`) or the Del, flagged with the body fields `body` holds.
+    fn body_header(&mut self, put: bool, body: &BodyParts<'_>) -> Result<(), CodecError> {
+        let extended = body.source_info.is_some() || body.attachment.is_some();
+        self.write_u8(
+            if put { PUT_HEADER } else { DEL_HEADER }
+                | if body.timestamp.is_some() { 0x20 } else { 0 }
+                | if body.encoding.is_some() { 0x40 } else { 0 }
+                | if extended { 0x80 } else { 0 },
+        )
+    }
+
     /// Hand what is gathered to `sink` in one write and start again empty.
     fn flush_into<S: SceSink>(&mut self, sink: &mut S) -> Result<(), CodecError>
     where
@@ -658,22 +687,17 @@ impl PutHead {
         } else {
             crate::sample::QosLevel::DEFAULT
         };
+        // The fields the Push writer writes before a plain Put's payload length, gathered by the
+        // writer's own steps where it gathers them: the head is no second compiled writer, and
+        // no sink is made for it.
+        let with_qos = qos_rides(qos);
         let mut written = Head::default();
-        write_push(
-            &mut written,
-            mapping_id,
-            None,
-            true,
-            &[],
-            qos,
-            &BodyParts::NONE,
-        )
-        .ok()?;
-        // The empty payload's length closes what the writer wrote, one zero byte.
-        let (&length, head) = written.0.split_last()?;
-        if length != 0 {
-            return None;
+        written.push_key(mapping_id, None, with_qos).ok()?;
+        if with_qos {
+            written.qos_extension(qos, false).ok()?;
         }
+        written.body_header(true, &BodyParts::NONE).ok()?;
+        let head = &written.0[..];
         let mut bytes = [0u8; PUT_HEAD_ROOM];
         bytes.get_mut(..head.len())?.copy_from_slice(head);
         Some(Self {

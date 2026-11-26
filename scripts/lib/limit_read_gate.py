@@ -121,15 +121,28 @@ ALLOWED: tuple[tuple[str, str, str], ...] = (
     ("crates/wz-session-mcu/src/connect_manager.rs", "PEERS", "a constant that sizes the fixed connect manager's peer and dial tables from the endpoint rows the build sizes"),
     ("crates/wz-admin/src/admin_connect.rs", "push_entry", "the admin write fills a heapless list of the build's endpoint rows on every backing, and refuses the entry that list has no row for"),
     ("crates/wz-capi-coop/src/arena.rs", "MAX_FACE_SETS", "a constant that sizes the registry's table of face table sets from the build's faces and task cells; a session's limits hold the faces it admits to fewer through ArenaPlan::of"),
-    ("crates/wz-capi-coop/src/engine.rs", "new", "an endpoint's refusal keeps its text in a LocatorText row, whose length is the build's MAX_LOCATOR_LEN, and cuts the text to that row"),
-    ("crates/wz-capi-coop/src/round.rs", "_", "a build-time assertion on the storage the constant sizes: a record names its callbacks by a u32"),
-    ("crates/wz-capi-coop/src/round.rs", "RELEASED_ROWS", "a constant that sizes the round's list of rows waiting to be let go of, as many as the build's tables of the kinds whose calls it ends hold"),
-    ("crates/wz-capi-pico/src/endpoint.rs", "checked_endpoint", "an endpoint text the engine keeps in a LocatorText row of the build's MAX_LOCATOR_LEN is refused at the door when it is longer than that row"),
+    ("crates/wz-runtime-coop/src/transport.rs", "new", "an endpoint's refusal keeps its text in a LocatorText row, whose length is the build's MAX_LOCATOR_LEN, and cuts the text to that row"),
+    ("crates/wz-session-core/src/round.rs", "_", "a build-time assertion on the storage the constant sizes: a record names its callbacks by a u32"),
     ("crates/wz-runtime-coop/src/faces.rs", "ENDPOINT_TEXT_ROWS", "a constant that sizes the rows of either role's endpoint texts, the larger of the build's two bounds; a session's config holds each role to its own count"),
     ("crates/wz-session-core/src/reply_hold.rs", "HOLD_ROW_BYTES", "a constant that sizes a held reply's row, its key and its payload at the build's lengths; a session's reply quota holds the replies to fewer"),
     ("crates/wz-session-core/src/session_tables.rs", "FILTER_ROWS", "a constant that sizes the write filters' table and the Interests' from the build's publishers and queriers; a session's limits hold each kind to fewer"),
     ("crates/wz-session-mcu/src/group_drive/stage.rs", "held_to", "a group stage's storage for the releases of its pushes is taken when the stage is made, so a reply quota that holds no bound takes the build's MAX_MULTICAST_REPLIES rows"),
-    ("crates/wz-capi-coop/src/arena.rs", "of", "the session arena's plan sizes the arena from the session's limits and holds each under the build's value, the memory the build fixes for an image, which a stage after the build only lowers; a value over it is refused under its own name before anything is lent"),
+    ("crates/wz-capi-coop/src/engine/state_places.rs", "LEG_ROWS", "a constant that sizes a region's rows of the legs of gets from the build's tables of pending gets, whose arrays the region holds; a session's limits hold its gets to fewer"),
+    ("crates/wz-capi-pico/src/process_pool.rs", "LARGEST_MESSAGE", "a constant that sizes the blocks of the process's payload pools by the largest message the build's batches and rejoining hold; the pools are reserved once for the process, apart from any session's limits"),
+    ("crates/wz-capi-pico/src/process_pool.rs", "LARGEST_BLOCK", "a constant that sizes the largest block of the process's payload pools by the build's longest key beside its largest message; the pools are reserved once for the process, apart from any session's limits"),
+    ("crates/wz-capi-pico/src/session.rs", "PRESET", "a constant that lays out, when the build is compiled, the arena every session of a build with no policy, listen or group opens: a dial row for each of the build's endpoint rows, the storage a config's dials are placed in"),
+    ("crates/wz-capi-port/src/cancellation.rs", "TOKEN_PLACES", "a constant that sizes the process's places for cancellation tokens from the build's engine rows and the gets each session's tables hold at most; the places are reserved for the process, apart from any session's limits"),
+    ("crates/wz-capi-port/src/told.rs", "_", "a build-time assertion on the storage the constant sizes: each listener of a plane is a bit of a u64"),
+    ("crates/wz-runtime-coop/src/faces.rs", "OWING_WAITS", "a constant that sizes the table of waits for an outbound slot, the fewer of the build's outbound slots and its faces"),
+    ("crates/wz-runtime-coop/src/session_drive.rs", "SERIAL_PATH_LEN", "a constant that sizes a serial device path's row, what a locator row of the build's MAX_LOCATOR_LEN leaves after its scheme"),
+    ("crates/wz-runtime-coop/src/session_drive.rs", "UNIXPIPE_PATH_LEN", "a constant that sizes a unixpipe base path's row, what a locator row of the build's MAX_LOCATOR_LEN leaves after its scheme and longest suffix"),
+    ("crates/wz-runtime-coop/src/stream_link.rs", "fit", "a link's ends are named in rows of the build's MAX_LOCATOR_LEN, so a FIFO whose locator is longer than that row is refused where it is admitted"),
+    ("crates/wz-runtime-coop/src/udp_link.rs", "ends_fit", "a link's ends are named in rows of the build's MAX_LOCATOR_LEN, so an IP end whose locator is longer than that row is refused where it is admitted"),
+    ("crates/wz-runtime-posix/src/unixpipe.rs", "PATH_BUF", "a constant that sizes the buffer a FIFO's path is handed to the host in, a locator row of the build's MAX_LOCATOR_LEN and its NUL"),
+    ("crates/wz-session-core/src/declare/local_token.rs", "places", "a check, in the constant a region's description is, that the rows the region lays out for tokens are no more than the build's bound; a session's limits hold its tokens to fewer"),
+    ("crates/wz-session-core/src/face_plane.rs", "MAX_WATCHERS", "a constant that sizes a face plane's list of watchers from the build's listeners of transports and of links; a session's limits hold each kind to fewer"),
+    ("crates/wz-session-core/src/link.rs", "fmt", "the message of a locator refused for its length names the length of the build's row it did not fit"),
+    ("crates/wz-session-core/src/match_set.rs", "SET_WORDS", "a constant that sizes a subscriber set's words, a bit for each row of a table of the build's MAX_SUBSCRIPTIONS"),
 )
 
 #: (path pattern relative to the root, innermost item, reason): a site that reads a snapshot it
@@ -195,10 +208,13 @@ def _in_generic_list(text: str, brace: int) -> bool:
             prev = text[i - 1] if i > 0 else " "
             if ch == ">" and not prev.isspace() and prev not in "-=>":
                 angle += 1
-            # A qualified path opens a second list straight after the first (`Row<<P as T>::K>`):
-            # its `<` follows a `<` and comes before a name, where a shift stands between spaces.
+            # A qualified path opens a list straight after the first (`Row<<P as T>::K>`) or as a
+            # later argument (`Row<K, <P as T>::L>`): its `<` follows a `<` or a space and comes
+            # before a name, where a shift or a comparison stands between spaces.
             elif ch == "<" and (
-                prev.isalnum() or prev in "_:" or (prev == "<" and text[i + 1 : i + 2].isalnum())
+                prev.isalnum()
+                or prev in "_:"
+                or ((prev == "<" or prev.isspace()) and text[i + 1 : i + 2].isalnum())
             ):
                 if angle == 0:
                     return True
@@ -414,6 +430,7 @@ def selftest() -> int:
                "pub struct Table {\n    v: BoundedVec<u8, { caps::MOVED }, P>,\n"
                "    a: [u8; caps::MOVED],\n    b: [u8; { caps::DONE }],\n}\n"
                "pub type Keyed<P> =\n    Map<Row<<P as Store>::Key>, { caps::MOVED }, P>;\n"
+               "pub type Lens<P> =\n    Map<Row<<P as Store>::Key, <P as Store>::Len>, { caps::MOVED }, P>;\n"
                "pub fn turbo() -> usize {\n    Foo::<{ crate::caps::MOVED }>::new().len()\n}\n"
                "pub fn fill() -> [u8; 4] {\n    [0; caps::MOVED]\n}\n"
                "pub fn machine(n: usize) -> bool {\n    n < caps::MOVED\n}\n"

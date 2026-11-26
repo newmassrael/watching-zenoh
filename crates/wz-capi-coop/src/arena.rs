@@ -53,9 +53,11 @@
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
 //!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
-//!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
-//!   each reliability a peer has a chain open in, and one for the rejoined message the round
-//!   reads where its chain lay), each buffer claimed when a chain's first fragment arrives and
+//!   table for the session, as many as its `REASSEMBLY_CHAINS` (under the build's; by default one
+//!   for each reliability a peer has a chain open in and one for the rejoined message the round
+//!   reads where its chain lay, `SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`), a
+//!   first fragment that finds none free refused and counted (`LentStaging::refused` of
+//!   `wz_session_core::chain_staging`), each buffer claimed when a chain's first fragment arrives and
 //!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
@@ -72,18 +74,18 @@
 //! - the key arena every keyed row of the session keeps its key in (`KEY_ARENA_BYTES`, under the
 //!   build's): that record's, the application's tables', each face's pending gets' and what each
 //!   face's peer declares and asks, one area of blocks a key takes as long as it is held
-//!   ([`KeySpace`](wz_session_core::key_arena::KeySpace)), lent after the record and before the tables that keep their keys in it. A
-//!   peer's key that finds no room there is dropped and counted, as zenoh-pico drops a
-//!   declaration its heap cannot hold;
+//!   ([`wz_session_core::key_arena::KeySpace`]), lent after the record and before the tables
+//!   that keep their keys in it. A peer's key that finds no room there is dropped and counted, as
+//!   zenoh-pico drops a declaration its heap cannot hold;
 //! - with [`ArenaPlan::holding`], last, the place the ABI keeps its own handle of the session in,
 //!   and the places it keeps its objects of the session's entities in, one for each row the
 //!   session keeps of each kind it names ([`HeldPlaces`]), so what the ABI holds of a session is
 //!   reserved with the session, sized by the session's own limits, and takes no memory of its own.
 //!
 //! A table's entry is the registry's own `ROW_BYTES` as the lent policy lays the row out
-//! ([`Lent`]), and its count the value of its limit the open resolved, under the build's value
-//! ([`Quota::lent_under`]): a stage after the build chooses within the memory the build fixes and
-//! never adds to it, so a value over the build's refuses the open.
+//! ([`wz_session_core::bounded::Lent`]), and its count the value of its limit the open resolved,
+//! under the build's value ([`Quota::lent_under`]): a stage after the build chooses within the
+//! memory the build fixes and never adds to it, so a value over the build's refuses the open.
 //!
 //! A session holds the dial role's face, a face for each group it joins and as many faces besides
 //! as `max_faces` admits, each a link it attaches or accepts, one still in its handshake among them
@@ -120,7 +122,6 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
-use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
@@ -376,8 +377,8 @@ impl ArenaPart {
             Self::RouterLend => ("router lend", ""),
             Self::LinkRooms => ("link rooms", ""),
             Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
-            Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
-            Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
+            Self::ReassemblyFlags => ("reassembly flags", "REASSEMBLY_CHAINS"),
+            Self::ReassemblyBuffers => ("reassembly buffers", "REASSEMBLY_CHAINS"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
             Self::HandedLegPlaces => ("handed leg places", "HANDED_LEG_BYTES"),
             Self::HandedLegs => ("handed legs", "HANDED_LEG_BYTES"),
@@ -750,15 +751,32 @@ impl ArenaRegion {
         &self.limits
     }
 
+    /// Lay out on `plan`, an open's blank plan or [`ArenaPlan::vacant`] as made, this region's
+    /// rows for an open of `config`, the plan [`ArenaPlan::count`] would lay out for a config of
+    /// the region's shape and limits, refused as [`Self::admit`] refuses the config.
+    #[cfg(feature = "runtime-plan")]
+    pub(crate) fn lay_out_on<E: EndpointList, const ROWS: usize>(
+        &self,
+        plan: &mut ArenaPlan<ROWS>,
+        config: &CoopConfig<E>,
+    ) -> Result<(), ArenaRefused> {
+        self.admit(config)?;
+        plan.take_on(&self.plan);
+        Ok(())
+    }
+
     /// Lay out on `plan`, [`ArenaPlan::vacant`] as made, this region's rows for an open of
     /// `config`, the plan [`ArenaPlan::count`] would lay out for a config of the region's shape
     /// and limits, refused as [`Self::admit`] refuses the config.
+    #[cfg(not(feature = "runtime-plan"))]
     pub(crate) fn lay_out_on<E: EndpointList>(
         &self,
         plan: &mut ArenaPlan,
         config: &CoopConfig<E>,
     ) -> Result<(), ArenaRefused> {
         self.admit(config)?;
+        // Stored whole over the plan the open made, so the optimiser drops that plan's making:
+        // a build without `runtime-plan` lists no rows, and its open's plan is this one alone.
         plan.clone_from(&self.plan);
         Ok(())
     }
@@ -934,6 +952,7 @@ pub enum ArenaLimit {
     MaxPendingDeclares,
     RxPoolBuffers,
     TxPoolSlots,
+    ReassemblyChains,
     /// The config's limits are not those of the region the build laid out when it was compiled
     /// ([`ArenaRegion`]): the build lays out no arena for any other.
     LimitsDifferFromBuild,
@@ -988,6 +1007,7 @@ impl ArenaLimit {
             Self::MaxPendingDeclares => "MAX_PENDING_DECLARES",
             Self::RxPoolBuffers => "RX_POOL_BUFFERS",
             Self::TxPoolSlots => "TX_POOL_SLOTS",
+            Self::ReassemblyChains => "REASSEMBLY_CHAINS",
             Self::LimitsDifferFromBuild => "LIMITS_DIFFER_FROM_BUILD",
             Self::ShapeDiffersFromBuild => "SHAPE_DIFFERS_FROM_BUILD",
         }
@@ -1215,7 +1235,7 @@ pub struct TransportRows {
     link_bytes: usize,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
-    /// How many such buffers, in the one table the session's links share.
+    /// How many such buffers, in the one table the session's links share (`REASSEMBLY_CHAINS`).
     reassembly_chains: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
@@ -1598,14 +1618,14 @@ impl Iterator for HeldPlacesWalk {
 /// ([`Self::transport`], [`Self::session`], [`Self::places`]). The arena is the sum of the rows'
 /// spans whatever order they are lent in, so each layer lends its own in an order of its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ArenaPlan {
+pub struct ArenaPlan<const ROWS: usize = ARENA_ROWS> {
     /// The rows laid out, in order, the first `len` of them: a row is written when it is laid
     /// out, and the rows past `len` are [`UNLAID_ROW`] in every plan, so two plans of the same rows
     /// are equal. Kept where a plan is read row by row, a build that lays its plans out at the
     /// open and the tests: an open by a region reads `reserved` and the rows of each layer alone,
     /// so a region carries no table of rows.
     #[cfg(any(feature = "runtime-plan", test))]
-    rows: [ArenaRow; ARENA_ROWS],
+    rows: [ArenaRow; ROWS],
     /// How many rows were laid out.
     len: usize,
     /// The bytes the rows laid out take together, each row's span added as it is laid out;
@@ -1628,8 +1648,10 @@ pub struct ArenaPlan {
 }
 
 impl ArenaPlan {
-    /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]): out of line,
-    /// so the plan is made where its caller keeps it.
+    /// A plan of no rows that lists every row it lays out (`rows`, where a build keeps a list): the
+    /// plan a report and a test read row by row, and the place an open of a build without
+    /// `runtime-plan` lays its plan out in ([`Self::count`]). Out of line, so the plan is made
+    /// where its caller keeps it.
     #[inline(never)]
     pub const fn vacant() -> Self {
         Self {
@@ -1656,21 +1678,6 @@ impl ArenaPlan {
         Ok(plan)
     }
 
-    /// Lay out on this plan, [`Self::vacant`] as made, the rows of a session `config` opens under
-    /// `limits` (see the module), where the plan lies: an open that keeps its plan in its own frame
-    /// moves no 2 KB plan out of a returned value. Refused when a limit is over the build's value
-    /// or the arena is past the address space; a refused plan is no plan to open by. The numbers
-    /// of the config are read once ([`PlanShape::of`]) and laid out as [`Self::lay_out`] lays out
-    /// a build's constants.
-    #[inline(never)]
-    pub fn count<E: EndpointList>(
-        &mut self,
-        config: &CoopConfig<E>,
-        limits: &SessionLimits,
-    ) -> Result<(), ArenaRefused> {
-        self.lay_out(PlanShape::of(config), limits)
-    }
-
     /// The plan of a session of `shape` under `limits`, laid out as [`Self::lay_out`] lays it out:
     /// a constant where both are, so a build that states them has its plan when it is compiled
     /// and runs none of the walk.
@@ -1680,6 +1687,84 @@ impl ArenaPlan {
             Ok(()) => Ok(plan),
             Err(refused) => Err(refused),
         }
+    }
+}
+
+/// The plan an open lays out and reserves by where the build lays its plans out at the open
+/// (`lend_session`): every sum and every layer's rows of a listed plan, and no list of the rows,
+/// which only a report reads, so the open's frame holds no table of them and its walk writes none.
+/// A build without `runtime-plan` lists no rows in any plan and opens by [`ArenaPlan::vacant`], so
+/// it has no second kind of plan to make.
+#[cfg(feature = "runtime-plan")]
+pub(crate) type OpenPlan = ArenaPlan<0>;
+
+impl<const ROWS: usize> ArenaPlan<ROWS> {
+    /// A plan of no rows, the place an open lays its plan out in ([`Self::count`]), listing the
+    /// first `ROWS` rows it lays out: out of line, so the plan is made where its caller keeps it.
+    #[cfg(feature = "runtime-plan")]
+    #[inline(never)]
+    pub(crate) const fn blank() -> Self {
+        Self {
+            rows: [UNLAID_ROW; ROWS],
+            len: 0,
+            reserved: Some(0),
+            refused: None,
+            transport: TransportRows::NONE,
+            session: SessionRows::NONE,
+            places: PlaceRows::NONE,
+            runtime_bytes: 0,
+        }
+    }
+
+    /// Lay out on this plan, [`ArenaPlan::vacant`] or an open's blank plan as made, the rows of a
+    /// session `config` opens under `limits` (see the module), where the plan lies: an open that
+    /// keeps its plan in its own frame moves no plan out of a returned value. Refused when a limit
+    /// is over the build's value or the arena is past the address space; a refused plan is no plan
+    /// to open by. The numbers of the config are read once ([`PlanShape::of`]) and laid out as
+    /// [`Self::lay_out`] lays out a build's constants.
+    #[inline(never)]
+    pub fn count<E: EndpointList>(
+        &mut self,
+        config: &CoopConfig<E>,
+        limits: &SessionLimits,
+    ) -> Result<(), ArenaRefused> {
+        self.lay_out(PlanShape::of(config), limits)
+    }
+
+    /// Take on the rows `laid` laid out and every sum of them, as this plan would have laid them
+    /// out itself, listing as many of its listed rows as this plan lists: what an open by a region
+    /// lays out, the region's plan made when the build was compiled.
+    #[cfg(feature = "runtime-plan")]
+    pub(crate) fn take_on<const LAID: usize>(&mut self, laid: &ArenaPlan<LAID>) {
+        let ArenaPlan {
+            rows,
+            len,
+            reserved,
+            refused,
+            transport,
+            session,
+            places,
+            runtime_bytes,
+        } = laid;
+        let rows = {
+            let mut listed = [UNLAID_ROW; ROWS];
+            let shared = ROWS.min(LAID);
+            listed[..shared].copy_from_slice(&rows[..shared]);
+            listed
+        };
+        let taken = Self {
+            rows,
+            len: *len,
+            reserved: *reserved,
+            refused: *refused,
+            transport: *transport,
+            session: *session,
+            places: *places,
+            runtime_bytes: *runtime_bytes,
+        };
+        // Made apart and stored whole, as `clone_from` stores a plan, so that no byte of the plan
+        // it replaces outlives this store.
+        *self = taken;
     }
 
     /// Lay out on this plan, [`Self::vacant`] as made, the rows of a session of `shape` under
@@ -1698,10 +1783,9 @@ impl ArenaPlan {
             shape.max_faces,
             tried!(admitted_faces(limits)),
         ));
-        tried!(hold(
+        tried!(hold_under::<{ caps::MAX_STATIC_CONNECT }>(
             ArenaLimit::MaxStaticConnect,
             shape.dials,
-            caps::MAX_STATIC_CONNECT,
         ));
         tried!(hold(
             ArenaLimit::MaxAdminLocators,
@@ -1727,7 +1811,7 @@ impl ArenaPlan {
             tx_slots: links,
             link_bytes,
             reassembly_bytes: 0,
-            reassembly_chains: SESSION_CHAIN_BUFFERS,
+            reassembly_chains: 0,
             endpoint_rows: (shape.dials, shape.listens),
             cell_bytes: NO_CELLS,
             cells_held: HeldBits(0),
@@ -1742,11 +1826,16 @@ impl ArenaPlan {
         };
         // The largest message a link rejoins is decided before the lane that hands it on, so a
         // value over the build's is refused under its own name.
-        self.transport.reassembly_bytes = self.lent(
+        self.transport.reassembly_bytes = self.lent_to::<{ caps::PICO_FRAG_MAX_BYTES }>(
             ArenaLimit::PicoFragMaxBytes,
             limits.pico_frag_max_bytes(),
-            caps::PICO_FRAG_MAX_BYTES,
         );
+        // The buffers of the session's one table of chains, as a report reads them
+        // (`link_buffers`).
+        match reassembly_chains(limits) {
+            Ok(chains) => self.transport.reassembly_chains = chains,
+            Err(refused) => self.refuse(refused),
+        }
         // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
         match pooled_buffers(links, limits) {
             Ok((rx_buffers, tx_slots)) => {
@@ -1758,27 +1847,23 @@ impl ArenaPlan {
         #[cfg(wz_round)]
         {
             self.session.round = RoundRowCounts {
-                records: self.lent(
+                records: self.lent_to::<{ caps::DELIVERY_LANE_EVENTS }>(
                     ArenaLimit::DeliveryLaneEvents,
                     limits.delivery_lane_events(),
-                    caps::DELIVERY_LANE_EVENTS,
                 ),
-                callbacks: self.lent(
+                callbacks: self.lent_to::<{ caps::DELIVERY_LANE_CALLBACKS }>(
                     ArenaLimit::DeliveryLaneCallbacks,
                     limits.delivery_lane_callbacks(),
-                    caps::DELIVERY_LANE_CALLBACKS,
                 ),
-                longest_key: self.lent(
+                longest_key: self.lent_to::<{ caps::MAX_KEYEXPR_BYTES }>(
                     ArenaLimit::MaxKeyexprBytes,
                     limits.max_keyexpr_bytes(),
-                    caps::MAX_KEYEXPR_BYTES,
                 ),
             };
         }
-        self.session.key_bytes = self.lent(
+        self.session.key_bytes = self.lent_to::<{ caps::KEY_ARENA_BYTES }>(
             ArenaLimit::KeyArenaBytes,
             Quota::at_most(limits.key_arena_bytes()),
-            caps::KEY_ARENA_BYTES,
         );
         let faces = self.sized(shape.faces());
         // The texts of the endpoints the session dials and listens on, a text a row of one table
@@ -1836,10 +1921,9 @@ impl ArenaPlan {
         // session that listens on no `udp/` endpoint binds no port and holds none.
         #[cfg(feature = "listen")]
         {
-            let slots = self.lent(
+            let slots = self.lent_to::<{ caps::UDP_PORT_SLOTS }>(
                 ArenaLimit::UdpPortSlots,
                 Quota::at_most(limits.udp_port_slots()),
-                caps::UDP_PORT_SLOTS,
             );
             // A plan of a session with no udp port lays none of the ports' rows out, as one that
             // names no group lays out no group's: their tables are lent no rows and take no byte
@@ -1918,10 +2002,9 @@ impl ArenaPlan {
         // held is dropped on every face, and the session reserves no place for one.
         #[cfg(any(feature = "listen", feature = "group"))]
         {
-            let bytes = self.lent(
+            let bytes = self.lent_to::<{ caps::HANDED_LEG_BYTES }>(
                 ArenaLimit::HandedLegBytes,
                 Quota::at_most(limits.handed_leg_bytes()),
-                caps::HANDED_LEG_BYTES,
             );
             let legs = match (shape.keeps_handed, bytes.checked_div(link_bytes)) {
                 (true, Some(legs)) => legs,
@@ -1947,10 +2030,9 @@ impl ArenaPlan {
         };
         // The watchers' lists of the application's observer, lent with its tables
         // (`SlotObserverOf::lent`): one row of their spans, as a face's gets are one of theirs.
-        let watchers = self.lent(
+        let watchers = self.lent_to::<{ caps::MAX_DECL_OBSERVERS }>(
             ArenaLimit::MaxDeclObservers,
             limits.max_decl_observers(),
-            caps::MAX_DECL_OBSERVERS,
         );
         // A build of the region's form lays the lists out in its region, at the build's bound; the
         // limit is still held, so a config over the build's is refused under its name either way.
@@ -1965,19 +2047,17 @@ impl ArenaPlan {
         let _laid_out_in_the_region = watchers;
         // A build that asks no query registers no get, so its tables of them hold no row.
         let queries = if cfg!(feature = "query") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_QUERIES }>(
                 ArenaLimit::MaxPendingQueries,
                 limits.max_pending_queries(),
-                caps::MAX_PENDING_QUERIES,
             )
         } else {
             0
         };
         let liveliness_gets = if cfg!(feature = "liveliness-get") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_LIVELINESS_GETS }>(
                 ArenaLimit::MaxPendingLivelinessGets,
                 limits.max_pending_liveliness_gets(),
-                caps::MAX_PENDING_LIVELINESS_GETS,
             )
         } else {
             0
@@ -2026,10 +2106,9 @@ impl ArenaPlan {
         // The limit is held either way, so a config over the build's is refused under its name.
         #[cfg(feature = "query")]
         {
-            self.session.held_replies = self.lent(
+            self.session.held_replies = self.lent_to::<{ caps::MAX_PENDING_REPLIES }>(
                 ArenaLimit::MaxPendingReplies,
                 limits.max_pending_replies(),
-                caps::MAX_PENDING_REPLIES,
             );
             #[cfg(feature = "runtime-plan")]
             self.put(
@@ -2122,10 +2201,9 @@ impl ArenaPlan {
             );
         }
         self.session.held_queries = if cfg!(feature = "queryable") {
-            self.lent(
+            self.lent_to::<{ caps::MAX_PENDING_FINALS }>(
                 ArenaLimit::MaxPendingFinals,
                 limits.max_pending_finals(),
-                caps::MAX_PENDING_FINALS,
             )
         } else {
             0
@@ -2356,6 +2434,13 @@ impl ArenaPlan {
                 0
             }
         }
+    }
+
+    /// [`Self::lent`] under `CEILING`, the build's value of the limit: the most rows the build
+    /// sizes the table's storage for, a const of the caller's as every ceiling of storage is
+    /// ([`lent`]), so the build's value is read as that and nothing else.
+    const fn lent_to<const CEILING: usize>(&mut self, limit: ArenaLimit, value: Quota) -> usize {
+        self.lent(limit, value, CEILING)
     }
 
     /// `bytes`, a size `None` past the address space, which is then kept as the plan's refusal
@@ -2646,12 +2731,21 @@ pub const fn link_buffers(
 ) -> Result<LinkBuffers, ArenaRefused> {
     let bytes = tried!(link_batch(batch, limits));
     let (receive, transmit) = tried!(pooled_buffers(links, limits));
+    let chains = tried!(reassembly_chains(limits));
     Ok(LinkBuffers {
         receive,
         transmit,
         bytes,
-        chains: SESSION_CHAIN_BUFFERS,
+        chains,
     })
+}
+
+/// The buffers of a session's one table of chains under `limits`, which its links share: its
+/// `REASSEMBLY_CHAINS`, held under the build's value, which a session lowers and never raises, so
+/// a value over it is refused under its own name. However many links the session holds, as a
+/// chain is claimed from the table and not from a link's own buffers.
+const fn reassembly_chains(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::REASSEMBLY_CHAINS }>(ArenaLimit::ReassemblyChains, limits.reassembly_chains())
 }
 
 /// The receive buffers and the outbound slots of `links` links under `limits`. A build that
@@ -3076,6 +3170,16 @@ const fn hold(limit: ArenaLimit, asked: usize, admitted: usize) -> Result<(), Ar
         });
     }
     Ok(())
+}
+
+/// [`hold`] under `CEILING`, the build's value of the limit: the most rows the build sizes the
+/// table for, where no session's value of it is in reach, a const of the caller's as a ceiling of
+/// storage is ([`lent`]).
+const fn hold_under<const CEILING: usize>(
+    limit: ArenaLimit,
+    asked: usize,
+) -> Result<(), ArenaRefused> {
+    hold(limit, asked, CEILING)
 }
 
 /// Whether a session `config` opens gives its dial role's face a link: it does when it lists an
@@ -3541,8 +3645,8 @@ impl SessionArena {
     /// Reserve the arena `plan` lays out from `memory`. Refused, having taken nothing, when the
     /// arena is past the address space or the memory has none to give.
     #[cfg(any(feature = "runtime-plan", test))]
-    pub(crate) fn reserve(
-        plan: &ArenaPlan,
+    pub(crate) fn reserve<const ROWS: usize>(
+        plan: &ArenaPlan<ROWS>,
         memory: &'static dyn ArenaMemory,
     ) -> Result<Self, ArenaRefused> {
         Self::of_bytes(plan.reserved_bytes().ok_or(ArenaRefused::TooLarge)?, memory)
@@ -4244,6 +4348,7 @@ mod tests {
             MaxPendingDeclares,
             RxPoolBuffers,
             TxPoolSlots,
+            ReassemblyChains,
             LimitsDifferFromBuild,
             ShapeDiffersFromBuild,
         ];

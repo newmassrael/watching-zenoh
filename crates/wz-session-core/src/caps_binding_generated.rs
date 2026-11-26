@@ -574,6 +574,18 @@ pub const MAX_SHARED_KEY_IDS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::STATS_KEY_SERIES`] is bound.
+pub const STATS_KEY_SERIES: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Capacity,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Build),
+    binding_fixed: None,
+    wire: Wire::None,
+};
+
 /// Where [`super::MAX_REMOTE_DECLS`] is bound.
 pub const MAX_REMOTE_DECLS: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,
@@ -951,6 +963,18 @@ pub const TX_POOL_SLOTS: LimitBinding = LimitBinding {
     kind: LimitKind::Parameter,
     driven: None,
     range: Some((1, 4294967295)),
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
+/// Where [`super::REASSEMBLY_CHAINS`] is bound.
+pub const REASSEMBLY_CHAINS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
     storage: Storage::Both,
     scope: &[Scope::Session],
     binding_heap: Some(Binding::Open),

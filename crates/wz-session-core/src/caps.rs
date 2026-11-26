@@ -496,6 +496,13 @@ pub const MAX_PEER_KEYEXPR_ALIASES: usize = generated::MAX_PEER_KEYEXPR_ALIASES;
 /// link of the session, so this bounds what an open may be handed rather than sizing a table.
 pub const MAX_SHARED_KEY_IDS: usize = generated::MAX_SHARED_KEY_IDS;
 
+/// The per-key payload series ONE `stats/filters` key of a session holds in each direction
+/// (`transport-stats`): the label sets its payloads are counted under. The rows of every key
+/// are reserved when the filter list is set; a payload of a label set past its key's rows is
+/// counted under no key and counted as refused
+/// (`stats_registry::TransportMetrics::per_key_refused`).
+pub const STATS_KEY_SERIES: usize = generated::STATS_KEY_SERIES;
+
 /// Maximum number of declarations of ONE kind (subscribers, queryables, liveliness
 /// tokens) a peer may hold open to this session at a time (the deploy `limits`
 /// key `remote_decls`). Bounds each of [`crate::id_map::DeclaredKeys`] and
@@ -504,11 +511,15 @@ pub const MAX_SHARED_KEY_IDS: usize = generated::MAX_SHARED_KEY_IDS;
 /// application, as one whose keyexpr does not resolve never was.
 pub const MAX_REMOTE_DECLS: usize = generated::MAX_REMOTE_DECLS;
 
-/// Maximum number of data replies a queryable's handlers may have staged for ONE
-/// session between two drains (the deploy `limits` key `pending_replies`). On the
-/// fixed backing a reply past it is refused with
-/// [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
-/// made it is told, and nothing is built on the heap in its place.
+/// Maximum number of data replies a dispatch that calls a session's queryables under
+/// the session's lock may have staged for ONE session between two drains (the deploy
+/// `limits` key `pending_replies`). On the fixed backing a reply past it is refused
+/// with [`crate::query_sink::ReplyError::StagingFull`] and counted; the handler that
+/// made it is told, and nothing is built on the heap in its place. A queryable whose
+/// callback runs with no lock held hands each reply on as it makes it
+/// ([`crate::reply_pass::ReplyPass`]), and this count bounds none of its replies. The
+/// same count sizes the rows a consolidating get holds back
+/// ([`crate::reply_hold::HeldReplies`]).
 pub const MAX_PENDING_REPLIES: usize = generated::MAX_PENDING_REPLIES;
 
 /// Maximum number of `ResponseFinal`s ONE session may owe between two drains (the
@@ -755,6 +766,14 @@ const _: () = assert!(
     TX_POOL_SLOTS >= 1,
     "a pool of no outbound slot sends nothing"
 );
+
+/// How many buffers, each of [`PICO_FRAG_MAX_BYTES`], the links of a session whose engine lends
+/// them from its arena share at most to rejoin fragmented messages in: a chain holds one from its
+/// first fragment to its end, and the message it rejoined until that message's records are handed
+/// out. A session's config states how many its open reserves, up to this; a first fragment that
+/// finds none free is refused and counted, as zenoh-pico drops a chain whose defragmentation
+/// buffer it cannot allocate. `0` rejoins no fragmented message.
+pub const REASSEMBLY_CHAINS: usize = generated::REASSEMBLY_CHAINS;
 
 /// Maximum number of key expressions all the peers of a session hold declared to it at once,
 /// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'

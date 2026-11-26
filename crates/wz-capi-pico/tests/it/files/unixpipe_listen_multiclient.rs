@@ -33,6 +33,7 @@ mod multiclient {
     /// `drive_listen` refuses the listener at bind.
     #[test]
     fn pico_z_open_accepts_a_unixpipe_listen_at_bind() {
+        let _program = crate::programs::admit();
         let base = format!("/tmp/wzpl{}", std::process::id());
         let request = format!("{base}_uplink");
         // A node a crashed run left is made again by the listen, which tolerates one.

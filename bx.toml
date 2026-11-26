@@ -427,6 +427,16 @@ local = "never"
 # replay cannot be made without turning a hook off. A merge keeps every commit and its reason, and
 # the hook judges the merged tree, which is the tree that lands. A single-commit item merges the
 # same way; read main by its first parents for the sequence of landings.
+[view]
+# Caches several runs of this repository on one machine write in the build account's home, named
+# so bx can isolate the rest of a run's home writes per slot (bx RFC 0035, 4.2 and 6): with no
+# unshared home write left, a machine admits more than one run of this repository at a time
+# instead of queueing them behind its one path. Each is safe under concurrent writers:
+# - .debug: perf's build-id cache, content-addressed by build id.
+# - .local/mn: the pinned mnemosyne-cli, one directory per revision (scripts/install-mnemosyne-cli.sh).
+# - wz-kit-lane: scripts/kit-lane.sh's default KIT_LANE_HOME, built under KIT_LANE_LOCK.
+shared = [".debug", ".local/mn", "wz-kit-lane"]
+
 [land]
 remote         = "origin"
 ref            = "main"

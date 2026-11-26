@@ -77,6 +77,29 @@
 //! length and bytes), so such an entry decodes; the readers of the chain used to
 //! read it as absent, which acted on a message upstream never delivers.
 //!
+//! The length of such an extension's body is its extent. wz reads the fields of a timestamp, a
+//! timestamp stack, a responder and a source info from the bytes the length covers and from
+//! nothing else, and a body those fields do not fill exactly is malformed, in both directions by
+//! one rule: fields that run past the length, and bytes the fields leave in the body, are each
+//! [`ExtAdmission::MalformedExt`]. zenoh 1.10.2 reads the header and the length of each of these
+//! and then reads the fields from the message's reader rather than from the body, so it never
+//! holds the fields to the length (`commons/zenoh-codec/src/network/mod.rs` @
+//! `let (_, more): (ZExtZBufHeader<{ ID }>, bool) = self.read(&mut *reader)?;`, followed by
+//! `let timestamp: uhlc::Timestamp = self.codec.read(&mut *reader)?;`; the same shape in
+//! `commons/zenoh-codec/src/zenoh/mod.rs` @ `let sn: u32 = self.codec.read(&mut *reader)?;` and
+//! `commons/zenoh-codec/src/network/timestamp_stack.rs` @
+//! `let ts_stack: TimestampStack = self.codec.read(&mut *reader)?;`). For a sender whose length
+//! agrees with its fields the two readings are one. For one whose length disagrees, upstream reads
+//! the fields across the end of the body into what follows it, or reads the bytes the fields leave
+//! as the next extension or as the message's own body: a reading that depends on bytes the
+//! extension does not own, which is why it is not the preset's contract and wz refuses the
+//! message. An undeclaration's wire expression and a Query's value are read inside the body by
+//! upstream as well (`commons/zenoh-codec/src/network/declare.rs` @
+//! `let mut zeader = ext.value.reader();`), so wz reads them as upstream does: the suffix and the
+//! payload are the rest of the body. The differential test
+//! `conformance/differential/tests/zenoh_ext_body_extent.rs` records both answers on bodies one
+//! byte shorter and one byte longer than their fields.
+//!
 //! [`judge_ext_entries`] judges the entries of a network or zenoh-body chain,
 //! headers and bodies, in chain order, and answers
 //! [`ExtAdmission::MalformedExt`] for a body the declared extension's reader
@@ -100,6 +123,10 @@
 //! that is not mandatory and has no body rule, such as a Push's QoS) with no call, and the
 //! verdict on a chain whose every entry reads (`judge_end`), which a caller that names its
 //! carrier as a constant reads as a constant.
+//!
+//! [`judge_ext_entries`]: crate::ext_admit::judge_ext_entries
+//! [`judge_ext_chain`]: crate::ext_admit::judge_ext_chain
+//! [`ExtAdmission::MalformedExt`]: crate::ext_admit::ExtAdmission::MalformedExt
 
 use crate::ext_header::{ext_eid, EXT_ENC_MASK, EXT_FLAG_M};
 use wz_codecs::wire_const;
@@ -696,12 +723,11 @@ const fn eid_bit(eid: u8) -> u128 {
 /// other than the encoding the rule reads (no ZInt for a ZInt rule, no plain bytes for a ZBuf
 /// one) is not this reader's to judge, and reads.
 ///
-/// Upstream's readers of a timestamp, a responder, a source info and a timestamp stack read their
-/// fields from the message's reader after the extension's length, not from the bytes the length
-/// covers; wz reads the fields from those bytes, so fields that run past the length are refused
-/// here where upstream would read on into what follows them, and bytes the fields leave over are
-/// read past here where upstream would read them as the next extension. Both are a sender that
-/// wrote a length its fields do not have.
+/// The fields of a timestamp, a responder, a source info and a timestamp stack must fill the body
+/// exactly ([`fields_fill_the_body`]): fields that run past the length and bytes the fields leave
+/// over are both refused, where upstream reads on into what follows the body or reads the leftover
+/// bytes as the next extension (the module's section on a declared extension whose body its reader
+/// refuses says why the bounded reading is the contract).
 fn body_reads(rule: BodyRule, body: JudgedBody<'_>) -> bool {
     let bytes = match body {
         JudgedBody::Zint(target) => return rule != BodyRule::QueryTarget || target <= 2,
@@ -720,7 +746,18 @@ fn body_reads(rule: BodyRule, body: JudgedBody<'_>) -> bool {
         BodyRule::QueryValue => read_encoding(&mut cursor),
         BodyRule::QueryTarget => Some(()),
     };
-    read.is_some()
+    read.is_some() && (!fields_fill_the_body(rule) || cursor.remaining() == 0)
+}
+
+/// Whether the fields the reader `rule` names are the whole of the extension's body, so that a
+/// body they end before is malformed. An undeclaration's suffix and a Query's payload are the rest
+/// of the body, which upstream also reads inside the body, and a Request's target is a ZInt with
+/// no length.
+const fn fields_fill_the_body(rule: BodyRule) -> bool {
+    matches!(
+        rule,
+        BodyRule::Timestamp | BodyRule::TsStack | BodyRule::EntityGlobalId | BodyRule::SourceInfo
+    )
 }
 
 /// One byte.
@@ -1388,6 +1425,142 @@ mod tests {
         assert_eq!(
             judge_ext_entries(ExtCarrier::Transport(0x1F), [zbuf(0x42, &[])]),
             ExtAdmission::Unjudged
+        );
+    }
+
+    /// For each carrier in `carriers`, the extension `header` is read with the body its fields fill
+    /// exactly, and refused with a body one byte `shorter` than its fields and one a byte `longer`.
+    #[track_caller]
+    fn assert_the_length_is_the_extent(
+        carriers: &[ExtCarrier],
+        header: u8,
+        exact: &'static [u8],
+        shorter: &'static [u8],
+        longer: &'static [u8],
+    ) {
+        assert_eq!(
+            shorter.len() + 1,
+            exact.len(),
+            "{header:#04x}: one byte short"
+        );
+        assert_eq!(
+            longer.len(),
+            exact.len() + 1,
+            "{header:#04x}: one byte over"
+        );
+        let refused = ExtAdmission::MalformedExt {
+            eid: ext_eid(header),
+        };
+        for &carrier in carriers {
+            assert_eq!(
+                judge_ext_entries(carrier, [zbuf(header, exact)]),
+                ExtAdmission::Admissible,
+                "{carrier:?}: {header:#04x}: the body its fields fill"
+            );
+            assert_eq!(
+                judge_ext_entries(carrier, [zbuf(header, shorter)]),
+                refused,
+                "{carrier:?}: {header:#04x}: fields past the length"
+            );
+            assert_eq!(
+                judge_ext_entries(carrier, [zbuf(header, longer)]),
+                refused,
+                "{carrier:?}: {header:#04x}: a byte the fields leave over"
+            );
+        }
+    }
+
+    /// A timestamp's length is the extent of its time, the length of its id and the id, on every
+    /// network message. Turned red by `fields_fill_the_body` leaving out `BodyRule::Timestamp`,
+    /// which reads past the byte a longer body leaves over.
+    #[test]
+    fn a_timestamp_body_its_fields_do_not_fill_is_refused_both_ways() {
+        use NetworkEnvelope as N;
+        let carriers = [
+            N::Push,
+            N::Request,
+            N::Response,
+            N::ResponseFinal,
+            N::Interest,
+            N::Declare,
+            N::Oam,
+        ]
+        .map(ExtCarrier::Network);
+        assert_the_length_is_the_extent(
+            &carriers,
+            TIMESTAMP_EID,
+            &[0x05, 0x02, 0x01, 0x8E],
+            &[0x05, 0x02, 0x01],
+            &[0x05, 0x02, 0x01, 0x8E, 0x8E],
+        );
+    }
+
+    /// A timestamp stack's length is the extent of its flags, its count and its interceptions.
+    /// Turned red by `fields_fill_the_body` leaving out `BodyRule::TsStack`.
+    #[test]
+    fn a_timestamp_stack_body_its_fields_do_not_fill_is_refused_both_ways() {
+        use NetworkEnvelope as N;
+        let carriers = [N::Push, N::Request, N::Response].map(ExtCarrier::Network);
+        assert_the_length_is_the_extent(
+            &carriers,
+            TS_STACK_EID,
+            &[0x01, 0x01, 0x02, 0x01, 0xAA],
+            &[0x01, 0x01, 0x02, 0x01],
+            &[0x01, 0x01, 0x02, 0x01, 0xAA, 0x00],
+        );
+    }
+
+    /// A responder's length is the extent of its flags, its zid and its entity id. Turned red by
+    /// `fields_fill_the_body` leaving out `BodyRule::EntityGlobalId`.
+    #[test]
+    fn a_responder_body_its_fields_do_not_fill_is_refused_both_ways() {
+        assert_the_length_is_the_extent(
+            &[ExtCarrier::Network(NetworkEnvelope::Response)],
+            crate::ext_header::network_eid::RESPONDER,
+            &[0x00, 0x01, 0x07],
+            &[0x00, 0x01],
+            &[0x00, 0x01, 0x07, 0x00],
+        );
+    }
+
+    /// A source info's length is the extent of its flags, its zid, its entity id and its sequence
+    /// number, on every zenoh body that declares it. Turned red by `fields_fill_the_body` leaving
+    /// out `BodyRule::SourceInfo`.
+    #[test]
+    fn a_source_info_body_its_fields_do_not_fill_is_refused_both_ways() {
+        use ZenohBody as Z;
+        let carriers = [Z::Put, Z::Del, Z::Query, Z::Err].map(ExtCarrier::Zenoh);
+        assert_the_length_is_the_extent(
+            &carriers,
+            crate::ext_header::body_eid::SOURCE_INFO,
+            &[0x00, 0x01, 0x07, 0x04],
+            &[0x00, 0x01, 0x07],
+            &[0x00, 0x01, 0x07, 0x04, 0x04],
+        );
+    }
+
+    /// The readers whose last field is the rest of the body keep reading it: an undeclaration's
+    /// wire expression with no suffix ignores the bytes after its scope, and a Query's payload is
+    /// whatever follows its encoding, as upstream reads both inside the body. Turned red by
+    /// `fields_fill_the_body` taking in `BodyRule::WireExpr` or `BodyRule::QueryValue`.
+    #[test]
+    fn a_reader_whose_last_field_is_the_rest_of_the_body_reads_what_is_left() {
+        assert_eq!(
+            judge_ext_entries(
+                ExtCarrier::Declaration(DeclarationKind::UndeclToken),
+                [zbuf(WIRE_EXPR_EID, &[0x00, 0x05, 0x77])]
+            ),
+            ExtAdmission::Admissible
+        );
+        assert_eq!(
+            judge_ext_entries(
+                ExtCarrier::Zenoh(ZenohBody::Query),
+                [zbuf(
+                    crate::ext_header::body_eid::QUERY_VALUE,
+                    &[0x00, b'p', b'q']
+                )]
+            ),
+            ExtAdmission::Admissible
         );
     }
 

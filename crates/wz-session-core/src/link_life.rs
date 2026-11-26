@@ -41,6 +41,11 @@
 //!
 //! A handshake that completed is established even when its link ended after: the owner reports
 //! `Established` before `Ended` when it reads both at one look.
+//!
+//! [`UnicastLink`]: crate::link_life::UnicastLink
+//! [`Effects`]: crate::link_life::Effects
+//! [`Effects::removes`]: crate::link_life::Effects::removes
+//! [`LinkRole::Taken`]: crate::link_life::LinkRole::Taken
 
 use core::mem::MaybeUninit;
 use core::ptr::addr_of_mut;

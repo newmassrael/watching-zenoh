@@ -172,6 +172,7 @@ unsafe fn put(session: &z_owned_session_t, keyexpr: &std::ffi::CStr, destination
 
 #[test]
 fn a_sessions_own_put_reaches_its_own_subscriber_inside_the_call() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut session = open_alone();
         let seen: &'static Seen = Box::leak(Box::default());
@@ -196,6 +197,7 @@ fn a_sessions_own_put_reaches_its_own_subscriber_inside_the_call() {
 
 #[test]
 fn the_localities_filter_both_ways() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut session = open_alone();
         let local_only: &'static Seen = Box::leak(Box::default());
@@ -273,6 +275,7 @@ unsafe fn matching(publisher: &z_owned_publisher_t) -> bool {
 
 #[test]
 fn a_publishers_matching_counts_the_sessions_own_subscriber_where_its_destination_does() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut session = open_alone();
         let mut counting = declare_publisher(&session, c"demo/local/m", Z_LOCALITY_ANY);
@@ -334,6 +337,7 @@ unsafe extern "C" fn on_reply(_reply: *mut z_loaned_reply_t, ctx: *mut c_void) {
 
 #[test]
 fn a_sessions_own_get_reaches_its_own_queryable_inside_the_call() {
+    let _program = crate::programs::admit();
     unsafe {
         let mut session = open_alone();
         let asked: &'static Seen = Box::leak(Box::default());

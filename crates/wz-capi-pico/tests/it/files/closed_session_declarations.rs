@@ -94,6 +94,7 @@ unsafe fn declare_publisher(
 /// while the session is open.
 #[test]
 fn a_publisher_on_a_declared_key_of_a_closed_session_is_refused_by_its_filter() {
+    let _program = crate::programs::admit();
     // SAFETY: every handle is made here and let go of once.
     unsafe {
         let mut session = open_listening();

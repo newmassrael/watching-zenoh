@@ -501,7 +501,9 @@ pub(crate) struct Answering<T, K = ()> {
 }
 
 impl<T, K> Answering<T, K> {
-    /// `value`, keeping `kept` for its closures, with none counted yet.
+    /// `value`, keeping `kept` for its closures, with none counted yet, made by value: a test's
+    /// place, whose count's lock is the host's and is not taken before the place is filled.
+    #[cfg(test)]
     pub(crate) fn keeping(value: T, kept: K) -> Self {
         Self {
             value: core::mem::ManuallyDrop::new(value),
@@ -510,8 +512,26 @@ impl<T, K> Answering<T, K> {
         }
     }
 
-    /// As [`Self::keeping`], the value and what is kept written by `write` and `write_kept` in
-    /// the places where they stay: what a value holding a lock is made in, its lock made there
+    /// `value` and `kept` written in the place at `at`, beside a count with none held made there
+    /// (`OpenClosures::init_at`): a kernel's lock is made where it stays.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it and holds none, and the place is not
+    /// moved while it holds one.
+    unsafe fn write_parts(at: *mut Self, value: T, kept: K) {
+        // SAFETY: the caller's: each field is written once through a pointer to it, not null as
+        // `at` is valid.
+        unsafe {
+            core::ptr::addr_of_mut!((*at).value).write(core::mem::ManuallyDrop::new(value));
+            crate::ffi::OpenClosures::init_at(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*at).open
+            )));
+            core::ptr::addr_of_mut!((*at).kept).write(core::mem::ManuallyDrop::new(kept));
+        }
+    }
+
+    /// As `Slot::fill_answering`, the value and what is kept written by `write` and `write_kept`
+    /// in the places where they stay: what a value holding a lock is made in, its lock made there
     /// ([`wz_capi_port::os::mutex_in`]).
     ///
     /// # Safety
@@ -529,11 +549,23 @@ impl<T, K> Answering<T, K> {
             write(NonNull::new_unchecked(
                 core::ptr::addr_of_mut!((*at).value).cast::<T>(),
             ));
-            core::ptr::addr_of_mut!((*at).open).write(crate::ffi::OpenClosures::default());
+            crate::ffi::OpenClosures::init_at(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*at).open
+            )));
             write_kept(NonNull::new_unchecked(
                 core::ptr::addr_of_mut!((*at).kept).cast::<K>(),
             ));
         }
+    }
+}
+
+impl<T, K> Slot<Answering<T, K>> {
+    /// The place filled with `value`, keeping `kept` for its closures, with none counted yet:
+    /// each part written where it stays, the count's lock made there.
+    pub(crate) fn fill_answering(self, value: T, kept: K) -> *mut Answering<T, K> {
+        // SAFETY: the slot's place is sized and aligned for an `Answering<T, K>` and holds none,
+        // and `write_parts` leaves one there.
+        unsafe { self.fill_in_place(|at| Answering::write_parts(at, value, kept)) }
     }
 }
 
@@ -1126,9 +1158,10 @@ mod tests {
         assert!(places > 0, "the session's limit admits queriers");
 
         let drops = core::cell::Cell::new(0);
-        let object = Slot::take_entity(&engine, Kind::Querier)
+        // Filled as a door fills an entity's place, its count made where it stays.
+        let object = Slot::<Answering<Counted<'_>>>::take_entity(&engine, Kind::Querier)
             .expect("a querier's place")
-            .fill(Answering::keeping(Counted(&drops), ()))
+            .fill_answering(Counted(&drops), ())
             .cast::<Counted<'_>>();
         let mut closure = crate::ffi::CClosure::<Option<unsafe extern "C" fn()>>::uncounted(
             core::ptr::null_mut(),
@@ -1295,6 +1328,73 @@ mod tests {
             HeldPlaces::handle(HANDLE),
             "every build has publishers, so some place is held"
         );
+    }
+
+    /// Every kind of entity the build has, whose door it exports, is laid at least one place in
+    /// the arena of a session that opens under the opening limits and states nothing, a client of
+    /// as many endpoints as the build dials; and in a build that opens by its region, whose tables
+    /// no config resizes, a querier and a liveliness subscriber are laid two, where the build's
+    /// domain holds two, so a program holds a second of each. Turned red by a kind left out of the
+    /// rows (`entity_rows` in `wz-capi-coop`) or a region laid out under the open values.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    fn every_built_kind_is_laid_a_place_by_the_open_of_a_session_that_states_nothing() {
+        use crate::session::{opening_limits, pico_unicast_batch};
+        use wz_capi_coop::arena::{ArenaPlan, PlanShape};
+        let limits = opening_limits();
+        let shape = PlanShape::dial_only(
+            wz_session_core::caps::MAX_STATIC_CONNECT,
+            pico_unicast_batch(&limits),
+        );
+        let rows = ArenaPlan::planned(shape, &limits)
+            .expect("a client of the opening limits lays out")
+            .entities();
+        let built: Vec<(Kind, wz_capi_port::EntityKind)> = BUILT_KINDS
+            .into_iter()
+            .flatten()
+            .filter_map(|kind| Some((kind, entity_place(kind)?.0)))
+            .collect();
+        assert!(
+            built.iter().any(|(kind, _)| *kind == Kind::Publisher),
+            "CONTROL: every build has publishers"
+        );
+        for (kind, entity) in &built {
+            assert!(
+                rows.of_kind(*entity) >= 1,
+                "{kind:?} is a kind the build has, and its session is laid no place for one"
+            );
+        }
+        #[cfg(all(
+            feature = "query",
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        if wz_session_core::limits::SessionLimits::defaults()
+            .select_max_queriers(wz_session_core::limit_binding::Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(rows.of_kind(wz_capi_port::EntityKind::Querier), 2);
+        }
+        #[cfg(all(
+            feature = "liveliness",
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        if wz_session_core::limits::SessionLimits::defaults()
+            .select_max_liveliness_subscriptions(wz_session_core::limit_binding::Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(
+                rows.of_kind(wz_capi_port::EntityKind::LivelinessSubscriber),
+                2
+            );
+        }
     }
 
     /// What one entity of each kind takes of its session's arena for the ABI's object, printed for

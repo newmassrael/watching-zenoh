@@ -408,7 +408,7 @@ use crate::interceptor::InterceptorKeyexprCache;
 use crate::interceptor::{
     InterceptorChain, InterceptorConfig, InterceptorContext, InterceptorFlow, InterceptorVerdict,
 };
-use crate::linkstate_forward::{
+use crate::linkstate_routes::{
     absorb_keyexpr_into, all_query_directions, bring_client_routes, bring_mesh_routes,
     build_declare_queryable_with_info, client_inputs, client_query_route, client_route,
     complete_query_directions, compute_push_forward, compute_self_publish_forward,
@@ -2138,19 +2138,12 @@ fn lent_keyexpr<'k>(
     }
 }
 
-/// R2684 — MOVED to [`crate::linkstate_forward`], re-exported here so the
-/// router-hat paths that already name it keep working.
-///
-/// It moved because of which FEATURE each module sits behind: this one is
-/// `routing-router-hat`, `linkstate_forward` is `routing-peer`, and the graph
-/// the view renders — `LinkstateNetwork` — belongs to the PEER tier. A plain
-/// linkstate peer therefore owned the data and could not name the handle that
-/// renders it, which is why the peers' `linkstate/<region>` leg was servable only
-/// from a router.
-/// The type and its impl were never gated within this module; only the module's
-/// own `#[cfg]` confined them.
+/// The read-only view of one mesh graph that `routers_net_view` and `peers_net_view` hand
+/// out, and the one public path a host names it by.
+/// It is defined in the crate-private route cores (`linkstate_routes`), beside the graph handle
+/// it reads through.
 #[cfg(feature = "adminspace-router-linkstate")]
-pub use crate::linkstate_forward::LinkstateNetView;
+pub use crate::linkstate_routes::LinkstateNetView;
 
 /// `resource-snapshot` — a read-only handle over the router's face set that answers what the
 /// faces' receive paths have counted, those that are up and those that have gone, as one reading
@@ -4104,7 +4097,7 @@ impl Tables {
 
 /// The graph of one mesh region of a router, named by the region and read through the router's
 /// tables when it is asked for: what a view or a node-locator keeps of a graph that is a field
-/// of a hat and so cannot be held on its own ([`crate::linkstate_forward::NetHandle`]).
+/// of a hat and so cannot be held on its own ([`crate::linkstate_routes::NetHandle`]).
 #[cfg(any(
     feature = "adminspace-router-linkstate",
     all(
@@ -4126,7 +4119,7 @@ pub(crate) struct TablesNet {
         feature = "router-connect-reconcile"
     )
 ))]
-impl crate::linkstate_forward::NetHandle for TablesNet {
+impl crate::linkstate_routes::NetHandle for TablesNet {
     fn with_net(&self, f: &mut dyn FnMut(&LinkstateNetwork)) {
         let tables = self.tables.read();
         f(&tables.mesh(self.region).net);
@@ -4688,7 +4681,8 @@ impl RouterForwarder {
     /// The queryable is called with no tables held: it is the program's callback and may declare
     /// on the node or ask it a query. Only [`Self::deliver_owed`] calls this, once the span of the
     /// route that owed the job has ended and its guard is let go. The tables are taken for reading
-    /// after the handler returns, to send its replies and to end the branch.
+    /// to send each reply as the handler makes it, and after the handler returns to end the
+    /// branch.
     fn run_query_job(&self, job: QueryJob) {
         let QueryJob {
             handler,
@@ -4715,8 +4709,22 @@ impl RouterForwarder {
         } else {
             &full
         };
-        let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(self.reply_bounds());
+        // Each reply leaves as the handler makes it, under the tables taken for reading for that
+        // send alone: nothing is held between two replies, so no count of rows bounds how many
+        // one query has, as zenoh-pico's queryable sends each at the call.
+        let namespaced = record.namespaced;
         {
+            let mut replies = wz_session_core::reply_pass::ReplyPass::new(
+                self.reply_bounds(),
+                |parts: wz_session_core::reply_stage::ReplyParts<'_>| {
+                    self.on_tables().send_queryable_reply(
+                        wz_session_core::query::QueryReply::from_parts(&parts),
+                        inbound,
+                        reliable,
+                        namespaced,
+                    );
+                },
+            );
             let mut responder = QueryResponder::new(
                 full.rid(),
                 view.keyexpr().to_string(),
@@ -4730,8 +4738,6 @@ impl RouterForwarder {
             let _ = handler.call(|h| h(view, &mut responder));
             HOSTED_QUERY.with(|current| *current.borrow_mut() = previous);
         }
-        self.on_tables()
-            .send_hosted_replies(replies, inbound, reliable, record.namespaced);
         // The handler has returned: its hold is let go, and the branch ends with the last.
         self.release_held(&record);
     }
@@ -5688,7 +5694,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 Arc::new(TablesNet {
                     tables: Arc::clone(&self.fwd.tables),
                     region,
-                }) as Arc<dyn crate::linkstate_forward::NetHandle + Send + Sync>
+                }) as Arc<dyn crate::linkstate_routes::NetHandle + Send + Sync>
             })
             .collect();
         crate::session_lifecycle_open::NodeLocators::new(nets)
@@ -7013,7 +7019,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
             self.interceptor_dropped.bump();
             // Charge the drop to the DESTINATION face's own
             // session on upstream's per-reason counter.
-            crate::linkstate_forward::charge_interceptor_drop(
+            crate::linkstate_routes::charge_interceptor_drop(
                 &face.runtime.actions,
                 &msg,
                 kind,
@@ -11932,13 +11938,9 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
     /// sample of `push` to each hosted subscriber that matches `keyexpr`.
     #[cfg(any(feature = "pubsub-put", feature = "pubsub-delete"))]
     fn deliver_push_to_hosted(&self, reliable: bool, push: &PushOwned, keyexpr: &str) {
-        // The body a host subscriber sees — Put payload raw, Del as the Del kind
-        // with an empty payload, moved with the peer twin in R2646 and for the
-        // same reason (`linkstate_forward.rs` @ `R2646 — THE DEL ARM`, which
-        // carries the full note). Both planes stay one behaviour: this comment
-        // used to read "a host subscriber sees Puts", which described the twin
-        // accurately and was a statement of the LIMIT, not of a policy —
-        // upstream's admin subscriber is handed the whole body.
+        // The body a host subscriber sees: a Put's payload raw, a Del as the Del
+        // kind with an empty payload. Upstream hands its admin subscriber the whole
+        // body, so delivering only Puts would be a limit of this plane, not a policy.
         let reliability = if reliable {
             crate::Reliability::Reliable
         } else {
@@ -12469,7 +12471,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
                 is_peer_hat(*region, self.tables.node_mode) && hat.mesh().is_some()
             })
             .map(|(region, _)| region);
-        let net: Arc<dyn crate::linkstate_forward::NetHandle + Send + Sync> =
+        let net: Arc<dyn crate::linkstate_routes::NetHandle + Send + Sync> =
             match first_peers_region {
                 Some(region) => Arc::new(TablesNet {
                     tables: Arc::clone(&self.fwd.tables),
@@ -12652,19 +12654,26 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         let Some(to) = self.pending.guard().peek(LOCAL_FACE, record.qid) else {
             return;
         };
-        let mut replies =
-            wz_session_core::reply_stage::ReplyStage::held_to(self.fwd.reply_bounds());
-        {
-            let mut responder = QueryResponder::new(
-                to.rid,
-                record.keyexpr.clone(),
-                record.accept,
-                to.qos,
-                &mut replies,
-            );
-            answer(&mut responder);
-        }
-        self.send_hosted_replies(replies, to.face, record.reliable, record.namespaced);
+        // Each reply leaves as `answer` makes it, as a hosted queryable's does from its job.
+        let mut replies = wz_session_core::reply_pass::ReplyPass::new(
+            self.fwd.reply_bounds(),
+            |parts: wz_session_core::reply_stage::ReplyParts<'_>| {
+                self.send_queryable_reply(
+                    wz_session_core::query::QueryReply::from_parts(&parts),
+                    to.face,
+                    record.reliable,
+                    record.namespaced,
+                );
+            },
+        );
+        let mut responder = QueryResponder::new(
+            to.rid,
+            record.keyexpr.clone(),
+            record.accept,
+            to.qos,
+            &mut replies,
+        );
+        answer(&mut responder);
     }
 
     /// Let go of one hold of a held query; the last one ends its branch of the fan, which sends
@@ -13893,38 +13902,36 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         self.send_to_face(target, reliable, build)
     }
 
-    /// Send what a queryable of the node's own session staged in `replies` to the face `target`
-    /// that asked, each under the session's namespace when the queryable is `namespaced`. A
-    /// reply whose payload is a buffer of shared memory goes as the buffer, as a publication of
-    /// one does ([`Self::publish_shm_with`]): the faces are sent its descriptor with a reference
-    /// of their own or its bytes, through the pass that holds it, and a get of the session
-    /// itself is handed the buffer.
-    fn send_hosted_replies(
+    /// Send a reply a queryable of the node's own session made to the face `target` that asked,
+    /// under the session's namespace when the queryable is `namespaced`. A reply whose payload
+    /// is a buffer of shared memory goes as the buffer, as a publication of one does
+    /// ([`Self::publish_shm_with`]): the faces are sent its descriptor with a reference of their
+    /// own or its bytes, through the pass that holds it, and a get of the session itself is
+    /// handed the buffer.
+    fn send_queryable_reply(
         &self,
-        replies: wz_session_core::reply_stage::ReplyStage,
+        reply: wz_session_core::query::QueryReply,
         target: FaceId,
         reliable: bool,
         namespaced: bool,
     ) {
-        for reply in replies {
-            #[cfg(feature = "transport-shm")]
-            if let Some(handle) = reply.shared_payload().cloned() {
-                self.send_hosted_shm_reply(reply, handle, target, reliable, namespaced);
-                continue;
-            }
-            let Ok(mut resp) = reply.into_response() else {
-                continue;
-            };
-            if namespaced {
-                self.fwd.put_under_namespace(&mut resp);
-            }
-            self.send_hosted_reply(target, reliable, || {
-                NetworkMessage::Response(Box::new(resp.clone()))
-            });
+        #[cfg(feature = "transport-shm")]
+        if let Some(handle) = reply.shared_payload().cloned() {
+            self.send_hosted_shm_reply(reply, handle, target, reliable, namespaced);
+            return;
         }
+        let Ok(mut resp) = reply.into_response() else {
+            return;
+        };
+        if namespaced {
+            self.fwd.put_under_namespace(&mut resp);
+        }
+        self.send_hosted_reply(target, reliable, || {
+            NetworkMessage::Response(Box::new(resp.clone()))
+        });
     }
 
-    /// [`Self::send_hosted_replies`] for one reply whose payload is the buffer `handle`.
+    /// [`Self::send_queryable_reply`] for one reply whose payload is the buffer `handle`.
     #[cfg(feature = "transport-shm")]
     fn send_hosted_shm_reply(
         &self,
@@ -14277,7 +14284,7 @@ impl<T: std::ops::Deref<Target = Tables>> OnTables<'_, T> {
         if let Some(kind) = verdict.dropped_by() {
             self.interceptor_dropped.bump();
             if let Some(face) = self.tables.faces.get(&id) {
-                crate::linkstate_forward::charge_interceptor_drop(
+                crate::linkstate_routes::charge_interceptor_drop(
                     &face.runtime.actions,
                     message,
                     kind,
@@ -15137,13 +15144,13 @@ impl RouterForwarder {
         let mut writes_held = 0usize;
         let mut reading: Option<ReadRun<'_>> = None;
         for message in messages {
-            // What upstream routes is the message its decoder made, which holds an extension a
-            // chain repeats once, as its last entry, and so sends it on once: the received
-            // message is made that one before anything reads it, so every way it leaves (a mesh
-            // face, a client's carrier, a group) sends what upstream sends
-            // (`wz_session_core::network_message::without_superseded_exts`). Nearly every
-            // message repeats nothing and is routed as it came.
-            let decoded = wz_session_core::network_message::without_superseded_exts(message);
+            // What upstream routes is the message its decoder made, which holds exactly the
+            // extensions the message's kind declares, a repeated one once as its last entry: the
+            // received message is made that one before anything reads it, so every way it leaves
+            // (a mesh face, a client's carrier, a group) sends what upstream sends
+            // (`wz_session_core::network_message::as_routed`). Nearly every message is routed
+            // as it came.
+            let decoded = wz_session_core::network_message::as_routed(message);
             let message = decoded.as_ref().unwrap_or(message);
             // A topology message, a declaration and an interest write the tables; every other
             // kind reads them.
@@ -15477,9 +15484,9 @@ impl FaceForwarder for RouterForwarder {
         // The subscribers of the node's own session are handed what the group brought once the
         // tables are let go, as a face's frame does: a callback may declare. Declared before
         // the tables are taken, so that it ends after they are let go.
-        // The Push the group brought is routed as upstream's decoder made it, an extension a
-        // chain repeats held once, as a face's frame is ([`Self::forward_frame`]).
-        let decoded = wz_session_core::network_message::push_without_superseded_exts(push);
+        // The Push the group brought is routed as upstream's decoder made it, with exactly the
+        // extensions it declares, as a face's frame is ([`Self::forward_frame`]).
+        let decoded = wz_session_core::network_message::push_as_routed(push);
         let push = decoded.as_ref().unwrap_or(push);
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
@@ -15497,7 +15504,7 @@ impl FaceForwarder for RouterForwarder {
         // The queryables of the node's own session are called once the tables are let go, as
         // for a face's frame. Declared before the tables are taken, so that it ends after.
         // As the Push above: the Request as upstream's decoder made it.
-        let decoded = wz_session_core::network_message::request_without_superseded_exts(request);
+        let decoded = wz_session_core::network_message::request_as_routed(request);
         let request = decoded.as_ref().unwrap_or(request);
         let deliveries = local_publish::DeliveryScope::enter(self);
         self.on_tables()
@@ -18375,29 +18382,21 @@ mod tests {
         );
     }
 
-    /// R2646 — the ROUTER plane's twin of
-    /// `linkstate_forward::tests::peer_local_subscriber_sees_a_del_under_the_del_kind`:
-    /// a router-hosted subscriber observes a Del, under the Del kind and with an
-    /// empty payload.
+    /// R2646 — a router-hosted subscriber observes a Del, under the Del kind and
+    /// with an empty payload.
     ///
-    /// Written as its own test on this plane rather than trusted from the peer one.
-    /// The two dispatches are separate functions with separate match arms, and this
-    /// file's own header names a place where they already DIVERGE on purpose (the
-    /// busy-handler requeue), so "the twin was fixed" is not evidence about this
-    /// plane. It is the router that hosts the `router-connect-reconcile` admin
-    /// config-write handler, so this is the plane an operator's delete actually
-    /// arrives on.
+    /// This forwarder hosts the `router-connect-reconcile` admin config-write
+    /// handler, so this is the plane an operator's delete arrives on.
     ///
     /// Both bodies go through ONE subscriber and the assertion is on the ORDERED
     /// pair: a Del-only fixture cannot separate "the Del kind is delivered" from
     /// "everything is delivered as a Del", and equal payloads could not see a
     /// transposition.
     //
-    // Gated on the same feature as the arm it drives, for the reason its
-    // linkstate twin carries. No lane exposes it here — every guarded
-    // `router_forward` leg keeps default features, and `pubsub-delete` is one
-    // — so this gate is written from the twin's measurement rather than from a
-    // red of its own. Ungated it is a claim that happens to be unmeasured.
+    // Gated on the same feature as the arm it drives: a build without
+    // `pubsub-delete` has no Del arm to observe. No lane exposes the gate, since
+    // every guarded `router_forward` leg keeps default features and
+    // `pubsub-delete` is one of them.
     #[cfg(feature = "pubsub-delete")]
     #[test]
     fn a_router_hosted_subscriber_sees_a_del_under_the_del_kind() {
@@ -25659,6 +25658,76 @@ mod tests {
         }
     }
 
+    /// A Push whose envelope carries an extension a Push does not declare beside one it declares
+    /// leaves the router without the undeclared one and with the declared one, on the mesh relay
+    /// to a router and on the carrier made for a client alike: upstream's Push reader skips the
+    /// undeclared entry (`commons/zenoh-codec/src/network/push.rs` @
+    /// `has_ext = extension::skip(reader, "Push", ext)?;`), so its router forwards none of it.
+    /// Turned red by a forwarding path that routes the received message without
+    /// `wz_session_core::network_message::as_routed`.
+    #[test]
+    fn a_forwarded_push_carries_only_the_extensions_a_push_declares() {
+        use wz_codecs::ext_entry::{ExtEntryOwned, ExtEntryOwnedVariant};
+        use wz_codecs::ext_zint::ExtZint;
+        use wz_session_core::ext_admit::{declared_identities, ExtCarrier, NetworkEnvelope};
+        use wz_session_core::ext_header::{ext_eid, network_eid::QOS};
+        use wz_session_core::push_routing_context::HOPLIMIT_EXT_HEADER;
+        // An extension of id 0xB, a z64 and not mandatory, which a Push does not declare.
+        const UNDECLARED: u8 = 0x2B;
+        let fwd = RouterForwarder::new(zid(0x01));
+        let (a, _sink_a) = face(zid(0xAA), WIRE_ROUTER); // router source
+        let (c, sink_c) = face(zid(0xCC), WIRE_ROUTER); // router subscriber (mesh relay)
+        let (d, sink_d) = face(zid(0xDD), WIRE_CLIENT); // client subscriber (client carrier)
+        fwd.register(FaceId(0), &a);
+        fwd.register(FaceId(1), &c);
+        fwd.register(FaceId(2), &d);
+        advertise_link_back(&fwd, FaceId(0), 0x01, 0xAA, 5);
+        advertise_link_back(&fwd, FaceId(1), 0x01, 0xCC, 5);
+        fwd.tick();
+        forward_one(&fwd, FaceId(1), declare_sub("demo/data"));
+        forward_one(&fwd, FaceId(2), declare_sub("demo/data"));
+        sink_c.reset();
+        sink_d.reset();
+        let mut push = wz_session_core::push_build::build_push_literal("demo/data", b"payload")
+            .expect("build push");
+        let z64 = |header: u8, value: u64| ExtEntryOwned {
+            header,
+            body: ExtEntryOwnedVariant::CodecZenohExtZint(ExtZint { value }),
+        };
+        // The QoS a Push sends by default: data priority, congestion dropped, not express.
+        push.extensions = Some(
+            wz_session_core::held_list::held(vec![z64(UNDECLARED, 1), z64(QOS, 5)])
+                .expect("two entries are within the bound"),
+        );
+        wz_session_core::ext_nodeid::sync_header_z(&mut push.header, true);
+        forward_one(&fwd, FaceId(0), NetworkMessage::Push(Box::new(push)));
+        let declared = declared_identities(ExtCarrier::Network(NetworkEnvelope::Push))
+            .expect("a Push declares its extensions");
+        for (who, sink) in [("router", &sink_c), ("client", &sink_d)] {
+            assert_eq!(sink.frame_count(), 1, "{who}: the Push was forwarded");
+            let forwarded = forwarded_push(&sink.frame_bytes(0));
+            let eids: Vec<u8> = forwarded
+                .extensions
+                .as_deref()
+                .map(|chain| chain.iter().map(|entry| ext_eid(entry.header)).collect())
+                .unwrap_or_default();
+            assert!(
+                !eids.contains(&UNDECLARED),
+                "{who}: the undeclared extension is not forwarded: {eids:02x?}"
+            );
+            assert!(
+                eids.contains(&QOS),
+                "{who}: the declared QoS is forwarded: {eids:02x?}"
+            );
+            // The mesh hop limit is wz's own declaration on a Push, which a mesh egress stamps.
+            assert!(
+                eids.iter()
+                    .all(|eid| declared.contains(eid) || *eid == HOPLIMIT_EXT_HEADER),
+                "{who}: every extension forwarded is one a Push declares: {eids:02x?}"
+            );
+        }
+    }
+
     /// Decode the first forwarded `Push` in a recorded wire frame (the C3b twin
     /// of the linkstate `forwarded_hoplimit`), so a test can assert the
     /// re-injected carrier's self-source node_id + hop budget landed ON THE WIRE.
@@ -30978,6 +31047,90 @@ mod tests {
             fwd.pending.guard().len(),
             0,
             "the branch ended with the last hold"
+        );
+    }
+
+    /// Session limits that state `MAX_PENDING_REPLIES` as two, as the pico preset states it,
+    /// where the build lets a statement choose it, and the build's value otherwise.
+    fn two_pending_replies() -> wz_session_core::limits::SessionLimits {
+        use wz_session_core::limit_binding::{LimitSpec, Quota};
+        use wz_session_core::limits::{MaxPendingReplies, SessionLimits};
+        let mut limits = SessionLimits::defaults();
+        if !MaxPendingReplies::DOMAIN.is_singleton() {
+            limits
+                .select_max_pending_replies(Quota::at_most(2))
+                .expect("two is inside the domain");
+        }
+        limits
+    }
+
+    /// The replies and the final of query `rid` a querier is sent when its query is answered ten
+    /// times.
+    fn ten_replies_then_the_final(rid: u32) -> Vec<String> {
+        let mut sent = vec![format!("Reply {rid}"); 10];
+        sent.push(format!("Final {rid}"));
+        sent
+    }
+
+    /// A hosted queryable answers one query with every reply it makes, whatever count of rows the
+    /// node's limits state for the replies a dispatch holds back: with two stated, all ten replies
+    /// reach the querier, and then the final.
+    #[test]
+    fn a_hosted_queryable_of_a_node_stating_two_pending_replies_sends_all_ten_it_makes() {
+        let fwd = RouterForwarder::new(zid(0x01)).with_limits(&two_pending_replies());
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.tick();
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(|_view: &dyn QueryView, out: &mut dyn ReplyOut| {
+                for _ in 0..10 {
+                    out.reply(b"now");
+                }
+            }),
+        );
+        sink_querier.reset();
+        forward_one(&fwd, FaceId(0), request_best(43, "demo/h"));
+        assert_eq!(
+            responses_sent(&sink_querier),
+            ten_replies_then_the_final(43)
+        );
+        assert_eq!(fwd.pending.guard().len(), 0, "no branch is held");
+    }
+
+    /// The same for a query the hosted queryable keeps: ten replies made through it all reach the
+    /// querier before the final its drop sends.
+    #[test]
+    fn a_kept_query_of_a_node_stating_two_pending_replies_answers_all_ten() {
+        let fwd = Arc::new(RouterForwarder::new(zid(0x01)).with_limits(&two_pending_replies()));
+        let (querier, sink_querier) = face(zid(0xAA), WIRE_CLIENT);
+        fwd.register(FaceId(0), &querier);
+        fwd.tick();
+        let kept = Arc::new(std::sync::Mutex::new(None));
+        let keeper = kept.clone();
+        let router = Arc::downgrade(&fwd);
+        fwd.host_queryable(
+            "demo/h",
+            true,
+            Box::new(move |_view: &dyn QueryView, _out: &mut dyn ReplyOut| {
+                let held = router.upgrade().and_then(|fwd| fwd.hold_current_query());
+                *keeper.lock().unwrap() = held;
+            }),
+        );
+        sink_querier.reset();
+        forward_one(&fwd, FaceId(0), request_best(44, "demo/h"));
+
+        let held = kept.lock().unwrap().take().expect("the query was kept");
+        held.reply(&mut |out: &mut dyn ReplyOut| {
+            for _ in 0..10 {
+                out.reply(b"later");
+            }
+        });
+        drop(held);
+        assert_eq!(
+            responses_sent(&sink_querier),
+            ten_replies_then_the_final(44)
         );
     }
 

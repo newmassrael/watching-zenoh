@@ -8,10 +8,6 @@
 //! `wz_runtime_tokio::session::Queryable` is unchanged.
 
 use super::*;
-// The deferred handler job stages into a `ReplyStage` as the in-dispatch path does,
-// and takes the owned records out of it for the wire or the local reply plane.
-#[cfg(feature = "query-queryable")]
-use wz_session_core::reply_stage::ReplyStaging;
 
 /// Why a stamped reply ([`NodeStamp::reply_at`]) was not staged.
 ///
@@ -407,14 +403,17 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     /// sink copies the matched query out (owned) and stages one queue
     /// job; the job runs the user handler OUTSIDE the observer lock
     /// over a [`wz_session_core::query::QueryResponder`] bound to a
-    /// job-local reply buffer, then routes the accumulated replies by
-    /// query origin — wire queries emit each reply through the actions
-    /// layer directly (the [`Self::dispatch_iteration_event_with`]
-    /// SSOT emits the matching ResponseFinal after the drain, so
-    /// Reply-before-Final holds), local queries deliver back into the
-    /// local reply registry (whose own deferred reply fires drain in
-    /// the same pass). The handler signature is unchanged — deferral
-    /// is invisible at the type level.
+    /// [`wz_session_core::reply_pass::ReplyPass`], which routes each
+    /// reply by query origin as the handler makes it — wire queries
+    /// emit it on the transport's route (the
+    /// [`Self::dispatch_iteration_event_with`] SSOT emits the matching
+    /// ResponseFinal after the drain, so Reply-before-Final holds),
+    /// local queries deliver it into the local reply registry (whose
+    /// own deferred reply fires drain in the same pass). No count of
+    /// rows bounds how many replies one query has, as zenoh-pico's
+    /// queryable sends each at the call; the payload bound still
+    /// refuses a longer one. The handler signature is unchanged —
+    /// deferral is invisible at the type level.
     ///
     /// The wire-reply leg answers on the transport's route
     /// ([`TransportState::reply_route`]): the unicast link's actions, or the group's
@@ -453,15 +452,15 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
         // The clock a reply is stamped with: this session's own, shared with every other
         // consumer of it (`Session::node_hlc`), and held only where the policy asks for it.
         let reply_clock = reply_clock_for(&self.policy, stamps, &self.node_hlc);
-        // The bounds a job stages its replies under: the session's, read without the observer's
-        // lock, since the job runs outside it.
+        // The payload bound a job's replies are held to: the session's, read without the
+        // observer's lock, since the job runs outside it.
         let reply_bounds = self.reply_bounds;
         let sink = move |view: &dyn QueryView, _out: &mut dyn ReplyOut| {
             // The registry-provided responder (`_out`, bound to the
             // observer's pending_replies) is deliberately unused: the
-            // deferred handler's replies are emitted at the drain, and
-            // the registry's Final trigger keys on the MATCH count
-            // (R311li), not on staged replies.
+            // deferred handler's replies leave from its job, each as it
+            // is made, and the registry's Final trigger keys on the MATCH
+            // count (R311li), not on staged replies.
             let owned = OwnedQueryEvent::from_view(view);
             let cell = cell_for_sink.clone();
             let observer = observer.clone();
@@ -490,7 +489,31 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                     Some(shared) => shared,
                     None => &borrowed,
                 };
-                let mut replies = wz_session_core::reply_stage::ReplyStage::held_to(reply_bounds);
+                // Each reply leaves as the handler makes it. The job holds no lock of the
+                // session, so nothing has to wait for one to be let go, and a stage here would
+                // bound how many replies one query may have by rows that keep none of them past
+                // the call. The Finals still follow them: a local query's is released at the end
+                // of this job, and a wire query's is staged by the dispatch behind it.
+                let local = owned.is_local;
+                let mut replies = wz_session_core::reply_pass::ReplyPass::new(
+                    reply_bounds,
+                    |parts: wz_session_core::reply_stage::ReplyParts<'_>| {
+                        let reply = wz_session_core::query::QueryReply::from_parts(&parts);
+                        if local {
+                            // Loopback origin: into the local reply registry (the requester's
+                            // pending entry). The reply plane's own deferred fires staged here
+                            // drain in the same outer pass.
+                            let inbound: crate::reply::InboundReply = reply.into();
+                            R::with_mutex_mut(&observer, |obs| {
+                                obs.face().replies.deliver_local_reply(&inbound);
+                            });
+                        } else {
+                            // Wire origin: onto the route the query came in on; the dispatch
+                            // SSOT emits the ResponseFinal after the drain.
+                            route.send_reply(reply);
+                        }
+                    },
+                );
                 {
                     // R311y834 — the DEFERRED job runs the handler outside
                     // the observer lock, so it rebuilds the responder and
@@ -511,26 +534,6 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
                         responder.with_reply_clock(clock);
                     }
                     handler(view, &mut responder);
-                }
-                if owned.is_local {
-                    // Loopback origin: deliver into the local reply
-                    // registry (the requester's pending entry). The
-                    // reply plane's own deferred fires staged here
-                    // drain in the same outer pass.
-                    R::with_mutex_mut(&observer, |obs| {
-                        for reply in ReplyStaging::drain_staged(&mut replies) {
-                            let inbound: crate::reply::InboundReply = reply.into();
-                            obs.face().replies.deliver_local_reply(&inbound);
-                        }
-                    });
-                } else {
-                    // Wire origin: emit each reply now (lock-free);
-                    // the dispatch SSOT emits the ResponseFinal
-                    // after the drain. Overflow-rejected replies
-                    // are skipped, mirroring flush_pending.
-                    for reply in ReplyStaging::drain_staged(&mut replies) {
-                        route.send_reply(reply);
-                    }
                 }
                 // The Final this job owes is staged behind those replies, and taken by the
                 // loop that runs the job once the job has returned: a drain made here would

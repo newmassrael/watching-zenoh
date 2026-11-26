@@ -131,6 +131,7 @@ fn with_two_sessions(check: impl FnOnce(*const z_loaned_session_t, *const z_loan
 /// against.
 #[test]
 fn the_total_is_the_sum_of_the_bounded_rows() {
+    let _program = crate::programs::admit();
     with_two_sessions(|listener, dialer| {
         for (role, session) in [("listener", listener), ("dialer", dialer)] {
             let (summary, rows) = unsafe { report(session) };
@@ -162,6 +163,7 @@ fn the_total_is_the_sum_of_the_bounded_rows() {
 
 #[test]
 fn the_tables_are_the_session_cores_rows_for_the_limits_the_session_opened_under() {
+    let _program = crate::programs::admit();
     with_two_sessions(|_listener, dialer| {
         let (_, rows) = unsafe { report(dialer) };
         // A config that states no limit opens under zenoh-pico's preset, as every session of the
@@ -183,6 +185,7 @@ fn the_tables_are_the_session_cores_rows_for_the_limits_the_session_opened_under
 
 #[test]
 fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
+    let _program = crate::programs::admit();
     with_two_sessions(|listener, dialer| {
         let (_, dialled) = unsafe { report(dialer) };
         let handle = row(&dialled, "session handle");
@@ -273,6 +276,7 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
 
 #[test]
 fn a_row_past_the_last_and_null_arguments_are_refused() {
+    let _program = crate::programs::admit();
     with_two_sessions(|_listener, dialer| unsafe {
         let mut summary = wz_ext_session_memory_t::default();
         assert_eq!(wz_ext_session_memory(dialer, &mut summary), Z_OK);
@@ -314,6 +318,7 @@ const LOWERED_BATCH_BYTES: usize = 1031;
 #[cfg(feature = "config-document")]
 #[test]
 fn a_document_that_lowers_the_batch_size_is_the_batch_the_report_counts() {
+    let _program = crate::programs::admit();
     use wz_capi_pico::config_policy::wz_ext_config_document;
     use wz_capi_pico::result::Z_ERR_CONFIG_INVALID_VALUE;
     use wz_capi_pico::z_config_drop;

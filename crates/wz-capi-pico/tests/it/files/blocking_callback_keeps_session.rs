@@ -361,6 +361,7 @@ fn run_with_block(block: Duration) -> Run {
 /// long-block verdict below means nothing.
 #[test]
 fn a_callback_that_blocks_briefly_keeps_the_session_and_its_delivery() {
+    let _program = crate::programs::admit();
     let run = run_with_block(SHORT_BLOCK);
     assert!(run.released_in_time, "the blocked callback never returned");
     assert!(!run.ended_while_blocked, "the peer's session ended");
@@ -374,6 +375,7 @@ fn a_callback_that_blocks_briefly_keeps_the_session_and_its_delivery() {
 
 #[test]
 fn a_callback_that_blocks_past_the_lease_keeps_the_session_and_its_delivery() {
+    let _program = crate::programs::admit();
     assert!(
         LONG_BLOCK > LEASE + Duration::from_secs(2),
         "the block must outlast the lease or the test proves nothing"

@@ -560,6 +560,10 @@ pub struct EntityKey<Key> {
     /// names after every other holder may have let it go.
     named: Option<KeyexprHandle>,
     retraction: Retraction,
+    /// Whether the key passed the wire's pre-emit gate when the row was made: judged once there,
+    /// so the key is not walked again at each link it is announced or replayed on
+    /// (`NamedKey::check_outbound`).
+    proven: bool,
 }
 
 impl<Key: KeyBacking> EntityKey<Key> {
@@ -1926,6 +1930,19 @@ fn release_keyexpr<P: Storage>(
     Some(id)
 }
 
+/// A declaration found with its row: the handle the table knows it by and the row it reads.
+type FoundKeyexpr<'a, P> = Option<(
+    KeyexprHandle,
+    &'a KeyexprRow<<P as Storage>::Key, <P as Storage>::KeyLen>,
+)>;
+
+/// The declaration the wire names by `id` and its row: the one search of the declarations by id,
+/// which every lookup that knows only the id reads.
+#[inline(never)]
+fn keyexpr_row_by_id<P: Storage>(keyexprs: &Keyexprs<P>, id: ExprId) -> FoundKeyexpr<'_, P> {
+    keyexprs.iter().find(|(_, row)| row.id() == id)
+}
+
 /// Remove the entity `handle` names from `table`, and its holds of the declarations it names.
 // What the caller drops is taken out of the row here (`hand`), once for every caller, so the
 // whole row is moved no further than this.
@@ -2000,20 +2017,26 @@ impl<P: Storage> Declaring<'_, P> {
             .and_then(|own| Some((own, self.keyexprs.get(own)?.holds())));
         let named = Self::holdable(stated.or_else(|| {
             match form.retraction {
-                Retraction::Named(named) if named.mapping_id != 0 => self
-                    .keyexprs
-                    .iter()
-                    .find(|(_, row)| row.id() == named.mapping_id)
-                    .map(|(handle, row)| (handle, row.holds())),
+                Retraction::Named(named) if named.mapping_id != 0 => {
+                    keyexpr_row_by_id(&*self.keyexprs, named.mapping_id)
+                        .map(|(handle, row)| (handle, row.holds()))
+                }
                 _ => None,
             }
         }))?;
         let key = KeyMaker::shared(self.keys, text).map_err(unkept)?;
+        // A key the gate refuses is kept unproven, and each send of it judges it and refuses it
+        // as before.
+        #[cfg(feature = "storage-profile")]
+        let proven = crate::keyexpr_canon::check_outbound_keyexpr_pico_safe(text).is_ok();
+        #[cfg(not(feature = "storage-profile"))]
+        let proven = false;
         Ok(EntityKey {
             key,
             prefix,
             named,
             retraction: form.retraction,
+            proven,
         })
     }
 
@@ -2319,17 +2342,21 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// row. Ids are minted apart from every declared one, so either way finds the same row. `None`
     /// for the id `0`, which names no declaration.
     pub fn keyexpr_at(&self, declared: KeyexprRef) -> Option<KeyexprHandle> {
+        self.keyexpr_row_at(declared).map(|(handle, _)| handle)
+    }
+
+    /// [`Self::keyexpr_at`] with the row it found: the one lookup of a declaration a holder names,
+    /// which a reader of the row's key reads it in, with no second look at the handle.
+    #[inline(never)]
+    fn keyexpr_row_at(&self, declared: KeyexprRef) -> FoundKeyexpr<'_, P> {
         if declared.id == 0 {
             return None;
         }
-        declared
-            .row
-            .filter(|&row| {
-                self.keyexprs
-                    .get(row)
-                    .is_some_and(|kept| kept.id() == declared.id)
-            })
-            .or_else(|| self.keyexpr_by_id(declared.id))
+        let kept = declared.row.and_then(|row| {
+            let kept = self.keyexprs.get(row)?;
+            (kept.id() == declared.id).then_some((row, kept))
+        });
+        kept.or_else(|| keyexpr_row_by_id(&self.keyexprs, declared.id))
     }
 
     /// The declaration in row `row` when it declares the first bytes of `key`: its id and how many
@@ -2347,10 +2374,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// The declaration the wire names by `id`: a search of the declarations, which a holder that
     /// keeps the row it found ([`Self::keyexpr_at`]) does not make.
     pub fn keyexpr_by_id(&self, id: ExprId) -> Option<KeyexprHandle> {
-        self.keyexprs
-            .iter()
-            .find(|(_, row)| row.id() == id)
-            .map(|(handle, _)| handle)
+        keyexpr_row_by_id(&self.keyexprs, id).map(|(handle, _)| handle)
     }
 
     /// The form of an entity's key whose wire names the declaration `mapping_id` (`0` for none):
@@ -2461,7 +2485,8 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
             .prefix
             .and_then(|prefix| self.keyexprs.get(prefix))
             .and_then(|row| Some(Prefix::of(MappedId::new(row.id())?, text(&row.key))));
-        NamedKey::under_or_whole(whole, declared)
+        let named = NamedKey::under_or_whole(whole, declared)?;
+        Some(if key.proven { named.proven() } else { named })
     }
 
     /// `key`, which the program names by the declaration the wire calls `id` (`0` for none), as
@@ -2475,7 +2500,7 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     /// that row still holds the id ([`Self::keyexpr_at`]).
     pub fn named_at<'k>(&self, key: &'k str, declared: KeyexprRef) -> Option<NamedKey<'k>> {
         let prefix = MappedId::new(declared.id).and_then(|mapped| {
-            let row = self.keyexprs.get(self.keyexpr_at(declared)?)?;
+            let (_, row) = self.keyexpr_row_at(declared)?;
             Some(Prefix::of(mapped, text(&row.key)))
         });
         NamedKey::under_or_whole(key, prefix)
@@ -4239,6 +4264,7 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         )
     }
 
+    #[inline]
     fn deliver_from_peer_marked<D: FnMut(Self::RowId, RowAccess<'_, Self::Sink>)>(
         &mut self,
         key: &str,
@@ -4246,13 +4272,13 @@ impl<F: RowCallbacks, P: Storage> crate::pubsub::LocalSubscribers for SessionTab
         mark: &mut crate::match_set::MatchEntry,
         deliver: D,
     ) -> usize {
-        let key_gate = &mut self.key_gate;
         fire_into_marked(
             &mut self.subscribers,
             mark,
             self.subscriber_epoch,
             key,
-            || !matches!(admit_from_peer(key_gate, key, class), Admission::Refused),
+            &mut self.key_gate,
+            class,
             deliver,
         )
     }

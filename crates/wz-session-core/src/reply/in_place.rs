@@ -12,9 +12,10 @@
 //! ([`resolve_wireexpr_viewed_held`]), the payload, the encodings and the attachment
 //! are read where they lie (the Response is read as its view, a few words and the
 //! bytes its chains occupy, so the walk holds no kilobyte-sized record on the
-//! stack), and every pending get on the reply's rid is handed
+//! stack), and every pending get on the reply's rid, or the one entry the rid names in a
+//! table whose ids each name one ([`ReplyRegistry::reply_to_one`]), is handed
 //! a [`ReplyView`] over those bytes ([`LentReply`]) through the same matcher
-//! the owned path fires through ([`ReplyRegistry::fire_replies_for`]). A reply
+//! the owned path fires through (`ReplyRegistry::fire_replies_for`). A reply
 //! sink's contract was already a view borrowed for the call, so no sink
 //! changes; one that keeps the reply copies it
 //! ([`InboundReply::from_view`](super::InboundReply::from_view)).
@@ -46,7 +47,7 @@ use wz_codecs::response::{ResponseView, ResponseViewVariant};
 // (`wz_codecs::lent`) are sized for the deployment's node.
 use wz_codecs::timestamp::Timestamp;
 
-use super::ReplyRegistry;
+use super::{Reach, ReplyRegistry};
 use crate::bounded::Storage;
 use crate::driver_loop::OwedToProjection;
 use crate::ext_view::walked;
@@ -390,26 +391,29 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         &mut self,
         response: &ResponseView<'_>,
         spaces: MappingSpaces<'_, PS, OS>,
+        reach: Reach,
     ) {
-        match self.deliver_lent(response, spaces) {
+        match self.deliver_lent(response, spaces, reach) {
             Ok(()) => {}
             #[cfg(all(
                 feature = "alloc",
                 not(feature = "rx-lent-only"),
                 any(feature = "pubsub-put", feature = "query-reply")
             ))]
-            Err(Fallback::Sliced) => self.dispatch_owned_projection(response, spaces),
+            Err(Fallback::Sliced) => self.dispatch_owned_projection(response, spaces, reach),
             #[cfg(all(feature = "alloc", not(feature = "rx-lent-only")))]
-            Err(Fallback::KeyexprPastBound) => self.dispatch_owned_projection(response, spaces),
+            Err(Fallback::KeyexprPastBound) => {
+                self.dispatch_owned_projection(response, spaces, reach)
+            }
             #[cfg(all(feature = "pubsub-ts-stack", not(feature = "rx-lent-only")))]
-            Err(Fallback::Instrumented) => self.dispatch_owned_projection(response, spaces),
+            Err(Fallback::Instrumented) => self.dispatch_owned_projection(response, spaces, reach),
             // With no allocator, or in a build that lends only (`rx-lent-only`), there is no
             // owned projection to fall back on: a reply the lent form cannot represent is
             // dropped, and the pending get it answers ends by its own timeout, as it does for a
             // reply that never came.
             #[cfg(any(not(feature = "alloc"), feature = "rx-lent-only"))]
             Err(_) => {
-                let _ = spaces;
+                let _ = (spaces, reach);
             }
         }
     }
@@ -420,10 +424,11 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         &mut self,
         response: &ResponseView<'_>,
         spaces: MappingSpaces<'_, PS, OS>,
+        reach: Reach,
     ) -> Result<(), Fallback> {
         let mut room = ReplyRoom::default();
         if let Some(reply) = lent_reply(response, spaces, &mut room)? {
-            self.fire_replies_for(&reply, true);
+            self.fire_to(&reply, reach);
         }
         Ok(())
     }
@@ -437,9 +442,10 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         &mut self,
         response: &ResponseView<'_>,
         spaces: MappingSpaces<'_, PS, OS>,
+        reach: Reach,
     ) {
         if let Some(inbound) = self.project_response(response, spaces) {
-            self.fire_replies_for(&inbound, true);
+            self.fire_to(&inbound, reach);
         }
     }
 

@@ -901,7 +901,7 @@
               "x-wz-wire": "none"
             },
             "MAX_PENDING_REPLIES": {
-              "description": "The replies a session's queryables may have ready to send between two sends.",
+              "description": "The replies a dispatch that calls a session's queryables under the session's lock holds back until the lock is let go and they are sent.",
               "oneOf": [
                 {
                   "type": "integer",
@@ -1126,6 +1126,25 @@
               "maximum": 4294967295,
               "default": 4,
               "x-wz-kind": "parameter",
+              "x-wz-storage": "both",
+              "x-wz-scope": "session",
+              "x-wz-binding-heap": "open",
+              "x-wz-binding-fixed": "open",
+              "x-wz-wire": "none"
+            },
+            "REASSEMBLY_CHAINS": {
+              "description": "How many buffers, each as long as PICO_FRAG_MAX_BYTES, the links of a session share to rejoin fragmented messages in when its engine lends them from the session's memory at open.",
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "const": "unbounded"
+                }
+              ],
+              "x-wz-kind": "bound",
+              "x-wz-driven": "remote",
               "x-wz-storage": "both",
               "x-wz-scope": "session",
               "x-wz-binding-heap": "open",

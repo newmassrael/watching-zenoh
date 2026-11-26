@@ -1589,8 +1589,9 @@ pub mod source_info_ext;
 /// `attachment-bytes` catalog primitive that the `pubsub-attachment` /
 /// `query-attachment` consumer features select; owns the one encode /
 /// decode pair the Push / Query × encode / decode sites previously each
-/// re-derived. Sibling of `source_info_ext`.
-#[cfg(all(feature = "alloc", feature = "attachment-bytes"))]
+/// re-derived. Sibling of `source_info_ext`. A build without a heap holds the
+/// reader of an attachment where its frame lies; the rest is the heap's.
+#[cfg(feature = "attachment-bytes")]
 pub mod attachment;
 
 // SSOT for the Query body VALUE extension wire shape (the querier's attached
@@ -1946,6 +1947,11 @@ pub mod query;
 /// one, where a reply or a request that does not fit is refused and counted.
 #[cfg(feature = "storage-profile")]
 pub mod reply_stage;
+
+/// A reply handed on as its queryable makes it, held to the session's payload bound and to no
+/// count of rows: what a callback that runs with no lock of the session held answers through.
+#[cfg(feature = "storage-profile")]
+pub mod reply_pass;
 
 /// What a consolidating get holds back, and the one rule it holds by: the owned replies of one get
 /// on the heap, or the rows of the session's one table of held replies, with no allocation.

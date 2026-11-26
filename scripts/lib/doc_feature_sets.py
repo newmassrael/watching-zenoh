@@ -31,6 +31,17 @@ and not named is a hole, and one named but held by a set is a stale entry.
 A crate with no `[package.metadata.wz-docs]` is documented once, under `--all-features`, which is
 what the lane always did.
 
+THE TARGETS. The same sets are the configurations the lanes that build a crate's TARGETS use: Layer
+C1bf and pre-push gate 7 clippy each one, the reduced points clippy each one without a feature, and
+the test census of `nondefault-tests-gate.sh` lists the tests each one builds. A set builds every
+target unless it declares `clippy-targets`, a list of cargo target selectors. That is for a set
+whose test targets cannot be built on its own configuration: a dev-dependency follows its own
+features and not the crate's, or the tests name the heap the set gives up. The manifest says why
+beside the declaration, and the declaration is read here, so every one of those lanes builds the
+targets one statement names. The census lists a narrowed set's tests only through the selectors
+that build a target in test mode (`--tests`, `--benches`): a set narrowed to its library builds
+no test, lists none, and adds nothing to the census.
+
 THE OTHER DIRECTION. Those sets are the LARGEST configurations, and a doc link can only break in a
 smaller one: a link from an item that is compiled to an item that is not. `slot_plane`'s docs
 linked `slot_group`, which needs `transport-multicast`; the crate root's linked `connect_manager`,
@@ -60,6 +71,11 @@ docs carry are measured in the dependency; the residue is a crate's links INTO i
 Usage:
     doc_feature_sets.py <crate>            one line per largest set: `<label> <cargo argument>...`
     doc_feature_sets.py --reduced <crate>  the same, one line per reduced configuration
+    doc_feature_sets.py --clippy <crate>   one line per largest set: `<label>`, the target
+                                           selectors it builds, then its cargo arguments
+    doc_feature_sets.py --tests <crate>    one line per largest set: `<label>`, then the
+                                           `cargo test` arguments that list its tests; the label
+                                           alone for a set whose targets build no test
     doc_feature_sets.py --selftest
 Exit: 0 sets printed; 1 usage or the workspace could not be read; 2 the manifest is wrong.
 """
@@ -75,6 +91,13 @@ from pathlib import Path
 ALL_FEATURES = "--all-features"
 NO_DEFAULT_FEATURES = "--no-default-features"
 METADATA_KEY = "wz-docs"
+TARGETS_KEY = "clippy-targets"
+ALL_TARGETS = "--all-targets"
+# The cargo target selectors a set may narrow its targets to.
+TARGET_SELECTORS = (ALL_TARGETS, "--lib", "--bins", "--tests", "--examples", "--benches")
+# The selectors that build a target in test mode, so `cargo test --list` lists what they build.
+# `--lib`, `--bins` and `--examples` build a target as it ships, with no test compiled in it.
+TEST_SELECTORS = ("--tests", "--benches")
 # The cargo targets `cargo doc` documents.
 DOCUMENTED_KINDS = {"lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro", "bin"}
 CFG_FEATURE = re.compile(r'feature\s*=\s*"([^"]+)"')
@@ -119,6 +142,25 @@ def feature_set(features: dict[str, list[str]], except_: list[str]) -> list[str]
     ]
 
 
+def entry_targets(entry: dict) -> list[str]:
+    """The target selectors a declared set builds: its `clippy-targets`, or every target."""
+    if TARGETS_KEY not in entry:
+        return [ALL_TARGETS]
+    targets = entry[TARGETS_KEY]
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or any(t not in TARGET_SELECTORS for t in targets)
+        or len(set(targets)) != len(targets)
+        or (ALL_TARGETS in targets and len(targets) > 1)
+    ):
+        raise ManifestError(
+            f"the set {entry.get('name')!r} declares {TARGETS_KEY} {targets!r}; want a non-empty "
+            f"list of distinct selectors from {list(TARGET_SELECTORS)}, {ALL_TARGETS} alone"
+        )
+    return list(targets)
+
+
 def documentation_sets(package: dict) -> list[tuple[str, list[str]]]:
     """`[(set name, [feature, ...])]` for a package, or `[]` when it documents once."""
     config = (package.get("metadata") or {}).get(METADATA_KEY)
@@ -136,6 +178,7 @@ def documentation_sets(package: dict) -> list[tuple[str, list[str]]]:
         if not name or name in names:
             raise ManifestError(f"a feature set is unnamed or named twice: {name!r}")
         names.add(name)
+        entry_targets(entry)
         sets.append((name, feature_set(features, list(entry.get("except", [])))))
 
     # A feature in no set is either named as refused or is a hole. Both directions are checked,
@@ -177,6 +220,42 @@ def cargo_arguments(package: dict) -> list[tuple[str, list[str]]]:
     if not sets:
         return [("all", [ALL_FEATURES])]
     return [(name, features_argument(members)) for name, members in sets]
+
+
+def declared_targets(package: dict) -> dict[str, list[str]]:
+    """`set name -> target selectors` for every largest set of the package: `all` and every
+    target for a crate that declares no set."""
+    if not documentation_sets(package):
+        return {"all": [ALL_TARGETS]}
+    entries = package["metadata"][METADATA_KEY]["feature-sets"]
+    return {entry["name"]: entry_targets(entry) for entry in entries}
+
+
+def clippy_arguments(package: dict) -> list[tuple[str, list[str]]]:
+    """`[(label, cargo arguments)]` a lane that builds each largest configuration's targets runs:
+    the target selectors the set declares, then its features."""
+    targets = declared_targets(package)
+    return [(label, targets[label] + args) for label, args in cargo_arguments(package)]
+
+
+def test_selectors(targets: list[str]) -> list[str] | None:
+    """The `cargo test` selectors that list the tests a set's `targets` build: none for every
+    target (`cargo test`'s own, as the census always listed), the test-mode selectors of a
+    narrowed set, and `None` for a set whose targets build no test."""
+    if targets == [ALL_TARGETS]:
+        return []
+    return [t for t in targets if t in TEST_SELECTORS] or None
+
+
+def test_arguments(package: dict) -> list[tuple[str, list[str] | None]]:
+    """`[(label, cargo test arguments)]`, one per largest configuration; `None` for a set that
+    builds no test, which the census reads as a set with nothing to list."""
+    targets = declared_targets(package)
+    listed: list[tuple[str, list[str] | None]] = []
+    for label, args in cargo_arguments(package):
+        selectors = test_selectors(targets[label])
+        listed.append((label, None if selectors is None else selectors + args))
+    return listed
 
 
 def documented_sources(package: dict) -> list[Path]:
@@ -344,6 +423,52 @@ def selftest() -> int:
 
     # No metadata is one build with every feature, as before.
     assert cargo_arguments({"features": features}) == [("all", [ALL_FEATURES])]
+    assert clippy_arguments({"features": features}) == [("all", [ALL_TARGETS, ALL_FEATURES])]
+    assert test_arguments({"features": features}) == [("all", [ALL_FEATURES])]
+
+    # The targets. A set that declares none builds every target and its tests are listed with
+    # `cargo test`'s own targets; one narrowed to its library builds no test and lists none; one
+    # that names a test-mode selector lists through that selector alone.
+    def targeted(lean: object) -> dict:
+        return {
+            "features": {"alloc": [], "slot": [], "tls": []},
+            "metadata": {
+                METADATA_KEY: {
+                    "feature-sets": [
+                        {"name": "heap", "except": ["slot"]},
+                        {"name": "lean", "except": ["alloc"], TARGETS_KEY: lean},
+                    ]
+                }
+            },
+        }
+
+    heap_features = [NO_DEFAULT_FEATURES, "--features=alloc,tls"]
+    lean_features = [NO_DEFAULT_FEATURES, "--features=slot,tls"]
+    lib_only = targeted(["--lib"])
+    assert declared_targets(lib_only) == {"heap": [ALL_TARGETS], "lean": ["--lib"]}
+    assert clippy_arguments(lib_only) == [
+        ("heap", [ALL_TARGETS, *heap_features]),
+        ("lean", ["--lib", *lean_features]),
+    ], clippy_arguments(lib_only)
+    assert test_arguments(lib_only) == [("heap", heap_features), ("lean", None)], (
+        test_arguments(lib_only)
+    )
+    with_tests = targeted(["--lib", "--tests"])
+    assert test_arguments(with_tests)[1] == ("lean", ["--tests", *lean_features]), (
+        test_arguments(with_tests)
+    )
+    assert test_arguments(targeted(["--bins", "--examples"]))[1] == ("lean", None)
+    assert test_arguments(targeted([ALL_TARGETS]))[1] == ("lean", lean_features)
+    # A declaration that is not a list of distinct known selectors, or that pairs
+    # `--all-targets` with another, is refused by every reader of the sets, by the set's name.
+    for bad in ([], ["--lob"], ["--lib", "--lib"], [ALL_TARGETS, "--lib"], "--lib"):
+        for reader in (documentation_sets, clippy_arguments, test_arguments):
+            try:
+                reader(targeted(bad))
+            except ManifestError as error:
+                assert "'lean'" in str(error) and TARGETS_KEY in str(error), error
+            else:
+                raise AssertionError(f"{reader.__name__} accepted {TARGETS_KEY} {bad!r}")
 
     # The reduced configurations. `slot` and `group` are named by the sources, `group` needs
     # `slot`, and `preset` and `forward` are named by none.
@@ -426,16 +551,21 @@ def selftest() -> int:
 def main(argv: list[str]) -> int:
     if argv == ["--selftest"]:
         return selftest()
+    modes = {
+        "--reduced": reduced_arguments,
+        "--clippy": clippy_arguments,
+        "--tests": test_arguments,
+    }
     configurations = cargo_arguments
-    if argv[:1] == ["--reduced"]:
-        configurations = reduced_arguments
+    if argv[:1] and argv[0] in modes:
+        configurations = modes[argv[0]]
         argv = argv[1:]
     if len(argv) != 1 or argv[0].startswith("-"):
         print(__doc__, file=sys.stderr)
         return 1
     try:
         for label, arguments in configurations(workspace_package(argv[0])):
-            print(" ".join([label, *arguments]))
+            print(" ".join([label, *(arguments or [])]))
     except ManifestError as error:
         print(f"doc-feature-sets: {argv[0]}: {error}", file=sys.stderr)
         return 2

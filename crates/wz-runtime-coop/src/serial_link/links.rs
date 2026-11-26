@@ -535,6 +535,15 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: C
         self.receive(f)
     }
 
+    // A batch is lent from the link's destuffing buffer, which a receive alone writes
+    // (`Self::next_frame`, for a batch and for a dial's answer), never a service, which waits on
+    // the line and writes what is owed: what a receive lent lies there until the link is next
+    // asked to receive. A session whose round reads its records where they lie needs this; a link
+    // that answered the provided `false` would have every sample with a payload refused there.
+    fn lends_until_next_receive(&self) -> bool {
+        true
+    }
+
     fn lost(&self) -> Option<LostCause> {
         self.lost.get()
     }
@@ -580,6 +589,10 @@ type SerialDriverOf<D, N> = SerialDriver<
     TxBuffer<<N as CountKind>::Flag>,
     <N as CountKind>::Shared,
 >;
+
+/// The handle a stack's sessions hold a serial link by: on the cell it is made in, counted as they
+/// count their handles.
+type SerialCellOf<D, N> = CellRc<SerialDriverOf<D, N>, N>;
 
 /// What a listener keeps of its line between the links over it: the line, while the listener
 /// keeps it open and no link holds it, and whether a link holds it now. The line has one owner at
@@ -680,7 +693,7 @@ impl<D, M: CountKind> Drop for LineLease<D, M> {
 
 /// `link`, its handshake made, as the session shell holds a link.
 fn opened<D: SerialDevice + 'static, N: CountKind>(
-    link: CellRc<SerialDriverOf<D, N>, N>,
+    link: SerialCellOf<D, N>,
 ) -> OpenedLink<HeapLink<N>, N> {
     OpenedLink {
         sink: link.clone().into_sink(),
@@ -728,7 +741,7 @@ impl<N: CountKind> SerialShape<N> {
         &self,
         line: LineLease<D, N::Shared>,
         at: SerialLocator,
-    ) -> Result<CellRc<SerialDriverOf<D, N>, N>, LinkOpenError> {
+    ) -> Result<SerialCellOf<D, N>, LinkOpenError> {
         let (rx, tx) = heap_link_buffers(
             self.lent.as_ref(),
             SERIAL_MAX_COBS_BUF,
@@ -752,7 +765,7 @@ impl<N: CountKind> SerialShape<N> {
 /// A `serial/` dial under way ([`SessionLinks::begin_initiator`]): its line open, its `INIT`
 /// written, and the peer's answer asked for at each poll, timed on the opener's clock.
 pub struct SerialDial<O: SerialOpen, N: CountKind = OneTask> {
-    link: Option<CellRc<SerialDriverOf<O::Device, N>, N>>,
+    link: Option<SerialCellOf<O::Device, N>>,
     opener: O,
 }
 
@@ -824,9 +837,9 @@ impl<D: From<OpenedLink<HeapLink<N>, N>>, O: SerialOpen, N: CountKind>
 }
 
 /// The accepting end of a serial line: one link at a time, since a line is point-to-point. The
-/// line is opened by the first accept, as upstream's listener opens its port in its accept task
-/// and not when it is made, and the next accept waits for the link over it to end, as upstream's
-/// waits while its link is connected
+/// line is opened when the listener is made, as zenoh-pico's listen opens its device, so a peer's
+/// `INIT` written once the listen returns is not cleared by a later open; the next accept waits
+/// for the link over it to end, as upstream's waits while its link is connected
 /// (`io/zenoh-links/zenoh-link-serial/src/unicast.rs` @ `while is_connected.load(Ordering::Acquire) {`).
 /// A link made waits on the line for the peer's `INIT` (`waiting`) and is handed over once it
 /// is answered.
@@ -834,10 +847,37 @@ struct SerialListener<O: SerialOpen, N: CountKind> {
     opener: O,
     at: SerialLocator,
     shape: SerialShape<N>,
-    waiting: RefCell<Option<CellRc<SerialDriverOf<O::Device, N>, N>>>,
+    waiting: RefCell<Option<SerialCellOf<O::Device, N>>>,
     /// Where the line is kept between links when the locator does not release it on close, and
     /// whether a link holds it now ([`LineLease`]).
     home: HomeOf<O::Device, N::Shared>,
+}
+
+impl<O: SerialOpen, N: CountKind> SerialListener<O, N>
+where
+    O::Device: 'static,
+{
+    /// Take the line for the next link and wait on it for the peer's `INIT` (`waiting`): the
+    /// line kept between links, or the line opened now. `false`, with nothing taken, while a link
+    /// still holds the line. Only this listener lends the line, so a line found free stays free
+    /// until the lease below takes it.
+    fn wait_on_line(&self) -> Result<bool, LinkOpenError> {
+        let free = <N::Shared as CountKind>::with_local::<LineHome<O::Device>, _>(
+            &self.home,
+            LineHome::free,
+        );
+        let Some(kept) = free else {
+            return Ok(false);
+        };
+        let line = match kept {
+            Some(line) => line,
+            None => self.opener.open(&self.at)?,
+        };
+        let line = LineLease::homed(line, self.home.clone());
+        let link = self.shape.link(line, self.at)?;
+        *self.waiting.borrow_mut() = Some(link);
+        Ok(true)
+    }
 }
 
 impl<O: SerialOpen, N: CountKind> LinkListener<HeapLink<N>, N> for SerialListener<O, N>
@@ -849,23 +889,8 @@ where
     }
 
     fn accept(&self) -> Result<Option<OpenedLink<HeapLink<N>, N>>, LinkOpenError> {
-        if self.waiting.borrow().is_none() {
-            // Only this listener lends the line, so a line found free stays free until the lease
-            // below takes it.
-            let free = <N::Shared as CountKind>::with_local::<LineHome<O::Device>, _>(
-                &self.home,
-                LineHome::free,
-            );
-            let Some(kept) = free else {
-                return Ok(None);
-            };
-            let line = match kept {
-                Some(line) => line,
-                None => self.opener.open(&self.at)?,
-            };
-            let line = LineLease::homed(line, self.home.clone());
-            let link = self.shape.link(line, self.at)?;
-            *self.waiting.borrow_mut() = Some(link);
+        if self.waiting.borrow().is_none() && !self.wait_on_line()? {
+            return Ok(None);
         }
         let step = match self.waiting.borrow().as_ref() {
             Some(link) => link.accept_step(),
@@ -1059,7 +1084,7 @@ where
         let Some(at) = at.as_serial() else {
             return self.links.open_listener(at);
         };
-        Ok(Box::new(SerialListener {
+        let listener = SerialListener {
             opener: self.opener.clone(),
             at,
             shape: self.shape,
@@ -1070,7 +1095,14 @@ where
                 !at.options.release_on_close,
             )))
             .ok_or(LinkOpenError::Exhausted)?,
-        }))
+        };
+        // The line is open, and cleared once, before the listen is answered: a peer that dials
+        // as soon as the listen returns writes its `INIT` into a line already held, which a
+        // later open would clear. A line that does not open refuses the listen, as zenoh-pico's
+        // listen of a device does
+        // (`vendor/zenoh-pico/src/link/transport/serial/tty_posix.c` @ `static z_result_t _z_posix_tty_listen_from_dev(`).
+        listener.wait_on_line()?;
+        Ok(Box::new(listener))
     }
 
     fn open_group(
@@ -1185,8 +1217,11 @@ mod tests {
     impl SerialOpen for TestOpen {
         type Device = TestLine;
 
+        // An open clears what the line held, as the host's opener does and as zenoh-pico's open of a
+        // device does (`tcflush(fd, TCIOFLUSH)`).
         fn open(&self, _at: &SerialLocator) -> Result<TestLine, LinkOpenError> {
             self.opens.set(self.opens.get() + 1);
+            self.inbox.borrow_mut().clear();
             Ok(TestLine {
                 inbox: Rc::clone(&self.inbox),
                 outbox: Rc::clone(&self.outbox),
@@ -1330,6 +1365,35 @@ mod tests {
         assert!(!link.pump.recv_with(&mut |_| {}), "nothing more");
     }
 
+    /// The batch a receive lends lies where it was lent, unwritten, until the link is next asked
+    /// to receive: a service in between, with the peer's next frame waiting on the line, leaves it
+    /// as it was. What a session's round relies on to read a sample where it lies. Turned red by a
+    /// link that answers the provided `false`, or by a service that reads the line into the
+    /// destuffing buffer.
+    #[test]
+    fn a_lent_batch_lies_where_it_was_lent_until_the_next_receive() {
+        let open = TestOpen::new();
+        let link = made(&open);
+        assert!(link.pump.lends_until_next_receive());
+        open.peer_sends(DATA_HEADER, b"xyz");
+        let mut lent: Option<(*const u8, usize)> = None;
+        assert!(link
+            .pump
+            .recv_with(&mut |batch| lent = Some((batch.as_ptr(), batch.len()))));
+        let (at, len) = lent.expect("a batch");
+        open.peer_sends(DATA_HEADER, b"uvw");
+        link.pump.service();
+        // SAFETY: the bytes lie in the link's destuffing buffer, which the link holds and which
+        // nothing writes until the next receive below; this read is before it.
+        let still = unsafe { core::slice::from_raw_parts(at, len) };
+        assert_eq!(still, b"xyz", "a service leaves the lent batch as it was");
+        let mut next = Vec::new();
+        assert!(link
+            .pump
+            .recv_with(&mut |batch| next.extend_from_slice(batch)));
+        assert_eq!(next, b"uvw");
+    }
+
     #[test]
     fn a_frame_the_line_takes_in_part_is_owed_and_finished_by_the_next_step() {
         let open = TestOpen::new();
@@ -1369,8 +1433,8 @@ mod tests {
         assert!(matches!(listener.local(), Locator::Serial(_)));
         assert_eq!(
             open.opens.get(),
-            0,
-            "the line is opened by the first accept"
+            1,
+            "the line is opened when the listener is made"
         );
         assert!(listener.accept().expect("an open line").is_none());
         assert_eq!(open.opens.get(), 1);
@@ -1396,6 +1460,26 @@ mod tests {
             open.opens.get(),
             2,
             "the line opened again for the next link"
+        );
+    }
+
+    /// A peer that dials as soon as the listen returns has its `INIT` answered: the line was open
+    /// before the peer wrote, and the first accept reads what it wrote. Turned red by a listener
+    /// that opens its line at the first accept, whose open clears the `INIT` already on it.
+    #[test]
+    fn a_peer_that_dials_as_the_listen_returns_is_answered() {
+        let open = TestOpen::new();
+        let listener = links(&open)
+            .open_listener(serial(50_000, true))
+            .expect("a listener");
+        open.peer_sends(SERIAL_FLAG_INIT, &[]);
+        assert!(
+            listener.accept().expect("an open line").is_some(),
+            "the INIT written once the listen returned is answered"
+        );
+        assert_eq!(
+            open.written(),
+            frame(SERIAL_FLAG_INIT | SERIAL_FLAG_ACK, &[])
         );
     }
 

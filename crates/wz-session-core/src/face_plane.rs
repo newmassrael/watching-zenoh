@@ -17,6 +17,7 @@
 //! lost are counted on the last row kept ([`FaceLinkRow::lost_after`]), which tells each watcher
 //! of them once.
 //!
+//! [`MAX_WATCHERS`]: crate::face_plane::MAX_WATCHERS
 //! [`FacePlane::happened`]: crate::face_plane::FacePlane::happened
 //! [`FacePlane::place_in`]: crate::face_plane::FacePlane::place_in
 //! [`FaceLinkRow::lost_after`]: crate::face::FaceLinkRow::lost_after

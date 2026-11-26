@@ -2415,7 +2415,7 @@ impl Stage {
     /// then all unbuilt.
     unsafe fn open(self) -> Option<Open> {
         match self {
-            Stage::Pipe => Some(Open::Pipe(Bench::open())),
+            Stage::Pipe => Some(Open::Pipe(Box::new(Bench::open()))),
             Stage::Group => {
                 #[cfg(feature = "multicast-transport")]
                 {
@@ -2452,7 +2452,9 @@ impl Stage {
 
 /// A stage's pair, open.
 enum Open {
-    Pipe(Bench),
+    /// Boxed, being several times the size of the other pairs. The box is made as the stage opens,
+    /// before any of its windows does, so no reading counts it.
+    Pipe(Box<Bench>),
     #[cfg(feature = "multicast-transport")]
     Group(GroupPair),
     #[cfg(feature = "shared-key-ids")]

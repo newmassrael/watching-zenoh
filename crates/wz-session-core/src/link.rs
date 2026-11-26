@@ -1894,9 +1894,9 @@ pub trait ShareValues: SessionRuntime {
 pub struct LocalHeld;
 
 /// The heap had no room for a value a runtime keeps behind its pointer
-/// ([`ShareValues::share`], [`SessionRuntime::wrap_actions`]). The same answer from every
-/// runtime: what asked for the value refuses what it was making (an open refuses the session),
-/// and the program goes on.
+/// ([`ShareValues::share`], `SessionRuntime::wrap_actions` with `alloc` and no `session-slot`).
+/// The same answer from every runtime: what asked for the value refuses what it was making (an
+/// open refuses the session), and the program goes on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeapRefused;
 
@@ -2037,7 +2037,12 @@ pub trait SessionRuntime: Runtime + Sized {
     /// it (the cooperative profile, one per link), or the exclusive reference to it that a
     /// session's own slot hands out once (the fixed-memory profile). Present where the
     /// session's handshake is, as [`ActionsHandle`](Self::ActionsHandle) is.
-    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    ///
+    /// An implementor in another crate binds it where this crate's build-script metadata key
+    /// `unicast_runtime_items` is `1` (`DEP_WZ_SESSION_CORE_UNICAST_RUNTIME_ITEMS`), not under
+    /// a feature of its own: Cargo unifies this crate's features across the graph, so a crate
+    /// that does not enable the implementor's feature can still turn this item on.
+    #[cfg(wz_unicast_runtime_items)]
     type EntropyDraw: crate::entropy::EntropySource;
 
     /// Per-profile shared handle to the [`SessionLinkActions`] bundle one
@@ -2062,8 +2067,12 @@ pub trait SessionRuntime: Runtime + Sized {
     /// action methods, [`new_session_engine`](crate::drive::new_session_engine))
     /// reach the bundle through the opaque handle without naming `Arc` / `Rc`.
     ///
+    /// An implementor in another crate binds it where the metadata key `unicast_runtime_items`
+    /// is `1` (`DEP_WZ_SESSION_CORE_UNICAST_RUNTIME_ITEMS`), as it binds
+    /// [`EntropyDraw`](Self::EntropyDraw).
+    ///
     /// [`LinkSink`]: SessionRuntime::LinkSink
-    #[cfg(all(feature = "storage-profile", feature = "session-unicast"))]
+    #[cfg(wz_unicast_runtime_items)]
     type ActionsHandle<T: TimeSource>: Clone + Deref<Target = SessionLinkActions<Self, T>>;
 
     /// Wrap an owned [`SessionLinkActions`] bundle in the per-profile shared
@@ -2077,11 +2086,11 @@ pub trait SessionRuntime: Runtime + Sized {
     /// make a handle out of a bundle by value: the bundle is placed in a slot of
     /// storage somebody owns (`crate::session_slot::SessionSlots`), and the slot
     /// hands the handle out.
-    #[cfg(all(
-        feature = "alloc",
-        feature = "session-unicast",
-        not(feature = "session-slot")
-    ))]
+    ///
+    /// An implementor in another crate binds it where this crate's build-script metadata key
+    /// `wrap_actions` is `1` (`DEP_WZ_SESSION_CORE_WRAP_ACTIONS`), not under a feature of its
+    /// own.
+    #[cfg(wz_wrap_actions)]
     fn wrap_actions<T: TimeSource>(
         actions: SessionLinkActions<Self, T>,
     ) -> Result<Self::ActionsHandle<T>, HeapRefused>;

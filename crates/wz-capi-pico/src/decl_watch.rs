@@ -240,13 +240,13 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
         };
         let object = place
-            .fill(Answering::keeping(
+            .fill_answering(
                 WatchState {
                     engine: crate::session::EngineHold::clone(engine),
                     id: 0,
                 },
                 WatchKept { closure, entity },
-            ))
+            )
             .cast::<WatchState>();
         // The closure lies in the place now, counted there before the engine can call it or let
         // it go.

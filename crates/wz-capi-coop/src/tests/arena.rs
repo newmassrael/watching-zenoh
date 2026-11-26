@@ -26,7 +26,7 @@ use wz_session_core::policy::SessionPolicy;
 use wz_session_core::publish_options::PublishOptions;
 use wz_session_core::session_actions::{BatchLendCounts, FrameLendCounts};
 
-use super::entity_tables::lowered;
+use super::entity_tables::{lowered, open_under};
 use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
@@ -1443,15 +1443,15 @@ fn a_listening_session_reserves_places_for_the_publishes_it_keeps() {
     assert_eq!(row(&plan, "handed leg flags").count, expected);
 }
 
-/// The session is lent one table of reassembly buffers its links share, a buffer for each chain
-/// one peer stages at once and one for the rejoined message the round keeps, however many links
-/// the session may hold, each as long as the
-/// session's `PICO_FRAG_MAX_BYTES`: the build's for a session that states none, the value a
-/// session lowers it to, and a value over the build's refuses the plan under its own name.
+/// The session is lent one table of reassembly buffers its links share, as many as its
+/// `REASSEMBLY_CHAINS` however many links the session may hold, each as long as the session's
+/// `PICO_FRAG_MAX_BYTES`: the build's count and length for a session that states neither, the
+/// count and the length a session lowers them to, no buffer for a session that states none, and a
+/// value over the build's refuses the plan under its own name. A report reads the same count
+/// (`link_buffers`). Turned red by a table laid out at the build's count whatever the session
+/// states, or one that grows with the links.
 #[test]
-fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length() {
-    use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
-
+fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_and_length() {
     let config = CoopConfig {
         max_faces: BESIDE_DIAL,
         ..client_config()
@@ -1459,7 +1459,7 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     assert_eq!(
         row(&built, "reassembly buffers").count,
-        SESSION_CHAIN_BUFFERS
+        caps::REASSEMBLY_CHAINS
     );
     assert_eq!(
         row(&built, "reassembly buffers").entry_bytes,
@@ -1467,7 +1467,7 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     );
     assert_eq!(
         built.reassembly(),
-        (caps::PICO_FRAG_MAX_BYTES, SESSION_CHAIN_BUFFERS)
+        (caps::PICO_FRAG_MAX_BYTES, caps::REASSEMBLY_CHAINS)
     );
     let one_link = ArenaPlan::of(
         &CoopConfig {
@@ -1482,9 +1482,30 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
         built.reassembly(),
         "the table does not grow with the links"
     );
-    let lowered = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
-    let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
+    let lowered_bytes = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
+    let plan = ArenaPlan::of(&config, &lowered_bytes).expect("lays an arena out");
     assert_eq!(row(&plan, "reassembly buffers").entry_bytes, 1024);
+    let one = lowered(|l| l.select_reassembly_chains(Quota::at_most(1)));
+    let plan = ArenaPlan::of(&config, &one).expect("lays an arena out");
+    assert_eq!(
+        plan.reassembly(),
+        (caps::PICO_FRAG_MAX_BYTES, 1),
+        "the count the session states"
+    );
+    assert_eq!(row(&plan, "reassembly buffers").count, 1);
+    assert_eq!(row(&plan, "reassembly flags").count, 1);
+    assert_eq!(
+        crate::arena::link_buffers(1, config.batch_size, &one).map(|buffers| buffers.chains),
+        Ok(1),
+        "a report reads the count the plan lays out"
+    );
+    let none = lowered(|l| l.select_reassembly_chains(Quota::at_most(0)));
+    let plan = ArenaPlan::of(&config, &none).expect("lays an arena out");
+    assert_eq!(
+        plan.reassembly().1,
+        0,
+        "a session that states no chain is lent no buffer"
+    );
     let over = caps::PICO_FRAG_MAX_BYTES + 1;
     let mut raised = SessionLimits::defaults();
     if raised
@@ -1501,6 +1522,98 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
                 },
             })
         );
+    }
+    let more = caps::REASSEMBLY_CHAINS + 1;
+    let mut raised = SessionLimits::defaults();
+    if raised
+        .select_reassembly_chains(Quota::at_most(more))
+        .is_ok()
+    {
+        let refused = ArenaRefused::Limit {
+            limit: ArenaLimit::ReassemblyChains,
+            why: UnlentRows::OverCeiling {
+                value: more,
+                ceiling: caps::REASSEMBLY_CHAINS,
+            },
+        };
+        assert_eq!(ArenaPlan::of(&config, &raised), Err(refused));
+        assert_eq!(
+            crate::arena::link_buffers(1, config.batch_size, &raised).map(|buffers| buffers.chains),
+            Err(refused),
+            "a report is refused as the plan is"
+        );
+    }
+}
+
+/// A session whose config states one reassembly buffer rejoins one chain at a time: a chain of
+/// the other reliability that starts while the first is open is refused as pool exhaustion and
+/// counted by the session's staging, and once the first has rejoined its message and given its
+/// buffer back the next chain begins, uncounted. The CONTROL is a session at the build's count,
+/// where the same second chain begins. Turned red by an open that lends the table at the build's
+/// count whatever the config states, or a refusal the staging does not count.
+#[test]
+fn a_session_rejoins_as_many_chains_at_once_as_its_config_states() {
+    use wz_session_core::extfragment::FragmentMarkers;
+    use wz_session_core::qos::Priority;
+    use wz_session_core::reassembly_dispatch::{Fragment, IngestOutcome, RefuseReason};
+
+    /// One fragment of the chain of `reliable` at `sn`, the last of it where `more` is `0`,
+    /// rejoined by the session's Router.
+    fn ingest(engine: &Engine, reliable: bool, sn: u64, more: u8) -> IngestOutcome {
+        engine.with_chain_router(|reassembly, now_ms| {
+            reassembly.ingest(
+                Fragment {
+                    peer_key: &[0x5a; 16],
+                    reliable,
+                    sn,
+                    more,
+                    payload: b"part",
+                    priority: Priority::DEFAULT,
+                    markers: FragmentMarkers::NONE,
+                },
+                wz_session_core::sn::mask_from_res(0x02),
+                now_ms,
+                |_| {},
+            )
+        })
+    }
+    /// The chains the session's staging refused a buffer to.
+    fn refused(engine: &Engine) -> u64 {
+        engine.with_chain_router(|reassembly, _| reassembly.staging().refused())
+    }
+
+    // A router stand-in serves one session, so each session below dials one of its own.
+    let router = Router::start(CatchAll::None);
+    let one = open_under(
+        &router,
+        lowered(|l| l.select_reassembly_chains(Quota::at_most(1))),
+    );
+    assert_eq!(ingest(&one, true, 1, 1), IngestOutcome::Begun);
+    assert_eq!(
+        ingest(&one, false, 1, 1),
+        IngestOutcome::Refused(RefuseReason::PoolExhausted),
+        "the one buffer is the open chain's"
+    );
+    assert_eq!(refused(&one), 1, "the refused chain is counted");
+    assert_eq!(ingest(&one, true, 2, 0), IngestOutcome::Reassembled);
+    assert_eq!(
+        ingest(&one, false, 2, 1),
+        IngestOutcome::Begun,
+        "the buffer given back serves the next chain"
+    );
+    assert_eq!(refused(&one), 1, "a chain served counts nothing");
+    drop(one);
+    drop(router);
+    if caps::REASSEMBLY_CHAINS >= 2 {
+        let router = Router::start(CatchAll::None);
+        let built = open(&router);
+        assert_eq!(ingest(&built, true, 1, 1), IngestOutcome::Begun);
+        assert_eq!(
+            ingest(&built, false, 1, 1),
+            IngestOutcome::Begun,
+            "CONTROL: at the build's count the second chain has a buffer"
+        );
+        assert_eq!(refused(&built), 0);
     }
 }
 
@@ -3407,4 +3520,75 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
     );
     wz_capi_port::SessionDrive::close(&*engine);
     assert!(!handle.is_open(), "a second close changes nothing");
+}
+
+/// An open's plan lays out what a listed plan of the same session lays out, every sum and every
+/// layer's rows, and lists no row, so the open's frame holds no table of them; a listed plan taken
+/// on by an open's plan, as a region's is, is the same plan. Turned red by a walk whose sums depend
+/// on the list it keeps, or a `take_on` that leaves a sum or a layer's rows behind.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
+    let config = client_config();
+    let listed = ArenaPlan::of(&config, &config.limits).expect("lays an arena out");
+    let mut open = crate::arena::OpenPlan::blank();
+    open.count(&config, &config.limits)
+        .expect("lays an arena out");
+    assert!(
+        listed.rows().count() > 0,
+        "CONTROL: the listed plan lists its rows"
+    );
+    assert_eq!(open.rows().count(), 0);
+    assert_eq!(open.reserved_bytes(), listed.reserved_bytes());
+    assert_eq!(open.transport(), listed.transport());
+    assert_eq!(open.session(), listed.session());
+    assert_eq!(open.places(), listed.places());
+    let mut taken = crate::arena::OpenPlan::blank();
+    taken.take_on(&listed);
+    assert_eq!(taken, open);
+}
+
+/// A plan that takes a laid plan on is that plan, whatever it held before: every sum, every layer's
+/// rows and every listed row, so the plan an open made is replaced whole and keeps nothing of its
+/// own. Turned red by a `take_on` that leaves a sum, a layer's rows or a listed row of the plan it
+/// overwrote as it was.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn a_plan_taken_on_is_the_laid_plan_whatever_it_held() {
+    let laid = ArenaPlan::of(
+        &preset_client(caps::MAX_STATIC_CONNECT),
+        &SessionLimits::PICO_PRESET,
+    )
+    .expect("the preset lays a client out");
+    let mut taken = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        taken, laid,
+        "CONTROL: the plan written over differs from the one taken on"
+    );
+    taken.take_on(&laid);
+    assert_eq!(taken, laid);
+}
+
+/// A region lays its plan out over a plan that held another as over a vacant one, in a build that
+/// lays its plans out at the open and in one that does not: the open lays the region's plan over
+/// the plan it made, which keeps nothing of its own. Turned red by a `lay_out_on` that leaves a sum,
+/// a layer's rows or a listed row of the plan it lays out over as it was.
+#[test]
+fn a_region_lays_its_plan_over_one_that_held_another() {
+    let config = preset_client(caps::MAX_STATIC_CONNECT);
+    let mut vacant = ArenaPlan::vacant();
+    PRESET_REGION
+        .lay_out_on(&mut vacant, &config)
+        .expect("the region admits a client of its own shape");
+    let mut held = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        held, vacant,
+        "CONTROL: the plan laid over differs from the region's"
+    );
+    PRESET_REGION
+        .lay_out_on(&mut held, &config)
+        .expect("the region admits a client of its own shape");
+    assert_eq!(held, vacant);
 }

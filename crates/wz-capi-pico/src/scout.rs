@@ -120,25 +120,29 @@ mod window {
 
     /// The process's one table of a cooperative window's Hellos, and the buffer the window reads
     /// each datagram into: in the library's static memory, reserved when it is built, never on a
-    /// stack and never on the heap. A window holds both for its run and its delivery. A window
-    /// that finds them held by another thread's window waits for them, at most its own budget, on
-    /// a condition variable the holder signals when it lets go; one that finds them held by its
-    /// own thread, a scout asked from inside a scout's callback, is refused at once.
+    /// stack and never on the heap. Neither has an initial value the library's file holds: the
+    /// buffer is zero and the table is made where it lies for each window that holds it
+    /// ([`wz_session_core::scouting_host::HelloTable::init_in`]), so a process that never scouts
+    /// never writes their pages. A window holds both for its run and its delivery. A window that
+    /// finds them held by another thread's window waits for them, at most its own budget, on a
+    /// condition variable the holder signals when it lets go; one that finds them held by its own
+    /// thread, a scout asked from inside a scout's callback, is refused at once.
     #[cfg(not(feature = "engine-tokio"))]
     pub(in crate::scout) mod table {
         use core::cell::UnsafeCell;
+        use core::mem::MaybeUninit;
 
         use wz_capi_port::os;
         use wz_session_core::caps;
         use wz_session_core::limits::SessionLimits;
         use wz_session_core::scouting_host::HelloTable;
 
-        struct Region(UnsafeCell<HelloTable>);
+        struct Region(UnsafeCell<MaybeUninit<HelloTable>>);
 
         // SAFETY: the table is reached only by the one holder of the claim, through it.
         unsafe impl Sync for Region {}
 
-        static TABLE: Region = Region(UnsafeCell::new(HelloTable::new()));
+        static TABLE: Region = Region(UnsafeCell::new(MaybeUninit::uninit()));
 
         /// The buffer a window reads each datagram into: the build's multicast batch, which
         /// zenoh-pico reads a scout into, and of which a window uses its session limits' value.
@@ -196,16 +200,20 @@ mod window {
             }
 
             /// The table and the read buffer the claim holds, the buffer as long as the multicast
-            /// batch `limits` state, at most the build's.
+            /// batch `limits` state, at most the build's. The table is made anew, as a window
+            /// begins with none: a claim asks this once, before its window runs.
             pub(in crate::scout) fn parts(
                 &mut self,
                 limits: &SessionLimits,
             ) -> (&mut HelloTable, &mut [u8]) {
                 // SAFETY: one claim exists at a time, and it lends the table and the buffer through
                 // `&mut self`.
-                let (table, buffer) = unsafe { (&mut *TABLE.0.get(), &mut *BUFFER.0.get()) };
+                let (place, buffer) = unsafe { (&mut *TABLE.0.get(), &mut *BUFFER.0.get()) };
                 let room = limits.pico_multicast_batch_bytes().min(buffer.len());
-                (table, buffer.get_mut(..room).unwrap_or_default())
+                (
+                    HelloTable::init_in(place),
+                    buffer.get_mut(..room).unwrap_or_default(),
+                )
             }
         }
 

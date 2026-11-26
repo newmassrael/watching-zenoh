@@ -342,7 +342,6 @@ fn subscribe_putting(
     for subscriber in 0..3usize {
         let handed = handed.clone();
         let inner = inner.clone();
-        let session = session.clone();
         let key = if subscriber == 0 {
             "demo/l/fan"
         } else {
@@ -464,8 +463,10 @@ fn an_undeclare_on_another_thread_waits_for_the_running_call() {
 
 /// A callback that undeclares its own subscriber from inside a put's call of it does not wait for
 /// itself: the undeclaration returns inside the call, and the row is let go of once the call has
-/// returned, before the put does, by one walk of the tables. A put after it reaches nothing and
-/// walks no table; the CONTROL is the first put, which reached the subscriber.
+/// returned, before the put does. A put after it reaches nothing; the CONTROL is the first put,
+/// which reached the subscriber. A build that keeps the round lets the row go by one walk of the
+/// tables, and the put after it walks none; one that does not lets it go in the walk that ended
+/// its call, and counts no walk.
 #[test]
 fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
     let router = Router::start(CatchAll::Held);
@@ -490,7 +491,9 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
         .expect("declared")
         .id;
     *own.lock().unwrap() = Some(id);
+    #[cfg(wz_round)]
     let walks = || engine.takes.walks.load(Ordering::SeqCst);
+    #[cfg(wz_round)]
     let before = walks();
     assert_eq!(
         put_own(&engine, "demo/self/a", b"v"),
@@ -503,6 +506,7 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
         1,
         "let go of once its own call returned, before the put did"
     );
+    #[cfg(wz_round)]
     assert_eq!(walks() - before, 1, "one walk let the marked row go");
     assert_eq!(
         put_own(&engine, "demo/self/b", b"v"),
@@ -510,6 +514,8 @@ fn a_callback_that_undeclares_its_own_subscriber_does_not_wait_for_itself() {
         "nothing is left to reach"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(dropped.load(Ordering::SeqCst), 1, "let go of once");
+    #[cfg(wz_round)]
     assert_eq!(
         walks() - before,
         1,

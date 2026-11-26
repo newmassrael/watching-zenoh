@@ -1030,11 +1030,12 @@ function Invoke-Build {
     Copy-Item -Recurse -LiteralPath (Join-Path $picoTree 'include') -Destination $includeP
     Copy-Item -Recurse -Force -Path (Join-Path $build 'include\*') -Destination $includeP
 
-    # The probe against each arm with the same words. /MD: both libraries link the C runtime as a DLL.
+    # The probe against each arm with the same words. /MD: both libraries link the C runtime as a DLL. Arm W's
+    # probe states the counts its roles hold (PERF_WZ_ARM, perf_probe.c), by the wz_ext.h its package ships.
     $cl = 'cl /nologo /std:c11 /experimental:c11atomics /O2 /MD /DZENOH_WINDOWS'
     $arms = @(
-        @{ Arm = 'P'; Include = $includeP; Libraries = @($implib[0].FullName) },
-        @{ Arm = 'W'; Include = (Join-Path $top 'include');
+        @{ Arm = 'P'; Defines = ''; Include = $includeP; Libraries = @($implib[0].FullName) },
+        @{ Arm = 'W'; Defines = ' /DPERF_WZ_ARM'; Include = (Join-Path $top 'include');
            Libraries = @(@($manifest.libraries) | ForEach-Object { Join-Path $top "release\lib\$_.lib" }) }
     )
     foreach ($arm in $arms) {
@@ -1042,7 +1043,7 @@ function Invoke-Build {
         Reset-Directory $objects
         $libraries = ($arm.Libraries | ForEach-Object { $Q + $_ + $Q }) -join ' '
         $exe = Join-Path $script:BinDir "perf_probe_$($arm.Arm).exe"
-        $line = $cl + ' /I' + $Q + $arm.Include + $Q + ' ' + $Q + $probeSource + $Q + ' ' + $libraries +
+        $line = $cl + $arm.Defines + ' /I' + $Q + $arm.Include + $Q + ' ' + $Q + $probeSource + $Q + ' ' + $libraries +
                 ' ws2_32.lib psapi.lib /Fo:' + $Q + (Join-Path $objects 'perf_probe.obj') + $Q + ' /Fe:' + $Q + $exe + $Q
         $log = Join-Path $script:WorkDir "build-probe-$($arm.Arm).log"
         if ((Invoke-InVs "build-probe-$($arm.Arm)" @($line) $log) -ne 0) { Fail-WithLog "perf_probe against arm $($arm.Arm) did not build" $log }
@@ -1067,6 +1068,7 @@ function Invoke-Build {
         wz_features = $script:PlanDoc.wz_features
         wz_engine = $script:PlanDoc.wz_engine
         wz_stdlib = $script:PlanDoc.wz_stdlib
+        wz_preset = $script:PlanDoc.wz_preset
         wz_package = $script:PlanDoc.package
     }
     Write-Text (Join-Path $script:WorkDir 'reference.json') ($record | ConvertTo-Json -Depth 12)
@@ -1077,6 +1079,10 @@ function Invoke-Build {
         Say "pico built $($refused -join ', ') otherwise than asked, so the two builds differ there (reference.json says so)"
     }
     Say "arm W: $($script:PlanDoc.package.name) on the $($script:PlanDoc.wz_engine) engine, $($script:PlanDoc.wz_stdlib)"
+    if ($null -eq $script:PlanDoc.wz_preset) {
+        Say ('arm W is not built as zenoh-pico''s preset (beyond it: {0}; short of it: {1}): the gate judges no row of this run against the table of the preset' -f
+             (@($script:PlanDoc.wz_beyond_preset) -join ', '), (@($script:PlanDoc.wz_short_of_preset) -join ', '))
+    }
 }
 
 # -- the run ---------------------------------------------------------------------------------------------
@@ -1230,6 +1236,7 @@ $sizeList = @(foreach ($w in (Get-Words $Sizes)) { [int]$w })
             builds = $builds
             engine = $builds.wz_engine
             stdlib = $builds.wz_stdlib
+            preset = $builds.wz_preset
             external = [ordered]@{ status = 'not-measured'; why = 'arm X, an external library of the pico API, is run by the Linux runner alone' }
             not_measured = $notMeasured
             group_interface = $groupRecord
@@ -1328,7 +1335,7 @@ if ($Mode -eq 'idle-cpus') {
 if (-not $Plan -or -not (Test-Path -LiteralPath $Plan)) { Fail "-Plan names no plan ('$Plan'); make one with perf_matrix.py windows-plan" }
 if (-not $Work) { Fail '-Work names no directory' }
 $script:PlanDoc = Get-Content -Raw -LiteralPath $Plan | ConvertFrom-Json
-if ($script:PlanDoc.schema -ne 'wz-pico-perf-windows-plan/2') { Fail "$Plan is not a plan of schema wz-pico-perf-windows-plan/2; make it again with perf_matrix.py windows-plan" }
+if ($script:PlanDoc.schema -ne 'wz-pico-perf-windows-plan/3') { Fail "$Plan is not a plan of schema wz-pico-perf-windows-plan/3; make it again with perf_matrix.py windows-plan" }
 if (-not (Test-Path -LiteralPath $Work)) { [void](New-Item -ItemType Directory -Path $Work) }
 $script:WorkDir = (Resolve-Path -LiteralPath $Work).Path
 $script:BinDir = Join-Path $script:WorkDir 'bin'

@@ -33,15 +33,15 @@
 
 // `Requesters` is generic over the application's reply sink and names no heap
 // type, and neither is [`SlotObserverOf`]: the sinks it registers are the types an
-// [`ObserverSinks`] names, the liveliness listeners among them. The switchboard and the
-// tokens wz holds keep heap forms, so they, and the liveliness planes gated with them, sit
-// behind `alloc`.
+// [`ObserverSinks`] names, the liveliness listeners among them. The switchboard's registry
+// is the heap's table (an image without a heap dispatches through the static `match` its
+// codegen writes), so it sits behind `alloc`; the token planes are lent as the tables are.
 use core::mem::MaybeUninit;
 
 use crate::bounded::{Arena, LendRefused, Lent, Profile, Storage};
 use crate::caps;
 use crate::decl_sink::{DeclSink, UndeclSink};
-#[cfg(all(feature = "alloc", feature = "liveliness-token"))]
+#[cfg(feature = "liveliness-token")]
 use crate::declare::liveliness::LivelinessRegistry;
 #[cfg(feature = "liveliness-get")]
 use crate::declare::liveliness_get::LivelinessGetRegistry;
@@ -51,7 +51,7 @@ use crate::declare::liveliness_subscriber::LivelinessDelivered;
 use crate::declare::liveliness_subscriber::{
     LivelinessSubscriberTable, LocalLivelinessSubscribers,
 };
-#[cfg(all(feature = "alloc", feature = "liveliness-token"))]
+#[cfg(feature = "liveliness-token")]
 use crate::declare::local_token::LocalTokenRegistry;
 #[cfg(feature = "declare-queryable")]
 use crate::declare::queryable::RemoteQueryableTable;
@@ -545,7 +545,7 @@ pub struct SlotObserverOf<
     /// session's one table set. One registration serves every session.
     pub tables: K::Tables<P>,
     /// The statechart switchboard (the keyexpr -> event table).
-    #[cfg(feature = "switchboard")]
+    #[cfg(all(feature = "alloc", feature = "switchboard"))]
     pub switchboard: SwitchboardRegistry,
     /// The application's listeners on the subscribers a peer declares.
     #[cfg(feature = "declare-subscriber")]
@@ -1283,7 +1283,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         let _every_field_is_written = |observer: &Self| {
             let Self {
                 tables: _,
-                #[cfg(feature = "switchboard")]
+                #[cfg(all(feature = "alloc", feature = "switchboard"))]
                     switchboard: _,
                 #[cfg(feature = "declare-subscriber")]
                     remote_subscribers: _,
@@ -1305,7 +1305,7 @@ impl<K: ObserverSinks> SlotObserverOf<K> {
         // pointer to it.
         unsafe {
             ptr::write(addr_of_mut!((*at).tables), ObserverTables::empty());
-            #[cfg(feature = "switchboard")]
+            #[cfg(all(feature = "alloc", feature = "switchboard"))]
             ptr::write(addr_of_mut!((*at).switchboard), SwitchboardRegistry::new());
             #[cfg(feature = "declare-subscriber")]
             ptr::write(
@@ -1357,9 +1357,10 @@ pub const SLOT_OBSERVER_LINES: usize = 3 * crate::decl_sink::DECL_OBSERVER_LINES
 
 // SAFETY: of the region policy, at all zero bytes: the application tables are `ZeroEmpty` (the
 // bound), each watcher table and the registry of the session's own tokens is one of the region
-// policy (`ZeroEmpty`), and the matching sink's place holds no byte. A build with the switchboard
-// keeps a registry that is not empty at zero bytes, and has no observer of the region policy.
-#[cfg(not(feature = "switchboard"))]
+// policy (`ZeroEmpty`), and the matching sink's place holds no byte. A build with the heap's
+// switchboard keeps a registry that is not empty at zero bytes, and has no observer of the region
+// policy.
+#[cfg(not(all(feature = "alloc", feature = "switchboard")))]
 unsafe impl<K: ObserverSinks, M: MatchingReport> crate::bounded::ZeroEmpty
     for SlotObserverOf<K, crate::bounded::Region, M>
 where
@@ -1452,7 +1453,7 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
         let watchers = Self::decl_watcher_rows(limits)?;
         let mut observer = Self {
             tables: LentTables::lend(arena, keys, rows.tables)?,
-            #[cfg(feature = "switchboard")]
+            #[cfg(all(feature = "alloc", feature = "switchboard"))]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "declare-subscriber")]
             remote_subscribers: RemoteSubscriberTable::lent(arena, watchers)?,
@@ -1667,6 +1668,33 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
             ahead: taken,
         };
         self.planes_beside_subscribers(cx, peers, requesters, event, others, taken);
+    }
+
+    /// A Response or a ResponseFinal of one session lent where its frame lies, handed to the
+    /// session's pending gets `replies` alone, the peer's keys resolved through the two id spaces
+    /// as [`Self::dispatch_event`] resolves them: no other plane reads a reply, so a caller that
+    /// tells the record's kind hands it here and spares the fan over every plane, as zenoh-pico's
+    /// dispatch picks a reply's handler by the message's kind
+    /// (`vendor/zenoh-pico/src/session/rx.c` @ `case _Z_N_RESPONSE_FINAL:`). The table's ids each
+    /// name one entry ([`ReplyRegistry::dispatch_lent_reply`]).
+    #[cfg(any(
+        feature = "codec-response",
+        all(
+            feature = "rx-lent-control",
+            feature = "codec-frame",
+            feature = "codec-response-final"
+        )
+    ))]
+    pub fn dispatch_reply<R: ReplySink, Q: Storage, T: Storage>(
+        &self,
+        peers: &PeerTables<T>,
+        replies: &mut ReplyRegistry<R, Q>,
+        record: &crate::driver_loop::InPlaceRecord<'_, '_>,
+    ) {
+        let peer_table = peers
+            .subscribers
+            .mapping_spaces_over(self.tables.own_space());
+        replies.dispatch_lent_reply(record, peer_table);
     }
 
     /// The planes that tell what a peer declares (its subscribers, its queryables and its tokens),
@@ -2025,7 +2053,7 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
 
     /// Fan an event into the statechart switchboard against the session's alias
     /// table; see [`crate::observer::ApplicationLayerObserver::dispatch_switchboard`].
-    #[cfg(feature = "switchboard")]
+    #[cfg(all(feature = "alloc", feature = "switchboard"))]
     pub fn dispatch_switchboard<T: Storage>(
         &self,
         peers: &PeerTables<T>,
@@ -3292,10 +3320,13 @@ mod tests {
     /// dispatch of the one `Declare` tells it as the frame's would have. The CONTROL is the same
     /// frame with nothing taken, which tells it in the frame's pass. Turned red by a frame pass that
     /// tells a Declare its caller took, which a watch would be told twice, or a message dispatch
-    /// that tells nothing.
+    /// that tells nothing. A build that lends every record (`OWNED_RECORDS` false) delivers the
+    /// frame as records lent one at a time, each one message already, which the planes tell
+    /// whatever the caller says it took: there the frame's pass tells it in both rounds.
     #[cfg(feature = "declare-subscriber")]
     #[test]
     fn a_caller_that_takes_the_declares_tells_each_once_by_its_message() {
+        let owned = crate::driver_loop::OWNED_RECORDS;
         for taken in [false, true] {
             let mut f = fixture(true);
             let outcome = own_alias_frame();
@@ -3312,13 +3343,13 @@ mod tests {
                     },
                 )
             });
-            let told: Vec<String> = if taken {
+            let told: Vec<String> = if taken && owned {
                 Vec::new()
             } else {
                 vec!["ours/x".to_string()]
             };
             assert_eq!(*f.declared.lock().unwrap(), told, "the frame's pass");
-            if taken {
+            if taken && owned {
                 let declare = NetworkMessage::Declare(Box::new(
                     fx::declare_envelope_decl_subscriber(fx::decl_subscriber_nonlocal(1, 7, None)),
                 ));

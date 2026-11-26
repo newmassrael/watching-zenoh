@@ -15,6 +15,8 @@
 //! A place may hold no transport now (a face whose link is not up): it answers `None` and runs
 //! nothing, and the caller reads that as the send or the input it would have been for a link that
 //! is not there.
+//!
+//! [`TransportPlace`]: crate::transport_place::TransportPlace
 
 /// A place a session's transport lies in, lent by `&mut` for the length of one call.
 pub trait TransportPlace {

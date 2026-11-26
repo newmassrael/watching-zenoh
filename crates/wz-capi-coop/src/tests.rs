@@ -202,8 +202,15 @@ enum Command {
         &'static str,
     ),
     /// Ask a query of request id `.0` naming its key by id `.1` in the sender's space and the
-    /// rest `.2`, which no declaration precedes: an id of the key ids both ends share.
-    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    /// rest `.2`, which no declaration precedes: an id of the key ids both ends share. Sent only
+    /// by the shared key ids' tests (`tests::shared_key_ids`), and compiled where they are.
+    #[cfg(all(
+        feature = "queryable",
+        feature = "shared-key-ids",
+        feature = "listen",
+        feature = "query",
+        feature = "threads"
+    ))]
     QueryById(
         wz_session_core::wire_id::RequestId,
         wz_session_core::wire_id::ExprId,
@@ -343,8 +350,15 @@ impl Router {
     }
 
     /// A stand-in that announces itself a peer, on a free port: a session holding the shared
-    /// key ids names its keys to a peer by them, and to a router by its declarations.
-    #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+    /// key ids names its keys to a peer by them, and to a router by its declarations. Compiled where
+    /// its readers, the shared key ids' tests (`tests::shared_key_ids`), are.
+    #[cfg(all(
+        feature = "queryable",
+        feature = "shared-key-ids",
+        feature = "listen",
+        feature = "query",
+        feature = "threads"
+    ))]
     fn start_peer() -> Self {
         Self::start_announcing(router_port(), ROUTER_ZID, WhatAmI::Peer, CatchAll::None)
     }
@@ -924,7 +938,13 @@ fn run_router(
                 let _ = actions.send_push_literal(pushed, b"after", true);
                 let _ = actions.batch_stop();
             }
-            #[cfg(all(feature = "queryable", feature = "shared-key-ids"))]
+            #[cfg(all(
+                feature = "queryable",
+                feature = "shared-key-ids",
+                feature = "listen",
+                feature = "query",
+                feature = "threads"
+            ))]
             Ok(Command::QueryById(rid, id, rest)) => {
                 let _ = actions.send_request_query(rid, id, Some(rest));
             }

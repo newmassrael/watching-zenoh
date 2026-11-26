@@ -30,9 +30,9 @@ use wz_capi_pico::session::{
 use wz_capi_pico::{
     z_bytes_copy_from_str, z_bytes_move, z_close, z_closure_reply, z_closure_reply_move,
     z_config_default, z_config_loan_mut, z_config_move, z_declare_publisher, z_declare_querier,
-    z_loaned_reply_t, z_open, z_owned_bytes_t, z_owned_closure_reply_t, z_owned_config_t,
+    z_delete, z_loaned_reply_t, z_open, z_owned_bytes_t, z_owned_closure_reply_t, z_owned_config_t,
     z_owned_publisher_t, z_owned_querier_t, z_owned_session_t, z_publisher_delete,
-    z_publisher_drop, z_publisher_loan, z_publisher_move, z_publisher_put, z_querier_drop,
+    z_publisher_drop, z_publisher_loan, z_publisher_move, z_publisher_put, z_put, z_querier_drop,
     z_querier_get, z_querier_loan, z_querier_move, z_session_drop, z_session_loan,
     z_session_loan_mut, z_session_move, z_view_keyexpr_from_str, z_view_keyexpr_loan,
     z_view_keyexpr_t, zp_batch_flush, zp_batch_start, zp_batch_stop, zp_config_insert,
@@ -42,6 +42,8 @@ use wz_runtime_tokio_test_support::free_port;
 
 /// pico `_Z_ERR_SESSION_CLOSED` (`utils/result.h`).
 const SESSION_CLOSED: i8 = -73;
+/// pico `_Z_ERR_TRANSPORT_NOT_AVAILABLE` (`utils/result.h`).
+const TRANSPORT_NOT_AVAILABLE: i8 = -103;
 
 unsafe fn open_role(port: u16, key: u8) -> z_owned_session_t {
     let endpoint = CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -73,6 +75,7 @@ unsafe extern "C" fn count_drop(ctx: *mut c_void) {
 
 #[test]
 fn a_closed_session_refuses_its_publisher_and_querier() {
+    let _program = crate::programs::admit();
     unsafe {
         let port = free_port();
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
@@ -172,8 +175,68 @@ fn a_closed_session_refuses_its_publisher_and_querier() {
     }
 }
 
+/// A put and a delete on a session that was closed answer that it has no transport, as
+/// zenoh-pico's `_z_write` answers on the transport its close cleared, rather than success into a
+/// session that sends nothing. CONTROL: the same put before the close answers `Z_OK`.
+#[test]
+fn a_closed_sessions_put_and_delete_answer_that_it_has_no_transport() {
+    let _program = crate::programs::admit();
+    unsafe {
+        let port = free_port();
+        let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
+        let mut dialer = open_role(port, Z_CONFIG_CONNECT_KEY);
+
+        let mut ke: z_view_keyexpr_t = std::mem::zeroed();
+        assert_eq!(
+            z_view_keyexpr_from_str(&mut ke, c"demo/check".as_ptr()),
+            Z_OK
+        );
+        let mut bytes = payload(c"before");
+        assert_eq!(
+            z_put(
+                z_session_loan(&dialer),
+                z_view_keyexpr_loan(&ke),
+                z_bytes_move(&mut bytes),
+                std::ptr::null()
+            ),
+            Z_OK,
+            "CONTROL: a put on an open session succeeds"
+        );
+
+        assert_eq!(
+            z_close(z_session_loan_mut(&mut dialer), std::ptr::null()),
+            Z_OK
+        );
+
+        let mut bytes = payload(c"after");
+        assert_eq!(
+            z_put(
+                z_session_loan(&dialer),
+                z_view_keyexpr_loan(&ke),
+                z_bytes_move(&mut bytes),
+                std::ptr::null()
+            ),
+            TRANSPORT_NOT_AVAILABLE,
+            "a put on a closed session"
+        );
+        assert_eq!(
+            z_delete(
+                z_session_loan(&dialer),
+                z_view_keyexpr_loan(&ke),
+                std::ptr::null()
+            ),
+            TRANSPORT_NOT_AVAILABLE,
+            "a delete on a closed session"
+        );
+
+        z_session_drop(z_session_move(&mut dialer));
+        z_session_drop(z_session_move(&mut listener));
+    }
+}
+
 #[test]
 fn the_batch_calls_answer_a_null_session_as_a_closed_one() {
+    let _program = crate::programs::admit();
     unsafe {
         assert_eq!(zp_batch_start(std::ptr::null()), SESSION_CLOSED);
         assert_eq!(zp_batch_flush(std::ptr::null()), SESSION_CLOSED);
@@ -184,6 +247,7 @@ fn the_batch_calls_answer_a_null_session_as_a_closed_one() {
 #[cfg(not(feature = "multi-thread"))]
 #[test]
 fn the_single_threaded_entry_points_answer_an_open_session() {
+    let _program = crate::programs::admit();
     unsafe {
         let port = free_port();
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);
@@ -229,6 +293,7 @@ fn the_single_threaded_entry_points_answer_an_open_session() {
 #[cfg(not(feature = "multi-thread"))]
 #[test]
 fn the_single_threaded_entry_points_answer_a_closed_session() {
+    let _program = crate::programs::admit();
     unsafe {
         let port = free_port();
         let mut listener = open_role(port, Z_CONFIG_LISTEN_KEY);

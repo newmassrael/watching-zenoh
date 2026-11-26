@@ -8,6 +8,8 @@
 //! sent, not lost, once the slow stream takes the rest.
 
 use crate::EngineHold;
+use core::ffi::c_int;
+use std::net::SocketAddr;
 #[cfg(feature = "threads")]
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -16,6 +18,13 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "threads")]
 use wz_capi_port::SessionDrive;
 use wz_capi_port::{SessionEngine, SubscriberSink, WireKey};
+use wz_runtime_coop::group_transport::NoGroups;
+use wz_runtime_coop::ip_stack::IpLinks;
+use wz_runtime_coop::session_drive::LinkOpenError;
+use wz_runtime_coop::stream_link::{NoDial, StreamDial};
+use wz_runtime_posix::net::PosixUdpSocket;
+use wz_runtime_posix::stream::{PosixTcpDial, PosixTcpSocket};
+use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
@@ -28,8 +37,8 @@ use wz_session_core::WhatAmI;
 use super::one_thread::OwnThread;
 #[cfg(feature = "threads")]
 use super::Engine;
-use super::{client_config, config_zid, open_with};
-use crate::CoopConfig;
+use super::{client_config, config_zid, open_with, LOOPBACK};
+use crate::{CoopConfig, CoopEngine};
 
 /// What one droppable publish that fills the slow stream carries: many frames, so that a few of
 /// them fill what the kernel holds for a peer that reads nothing, and one is taken in part.
@@ -42,6 +51,47 @@ const STILL: Duration = Duration::from_millis(300);
 /// How long a droppable publish waits for a stream that takes nothing: zenoh's default
 /// `wait_before_drop`, where the pico profile's waits as long as a blocking one.
 const DROP_WAIT_US: u64 = 1_000;
+/// What the slow peer's end of its stream holds for its reader. The kernel grows a loopback
+/// stream's buffers to megabytes as it fills, and moves bytes on into them after a write was
+/// refused, so a stream of the host's own sizes fills, or fails to stay full for `STILL`, by the
+/// host's settings; held to this, it is full a few publishes after the peer stops reading.
+const SLOW_RECEIVE_BYTES: c_int = 4096;
+
+/// The host's dial, each stream it opens holding [`SLOW_RECEIVE_BYTES`] for its reader.
+#[derive(Debug, Clone, Copy, Default)]
+struct SlowReader;
+
+impl StreamDial for SlowReader {
+    type Stream = PosixTcpSocket;
+
+    fn dial(&self, to: SocketAddr) -> Result<PosixTcpSocket, LinkOpenError> {
+        let stream = PosixTcpDial.dial(to)?;
+        stream
+            .hold_receive_buffer(SLOW_RECEIVE_BYTES)
+            .map_err(|_| LinkOpenError::Refused)?;
+        Ok(stream)
+    }
+}
+
+/// The slow peer's links: the host's, their streams dialled by [`SlowReader`].
+type SlowLinks = IpLinks<PosixUdpSocket, SlowReader, NoDial, NoGroups, crate::LinkCount>;
+
+/// The slow peer: a client session of [`SlowLinks`] that dials `endpoint`.
+fn open_slow(endpoint: String) -> EngineHold<CoopEngine<SlowLinks, PosixClock>> {
+    CoopEngine::open(
+        IpLinks::<PosixUdpSocket, SlowReader>::new(LOOPBACK, SlowReader)
+            .counted_by::<crate::LinkCount>()
+            .waited_by_owner(),
+        PosixClock,
+        PosixEntropy,
+        CoopConfig {
+            endpoints: vec![endpoint],
+            zid: config_zid(0xc2),
+            ..client_config()
+        },
+    )
+    .expect("the slow peer's session opens")
+}
 
 fn publish(congestion: CongestionControl) -> PublishOptions<'static> {
     PublishOptions::put()
@@ -118,11 +168,8 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
     )
     .expect("the good peer declares its subscriber");
     eventually("the good peer's face", || publisher.faces_up() == 1);
-    let slow = stepped(CoopConfig {
-        endpoints: vec![endpoint],
-        zid: config_zid(0xc2),
-        ..client_config()
-    });
+    let slow = open_slow(endpoint);
+    SessionDrive::start_read_task(&*slow).expect("the slow peer's read task starts");
     eventually("the slow peer's face", || publisher.faces_up() == 2);
     SessionDrive::stop_read_task(&*slow).expect("the slow peer's read task stops");
 
@@ -291,7 +338,7 @@ fn a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot
     });
     let faces_up = || publisher.call(|engine| engine.faces_up());
     eventually("the good peer's face", || faces_up() == 1);
-    let slow = peer(0xc2);
+    let slow = OwnThread::open(move || open_slow(endpoint));
     eventually("the slow peer's face", || faces_up() == 2);
     let (resume, held) = std::sync::mpsc::channel::<()>();
     let paused = slow.hand(move |_| {

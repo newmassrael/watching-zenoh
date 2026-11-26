@@ -405,9 +405,31 @@ pub(crate) fn resolve_open(
 /// is the bound a config raises it to: zenoh-pico grows its lists on the heap, which an open that
 /// takes no memory after it cannot. A config states more, or less, over them. The process pools
 /// are sized by the same (`crate::process_pool`).
+///
+/// A build whose every session opens by the region of its tables laid out when it is compiled
+/// (`OPENS_BY_REGION`) opens each table at that bound instead (`SessionLimits::PICO_PRESET_BOUND`):
+/// no config resizes a region, so a table opened below its bound would never reach it, and a
+/// session of such a build could hold no second querier or liveliness subscriber whatever its
+/// program stated.
 pub(crate) const fn opening_limits() -> SessionLimits {
-    SessionLimits::PICO_PRESET
+    if OPENS_BY_REGION {
+        SessionLimits::PICO_PRESET_BOUND
+    } else {
+        SessionLimits::PICO_PRESET
+    }
 }
+
+/// Whether every session of the build opens by the region of its tables the build lays out when it
+/// is compiled (`PRESET`), its limits the region's and no other: a build of the cooperative engine
+/// that states no policy, listens on nothing and joins no group, whose open walks no plan.
+const OPENS_BY_REGION: bool = cfg!(all(
+    not(feature = "engine-tokio"),
+    not(any(
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))
+));
 
 #[cfg(test)]
 mod opening_limits_tests {
@@ -416,11 +438,30 @@ mod opening_limits_tests {
     use wz_session_core::limits::SessionLimits;
 
     /// A session of this ABI opens under zenoh-pico's limits: a listener holds the ten peers
-    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten.
-    /// Turned red by an open under the build's defaults.
+    /// zenoh-pico admits (`Z_LISTEN_MAX_CONNECTION_NB`), where the build's domain holds ten. A
+    /// build that opens by its region opens under the preset's bound, any other under the preset.
+    /// Turned red by an open under the build's defaults, or by a region build that opens under
+    /// the open values (`opening_limits` answering `PICO_PRESET` whatever `OPENS_BY_REGION` is).
     #[test]
     fn a_session_opens_under_picos_limits() {
+        #[cfg(not(all(
+            not(feature = "engine-tokio"),
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        )))]
         assert_eq!(opening_limits(), SessionLimits::PICO_PRESET);
+        #[cfg(all(
+            not(feature = "engine-tokio"),
+            not(any(
+                feature = "config-policy",
+                feature = "peer",
+                feature = "multicast-transport"
+            ))
+        ))]
+        assert_eq!(opening_limits(), SessionLimits::PICO_PRESET_BOUND);
         let mut probe = SessionLimits::defaults();
         if probe.select_max_faces(Quota::at_most(10)).is_ok() {
             assert_eq!(opening_limits().max_faces(), Quota::at_most(10));
@@ -430,7 +471,14 @@ mod opening_limits_tests {
     /// A session's entity tables open at what zenoh-pico's parity programs declare on one session
     /// (`[limit.pico_open]`), where the build's domain holds those counts: one subscriber, two
     /// queryables with the admin space's, one publisher, two declared keys and one get. Turned red
-    /// by a preset that opens them at the bound the Kconfig keeps.
+    /// by a preset that opens them at the bound the Kconfig keeps. A build that opens by its region
+    /// opens at the bound instead (the test below).
+    #[cfg(any(
+        feature = "engine-tokio",
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
     #[test]
     fn a_session_opens_its_entity_tables_at_the_parity_programs_counts() {
         let opening = opening_limits();
@@ -452,6 +500,123 @@ mod opening_limits_tests {
         }
         if probe.select_max_pending_queries(Quota::at_most(1)).is_ok() {
             assert_eq!(opening.max_pending_queries(), Quota::at_most(1));
+        }
+    }
+
+    /// A session opens two reassembly buffers (`[limit.pico_open]`), where the build's domain
+    /// holds two: one for the reliable chain zenoh-pico's parity programs send and one for the
+    /// message it rejoined while its records are handed out; a config raises it to the bound.
+    /// Turned red by a preset that opens them at the bound the Kconfig keeps.
+    #[cfg(any(
+        feature = "engine-tokio",
+        feature = "config-policy",
+        feature = "peer",
+        feature = "multicast-transport"
+    ))]
+    #[test]
+    fn a_session_opens_two_reassembly_buffers() {
+        let mut probe = SessionLimits::defaults();
+        if probe.select_reassembly_chains(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening_limits().reassembly_chains(), Quota::at_most(2));
+        }
+    }
+
+    /// A session of a build that opens by its region opens each entity table at the preset's
+    /// bound, which no config of it can raise past the region: two queriers, two liveliness
+    /// subscribers and tokens, two matching listeners and two pending gets, where the build's
+    /// domain holds two, as a program of such a build that holds two of a kind needs; and never
+    /// below the open values. The CONTROL is the open values themselves, which hold one of each.
+    /// Turned red by a region laid out under `PICO_PRESET`.
+    #[cfg(all(
+        not(feature = "engine-tokio"),
+        not(any(
+            feature = "config-policy",
+            feature = "peer",
+            feature = "multicast-transport"
+        ))
+    ))]
+    #[test]
+    fn a_session_of_a_region_build_opens_each_table_at_the_presets_bound() {
+        let opening = opening_limits();
+        let open = SessionLimits::PICO_PRESET;
+        let mut probe = SessionLimits::defaults();
+        if probe.select_max_queriers(Quota::at_most(2)).is_ok() {
+            assert_eq!(
+                open.max_queriers(),
+                Quota::at_most(1),
+                "CONTROL: the open value"
+            );
+            assert_eq!(opening.max_queriers(), Quota::at_most(2));
+        }
+        if probe
+            .select_max_liveliness_subscriptions(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_liveliness_subscriptions(), Quota::at_most(2));
+        }
+        if probe.select_max_local_tokens(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_local_tokens(), Quota::at_most(2));
+        }
+        if probe
+            .select_max_matching_listeners(Quota::at_most(2))
+            .is_ok()
+        {
+            assert_eq!(opening.max_matching_listeners(), Quota::at_most(2));
+        }
+        if probe.select_max_pending_queries(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening.max_pending_queries(), Quota::at_most(2));
+        }
+        let at_least = |bound: Quota, open: Quota| match (bound.most(), open.most()) {
+            (Some(bound), Some(open)) => bound >= open,
+            (bound, _) => bound.is_none(),
+        };
+        for (name, bound, open) in [
+            (
+                "MAX_SUBSCRIPTIONS",
+                opening.max_subscriptions(),
+                open.max_subscriptions(),
+            ),
+            (
+                "MAX_QUERYABLES",
+                opening.max_queryables(),
+                open.max_queryables(),
+            ),
+            (
+                "MAX_PUBLISHERS",
+                opening.max_publishers(),
+                open.max_publishers(),
+            ),
+            ("MAX_QUERIERS", opening.max_queriers(), open.max_queriers()),
+            (
+                "MAX_LIVELINESS_SUBSCRIPTIONS",
+                opening.max_liveliness_subscriptions(),
+                open.max_liveliness_subscriptions(),
+            ),
+            (
+                "MAX_LOCAL_TOKENS",
+                opening.max_local_tokens(),
+                open.max_local_tokens(),
+            ),
+            (
+                "MAX_MATCHING_LISTENERS",
+                opening.max_matching_listeners(),
+                open.max_matching_listeners(),
+            ),
+            (
+                "MAX_DECLARED_KEYEXPRS",
+                opening.max_declared_keyexprs(),
+                open.max_declared_keyexprs(),
+            ),
+            (
+                "MAX_PENDING_QUERIES",
+                opening.max_pending_queries(),
+                open.max_pending_queries(),
+            ),
+        ] {
+            assert!(
+                at_least(bound, open),
+                "{name}: {bound:?} below the open value {open:?}"
+            );
         }
     }
 }
@@ -878,14 +1043,30 @@ pub(crate) struct SessionTail {
 }
 
 impl SessionTail {
-    /// What stays beside `handle` in its place: no closure counted yet.
-    fn of(handle: &PicoSessionHandle) -> Self {
-        #[cfg(feature = "engine-tokio")]
-        let _ = handle;
+    /// What stays beside a handle of the tokio engine in its place: no closure counted yet.
+    #[cfg(feature = "engine-tokio")]
+    fn unheld() -> Self {
         Self {
             open: crate::ffi::OpenClosures::default(),
-            #[cfg(not(feature = "engine-tokio"))]
-            arena: core::mem::ManuallyDrop::new(engine_held(handle).clone()),
+        }
+    }
+
+    /// What stays beside a handle of the cooperative engine in its place, made at `at`: no
+    /// closure counted yet, and `arena`, the hold on the engine whose arena the place lies in. The
+    /// count's lock is made where it stays, as a kernel's is.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self`, aligned for it and holds none, and the tail is not
+    /// moved from it.
+    #[cfg(not(feature = "engine-tokio"))]
+    unsafe fn write_at(at: core::ptr::NonNull<Self>, arena: EngineHold) {
+        let at = at.as_ptr();
+        // SAFETY: the caller's: each field is written once through a pointer to it.
+        unsafe {
+            crate::ffi::OpenClosures::init_at(core::ptr::NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).open),
+            ));
+            core::ptr::addr_of_mut!((*at).arena).write(core::mem::ManuallyDrop::new(arena));
         }
     }
 }
@@ -1922,7 +2103,7 @@ unsafe fn open_on_tokio(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRe
             let handle = PicoSessionHandle::new(drive, ext);
             #[cfg(feature = "session-memory")]
             let handle = handle.with_memory(memory);
-            let beside = SessionTail::of(&handle);
+            let beside = SessionTail::unheld();
             *zs = z_owned_session_t {
                 _val: slot.fill(SessionPlace::holding(handle, beside)) as *mut c_void,
                 _cnt: core::ptr::null_mut(),
@@ -2413,9 +2594,9 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     // row it does not use and a page no row uses is never resident; an image's is its heap's,
     // written where a row must read empty.
     #[cfg(all(feature = "os-host", any(unix, windows)))]
-    let memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory = &crate::os::HostPages;
     #[cfg(not(all(feature = "os-host", any(unix, windows))))]
-    let memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
+    let arena_memory: &'static dyn wz_capi_coop::arena::ArenaMemory =
         &wz_capi_coop::arena::AllocatorMemory;
     let opened = wz_capi_coop::CoopEngine::open_made_in(
         links,
@@ -2425,7 +2606,7 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
         policy,
         request.key_ids,
         wz_capi_coop::arena::OpenStorage {
-            memory,
+            memory: arena_memory,
             held: const { crate::object_slot::held_places(SessionPlace::LAYOUT) },
             plan,
         },
@@ -2478,11 +2659,14 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     #[cfg(feature = "session-memory")]
     let handle = handle.with_memory(memory);
     debug_assert!(place.bytes() >= SessionPlace::LAYOUT.size());
-    let beside = SessionTail::of(&handle);
+    let arena = engine_held(&handle).clone();
     *zs = z_owned_session_t {
         // SAFETY: the arena lent the place for `SessionPlace::LAYOUT`, aligned as a span starts,
-        // to this handle alone, and it stands while the engine the tail beside it holds does.
-        _val: SessionPlace::fill(place.as_ptr(), handle, beside) as *mut c_void,
+        // to this handle alone, and it stands while the engine the tail beside it holds does; the
+        // tail is made there, beside the handle, and stays.
+        _val: SessionPlace::fill(place.as_ptr(), handle, |tail| {
+            SessionTail::write_at(tail, arena)
+        }) as *mut c_void,
         _cnt: core::ptr::null_mut(),
     };
     // The multi-threaded arm's read task starts with the open unless the options say not to. A

@@ -7,8 +7,8 @@
 //!
 //! Its owner holds the I/O and the wait, and hands this value what happened: the link's dials and
 //! handshakes as inputs ([`UnicastTransport::input`], [`UnicastTransport::pumped`]), a datagram
-//! the link read ([`UnicastTransport::on_datagram`], [`UnicastTransport::on_frame`]) and the
-//! time ([`UnicastTransport::on_time`]). It asks when to look again
+//! the link read (`UnicastTransport::on_datagram` with `rx-in-place`, `UnicastTransport::on_frame`
+//! with `alloc`) and the time ([`UnicastTransport::on_time`]). It asks when to look again
 //! ([`UnicastTransport::due_ms`]), the first of what the link and the session have due. Every
 //! order that matters (what is raised before a datagram is read, and that the lease is judged
 //! after it) is written once, here, so two owners of a transport cannot keep it in two orders.
@@ -24,6 +24,14 @@
 //! session's, built anew for each link its life brings up, and the actions are reached through the
 //! place the session's transport lies in ([`crate::transport_place::TransportPlace`]).
 //!
+//! [`UnicastTransport`]: crate::unicast_transport::UnicastTransport
+//! [`UnicastTransport::input`]: crate::unicast_transport::UnicastTransport::input
+//! [`UnicastTransport::pumped`]: crate::unicast_transport::UnicastTransport::pumped
+//! [`UnicastTransport::on_time`]: crate::unicast_transport::UnicastTransport::on_time
+//! [`UnicastTransport::due_ms`]: crate::unicast_transport::UnicastTransport::due_ms
+//! [`UnicastTransport::begin_input`]: crate::unicast_transport::UnicastTransport::begin_input
+//! [`InputTurn`]: crate::unicast_transport::InputTurn
+//! [`MadeLink`]: crate::unicast_transport::MadeLink
 //! [`UnicastLink`]: crate::link_life::UnicastLink
 //! [`UnicastRx`]: crate::unicast_rx::UnicastRx
 //! [`TransportTimers`]: crate::transport_timers::TransportTimers
@@ -243,8 +251,8 @@ impl<Router: RxReassembly, Life> UnicastTransport<Router, Life> {
         path
     }
 
-    /// [`Self::on_datagram`] for a datagram the copying receive read into a frame of its own
-    /// ([`UnicastRx::dispatch_frame`]), in the same order.
+    /// `on_datagram` (the in-place receive's, with `rx-in-place`) for a datagram the copying
+    /// receive read into a frame of its own ([`UnicastRx::dispatch_frame`]), in the same order.
     #[cfg(feature = "alloc")]
     pub fn on_frame<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,
@@ -307,7 +315,8 @@ impl<Router: RxReassembly, Life> InputTurn<'_, Router, Life> {
     /// What the receive parked of the last unit, if anything, handed to the session first, so the
     /// rest of a batch does not wait for the peer to send again: whether there was any. The
     /// copying receive parks the rest of every batch ([`UnicastRx::dispatch_pending`]); a receive
-    /// in place parks only the rest of a compressed one ([`UnicastRx::dispatch_parked_in_place`]).
+    /// in place parks only the rest of a compressed one (`UnicastRx::dispatch_parked_in_place`,
+    /// with `rx-in-place`).
     #[cfg(feature = "alloc")]
     pub fn parked<R: SessionRuntime, T: TimeSource, F: EventSink + ?Sized>(
         &mut self,

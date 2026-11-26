@@ -191,3 +191,21 @@ fn a_row_decoded_with_no_heap_is_the_scouted_hellos_row() {
         "a cleared table holds nothing"
     );
 }
+
+/// A table made in place is the one `HelloTable::new` makes, whatever its memory held: a host that
+/// keeps it in a static of no initial value makes it there for each window. Turned red by a row's
+/// role or zid, or the locator quota, left as the memory held them.
+#[test]
+fn a_table_made_in_place_is_the_new_one() {
+    let mut place = alloc::boxed::Box::<HelloTable>::new_uninit();
+    // SAFETY: the box's own memory, written as bytes, which a `MaybeUninit` holds as they are.
+    unsafe {
+        place
+            .as_mut_ptr()
+            .cast::<u8>()
+            .write_bytes(0xA5, core::mem::size_of::<HelloTable>());
+    }
+    let made = HelloTable::init_in(&mut place);
+    let new = alloc::boxed::Box::new(HelloTable::new());
+    assert_eq!(alloc::format!("{made:?}"), alloc::format!("{new:?}"));
+}

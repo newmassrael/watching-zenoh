@@ -448,6 +448,20 @@ pub enum MessageLabel {
 }
 
 impl MessageLabel {
+    /// Every kind, in declaration order, which is the order the derived `Ord` gives and the
+    /// order of each kind's discriminant.
+    pub const ALL: [MessageLabel; 9] = [
+        MessageLabel::Put,
+        MessageLabel::Del,
+        MessageLabel::Query,
+        MessageLabel::Reply,
+        MessageLabel::ReplyErr,
+        MessageLabel::ResponseFinal,
+        MessageLabel::Interest,
+        MessageLabel::Declare,
+        MessageLabel::Oam,
+    ];
+
     /// Upstream's label value.
     pub const fn label(self) -> &'static str {
         match self {

@@ -179,6 +179,7 @@ unsafe fn put_lent(
 
 #[test]
 fn a_fragmented_put_is_rejoined_up_to_the_ceiling_and_dropped_past_it() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
@@ -385,6 +386,7 @@ fn a_fragmented_put_is_rejoined_up_to_the_ceiling_and_dropped_past_it() {
 /// drops the chain, and the session goes on to carry the next put.
 #[test]
 fn a_put_past_every_ceiling_is_sent_as_pico_sends_it_and_dropped_by_the_receiver() {
+    let _program = crate::programs::admit();
     let port = free_port();
     let listen = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();
     let connect = std::ffi::CString::new(format!("tcp/127.0.0.1:{port}")).unwrap();

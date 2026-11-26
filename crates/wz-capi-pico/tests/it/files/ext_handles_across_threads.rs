@@ -154,6 +154,7 @@ fn reading(bay: u64, tilt: i32, body: &[u8]) -> Vec<u8> {
 
 #[test]
 fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
+    let _program = crate::programs::admit();
     let profile = CString::new(PROFILE).unwrap();
     let values = CString::new(VALUES).unwrap();
     unsafe {
@@ -252,6 +253,7 @@ fn a_sender_and_a_receiver_shared_by_threads_keep_each_streams_counter() {
 
 #[test]
 fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
+    let _program = crate::programs::admit();
     let description = CString::new(KEYED_DESCRIPTION).unwrap();
     const ROOM: usize = 32;
     let mut storage = vec![0u8; THREADS * ROOM];
@@ -352,6 +354,7 @@ fn a_keyer_shared_by_threads_keeps_each_instances_last_value() {
 
 #[test]
 fn a_catalog_and_a_schema_are_read_by_threads_at_once() {
+    let _program = crate::programs::admit();
     let text = CString::new(CATALOG).unwrap();
     unsafe {
         let mut catalog: wz_ext_owned_message_catalog_t = std::mem::zeroed();

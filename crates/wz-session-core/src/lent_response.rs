@@ -451,10 +451,11 @@ impl<'a> ResponseWriter<'a> {
         }
     }
 
-    /// [`Self::encode`] into a transmit sink, which can hand out a window: a plain reply is
-    /// measured, the room for it is checked once, and its bytes are stored where they go, in the
-    /// order the generated encoders write them. A buffer that hands out no window, and a reply
-    /// that is not plain, are written as [`Self::encode`] writes them.
+    /// [`Self::encode`] into a transmit sink, which can hand out a window: a plain reply's bytes
+    /// are stored where they go, in the order the generated encoders write them, into the whole
+    /// room of a buffer with an end (a slot) with no count of them first, or into a window of
+    /// the measured length of one without. A buffer that hands out no window, and a reply that
+    /// is not plain, are written as [`Self::encode`] writes them.
     ///
     /// Building the codec's `Response` for the reply nearly every query gets moves a record that
     /// holds a chain of eight extension entries inline at every level, encodes it through the
@@ -469,6 +470,23 @@ impl<'a> ResponseWriter<'a> {
             return self.encode_generic(sink);
         }
         self.direct_bounds()?;
+        // A buffer with an end of its own hands out all its room: the reply is written in one
+        // pass, its length where the writer stopped, and nothing is counted first.
+        let at = sink.position();
+        if let Some(room) = sink.reserve_rest() {
+            let total = room.len();
+            let out = self.write_window(room);
+            let written = if out.short {
+                None
+            } else {
+                Some(total.wrapping_sub(out.rest.len()))
+            };
+            sink.rewind_to(at.saturating_add(written.unwrap_or(0)));
+            return match written {
+                Some(_) => Ok(()),
+                None => Err(CodecError::BufferOverflow),
+            };
+        }
         match sink.reserve(self.direct_len())? {
             Some(window) => self.write_direct(window),
             None if GENERIC_REACHABLE => self.encode_generic(sink),
@@ -571,6 +589,17 @@ impl<'a> ResponseWriter<'a> {
     /// flag on each but the last), then the body: the Reply's header and a Put's (its header,
     /// encoding and payload) or a Del's header, or an Err's (its header, encoding and payload).
     fn write_direct(&self, window: &mut [u8]) -> Result<(), CodecError> {
+        if self.write_window(window).filled() {
+            Ok(())
+        } else {
+            Err(CodecError::BufferOverflow)
+        }
+    }
+
+    /// The reply's bytes from the front of `window`, as [`Self::write_direct`] writes them, and
+    /// what is left of the window: a window longer than the reply keeps its tail, and one shorter
+    /// is marked short.
+    fn write_window<'w>(&self, window: &'w mut [u8]) -> Window<'w> {
         let parts = &self.parts;
         let PartsView {
             body,
@@ -641,11 +670,7 @@ impl<'a> ResponseWriter<'a> {
             out.vle(payload.len() as u64);
             out.bytes(payload);
         }
-        if out.filled() {
-            Ok(())
-        } else {
-            Err(CodecError::BufferOverflow)
-        }
+        out
     }
 
     /// What a directly written reply writes besides its fixed parts, read once for the length and

@@ -81,6 +81,7 @@ pub(super) const MAX_INBOUND_SUB_INTERESTS: usize =
 pub(super) const MAX_PEER_KEYEXPR_ALIASES: usize =
     limit(option_env!("WZ_LIMIT_MAX_PEER_KEYEXPR_ALIASES"), 16);
 pub(super) const MAX_SHARED_KEY_IDS: usize = limit(option_env!("WZ_LIMIT_MAX_SHARED_KEY_IDS"), 256);
+pub(super) const STATS_KEY_SERIES: usize = limit(option_env!("WZ_LIMIT_STATS_KEY_SERIES"), 8);
 pub(super) const MAX_REMOTE_DECLS: usize = limit(option_env!("WZ_LIMIT_MAX_REMOTE_DECLS"), 16);
 pub(super) const MAX_PENDING_REPLIES: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_REPLIES"), 8);
 pub(super) const MAX_PENDING_FINALS: usize = limit(option_env!("WZ_LIMIT_MAX_PENDING_FINALS"), 8);
@@ -132,6 +133,7 @@ pub(super) const MAX_FACES: usize = limit(option_env!("WZ_LIMIT_MAX_FACES"), 100
 pub(super) const MAX_ACCEPT_PENDING: usize = limit(option_env!("WZ_LIMIT_MAX_ACCEPT_PENDING"), 100);
 pub(super) const RX_POOL_BUFFERS: usize = limit(option_env!("WZ_LIMIT_RX_POOL_BUFFERS"), 4);
 pub(super) const TX_POOL_SLOTS: usize = limit(option_env!("WZ_LIMIT_TX_POOL_SLOTS"), 4);
+pub(super) const REASSEMBLY_CHAINS: usize = limit(option_env!("WZ_LIMIT_REASSEMBLY_CHAINS"), 3);
 pub(super) const SESSION_MAX_PEER_KEYEXPR_ALIASES: usize = limit(
     option_env!("WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"),
     16016,

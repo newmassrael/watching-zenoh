@@ -55,6 +55,26 @@ pub enum Refusal {
     PeerNotAllowed(PeerOp),
 }
 
+/// The counter of [`Refused`] each reason is counted in, as a number that is never zero.
+const OUTSIDE_SET: core::num::NonZeroU8 = core::num::NonZeroU8::MIN;
+const ROLE_NOT_DECLARED: core::num::NonZeroU8 = OUTSIDE_SET.saturating_add(1);
+const PEER_UNKNOWN: core::num::NonZeroU8 = OUTSIDE_SET.saturating_add(2);
+const PEER_NOT_ALLOWED: core::num::NonZeroU8 = OUTSIDE_SET.saturating_add(3);
+
+impl Refusal {
+    /// The counter of [`Refused`] this reason is counted in, as a number that is never zero: what
+    /// a memory of a key's refusal keeps in plain bytes, all of whose zero is no refusal, to count
+    /// the refusal again by ([`KeyGate::count_refusal`]).
+    pub const fn counter(self) -> core::num::NonZeroU8 {
+        match self {
+            Self::OutsideSet => OUTSIDE_SET,
+            Self::RoleNotDeclared(_) => ROLE_NOT_DECLARED,
+            Self::PeerUnknown => PEER_UNKNOWN,
+            Self::PeerNotAllowed(_) => PEER_NOT_ALLOWED,
+        }
+    }
+}
+
 /// What an admitted key is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Admitted {
@@ -241,22 +261,24 @@ impl<'a> KeyGate<'a> {
         self.refused
     }
 
-    fn refuse(&mut self, reason: Refusal) -> Refusal {
+    /// Count a refusal by the counter its reason is counted in ([`Refusal::counter`]): what a
+    /// message on a key whose refusal is kept is counted by, the key not asked of the gate again.
+    pub fn count_refusal(&mut self, counter: core::num::NonZeroU8) {
         self.refused.total = self.refused.total.saturating_add(1);
-        match reason {
-            Refusal::OutsideSet => {
-                self.refused.outside_set = self.refused.outside_set.saturating_add(1);
-            }
-            Refusal::RoleNotDeclared(_) => {
-                self.refused.role_not_declared = self.refused.role_not_declared.saturating_add(1);
-            }
-            Refusal::PeerUnknown => {
-                self.refused.peer_unknown = self.refused.peer_unknown.saturating_add(1);
-            }
-            Refusal::PeerNotAllowed(_) => {
-                self.refused.peer_not_allowed = self.refused.peer_not_allowed.saturating_add(1);
-            }
-        }
+        let count = if counter == OUTSIDE_SET {
+            &mut self.refused.outside_set
+        } else if counter == ROLE_NOT_DECLARED {
+            &mut self.refused.role_not_declared
+        } else if counter == PEER_UNKNOWN {
+            &mut self.refused.peer_unknown
+        } else {
+            &mut self.refused.peer_not_allowed
+        };
+        *count = count.saturating_add(1);
+    }
+
+    fn refuse(&mut self, reason: Refusal) -> Refusal {
+        self.count_refusal(reason.counter());
         reason
     }
 }
@@ -469,5 +491,31 @@ pub(crate) mod tests {
         assert_eq!(gate.admit_key("x"), Err(Refusal::OutsideSet));
         assert_eq!(gate.refused().total, usize::MAX);
         assert_eq!(gate.refused().outside_set, usize::MAX);
+    }
+
+    /// A refusal counted again by its counter is counted where the gate counted it the first time,
+    /// each reason in its own counter. Turned red by two reasons sharing a counter, or a counter
+    /// that counts in another reason's place.
+    #[test]
+    fn a_refusal_counted_again_by_its_counter_lands_in_its_reasons_count() {
+        let reasons = [
+            Refusal::OutsideSet,
+            Refusal::RoleNotDeclared(EntityKind::Subscriber),
+            Refusal::PeerUnknown,
+            Refusal::PeerNotAllowed(PeerOp::Publish),
+        ];
+        for (n, one) in reasons.iter().enumerate() {
+            for other in &reasons[n + 1..] {
+                assert_ne!(one.counter(), other.counter(), "{one:?} and {other:?}");
+            }
+        }
+        for reason in reasons {
+            let mut first = KeyGate::closed(&TABLE);
+            first.refuse(reason);
+            let mut again = KeyGate::closed(&TABLE);
+            again.count_refusal(reason.counter());
+            assert_eq!(again.refused(), first.refused(), "{reason:?}");
+            assert_eq!(again.refused().total, 1);
+        }
     }
 }

@@ -11,9 +11,10 @@
 //!   queryables and tokens, its interests, the replies and Finals its queries are owed), which is
 //!   scoped by that peer's transport session and so cannot be shared, and the session's own gets
 //!   pending on that face, whose request ids the face's actions mint. Both are lent from the
-//!   session's arena at its open, one set for each face it may hold at once, a face taking a set
-//!   when it comes and giving it back, emptied, when it goes. A set is built where the registry
-//!   keeps it and never moved from there (`FaceTables::rowless_in`).
+//!   session's arena, which the open reserves one set for each face it may hold at once in, a set
+//!   built in its place as the first face takes it and a face giving it back, emptied, when it
+//!   goes. A set is built where the registry keeps it and never moved from there
+//!   (`FaceTables::rowless_in`).
 //!
 //! What a peer writes by its own choice (its aliases, its declarations and the repeats of them,
 //! its interests) is not lent to each set at the bound of one peer: each kind of row lies in one
@@ -153,8 +154,9 @@ pub(super) struct FaceTables {
     pub(super) peer: Peer,
     pub(super) gets: Gets,
     /// The set's row of the index of the earliest deadline of the session's gets
-    /// (`RegistryOf::dues`): the index keeps a leaf for each set, free or held, so its rows are
-    /// lent with the sets and none is added or removed as faces come and go.
+    /// (`RegistryOf::dues`): the index keeps a leaf for each set built, free or held, so its rows
+    /// are lent with the sets; a set built as a face first takes its place joins it by a rebuild
+    /// (`RegistryOf::reindex_dues`), and none leaves it as faces go.
     #[cfg(feature = "query")]
     due: DueRow,
     /// The face's link was lost and the tokens its peer declared are still to be retracted to the
@@ -554,21 +556,27 @@ pub(super) struct RegistryOf<H: Holders> {
     /// Where a sample the application's subscribers match goes: the session's round of
     /// deliveries, handed to each dispatch of the application's tables.
     delivery: RoundDelivery,
-    /// The session's pools of what its peers write by their own choice, which every face's tables
-    /// keep their rows in from the open on: what a test reads the pools' counts by.
-    #[cfg(all(test, feature = "runtime-plan"))]
-    pools: PeerPools,
-    /// Every set of face tables, each where it was built and never moved from, in a table the arena
-    /// lent at the open with a row for each face the config admits: the dial role's face's first
-    /// and always held by it, then the faces to come. A face past them is refused
-    /// (`FacesFull`), so the session's memory is the arena alone. A set no face holds is kept,
-    /// emptied, for the next face.
+    /// What builds the set of each place no face has taken yet, from the span the open reserved for
+    /// it, the session's pools of what its peers write by their own choice among it: a session of
+    /// its dial role's face alone builds its one set at the open and keeps none.
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
+    spares: adding::SpareSets,
+    /// Every set of face tables built so far, each where it was built and never moved from, in a
+    /// table the arena lent at the open with a row for each face the config admits: the dial role's
+    /// face's first and always held by it, then a set for each place a face has taken, built as the
+    /// first face takes it. A face past them is refused (`FacesFull`), so the session's memory is
+    /// the arena alone. A set no face holds is kept, emptied, for the next face.
     sets: ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds
     /// the first. The place is the face's in every table of the session (its link's, its room's).
     /// Every walk over the faces and every lookup of one reads this and the held sets alone; the
-    /// open lends a set for each face the config admits, most of them free at any time.
+    /// open lends a row for each face the config admits, most of them free at any time, and every
+    /// row past the sets built is free or kept.
     holders: H,
     /// The tokens of faces that went before each was retracted, in the order the faces went: each
     /// the token table the face's set held, its rows still in the session's pool, the set given
@@ -620,6 +628,10 @@ pub(super) struct RegistryOf<H: Holders> {
     /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
+    /// The lent Responses and ResponseFinals handed to the pending gets alone
+    /// ([`Self::dispatch_reply`]): what a test of a reply's dispatch counts.
+    #[cfg(all(test, feature = "std", feature = "query"))]
+    replies_alone: usize,
     /// How often a run of Pushes was drained before a later record of its own frame
     /// ([`Self::count_drain_within_frame`]): what tells a test that a Push and the record after
     /// it came in one frame.
@@ -759,10 +771,10 @@ impl<H: Holders> RegistryOf<H> {
     /// held to the session limits its open resolved, the application's lent from `arena`, `rows`
     /// of each, the pools of what the peers write `peers` counts lent from it next, and the tables
     /// of each face `gets` and `peers` count lent from it too: the dial face's (one of no rows for
-    /// a session that dials nothing, `FacePeers::dial`), the rest kept for the faces to come, and
-    /// the session's own gets where it answers its own. What the peers
-    /// declare keeps its keys in `keys`, the session's key arena, as the session's own
-    /// declarations do. What the application's subscribers match goes to `delivery`. Refused when
+    /// a session that dials nothing, `FacePeers::dial`), the rest reserved for the faces to come
+    /// and built as each first comes (`adding::SpareSets`), and the session's own gets where it
+    /// answers its own. What the peers declare keeps its keys in `keys`, the session's key arena,
+    /// as the session's own declarations do. What the application's subscribers match goes to `delivery`. Refused when
     /// the arena has not the rows, which one reserved by the plan that counts them always has.
     #[cfg(feature = "runtime-plan")]
     pub(super) fn new(
@@ -783,8 +795,8 @@ impl<H: Holders> RegistryOf<H> {
         debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
         // A session that dials nothing lent its dial face no set: that face holds one of no rows,
         // first, and every lent set is for the faces to come. Otherwise the first lent set is the
-        // dial face's. Either way every set the plan counts is lent by the one call below, so the
-        // open builds and lends a set in one place.
+        // dial face's. Either way every set is built and lent by `lend_set`, at the open or as a
+        // face comes, so a set is built in one place.
         let mut sets = arena.lend(peers.sets())?;
         let holders = H::lent(arena, peers.sets())?;
         if !peers.dial {
@@ -793,11 +805,40 @@ impl<H: Holders> RegistryOf<H> {
                 ceiling: 0,
             })?;
         }
-        for _ in 0..peers.tables {
+        // Where faces are added beside the dial role's, the dial face's set is built now and the
+        // set of each other place when a face first takes it, from a span reserved here and written
+        // by nothing until then: on a host the pages of the places no face took stay unresident.
+        #[cfg(any(
+            feature = "listen",
+            feature = "group",
+            all(test, feature = "runtime-plan")
+        ))]
+        let built = usize::from(peers.dial).min(peers.tables);
+        #[cfg(not(any(
+            feature = "listen",
+            feature = "group",
+            all(test, feature = "runtime-plan")
+        )))]
+        let built = peers.tables;
+        for _ in 0..built {
             lend_set(
                 &mut sets, arena, keys, &mut pools, gets.rows, peers.rows, limits,
             )?;
         }
+        #[cfg(any(
+            feature = "listen",
+            feature = "group",
+            all(test, feature = "runtime-plan")
+        ))]
+        let spares = adding::SpareSets::reserved(
+            arena,
+            keys,
+            pools,
+            gets.rows,
+            peers.rows,
+            *limits,
+            peers.tables.saturating_sub(built),
+        )?;
         // Every span an arena lends starts on one alignment, so lending the session's own gets
         // after the faces' takes the bytes the plan counts for them wherever it lends them.
         #[cfg(feature = "local-queryable")]
@@ -830,8 +871,12 @@ impl<H: Holders> RegistryOf<H> {
             owed,
             #[cfg(feature = "multicast-declarations")]
             peer_aliases: limits.max_peer_keyexpr_aliases_held(),
-            #[cfg(all(test, feature = "runtime-plan"))]
-            pools,
+            #[cfg(any(
+                feature = "listen",
+                feature = "group",
+                all(test, feature = "runtime-plan")
+            ))]
+            spares,
             #[cfg(feature = "local-queryable")]
             local,
             #[cfg(feature = "local-queryable")]
@@ -850,6 +895,8 @@ impl<H: Holders> RegistryOf<H> {
             set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
+            #[cfg(all(test, feature = "std", feature = "query"))]
+            replies_alone: 0,
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
         };
@@ -862,6 +909,18 @@ impl<H: Holders> RegistryOf<H> {
     fn index_dues(&mut self) {
         #[cfg(feature = "query")]
         self.dues().reset();
+    }
+
+    /// Index the gets of every set and the session's own again, each leaf keyed by the deadline its
+    /// table holds: what a set built after the open owes the index, whose leaves are the sets built.
+    #[cfg(any(
+        feature = "listen",
+        feature = "group",
+        all(test, feature = "runtime-plan")
+    ))]
+    fn reindex_dues(&mut self) {
+        #[cfg(feature = "query")]
+        self.dues().rebuild();
     }
 
     /// The count [`Self::peers_declare`]'s answers are good for: one taken while this read the
@@ -894,6 +953,12 @@ impl<H: Holders> RegistryOf<H> {
     #[cfg(all(test, feature = "std"))]
     pub(super) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.pushes
+    }
+
+    /// The lent Responses and ResponseFinals handed to the pending gets alone.
+    #[cfg(all(test, feature = "std", feature = "query"))]
+    pub(super) fn reply_dispatches(&self) -> usize {
+        self.replies_alone
     }
 
     /// One more run of Pushes drained before a later record of its own frame.
@@ -988,7 +1053,10 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
-    #[cfg(all(feature = "query", any(feature = "liveliness-get", test)))]
+    #[cfg(all(
+        feature = "query",
+        any(feature = "liveliness-get", all(test, feature = "runtime-plan"))
+    ))]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
         let gets = self.faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
@@ -997,7 +1065,10 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// [`Self::all_gets`], to write.
-    #[cfg(all(feature = "query", any(feature = "liveliness-get", test)))]
+    #[cfg(all(
+        feature = "query",
+        any(feature = "liveliness-get", all(test, feature = "runtime-plan"))
+    ))]
     pub(super) fn all_gets_mut(&mut self) -> impl Iterator<Item = &mut Gets> {
         let gets = self
             .sets
@@ -1096,9 +1167,10 @@ impl<H: Holders> RegistryOf<H> {
         }
     }
 
-    /// How many places the open lent a set for: the places of every table of the session's faces.
+    /// How many places the open holds for the faces' sets, each set built when a face first takes
+    /// its place: the places of every table of the session's faces.
     pub(super) fn places(&self) -> usize {
-        self.sets.len()
+        self.holders.rows().len()
     }
 
     /// The tables of `face`, gone with the face and left, emptied, where they lie for the next
@@ -1211,6 +1283,8 @@ impl<H: Holders> RegistryOf<H> {
             peer_aliases,
             ..
         } = self;
+        #[cfg(feature = "connectivity")]
+        let built = sets.len();
         // A session of its dial role's face alone has no row to write, and so no set to give back.
         for (set, holder) in sets.iter_mut().zip(holders.rows_mut().iter_mut()) {
             if *holder == DIAL_FACE {
@@ -1221,6 +1295,11 @@ impl<H: Holders> RegistryOf<H> {
                 #[cfg(feature = "multicast-declarations")]
                 set.peer.subscribers.limit_aliases_to(*peer_aliases);
             }
+            *holder = NO_FACE;
+        }
+        // A place no set was built at holds no face, though a tomb may keep it (`keep_place`).
+        #[cfg(feature = "connectivity")]
+        for holder in holders.rows_mut().iter_mut().skip(built) {
             *holder = NO_FACE;
         }
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
@@ -1545,6 +1624,29 @@ impl<H: Holders> RegistryOf<H> {
         }
         #[cfg(all(test, feature = "std"))]
         self.counted_push(looked);
+    }
+
+    /// A Response or a ResponseFinal of face `face` lent where its frame lies
+    /// ([`super::lent_reply`]), handed to the face's pending gets alone, the one plane that reads
+    /// a reply, as a Push is handed to the subscribers' plane alone ([`Self::dispatch_push`]):
+    /// what follows the dispatch is put off to the end of the run of such records
+    /// ([`Self::settle`]). A face the session no longer holds hears nothing.
+    #[cfg(all(
+        feature = "query",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
+    pub(super) fn dispatch_reply(
+        &mut self,
+        face: HeldFace,
+        record: &wz_session_core::driver_loop::InPlaceRecord<'_, '_>,
+    ) {
+        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
+            app.dispatch_reply(&face.peer, &mut face.gets.replies, record);
+        }
+        #[cfg(all(test, feature = "std"))]
+        {
+            self.replies_alone += 1;
+        }
     }
 
     /// A Push of face `face` lent where its frame lies, read into the sample its subscribers are
@@ -2812,7 +2914,7 @@ mod tests {
         remove(&mut held.registry, 5);
         remove(&mut held.registry, 6);
         assert_eq!(held.registry.owed.len(), 2, "each face's tokens owed apart");
-        let tokens_used = |held: &Held| held.registry.pools.counts().map(|c| c.tokens.used);
+        let tokens_used = |held: &Held| held.registry.spares.pools.counts().map(|c| c.tokens.used);
         assert_eq!(
             tokens_used(&held),
             Some(4),
@@ -3018,7 +3120,11 @@ mod tests {
             lent,
             "no rows were lent"
         );
-        assert_eq!(held.registry.sets.len(), 2, "the sets are the open's");
+        assert_eq!(
+            held.registry.sets.len(),
+            2,
+            "no set is built for the face refused"
+        );
         remove(&mut held.registry, 5);
         assert_eq!(
             held.registry.add_face(6).map(|face| face.at()),
@@ -3026,6 +3132,87 @@ mod tests {
             "CONTROL: a set is free again, at the place the face left"
         );
         assert!(in_a_lent_set(&held, 6));
+    }
+
+    /// The open builds the dial role's set alone and reserves the rows of the other places unlent:
+    /// a face that comes builds the set of its place from that reserve, a face after it that takes
+    /// the same place builds nothing, and nothing more is lent from the session's arena. Turned red
+    /// by an open that builds every set (`built` in `RegistryOf::new`), by a reserve that is not the
+    /// sets' rows, or by a face that builds a set where one lies.
+    #[test]
+    fn a_set_is_built_when_a_face_first_takes_its_place() {
+        let mut held = held(3);
+        let lent = held.arena.arena_mut().high_water();
+        assert_eq!(
+            (held.registry.sets.len(), held.registry.places()),
+            (1, 3),
+            "the dial role's set alone is built at the open"
+        );
+        let reserved = held.registry.spares.arena.bytes();
+        assert_eq!(
+            held.registry.spares.arena.high_water(),
+            0,
+            "no spare is lent"
+        );
+        held.registry
+            .add_face(5)
+            .expect("the open reserved a place for the face");
+        assert_eq!(held.registry.sets.len(), 2);
+        let one = held.registry.spares.arena.high_water();
+        assert!(one > 0, "the set's rows come from the reserve");
+        assert_eq!(2 * one, reserved, "the reserve is two sets' rows");
+        holds_one_final(face(&mut held.registry, 5));
+        remove(&mut held.registry, 5);
+        held.registry
+            .add_face(6)
+            .expect("the set the face left is free");
+        assert_eq!(held.registry.sets.len(), 2, "the set built is taken again");
+        assert_eq!(
+            held.registry.spares.arena.high_water(),
+            one,
+            "and nothing more is lent from the reserve"
+        );
+        assert_eq!(
+            held.arena.arena_mut().high_water(),
+            lent,
+            "nor from the session's arena"
+        );
+    }
+
+    /// A tomb keeps the first free place whether or not a set lies there: kept where none was
+    /// built, it is freed with the accepted faces; a face that comes past it builds the set of the
+    /// kept place on the way to its own, and once the tomb is freed the next face takes that set,
+    /// rows and all. Turned red by a removal of the accepted faces that leaves a kept place past
+    /// the sets built, or by a face that takes a place past the sets built without building them.
+    #[cfg(feature = "connectivity")]
+    #[test]
+    fn a_place_kept_where_no_set_lies_is_freed_and_passed() {
+        let mut held = held(3);
+        assert_eq!(held.registry.keep_place(), Some(1), "the first free place");
+        assert_eq!(held.registry.sets.len(), 1, "a kept place builds no set");
+        held.registry.remove_accepted_faces();
+        assert_eq!(
+            held.registry.holders.rows(),
+            &[DIAL_FACE, NO_FACE, NO_FACE],
+            "the kept place is free again"
+        );
+        assert_eq!(held.registry.keep_place(), Some(1));
+        let taken = held
+            .registry
+            .add_face(5)
+            .expect("a place is free past the kept one");
+        assert_eq!(taken.at(), 2);
+        assert_eq!(
+            held.registry.sets.len(),
+            3,
+            "the kept place's set is built on the way"
+        );
+        held.registry.free_kept(1);
+        held.registry
+            .add_face(6)
+            .expect("the kept place is free again");
+        assert_eq!(held.registry.held_at(6), Some(1));
+        holds_one_final(face(&mut held.registry, 6));
     }
 
     /// A free set's row of the index of held sets names no face: a lookup of the id it reads
@@ -3179,7 +3366,11 @@ mod tests {
             .expect("the open lent a set for the face");
         assert_eq!(face_ids(&held.registry), vec![DIAL_FACE, 9]);
         assert_eq!(walked(&held.registry), lying_at(&held.registry, &[0, 1]));
-        assert_eq!(held.registry.sets.len(), 5, "no set was made or dropped");
+        assert_eq!(
+            (held.registry.sets.len(), held.registry.places()),
+            (4, 5),
+            "a set for each place a face took, none made or dropped as faces went"
+        );
     }
 
     /// The faces other than the one a call acts on are the other held sets, in set order, and
@@ -3263,7 +3454,7 @@ mod tests {
                 declare_on(&mut held.registry, *id, sub, &format!("demo/{id}/{sub}"));
             }
         }
-        let pools = held.registry.pools.counts().expect("shared pools");
+        let pools = held.registry.spares.pools.counts().expect("shared pools");
         assert_eq!((pools.subscribers.used, pools.subscribers.refused), (16, 0));
         for id in &faces {
             assert_eq!(subscribers_of(&held.registry, *id), (2, 0), "face {id}");
@@ -3276,6 +3467,7 @@ mod tests {
         );
         assert_eq!(
             held.registry
+                .spares
                 .pools
                 .counts()
                 .expect("shared pools")
@@ -3325,6 +3517,7 @@ mod tests {
         }
         assert_eq!(
             held.registry
+                .spares
                 .pools
                 .counts()
                 .expect("shared pools")
@@ -3336,6 +3529,7 @@ mod tests {
         remove(&mut held.registry, 5);
         assert_eq!(
             held.registry
+                .spares
                 .pools
                 .counts()
                 .expect("shared pools")
@@ -3360,6 +3554,7 @@ mod tests {
         held.registry.remove_accepted_faces();
         assert_eq!(
             held.registry
+                .spares
                 .pools
                 .counts()
                 .expect("shared pools")
@@ -3370,6 +3565,7 @@ mod tests {
         );
         assert_eq!(
             held.registry
+                .spares
                 .pools
                 .counts()
                 .expect("shared pools")
@@ -3398,8 +3594,12 @@ mod tests {
                 shared: false,
             },
         );
-        assert!(!held.registry.pools.is_shared());
-        assert_eq!(held.registry.pools.counts(), None, "no pool to count");
+        assert!(!held.registry.spares.pools.is_shared());
+        assert_eq!(
+            held.registry.spares.pools.counts(),
+            None,
+            "no pool to count"
+        );
         for sub in 1..=3 {
             declare_on(
                 &mut held.registry,
@@ -3475,9 +3675,9 @@ mod tests {
             .add_face(6)
             .expect("the open lent a set for the face");
         assert_eq!(
-            held.registry.sets.len(),
-            16,
-            "CONTROL: sixteen sets were lent"
+            (held.registry.places(), held.registry.sets.len()),
+            (16, 3),
+            "CONTROL: sixteen places were reserved, a set built at each a face took"
         );
         let before = held.registry.set_reads.get();
         assert_eq!(held.registry.faces().count(), 3);
@@ -3493,11 +3693,11 @@ mod tests {
             assert_eq!(held.registry.all_gets_mut().count(), walked);
         }
     }
-    /// The index of the gets' deadlines keeps a leaf for each set the open lent, held or free, and
-    /// one for the session's own gets after them: a face's gets are its set's leaf, a face not held
-    /// has none and is not written, and a registry made with no get pending answers no deadline.
-    /// Turned red by an index made a leaf short or over, or by a face's gets found at another
-    /// set's leaf.
+    /// The index of the gets' deadlines keeps a leaf for each set built, held or free, and one for
+    /// the session's own gets after them: a face's gets are its set's leaf, a face not held has
+    /// none and is not written, and a registry made with no get pending answers no deadline.
+    /// Turned red by an index made a leaf short or over, by a set built as a face came that the
+    /// index was not rebuilt over, or by a face's gets found at another set's leaf.
     #[cfg(feature = "query")]
     #[test]
     fn the_index_of_the_gets_deadlines_keeps_a_leaf_for_each_set() {
@@ -3506,14 +3706,18 @@ mod tests {
             .add_face(5)
             .expect("the open lent a set for the face");
         let own = usize::from(cfg!(feature = "local-queryable"));
-        assert_eq!(held.registry.dues().leaves(), 4 + own);
+        assert_eq!(
+            held.registry.dues().leaves(),
+            2 + own,
+            "two sets built of four places"
+        );
         assert_eq!(held.registry.gets_leaf(DIAL_FACE), Some(0));
         let added = held.registry.gets_leaf(5);
         assert_eq!(added, held.registry.held_at(5));
-        assert!(added.is_some_and(|leaf| leaf > 0 && leaf < 4), "{added:?}");
+        assert_eq!(added, Some(1));
         assert_eq!(held.registry.gets_leaf(9), None, "a face not held");
         #[cfg(feature = "local-queryable")]
-        assert_eq!(held.registry.gets_leaf(LOCAL_FACE), Some(4));
+        assert_eq!(held.registry.gets_leaf(LOCAL_FACE), Some(2));
         let mut written = false;
         assert_eq!(held.registry.write_gets(9, |_| written = true), None);
         assert!(!written, "the gets of a face not held were written");

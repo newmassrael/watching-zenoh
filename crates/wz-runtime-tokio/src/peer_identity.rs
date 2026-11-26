@@ -4,15 +4,15 @@
 //! Who is on the other end of a link, read off the handshake the session ran —
 //! the validated routing identity and the authenticated name.
 //!
-//! R2702 — both readers lived in `linkstate_forward.rs`, and both have TWO
+//! R2702 — both readers lived in the routing module, and both have TWO
 //! consumers with different lifetimes: routing keys its graph on the zid, and
 //! the §5.16 enforcer uses the same two values as ACL subject axes. Keeping them
 //! in the routing module meant the enforcer could only exist in a routing build,
 //! which is half of what `access-acl`'s residual has been describing. They are
 //! neither routing nor access control on their own — they are the session→host
 //! identity boundary, which is why this module is named for that and not for
-//! either consumer. `linkstate_forward` re-exports both, so every caller there
-//! keeps its unqualified name.
+//! either consumer. `linkstate_routes` re-exports both, so the forwarder that
+//! imports the route cores names them from the same place.
 //!
 //! The conversion lives HERE rather than in session-core because
 //! [`SessionLinkActions`] is `#![no_std]` and deliberately routing-agnostic: it

@@ -329,13 +329,16 @@ fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
 /// [`bundle`] with its link established ([`SessionLinkActions::enter_established`]): the
 /// bundle a data or reply send is made on, since the data-send gate opens only there. A test of
 /// what a send does is made on this one; a test of the gate itself starts from [`bundle`].
-/// Compiled with the sends its tests make: a plain put, a gated reply, a staged reply.
+/// Compiled with the sends its tests make: a plain put, a gated reply, a staged reply, a counted
+/// get.
 #[cfg(any(
     all(feature = "codec-push", not(feature = "tx-lend-only")),
     all(feature = "reply-egress-gate", feature = "codec-response"),
+    all(feature = "codec-response", not(feature = "tx-lend-only")),
     all(
-        feature = "codec-response",
-        not(feature = "transport-stats"),
+        feature = "transport-stats",
+        feature = "codec-request",
+        feature = "storage-profile",
         not(feature = "tx-lend-only")
     )
 ))]
@@ -346,6 +349,40 @@ fn established_bundle() -> (
     let (actions, link) = bundle();
     actions.enter_established();
     (actions, link)
+}
+
+/// What `send` adds to the transmit counters of a new established session
+/// ([`established_bundle`]): its network messages, and the messages and the payload bytes it
+/// counts as `message` in `space`. The CONTROL is the link handed a write.
+#[cfg(all(
+    feature = "transport-stats",
+    not(feature = "tx-lend-only"),
+    any(
+        all(feature = "codec-request", feature = "storage-profile"),
+        feature = "codec-response"
+    )
+))]
+fn counted_as(
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    send: impl FnOnce(&SessionLinkActions<PlainRuntime, StillClock>),
+) -> (usize, usize, usize) {
+    use crate::stats::{DirectionReport, StatMedium};
+    let (actions, link) = established_bundle();
+    let before = actions.stats_report().tx;
+    send(&actions);
+    assert_ne!(
+        link.written.load(Ordering::SeqCst),
+        0,
+        "CONTROL: the send reached the link"
+    );
+    let after = actions.stats_report().tx;
+    let payload = |report: &DirectionReport| report.payload_of(message, space);
+    (
+        after.n_msgs_on(StatMedium::Net) - before.n_msgs_on(StatMedium::Net),
+        payload(&after).msgs - payload(&before).msgs,
+        payload(&after).pl_bytes - payload(&before).pl_bytes,
+    )
 }
 
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
@@ -1044,7 +1081,8 @@ mod lent_handshake {
 /// Under `tx-lend-only` a frame the link lends no slot for is refused before a byte of it is
 /// written, and takes no sequence number: the next frame of the conduit carries the one it would
 /// have, so the reliable channel has no gap no frame fills. Turned red by an SN taken before the
-/// slot is lent (`open_frame_lent` minting in its admission again), whose next frame carries SN 1.
+/// slot is lent (`write_n_msg` minting before its room is asked or its slot lent), whose next
+/// frame carries SN 1.
 #[cfg(all(feature = "tx-lend-only", feature = "codec-push", feature = "alloc"))]
 mod lent_frame_refusal {
     use alloc::sync::Arc;
@@ -1053,15 +1091,20 @@ mod lent_frame_refusal {
     use std::sync::Mutex;
 
     use super::{params, PlainRuntime, StillClock};
-    use crate::link::{BoxedLinkDriver, LinkDropCause, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::link::{
+        BoxedLinkDriver, LinkDropCause, LinkRoom, LinkSendOutcome, RoomAnswer, RoomWait, TxSlot,
+        TxSlotGrant,
+    };
     use crate::qos::Priority;
     use crate::reliability::Reliability;
     use crate::send_wire_error::SendWireError;
     use crate::session_actions::SessionLinkActions;
 
-    /// A link of one slot that lends it only while `lends` says so, and keeps each frame sent.
+    /// A link of one slot that lends it only while `lends` says so, has no room while `full`
+    /// says so, and keeps each frame sent.
     struct DryLink {
         lends: AtomicBool,
+        full: AtomicBool,
         slot: Mutex<Vec<u8>>,
         sent: Mutex<Vec<Vec<u8>>>,
         asked: Mutex<Vec<usize>>,
@@ -1071,6 +1114,7 @@ mod lent_frame_refusal {
         fn of_width(width: usize, lends: bool) -> Arc<Self> {
             Arc::new(Self {
                 lends: AtomicBool::new(lends),
+                full: AtomicBool::new(false),
                 slot: Mutex::new(alloc::vec![0; width]),
                 sent: Mutex::new(Vec::new()),
                 asked: Mutex::new(Vec::new()),
@@ -1086,6 +1130,19 @@ mod lent_frame_refusal {
         fn open_blocking(&self) {}
 
         fn close_blocking(&self) {}
+
+        fn wait_for_room_for(
+            &self,
+            _class: Reliability,
+            _priority: Priority,
+            _wait: RoomWait,
+        ) -> RoomAnswer {
+            RoomAnswer::at_once(if self.full.load(Ordering::SeqCst) {
+                LinkRoom::Congested
+            } else {
+                LinkRoom::Free
+            })
+        }
 
         fn tx_slot_acquire(&self, want: usize, _priority: Priority) -> Option<TxSlotGrant> {
             self.asked.lock().expect("the asks").push(want);
@@ -1186,6 +1243,7 @@ mod lent_frame_refusal {
                 StillClock,
             )
             .expect("the heap has room");
+            actions.enter_established();
             assert_eq!(put(&actions), Some(Ok(())));
             let mut sent = link.sent.lock().expect("the sends");
             assert_eq!(sent.len(), 1, "one frame");
@@ -1215,7 +1273,7 @@ mod lent_frame_refusal {
 
     /// A frame sent whole asks its link for the whole batch budget, as a window does: nothing
     /// measures the message before it is written into the slot. Turned red by a send that asks
-    /// for a size it counted first (`open_frame_lent` asking for anything but `emit.mtu`).
+    /// for a size it counted first (`write_n_msg` asking for anything but `emit.mtu`).
     #[test]
     fn a_frame_sent_whole_asks_for_the_batch_budget() {
         let link = DryLink::of_width(512, true);
@@ -1235,9 +1293,86 @@ mod lent_frame_refusal {
         );
     }
 
+    /// A put its link has no room for is dropped before its frame asks for a slot or takes an SN:
+    /// nothing reaches the link, and the next frame carries the SN the dropped one left untaken.
+    /// Turned red by `write_n_msg` lending its frame before it asks for room
+    /// (`congested_within` after `lease_on`), whose dropped put asks for a slot and takes SN 0,
+    /// or by the room not asked at all, whose put is sent while the link is full.
+    #[test]
+    fn a_put_its_link_has_no_room_for_asks_no_slot_and_takes_no_sequence_number() {
+        let link = DryLink::of_width(512, true);
+        link.full.store(true, Ordering::SeqCst);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        assert_eq!(
+            put(&actions),
+            Some(Ok(())),
+            "a droppable put the link has no room for is dropped, not refused"
+        );
+        assert!(
+            link.asked.lock().expect("the asks").is_empty(),
+            "no slot was asked for"
+        );
+        assert!(
+            link.sent.lock().expect("the sends").is_empty(),
+            "nothing reached the link"
+        );
+        link.full.store(false, Ordering::SeqCst);
+        assert_eq!(put(&actions), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "only the second put reached the link");
+        assert_eq!(
+            sent[0][1], 0,
+            "the second frame carries the SN the dropped one left untaken"
+        );
+    }
+
+    /// Without fragmentation a put past the batch budget is refused as oversize, and the SN its
+    /// frame was written with is given back: the next frame of the conduit carries it. Turned red
+    /// by the `unmint` of `write_n_msg`'s `FrameLend::PastMtu` arm taken out, whose next frame
+    /// carries SN 1.
+    #[cfg(not(feature = "transport-fragmentation"))]
+    #[test]
+    fn a_put_past_the_budget_without_fragmentation_gives_its_sequence_number_back() {
+        let link = DryLink::of_width(4096, true);
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        let (budget, _) = actions
+            .negotiated_tx_limits_for(Reliability::Reliable)
+            .expect("the limits are settled at establishment");
+        let key = crate::named_key::NamedKey::literal("home/gap").expect("a key");
+        let past = alloc::vec![0x5a; budget + 1];
+        assert_eq!(
+            actions.send_plain_put_qos(
+                key,
+                &past,
+                None,
+                super::super::SendAs {
+                    reliable: true,
+                    express: false,
+                    priority: Priority::DEFAULT,
+                },
+            ),
+            Some(Err(SendWireError::LinkRefused(LinkDropCause::Oversize)))
+        );
+        assert_eq!(put(&actions), Some(Ok(())));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 1, "only the second put reached the link");
+        assert_eq!(
+            sent[0][1], 0,
+            "the second frame carries the SN the refused one gave back"
+        );
+    }
+
     /// A slot lent short of the frame took the SN the frame was written with, and gives it back
     /// with the refusal: the next frame of the conduit carries it. Turned red by the
-    /// `unmint` of `open_frame_lent`'s `FrameLend::Heap` arm taken out, whose next frame
+    /// `unmint` of `write_n_msg`'s `FrameLend::Heap` arm taken out, whose next frame
     /// carries SN 1.
     #[test]
     fn a_frame_refused_in_a_short_slot_gives_its_sequence_number_back() {
@@ -1390,6 +1525,377 @@ mod lent_control_order {
     }
 }
 
+/// Under `tx-lend-only` a window's messages are written into the frame their conduit holds open
+/// in a lent slot: messages of one reliability share the frame, one of the other reliability sends
+/// it and opens the next, and one the frame has no room left for sends it once and is written whole
+/// into the next.
+#[cfg(all(
+    feature = "tx-lend-only",
+    feature = "transport-batching",
+    feature = "codec-push",
+    feature = "alloc"
+))]
+mod lent_window {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link of one slot wider than the batch, lent to one holder at a time, that keeps each
+    /// frame sent.
+    struct OneSlotLink {
+        lent: AtomicBool,
+        slot: Mutex<Vec<u8>>,
+        sent: Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl BoxedLinkDriver for OneSlotLink {
+        fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            if self.lent.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            Some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            start: usize,
+            len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            let written = self.slot.lock().expect("the slot")[start..start + len].to_vec();
+            self.sent.lock().expect("the sends").push(written);
+            self.lent.store(false, Ordering::SeqCst);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {
+            self.lent.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// An established session over a fresh [`OneSlotLink`] with its window open, and the link.
+    fn windowed() -> (
+        Arc<SessionLinkActions<PlainRuntime, StillClock>>,
+        Arc<OneSlotLink>,
+    ) {
+        let link = Arc::new(OneSlotLink {
+            lent: AtomicBool::new(false),
+            slot: Mutex::new(alloc::vec![0; 2048]),
+            sent: Mutex::new(Vec::new()),
+        });
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        assert_eq!(actions.batch_start(), Ok(()));
+        (actions, link)
+    }
+
+    /// A plain put of `value` on `actions`, reliable or best effort.
+    fn put(
+        actions: &SessionLinkActions<PlainRuntime, StillClock>,
+        value: &[u8],
+        reliable: bool,
+    ) -> Option<Result<(), SendWireError>> {
+        let key = crate::named_key::NamedKey::literal("home/window").expect("a key");
+        actions.send_plain_put_qos(
+            key,
+            value,
+            None,
+            super::super::SendAs {
+                reliable,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        )
+    }
+
+    /// Two reliable puts share the window's frame, and a best-effort put sends that frame and
+    /// opens one of its own. Turned red by `write_n_msg` not comparing the open frame's
+    /// reliability (its `open_channel == reliability` taken as true), whose best-effort put rides the reliable frame, or by a window's opening that
+    /// does not keep its frame open (`write_n_msg` sending the slot it should keep), whose first
+    /// put leaves alone.
+    #[test]
+    fn puts_of_one_reliability_share_a_frame_and_the_other_opens_its_own() {
+        let (actions, link) = windowed();
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert!(
+            link.sent.lock().expect("the sends").is_empty(),
+            "both wait in the window's frame"
+        );
+        assert_eq!(put(&actions, b"v", false), Some(Ok(())));
+        assert_eq!(
+            link.sent.lock().expect("the sends").len(),
+            1,
+            "the reliable frame left when the best-effort put came"
+        );
+        assert_eq!(actions.batch_flush(), Ok(()));
+        // A frame of one reliable put, for its length.
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(actions.batch_flush(), Ok(()));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(
+            sent.len(),
+            3,
+            "the two frames of the window, then the one of a put"
+        );
+        assert_eq!(
+            crate::frame_encode::frame_wire_reliability(&sent[0]),
+            Reliability::Reliable
+        );
+        assert_eq!(
+            crate::frame_encode::frame_wire_reliability(&sent[1]),
+            Reliability::BestEffort
+        );
+        // A frame is its header byte, its SN (one byte below 128) and its messages.
+        assert_eq!(
+            sent[0].len() - 2,
+            2 * (sent[2].len() - 2),
+            "the window's reliable frame holds two puts"
+        );
+    }
+
+    /// A put the window's frame has no room left for sends that frame once and is written whole
+    /// into the next. Turned red by an append that answers a put it did not write as written
+    /// (`write_n_msg` keeping the frame after its encoder was refused), whose second put is
+    /// lost, or by an overflow that does not send the open frame, whose second put finds no slot.
+    #[test]
+    fn a_put_the_open_frame_has_no_room_for_sends_it_once_and_opens_the_next() {
+        let (actions, link) = windowed();
+        let (budget, _) = actions
+            .negotiated_tx_limits_for(Reliability::Reliable)
+            .expect("the limits are settled at establishment");
+        // One such put fits a frame and two do not.
+        let value = alloc::vec![0x5a; budget * 3 / 5];
+        assert_eq!(put(&actions, &value, true), Some(Ok(())));
+        assert!(
+            link.sent.lock().expect("the sends").is_empty(),
+            "the first put waits in the window"
+        );
+        assert_eq!(put(&actions, &value, true), Some(Ok(())));
+        assert_eq!(
+            link.sent.lock().expect("the sends").len(),
+            1,
+            "the full frame left once"
+        );
+        assert_eq!(actions.batch_flush(), Ok(()));
+        let sent = link.sent.lock().expect("the sends");
+        assert_eq!(sent.len(), 2, "a frame for each put");
+        assert_eq!(sent[0].len(), sent[1].len(), "each holds one whole put");
+        assert!(sent[0].len() <= budget, "within the budget");
+        assert_eq!(
+            (sent[0][1], sent[1][1]),
+            (0, 1),
+            "the frames take SNs 0 and 1"
+        );
+        assert_eq!(actions.tx_refusals().no_slot, 0, "nothing was refused");
+    }
+}
+
+#[cfg(all(
+    not(feature = "tx-lend-only"),
+    feature = "transport-batching",
+    feature = "transport-tx-lend",
+    feature = "codec-push",
+    feature = "alloc"
+))]
+mod heap_window {
+    use alloc::sync::Arc;
+    use alloc::vec::Vec;
+    use core::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    use super::{params, PlainRuntime, StillClock};
+    use crate::link::{BoxedLinkDriver, LinkSendOutcome, TxSlot, TxSlotGrant};
+    use crate::qos::Priority;
+    use crate::reliability::Reliability;
+    use crate::send_wire_error::SendWireError;
+    use crate::session_actions::SessionLinkActions;
+
+    /// A link that lends one slot far shorter than the batch, and keeps each frame written to it
+    /// from the heap and each slot it was handed.
+    struct ShortSlotLink {
+        lent: AtomicBool,
+        slot: Mutex<Vec<u8>>,
+        written: Mutex<Vec<Vec<u8>>>,
+        slots_sent: Mutex<usize>,
+    }
+
+    impl BoxedLinkDriver for ShortSlotLink {
+        fn send_blocking(&self, bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+            self.written
+                .lock()
+                .expect("the writes")
+                .push(bytes.to_vec());
+            LinkSendOutcome::Sent
+        }
+
+        fn open_blocking(&self) {}
+
+        fn close_blocking(&self) {}
+
+        fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+            if self.lent.swap(true, Ordering::SeqCst) {
+                return None;
+            }
+            Some(TxSlotGrant {
+                slot: TxSlot(0),
+                headroom: 0,
+            })
+        }
+
+        fn tx_slot_storage(&self, _slot: TxSlot) -> (*mut u8, usize) {
+            let mut slot = self.slot.lock().expect("the slot");
+            (slot.as_mut_ptr(), slot.len())
+        }
+
+        fn tx_slot_send(
+            &self,
+            _slot: TxSlot,
+            _start: usize,
+            _len: usize,
+            _reliability: Reliability,
+            _priority: Priority,
+        ) -> LinkSendOutcome {
+            *self.slots_sent.lock().expect("the slot sends") += 1;
+            self.lent.store(false, Ordering::SeqCst);
+            LinkSendOutcome::Sent
+        }
+
+        fn tx_slot_abort(&self, _slot: TxSlot) {
+            self.lent.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// A plain put of `value` on `actions`, reliable or best effort.
+    fn put(
+        actions: &SessionLinkActions<PlainRuntime, StillClock>,
+        value: &[u8],
+        reliable: bool,
+    ) -> Option<Result<(), SendWireError>> {
+        let key = crate::named_key::NamedKey::literal("home/heap").expect("a key");
+        actions.send_plain_put_qos(
+            key,
+            value,
+            None,
+            super::super::SendAs {
+                reliable,
+                express: false,
+                priority: Priority::DEFAULT,
+            },
+        )
+    }
+
+    /// A window's frame the link lends no whole-batch slot for is staged on the heap, counted as
+    /// a short slot, and the next put of its reliability joins it there without a slot asked; a
+    /// best-effort put sends it once and opens its own. Turned red by `write_n_msg`'s heap arm not
+    /// comparing the open frame's R flag (the best-effort put joins the reliable frame and
+    /// nothing is written before the flush), by that arm skipped (the second put opens a frame of
+    /// its own and the first leaves alone), or by the short slot counted as no slot (its
+    /// `heap_why = HeapStage::ShortSlot` taken out).
+    #[test]
+    fn a_window_frame_no_whole_slot_holds_is_staged_and_joined_on_the_heap() {
+        let link = Arc::new(ShortSlotLink {
+            lent: AtomicBool::new(false),
+            slot: Mutex::new(alloc::vec![0; 16]),
+            written: Mutex::new(Vec::new()),
+            slots_sent: Mutex::new(0),
+        });
+        let sink: Arc<dyn BoxedLinkDriver + Send + Sync> = link.clone();
+        let actions =
+            SessionLinkActions::<PlainRuntime, StillClock>::new_generic(sink, params(), StillClock)
+                .expect("the heap has room");
+        actions.enter_established();
+        assert_eq!(actions.batch_start(), Ok(()));
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert!(
+            link.written.lock().expect("the writes").is_empty(),
+            "both wait in the window's heap frame"
+        );
+        let counts = actions.batch_lend_counts();
+        assert_eq!(
+            (
+                counts.heap_short_slot,
+                counts.heap_no_slot,
+                counts.slot_frames
+            ),
+            (1, 0, 0),
+            "one frame opened, on the heap, for a short slot"
+        );
+        assert_eq!(put(&actions, b"v", false), Some(Ok(())));
+        assert_eq!(
+            link.written.lock().expect("the writes").len(),
+            1,
+            "the reliable frame left when the best-effort put came"
+        );
+        assert_eq!(actions.batch_flush(), Ok(()));
+        let written = link.written.lock().expect("the writes");
+        assert_eq!(written.len(), 2, "the two frames of the window");
+        assert_eq!(
+            crate::frame_encode::frame_wire_reliability(&written[0]),
+            Reliability::Reliable
+        );
+        assert_eq!(
+            crate::frame_encode::frame_wire_reliability(&written[1]),
+            Reliability::BestEffort
+        );
+        drop(written);
+        // A frame of one reliable put, for its length.
+        assert_eq!(put(&actions, b"v", true), Some(Ok(())));
+        assert_eq!(actions.batch_flush(), Ok(()));
+        let written = link.written.lock().expect("the writes");
+        assert_eq!(written.len(), 3, "and the frame of one put");
+        assert_eq!(
+            written[1].len(),
+            written[2].len(),
+            "a frame of one put is as long whatever its reliability"
+        );
+        assert!(
+            written[0].len() > written[2].len(),
+            "the window's reliable frame holds more than one put"
+        );
+        assert_eq!(
+            *link.slots_sent.lock().expect("the slot sends"),
+            0,
+            "no slot was sent"
+        );
+        assert!(
+            !link.lent.load(Ordering::SeqCst),
+            "every short slot went back"
+        );
+        assert_eq!(actions.batch_lend_counts().heap_short_slot, 3);
+    }
+}
+
 /// A plain put whose key is past its protocol bound is refused with the codec's error on the heap
 /// path, and nothing reaches the link: the vector refuses no write, but the body refuses its
 /// message, and the send answers that as a value.
@@ -1422,18 +1928,14 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
     );
 }
 
-/// A staged reply leaves through the writer of its parts in a build that reads no owned reply (no
-/// statistics; no policy or namespace is installed here): one the writer takes is written, and one
-/// it refuses is skipped with nothing built. The responder identity of no bytes is the case the
-/// owned builder asserts against, so a refused reply that fell back to the owned record would panic
-/// here.
+/// A staged reply leaves through the writer of its parts in a session that reads no owned reply (no
+/// policy or namespace is installed here), whether the build counts its transports or not: one the
+/// writer takes is written, and one it refuses is skipped with nothing built. The responder
+/// identity of no bytes is the case the owned builder asserts against, so a refused reply that fell
+/// back to the owned record would panic here.
 ///
 /// Turned red by a `send_reply_parts` that sends a reply the writer refuses as an owned one.
-#[cfg(all(
-    feature = "codec-response",
-    not(feature = "transport-stats"),
-    not(feature = "tx-lend-only")
-))]
+#[cfg(all(feature = "codec-response", not(feature = "tx-lend-only")))]
 mod staged_replies {
     use core::sync::atomic::Ordering;
 
@@ -1477,12 +1979,158 @@ mod staged_replies {
             "CONTROL: a reply the writer takes is written"
         );
     }
+
+    /// A staged reply written from its parts is counted once, as the owned reply of the same parts
+    /// is counted by a session that sends that record: one network message, one reply in the space
+    /// of the key it is stamped with, by its payload.
+    ///
+    /// Turned red by a `send_reply_parts` that hands its dispatch no class
+    /// (`NetworkStatsClass::unread` there), or by a class of the parts that reads another space or
+    /// another payload than the owned reply's (`network_message::reply_parts_stats_class`).
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_staged_reply_is_counted_once_as_its_owned_reply_is() {
+        use super::counted_as;
+        use crate::stats::{StatMessage, StatSpace};
+        for (keyexpr, space) in [
+            ("demo/asked", StatSpace::User),
+            ("@/demo/asked", StatSpace::Admin),
+        ] {
+            let parts = staged(keyexpr, Some((&[1, 2, 3, 4], 5)));
+            let lent = counted_as(StatMessage::Reply, space, |actions| {
+                actions.send_reply_parts(parts);
+            });
+            let owned = counted_as(StatMessage::Reply, space, |actions| {
+                let response = crate::query::QueryReply::from_parts(&parts)
+                    .into_response()
+                    .expect("the owned reply");
+                actions.send_response(response);
+            });
+            assert_eq!(lent, owned, "{keyexpr}: counted as its owned reply is");
+            assert_eq!(
+                lent,
+                (1, 1, b"answer".len()),
+                "{keyexpr}: one reply in its key's space, by its payload"
+            );
+        }
+    }
+}
+
+/// A get written from its parts is counted once, as the owned `Request` of the same parts is
+/// counted by a session that sends that message: one network message, one query in the space of
+/// its key, by the payload of its value and its attachment as far as the build writes them.
+///
+/// Turned red by a `send_get_parts` that hands its dispatch no class (`NetworkStatsClass::unread`
+/// there), or by a get class that reads a declared key's space from another table than the owned
+/// send resolves it through (`SessionLinkActions::with_outbound_mapping`).
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "codec-request",
+    feature = "storage-profile",
+    not(feature = "tx-lend-only")
+))]
+mod counted_gets {
+    use super::{counted_as, PlainRuntime, StillClock};
+    use crate::query_parts::{GetParts, QueryParts};
+    use crate::reply_stage::EncodingParts;
+    use crate::session_actions::SessionLinkActions;
+    use crate::stats::{StatMessage, StatSpace};
+    use crate::wire_key::WireKey;
+
+    /// What `parts` adds to the counters of a session that sends them as they are and of one that
+    /// sends their owned `Request`, each prepared by `prepare` first.
+    fn both_ways(
+        parts: GetParts<'_>,
+        space: StatSpace,
+        prepare: impl Fn(&SessionLinkActions<PlainRuntime, StillClock>),
+    ) -> [(usize, usize, usize); 2] {
+        let lent = counted_as(StatMessage::Query, space, |actions| {
+            prepare(actions);
+            assert_eq!(actions.send_get_parts(parts), Ok(()), "{parts:?}");
+        });
+        let owned = counted_as(StatMessage::Query, space, |actions| {
+            prepare(actions);
+            let request = parts.owned_request().expect("the owned request");
+            assert_eq!(actions.dispatch_request(request, true), Ok(()), "{parts:?}");
+        });
+        [lent, owned]
+    }
+
+    #[test]
+    fn a_get_sent_from_its_parts_is_counted_once_as_its_owned_request_is() {
+        let query = QueryParts {
+            value: Some((
+                EncodingParts {
+                    packed_id: 0,
+                    schema: None,
+                },
+                b"payload".as_slice(),
+            )),
+            attachment: b"attached",
+            ..QueryParts::PLAIN
+        };
+        // The value and the attachment count where the build writes them.
+        let value = if cfg!(feature = "query-value") {
+            "payload".len()
+        } else {
+            0
+        };
+        let attachment = if cfg!(feature = "query-attachment") {
+            "attached".len()
+        } else {
+            0
+        };
+        for (key, space) in [
+            (WireKey::literal("demo/asked"), StatSpace::User),
+            (WireKey::literal("@/demo/asked"), StatSpace::Admin),
+        ] {
+            let parts = GetParts {
+                rid: 3,
+                key: key.expect("a literal"),
+                query,
+            };
+            let [lent, owned] = both_ways(parts, space, |_| {});
+            assert_eq!(lent, owned, "{parts:?}: counted as its owned Request is");
+            assert_eq!(
+                lent,
+                (1, 1, value + attachment),
+                "{parts:?}: one query in its key's space, by its payload"
+            );
+        }
+    }
+
+    /// A get whose key is named by a declaration of the session's own is counted in the space of
+    /// the declared key, read where the declaration lies, as the owned send resolves it. A build
+    /// whose session keeps its declarations off the link (`session-keeps-keyexprs`) resolves
+    /// neither, and counts both in the user space.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn a_get_named_by_a_declaration_is_counted_in_the_declared_keys_space() {
+        let parts = GetParts {
+            rid: 3,
+            key: WireKey::from_parts(5, Some("/asked")).expect("an id and a suffix"),
+            query: QueryParts::PLAIN,
+        };
+        let space = if cfg!(feature = "session-keeps-keyexprs") {
+            StatSpace::User
+        } else {
+            StatSpace::Admin
+        };
+        let [lent, owned] = both_ways(parts, space, |actions| {
+            actions.with_facts(|facts| facts.own_keyexprs.sent_declaration(5, "@/demo"));
+        });
+        assert_eq!(lent, owned, "counted as its owned Request is");
+        assert_eq!(lent, (1, 1, 0), "one query in the declared key's space");
+    }
 }
 
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,
 /// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
 mod facts_lock {
-    use super::{bundle, holds_in};
+    use super::bundle;
+    // The tests that count holds read an admitted Open (`codec-open-body`).
+    #[cfg(feature = "codec-open-body")]
+    use super::holds_in;
 
     #[test]
     fn a_fact_written_through_its_door_is_read_in_the_one_row() {
@@ -1730,41 +2378,6 @@ mod facts_lock {
         assert!(awaiting, "a refused OpenAck ends no wait");
         assert_eq!(lease, None, "a refused OpenAck adopts no lease");
         assert_eq!(bound, None, "a refused bound is not written");
-    }
-
-    /// The RX SN gate reads the ring the peer's capabilities give and moves the conduit's
-    /// baseline in one hold of the facts. Turned red by a gate that reads the capabilities in a
-    /// hold of their own.
-    #[test]
-    fn the_rx_sn_gate_judges_in_one_hold_of_the_facts() {
-        use crate::qos::Priority;
-        use crate::sn::RxAdmit;
-        let (actions, _link) = bundle();
-        let mut first = None;
-        let holds = holds_in(|| {
-            first = Some(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 5));
-        });
-        assert_eq!(
-            first,
-            Some(RxAdmit::Accept),
-            "a channel's first frame is taken"
-        );
-        assert_eq!(holds, 1, "the gate takes the facts once");
-        assert_eq!(
-            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 5),
-            RxAdmit::Stale,
-            "a duplicate is dropped"
-        );
-        assert_eq!(
-            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 7),
-            RxAdmit::Gap { missing: 1 },
-            "a forward jump is taken and reports the frame it skipped"
-        );
-        assert_eq!(
-            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 5),
-            RxAdmit::Accept,
-            "the best-effort channel keeps a baseline of its own"
-        );
     }
 
     /// The chain-boundary markers are read off the negotiated patch level: none before an Init
@@ -2098,9 +2711,13 @@ mod link_stamps {
     }
 
     /// Timers that read the deadlines keep them: a step before the first of them falls due reads
-    /// no stamp and no lease. Turned red by timers that read the deadlines at every step.
+    /// no stamp and no lease. The stamps and the peer's lease are words, read under no lock, so
+    /// what a step reads is told by what it judges: the lease is cut short after the first step
+    /// through its door, which counts no move, and a step that read it again would judge the
+    /// earlier expiry. Turned red by timers that read the deadlines at every step.
     #[test]
     fn a_step_before_the_deadlines_fall_due_reads_none_of_them() {
+        use crate::lease::LeaseCheckOutcome;
         use crate::session_timeouts::SessionTimeouts;
         use crate::transport_timers::TransportTimers;
 
@@ -2112,17 +2729,31 @@ mod link_stamps {
             .store(true, core::sync::atomic::Ordering::SeqCst);
         actions.link.fact_established_at(|slot| *slot = Some(100));
         assert!(
-            101 < 100 + actions.adopted_lease_ms(),
+            101 < 100 + 1 + actions.adopted_lease_ms(),
             "CONTROL: 101 is before the expiry"
         );
         let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
-        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
-        let mut checks = alloc::vec::Vec::new();
-        let first = holds_in(|| checks = step(100));
-        assert_eq!(first, 1, "CONTROL: the first step reads the peer's lease");
-        let later = holds_in(|| checks = step(101));
-        assert_eq!(later, 0, "a step before the expiry reads nothing");
-        assert!(checks.is_empty(), "and judges nothing");
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 100).is_empty(),
+            "CONTROL: nothing is due at the establishment"
+        );
+        let moved = actions.link.deadlines_moved();
+        actions.fact_peer_open_lease_ms(|slot| *slot = Some(0));
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            moved,
+            "CONTROL: the lease's door counts no move"
+        );
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 101).is_empty(),
+            "a step before the expiry it holds reads nothing and judges nothing"
+        );
+        let mut fresh = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            lease_checks(&mut fresh, &mut engine, &actions, 101),
+            [LeaseCheckOutcome::Expired],
+            "CONTROL: a step that reads the lease at 101 judges it expired"
+        );
     }
 
     /// A receipt moves the lease's deadline later with one store and no count: the timers find the
@@ -2570,7 +3201,7 @@ mod rx_sn_gate {
     use super::{bundle, holds_in};
     use crate::peer_init_caps::PeerInitCaps;
     use crate::qos::Priority;
-    use crate::sn::{mask_from_res, RxAdmit, RxConduits};
+    use crate::sn::RxAdmit;
 
     /// The peer's capabilities with the sequence-number resolution `seq_num_res`.
     fn caps(seq_num_res: u8) -> Option<PeerInitCaps> {
@@ -2582,8 +3213,10 @@ mod rx_sn_gate {
     }
 
     /// Every frame of a walk is judged under no lock: the first taken as the baseline, the next
-    /// one accepted, its duplicate stale, a skip a gap. Turned red by a judgement that takes a
-    /// lock to read the baseline or the ring.
+    /// one accepted, its duplicate stale, a skip a gap; and the best-effort channel, a baseline of
+    /// its own, takes the first frame it sees though the reliable one has passed it. Turned red by
+    /// a judgement that takes a lock to read the baseline or the ring, or by channels that share
+    /// one baseline.
     #[test]
     fn a_frame_is_judged_under_no_lock() {
         let (actions, _link) = bundle();
@@ -2592,6 +3225,7 @@ mod rx_sn_gate {
             for sn in [5, 6, 6, 9] {
                 verdicts.push(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, sn));
             }
+            verdicts.push(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 5));
         });
         assert_eq!(
             verdicts,
@@ -2599,7 +3233,8 @@ mod rx_sn_gate {
                 RxAdmit::Accept,
                 RxAdmit::Accept,
                 RxAdmit::Stale,
-                RxAdmit::Gap { missing: 2 }
+                RxAdmit::Gap { missing: 2 },
+                RxAdmit::Accept
             ]
         );
         assert_eq!(
@@ -2639,6 +3274,7 @@ mod rx_sn_gate {
     #[test]
     fn an_admitted_open_ack_seeds_the_gate_on_the_peers_ring() {
         use crate::session_actions::OpenAckAdmission;
+        use crate::sn::{mask_from_res, RxConduits};
         let (actions, _link) = bundle();
         actions.set_peer_init_caps(caps(0x00));
         actions.fact_awaiting_open_ack(|slot| *slot = true);
@@ -2665,6 +3301,8 @@ mod rx_sn_gate {
     #[cfg(feature = "session-reconnect")]
     #[test]
     fn a_reopen_clears_the_gate_and_its_ring() {
+        use crate::sn::RxConduits;
+
         let (actions, _link) = bundle();
         actions.set_peer_init_caps(caps(0x00));
         assert_eq!(
