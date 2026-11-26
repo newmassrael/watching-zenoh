@@ -8118,6 +8118,25 @@
         "Windows x64/x86 tests and the DLL import table on the landed build, by the Windows peer session.",
         "Vtsan stays advisory until two green runs."
       ]
+    },
+    "Round 4669": {
+      "decision_summary": "Land round-5a's remainder with the two reds main carries since deliv: a peer\ntoken's key is written into a static row, so liveliness tokens and gets\nallocate nothing after open again; a face's send place is not held for a\nreplay turn that is not due; the key buffers are gated by what reads them. The\ntime base's advanced family is locked at no allocation and the archive test's\ntypes are named, which Layers C1nh and C1bf asked for.",
+      "changes_bullets": [
+        "session-core: a peer token's key is written into a static KeyexprRow; key buffers gated by their readers.",
+        "capi-coop: no face's send place is held for a replay turn not due; readers compiled where their callers are.",
+        "no-heap ratchet: time-base-advanced locked at 0 allocations a round.",
+        "cdylib-build: the archive test names its member and symbol types."
+      ],
+      "verification_bullets": [
+        "Layer C1nh passes (liveliness-get and liveliness-token back at 0 allocations a round; time-base-advanced held).",
+        "Layers C1co and C1bf pass; nondefault-features clean for wz-capi-coop, wz-session-core, wz-capi-pico."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"
+      ],
+      "carry_forward_bullets": [
+        "a cooperative build without object-pool does not refuse a session past HELD_SESSIONS at its open."
+      ]
     }
   },
   "inventory_entries": {
