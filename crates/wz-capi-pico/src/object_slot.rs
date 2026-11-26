@@ -1345,6 +1345,7 @@ mod tests {
         let shape = PlanShape::dial_only(
             wz_session_core::caps::MAX_STATIC_CONNECT,
             pico_unicast_batch(&limits),
+            &wz_session_core::policy::SessionPolicy::defaults(),
         );
         let rows = ArenaPlan::planned(shape, &limits)
             .expect("a client of the opening limits lays out")
@@ -1523,13 +1524,24 @@ mod tests {
             listens: 1,
             max_faces: admitted_faces(&limits).expect("the build admits its own faces"),
             accept_pending: admitted_handshakes(&limits).expect("the build admits its handshakes"),
-            ..PlanShape::dial_only(0, batch)
+            ..PlanShape::dial_only(
+                0,
+                batch,
+                &wz_session_core::policy::SessionPolicy::defaults(),
+            )
         };
         let mut listens = ArenaPlan::planned(listener, &limits).expect("a listener's rows lay out");
         listens.holding(&held).expect("the places lay out");
         print("a listener's tables and places", &listens);
-        let mut dials =
-            ArenaPlan::planned(PlanShape::dial_only(1, batch), &limits).expect("a dial lays out");
+        let mut dials = ArenaPlan::planned(
+            PlanShape::dial_only(
+                1,
+                batch,
+                &wz_session_core::policy::SessionPolicy::defaults(),
+            ),
+            &limits,
+        )
+        .expect("a dial lays out");
         dials.holding(&held).expect("the places lay out");
         print("a dialer's tables and places", &dials);
 

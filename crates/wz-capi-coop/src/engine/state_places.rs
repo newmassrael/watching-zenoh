@@ -311,8 +311,11 @@ mod tests {
     /// than the sets the build's plan counts, or by a table placed anywhere but the places.
     #[test]
     fn the_rooms_places_take_the_regions_sets_at_most() {
-        let plan = ArenaPlan::planned(PlanShape::dial_only(1, 1024), &SessionLimits::BUILD)
-            .expect("the build's client");
+        let plan = ArenaPlan::planned(
+            PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults()),
+            &SessionLimits::BUILD,
+        )
+        .expect("the build's client");
         let sets = plan.peers().sets();
         assert!(
             sets <= FACE_SETS,
@@ -340,7 +343,8 @@ mod tests {
     #[cfg(any(feature = "query", feature = "queryable"))]
     #[test]
     fn the_plain_tables_take_the_plans_rows_in_the_places() {
-        let shape = PlanShape::dial_only(1, 1024);
+        let shape =
+            PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults());
         let plan = ArenaPlan::planned(shape, &SessionLimits::BUILD).expect("the build's client");
         let rows = plan.session();
         let mut places = std::boxed::Box::new(MaybeUninit::<StatePlaces>::uninit());

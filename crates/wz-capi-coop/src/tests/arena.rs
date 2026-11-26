@@ -3324,7 +3324,7 @@ fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
             0
         },
         accept_pending: caps::MAX_ACCEPT_PENDING,
-        ..PlanShape::dial_only(0, 1024)
+        ..PlanShape::dial_only(0, 1024, &SessionPolicy::defaults())
     };
     const CLIENT_PLAN: Result<ArenaPlan, ArenaRefused> =
         ArenaPlan::planned(CLIENT, &SessionLimits::BUILD);
@@ -3336,7 +3336,8 @@ fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
     );
     assert_eq!(CLIENT_PLAN, at_open);
 
-    const PRESET: PlanShape = PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024);
+    const PRESET: PlanShape =
+        PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024, &SessionPolicy::defaults());
     const PRESET_PLAN: Result<ArenaPlan, ArenaRefused> =
         ArenaPlan::planned(PRESET, &SessionLimits::PICO_PRESET);
     let preset = CoopConfig {
@@ -3363,7 +3364,7 @@ fn a_plan_laid_out_when_the_build_is_compiled_is_the_one_an_open_lays_out() {
 /// The region of a client of the pico preset that dials as many endpoints as the build admits and
 /// advertises a batch of 1024 bytes, as a build of fixed limits lays it out when it is compiled.
 static PRESET_REGION: crate::arena::ArenaRegion = match crate::arena::ArenaRegion::of(
-    crate::arena::PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024),
+    crate::arena::PlanShape::dial_only(caps::MAX_STATIC_CONNECT, 1024, &SessionPolicy::defaults()),
     SessionLimits::PICO_PRESET,
 ) {
     Ok(region) => region,

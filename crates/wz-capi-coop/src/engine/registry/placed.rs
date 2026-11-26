@@ -308,7 +308,8 @@ mod tests {
     /// offset, by rows of a count the plan does not lend, or by a set counted before it is bound.
     #[test]
     fn a_placed_registry_holds_the_rows_the_builds_plan_counts() {
-        let shape = PlanShape::dial_only(0, 1024);
+        let shape =
+            PlanShape::dial_only(0, 1024, &wz_session_core::policy::SessionPolicy::defaults());
         let plan = ArenaPlan::planned(shape, &SessionLimits::BUILD).expect("the build's client");
         let rows = plan.tables();
         let block = Block::zeroed();

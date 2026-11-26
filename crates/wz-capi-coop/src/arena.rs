@@ -3398,9 +3398,16 @@ impl PlanShape {
     }
 
     /// A session that dials `dials` endpoints, advertises `batch`, listens on nothing, joins no
-    /// group and admits no face besides its dial, under the build's default policy: what a client
-    /// of an ABI holds.
-    pub const fn dial_only(dials: usize, batch: u16) -> Self {
+    /// group and admits no face besides its dial, under `policy`: what a client of an ABI holds.
+    /// The policy is the creator's, as [`Self::of`] takes the one its open resolves; a build that
+    /// states no policy hands the build's.
+    pub const fn dial_only(
+        dials: usize,
+        batch: u16,
+        policy: &wz_session_core::policy::SessionPolicy,
+    ) -> Self {
+        #[cfg(not(all(wz_round, any(feature = "listen", feature = "group"))))]
+        let _ = policy;
         Self {
             dials,
             listens: 0,
@@ -3413,7 +3420,7 @@ impl PlanShape {
             #[cfg(feature = "group")]
             group_batch: 0,
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
-            keeps_handed: keeps_handed(&wz_session_core::policy::SessionPolicy::defaults()),
+            keeps_handed: keeps_handed(policy),
         }
     }
 

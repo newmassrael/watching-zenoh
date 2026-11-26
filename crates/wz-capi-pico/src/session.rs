@@ -2361,7 +2361,8 @@ mod unicast_endpoint_tests {
 /// joins no group opens, laid out when it is compiled: such a build opens each session under the
 /// pico preset (`opening_limits`) as a client that dials at most the endpoints the build admits
 /// (`MAX_STATIC_CONNECT`), advertising the preset's batch and admitting no face besides its dial,
-/// so its open walks no plan of its own.
+/// under the build's policies, the only ones a build that states none opens under, so its open
+/// walks no plan of its own.
 #[cfg(all(
     not(feature = "engine-tokio"),
     not(any(
@@ -2375,6 +2376,7 @@ const PRESET: Result<wz_capi_coop::arena::ArenaRegion, wz_capi_coop::arena::Aren
         wz_capi_coop::arena::PlanShape::dial_only(
             wz_session_core::caps::MAX_STATIC_CONNECT,
             pico_unicast_batch(&opening_limits()),
+            &SessionPolicy::defaults(),
         ),
         opening_limits(),
     );
