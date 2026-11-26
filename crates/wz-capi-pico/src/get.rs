@@ -2442,7 +2442,8 @@ mod tests {
     }
 
     /// The receive half reads the answering peer's key as the text it arrived as: a reply keyed
-    /// off canon form is judged by the intersection alone, as pico's `query.c:121` judges it.
+    /// off canon form is judged by the intersection alone, as pico judges it
+    /// (`vendor/zenoh-pico/src/session/query.c` @ `!pen_qry->_anyke && !_z_keyexpr_intersects(&pen_qry->_key, keyexpr)`).
     /// Turned red by a gate that refuses what the canon check refuses.
     #[test]
     fn the_reply_gate_judges_a_received_key_by_intersection_alone() {

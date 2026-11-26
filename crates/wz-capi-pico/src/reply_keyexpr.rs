@@ -91,7 +91,8 @@ pub(crate) fn reply_keyexpr_is_covered(
 
 /// Whether a reply a get received is covered by the get's query: the requester's gate, pico's
 /// `!pen_qry->_anyke && !_z_keyexpr_intersects(&pen_qry->_key, keyexpr)` -> the reply dropped
-/// (`~/zenoh-pico/src/session/query.c:121-127`), through the intersection the responder's gate
+/// (`vendor/zenoh-pico/src/session/query.c` @ `!pen_qry->_anyke && !_z_keyexpr_intersects(&pen_qry->_key, keyexpr)`), through the intersection the
+/// responder's gate
 /// takes too ([`wz_session_core::reply_acceptance::reply_keyexpr_intersects`]).
 ///
 /// The reply's key is the answering peer's text, which the receive path resolves and does not
