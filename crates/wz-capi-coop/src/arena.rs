@@ -509,8 +509,9 @@ const STEP_LEND_ROWS: usize =
 const REASSEMBLY_ROWS: usize = 2;
 /// The read slots and send places of the faces past the dial role's, where each face is read where
 /// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
-/// does one that takes no face beside its dial role's (`TAKES_FACES`).
-const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && TAKES_FACES) as usize;
+/// does one that listens on no port (`listen`), the one role that reads a face past the dial
+/// role's where it lies (`read_faces`).
+const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
@@ -1806,11 +1807,12 @@ impl ArenaPlan {
         let faces = self.sized(shape.faces());
         // Each face's read stages its chains in a Router of its own (`crate::engine::direct`),
         // which holds at most its share of them open and keeps one rejoined message: the table
-        // holds every face's share, so the chains of one face never take another's buffers.
+        // holds the share of every face read where it lies, so the chains of one face never take
+        // another's buffers.
         #[cfg(not(wz_round))]
         {
-            let sets = FacePeers::sets_of(faces, shape.dial_role());
-            self.transport.reassembly_chains = match SESSION_CHAIN_BUFFERS.checked_mul(sets) {
+            let shares = read_faces(FacePeers::sets_of(faces, shape.dial_role()));
+            self.transport.reassembly_chains = match SESSION_CHAIN_BUFFERS.checked_mul(shares) {
                 Some(chains) => chains,
                 None => {
                     self.refuse(ArenaRefused::TooLarge);
@@ -2585,11 +2587,11 @@ impl ArenaPlan {
     }
 
     /// Lay out the read slots and send places of the faces past the dial role's, a row of `bytes`
-    /// for each place of the face table after its first (`crate::engine::direct`): the dial
-    /// role's lies in the engine's place. Laid out once, at the open, the plan not settled.
+    /// for each face read where it lies after the first (`read_faces`): the dial role's lies in
+    /// the engine's place. Laid out once, at the open, the plan not settled.
     #[cfg(not(wz_round))]
     pub(crate) fn lay_direct_faces(&mut self, bytes: usize) {
-        let rows = self.session.peers.sets().saturating_sub(1);
+        let rows = read_faces(self.session.peers.sets()).saturating_sub(1);
         if rows != 0 {
             self.put(ArenaPart::DirectFaces, rows, bytes);
         }
@@ -3029,6 +3031,20 @@ pub const fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefuse
 /// faces it attaches (`listen`), and the groups it joins (`group`). A build of neither holds
 /// its dial role's face alone (`wz_runtime_coop::faces::OneFace`).
 pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "group"));
+
+/// The faces of the face table's `sets` places that are read where they lie, each with a read
+/// slot, a send place and a share of the chain buffers of its own (`crate::engine::direct`):
+/// every place where the session listens, whose ports' connections and attaches take the places
+/// past the dial role's, and the dial role's alone otherwise. A group's place is read through the
+/// group's own session, which stages its chains itself, so it is lent neither.
+#[cfg(not(wz_round))]
+const fn read_faces(sets: usize) -> usize {
+    if cfg!(feature = "listen") {
+        sets
+    } else {
+        1
+    }
+}
 
 /// The inbound links in their handshake at once that `limits` admit: the session's
 /// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as

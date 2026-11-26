@@ -1379,10 +1379,12 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
     };
     let built = ArenaPlan::of(&config, &SessionLimits::defaults()).expect("lays an arena out");
     // Where the links are tasks they share the one table's chains; where each face's read stages
-    // its chains in a Router of its own (`direct`), the table holds a share for each set of
-    // tables, so the chains of one face never take another's buffers.
+    // its chains in a Router of its own (`direct`), the table holds a share for each face read
+    // where it lies, so the chains of one face never take another's buffers: each set of tables
+    // where the session listens, and the dial role's alone otherwise, a group's session staging
+    // its chains itself.
     let shares = |plan: &ArenaPlan| {
-        if cfg!(wz_round) {
+        if cfg!(wz_round) || !cfg!(feature = "listen") {
             1
         } else {
             plan.peers().sets()
@@ -1409,7 +1411,7 @@ fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_length()
             caps::PICO_FRAG_MAX_BYTES,
             SESSION_CHAIN_BUFFERS * shares(&one_link)
         ),
-        "the table grows with the faces' sets alone, and not at all where the links are tasks"
+        "the table grows with the sets of the faces read where they lie alone"
     );
     let lowered = lowered(|l| l.select_pico_frag_max_bytes(Quota::at_most(1024)));
     let plan = ArenaPlan::of(&config, &lowered).expect("lays an arena out");
@@ -3347,11 +3349,14 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
 }
 
 /// Where each face is read where it lies (no `wz_round`), each face's Router stages its chains
-/// apart: the reassembly table holds one face's share for each place of the face table, and the
-/// faces past the dial role's are laid out a row each, of one face's read slot and send place;
-/// a session of the dial role's face alone has no such row. Turned red by a table of one share
-/// whatever the faces (`ArenaPlan::lay_out`), or by a row for the dial role's face, which lies in
-/// the engine's place (`ArenaPlan::lay_direct_faces`).
+/// apart: the reassembly table holds one face's share for each face read where it lies, and the
+/// faces past the dial role's are laid out a row each, of one face's read slot and send place.
+/// Only a session that listens reads a face past the dial role's where it lies: a build without
+/// `listen`, groups and all, has one share and no such row whatever its face table's places, a
+/// group's place being read through the group's own session. Turned red by a table of one share
+/// whatever the faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for
+/// each place of a build that does not (`read_faces`), or by a row for the dial role's face,
+/// which lies in the engine's place (`ArenaPlan::lay_direct_faces`).
 #[cfg(not(wz_round))]
 #[test]
 fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
@@ -3363,14 +3368,21 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
     };
     let plan = host_plan(&config).expect("lays an arena out");
     let sets = plan.peers().sets();
+    if crate::arena::TAKES_FACES {
+        assert!(
+            sets > 1,
+            "CONTROL: the face table has places past the dial role's"
+        );
+    }
+    let read = if cfg!(feature = "listen") { sets } else { 1 };
     assert_eq!(
         row(&plan, "reassembly buffers").count,
-        SESSION_CHAIN_BUFFERS * sets
+        SESSION_CHAIN_BUFFERS * read
     );
     let direct = plan.rows().find(|row| row.part() == "direct faces");
-    if sets > 1 {
+    if read > 1 {
         let direct = direct.expect("a row of the faces past the dial role's");
-        assert_eq!(direct.count, sets - 1);
+        assert_eq!(direct.count, read - 1);
         assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
     } else {
         assert!(

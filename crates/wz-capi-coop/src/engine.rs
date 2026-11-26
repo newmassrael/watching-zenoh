@@ -765,7 +765,7 @@ struct SessionLent {
     router: SessionReassembly,
     /// The rows of the faces past the dial role's the plan laid out for their read slots and send
     /// places (`ArenaPlan::lay_direct_faces`), which the open lends and makes.
-    #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+    #[cfg(all(not(wz_round), feature = "listen"))]
     taken_faces: usize,
     keys: KeySpace,
     registry: RegistryHold,
@@ -1143,7 +1143,7 @@ fn lend_session(
         cache,
         #[cfg(not(feature = "runtime-plan"))]
         state,
-        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+        #[cfg(all(not(wz_round), feature = "listen"))]
         taken_faces: plan.peers().sets().saturating_sub(1),
         arena,
     })
@@ -1248,6 +1248,11 @@ pub struct CoopEngine<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> 
     /// state's cells.
     #[cfg(not(wz_round))]
     direct: direct::DirectFaces<L, C>,
+    /// Whether the session's config names a group, each joined at the open or the open refused
+    /// (`Core::join_groups`): a session that joined none hands a publish no groups' leg and
+    /// steps no group at a read, so in a build with groups it costs what it costs in one without.
+    #[cfg(all(not(wz_round), feature = "group"))]
+    joins_groups: bool,
     core: CoreLock<L, C>,
     /// The waits for room of the faces that are up, asked by a publish that may be dropped while
     /// another holds the session ([`Self::live_to_publish`]), how long it waits
@@ -6190,7 +6195,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         })?;
         // The read slots and send places of the faces past the dial role's, each with a Router of
         // its own over the session's chain buffers.
-        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+        #[cfg(all(not(wz_round), feature = "listen"))]
         let taken = {
             // SAFETY: the handle is held by the faces' rows, which the engine drops first, before
             // the place's owner, `Core::steps`, which hands out no `&mut` of it.
@@ -6436,7 +6441,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(Self::engine_of(
             core,
             apart,
-            #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
+            #[cfg(all(not(wz_round), feature = "listen"))]
             taken,
             row,
         ))
@@ -6451,8 +6456,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn engine_of(
         core: Core<L, C>,
         apart: LentApart,
-        #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
-        taken: direct::TakenFaces<L, C>,
+        #[cfg(all(not(wz_round), feature = "listen"))] taken: direct::TakenFaces<L, C>,
         row: RowClaim,
     ) -> EngineHold<Self> {
         // The place is a span of the arena, aligned as a span starts.
@@ -6494,6 +6498,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let rooms = unsafe { core.rooms.share() };
         let wait_before_drop_us = core.config.tx_queue.wait_before_drop_us;
         let held_drop = core.config.tx_queue.held_drop;
+        #[cfg(all(not(wz_round), feature = "group"))]
+        let joins_groups = !core.config.groups.is_empty();
         #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         let handed_limits = HandedLimits::new(core.config.tx_queue.sizes);
         let arena_bytes = core.arena.bytes();
@@ -6526,9 +6532,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     NonNull::new_unchecked(addr_of_mut!((*at).direct)),
                     router,
                     direct_lend,
-                    #[cfg(any(feature = "listen", feature = "group"))]
+                    #[cfg(feature = "listen")]
                     taken,
                 );
+                #[cfg(all(not(wz_round), feature = "group"))]
+                addr_of_mut!((*at).joins_groups).write(joins_groups);
                 CoreLock::init_at(NonNull::new_unchecked(addr_of_mut!((*at).core)), core);
                 addr_of_mut!((*at).rooms).write(rooms);
                 addr_of_mut!((*at).wait_before_drop_us).write(wait_before_drop_us);
@@ -6592,6 +6600,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let Self {
                 #[cfg(not(wz_round))]
                     direct: _,
+                #[cfg(all(not(wz_round), feature = "group"))]
+                    joins_groups: _,
                 core: _,
                 rooms: _,
                 wait_before_drop_us: _,

@@ -574,6 +574,28 @@ mod group {
         });
     }
 
+    /// A publish of a member of one thread that joined the group hands the group one leg of its
+    /// own, beside the faces', so a put is sent to the group once. Turned red by a walk that hands
+    /// a session's groups no leg, as it hands none to a session that joined no group
+    /// (`CoopEngine::on_faces`), or by a face's leg that reaches the groups too
+    /// (`FaceTx::reaches_groups`). Twin of
+    /// `direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg`.
+    #[test]
+    fn a_publish_of_a_member_of_one_thread_reaches_the_group_by_one_leg() {
+        let network = Arc::new(Network::default());
+        let member = {
+            let network = Arc::clone(&network);
+            OwnThread::open(move || {
+                open_member(&network, 1, member_config(1, GROUP)).expect("the member joins")
+            })
+        };
+        assert_eq!(
+            member.call(|engine| engine.group_legs_of_a_publish()),
+            1,
+            "one leg reaches the group, beside the faces'"
+        );
+    }
+
     /// A member of one thread that joins a group after another declared a keyexpr on it asks the
     /// group for its members' keyexprs as it comes up, from its own reads, and so takes a put named
     /// by that declaration, which it never heard declared. Turned red by a read that leaves a

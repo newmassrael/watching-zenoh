@@ -939,36 +939,37 @@ fn an_operation_on_a_closed_session_runs_nothing_and_holds_nothing() {
 }
 
 /// A publish's walk of the faces hands one leg to each face whose place holds a link, each leg
-/// reaching its own face alone: the session open on the dial role's face is handed one leg, which
-/// reaches that face, and one for the groups in a build that joins them. Turned red by a walk that skips the dial role's row (`DirectFaces::iter`),
-/// or a leg that reaches no face (`FaceTx::reaches`).
+/// reaching its own face alone: the session open on the dial role's face, and joined to no group,
+/// is handed one leg, which reaches that face, in every build. Turned red by a walk that skips the
+/// dial role's row (`DirectFaces::iter`), a leg that reaches no face (`FaceTx::reaches`), or a
+/// groups' leg handed to a session that joined none (`CoopEngine::on_faces`).
 #[cfg(not(wz_round))]
 #[test]
 fn a_publish_hands_each_face_a_leg_of_its_own() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
-    // A build that joins groups hands them one leg more, which reaches no face.
-    let groups_leg = usize::from(cfg!(feature = "group"));
     assert_eq!(
         engine.legs_of_a_publish(),
-        (1 + groups_leg, 1),
+        (1, 1),
         "one leg, for the dial role's face, which reaches that face"
     );
 }
 
-/// A publish reaches the session's groups by one leg of its own, whatever its faces: the dial
-/// role's leg reaches its face and no group, so a put is sent to each group once. Turned red by a
-/// face's leg that reaches the groups too (`FaceTx::reaches_groups`), or a walk that hands the
-/// groups no leg of their own (`CoopEngine::on_faces`).
+/// A session that joined no group is handed no groups' leg by a publish, which would take the
+/// session for nothing: its dial role's leg reaches its face and no group. The member that joined
+/// one is handed one leg for it
+/// (`one_thread::group::a_publish_of_a_member_of_one_thread_reaches_the_group_by_one_leg`).
+/// Turned red by a groups' leg handed whatever the session joined (`CoopEngine::on_faces`), or a
+/// face's leg that reaches the groups (`FaceTx::reaches_groups`).
 #[cfg(all(feature = "group", not(wz_round)))]
 #[test]
-fn a_publish_reaches_the_groups_by_one_leg() {
+fn a_session_that_joined_no_group_hands_the_groups_no_leg() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     assert_eq!(
         engine.group_legs_of_a_publish(),
-        1,
-        "one leg reaches the groups, beside the dial role's face's"
+        0,
+        "no leg reaches a group, the session having joined none"
     );
 }
 

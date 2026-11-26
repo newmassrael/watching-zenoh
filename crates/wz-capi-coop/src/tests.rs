@@ -1382,10 +1382,12 @@ fn an_operation_lets_the_session_go_for_the_next_one_on_another_thread() {
 /// at all. A read that steps its one link itself keeps that link's deadlines (its keep-alive, its
 /// lease) with the session's, which a build whose links are tasks leaves to the tasks' timers: its
 /// wait has that deadline to work out, and reads the clock once for it. The session's lock is
-/// taken twice: for the wait and for the step. The counts are otherwise the same in every build:
-/// the sweep of the gets, each face and the look for a due job share the step's reading and its
-/// take. Turned red by a step that reads the clock again for its link, or a wait that reads it
-/// with nothing to bound.
+/// taken twice: for the wait and for the step. The counts are otherwise the same in every build,
+/// one with groups among them, the session having joined none: the sweep of the gets, each face
+/// and the look for a due job share the step's reading and its take. Turned red by a step that
+/// reads the clock again for its link, a wait that reads it with nothing to bound, or a read that
+/// takes the session to step and poll the groups of a session that joined none
+/// (`CoopEngine::read_groups`).
 #[test]
 fn a_read_step_reads_the_clock_once_and_takes_the_session_for_its_wait_and_its_step() {
     let router = Router::start(CatchAll::None);

@@ -48,7 +48,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
 
 use super::registry::Planes;
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(feature = "listen")]
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
@@ -1048,19 +1048,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
 }
 
 /// The faces past the dial role's, a row of the session's arena for each place of the face table
-/// after its first, made at the open and kept where they lie for the session's life. A build that
-/// takes no face beside the dial role's has none, nor any walk of them.
-#[cfg(any(feature = "listen", feature = "group"))]
+/// after its first, made at the open and kept where they lie for the session's life. Only a port's
+/// connection or an attach takes such a face (`listen`): a group's place is read through the
+/// group's own session (`CoopEngine::read_groups`), so a build that listens on none has no row.
+#[cfg(feature = "listen")]
 pub(super) type TakenFaces<L, C> = BoundedVec<DirectFace<L, C>, { usize::MAX }, Lent>;
 
 /// Every face the read steps itself: the dial role's, at the face table's first place, in the
-/// engine's place, and one for each place after it in a table of the session's arena
-/// (`TakenFaces`). Each face has its own read slot, Router and send place, so a face's read
+/// engine's place, and, where the session listens, one for each place after it in a table of the
+/// session's arena (`TakenFaces`). Each face has its own read slot, Router and send place, so a face's read
 /// and its sends never wait on another face's; and none moves, so the session's record of a face
 /// reaches its place by a handle.
 pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> {
     dial: DirectFace<L, C>,
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(feature = "listen")]
     taken: TakenFaces<L, C>,
 }
 
@@ -1069,7 +1070,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// table's place `n` in the table's row `n - 1`, each with a Router of its own under
     /// `policy`, staging its chains in `chains`, lent through `lend`. Refused past what the
     /// arena has left.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(feature = "listen")]
     pub(super) fn taken_in(
         arena: &mut Arena,
         rows: usize,
@@ -1104,7 +1105,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         at: NonNull<Self>,
         router: SessionReassembly,
         lend: RouterLend<SessionReassembly, RouterPlace>,
-        #[cfg(any(feature = "listen", feature = "group"))] taken: TakenFaces<L, C>,
+        #[cfg(feature = "listen")] taken: TakenFaces<L, C>,
     ) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
@@ -1116,7 +1117,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
                 router,
                 lend,
             );
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(feature = "listen")]
             addr_of_mut!((*at).taken).write(taken);
         }
     }
@@ -1124,8 +1125,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// Every face that may hold a link, in the order of the face table's rows: the dial role's
     /// first, then, where the session listens, each past it in its row of the arena. Only a
     /// port's connection or an attach takes a face past the dial role's, so a build that listens
-    /// on none holds a link in no row past it: the rows its groups' places are laid out with are
-    /// walked by no read and no operation, each group's session being read apart
+    /// on none has no row past it (`TakenFaces`), each group's session being read apart
     /// (`CoopEngine::read_groups`).
     #[inline(always)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
@@ -1173,7 +1173,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// Let go of every face's link with the faces owned whole: the engine's drop.
     pub(super) fn let_go_owned(&mut self) {
         self.dial.let_go_owned();
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(feature = "listen")]
         for face in self.taken.iter_mut() {
             face.let_go_owned();
         }
@@ -1398,8 +1398,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// (`Self::poll_groups`), the dial role's read slot held across them, so a read from a
     /// callback of a group's record finds the faces held and reads nothing. A slot found held is
     /// a read under way on this thread, whose callback this is called from: nothing is stepped.
+    /// A session that joined no group steps none and takes nothing for them.
     #[cfg(feature = "group")]
     pub(super) fn read_groups(&self) {
+        if !self.joins_groups {
+            return;
+        }
         if let Some(_reading) = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot) {
             self.step_groups();
             self.poll_groups();
@@ -1490,6 +1494,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// its link did not open.
     #[cfg(feature = "group")]
     fn first_group_steps(&self) -> Result<(), OpenError> {
+        if !self.joins_groups {
+            return Ok(());
+        }
         self.step_groups();
         let held = self.live().ok_or(OpenError::NoEndpoint)?;
         match held
@@ -2227,7 +2234,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// face that waits holds up no other. `leg` takes the session's lock its own way inside each
     /// hold (one that may be dropped tries it) and reaches the held face alone
     /// ([`FaceTx::reaches`]). A face whose place holds no parts is not handed to `leg`. The
-    /// session's groups are one leg after the faces', which reaches them alone
+    /// groups of a session that joined any are one leg after the faces', which reaches them alone
     /// ([`FaceTx::reaches_groups`]). What the last leg that failed came to, else `Ok(0)`, as a
     /// leg's own faces answer.
     // Inlined whole: a publish's path is the one a message takes each time.
@@ -2258,9 +2265,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             }
         }
         // The groups' leg, after the faces': a group is written on through its own stage, under the
-        // session's lock, so its leg holds no face's place and reaches no face's link.
+        // session's lock, so its leg holds no face's place and reaches no face's link. A session
+        // that joined no group is handed none, which would take the session for nothing.
         #[cfg(feature = "group")]
-        {
+        if self.joins_groups {
             let sent = leg(FaceTx {
                 held: None,
                 alone: true,
