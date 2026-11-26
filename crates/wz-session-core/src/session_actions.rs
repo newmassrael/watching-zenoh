@@ -20633,7 +20633,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 /// `REALIZATION = Simulates` ([`SESSION_HOST_REALIZATION`]): the emit is a
 /// duty of the machine, and a body without it does not perform it.
 ///
-/// # Why every method is `#[inline(never)]`
+/// # Why the methods are `#[inline(never)]`
 ///
 /// R2776 — a STACK property, not a speed one. The generated engine calls
 /// these from one dispatch function, and inlined there their bodies share
@@ -20647,6 +20647,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionActionsBinding<R, T> {
 /// line, an action's locals are on the stack only while that action runs,
 /// and that acceptor's measured peak fell from 7920 to 7264 bytes.
 /// Open-debt item 805.
+///
+/// The methods whose body holds no local of its own (a count, one atomic
+/// store) are inlined instead: they add nothing to that frame, and their own
+/// body and the call to it were all they cost.
 impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
     for SessionActionsBinding<R, T>
 {
@@ -21171,7 +21175,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         a.link_driver().close_blocking();
     }
 
-    #[inline(never)]
+    #[inline]
     fn enable_rx_tx_regions(&mut self) {
         self.inner
             .note_action(|t| t.enable_rx_tx_regions = t.enable_rx_tx_regions.saturating_add(1));
@@ -21186,7 +21190,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         a.enter_established();
     }
 
-    #[inline(never)]
+    #[inline]
     fn start_lease_monitor(&mut self) {
         self.inner
             .note_action(|t| t.start_lease_monitor = t.start_lease_monitor.saturating_add(1));
@@ -21197,7 +21201,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             .store(true, core::sync::atomic::Ordering::SeqCst);
     }
 
-    #[inline(never)]
+    #[inline]
     fn stop_lease_monitor(&mut self) {
         self.inner
             .note_action(|t| t.stop_lease_monitor = t.stop_lease_monitor.saturating_add(1));
@@ -21206,7 +21210,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
             .store(false, core::sync::atomic::Ordering::SeqCst);
     }
 
-    #[inline(never)]
+    #[inline]
     fn start_keepalive_worker(&mut self) {
         // R311cb — transport-keepalive gates the keepalive worker. Wire-level
         // KeepAlive parse is a separate axis (codec-keep-alive). cfg-off the
@@ -21223,7 +21227,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
-    #[inline(never)]
+    #[inline]
     fn stop_keepalive_worker(&mut self) {
         #[cfg(feature = "transport-keepalive")]
         {
@@ -21236,7 +21240,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionFsmUnicastActionsTrait
         }
     }
 
-    #[inline(never)]
+    #[inline]
     fn free_pool_slots(&mut self) {
         self.inner
             .note_action(|t| t.free_pool_slots = t.free_pool_slots.saturating_add(1));
