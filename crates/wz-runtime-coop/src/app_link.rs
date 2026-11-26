@@ -282,25 +282,28 @@ mod wait_parked {
             }
         }
 
-        /// Wait while `pending` answers `true` and `bound`, a sleep of the session's clock, has
-        /// not ended: the program's calls and the clock's move both wake the link's waker, and the
-        /// wall clock bounds nothing.
+        /// Wait while `pending` answers `true` and `bound`, armed for `ms` of the session's
+        /// clock, has not ended: the program's calls and the clock's move both wake the link's
+        /// waker, and the wall clock bounds nothing. The sleep is let go of once the wait ends.
         pub(super) fn wait_while_bound(
             &self,
-            mut bound: super::BoundSleep,
+            bound: &super::OpenBound,
+            ms: u64,
             mut pending: impl FnMut(Option<&Waker>) -> bool,
         ) {
             let mut cx = Context::from_waker(&self.waker);
+            bound.arm(ms);
             loop {
                 let seen = self.seen();
                 if !pending(Some(&self.waker)) {
-                    return;
+                    break;
                 }
-                if bound.as_mut().poll(&mut cx).is_ready() {
-                    return;
+                if bound.poll_armed(&mut cx).is_ready() {
+                    break;
                 }
                 wait_past(&self.wake.changed, lock(&self.wake.wakes), seen, None);
             }
+            bound.disarm();
         }
     }
 }
@@ -348,26 +351,40 @@ mod wait_turns {
         }
 
         /// [`Self::wait_while`] whatever the clock: the turns bound an image's look, and the
-        /// open's own deadline on the session's clock is the engine's.
+        /// open's own deadline on the session's clock is the engine's, so the sleep is not armed.
         pub(super) fn wait_while_bound(
             &self,
-            bound: super::BoundSleep,
+            _bound: &super::OpenBound,
+            _ms: u64,
             pending: impl FnMut(Option<&Waker>) -> bool,
         ) {
-            drop(bound);
             self.wait_while(0, pending);
         }
     }
 }
 
-/// A sleep of the session's clock: what an [`OpenBound`] makes.
-pub type BoundSleep = core::pin::Pin<Box<dyn core::future::Future<Output = ()> + Send>>;
+/// The sleep of a session's clock that its opens over the program's transport wait on: given for a
+/// clock the program moves (a time base it supplies), whose sleeps end when the program says its
+/// time has passed them and not when the wall clock's do ([`AppLinks::with_open_bound`]).
+///
+/// The sleep lies in one place the session made when it opened, and each open arms it there again,
+/// so an open after the session's (a dial again, a group joined again) takes no memory. A session
+/// makes its opens one at a time, under its lock, so one place serves them all.
+pub trait OpenSleep: Send + Sync {
+    /// Arm the sleep to end once `ms` milliseconds of the session's clock have passed from now, in
+    /// place of whatever was armed before.
+    fn arm(&self, ms: u64);
 
-/// How a session's clock bounds an open over the program's transport: a sleep of that many
-/// milliseconds of it. Given for a clock the program moves (a time base it supplies), whose
-/// sleeps end when the program says its time has passed them and not when the wall clock's do
-/// ([`AppLinks::with_open_bound`]).
-pub type OpenBound = Arc<dyn Fn(u64) -> BoundSleep + Send + Sync>;
+    /// `Ready` once the armed sleep has ended, or when none is armed; else `Pending`, and the
+    /// waker of `cx` is woken when it ends.
+    fn poll_armed(&self, cx: &mut core::task::Context<'_>) -> core::task::Poll<()>;
+
+    /// Let go of the armed sleep: the open it bounded has ended, and it wakes nothing more.
+    fn disarm(&self);
+}
+
+/// How a session's clock bounds an open over the program's transport ([`OpenSleep`]).
+pub type OpenBound = Arc<dyn OpenSleep>;
 
 /// The socket address a locator names, or the unspecified address when it names none.
 fn socket_of(locator: &str) -> SocketAddr {
@@ -403,7 +420,7 @@ fn open_link(
         progress == OpenProgress::Opening
     };
     match bound {
-        Some(bound) => waits.wait_while_bound(bound(OPEN_WAIT_MS), opening),
+        Some(bound) => waits.wait_while_bound(bound, OPEN_WAIT_MS, opening),
         None => waits.wait_while(OPEN_WAIT_MS, opening),
     }
     match progress {
@@ -1371,7 +1388,8 @@ impl<N: CountKind> AppLinks<N> {
 
     /// Links whose opens wait for the program to report a link up for `OPEN_WAIT_MS` of the
     /// session's clock, which `bound` sleeps on, in place of the wall clock's: the clock of a
-    /// session timed by a time base the program supplies.
+    /// session timed by a time base the program supplies. Every open of the links, its stream
+    /// dial's among them, arms that one sleep.
     #[must_use]
     pub fn with_open_bound(mut self, bound: OpenBound) -> Self {
         self.dial.open_bound = Some(Arc::clone(&bound));
@@ -2462,22 +2480,38 @@ mod tests {
         fn close(&self, _link: LinkHandle) {}
     }
 
-    /// A sleep of a clock the test moves: it ends once the test says the clock passed it, and
-    /// wakes whoever waits on it then.
+    /// A sleep of a clock the test moves, in the one place every open of its links arms it: it
+    /// ends once the test says the clock passed it, and wakes whoever waits on it then. It counts
+    /// how often it was armed, for how long the last time, and how often it was let go of.
     #[cfg(feature = "host-lock")]
+    #[derive(Default)]
     struct Until {
-        passed: Arc<std::sync::atomic::AtomicBool>,
-        waker: Arc<Mutex<Option<core::task::Waker>>>,
+        passed: std::sync::atomic::AtomicBool,
+        waker: Mutex<Option<core::task::Waker>>,
+        arms: std::sync::atomic::AtomicUsize,
+        armed_ms: std::sync::atomic::AtomicU64,
+        disarms: std::sync::atomic::AtomicUsize,
     }
 
     #[cfg(feature = "host-lock")]
-    impl core::future::Future for Until {
-        type Output = ();
+    impl Until {
+        /// The test's clock passes the sleep, and whoever waits on it is woken.
+        fn pass(&self) {
+            self.passed.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(waker) = self.waker.lock().unwrap().take() {
+                waker.wake();
+            }
+        }
+    }
 
-        fn poll(
-            self: core::pin::Pin<&mut Self>,
-            cx: &mut core::task::Context<'_>,
-        ) -> core::task::Poll<()> {
+    #[cfg(feature = "host-lock")]
+    impl OpenSleep for Until {
+        fn arm(&self, ms: u64) {
+            self.arms.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.armed_ms.store(ms, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn poll_armed(&self, cx: &mut core::task::Context<'_>) -> core::task::Poll<()> {
             let passed = || self.passed.load(std::sync::atomic::Ordering::SeqCst);
             if passed() {
                 return core::task::Poll::Ready(());
@@ -2488,6 +2522,12 @@ mod tests {
             } else {
                 core::task::Poll::Pending
             }
+        }
+
+        fn disarm(&self) {
+            self.disarms
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.waker.lock().unwrap() = None;
         }
     }
 
@@ -2500,17 +2540,8 @@ mod tests {
             Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
             Box::new(Unanswered),
         ));
-        let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let waker = Arc::new(Mutex::new(None::<core::task::Waker>));
-        let bound: OpenBound = {
-            let (passed, waker) = (Arc::clone(&passed), Arc::clone(&waker));
-            Arc::new(move |_ms| {
-                Box::pin(Until {
-                    passed: Arc::clone(&passed),
-                    waker: Arc::clone(&waker),
-                }) as BoundSleep
-            })
-        };
+        let until = Arc::new(Until::default());
+        let bound: OpenBound = Arc::clone(&until);
         let opening = std::thread::spawn(move || {
             let started = std::time::Instant::now();
             let opened = AppDatagramSocket::dial_bounded(
@@ -2526,10 +2557,7 @@ mod tests {
             !opening.is_finished(),
             "the open ended while the session's clock stood still"
         );
-        passed.store(true, std::sync::atomic::Ordering::SeqCst);
-        if let Some(waker) = waker.lock().unwrap().take() {
-            waker.wake();
-        }
+        until.pass();
         let (refused, took) = opening.join().expect("the opening thread");
         assert!(refused, "an open the program never reported up is refused");
         assert!(
@@ -2549,32 +2577,19 @@ mod tests {
                 Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
                 Box::new(Unanswered),
             ));
-            let passed = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let waker = Arc::new(Mutex::new(None::<core::task::Waker>));
-            let bound: OpenBound = {
-                let (passed, waker) = (Arc::clone(&passed), Arc::clone(&waker));
-                Arc::new(move |_ms| {
-                    Box::pin(Until {
-                        passed: Arc::clone(&passed),
-                        waker: Arc::clone(&waker),
-                    }) as BoundSleep
-                })
-            };
+            let until = Arc::new(Until::default());
+            let bound: OpenBound = Arc::clone(&until);
             // The links stay on the thread that opens them, as a session's links stay behind its
             // engine's lock: the buffers a session lends them are not `Send`. The clock is moved
             // from another thread, as a program's time base moves it.
             let links = AppLinks::new(session(&transport, 64)).with_open_bound(bound);
             let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let clock = {
-                let (passed, waker, ended) =
-                    (Arc::clone(&passed), Arc::clone(&waker), Arc::clone(&ended));
+                let (until, ended) = (Arc::clone(&until), Arc::clone(&ended));
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(200));
                     let ended_early = ended.load(std::sync::atomic::Ordering::SeqCst);
-                    passed.store(true, std::sync::atomic::Ordering::SeqCst);
-                    if let Some(waker) = waker.lock().unwrap().take() {
-                        waker.wake();
-                    }
+                    until.pass();
                     ended_early
                 })
             };
@@ -2604,6 +2619,48 @@ mod tests {
                 "listen={listen}: the open waited out the wall clock's bound ({took:?})"
             );
         }
+    }
+
+    /// Every bounded open of one session's links, its dials of either kind and its listens, made
+    /// again and again as a session dials again, arms the one sleep the session gave its links,
+    /// for the bound of an open, and lets go of it once the open ends: no open makes a sleep of
+    /// its own. Turned red by an open that waits on a sleep it makes, an open the links' stream
+    /// dial bounds by another place, or a wait that ends with its sleep still armed.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn every_bounded_open_arms_the_one_sleep_of_its_links_and_lets_it_go() {
+        const ROUNDS: usize = 3;
+        let transport = Arc::new(AppTransport::new(
+            Box::new(HostLock(Mutex::new(AppLinkTable::new()))),
+            Box::new(Unanswered),
+        ));
+        let until = Arc::new(Until::default());
+        // The clock has passed every bound already, so each open is given up at once.
+        until.pass();
+        let links =
+            AppLinks::new(session(&transport, 64)).with_open_bound(Arc::clone(&until) as OpenBound);
+        for round in 0..ROUNDS {
+            assert!(
+                links.open_initiator(Locator::udp(PEER)).is_err(),
+                "round {round}: a datagram dial never reported up is refused"
+            );
+            assert!(
+                links.open_initiator(Locator::tcp(PEER)).is_err(),
+                "round {round}: a stream dial never reported up is refused"
+            );
+            assert!(
+                links.open_listener(Locator::udp(PEER)).is_err(),
+                "round {round}: a listen never reported up is refused"
+            );
+        }
+        let ordering = std::sync::atomic::Ordering::SeqCst;
+        assert_eq!(until.arms.load(ordering), 3 * ROUNDS, "each open armed it");
+        assert_eq!(
+            until.disarms.load(ordering),
+            3 * ROUNDS,
+            "each open let it go once it ended"
+        );
+        assert_eq!(until.armed_ms.load(ordering), OPEN_WAIT_MS);
     }
 
     /// One wake of a link's waits ends every wait on the link, its read's and a publisher's for
