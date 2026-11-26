@@ -2374,6 +2374,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         (legs, reached)
     }
 
+    /// How many of a publish's legs reach the session's groups (`FaceTx::reaches_groups`).
+    #[cfg(all(test, feature = "std", feature = "group"))]
+    pub(crate) fn group_legs_of_a_publish(&self) -> usize {
+        let mut legs = 0;
+        let _ = self.on_faces(|tx| {
+            legs += usize::from(tx.reaches_groups());
+            Ok(0)
+        });
+        legs
+    }
+
     /// Whether the one link's send place is free now: a try of it finds no holder.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn send_place_is_free(&self) -> bool {
