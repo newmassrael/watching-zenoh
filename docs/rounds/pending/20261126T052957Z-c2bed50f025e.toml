@@ -1,0 +1,25 @@
+impact = ["watching-zenoh/local-ci-gates", "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-3-coherence", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-4-session"]
+decision = '''
+Repay, in order of what blocks most, the debts that keep main red: build and test failures first, then a defect each failing test found, then the count guards the hosted lanes never reached.
+
+Fourteen guard commands failed. Nine were one unused import in the bundle tests (census-fix's c0e39ae24, carried here so main's session-core lanes compile) and one of this session's own (4654 left holds_in for the codec-open-body tests alone); the others were 50442a992's narrowing of the refused event to builds with a handshake body, which the auth and multilink stages also name, a lwip test helper no test of some builds calls, and a udp listener under test that names its count kind since the cold dial module. The capi-coop host group (census-fix's) stays watching-zenoh-1c's.
+
+A router node's own get handed every reply over as it came, whatever its consolidation: its local face registered the query passthrough. A session's get resolves its mode once (resolved_consolidation: Latest unless named or time-ranged) and holds each key's newest reply to the end, as zenoh's session does; the node now does the same. The kept-query port test, red since 6ee2aa0a3 added it, asked with the default mode and waited for a reply before the end, which Latest never gives: it now names the mode it means, none, and two tests hold Latest to its end on both engines.
+
+A serial listener of the cooperative runtime opened its line at its first accept, and the open clears the line; a peer that dialled as the listen returned had its INIT cleared and its open refused after ten seconds. zenoh-pico opens a listened device at the listen; the listener now does too, and accepts after a link ends still reopen. The sample then crosses the link and reaches the listener's session but not its subscriber's callback, which is registered as its own debt.
+
+Forty-two count guards moved to what their commands print, measured by guarded_count_gate.py over 913bfef90..HEAD; the hosted lanes had stopped at earlier reds and never read them. C1p session-multicast's 67 was never what it ran: 63 at the commit that wrote it.
+'''
+changes = '''
+crates/wz-session-core: bundle_tests.rs imports (holds_in, the SN ring types); drive.rs names the refused event with session-extauth or transport-multilink.
+crates/wz-session-lwip/src/multicast_drive.rs: member_on under the tests that send to the group. crates/wz-runtime-coop/src/ip_stack.rs: the udp listener test counted for one task.
+crates/wz-capi-core/src/drive/router_node.rs and router_node/local_face.rs: a get's consolidation resolved and held by its ConsolidatingSink; router_node/engine/port_tests.rs: the kept-query helper names its mode, two Latest tests.
+crates/wz-runtime-coop/src/serial_link/links.rs: SerialListener opens its line at the listen (wait_on_line), the test line clears on open, a dial at the listen is answered; the waiting link's type named.
+scripts/run-ci.sh: 42 count guards and nine labels moved. docs/.atomic: debt-c1ay-router-forward-count-drift closed, debt-coop-serial-sample-not-handed registered. docs/hosted-red-acks.md: run 45744512160. docs/reason-review-pins.md: the session drive's pin.
+'''
+verification = '''
+On build hosts: the fourteen guard commands guarded_count_gate.py named as exiting non-zero now pass but the capi-coop host group (census-fix's); guarded_count_gate.py --range 913bfef90..HEAD reports no count that differs from what its command prints (113 judged); wz-capi-core router-node,transport-qos router_node 39 passed, and the new Latest test fails, as it must, with the node's consolidation pinned to none; zenoh (wz-zenoh) router 16 passed and wz-capi-c's suites 230, 134 and 1 passed; wz-runtime-coop serial serial_link 14 passed, the new dial-at-listen test fails with the line opened at the first accept, and clippy --all-targets -D warnings is green; files::serial_link_roundtrip now opens both sessions over the ptys (z_open was -102) and stops at the delivery registered as a debt; rustfmt --check on every changed file; count_guard_lint, guarded_count_lattice_gate, unguarded_test_filter_lint --check, logic census coverage and the reason pins of the changed files green; validate-workspace T1 new +0, T3 warn 4.
+'''
+carry = '''
+Open, this session's next: debt-coop-serial-sample-not-handed (the round a serial face fills on the threaded cooperative engine is not handed out to the subscriber's callback); the C1co client-only build's querier and liveliness subscriber with no place (-78, watching-zenoh-1c's entity-places); census-fix's capi-coop test types (host_group, one_thread, tx_pool) and the C1bzr feature-model rows of transport-link-raweth without alloc (branch gate-targets); the Windows pico size ceiling (debt-windows-x86-pico-ratchet-loss, x64 too); C1bnl's shard weights (940 to 1,717 s against 1,260 predicted).
+'''
