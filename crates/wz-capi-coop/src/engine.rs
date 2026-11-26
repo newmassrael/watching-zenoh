@@ -3038,12 +3038,15 @@ fn leg_deadline_ms(now_us: u64, timeout_ms: u32) -> u64 {
 }
 
 /// What every leg of one get is held pending with (`CoopEngine::hold_leg`): the key it was asked
-/// under, its options, whether its callbacks show a reply's timestamp, and the mint of each leg's
+/// under, its options, the consolidation and the replies' keys its parameters state, read once
+/// for every leg, whether its callbacks show a reply's timestamp, and the mint of each leg's
 /// callback.
 #[cfg(feature = "query")]
 struct LegAsk<'a, 'o> {
     keyexpr: &'a str,
     opts: &'a QueryOptionsOf<'o>,
+    consolidation: wz_session_core::query_mode::ConsolidationMode,
+    accept: wz_session_core::reply_acceptance::ReplyKeyExpr,
     expose: bool,
     mint: &'a mut dyn FnMut() -> ReplyCallback,
 }
@@ -7589,11 +7592,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // keeps one, the session state's fields after the registry's.
         let leg_sink = unsafe { get::LegSink::new(leg_id, row, self.gets, self.uncaptured()) };
         let sink = ConsolidatingSink::with_hold(
-            ask.opts.resolved_consolidation(),
+            ask.consolidation,
             leg_sink,
             get::LegHold::new(leg_id, self.gets),
         );
-        let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.opts.effective_accept_replies());
+        let accept = ReplyAcceptance::for_query(ask.keyexpr, ask.accept);
         // Through the registry's writer of the gets, which lowers the index of their deadlines.
         let registered = registry.write_gets(face, |gets| {
             gets.replies
@@ -9449,10 +9452,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // states none, applied to every leg's callback, after its replies are consolidated.
             opts.expose_timestamp_by(&guard.0.policy)
         };
+        // What every link is asked, read from the options once: the sink of each leg consolidates
+        // as the Request states.
+        let request = opts.query_parts();
         // What every leg of this get is held with, the mint of each leg's callback among it.
         let mut ask = LegAsk {
             keyexpr,
             opts,
+            consolidation: request.sink_consolidation(),
+            accept: opts.effective_accept_replies(),
             expose,
             mint: leg,
         };
@@ -9520,7 +9528,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     .send_get_parts(wz_session_core::query_parts::GetParts {
                         rid,
                         key,
-                        query: opts.query_parts(),
+                        query: request,
                     })
                     .is_ok(),
                 None => false,
@@ -9610,7 +9618,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     continue;
                 }
             }
-            if !group.ask(rid, keyexpr, wire, opts.query_parts()) {
+            if !group.ask(rid, keyexpr, wire, request) {
                 // Nothing was queued: the entry and the leg go, and the leg is over.
                 if let Some(tables) = core.session.registry.face_mut(face) {
                     tables.gets.replies.unregister(rid);

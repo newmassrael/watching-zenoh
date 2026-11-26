@@ -116,6 +116,10 @@ fn trim_trailing(params: &str) -> &str {
 /// for a segment with no `=` (`parameters.rs:36-44`), so a flag IS a key with an
 /// empty value rather than a segment with no key.
 pub fn has_param(params: &str, key: &str) -> bool {
+    // Most selectors carry none, and an empty list holds no key to split out.
+    if params.is_empty() {
+        return false;
+    }
     trim_trailing(params)
         .split(PARAM_LIST_SEPARATOR)
         .filter(|p| !p.is_empty())
@@ -206,6 +210,16 @@ mod tests {
         assert_eq!(param_value(s, "_max"), Some("5"));
         assert_eq!(param_value(s, "_time"), Some("[now(-10s)..]"));
         assert_eq!(param_value(s, "_sn"), None);
+    }
+
+    /// An empty list holds no key, whichever key is asked, the empty one included, and a list of
+    /// separators alone holds none either.
+    #[test]
+    fn an_empty_list_holds_no_key() {
+        assert!(!has_param("", TIME_RANGE_PARAM));
+        assert!(!has_param("", ""));
+        assert!(!has_param(";;", TIME_RANGE_PARAM));
+        assert!(has_param("_time", TIME_RANGE_PARAM));
     }
 
     /// A lone parameter is separator-independent, which is why the `&` bug
