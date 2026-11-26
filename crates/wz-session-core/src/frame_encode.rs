@@ -18,21 +18,108 @@
 #[cfg(feature = "alloc")]
 use alloc::vec::Vec;
 
-// The three imports below serve the frame writers, which a build has when it has a heap or a
-// link kind to send over for a message kind (the gate of [`frame_flags`], [`begin_frame`] and
-// [`encode_frame_envelope_into`]), and the fragment writers, which a build has when it can
-// reassemble fragments (the gate of [`write_fragment_head`]).
+// The union of the gates of the items that name it: [`begin_frame`], whose gate holds those of the
+// envelope writers built on it, [`push_body`], [`oam_body`], and [`write_fragment_head`], whose
+// gate holds those of the fragment writers. A heap alone frames an owned message through the
+// vector's sink, which refuses no write, so it does not import it.
 #[cfg(any(
-    feature = "alloc",
     all(
         any(
-            feature = "codec-push",
-            feature = "codec-request",
-            feature = "codec-response",
-            feature = "codec-response-final",
-            feature = "codec-declare",
+            feature = "alloc",
+            all(
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "codec-declare",
+                ),
+                any(feature = "session-unicast", feature = "session-multicast")
+            )
         ),
-        any(feature = "session-unicast", feature = "session-multicast")
+        any(
+            all(
+                feature = "alloc",
+                any(
+                    all(test, feature = "transport-qos"),
+                    all(
+                        feature = "storage-profile",
+                        feature = "session-unicast",
+                        not(feature = "tx-lend-only"),
+                        any(
+                            feature = "codec-push",
+                            feature = "codec-request",
+                            feature = "codec-response",
+                            feature = "codec-response-final",
+                            feature = "declare-keyexpr",
+                            feature = "declare-subscriber",
+                            feature = "declare-queryable",
+                            feature = "declare-token",
+                            feature = "declare-interest",
+                            feature = "liveliness-token"
+                        )
+                    ),
+                    all(
+                        feature = "session-multicast",
+                        feature = "codec-frame",
+                        feature = "storage-profile",
+                        any(
+                            feature = "codec-push",
+                            feature = "codec-response",
+                            feature = "codec-response-final",
+                            feature = "liveliness-token",
+                            feature = "declare-subscriber"
+                        )
+                    )
+                )
+            ),
+            all(
+                feature = "storage-profile",
+                feature = "session-unicast",
+                feature = "transport-tx-lend",
+                any(
+                    feature = "codec-push",
+                    feature = "codec-request",
+                    feature = "codec-response",
+                    feature = "codec-response-final",
+                    feature = "declare-keyexpr",
+                    feature = "declare-subscriber",
+                    feature = "declare-queryable",
+                    feature = "declare-token",
+                    feature = "declare-interest",
+                    feature = "liveliness-token"
+                )
+            ),
+            all(
+                feature = "session-multicast",
+                feature = "codec-frame",
+                feature = "storage-profile",
+                feature = "codec-push",
+                feature = "transport-tx-lend"
+            ),
+            all(test, feature = "codec-push"),
+            all(test, feature = "transport-fragmentation"),
+            all(test, feature = "transport-qos")
+        )
+    ),
+    all(
+        feature = "codec-push",
+        feature = "alloc",
+        any(
+            test,
+            feature = "tx-lend-only",
+            all(feature = "storage-profile", feature = "session-unicast"),
+            all(
+                feature = "session-multicast",
+                feature = "codec-frame",
+                feature = "storage-profile"
+            )
+        )
+    ),
+    all(
+        feature = "codec-linkstate",
+        feature = "codec-push",
+        feature = "session-unicast"
     ),
     all(feature = "codec-fragment", feature = "reassembly")
 ))]
@@ -45,6 +132,9 @@ use sce_forge_runtime::codec::VecSink;
     all(feature = "codec-fragment", feature = "reassembly")
 ))]
 use sce_forge_runtime::codec::Bounded;
+// The two imports below serve the frame writers, which a build has when it has a heap or a link
+// kind to send over for a message kind (the gate of [`frame_flags`]), and the fragment writers,
+// which a build has when it can reassemble fragments (the gate of [`write_fragment_head`]).
 #[cfg(any(
     feature = "alloc",
     all(
