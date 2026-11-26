@@ -1682,6 +1682,12 @@ impl<C: RoundCalls> Round<C> {
             !(holds_sender && self.gated.load(Ordering::Acquire)),
             "a record the gate let through found no room in the round"
         );
+        self.count_refused(holds_sender);
+    }
+
+    /// Count a refused record with the records that hold their sender, or with those that may be
+    /// dropped.
+    fn count_refused(&self, holds_sender: bool) {
         let count = if holds_sender {
             &self.held_over
         } else {
@@ -1691,11 +1697,14 @@ impl<C: RoundCalls> Round<C> {
     }
 
     /// Count a record a part of which found no place: one the round cannot read where it lies, as
-    /// it keeps no area to copy it into. Refused as one that found no room is, and counted apart as
-    /// well ([`RoundCounts::unplaced`]).
+    /// it keeps no area to copy it into. Counted with the records that found no room, and apart as
+    /// well ([`RoundCounts::unplaced`]). No defect of the gate's bound whatever let it through:
+    /// the gate asks for the room of a record, and where a peer's parts lie is the peer's (a key
+    /// composed past the session's bound is handed through its owned projection, which lies in no
+    /// region the round reads).
     fn refuse_unplaced(&self, holds_sender: bool) {
         self.unplaced.fetch_add(1, Ordering::Relaxed);
-        self.refuse(holds_sender);
+        self.count_refused(holds_sender);
     }
 
     /// Hand out, instead of holding, the calls of the subscribers the samples offered from here on
@@ -1858,9 +1867,10 @@ impl<C: RoundCalls> Round<C> {
             return;
         };
         if unplaced {
-            self.unplaced.fetch_add(1, Ordering::Relaxed);
+            self.refuse_unplaced(holds_sender);
+        } else {
+            self.refuse(holds_sender);
         }
-        self.refuse(holds_sender);
         self.released.end(call);
     }
 

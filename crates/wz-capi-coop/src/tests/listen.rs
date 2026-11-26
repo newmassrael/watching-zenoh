@@ -1102,9 +1102,11 @@ fn a_session_announces_the_zid_its_config_states_without_its_trailing_zeros() {
 
 /// A key a peer names by its declaration and a suffix one byte past the row the listener composes
 /// keys in is refused where it lies and counted, and the session reads the count off its faces
-/// (`CoopEngine::in_place_fallbacks`). The CONTROL is a key named the same way that fits the row:
-/// it is composed there, heard, and counted nowhere. Turned red by a face whose counts the session
-/// does not read (`Registry::in_place_fallbacks` folding no face).
+/// (`CoopEngine::in_place_fallbacks`). A build that hands records through its round refuses the
+/// owned projection there as well, which lies nowhere the round reads, and counts it apart
+/// (`RoundCounts::unplaced`). The CONTROL is a key named the same way that fits the row: it is
+/// composed there, heard, and counted nowhere. Turned red by a face whose counts the session does
+/// not read (`Registry::in_place_fallbacks` folding no face).
 #[test]
 fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
     let (listener, endpoint) = listening(|_| {});
@@ -1163,4 +1165,13 @@ fn a_composed_key_past_the_row_is_counted_where_the_session_reads_it() {
         "CONTROL: a composed key that fits the row is heard"
     );
     assert_eq!(listener.in_place_fallbacks().keyexpr_past_bound, 1);
+    #[cfg(wz_round)]
+    {
+        let counts = listener.round_counts();
+        assert_eq!(
+            (counts.held_over, counts.unplaced),
+            (1, 1),
+            "the round refused the blocking put past the row and counted it apart"
+        );
+    }
 }

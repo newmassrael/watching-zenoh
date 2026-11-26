@@ -681,6 +681,38 @@ fn a_sample_with_no_room_or_no_place_is_refused_and_its_call_ended() {
     assert_eq!(log.ended(), 3 + room);
 }
 
+/// A record a link's gate let through that holds its sender and has a part lying nowhere the round
+/// reads it (a key longer than the round's keys hold) is refused, counted with the records that
+/// hold their sender and apart, and its call ended; a debug build goes on, since where a peer's
+/// parts lie is no bound the gate asks for. Turned red by a refusal of a part that stops at the
+/// check of the gate's bound, or that counts it with the drops.
+#[test]
+fn a_gated_record_with_a_part_past_the_rounds_keys_is_counted_and_not_a_defect() {
+    let log = Arc::new(Log::default());
+    let lean = round::<Lean>();
+    let long: &'static str = "k".repeat(2 * caps::MAX_KEYEXPR_BYTES + 1).leak();
+    let call = Call {
+        row: 1,
+        log: log.clone(),
+    };
+    #[cfg(debug_assertions)]
+    lean.offering_gated(true);
+    // SAFETY: the test is the round's one writer, as a holder of the session's lock is.
+    unsafe { lean.offer_sample(call, &Blocking(long), true) };
+    #[cfg(debug_assertions)]
+    lean.offering_gated(false);
+    assert_eq!(
+        lean.counts(),
+        RoundCounts {
+            dropped: 0,
+            held_over: 1,
+            unplaced: 1
+        }
+    );
+    assert_eq!(log.ended(), 1, "the refused call is ended at once");
+    assert!(log.handed().is_empty(), "nothing is handed");
+}
+
 /// A reply is held for its leg's callback where the round keeps replies, and the record's count of
 /// the leg given back once it was handed; where it keeps none it is refused, the legs it was told
 /// of held by none.
