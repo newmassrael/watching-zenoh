@@ -2219,7 +2219,7 @@ def _selftest() -> int:
                 lambda: resolve_profile(decl, "../configs/profiles/host-client-tcp-query"))
         refuses("a profile nobody registered", "no registered profile", lambda: resolve_profile(decl, "nope"))
         expect("a resolved profile builds the libraries it can",
-               profile_cargo_args(decl, next(a for a in decl["artifacts"] if a["id"] == "capi-c"), real)[0]
+               profile_cargo_args(next(a for a in decl["artifacts"] if a["id"] == "capi-c"), real)[0]
                == "--no-default-features")
 
         def built_features(build: tuple[list[str], dict[str, str]] | None) -> set[str]:
