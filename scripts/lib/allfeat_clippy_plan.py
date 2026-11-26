@@ -17,7 +17,9 @@ declares `clippy-targets`, a list of cargo target selectors, in the same manifes
 for a set whose test targets cannot be built on its configuration: a dev-dependency follows its
 own features and not the crate's, so a crate whose selector replaces forms that its
 dev-dependencies are written over has tests only on the other set. The manifest says why beside
-the declaration; this plan holds the declaration to known selectors.
+the declaration. The declaration is `doc_feature_sets.py`'s to read and hold to known selectors,
+through its `clippy_arguments`, so this lane, pre-push gate 7, the reduced points and the test
+census build the targets one statement names.
 
 WHY EVERY MEMBER. A struct literal, a match or an import names the items of the build its author
 made, and a feature that is never on together with another is a composition no lane compiles.
@@ -60,9 +62,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CRATES = ROOT / "crates"
 COSTS = Path(__file__).resolve().parent / "allfeat_clippy_costs.txt"
 UNMEASURED_SECONDS = 60
-ALL_TARGETS = "--all-targets"
-# The cargo target selectors a set may narrow its clippy to.
-TARGET_SELECTORS = (ALL_TARGETS, "--lib", "--bins", "--tests", "--examples", "--benches")
+ALL_TARGETS = doc_feature_sets.ALL_TARGETS
 
 Configuration = tuple[str, str, list[str]]
 
@@ -89,51 +89,16 @@ def workspace_packages() -> list[dict]:
     return packages
 
 
-def declared_targets(package: dict) -> dict[str, list[str]]:
-    """`set name -> target arguments` for each set that declares `clippy-targets`.
-
-    A set that declares none is clippied with every target. One that declares a list is
-    clippied with those cargo target selectors and no others: a set whose test targets cannot
-    be built on its own configuration (a dev-dependency that cannot follow its features) says so
-    in its manifest, beside the reason, rather than in a list kept here.
-    """
-    config = (package.get("metadata") or {}).get(doc_feature_sets.METADATA_KEY) or {}
-    out: dict[str, list[str]] = {}
-    for entry in config.get("feature-sets") or []:
-        if "clippy-targets" not in entry:
-            continue
-        targets = entry["clippy-targets"]
-        name = entry.get("name")
-        if (
-            not isinstance(targets, list)
-            or not targets
-            or len(set(targets)) != len(targets)
-            or any(t not in TARGET_SELECTORS for t in targets)
-            or (ALL_TARGETS in targets and len(targets) > 1)
-        ):
-            raise PlanError(
-                f"{package['name']}: the set {name!r} declares clippy-targets {targets!r}; want a "
-                f"non-empty list of distinct selectors from {list(TARGET_SELECTORS)}, "
-                f"{ALL_TARGETS} alone"
-            )
-        out[name] = list(targets)
-    return out
-
-
 def configurations(packages: list[dict]) -> list[Configuration]:
     """`[(crate, label, cargo arguments)]` for the workspace, in the fixed order. The arguments
     are the targets, then the features."""
     listed: list[Configuration] = []
     for package in packages:
         try:
-            arguments = doc_feature_sets.cargo_arguments(package)
+            arguments = doc_feature_sets.clippy_arguments(package)
         except doc_feature_sets.ManifestError as error:
             raise PlanError(f"{package['name']}: {error}") from error
-        targets = declared_targets(package)
-        listed.extend(
-            (package["name"], label, targets.get(label, [ALL_TARGETS]) + args)
-            for label, args in arguments
-        )
+        listed.extend((package["name"], label, args) for label, args in arguments)
     return listed
 
 

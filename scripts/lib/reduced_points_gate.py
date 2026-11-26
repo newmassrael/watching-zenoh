@@ -70,7 +70,6 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import allfeat_clippy_plan  # noqa: E402
 import doc_feature_sets  # noqa: E402
 import reduced_docs_gate  # noqa: E402
 from no_allocator_link_gate import ZEPHYR_BUILD_VALUES  # noqa: E402
@@ -173,18 +172,16 @@ def points_of(package: dict, named: set[str], touched: set[str]) -> list[Point]:
     """The reduced points of `package` that give up a feature in `touched`, with their clippy
     arguments: the targets the largest set declares, then the features."""
     try:
-        targets = allfeat_clippy_plan.declared_targets(package)
+        targets = doc_feature_sets.declared_targets(package)
         reduced = doc_feature_sets.reduced_points(package, named)
-    except (doc_feature_sets.ManifestError, allfeat_clippy_plan.PlanError) as error:
+    except doc_feature_sets.ManifestError as error:
         raise GateError(f"{package['name']}: {error}") from error
     selected: list[Point] = []
     for label, set_name, given_up, kept in reduced:
         hit = [g for g in given_up if g in touched]
         if not hit:
             continue
-        arguments = targets.get(set_name, [allfeat_clippy_plan.ALL_TARGETS]) + (
-            doc_feature_sets.features_argument(kept)
-        )
+        arguments = targets[set_name] + doc_feature_sets.features_argument(kept)
         selected.append((package["name"], label, hit, arguments))
     return selected
 

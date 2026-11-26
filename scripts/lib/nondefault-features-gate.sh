@@ -111,7 +111,11 @@ lib_only=""
 excluded="wz wz-tls-mbedtls"
 
 # Tier 4: checked once per feature set the crate declares under `[package.metadata.wz-docs]`
-# (`scripts/lib/doc_feature_sets.py`, the sets Layers C1bf and C1bz build), with every target.
+# (`scripts/lib/doc_feature_sets.py`, the sets Layers C1bf and C1bz build), at the targets the set
+# declares: every target, or the selectors its `clippy-targets` names, read through
+# `doc_feature_sets.py --clippy` exactly as Layer C1bf reads them. A set narrowed to its library
+# (its tests name a heap or a dev-dependency form the set gives up) is clippied as a library, so the
+# library a fixed-memory profile ships is judged here and not only on hosted CI.
 # A crate that refuses a combination of its own features and is in no tier above: `wz-capi-pico`
 # has one engine per library, so its tokio set gives up the cooperative forms and its cooperative
 # set the tokio engine. Derived from the manifests below, so a crate that declares sets later is
@@ -209,7 +213,7 @@ for pkg in "${members[@]}"; do
     fi
     if [[ "$with_sets" == *" $pkg "* && " $lib_only " != *" $pkg "* ]]; then
         checked=$((checked + 1))
-        if ! sets="$(python3 "$sets_reader" "$pkg")" || [[ -z "$sets" ]]; then
+        if ! sets="$(python3 "$sets_reader" --clippy "$pkg")" || [[ -z "$sets" ]]; then
             echo "  nondefault-features FAIL: $pkg declares feature sets that" \
                  "doc_feature_sets.py could not read (the line above says why)"
             fail=1
@@ -218,9 +222,10 @@ for pkg in "${members[@]}"; do
         while read -r label set_args; do
             [[ -n "$label" ]] || continue
             read -r -a set_argv <<<"$set_args"
-            if ! cargo clippy -p "$pkg" --all-targets "${set_argv[@]}" --quiet -- -D warnings; then
+            # The line carries the targets before the features, as Layer C1bf's plan does.
+            if ! cargo clippy -p "$pkg" "${set_argv[@]}" --quiet -- -D warnings; then
                 echo "  nondefault-features FAIL: $pkg does not compile CLEAN in its" \
-                     "declared feature set \`$label\` (all targets)."
+                     "declared feature set \`$label\` (at the targets the set declares)."
                 fail=1
             fi
         done <<<"$sets"

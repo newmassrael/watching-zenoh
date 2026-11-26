@@ -2366,7 +2366,8 @@ if [[ "${1:-}" == "--census" ]]; then
         if [[ "$feats" == "@all" ]]; then
             argv+=(--all-features)
         elif [[ "$feats" == @args:* ]]; then
-            # A feature set a crate declares (`doc_feature_sets.py`), as its cargo arguments.
+            # A feature set a crate declares (`doc_feature_sets.py --tests`), as its cargo
+            # arguments: the test selectors its targets build, then its features.
             local -a set_argv
             read -r -a set_argv <<<"${feats#@args:}"
             argv+=("${set_argv[@]}")
@@ -2447,17 +2448,25 @@ if [[ "${1:-}" == "--census" ]]; then
         fi
 
         # A crate gate 7 checks once per feature set it declares (`sets`) cannot be listed with
-        # every feature on: its population is the union of what each declared set lists.
+        # every feature on: its population is the union of what each declared set lists, at the
+        # targets the set declares (`doc_feature_sets.py --tests`), the ones gate 7 and Layer
+        # C1bf build it at. A set narrowed to targets that build no test (its library alone) has
+        # no test to list, and is named rather than built.
         listed_all() {
             local set_lines label set_args
             if [[ "$tier" != "sets" ]]; then
                 list_names "$pkg" "@all" ""
                 return
             fi
-            set_lines="$(python3 "$here/doc_feature_sets.py" "$pkg")" || return 1
+            set_lines="$(python3 "$here/doc_feature_sets.py" --tests "$pkg")" || return 1
             [[ -n "$set_lines" ]] || return 1
             while read -r label set_args; do
                 [[ -n "$label" ]] || continue
+                if [[ -z "$set_args" ]]; then
+                    echo "  census: $pkg set $label builds no test target (its" \
+                         "clippy-targets), so it adds no test to the population" >&2
+                    continue
+                fi
                 list_names "$pkg" "@args:$set_args" "" || return 1
             done <<<"$set_lines" | sort -u
             return "${PIPESTATUS[0]}"
