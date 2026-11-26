@@ -4001,7 +4001,7 @@ enum LentDeclaration<'a> {
     UndeclareKeyexpr { mapping_id: crate::wire_id::ExprId },
     /// A retraction, naming its key when `key` holds it.
     #[cfg(all(
-        feature = "alloc",
+        feature = "tx-lend-only",
         feature = "declare-subscriber",
         feature = "declare-undeclare"
     ))]
@@ -4010,7 +4010,7 @@ enum LentDeclaration<'a> {
         key: Option<&'a crate::lent_control::NamedKeyexpr>,
     },
     #[cfg(all(
-        feature = "alloc",
+        feature = "tx-lend-only",
         feature = "declare-queryable",
         feature = "declare-undeclare"
     ))]
@@ -4019,7 +4019,7 @@ enum LentDeclaration<'a> {
         key: Option<&'a crate::lent_control::NamedKeyexpr>,
     },
     #[cfg(all(
-        feature = "alloc",
+        feature = "tx-lend-only",
         feature = "declare-token",
         feature = "declare-undeclare"
     ))]
@@ -4117,7 +4117,7 @@ impl<'a> LentDeclaration<'a> {
                 crate::lent_control::undeclare_kexpr_declaration(mapping_id),
             )),
             #[cfg(all(
-                feature = "alloc",
+                feature = "tx-lend-only",
                 feature = "declare-subscriber",
                 feature = "declare-undeclare"
             ))]
@@ -4125,7 +4125,7 @@ impl<'a> LentDeclaration<'a> {
                 crate::lent_control::undeclare_subscriber_declaration(id, key),
             )),
             #[cfg(all(
-                feature = "alloc",
+                feature = "tx-lend-only",
                 feature = "declare-queryable",
                 feature = "declare-undeclare"
             ))]
@@ -4133,7 +4133,7 @@ impl<'a> LentDeclaration<'a> {
                 crate::lent_control::undeclare_queryable_declaration(id, key),
             )),
             #[cfg(all(
-                feature = "alloc",
+                feature = "tx-lend-only",
                 feature = "declare-token",
                 feature = "declare-undeclare"
             ))]
