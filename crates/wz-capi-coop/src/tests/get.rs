@@ -130,6 +130,29 @@ fn a_get_is_answered_and_ends_with_its_final() {
     assert_eq!(router.seen(|s| s.queries), 1);
 }
 
+/// A get of the link's peer alone reads the session's timestamp policy and holds its leg under one
+/// hold of the session, and takes one more to find that no other face is up. The CONTROL is the
+/// leg's end, which says the get was asked. Turned red by the policy read under a hold of its own,
+/// before the walk of the faces.
+#[test]
+fn a_get_of_one_peer_reads_the_policy_in_the_hold_of_its_leg() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
+    let takes = || engine.takes.core.load(Ordering::SeqCst);
+    let before = takes();
+    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
+    let held = takes() - before;
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
+    assert_eq!(
+        held, 2,
+        "one hold for the policy and the leg, one to find no other face"
+    );
+    until(&engine, "CONTROL: the leg to end", || {
+        leg.lock().unwrap().ended
+    });
+}
+
 /// A reply read where its frame lies is handed to the session's gets alone, by its kind, as a Push
 /// is handed to the subscribers alone: the reply reaches its leg and its Final ends the get, each
 /// through that one dispatch, and a subscriber on the reply's key is handed no sample of either.

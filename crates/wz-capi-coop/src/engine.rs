@@ -9515,24 +9515,27 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // with nothing sent and no queryable asked, where zenoh-pico refuses a get whose delivery
         // to its own queryables failed (`vendor/zenoh-pico/src/net/primitives.c` @
         // `_Z_CLEAN_RETURN_IF_ERR(ret, _z_unregister_pending_query(zn, qid));`).
+        // One hold of the session for what the get reads of it before its first leg (the row of
+        // its own Final, the timestamp policy) and for that leg: the walk below takes it as the
+        // hold of its first face.
+        let mut held = self.live();
+        let Some(first) = held.as_mut() else {
+            return Err(Declined::Closed);
+        };
         #[cfg(feature = "local-queryable")]
         let own = if opts.allowed_destination.allows_local() {
-            let mut guard = self.live().ok_or(Declined::Closed)?;
             // The session's own request ids are a space of their own: the leg is registered in
             // the session's own pending gets (`Registry::local`) and answered under the local
             // generation (`query::LOCAL_QUERY`), so no table a link's ids reach holds it, and
             // the two counters never meet.
-            let rid = guard.0.session.local_requests.take();
+            let rid = first.0.session.local_requests.take();
             Some(query::OwnFinalHold::take(&self.plane, rid).ok_or(Declined::TableFull)?)
         } else {
             None
         };
-        let expose = {
-            let guard = self.live().ok_or(Declined::Closed)?;
-            // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it
-            // states none, applied to every leg's callback, after its replies are consolidated.
-            opts.expose_timestamp_by(&guard.0.policy)
-        };
+        // `entity-timestamp-opt-in`: the query's choice, or the session's policy when it states
+        // none, applied to every leg's callback, after its replies are consolidated.
+        let expose = opts.expose_timestamp_by(&first.0.policy);
         // What every link is asked, read from the options once: the sink of each leg consolidates
         // as the Request states.
         let request = opts.query_parts();
@@ -9551,10 +9554,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // issued none, and found no room for one, is refused whole.
         let mut unheld = 0usize;
         // The faces whose links are up, each asked once in the order of their ids: the walk keeps
-        // the last face it asked and takes the session's lock for each, holding no list of them.
+        // the last face it asked and takes the session's lock for each, holding no list of them,
+        // the first under the hold taken above.
         let mut asked = None;
         loop {
-            let Some(mut guard) = self.live() else {
+            let Some(mut guard) = held.take().or_else(|| self.live()) else {
                 return issued_so_far(issued);
             };
             let core = &mut guard.0;
