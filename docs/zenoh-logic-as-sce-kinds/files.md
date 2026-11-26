@@ -240,6 +240,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/runtime_tables.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/shared_key_ids.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/snapshot.rs` | S7 | |
+| `crates/wz-capi-coop/src/tests/step.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/ticker.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/timestamps.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/tx_pool.rs` | excluded: test | Test-only file by its name. |

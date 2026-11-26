@@ -3791,6 +3791,7 @@ mod runtime_tables;
 mod shared_key_ids;
 #[cfg(feature = "liveliness-get")]
 mod snapshot;
+mod step;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;
