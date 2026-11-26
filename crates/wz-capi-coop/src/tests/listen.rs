@@ -19,6 +19,7 @@ use wz_capi_port::{
 };
 use wz_session_core::locality::Locality;
 use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::qos::CongestionControl;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::ReplyView;
 use wz_session_core::session_init_params::SessionZid;
@@ -292,11 +293,16 @@ fn a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before()
         // Long enough that a batch holds a few, so a sample read into another link's buffer
         // would show in its bytes.
         let payload = vec![tag ^ at; 200 + usize::from(at)];
+        // Blocking: under the clients' pico profile a droppable put that finds its link's send
+        // held by the client's own read task (a keep-alive) is dropped and told, and every sample
+        // is what the listener's links are read for here.
         peer.publish_on_wire_all(
             "demo/full/x",
             &WireKey::literal(),
             &payload,
-            &PublishOptions::put().with_locality(Locality::Remote),
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Block),
         )
         .expect("a put the link carries");
         payload
