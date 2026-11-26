@@ -5238,7 +5238,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let config = source.into_input(&mut endpoints);
         let input = OpenInput {
             config,
-            endpoints: &endpoints,
+            endpoints: &mut endpoints,
         };
         Self::assemble(links, clock, entropy, input, policy, key_ids, storage)
     }

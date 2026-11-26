@@ -2088,7 +2088,7 @@ where
         crate::coop_host::entropy(),
         wz_capi_coop::open_source::OpenInput {
             config: make_config(),
-            endpoints: &endpoints,
+            endpoints: &mut endpoints,
         },
         policy,
         key_ids,

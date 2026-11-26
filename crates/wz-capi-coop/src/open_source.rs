@@ -178,19 +178,18 @@ impl OpenEndpoints {
     }
 
     /// Copy the texts into `rows`, the rows the open lent, in the order they were written, or
-    /// answer the refusal of the first that had none. Out of line: one copy body for every engine
-    /// the open is made over.
+    /// answer the refusal of the first that had none, handed over rather than copied. Every text
+    /// written fits a row, as the one that did not was refused when it was written, so a row
+    /// refused here is one past the rows the open lent, which its config counted. Out of line:
+    /// one copy body for every engine the open is made over.
     #[inline(never)]
-    pub(crate) fn copy_into(&self, rows: &mut EndpointTexts) -> Result<(), OpenError> {
-        if let Some(refused) = &self.refused {
-            return Err(refused.clone());
+    pub(crate) fn copy_into(&mut self, rows: &mut EndpointTexts) -> Result<(), OpenError> {
+        if let Some(refused) = self.refused.take() {
+            return Err(refused);
         }
-        for at in 0..self.len {
-            let Some((role, text)) = self.row(at) else {
-                break;
-            };
-            rows.write(role, text)
-                .map_err(|why| unwritten(text, why, role))?;
+        for (text, role) in self.texts.iter().zip(&self.roles).take(self.len) {
+            rows.write(*role, text.as_str())
+                .map_err(|_| OpenError::Arena(ArenaRefused::TooLarge))?;
         }
         Ok(())
     }
@@ -219,8 +218,8 @@ fn unwritten(text: &str, why: EndpointTextRefused, role: EndpointRole) -> OpenEr
 pub struct OpenInput<'a> {
     /// The session's config.
     pub config: CoopConfig<Counted>,
-    /// Its endpoints' texts.
-    pub endpoints: &'a OpenEndpoints,
+    /// Its endpoints' texts, which the open copies, and whose refusal it hands on.
+    pub endpoints: &'a mut OpenEndpoints,
 }
 
 /// What a host's open reads its session's config from, once: the config, which counts the
