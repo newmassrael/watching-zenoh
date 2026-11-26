@@ -142,12 +142,20 @@ impl Iterator for Places<'_> {
     }
 }
 
+/// What a [`MatchEntry`] keeps, as its one state byte: nothing (zero, so an entry of all zero
+/// bytes keeps none), the places of its set, or a refusal. One byte, so the answer every message
+/// of a kept key is handed is told from the other two by one compare.
+const KEPT_NOTHING: u8 = 0;
+const KEPT_PLACES: u8 = 1;
+const KEPT_REFUSAL: u8 = 2;
+
 /// One kept answer: the subscribers a peer's key reached, the key named by the peer's id under its
 /// sender ([`crate::wire_id::sender_peer_key`]), and the epoch of the table it was worked out at.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MatchEntry {
-    /// Whether an answer is kept: an entry of all zero bytes keeps none.
-    kept: bool,
+    /// What is kept: `KEPT_NOTHING`, `KEPT_PLACES` (the places of `set`) or `KEPT_REFUSAL`
+    /// (the counter of `refused`).
+    kept: u8,
     /// The key the answer is of.
     wire: u64,
     /// The table's epoch when the answer was worked out.
@@ -156,14 +164,14 @@ pub struct MatchEntry {
     set: SubscriberSet,
     /// When the answer is that the key gate refused the key: the counter it counted the refusal
     /// in ([`crate::key_gate::Refusal::counter`]), which each message on the key is counted in
-    /// again with the gate not asked. `None`, all zero, for an answer of places.
+    /// again with the gate not asked. Read only while `kept` is a refusal.
     refused: Option<core::num::NonZeroU8>,
 }
 
 impl MatchEntry {
     /// An entry that keeps no answer.
     pub const NONE: Self = Self {
-        kept: false,
+        kept: KEPT_NOTHING,
         wire: 0,
         epoch: 0,
         set: SubscriberSet::EMPTY,
@@ -172,14 +180,15 @@ impl MatchEntry {
 
     /// The places the key reached, when that is the answer kept at the table's `epoch`: `None`
     /// for an answer of another epoch, and for a key the gate refused.
+    #[inline]
     pub fn answer(&self, epoch: u64) -> Option<&SubscriberSet> {
-        (self.kept && self.epoch == epoch && self.refused.is_none()).then_some(&self.set)
+        (self.kept == KEPT_PLACES && self.epoch == epoch).then_some(&self.set)
     }
 
     /// The counter of the key gate's refusal of the key, when that is the answer kept at the
     /// table's `epoch`.
     pub fn refusal(&self, epoch: u64) -> Option<core::num::NonZeroU8> {
-        if self.kept && self.epoch == epoch {
+        if self.kept == KEPT_REFUSAL && self.epoch == epoch {
             self.refused
         } else {
             None
@@ -188,17 +197,16 @@ impl MatchEntry {
 
     /// Keep `set` as the answer of this entry's key at `epoch`.
     pub fn keep(&mut self, epoch: u64, set: SubscriberSet) {
-        self.kept = true;
+        self.kept = KEPT_PLACES;
         self.epoch = epoch;
         self.set = set;
-        self.refused = None;
     }
 
     /// Keep, as the answer of this entry's key at `epoch`, that the key gate refused it and
     /// counted the refusal in `counter`: the gate's answer changes only with the gate, which moves
     /// the epoch, or with the peer's class, which forgets the memory.
     pub fn keep_refused(&mut self, epoch: u64, counter: core::num::NonZeroU8) {
-        self.kept = true;
+        self.kept = KEPT_REFUSAL;
         self.epoch = epoch;
         self.set = SubscriberSet::EMPTY;
         self.refused = Some(counter);
@@ -232,7 +240,7 @@ impl PeerMatches {
             self.names = names;
         }
         let entry = self.entries.get_mut((wire as usize) & ENTRY_MASK)?;
-        if !entry.kept || entry.wire != wire {
+        if entry.kept == KEPT_NOTHING || entry.wire != wire {
             *entry = MatchEntry {
                 wire,
                 ..MatchEntry::NONE
@@ -244,7 +252,7 @@ impl PeerMatches {
     /// Forget every answer: what decides one changed other than the table (the peer's class).
     pub fn forget(&mut self) {
         for entry in &mut self.entries {
-            entry.kept = false;
+            entry.kept = KEPT_NOTHING;
         }
     }
 }
@@ -309,6 +317,42 @@ mod tests {
         entry.keep(5, set);
         assert_eq!(entry.answer(5), Some(&set));
         assert_eq!(entry.refusal(5), None, "places kept over the refusal");
+    }
+
+    /// A refusal is forgotten as an answer of places is: by forgetting, by a change of the side's
+    /// names, and by another key taking its entry; and the entry of all zero bytes keeps nothing.
+    /// Turned red by a refusal that outlives `forget`, a fresh entry that keeps one, or a state
+    /// of nothing that is not zero.
+    #[test]
+    fn a_kept_refusal_is_forgotten_as_places_are() {
+        assert_eq!(
+            MatchEntry::default(),
+            MatchEntry::NONE,
+            "all zero is nothing"
+        );
+        let counter = core::num::NonZeroU8::MIN;
+        let wire = 3;
+        let mut memory = PeerMatches::NONE;
+        memory.entry(wire, 0).unwrap().keep_refused(1, counter);
+        assert_eq!(memory.entry(wire, 0).unwrap().refusal(1), Some(counter));
+        memory.forget();
+        let entry = memory.entry(wire, 0).unwrap();
+        assert_eq!(entry.refusal(1), None, "forgotten");
+        assert_eq!(entry.answer(1), None, "nor read as places");
+        entry.keep_refused(1, counter);
+        assert_eq!(
+            memory.entry(wire, 1).unwrap().refusal(1),
+            None,
+            "names changed"
+        );
+        memory.entry(wire, 1).unwrap().keep_refused(1, counter);
+        let other = wire + PEER_MATCH_ENTRIES as u64;
+        assert_eq!(
+            memory.entry(other, 1).unwrap().refusal(1),
+            None,
+            "another key"
+        );
+        assert_eq!(memory.entry(wire, 1).unwrap().refusal(1), None);
     }
 
     #[test]

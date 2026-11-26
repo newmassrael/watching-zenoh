@@ -482,6 +482,7 @@ impl<'a, P: Storage> PeerSpace<'a, P> {
     /// The key the peer declared for `id`, found once: its text, and, when its table keeps it in
     /// the session's key arena (the lent policy's), the row's own key, whose block a holder may
     /// keep. `None` for an id the peer did not declare.
+    #[inline]
     fn declared(
         &self,
         id: crate::wire_id::ExprId,
@@ -1110,7 +1111,7 @@ pub fn resolve_wireexpr_viewed_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: 
     own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
 ) -> Result<Option<(&'k str, Option<&'k crate::key_arena::KeyRef>)>, KeyexprPastBound> {
-    resolve_viewed_parts_held_over(ViewedParts::of(body), spaces, own, out)
+    resolve_viewed_parts_held_over(&ViewedParts::of(body), spaces, own, out)
 }
 
 /// What a wireexpr read as its view carries, read off it once: its id, its suffix, and whether
@@ -1168,8 +1169,9 @@ impl<'f> ViewedParts<'f> {
     feature = "codec-response",
     feature = "codec-push"
 ))]
+#[inline]
 pub fn resolve_viewed_parts_held_over<'k, 'f: 'k, P: Storage, O: Storage, T: Storage>(
-    parts: ViewedParts<'f>,
+    parts: &ViewedParts<'f>,
     spaces: MappingSpaces<'k, P, O>,
     own: Option<OwnSpace<'_, T>>,
     out: &'k mut dyn KeyexprOut,
@@ -1680,7 +1682,7 @@ mod bounded_space_tests {
         spaces: MappingSpaces<'k, Static>,
         out: &'k mut KeyexprBuf,
     ) -> Result<Option<(&'k str, bool)>, KeyexprPastBound> {
-        resolve_viewed_parts_held_over(parts, spaces, None::<OwnSpace<'_, Static>>, out)
+        resolve_viewed_parts_held_over(&parts, spaces, None::<OwnSpace<'_, Static>>, out)
             .map(|found| found.map(|(text, held)| (text, held.is_some())))
     }
 
