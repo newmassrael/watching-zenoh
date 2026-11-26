@@ -14836,9 +14836,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return Err(UnsentShared::Unshareable);
         }
         #[cfg(feature = "transport-stats")]
-        let class = self.stats_keys_of(encoded.stats_class(), || {
-            encoded.keyexpr().map(alloc::string::String::from)
-        });
+        let class = self.stats_keys_of(encoded.stats_class(), || encoded.keyexpr());
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         let ended = self.dispatch_network_message_at(
