@@ -524,6 +524,7 @@ enum Reserved<H> {
     /// The leg refused the publish for a reason every leg would meet (a payload or key its codec
     /// cannot carry), found while it built the message it reserves for: the publish ends with the
     /// error, and nothing is sent. Only a group builds its message before it reserves.
+    #[cfg(feature = "multicast-transport")]
     Refused,
 }
 
@@ -534,6 +535,7 @@ impl<H> Reserved<H> {
             Reserved::Held(reservation) => Reserved::Held(f(reservation)),
             Reserved::NoRoom => Reserved::NoRoom,
             Reserved::Absent => Reserved::Absent,
+            #[cfg(feature = "multicast-transport")]
             Reserved::Refused => Reserved::Refused,
         }
     }
@@ -784,7 +786,7 @@ fn pause_between_passes(delay_ms: u16) {
 /// A face that refuses in phase two for a reason every face would meet ends the publish with the
 /// error. It is the first face in practice, since the faces are sent the same payload, and the
 /// reservations not yet used are given back as it ends. One that refuses in phase one
-/// ([`Reserved::Refused`]) ends it there, before anything is sent, with every reservation taken
+/// (`Reserved::Refused`, a group's) ends it there, before anything is sent, with every reservation taken
 /// given back.
 fn atomic_passes<H>(
     retry: Option<AdmissionRetry>,
@@ -809,6 +811,7 @@ fn atomic_passes<H>(
                     break;
                 }
                 // Dropping what is held gives its room back as the publish ends.
+                #[cfg(feature = "multicast-transport")]
                 Reserved::Refused => return Err(FanoutError::ExceedsCapacity),
             }
         }
