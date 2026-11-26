@@ -312,6 +312,13 @@ The order, each step landing whole with its tests:
    session as itself through the engine's `SharedView`) and asks for the engine's
    `transport_copy` for the implicit optimisation; its own send buffer, reservation, view storage
    and copy went. S6 is landed.
+   Measured on 2026-11-27 by the command of step 1, on one build host, main `f5a045229` against
+   the same main with steps 3 to 5: the C library's `.text` is 8,776,704 without the
+   shared-memory arm on both (`zenoh-shm` is not linked there), and 9,254,592 against 9,289,296
+   with it (+34,704). The engine's half lost 7,131 lines and gained 1,922 (`shm_buffer`, the C
+   ABI's provider over `zenoh-shm`); the text grows because `zenoh-shm`'s provider is generic
+   over its backend and its allocation policies, and the C ABI instantiates zenoh-c's five
+   policy compositions over two backends, where the engine's provider was one type.
 
 `wz-runtime-tokio` then depends on `crates/wz-zenoh-shm`, which the layer gates allow (it is a crate
 below the top crate, not the top crate), and the capability-cost budgets of the C images with shared
