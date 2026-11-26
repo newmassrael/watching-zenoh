@@ -258,8 +258,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
             subs,
             push,
             ViewedParts::of(&push.view.keyexpr.body),
-            reliability,
-            record.sender(),
+            PushOrigin {
+                reliability,
+                sender: record.sender(),
+            },
             room,
         )
         .map_err(|why| {
@@ -321,8 +323,10 @@ impl<Q: Storage> SubscriberPeer<Q> {
             &*subs,
             push,
             parts,
-            reliability,
-            sender,
+            PushOrigin {
+                reliability,
+                sender,
+            },
             &mut room,
         )?
         else {
@@ -374,10 +378,13 @@ impl<Q: Storage> SubscriberPeer<Q> {
         subs: &L,
         push: &'s PushRead<'_>,
         parts: ViewedParts<'s>,
-        reliability: Reliability,
-        sender: u64,
+        origin: PushOrigin,
         room: &'s mut LentRoom<Q>,
     ) -> Result<Option<SampleRef<'s>>, Fallback> {
+        let PushOrigin {
+            reliability,
+            sender,
+        } = origin;
         let Some(body) = lent_body(push)? else {
             return Ok(None);
         };
@@ -1545,4 +1552,12 @@ mod tests {
             std::vec![(2, "demo/b".to_string()), (3, "demo/b".to_string())]
         );
     }
+}
+
+/// Where a lent Push came from: the reliability of the frame it was read in and the peer that
+/// sent it, the two facts of its record a sample carries besides its own parts.
+#[derive(Clone, Copy)]
+struct PushOrigin {
+    reliability: Reliability,
+    sender: u64,
 }
