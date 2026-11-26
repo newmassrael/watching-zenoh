@@ -1918,6 +1918,21 @@ impl<W: LinkWaits> LinkRooms<W> {
             (true, true) => Room::Congested(congested),
         }
     }
+
+    /// Ask the face at place `at` alone for room within `wait_us`, with nothing of the session
+    /// held: what a droppable publish asks of a face whose send place another holder has, where
+    /// each face's place is taken on its own. `Unasked` when the place names no wait.
+    #[cfg(not(wz_round))]
+    pub(crate) fn on_face(&self, at: usize, wait_us: u64) -> face_send::Room<()> {
+        let Some(Some(RoomPlace { on, .. })) = self.room_at(at) else {
+            return face_send::Room::Unasked;
+        };
+        if self.waits.wait_room(on, wait_us) {
+            face_send::Room::Free
+        } else {
+            face_send::Room::Congested(())
+        }
+    }
 }
 
 /// One publish as its leg to the links sends it ([`CoopEngine::fan_out`]).
@@ -7038,6 +7053,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[inline(always)]
     fn on_faces(
         &self,
+        _droppable: bool,
         leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
         leg(core::marker::PhantomData)
@@ -7494,8 +7510,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !opts.allowed_destination.allows_remote() {
             return Ok(0);
         }
-        // Each face's place is taken before the session, as every send on it takes them.
-        self.on_faces(|tx| self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx))
+        // Each face's place is taken before the session, as every send on it takes them; one that
+        // may be dropped is not held behind another holder of a face's place (`direct`).
+        let congestion = opts.qos.unwrap_or(QosLevel::DEFAULT).congestion();
+        let droppable = face_send::droppable(opts.reliable_bool(), congestion);
+        self.on_faces(droppable, |tx| {
+            self.publish_to_link_on(keyexpr, wire, payload, opts, plan, tx)
+        })
     }
 
     /// [`Self::publish_to_link`] through `tx`, what the caller holds of the one link.
@@ -11197,7 +11218,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(all(not(wz_round), any(feature = "listen", feature = "group")))]
         {
             let mut answer: Option<FilteredPut> = None;
-            let _ = self.on_faces(|tx| {
+            let _ = self.on_faces(false, |tx| {
                 if matches!(
                     answer,
                     Some(FilteredPut::Suppressed | FilteredPut::NotPlain)

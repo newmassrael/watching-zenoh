@@ -2153,29 +2153,83 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[inline(always)]
     pub(super) fn on_faces(
         &self,
+        droppable: bool,
         mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
         let mut outcome = Ok(0);
-        for face in self.direct.iter() {
-            // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as
-            // `LinkTx`.
-            let Some(mut send) = (unsafe { face.site.hold_send() }) else {
-                continue;
+        for (at, face) in self.direct.iter().enumerate() {
+            // A place another thread holds is held only where there are other threads.
+            let sent = if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
+                self.try_leg(face, at, &mut leg)
+            } else {
+                Self::hold_leg(face, &mut leg)
             };
-            let held = HeldSend {
-                face: &face.end,
-                wire: send.tx().and_then(|tx| tx.as_ref()),
-                before: None,
-            };
-            let sent = leg(FaceTx {
-                held: Some(&held),
-                alone: true,
-            });
-            if sent.is_err() {
-                outcome = sent;
+            if let Some(Err(error)) = sent {
+                outcome = Err(error);
             }
         }
         outcome
+    }
+
+    /// `leg` on `face` under a hold of its send place, which waits for whatever holds it now.
+    /// `None`, with `leg` not run, while the place holds no parts.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[inline(always)]
+    fn hold_leg(
+        face: &DirectFace<L, C>,
+        leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Option<Result<usize, FanoutError>> {
+        // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as `LinkTx`.
+        let mut send = unsafe { face.site.hold_send() }?;
+        let held = HeldSend {
+            face: &face.end,
+            wire: send.tx().and_then(|tx| tx.as_ref()),
+            before: None,
+        };
+        Some(leg(FaceTx {
+            held: Some(&held),
+            alone: true,
+        }))
+    }
+
+    /// `leg` of a droppable publish on `face`, the face at place `at`: its send place tried, and
+    /// while another holder has it, the face passed over or the place waited for as the queue
+    /// profile says (`Self::behind_held_place`). `None`, with `leg` not run, while the place
+    /// holds no parts.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    #[inline(never)]
+    fn try_leg(
+        &self,
+        face: &DirectFace<L, C>,
+        at: usize,
+        leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+    ) -> Option<Result<usize, FanoutError>> {
+        loop {
+            let lent = face.site.try_lend(|parts| {
+                // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as
+                // `LinkTx`, a borrow of the lend that ends before it.
+                let wire = unsafe { parts.parts_mut() }.tx().as_ref();
+                let held = HeldSend {
+                    face: &face.end,
+                    wire,
+                    before: None,
+                };
+                leg(FaceTx {
+                    held: Some(&held),
+                    alone: true,
+                })
+            });
+            match lent {
+                Lend::Lent(sent) => return Some(sent),
+                Lend::Empty => return None,
+                Lend::Held => {}
+            }
+            match self.behind_held_place(at) {
+                Behind::TryAgain => core::hint::spin_loop(),
+                Behind::WaitForSession => return Self::hold_leg(face, leg),
+                Behind::Dropped { told, .. } => return Some(self.dropped_on_face(told)),
+            }
+        }
     }
 
     /// `f` on the session's state where the dial role's face is the only face: its send place
@@ -2230,10 +2284,34 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[inline(always)]
     pub(super) fn on_faces(
         &self,
-        leg: impl FnOnce(LinkTx<'_, C>) -> Result<usize, FanoutError>,
+        droppable: bool,
+        mut leg: impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Result<usize, FanoutError> {
+        let face = &self.direct.dial;
+        // A place another thread holds is held only where there are other threads.
+        if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
+            loop {
+                let lent = face.site.try_lend(|parts| {
+                    // SAFETY: as in `Self::hold_dial`: `leg` reaches the send part only as
+                    // `LinkTx`, a borrow of the lend that ends before it.
+                    let wire = unsafe { parts.parts_mut() }.tx().as_ref();
+                    leg(FaceTx { wire })
+                });
+                match lent {
+                    Lend::Lent(sent) => return sent.map(|_| 0),
+                    Lend::Empty => return Ok(0),
+                    Lend::Held => {}
+                }
+                // The dial role's face is at the first place.
+                match self.behind_held_place(0) {
+                    Behind::TryAgain => core::hint::spin_loop(),
+                    Behind::WaitForSession => break,
+                    Behind::Dropped { told, .. } => return self.dropped_on_face(told),
+                }
+            }
+        }
         // SAFETY: as in `Self::hold_dial`: `leg` reaches the send part only as `LinkTx`.
-        let mut send = unsafe { self.direct.dial.site.hold_send() };
+        let mut send = unsafe { face.site.hold_send() };
         // Matched where it lies, as an operation's hold is (`Self::live_on_link`): the send is
         // not moved out of its `Option` on a publish's path.
         let Some(send) = send.as_mut() else {
@@ -2242,6 +2320,32 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let wire = send.tx().and_then(|tx| tx.as_ref());
         leg(FaceTx { wire })?;
         Ok(0)
+    }
+
+    /// What a droppable publish does on the face at place `at`, whose send place another holder
+    /// has now, by the queue profile's `held_drop`, with nothing of the session held: pico's drops
+    /// it on the face at once and tells the caller, as pico's put fails when its try of the
+    /// transmit lock finds it held; zenoh's asks the face's link for room within
+    /// `wait_before_drop`, tries the place again once the link took room and drops the publish on
+    /// the face, untold, when it took none. A face that names no wait for its room is waited for.
+    fn behind_held_place(&self, at: usize) -> Behind<()> {
+        let room = match self.held_drop {
+            HeldDrop::DropAtOnce => face_send::Room::Held(mark_of_place(at)),
+            HeldDrop::WaitForRoom => self.rooms.on_face(at, self.wait_before_drop_us),
+        };
+        room.behind()
+    }
+
+    /// What a droppable publish's leg answers once it is dropped on a face whose send place
+    /// another holder has, counted as the transport's drop as a drop behind the session is.
+    fn dropped_on_face(&self, told: bool) -> Result<usize, FanoutError> {
+        #[cfg(feature = "transport-stats")]
+        self.unsent_drops.fetch_add(1, Ordering::Relaxed);
+        if told {
+            Err(FanoutError::HeldConduit)
+        } else {
+            Ok(0)
+        }
     }
 
     /// When the earliest face is next due, as a read's wait reads it and as the faces' slots
@@ -2291,7 +2395,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn legs_of_a_publish(&self) -> (usize, usize) {
         let (mut legs, mut reached) = (0, 0);
-        let _ = self.on_faces(|tx| {
+        let _ = self.on_faces(false, |tx| {
             legs += 1;
             if let Some(core) = self.live() {
                 reached += core
@@ -2309,6 +2413,23 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn send_place_is_free(&self) -> bool {
         !matches!(self.direct.dial.site.try_lend(|_| ()), Lend::Held)
+    }
+
+    /// Run `held` while this thread holds the send place of the dial role's face, as a send holds
+    /// it: what a test of a publish that finds that place held runs beside one. `None`, with
+    /// `held` not run, while the place holds no link.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "threads",
+        not(any(feature = "listen", feature = "group"))
+    ))]
+    pub(crate) fn holding_the_dial_send_place<U>(&self, held: impl FnOnce() -> U) -> Option<U> {
+        // SAFETY: the hold lends nothing of the link: no handle on a cell of it is made.
+        let send = unsafe { self.direct.dial.site.hold_send() }?;
+        let answer = held();
+        drop(send);
+        Some(answer)
     }
 
     /// How many faces that are up an operation reaches through the wire its hold of their place

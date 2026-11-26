@@ -353,6 +353,65 @@ fn the_sessions_message_reading_counts_what_its_link_received() {
 /// The engine over a link whose peer took the connection, brought the session up and then read
 /// nothing more: what the session sends fills the stream, and a blocking publish waits on it.
 // Its publisher and peers are stepped by their read tasks.
+/// A droppable publish that finds the send place of the session's one face held by another
+/// thread is not held behind it: under the pico profile, which the tests' sessions open with, it
+/// is dropped at once and its caller told, as pico's put fails when its try of the transmit lock
+/// finds it held. CONTROL: with the place free the same publish is sent. Turned red by a droppable
+/// leg that waits for the place as a blocking one does (`CoopEngine::on_faces`).
+#[cfg(all(
+    feature = "threads",
+    not(wz_round),
+    not(any(feature = "listen", feature = "group"))
+))]
+#[test]
+fn a_droppable_publish_behind_the_one_faces_held_send_place_is_dropped_at_once() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    use wz_capi_port::{FanoutError, SessionEngine, WireKey};
+    use wz_session_core::locality::Locality;
+    use wz_session_core::publish_options::PublishOptions;
+    use wz_session_core::qos::CongestionControl;
+    use wz_session_core::session_init_params::HeldDrop;
+
+    assert_eq!(
+        super::client_config().tx_queue.held_drop,
+        HeldDrop::DropAtOnce,
+        "CONTROL: the tests' sessions drop at once"
+    );
+    let router = super::Router::start(super::CatchAll::None);
+    let engine = super::open(&router);
+    let publish = |engine: &crate::EngineHold<super::Engine>| {
+        engine.publish_on_wire_all(
+            "demo/held",
+            &WireKey::literal(),
+            b"v",
+            &PublishOptions::put()
+                .with_locality(Locality::Remote)
+                .with_congestion_control(CongestionControl::Drop),
+        )
+    };
+    assert!(
+        publish(&engine).is_ok(),
+        "CONTROL: with the place free the publish is sent"
+    );
+    let (told, answer) = mpsc::channel();
+    let held = engine.holding_the_dial_send_place(|| {
+        let publisher = engine.clone();
+        let thread = std::thread::spawn(move || {
+            let _ = told.send(publish(&publisher));
+        });
+        (thread, answer.recv_timeout(Duration::from_secs(2)))
+    });
+    let (thread, dropped) = held.expect("CONTROL: the one face's place holds its link");
+    thread.join().expect("the publishing thread ends");
+    assert_eq!(
+        dropped,
+        Ok(Err(FanoutError::HeldConduit)),
+        "the publish was dropped at once and told, not held behind the place"
+    );
+}
+
 #[cfg(all(feature = "listen", feature = "threads"))]
 mod stalled_link {
     use std::sync::atomic::{AtomicUsize, Ordering};
