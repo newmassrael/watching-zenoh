@@ -149,7 +149,7 @@ impl OpenEndpoints<'_> {
     /// Read each text and write it into `rows`, the rows the open lent, every one to dial and
     /// then every one to listen on, or answer the refusal of the first that has no row, by the
     /// role it is written as. Out of line and generic over nothing: the one body of every ABI
-    /// and every engine the open is made over, its reading's row in this frame alone.
+    /// and every engine the open is made over.
     #[inline(never)]
     pub(crate) fn write_into(&self, rows: &mut EndpointTexts) -> Result<(), OpenError> {
         let lists = [
@@ -158,14 +158,29 @@ impl OpenEndpoints<'_> {
         ];
         for (role, list) in lists {
             for endpoint in list.texts() {
-                let mut kept = LocatorText::new();
-                let text = (self.reading)(endpoint, &mut kept);
-                rows.write(role, text)
-                    .map_err(|why| unwritten(text, why, role))?;
+                write_text(rows, role, self.reading, endpoint)?;
             }
         }
         Ok(())
     }
+}
+
+/// Read `endpoint` as `reading` reads it and write it into the next row of `role` in `rows`, or
+/// answer why it has no row (`unwritten`). Out of line: the walks over the two roles' lists,
+/// each over the texts held as views and those held as strings, are each a call of this one body,
+/// and the reading's row lies in its frame alone.
+#[inline(never)]
+fn write_text(
+    rows: &mut EndpointTexts,
+    role: EndpointRole,
+    reading: EndpointReading,
+    endpoint: &str,
+) -> Result<(), OpenError> {
+    let mut kept = LocatorText::new();
+    let text = reading(endpoint, &mut kept);
+    rows.write(role, text)
+        .map_err(|why| unwritten(text, why, role))?;
+    Ok(())
 }
 
 /// The open's refusal of the endpoint `text` of `role` that has no row: one longer than a row is
