@@ -2570,7 +2570,7 @@ mod rx_sn_gate {
     use super::{bundle, holds_in};
     use crate::peer_init_caps::PeerInitCaps;
     use crate::qos::Priority;
-    use crate::sn::{mask_from_res, RxAdmit, RxConduits};
+    use crate::sn::RxAdmit;
 
     /// The peer's capabilities with the sequence-number resolution `seq_num_res`.
     fn caps(seq_num_res: u8) -> Option<PeerInitCaps> {
@@ -2639,6 +2639,7 @@ mod rx_sn_gate {
     #[test]
     fn an_admitted_open_ack_seeds_the_gate_on_the_peers_ring() {
         use crate::session_actions::OpenAckAdmission;
+        use crate::sn::{mask_from_res, RxConduits};
         let (actions, _link) = bundle();
         actions.set_peer_init_caps(caps(0x00));
         actions.fact_awaiting_open_ack(|slot| *slot = true);
@@ -2665,6 +2666,8 @@ mod rx_sn_gate {
     #[cfg(feature = "session-reconnect")]
     #[test]
     fn a_reopen_clears_the_gate_and_its_ring() {
+        use crate::sn::RxConduits;
+
         let (actions, _link) = bundle();
         actions.set_peer_init_caps(caps(0x00));
         assert_eq!(
