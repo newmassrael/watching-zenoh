@@ -91,14 +91,81 @@ impl Kept {
     }
 }
 
-/// A value and the count of its holders, the count first, so a pointer to the count is a pointer
-/// to the whole.
+/// The count of a held value's holders and the memory it is placed in: what every held value
+/// starts with whatever its type, so what is done to it is one body for every type.
 #[repr(C)]
-struct Held<T> {
+struct Head {
     kept: Kept,
     /// The memory the value is placed in, a count of which it holds: `None` on the heap.
     memory: Option<NonNull<Kept>>,
+}
+
+/// A value after its head, the count first, so a pointer to the count is a pointer to the whole.
+#[repr(C)]
+struct Held<T> {
+    head: Head,
     value: T,
+}
+
+/// Write the head of a value placed at `at` in memory `memory` keeps, a count of which it takes,
+/// its last holder running `last`.
+///
+/// # Safety
+/// `at` is aligned and valid for a write of a `Head`, and `memory` is live.
+#[inline(never)]
+unsafe fn place_head(at: NonNull<Head>, memory: NonNull<Kept>, last: unsafe fn(NonNull<Kept>)) {
+    // SAFETY: the caller's: the count is live and the place free for a head.
+    unsafe {
+        memory.as_ref().retain();
+        at.as_ptr().write(Head {
+            kept: Kept::new(last),
+            memory: Some(memory),
+        });
+    }
+}
+
+/// Give back the count of the memory a value was placed in, read before its value was dropped:
+/// nothing for a value of the heap.
+///
+/// # Safety
+/// `memory` is a count the value held, given back once.
+#[inline(never)]
+unsafe fn give_back(memory: Option<NonNull<Kept>>) {
+    if let Some(memory) = memory {
+        // SAFETY: the caller's.
+        unsafe { Kept::release(memory) };
+    }
+}
+
+/// Memory of the heap for a held value of `layout`, its head written, its last holder running
+/// `last`: `None` when the heap refuses it.
+#[inline(never)]
+fn box_head(layout: Layout, last: unsafe fn(NonNull<Kept>)) -> Option<NonNull<Head>> {
+    // A held value starts with its head, so its layout is never of no bytes.
+    if layout.size() == 0 {
+        return None;
+    }
+    // SAFETY: the layout's size is not zero.
+    let at = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?.cast::<Head>();
+    // SAFETY: the memory was allocated for the layout, which starts with a head and is at least
+    // as aligned.
+    unsafe {
+        at.as_ptr().write(Head {
+            kept: Kept::new(last),
+            memory: None,
+        })
+    };
+    Some(at)
+}
+
+/// Give back the memory of the heap a held value of `layout` was boxed in, its value dropped.
+///
+/// # Safety
+/// `at` is what [`box_head`] answered for `layout`, given back once.
+#[inline(never)]
+unsafe fn free_boxed(at: NonNull<Head>, layout: Layout) {
+    // SAFETY: the caller's.
+    unsafe { alloc::alloc::dealloc(at.as_ptr().cast(), layout) };
 }
 
 /// A value shared by a count of its holders: one of them. Cloning takes a count, dropping gives it
@@ -118,17 +185,13 @@ impl<T> Shared<T> {
     /// `value` in memory of the heap, freed with it, or `value` handed back when the heap
     /// refuses its memory.
     pub fn try_boxed(value: T) -> Result<Self, T> {
-        let held = Held {
-            kept: Kept::new(Self::last_boxed),
-            memory: None,
-            value,
+        let Some(head) = box_head(Self::layout(), Self::last_boxed) else {
+            return Err(value);
         };
-        match try_box(held) {
-            Ok(held) => Ok(Self {
-                at: NonNull::from(Box::leak(held)),
-            }),
-            Err(held) => Err(held.value),
-        }
+        let at = head.cast::<Held<T>>();
+        // SAFETY: the memory holds a `Held<T>` whose head was written; its value is written once.
+        unsafe { ptr::addr_of_mut!((*at.as_ptr()).value).write(value) };
+        Ok(Self { at })
     }
 
     /// The bytes and alignment [`Self::placed`] writes.
@@ -143,17 +206,13 @@ impl<T> Shared<T> {
     /// `at` is aligned and valid for a write of [`Self::layout`], and nothing else uses those
     /// bytes while a count of `memory` is held; `memory` is live and its memory holds `at`.
     pub unsafe fn placed(at: NonNull<u8>, value: T, memory: NonNull<Kept>) -> Self {
-        // SAFETY: the caller's: the count is live.
-        unsafe { memory.as_ref() }.retain();
         let at = at.cast::<Held<T>>();
-        // SAFETY: the caller's: the place is aligned and free for a `Held<T>`.
+        // SAFETY: the caller's: the count is live, and the place aligned and free for a
+        // `Held<T>`, whose head lies at its start and whose value is written once.
         unsafe {
-            at.as_ptr().write(Held {
-                kept: Kept::new(Self::last_placed),
-                memory: Some(memory),
-                value,
-            })
-        };
+            place_head(at.cast(), memory, Self::last_placed);
+            ptr::addr_of_mut!((*at.as_ptr()).value).write(value);
+        }
         Self { at }
     }
 
@@ -174,13 +233,9 @@ impl<T> Shared<T> {
         // inside it and is not null; no reference to the unwritten value is made.
         let value_at = unsafe { NonNull::new_unchecked(ptr::addr_of_mut!((*held).value)) };
         make(value_at);
-        // SAFETY: the caller's: the count is live, and `at` is free for the rest of a
-        // `Held<T>`, whose value `make` wrote.
-        unsafe {
-            memory.as_ref().retain();
-            ptr::addr_of_mut!((*held).kept).write(Kept::new(Self::last_placed));
-            ptr::addr_of_mut!((*held).memory).write(Some(memory));
-        }
+        // SAFETY: the caller's: the count is live, and `at` is free for the head of a `Held<T>`,
+        // whose value `make` wrote.
+        unsafe { place_head(at.cast(), memory, Self::last_placed) };
         Self { at: at.cast() }
     }
 
@@ -206,6 +261,7 @@ impl<T> Shared<T> {
     pub fn holders(this: &Self) -> usize {
         // SAFETY: this holder keeps the count alive.
         unsafe { this.at.as_ref() }
+            .head
             .kept
             .count
             .load(Ordering::Relaxed)
@@ -235,6 +291,7 @@ impl<T> Shared<T> {
         let at = unsafe { Self::held_of(value) };
         // SAFETY: the caller's: the count's place stands, whatever it counts.
         unsafe { at.as_ref() }
+            .head
             .kept
             .retain_live()
             .then_some(Self { at })
@@ -258,8 +315,13 @@ impl<T> Shared<T> {
     /// # Safety
     /// `kept` is the count of a `Held<T>` [`Self::try_boxed`] made, which no holder is left of.
     unsafe fn last_boxed(kept: NonNull<Kept>) {
-        // SAFETY: the caller's: the box was leaked by `boxed` and is taken back once.
-        drop(unsafe { Box::from_raw(kept.cast::<Held<T>>().as_ptr()) });
+        let held = kept.cast::<Held<T>>().as_ptr();
+        // SAFETY: the caller's: the value is live and dropped once, here, and then its memory,
+        // which `box_head` allocated for `Self::layout`, is given back once.
+        unsafe {
+            ptr::drop_in_place(ptr::addr_of_mut!((*held).value));
+            free_boxed(kept.cast(), Self::layout());
+        }
     }
 
     /// The last holder of a placed value let go: the value is dropped where it lies, and the count
@@ -272,11 +334,9 @@ impl<T> Shared<T> {
         // SAFETY: the caller's: the value is live and dropped once, here; the memory's count is
         // read before, as the memory may go with it.
         unsafe {
-            let memory = (*held).memory;
+            let memory = (*held).head.memory;
             ptr::drop_in_place(ptr::addr_of_mut!((*held).value));
-            if let Some(memory) = memory {
-                Kept::release(memory);
-            }
+            give_back(memory);
         }
     }
 }
@@ -284,7 +344,7 @@ impl<T> Shared<T> {
 impl<T> Clone for Shared<T> {
     fn clone(&self) -> Self {
         // SAFETY: this holder keeps the value alive.
-        unsafe { self.at.as_ref() }.kept.retain();
+        unsafe { self.at.as_ref() }.head.kept.retain();
         Self { at: self.at }
     }
 }
@@ -450,6 +510,46 @@ mod tests {
         );
         drop(made);
         assert_eq!(drops.get(), 1);
+        // SAFETY: the memory's own holder lets go, its last.
+        unsafe { Kept::release(memory) };
+        // SAFETY: the count gave its place up; the box is taken back once, here.
+        drop(unsafe { Box::from_raw(memory.as_ptr()) });
+    }
+
+    /// A value more aligned than its head.
+    #[repr(align(32))]
+    struct Wide(u8);
+
+    /// A held value starts with its count, its value after the head at its own alignment, boxed or
+    /// placed alike: the count is read where a holder that keeps only it looks. Turned red by a
+    /// head written after the value, or a value written elsewhere than `as_ptr` reads it.
+    #[test]
+    fn a_held_value_lies_after_its_head_at_its_own_alignment() {
+        let head = core::mem::size_of::<Head>();
+        assert_eq!(core::mem::offset_of!(Held<Wide>, head), 0);
+        assert_eq!(
+            core::mem::offset_of!(Held<Wide>, value),
+            head.next_multiple_of(32)
+        );
+        let Ok(boxed) = Shared::try_boxed(Wide(3)) else {
+            panic!("the heap has room");
+        };
+        assert_eq!(boxed.0, 3);
+        assert_eq!(Shared::as_ptr(&boxed).as_ptr() as usize % 32, 0);
+        assert_eq!(Shared::kept(&boxed).cast::<u8>(), boxed.at.cast::<u8>());
+        assert_eq!(Shared::holders(&boxed), 1);
+        let mut room = MaybeUninit::<[Wide; 4]>::uninit();
+        assert!(Shared::<Wide>::layout().size() <= core::mem::size_of_val(&room));
+        let memory = NonNull::from(Box::leak(Box::new(Kept::new(given_back_unseen))));
+        // SAFETY: the room is aligned for a `Wide`, which is the `Held`'s alignment, holds its
+        // bytes, and is used by nothing else while the value lives.
+        let placed = unsafe { Shared::placed(NonNull::from(&mut room).cast(), Wide(5), memory) };
+        assert_eq!(placed.0, 5);
+        // SAFETY: the memory is live; the placed value holds a count of it beside its own.
+        assert_eq!(unsafe { memory.as_ref() }.count.load(Ordering::Relaxed), 2);
+        drop(placed);
+        // SAFETY: as above.
+        assert_eq!(unsafe { memory.as_ref() }.count.load(Ordering::Relaxed), 1);
         // SAFETY: the memory's own holder lets go, its last.
         unsafe { Kept::release(memory) };
         // SAFETY: the count gave its place up; the box is taken back once, here.
