@@ -54,6 +54,7 @@ use core::ffi::c_void;
 use core::ptr::NonNull;
 
 use wz_capi_port::{QblId, QueryHolder, QueryableSink};
+use wz_session_core::keyexpr_canon::CanonKey;
 use wz_session_core::query_sink::{QueryView, ReplyMeta, ReplyOut};
 use wz_session_core::reply_acceptance::ReplyKeyExpr;
 
@@ -381,6 +382,17 @@ impl Drop for Deferred {
     }
 }
 
+/// What the canon check found of a query's own key ([`QueryMarshal::own_key`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyVerdict {
+    /// Not judged yet.
+    Unread,
+    /// In canon form.
+    Canon,
+    /// Refused, with the code the check answered.
+    Refused(ZResult),
+}
+
 /// The owned marshal behind a borrowed `z_loaned_query_t` during one callback.
 ///
 /// Reads the query's keyexpr, parameters and value where the wz [`QueryView`] holds them for the
@@ -468,6 +480,12 @@ pub(crate) struct QueryMarshal {
     /// thread, is undefined behaviour, in pico too, whose loaned query is only escapable via
     /// `z_query_take_from_loaned`.
     responder: Cell<Option<NonNull<dyn ReplyOut>>>,
+    /// What the canon check found of the query's own key, from the first reply that names it with
+    /// the loan [`z_query_keyexpr`] hands out ([`Self::own_key`]): a query is answered with its own
+    /// key more often than with any other, and the key does not change while the marshal holds it,
+    /// so it is judged once however many replies name it. A `Cell` for the reason
+    /// [`Self::responder`] is one.
+    own_verdict: Cell<KeyVerdict>,
 }
 
 impl QueryMarshal {
@@ -523,6 +541,7 @@ impl QueryMarshal {
             is_local: view.is_local(),
             deferred: None,
             responder: Cell::new(None),
+            own_verdict: Cell::new(KeyVerdict::Unread),
         }
     }
 
@@ -638,6 +657,8 @@ impl QueryMarshal {
             is_local: self.is_local,
             deferred: Some(held),
             responder: Cell::new(None),
+            // The copy's key holds the bytes this verdict was found of.
+            own_verdict: Cell::new(self.own_verdict.get()),
         }
     }
 
@@ -688,6 +709,49 @@ impl QueryMarshal {
         self.responder.set(Some(lent));
         call(self);
         self.responder.set(None);
+    }
+
+    /// The query's own key as a reply names it with the loan [`z_query_keyexpr`] hands out: judged
+    /// as [`crate::keyexpr::canon_key`] judges the key of every reply, the first time, and read
+    /// from the verdict kept after.
+    fn own_key(&self) -> Result<CanonKey<'_>, ZResult> {
+        let text = self.keyexpr.get();
+        match self.own_verdict.get() {
+            // SAFETY: the verdict is the canon check's of this text, which the marshal keeps
+            // unchanged, or of the bytes a copy's text holds the same of.
+            KeyVerdict::Canon => Ok(unsafe { CanonKey::judged_before(text) }),
+            KeyVerdict::Refused(code) => Err(code),
+            KeyVerdict::Unread => {
+                let judged = crate::keyexpr::canon_key(text);
+                self.own_verdict.set(match judged {
+                    Ok(_) => KeyVerdict::Canon,
+                    Err(code) => KeyVerdict::Refused(code),
+                });
+                judged
+            }
+        }
+    }
+
+    /// The key a reply names, judged: the query's own loan from the verdict [`Self::own_key`]
+    /// keeps, any other read where the caller holds it and judged as every door judges a key.
+    ///
+    /// pico dereferences the key unconditionally (`_z_send_reply` passes it straight into
+    /// `_z_declared_keyexpr_intersects`), so a null there is a caller bug that crashes pico; it is
+    /// answered `Z_ERR_NULL`, as a key that is not UTF-8 is, rather than replaced by the query's
+    /// own key, which would hide the bug.
+    ///
+    /// # Safety
+    /// `keyexpr` is null or a live loaned keyexpr.
+    unsafe fn reply_key(
+        &self,
+        keyexpr: *const z_loaned_keyexpr_t,
+    ) -> Result<CanonKey<'_>, ZResult> {
+        if core::ptr::eq(keyexpr, &self.loaned_keyexpr) {
+            return self.own_key();
+        }
+        // SAFETY: the caller's.
+        let text = unsafe { keyexpr_str(keyexpr) }.ok_or(Z_ERR_NULL)?;
+        crate::keyexpr::canon_key(text)
     }
 
     /// Hand a reply the C callback asked for to the query's responder: the held query's for an
@@ -1908,24 +1972,17 @@ pub unsafe extern "C" fn z_query_reply(
         if marshal.session_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        // pico dereferences `keyexpr` unconditionally (`_z_send_reply` passes it
-        // straight into `_z_declared_keyexpr_intersects`), so a null there is a
-        // caller bug that SEGFAULTS pico. Report it instead of inventing a
-        // fallback: silently substituting the query's own key would hide the bug
-        // and claim a pico semantic that does not exist.
-        let Some(ke) = keyexpr_str(keyexpr) else {
-            return Z_ERR_NULL;
-        };
         // A reply's key not in canon form is refused as every door refuses one, before it is
         // judged against the query.
-        if let Err(code) = crate::keyexpr::canon_key(ke) {
-            return code;
-        }
-        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
+        let key = match marshal.reply_key(keyexpr) {
+            Ok(key) => key,
+            Err(code) => return code,
+        };
+        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), key, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
         marshal.reply(PendingReply::Put {
-            keyexpr: ke,
+            keyexpr: key.as_str(),
             payload: buf,
             attachment,
             meta,
@@ -1988,18 +2045,17 @@ pub unsafe extern "C" fn z_query_reply_del(
         if marshal.session_closed() {
             return Z_ERR_SESSION_CLOSED;
         }
-        // Null is a caller bug that segfaults pico — reported, not substituted
-        // (see `z_query_reply`).
-        let Some(ke) = keyexpr_str(keyexpr) else {
-            return Z_ERR_NULL;
+        let key = match marshal.reply_key(keyexpr) {
+            Ok(key) => key,
+            Err(code) => return code,
         };
-        if let Err(code) = crate::keyexpr::canon_key(ke) {
-            return code;
-        }
-        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), ke, marshal.anyke) {
+        if !reply_keyexpr_is_covered(marshal.keyexpr.get(), key, marshal.anyke) {
             return Z_ERR_KEYEXPR_NOT_MATCH;
         }
-        marshal.reply(PendingReply::Del { keyexpr: ke, meta })
+        marshal.reply(PendingReply::Del {
+            keyexpr: key.as_str(),
+            meta,
+        })
     })
 }
 
@@ -2215,17 +2271,20 @@ mod tests {
     /// one an earlier string-equality cut of this round rejected.
     #[test]
     fn reply_coverage_is_intersection_not_string_equality() {
+        fn canon(text: &str) -> CanonKey<'_> {
+            crate::keyexpr::canon_key(text).expect("canon")
+        }
         // The case string equality got wrong: query is a PATTERN, reply concrete.
-        assert!(reply_keyexpr_is_covered("a/**", "a/b", false));
-        assert!(reply_keyexpr_is_covered("a/*", "a/b", false));
-        assert!(reply_keyexpr_is_covered("a/b", "a/b", false));
+        assert!(reply_keyexpr_is_covered("a/**", canon("a/b"), false));
+        assert!(reply_keyexpr_is_covered("a/*", canon("a/b"), false));
+        assert!(reply_keyexpr_is_covered("a/b", canon("a/b"), false));
         // Genuinely disjoint replies are rejected...
-        assert!(!reply_keyexpr_is_covered("a/**", "z/b", false));
-        assert!(!reply_keyexpr_is_covered("a/b", "a/c", false));
+        assert!(!reply_keyexpr_is_covered("a/**", canon("z/b"), false));
+        assert!(!reply_keyexpr_is_covered("a/b", canon("a/c"), false));
         // ...unless the querier said it accepts any key (`_anyke`), which is
         // exactly pico's `!query->_anyke && !intersects` short-circuit.
-        assert!(reply_keyexpr_is_covered("a/**", "z/b", true));
-        assert!(reply_keyexpr_is_covered("a/b", "a/c", true));
+        assert!(reply_keyexpr_is_covered("a/**", canon("z/b"), true));
+        assert!(reply_keyexpr_is_covered("a/b", canon("a/c"), true));
     }
 
     /// A query whose only content is its selector parameters.
@@ -2536,6 +2595,112 @@ mod tests {
             ],
             "a reply made with is_express set is express, and one made with no options is not"
         );
+    }
+
+    /// A [`ReplyOut`] that records the key of each staged reply.
+    #[derive(Default)]
+    struct KeyTap {
+        keys: Vec<String>,
+    }
+
+    impl ReplyOut for KeyTap {
+        fn reply(&mut self, _payload: &[u8]) {}
+        fn reply_del(&mut self) {}
+        fn reply_err(&mut self, _id: Option<u32>, _schema: Option<&[u8]>, _payload: &[u8]) {}
+        fn with_responder(&mut self, _zid: &[u8], _eid: u32) {}
+        fn clear_responder(&mut self) {}
+        fn responder(&self) -> Option<(&[u8], u32)> {
+            None
+        }
+        fn reply_keyed_meta(
+            &mut self,
+            keyexpr: &str,
+            _payload: &[u8],
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            self.keys.push(keyexpr.to_owned());
+            Ok(())
+        }
+        fn reply_keyed_del_meta(
+            &mut self,
+            keyexpr: &str,
+            _meta: ReplyMeta<'_>,
+        ) -> Result<(), wz_session_core::query_sink::ReplyError> {
+            self.keys.push(keyexpr.to_owned());
+            Ok(())
+        }
+    }
+
+    /// A Put reply of one byte to `query` under `key`, with no options.
+    ///
+    /// # Safety
+    /// `query` is a bound marshal inside its callback, `key` null or a live loaned keyexpr.
+    unsafe fn put_reply(query: *const z_loaned_query_t, key: *const z_loaned_keyexpr_t) -> ZResult {
+        let mut payload = core::mem::zeroed();
+        assert_eq!(
+            crate::bytes::z_bytes_copy_from_str(&mut payload, c"p".as_ptr()),
+            Z_OK
+        );
+        z_query_reply(
+            query,
+            key,
+            crate::bytes::z_bytes_move(&mut payload),
+            core::ptr::null(),
+        )
+    }
+
+    /// A reply named with the loan `z_query_keyexpr` hands out is judged once, from the first
+    /// reply, and every later one reads the verdict kept: a canon key is staged under the query's
+    /// key, one not in canon form is refused with the code the check gives any key. A key lent
+    /// any other way is judged where it lies whatever the query's verdict, and one with the
+    /// query's own text is covered. Turned red by a verdict that is not kept, one that takes a
+    /// refused key as canon, or a loan of the query's text read as the query's own.
+    #[test]
+    fn a_reply_with_the_querys_own_key_is_judged_once() {
+        for (key, first) in [("demo/q", Z_OK), ("demo//q", crate::result::Z_EINVAL)] {
+            let view = FakeQuery {
+                keyexpr: key.to_owned(),
+                payload: Vec::new(),
+                attachment: Vec::new(),
+            };
+            // SAFETY: the marshal is dropped before `view`.
+            let mut marshal = unsafe { QueryMarshal::new(&view) };
+            marshal.bind();
+            assert_eq!(marshal.own_verdict.get(), KeyVerdict::Unread);
+            let mut tap = KeyTap::default();
+            marshal.answer_with(&mut tap, |marshal| unsafe {
+                let query = marshal as *const QueryMarshal as *const z_loaned_query_t;
+                let own = z_query_keyexpr(query);
+                assert_eq!(put_reply(query, own), first, "{key}");
+                let found = if first == Z_OK {
+                    KeyVerdict::Canon
+                } else {
+                    KeyVerdict::Refused(first)
+                };
+                assert_eq!(marshal.own_verdict.get(), found, "{key}");
+                assert_eq!(z_query_reply_del(query, own, core::ptr::null()), first);
+                // What the next reply reads is the verdict kept, not the text judged again.
+                marshal
+                    .own_verdict
+                    .set(KeyVerdict::Refused(crate::result::Z_ERR_GENERIC));
+                assert_eq!(put_reply(query, own), crate::result::Z_ERR_GENERIC);
+                if first == Z_OK {
+                    let mut view_key: crate::abi::z_view_keyexpr_t = core::mem::zeroed();
+                    assert_eq!(
+                        crate::keyexpr::z_view_keyexpr_from_str(&mut view_key, c"demo/q".as_ptr()),
+                        Z_OK
+                    );
+                    let same_text = crate::keyexpr::z_view_keyexpr_loan(&view_key);
+                    assert_eq!(put_reply(query, same_text), Z_OK);
+                }
+            });
+            let staged: Vec<String> = if first == Z_OK {
+                vec![key.to_owned(); 3]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(tap.keys, staged, "{key}");
+        }
     }
 
     /// A query whose value carries an encoding with a schema.
