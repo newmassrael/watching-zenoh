@@ -522,3 +522,62 @@ send places, each holding no parts (136.0), the key looked up in the session's t
 link that is up (48.0), `live_to_publish` (37.0) and the run's marks. The write filter before it
 (`PublisherState::publish` 3,250.0 against `publish_everywhere` 2,750.0) is 500.0. What stays
 past those is the groups' leg against zenoh-pico's `_z_write` 1,670.0, section 2's S1 to S4.
+
+### 7.10 The put's write filter, function by function
+
+The put of the fourth reading, `z_publisher_put` with no options of its own on a publisher whose
+key the session declared (`EntityKey::whole`), so its write filter's row keeps a plain way
+(`PlainPublisher::declare`, `keep_plain`). What each function does once a message, in the order
+the put calls them, with zenoh-pico's counterpart:
+
+| # | function (wz) | what it does each put | zenoh-pico |
+|---|---|---|---|
+| W1 | `PlainPublisher::publish` (`wz-capi-pico/src/pubsub.rs`) | the session's closed mark, the filter's call | the session check of `z_publisher_put` |
+| W2 | `publish_filtered`, `put_through_filter` (`engine.rs`) | the faces' walk (`on_faces`): each face at rest passed over, then the groups' leg | `!_z_write_filter_active(&pub->_filter)`, a field read |
+| W3 | the groups' leg of `put_through_filter` | the session taken (`live`), the filter's row looked up, the send epoch read, the groups asked whether they ask the filters, the row's plain way read | none: `_z_write` takes the transmit lock once |
+| W4 | `put_plain_in` | the session's own subscribers searched for the key (`has_local_matching`), the destination read, then `NotPlain` because the session holds a group | the loopback's own search, inside `_z_write` |
+| W5 | `PlainPublisher::publish`'s `NotPlain` arm | the bare options made again (`put_options`, `PublisherQos::apply`), the general publish called | none |
+| W6 | `publish_everywhere`, `publish_to_link`, `on_publish_legs` | the statement check, the faces' walk a second time, the groups' leg: the push metadata, the session taken a second time (`live_to_publish`), the key's emptiness, the `SendAs` | none |
+| W7 | `publish_to_subscribers` | the session's own subscribers searched a second time | none |
+
+The write filter's 500 is W1 to W5, and W6 and W7 repeat what W2 to W4 did: a put of a session
+whose one transport is a group asks the session twice, walks the faces twice and searches its own
+subscribers twice, because the plain way, the one pico's put has, answers `NotPlain` wherever the
+session holds a group (W4) and sends the put back up for the general publish to send. The reason
+it did so is that the plain way wrote a Put only through a face's link (`send_on_links`); a group
+is written from a `GroupPut`, whose parts the plain way holds all of: the key and the entity's
+`WireKey`, the payload, `SampleKind::Put`, a `PushMetadata` of the QoS alone (a plain way carries
+nothing else, `PublishOptions::plain_put_params`), the reliability and the priority.
+
+The design (W8): the groups' own leg of a plain put sends the put to the groups itself.
+
+* `put_through_filter_in` on the groups' own leg (`FaceTx::is_groups_leg`, the leg at
+  `GROUPS_LEG`) goes, once the filter's answer and the plain way are read, to
+  `put_plain_on_groups`: the same answers before the wire as a face's leg (`plain_off_the_wire`:
+  a put the session's own subscriber wants is `NotPlain`, one whose destination admits no peer is
+  sent nothing), then the `GroupPut` written from the plain way onto each group
+  (`put_on_groups`, the body the general publish's groups' leg now calls too). No key is named
+  in the session's tables (`named_at`), which a group's key does not read, and no plan is kept.
+* A face's leg on a session that holds a group sends its face the plain put, as on a session
+  that holds none; only a hold that reaches every face and every group at once (the session's
+  own, `FaceTx` with no leg) still answers `NotPlain` for the general publish, as before.
+* The `wire` the groups' leg names the key by is the entity's, handed down from
+  `publish_filtered`; `put_plain_filtered`, whose caller names the whole key by a declaration,
+  hands the `WireKey` of that declaration.
+
+What it keeps: the filter's answer (a group that asks the filters still holds the put back as
+before; one that does not still sends it), the session's own subscribers (a put one wants is the
+general publish's, which delivers it), the fold of the legs' answers (a leg after the first sends
+as the first decided), and the empty key (left to the general publish, which refuses it). What it
+changes: the groups' leg of a plain put waits for the session as the plain way's face legs do,
+where the general publish's groups' leg tries it for a put that may be dropped; the put took the
+session with a wait in W3 already, so only a holder that came between W3 and W6 was told apart.
+
+Expected: the calling thread's put then holds W1 to W4 and the groups' publish (S1 to S4), with
+the session taken once; W5 to W7, the second take, walk and search, are off it, to be read on the
+arm (M4) against the 500 of the fourth reading and `publish_to_subscribers`'s 36.
+
+Unit test: `wz-capi-coop` `tests::group::woken::a_bare_put_through_its_filter_reaches_the_group_the_plain_way`
+(the put answered `Sent`, one take of the session, no naming, the datagram written before the
+put returns; the CONTROL a row with no plain way, `NotPlain`):
+`cargo test -p wz-capi-coop --features group,app-transport,threads --lib a_bare_put_through_its_filter_reaches_the_group`.
