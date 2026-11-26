@@ -650,7 +650,12 @@ measurement:
    none, and a read walks the table three times; the bound is kept where the rows are held and let
    go of, under the session's lock (`DirectFaces::hold_face`), and read once a walk. Expected: most of the 174 of the walks in `run_body`.
 3. **The wait taken without the session where a link holds input**, and the deliveries entered
-   once a read rather than once a face and once a drain, after the two above are measured.
+   once a read rather than once a face and once a drain. A face's read tells outside the session
+   whether its link holds input (`SiteFacts`), the facts the faces' records read under it, so the
+   read's wait reads them first and takes the session only to work out a wait that is one
+   (`CoopEngine::link_wait`); a group's datagram taken is still read under the session. The drain
+   of a run of Pushes enters no delivery: the read enters one, after every face and group it
+   stepped, where a callback's read reads nothing (`CoopEngine::read_direct`).
 
 This is not the fast path of one face 8.12 rejects: every face is in the one walk, and a face is
 passed over by what its own slot says, whatever the session's preset.
