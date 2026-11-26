@@ -12,7 +12,7 @@
 //! program that clock's time.
 //!
 //! What the registry does is [`wz_capi_port::observation::clock`]'s, which the pico ABI's
-//! `wz_ext_clock_*` doors act on too; this file is this ABI's names and result codes for it.
+//! `zext_clock_*` doors act on too; this file is this ABI's names and result codes for it.
 //!
 //! The library cannot know whether the registered clock follows a reference. The program can, so
 //! it reports it (`wz_capi_c_clock_report`), and a build whose `clock-quality-stamping` policy is

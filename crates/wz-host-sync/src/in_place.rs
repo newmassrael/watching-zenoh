@@ -278,7 +278,7 @@ const WAITING: u32 = WRITER_WAITING | READERS_WAITING;
 /// waits again. A writer takes the word with the marks it finds, since a thread that set one may
 /// still be asleep, and its release is the one that wakes it.
 pub struct RwLock<T> {
-    state: AtomicU32,
+    raw: RawRwLock,
     value: UnsafeCell<T>,
 }
 
@@ -291,24 +291,85 @@ impl<T> RwLock<T> {
     /// `value`, behind a lock no thread holds.
     pub const fn new(value: T) -> Self {
         Self {
-            state: AtomicU32::new(0),
+            raw: RawRwLock::new(),
             value: UnsafeCell::new(value),
         }
     }
 
     /// Wait until no writer holds the lock or waits for it, and read.
     pub fn read(&self) -> RwLockReadGuard<'_, T> {
+        self.raw.read();
+        RwLockReadGuard { lock: self }
+    }
+
+    /// Wait until no thread holds the lock, and write.
+    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+        self.raw.write();
+        RwLockWriteGuard { lock: self }
+    }
+
+    /// The value, through the only reference there is.
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    /// The value, the lock gone.
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+/// [`RwLock`]'s word and what is done to it, whatever value the lock holds: the typed lock keeps
+/// the casts to its value and nothing of the word, so a build of locks of many types links one
+/// body of each wait. A take that finds the word free is one compare and swap, in line; one that
+/// has to wait is out of line.
+struct RawRwLock {
+    state: AtomicU32,
+}
+
+impl RawRwLock {
+    /// A word no thread holds or waits on.
+    const fn new() -> Self {
+        Self {
+            state: AtomicU32::new(0),
+        }
+    }
+
+    /// Wait until no writer holds the word or waits for it, and count a reader.
+    #[inline]
+    fn read(&self) {
+        let state = self.state.load(Ordering::Relaxed);
+        if !Self::reader_may_enter(state)
+            || self
+                .state
+                .compare_exchange_weak(state, state + 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            self.read_contended();
+        }
+    }
+
+    /// Whether a reader may be counted on the word as it reads: no writer holds it or waits for
+    /// it, and the count is below its top, which waits as behind a writer so it never runs into
+    /// the marks.
+    #[inline]
+    fn reader_may_enter(state: u32) -> bool {
+        state & (WRITER | WRITER_WAITING) == 0 && state & READERS != READERS
+    }
+
+    /// [`Self::read`] once the first try did not count the reader.
+    #[cold]
+    fn read_contended(&self) {
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
-            // A count at its top waits as behind a writer, so it never runs into the marks.
-            if state & (WRITER | WRITER_WAITING) == 0 && state & READERS != READERS {
+            if Self::reader_may_enter(state) {
                 match self.state.compare_exchange_weak(
                     state,
                     state + 1,
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => return RwLockReadGuard { lock: self },
+                    Ok(_) => return,
                     Err(now) => state = now,
                 }
             } else {
@@ -317,8 +378,23 @@ impl<T> RwLock<T> {
         }
     }
 
-    /// Wait until no thread holds the lock, and write.
-    pub fn write(&self) -> RwLockWriteGuard<'_, T> {
+    /// Wait until no thread holds the word, and hold it as its writer.
+    #[inline]
+    fn write(&self) {
+        let state = self.state.load(Ordering::Relaxed);
+        if state & (WRITER | READERS) != 0
+            || self
+                .state
+                .compare_exchange_weak(state, state | WRITER, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+        {
+            self.write_contended();
+        }
+    }
+
+    /// [`Self::write`] once the first try did not take the word.
+    #[cold]
+    fn write_contended(&self) {
         let mut state = self.state.load(Ordering::Relaxed);
         loop {
             if state & (WRITER | READERS) == 0 {
@@ -328,7 +404,7 @@ impl<T> RwLock<T> {
                     Ordering::Acquire,
                     Ordering::Relaxed,
                 ) {
-                    Ok(_) => return RwLockWriteGuard { lock: self },
+                    Ok(_) => return,
                     Err(now) => state = now,
                 }
             } else {
@@ -356,14 +432,23 @@ impl<T> RwLock<T> {
         self.state.load(Ordering::Relaxed)
     }
 
-    /// The value, through the only reference there is.
-    pub fn get_mut(&mut self) -> &mut T {
-        self.value.get_mut()
+    /// Uncount a reader. The last reader out wakes the threads that wait for none to be left. The
+    /// marks stay, so a waiting writer still comes before a reader that comes now.
+    #[inline]
+    fn read_unlock(&self) {
+        let state = self.state.fetch_sub(1, Ordering::Release);
+        if state & READERS == 1 && state & WAITING != 0 {
+            sys::wake_all(&self.state);
+        }
     }
 
-    /// The value, the lock gone.
-    pub fn into_inner(self) -> T {
-        self.value.into_inner()
+    /// Let the writer's hold go. Every mark goes with it, and every thread asleep on the word is
+    /// woken: each that still has to wait marks the word again.
+    #[inline]
+    fn write_unlock(&self) {
+        if self.state.swap(0, Ordering::Release) & WAITING != 0 {
+            sys::wake_all(&self.state);
+        }
     }
 }
 
@@ -394,12 +479,7 @@ impl<T> Deref for RwLockReadGuard<'_, T> {
 
 impl<T> Drop for RwLockReadGuard<'_, T> {
     fn drop(&mut self) {
-        // The last reader out wakes the threads that wait for none to be left. The marks stay, so
-        // a waiting writer still comes before a reader that comes now.
-        let state = self.lock.state.fetch_sub(1, Ordering::Release);
-        if state & READERS == 1 && state & WAITING != 0 {
-            sys::wake_all(&self.lock.state);
-        }
+        self.lock.raw.read_unlock();
     }
 }
 
@@ -425,11 +505,7 @@ impl<T> DerefMut for RwLockWriteGuard<'_, T> {
 
 impl<T> Drop for RwLockWriteGuard<'_, T> {
     fn drop(&mut self) {
-        // Every mark goes with the write, and every thread asleep on the word is woken: each that
-        // still has to wait marks the word again.
-        if self.lock.state.swap(0, Ordering::Release) & WAITING != 0 {
-            sys::wake_all(&self.lock.state);
-        }
+        self.lock.raw.write_unlock();
     }
 }
 
@@ -537,7 +613,7 @@ mod tests {
             std::thread::spawn(move || *lock.write() = 2)
         };
         let started = Instant::now();
-        while lock.state.load(Ordering::SeqCst) & WRITER_WAITING == 0 {
+        while lock.raw.state.load(Ordering::SeqCst) & WRITER_WAITING == 0 {
             assert!(
                 started.elapsed() < Duration::from_secs(5),
                 "the writer never waited"
@@ -564,7 +640,7 @@ mod tests {
         );
         assert_eq!(*lock.read(), 2);
         assert_eq!(
-            lock.state.load(Ordering::SeqCst),
+            lock.raw.state.load(Ordering::SeqCst),
             0,
             "nothing holds or waits"
         );
@@ -592,6 +668,28 @@ mod tests {
             thread.join().expect("a writer");
         }
         assert_eq!(*lock.read(), 8000);
+    }
+
+    /// Locks of two value types each count on their own word, though one body takes both: a
+    /// writer of one is let in while the other is read, and each word is clear once its guards
+    /// go. Turned red by a word the typed locks share (the write waits for good) or by a release
+    /// that leaves a count on its word.
+    #[test]
+    fn locks_of_two_types_each_count_on_their_own_word() {
+        let small = RwLock::new(1_u8);
+        let large = RwLock::new([7_u64; 4]);
+        let read = small.read();
+        *large.write() = [9; 4];
+        assert_eq!(
+            small.raw.state.load(Ordering::SeqCst),
+            1,
+            "the reader is counted on its own lock's word"
+        );
+        assert_eq!(*read, 1);
+        drop(read);
+        assert_eq!(small.raw.state.load(Ordering::SeqCst), 0);
+        assert_eq!(large.raw.state.load(Ordering::SeqCst), 0);
+        assert_eq!(large.read()[0], 9, "the write is read after it");
     }
 
     /// A lock whose holder panicked reads as poisoned and still hands out the value as the holder

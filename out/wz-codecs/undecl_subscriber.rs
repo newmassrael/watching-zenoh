@@ -4,7 +4,7 @@
 // Runtime: none
 // Do not edit — regenerate from the source SCXML file.
 
-use sce_forge_runtime::codec::{CodecError, SceCursor, SceSink};
+use sce_forge_runtime::codec::{CodecError, SceCursor, SceReader, SceSink};
 // RFC §synth-5-B: `VecSink` and the heap-backed `encode_to_vec` facade
 // are gated on the `alloc` feature (see
 // `backends/rust/forge-runtime/src/codec.rs`). MCU / `no_std` consumers see
@@ -17,7 +17,6 @@ use alloc::vec::Vec;
 use sce_forge_runtime::codec::VecSink;
 
 use sce_forge_runtime::codec::{Bounded, ListView};
-use super::ext_entry::ExtEntryView;
 
 // pub API: codecs are intended for cross-crate consumption (SCE_FORGE.md
 // §6 codec). The kind-agnostic conformance harness only references a
@@ -87,6 +86,31 @@ impl<S: UndeclSubscriberStorage> Default for UndeclSubscriberIn<S> {
     }
 }
 
+/// How the chain `extensions` is read (docs/adr/0136): where it ends, and
+/// how each entry is read, what it carries to the next and the kinds the
+/// gates ask of it, each a part of this type, so the runtime's read of the
+/// chain calls each by name.
+#[allow(dead_code)]
+pub struct UndeclSubscriberExtensionsChain;
+
+impl ::sce_forge_runtime::codec::ChainEnds for UndeclSubscriberExtensionsChain {
+    const END: ::sce_forge_runtime::codec::ChainEnd = ::sce_forge_runtime::codec::ChainEnd::Flag;
+    const DEPTH: Option<u32> = None;
+}
+
+impl<'f, S: UndeclSubscriberFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0> for UndeclSubscriberExtensionsChain {
+    type Kinds = ::sce_forge_runtime::codec::NoKinds;
+
+    #[inline]
+    fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
+        ExtEntryOwned::<S>::read(_r)
+    }
+
+    fn follows(_e: &ExtEntryOwned<S>) -> bool {
+        _e.z()
+    }
+}
+
 #[allow(dead_code)]
 impl<S: UndeclSubscriberStorage> UndeclSubscriberIn<S> {
     /// Construct an instance with every field at its own type's
@@ -100,10 +124,10 @@ impl<S: UndeclSubscriberStorage> UndeclSubscriberIn<S> {
         Self::default()
     }
 
-    /// Decode the next frame from `cursor`. On success the cursor
-    /// advances past the consumed bytes; on `NeedMoreBytes` the cursor
-    /// is left untouched so the caller can resume after appending more
-    /// bytes (RFC §synth-5-B L494-519).
+    /// Decode the next frame from `cursor`. On success the cursor advances
+    /// past the consumed bytes; on a refusal it does not move, so a caller that
+    /// receives `NeedMoreBytes` reads the frame again from the same place once
+    /// more bytes have arrived (RFC §synth-5-B L494-519, docs/adr/0128).
     pub fn decode<'f>(cursor: &mut SceCursor<'f>) -> Result<Self, CodecError> where S: UndeclSubscriberFrom<'f> {
         let mut _out = Self::default();
         Self::decode_into(cursor, &mut _out)?;
@@ -127,56 +151,52 @@ impl<S: UndeclSubscriberStorage> UndeclSubscriberIn<S> {
     /// `_out` holds the fields decoded so far and is not to be read; each of
     /// them holds what its type says.
     pub fn decode_into<'f>(cursor: &mut SceCursor<'f>, _out: &mut Self) -> Result<(), CodecError> where S: UndeclSubscriberFrom<'f> {
-        // A field past what the profile holds is read on and not held; the
-        // frame says so once it is read whole (docs/adr/0077 §7).
-        let mut _over = false;
-        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        cursor.read_frame(|cursor| Self::read_into(cursor, _out))
+    }
+
+    /// Read the frame through `cursor`, the frame's reader, into `_out`: every
+    /// read total, each refusal recorded in the reader and the first of them
+    /// the frame's verdict, which the reader says once the frame is read
+    /// (docs/adr/0128). A codec that embeds or dispatches to this one reads it
+    /// through its own reader, so one frame has one verdict, and through this
+    /// one function, out of line where the set reads it from two sites or more
+    /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: UndeclSubscriberFrom<'f> {
+        // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the cursor and
-        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let header = {
-            let raw = cursor.peek_array::<1>()?;
-            let _v = raw[0];
-            cursor.advance(1)?;
-            _v
+            let raw = cursor.take_array::<1>();
+            raw[0]
         };
-        let id = cursor.read_vle_u64()?;
+        let id = cursor.read_vle_u64();
         if (header & 0x80u8) != 0 {
-            ::sce_forge_runtime::codec::note_capacity(_out.extensions.insert(Default::default()).refill(|_vec| {
-                let mut _full = false;
-                let mut _more = false;
-                loop {
-                    let mut _entry = ExtEntryOwned::<S>::default();
-                    ::sce_forge_runtime::codec::note_capacity(ExtEntryOwned::<S>::decode_into(cursor, &mut _entry), &mut _full)?;
-                    _more = _entry.z();
-                    ::sce_forge_runtime::codec::push_keeping(_vec, _entry, &[], &mut _full);
-                    if !_more { break; }
-                }
-                if _more && cursor.remaining() == 0 {
-                    return Err(CodecError::NeedMoreBytes);
-                }
-                if _full {
-                    return Err(CodecError::CapacityExceeded);
-                }
-                Ok(())
-            }), &mut _over)?;
+            cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
+                ::sce_forge_runtime::codec::read_chain_into::<UndeclSubscriberExtensionsChain, _, 0>(cursor, _vec, [], &mut [])
+            }));
         } else {
             _out.extensions = None;
         }
         _out.header = header;
         _out.id = id;
-        if _over {
-            return Err(CodecError::CapacityExceeded);
-        }
-        Ok(())
+
+    }
+
+    /// [`Self::read_into`] of a value of its own: a list's entry, which the
+    /// list then holds.
+    pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: UndeclSubscriberFrom<'f> {
+        let mut _out = Self::default();
+        Self::read_into(cursor, &mut _out);
+        _out
     }
 
     // RFC §synth-5-B flags primitive: per-bit-range accessors over
@@ -393,8 +413,9 @@ pub struct UndeclSubscriberWalk;
 impl ::sce_forge_runtime::codec::ListWalk<0> for UndeclSubscriberWalk {
     type Entry<'b> = UndeclSubscriberView<'b>;
 
-    fn decode<'b>(_c: &mut SceCursor<'b>, _a: &[u8; 0]) -> Result<Self::Entry<'b>, CodecError> {
-        UndeclSubscriberView::decode(_c)
+    #[inline(always)]
+    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
+        UndeclSubscriberView::read_with(_r, _h)
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
@@ -413,6 +434,12 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for UndeclSubscriberWalk {
 /// carries nothing from one entry to the next.
 #[allow(dead_code)]
 pub type UndeclSubscriberExtensionsWalk = super::ext_entry::ExtEntryWalk;
+
+impl<'b> ::sce_forge_runtime::codec::ChainScanRule<super::ext_entry::ExtEntryView<'b>> for UndeclSubscriberExtensionsChain {
+    fn follows(_e: &super::ext_entry::ExtEntryView<'b>) -> bool {
+        _e.z()
+    }
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq)]
@@ -442,56 +469,84 @@ impl<'a> UndeclSubscriberView<'a> {
 
     /// Decode the next frame from `cursor`: the bytes, the bounds and the
     /// errors of [`UndeclSubscriberIn::decode`], held as a view. On success the
-    /// cursor advances past the consumed bytes.
+    /// cursor advances past the consumed bytes; on a refusal it does not move.
+    /// The view is the value its read builds, answered as it is: no default of
+    /// it is made first and copied over (docs/adr/0137).
     pub fn decode(cursor: &mut SceCursor<'a>) -> Result<Self, CodecError> {
-        let mut _out = Self::default();
-        Self::decode_into(cursor, &mut _out)?;
-        Ok(_out)
+        cursor.read_frame(Self::read)
     }
 
-    /// [`Self::decode`] into a destination the caller owns, so a view that
-    /// embeds or dispatches to this one is filled where it will live. On
-    /// `Err`, `_out` holds the fields decoded so far and is not to be read.
+    /// [`Self::decode`] into a destination the caller owns. On `Err`, `_out`
+    /// holds what the reads made of the frame and is not to be read.
     pub fn decode_into(cursor: &mut SceCursor<'a>, _out: &mut Self) -> Result<(), CodecError> {
-        // Streaming cursor decode (SSOT selection: `needs_streaming`).
+        cursor.read_frame(|cursor| *_out = Self::read(cursor))
+    }
+
+    /// Read the frame through `cursor`, the frame's reader, as a view built
+    /// once from what its reads return (docs/adr/0128): a view is a value of a
+    /// few words, so no field of it is written first with a default and then
+    /// with what the frame says, and no arm's body is installed before it is
+    /// read. Every read is total, each refusal is recorded in the reader and the
+    /// first of them is the frame's verdict.
+    pub fn read(cursor: &mut SceReader<'a>) -> Self {
+        Self::read_with(cursor, &mut ())
+    }
+
+    /// [`Self::read`], each entry of every chain the frame holds, this view's
+    /// and those of every body it reads, shown to `_hook` right after the entry
+    /// is read (docs/adr/0130). What the hook refuses is the frame's refusal.
+    /// The hook is generic, so a read with `()` is [`Self::read`] itself. A
+    /// view that embeds, dispatches to or lists this one reads it through this
+    /// one function, out of line where the set reads it from two sites or more
+    /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
+    pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
+        // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
         // field's absolute offset is fixed at codegen time; this branch
         // handles every codec where it is not — present-if-gated fields
         // (runtime presence), VLE / repeat / TLV-chain / embed fields
         // (runtime width), string fields (UTF-8 decode), and a fixed field
         // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the cursor and
-        // advances past exactly what it consumed. Per-field `is_repeat` /
+        // length). Each field reads its own bytes from the reader and
+        // consumes exactly what it read. Per-field `is_repeat` /
         // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
         // every other field flows through `present_if_decode_stmt`, whose
         // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
         let header = {
-            let raw = cursor.peek_array::<1>()?;
-            let _v = raw[0];
-            cursor.advance(1)?;
-            _v
+            let raw = cursor.take_array::<1>();
+            raw[0]
         };
-        let id = cursor.read_vle_u64()?;
+        let id = cursor.read_vle_u64();
+        #[allow(clippy::needless_late_init)]
+        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
         if (header & 0x80u8) != 0 {
-            let _rest = cursor.peek_slice(cursor.remaining())?;
-            let mut _count: u32 = 0;
-            let mut _more = false;
-            loop {
-                let _entry = ExtEntryView::decode(cursor)?;
-                _more = _entry.z();
-                _count += 1;
-                if !_more { break; }
-            }
-            if _more && cursor.remaining() == 0 {
-                return Err(CodecError::NeedMoreBytes);
-            }
-            _out.extensions = Some(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements)?);
+            let _rest = cursor.rest();
+            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, UndeclSubscriberExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
+                site: ::sce_forge_runtime::codec::ChainSite { codec: "undecl_subscriber", field: "extensions" },
+                args: [],
+            });
+            extensions = cursor.settle(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements).map(Some));
         } else {
-            _out.extensions = None;
+            extensions = None;
         }
-        _out.header = header;
-        _out.id = id;
-        Ok(())
+        Self {
+            header,
+            id,
+            extensions,
+        }
+
+    }
+
+    /// [`Self::decode_into`] with each chain entry shown to `hook`
+    /// ([`Self::read_with`]); the frame's verdict is the first refusal, the
+    /// hook's among them.
+    pub fn decode_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceCursor<'a>, _out: &mut Self, hook: &mut H) -> Result<(), CodecError> {
+        cursor.read_frame(|cursor| *_out = Self::read_with(cursor, hook))
+    }
+
+    /// [`Self::read`] into a destination the caller owns.
+    pub fn read_into(cursor: &mut SceReader<'a>, _out: &mut Self) {
+        *_out = Self::read(cursor);
     }
 
     /// Fill `_out`, the builder form [`UndeclSubscriberIn`] a sender fills and

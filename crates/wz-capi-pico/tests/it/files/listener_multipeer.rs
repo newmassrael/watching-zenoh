@@ -87,7 +87,8 @@ unsafe extern "C" fn on_drop_flag(ctx: *mut c_void) {
 
 // --- helpers ---------------------------------------------------------------
 
-use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
+use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
+use wz_capi_pico::result::Z_ERR_TRANSPORT_TX_FAILED;
 use wz_runtime_tokio_test_support::free_port;
 
 unsafe fn open_role(port: u16, key: u8, role: &str) -> z_owned_session_t {
@@ -102,7 +103,7 @@ unsafe fn open_role(port: u16, key: u8, role: &str) -> z_owned_session_t {
     assert_eq!(
         zp_config_insert(
             z_config_loan_mut(&mut cfg),
-            WZ_EXT_CONFIG_LIMITS_KEY,
+            ZEXT_CONFIG_LIMITS_KEY,
             c"MAX_SUBSCRIPTIONS=2".as_ptr()
         ),
         Z_OK
@@ -155,20 +156,28 @@ unsafe fn declare_sub(
     sub
 }
 
-unsafe fn put(session: &z_owned_session_t, keyexpr: &CStr, payload: &CStr) {
+/// One put of a convergence loop: `true` when the session sent it. A put with pico's default
+/// congestion control may be dropped, and is answered `Z_ERR_TRANSPORT_TX_FAILED`, when it
+/// finds a face's transmit lock held by another send of the session, as pico's send answers it
+/// (`vendor/zenoh-pico/src/transport/common/tx.c` @
+/// `_Z_INFO("Dropping zenoh message because of congestion control");`): the loop's next put
+/// is its retry. Any other answer fails the test.
+unsafe fn put(session: &z_owned_session_t, keyexpr: &CStr, payload: &CStr) -> bool {
     let mut ke: z_view_keyexpr_t = std::mem::zeroed();
     assert_eq!(z_view_keyexpr_from_str(&mut ke, keyexpr.as_ptr()), Z_OK);
     let mut buf = std::mem::zeroed();
     assert_eq!(z_bytes_copy_from_str(&mut buf, payload.as_ptr()), Z_OK);
-    assert_eq!(
-        z_put(
-            z_session_loan(session),
-            z_view_keyexpr_loan(&ke),
-            z_bytes_move(&mut buf),
-            std::ptr::null(),
-        ),
-        Z_OK
+    let rc = z_put(
+        z_session_loan(session),
+        z_view_keyexpr_loan(&ke),
+        z_bytes_move(&mut buf),
+        std::ptr::null(),
     );
+    assert!(
+        rc == Z_OK || rc == Z_ERR_TRANSPORT_TX_FAILED,
+        "a put on {keyexpr:?} answered {rc}, neither sent nor dropped behind a held send"
+    );
+    rc == Z_OK
 }
 
 unsafe fn close_session(session: &mut z_owned_session_t) {
@@ -331,19 +340,23 @@ fn listener_holds_two_concurrent_peers_and_fans_out() {
             ctx_two,
         );
 
-        // listener -> both peers.
+        // listener -> both peers. The puts a held send dropped are counted, so a failure says
+        // whether the samples were not sent or not delivered.
         let mut fanned = false;
+        let mut dropped = 0;
         for _ in 0..250 {
             if got_one.load(Ordering::SeqCst) && got_two.load(Ordering::SeqCst) {
                 fanned = true;
                 break;
             }
-            put(&listener, c"fan/x", c"fan-payload");
+            if !put(&listener, c"fan/x", c"fan-payload") {
+                dropped += 1;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
             fanned,
-            "a listener z_put did not reach BOTH peers (one={}, two={}) \
+            "a listener z_put did not reach BOTH peers (one={}, two={}, puts dropped {dropped}) \
              -- fan-out across concurrent faces failed",
             got_one.load(Ordering::SeqCst),
             got_two.load(Ordering::SeqCst)
@@ -351,6 +364,7 @@ fn listener_holds_two_concurrent_peers_and_fans_out() {
 
         // both peers -> listener.
         let mut both = false;
+        let (mut dropped_one, mut dropped_two) = (0, 0);
         for _ in 0..250 {
             {
                 let seen = seen.lock().unwrap();
@@ -359,14 +373,18 @@ fn listener_holds_two_concurrent_peers_and_fans_out() {
                     break;
                 }
             }
-            put(&dialer_one, c"demo/one", c"from-one");
-            put(&dialer_two, c"demo/two", c"from-two");
+            if !put(&dialer_one, c"demo/one", c"from-one") {
+                dropped_one += 1;
+            }
+            if !put(&dialer_two, c"demo/two", c"from-two") {
+                dropped_two += 1;
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(
             both,
-            "the listener's subscriber did not see BOTH peers' puts (saw {:?}) \
-             -- a second concurrent peer was not held",
+            "the listener's subscriber did not see BOTH peers' puts (saw {:?}, puts dropped \
+             one={dropped_one} two={dropped_two}) -- a second concurrent peer was not held",
             seen.lock().unwrap()
         );
 

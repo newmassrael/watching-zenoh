@@ -88,7 +88,8 @@ then compiles `crates/wz-capi-pico/csrc/pico_layout_pins.c` (whose static assert
 the library writes into each type a program allocates to what the package's headers give it), every
 example and `crates/wz-capi-pico/tests/c/package_check.c` against the package's own `include/` and
 import library with MSVC's `cl` of the package's width (its manifest's `target`), for the debug and
-the release build, and runs each with the package's `bin/` on the path. The check program holds the
+the release build, and runs each with the package's `bin/` on the path. It holds each build's DLL to
+the imports and exports `--build` holds it to (`library_findings`). The check program holds the
 DLL to the conformance digest of the package's `build-statement.json` and reads the configuration
 sample through it.
 
@@ -112,6 +113,13 @@ on a finding.
 * The build environment is the profile's alone. A `WZ_LIMIT_*` or `WZ_POLICY_*` the caller's
   environment states would change the library and not the statement the package carries, so it is
   refused, by name, before anything is built.
+* The C library's DLL is linked by the toolchain's own linker (`rust-lld`, `crates/.cargo/capi-nostd.toml`)
+  with no library of Visual Studio or the Windows SDK, so it builds where Visual Studio is not
+  installed and imports no C runtime DLL of Visual Studio's. Each build's DLL is read back: a DLL it
+  imports that is not the system's own (`SYSTEM_IMPORTS`; `VCRUNTIME140.dll` above all, which a
+  machine has only with Visual Studio's redistributable), and a name of the C runtime it exports
+  (`RUNTIME_SYMBOLS`), refuse the package. The headers' build and `--test` still compile C with
+  MSVC's `cl`; the split form's additional library links `std` and the C runtime with it.
 * The DLL is linked with `/Brepro` (no clock reading in the image) and `/PDBALTPATH:%_PDB%` (the
   symbols are named by file name, not by the build machine's path), so the bytes depend on the
   sources, the toolchain and the paths of the build host's checkout and registry, which a hosted
@@ -217,6 +225,7 @@ RELEASE_DOORS = (
     "app-transport", "config-document", "config-policy", "conformance-digest", "device-requires",
     "e2e-receiver", "e2e-sender", "e2e-sender-demux", "e2e-supervision", "instance-key",
     "message-catalog", "message-payload", "remote-declaration-watch", "replay-cache", "shared-key-ids",
+    "time-base",
 )
 # The like-for-like library of each width and each door over it, each held under the release
 # reading's zenoh-pico by its row of `deploy/pico_host_ceiling.json`: the case -> (its width, its
@@ -256,6 +265,25 @@ DERIVATION_INPUTS = ("deploy/wz-config.toml", "crates/wz-capi-pico/Cargo.toml", 
 SCN_CNT_UNINITIALIZED_DATA = 0x00000080
 SCN_MEM_DISCARDABLE = 0x02000000
 SCN_MEM_WRITE = 0x80000000
+# The DLLs the C library may import, compared without case as the loader compares them: the
+# system's own, by the names their importers give them (the system calls by DLL name, the C
+# runtime's heap by the API set the system exports it through, `getrandom`'s two through the import
+# libraries the library's build writes, wz-capi-pico-lib/build.rs). Visual Studio's C runtime
+# (`VCRUNTIME140.dll`, `MSVCP140.dll`, their debug forms) is not one: the library defines what the
+# compiler's code calls of it (`wz-msvc-runtime`), so it builds without Visual Studio and loads on a
+# machine without its redistributable.
+SYSTEM_IMPORTS = frozenset({
+    "kernel32.dll", "api-ms-win-core-synch-l1-2-0.dll", "api-ms-win-crt-heap-l1-1-0.dll",
+    "advapi32.dll", "bcrypt.dll", "ws2_32.dll", "iphlpapi.dll",
+})
+# The C runtime's names the library defines for itself and must not export: the memory functions,
+# the heap, the stack probe, the floating-point marker, the entry, the frame handler and x86's
+# division helpers.
+RUNTIME_SYMBOLS = frozenset({
+    "memcpy", "memmove", "memset", "memcmp", "strlen", "malloc", "free", "realloc", "abort", "__chkstk",
+    "_chkstk", "_fltused", "_DllMainCRTStartup", "__CxxFrameHandler3", "_alldiv", "_aulldiv", "_allrem",
+    "_aullrem",
+})
 PROFILE_ID_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 FORMAT = "wz-pico-windows-package"
 # 3: `stdlib` joined the manifest; a version-2 manifest cannot say which a DLL is.
@@ -694,7 +722,7 @@ def release_notes(template: str, facts: dict) -> str:
         f"- Source: commit `{facts['commit']}`" + ("" if facts["tree_clean"] else " with changes not committed"),
         f"- Toolchain: `{facts['rustc']}`, target `{facts['target']}`",
         f"- Profile: `{facts['profile']}` (`configs/profiles/{facts['profile']}.conf`)",
-        f"- Conformance digest: `{statement['digest']}` (what `wz_ext_conformance_digest()` answers)",
+        f"- Conformance digest: `{statement['digest']}` (what `zext_conformance_digest()` answers)",
         f"- Engine: {statement['engine']}",
         f"- Rust standard library: `{LIBRARY}.dll` links none: `core` and `alloc` over the system's own "
         f"calls (`{ENGINE_FEATURE}`), the process heap as its allocator, a panic ends the process",
@@ -763,6 +791,99 @@ def pe_header(image: bytes) -> tuple[int, str]:
     if int.from_bytes(image[coff + 16:coff + 18], "little") < 4:
         raise Refusal("not a PE image: its optional header records no linker")
     return int.from_bytes(image[coff:coff + 2], "little"), f"{image[coff + 22]}.{image[coff + 23]}"
+
+
+def pe_directories(image: bytes) -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int]]]:
+    """The sections of a PE image as (address, size in memory, size stored, file offset) and its data
+    directories as (address, size), read from its own headers (PE32 and PE32+ alike). Bytes that
+    are no PE image are refused."""
+    pe_sections(image)
+    coff = int.from_bytes(image[0x3C:0x40], "little") + 4
+    optional_size = int.from_bytes(image[coff + 16:coff + 18], "little")
+    opt = coff + 20
+    magic = int.from_bytes(image[opt:opt + 2], "little")
+    if magic not in (0x10B, 0x20B):
+        raise Refusal("not a PE image: its optional header is neither PE32 nor PE32+")
+    first = opt + (96 if magic == 0x10B else 112)
+    if first > opt + optional_size:
+        raise Refusal("not a PE image: its optional header has no room for its data directories")
+    count = min(int.from_bytes(image[first - 4:first], "little"), (opt + optional_size - first) // 8)
+    directories = [(int.from_bytes(image[first + 8 * i:first + 8 * i + 4], "little"),
+                    int.from_bytes(image[first + 8 * i + 4:first + 8 * i + 8], "little")) for i in range(count)]
+    table = opt + optional_size
+    sections = []
+    for i in range(int.from_bytes(image[coff + 2:coff + 4], "little")):
+        row = image[table + 40 * i:table + 40 * (i + 1)]
+        sections.append((int.from_bytes(row[12:16], "little"), int.from_bytes(row[8:12], "little"),
+                         int.from_bytes(row[16:20], "little"), int.from_bytes(row[20:24], "little")))
+    return sections, directories
+
+
+def pe_offset(sections: list[tuple[int, int, int, int]], address: int) -> int:
+    """The file offset of the stored byte at `address` of an image; an address in no section, or
+    past what its section stores, is refused."""
+    for start, in_memory, stored, offset in sections:
+        if start <= address < start + max(in_memory, stored):
+            if address - start >= stored:
+                break
+            return offset + address - start
+    raise Refusal(f"not a PE image: the address {address:#x} lies in no stored byte of a section")
+
+
+def pe_name(image: bytes, offset: int) -> str:
+    end = image.find(b"\0", offset)
+    if end < 0:
+        raise Refusal("not a PE image: a name runs past the file")
+    return image[offset:end].decode("ascii", "replace")
+
+
+def pe_imports(image: bytes) -> list[str]:
+    """The DLLs a PE image imports from, as its import directory and its delay-load import
+    directory name them, in their order."""
+    sections, directories = pe_directories(image)
+    names: list[str] = []
+    # (directory, the size of one of its rows, where in a row the DLL's name is)
+    for index, row_size, name_at in ((1, 20, 12), (13, 32, 4)):
+        if index >= len(directories) or directories[index][0] == 0:
+            continue
+        at = pe_offset(sections, directories[index][0])
+        while True:
+            row = image[at:at + row_size]
+            if len(row) < row_size:
+                raise Refusal("not a PE image: an import table runs past the file")
+            if not any(row):
+                break
+            names.append(pe_name(image, pe_offset(sections, int.from_bytes(row[name_at:name_at + 4], "little"))))
+            at += row_size
+    return names
+
+
+def pe_exports(image: bytes) -> list[str]:
+    """The names a PE image exports, from its export directory, in its order."""
+    sections, directories = pe_directories(image)
+    if not directories or directories[0][0] == 0:
+        return []
+    at = pe_offset(sections, directories[0][0])
+    count = int.from_bytes(image[at + 24:at + 28], "little")
+    if count == 0:
+        return []
+    table = pe_offset(sections, int.from_bytes(image[at + 32:at + 36], "little"))
+    return [pe_name(image, pe_offset(sections, int.from_bytes(image[table + 4 * i:table + 4 * i + 4], "little")))
+            for i in range(count)]
+
+
+def library_findings(image: bytes) -> list[str]:
+    """What keeps the DLL `image` of the C library from loading on a machine that has the system
+    alone: a DLL it imports that is not one of `SYSTEM_IMPORTS` (Visual Studio's C runtime,
+    `VCRUNTIME140.dll`, above all, which a machine has only with Visual Studio's redistributable),
+    and a name of the C runtime it exports, which a program linking its import library would take
+    in place of its own C runtime's."""
+    findings = [f"imports {dll}, which is no DLL of the system a machine has without Visual Studio "
+                f"({', '.join(sorted(SYSTEM_IMPORTS))})"
+                for dll in pe_imports(image) if dll.lower() not in SYSTEM_IMPORTS]
+    findings += [f"exports {name}, a name of the C runtime, which a program linking the library would "
+                 f"take in place of its own" for name in pe_exports(image) if name.split("@")[0] in RUNTIME_SYMBOLS]
+    return findings
 
 
 def unwind_bytes(image: bytes) -> int:
@@ -1097,8 +1218,13 @@ def build(out: pathlib.Path, profile: str, arch: str, form: str) -> pathlib.Path
     nostd_dir = pathlib.Path(metadata["target_directory"]) / "pico-nostd"
 
     def packaged(report: str, library: str, where: str) -> None:
-        """The library into the package, and the sizes of the release build's DLL printed."""
+        """The library into the package, and the sizes of the release build's DLL printed. The C
+        library's DLL that would not load without Visual Studio's C runtime is refused."""
         dll = copy_library(report, library, where, stage)
+        if library == LIBRARY:
+            findings = library_findings(dll.read_bytes())
+            if findings:
+                raise Refusal(f"the {where} build's {library}.dll " + "; ".join(findings))
         if where == "release":
             say(f"pico-package-size on Windows {arch}: {name}: {library}.dll {size_line(dll.read_bytes())}")
 
@@ -1512,6 +1638,13 @@ def test(archive: pathlib.Path) -> int:
         verdict = "PASS" if layout_pins_hold(vs, vcvars, package, pins_work) else "did not compile: FAIL"
         failed += not verdict.startswith("PASS")
         say(f"pico-package-test on Windows {arch}: {LAYOUT_PINS.name}: {verdict}")
+        for where, _ in NOSTD_BUILDS:
+            findings = library_findings((package / where / "bin" / f"{LIBRARY}.dll").read_bytes())
+            for finding in findings:
+                say(f"pico-package-test on Windows {arch}: {where} {LIBRARY}.dll {finding}")
+            failed += bool(findings)
+            say(f"pico-package-test on Windows {arch}: {where} {LIBRARY}.dll imports and exports: "
+                f"{'FAIL' if findings else 'PASS'}")
         for where, _ in NOSTD_BUILDS:
             work = pathlib.Path(tmp) / f"work-{where}"
             work.mkdir()
@@ -1985,6 +2118,72 @@ def selftest() -> int:
             expect(f"bytes that are no PE image are refused ({len(bad)} bytes)", False)
         except Refusal:
             pass
+
+    # The C library's imports and exports: a DLL that would need Visual Studio's C runtime on the
+    # machine that loads it, or that exports a name of the C runtime, is a finding.
+    def pe_with_tables(imports: list[str], exports: list[str], delay: tuple[str, ...] = (),
+                       pe32: bool = False) -> bytes:
+        """A PE image of one section at 0x1000 holding an import directory of `imports`, a delay-load
+        one of `delay` and an export directory of `exports`, where its optional header points."""
+        base, stored_at = 0x1000, 0x200
+        body = bytearray()
+
+        def put(data: bytes) -> int:
+            at = base + len(body)
+            body.extend(data)
+            body.extend(b"\0" * (-len(body) % 4))
+            return at
+
+        dll_names = [put(n.encode() + b"\0") for n in imports]
+        delay_names = [put(n.encode() + b"\0") for n in delay]
+        export_names = [put(n.encode() + b"\0") for n in exports]
+        import_dir = put(b"".join(b"\0" * 12 + n.to_bytes(4, "little") + b"\0" * 4 for n in dll_names) + b"\0" * 20)
+        delay_dir = put(b"".join(b"\0" * 4 + n.to_bytes(4, "little") + b"\0" * 24 for n in delay_names) + b"\0" * 32)
+        name_table = put(b"".join(n.to_bytes(4, "little") for n in export_names) or b"\0" * 4)
+        export_dir = put(b"\0" * 24 + len(exports).to_bytes(4, "little") + b"\0" * 4
+                         + name_table.to_bytes(4, "little") + b"\0" * 4)
+        first = 96 if pe32 else 112
+        optional = bytearray(first + 16 * 8)
+        optional[0:2] = (0x10B if pe32 else 0x20B).to_bytes(2, "little")
+        optional[2:4] = bytes((14, 0))
+        optional[first - 4:first] = (16).to_bytes(4, "little")
+        for index, address in ((0, export_dir), (1, import_dir), (13, delay_dir if delay else 0)):
+            optional[first + 8 * index:first + 8 * index + 4] = address.to_bytes(4, "little")
+        image = bytearray(b"MZ" + b"\0" * 0x3E)
+        image[0x3C:0x40] = (0x40).to_bytes(4, "little")
+        image += (b"PE\0\0" + (0x014C if pe32 else 0x8664).to_bytes(2, "little") + (1).to_bytes(2, "little")
+                  + b"\0" * 12 + len(optional).to_bytes(2, "little") + b"\0" * 2 + bytes(optional))
+        image += (b".rdata\0\0" + len(body).to_bytes(4, "little") + base.to_bytes(4, "little")
+                  + len(body).to_bytes(4, "little") + stored_at.to_bytes(4, "little") + b"\0" * 12
+                  + (0x40000040).to_bytes(4, "little"))
+        return bytes(image.ljust(stored_at, b"\0") + body)
+
+    system = ["KERNEL32.dll", "api-ms-win-core-synch-l1-2-0.dll", "api-ms-win-crt-heap-l1-1-0.dll",
+              "bcrypt.dll", "ADVAPI32.dll", "WS2_32.dll", "IPHLPAPI.DLL"]
+    clean = pe_with_tables(system, ["z_open", "z_close"])
+    expect("a DLL's imports are read from its import directory, and its exports from its export one",
+           pe_imports(clean) == system and pe_exports(clean) == ["z_open", "z_close"])
+    expect("a DLL that imports the system's DLLs alone, of any case, and exports the C ABI is no finding",
+           library_findings(clean) == [])
+    expect("an x86 image (PE32) is read as an x64 one is",
+           library_findings(pe_with_tables(system, ["z_open"], pe32=True)) == []
+           and pe_imports(pe_with_tables(["bcrypt.dll"], [], pe32=True)) == ["bcrypt.dll"])
+    vcruntime = library_findings(pe_with_tables(system + ["VCRUNTIME140.dll"], ["z_open"]))
+    expect("a DLL that imports Visual Studio's C runtime is a finding that names it",
+           len(vcruntime) == 1 and vcruntime[0].startswith("imports VCRUNTIME140.dll"))
+    expect("a C runtime DLL imported late (delay-load) is a finding too",
+           len(library_findings(pe_with_tables(system, [], delay=("MSVCP140.dll",)))) == 1)
+    expect("the C runtime's API sets other than its heap are findings",
+           len(library_findings(pe_with_tables(["api-ms-win-crt-runtime-l1-1-0.dll",
+                                                "api-ms-win-crt-string-l1-1-0.dll"], []))) == 2)
+    exported = library_findings(pe_with_tables(system, ["z_open", "memcpy", "_DllMainCRTStartup", "__chkstk"]))
+    expect("an export of a name of the C runtime is a finding, each one",
+           len(exported) == 3 and all(f.startswith("exports ") for f in exported))
+    try:
+        pe_offset(pe_directories(clean)[0], 0x9000)
+        expect("an address in no section is refused", False)
+    except Refusal:
+        pass
 
     # The size ceiling of the release DLL: its cases, the headers it reads, the derivation of the
     # reference, and what keeps a reading from being a figure.

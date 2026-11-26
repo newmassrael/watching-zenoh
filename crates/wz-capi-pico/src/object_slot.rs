@@ -31,8 +31,8 @@ use crate::prelude::*;
 /// nowhere is not a variant of it, and each keeps its number in every build.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Kind {
-    // The cooperative engine's session lies in its own arena (`crate::session_place`); its pool
-    // is the program's to reserve where the doors are.
+    // The cooperative engine's session lies in its own arena (`crate::session_place`); where the
+    // doors are, its open takes a seat of this pool (`crate::session::SessionSeat`).
     #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
     Session = 0,
     Publisher = 1,
@@ -1427,7 +1427,7 @@ mod tests {
     #[ignore = "a measurement printed for reading, not a check"]
     fn print_the_parts_of_the_publisher_and_subscriber_places() {
         use core::mem::size_of;
-        let parts: [(&str, usize); 23] = [
+        let parts: [(&str, usize); 22] = [
             (
                 "publisher place",
                 InSession::<crate::pubsub::PublisherState>::LAYOUT.size(),
@@ -1474,7 +1474,6 @@ mod tests {
             ("Lender", size_of::<Lender>()),
             ("EntityPlace", size_of::<wz_capi_port::EntityPlace>()),
             ("EngineHold", size_of::<crate::session::EngineHold>()),
-            ("EngineHandle", size_of::<crate::session::EngineHandle>()),
         ];
         for (part, bytes) in parts {
             std::println!("place-part: {part:<28} {bytes:>5} B");

@@ -22,7 +22,25 @@
 # the link (docs/c-abi-size-diet.md T7).
 #
 # The flag is given to POSIX hosts only: a Windows build keeps its tables, which the system's own
-# exception handling reads, and needs no other flag: `panic = "abort"` is the profile's, and the
-# library names the C runtime it links itself (`src/os/no_std_host.rs` of `wz-capi-pico`).
+# exception handling reads. `panic = "abort"` is the profile's.
 [target.'cfg(unix)']
 rustflags = ["-C", "force-unwind-tables=no"]
+
+# A Windows build is linked by the toolchain's own linker (`rust-lld` as `lld-link`, which the
+# compiler finds in its own sysroot), with no library of Visual Studio or the Windows SDK: the
+# library defines the C runtime the compiler's code calls (`wz-msvc-runtime`), imports the C
+# runtime's heap and every system call by DLL name, and its build script writes the import
+# libraries of the system libraries its graph names and keeps every other default library off the
+# link (`wz-capi-pico-lib/build.rs`, `/NODEFAULTLIB`). So the DLL builds where no Visual Studio is
+# installed and imports no C runtime DLL of Visual Studio's. The linker is a configuration key, which
+# a `RUSTFLAGS` in the environment does not replace; the flavor beside it is the one the
+# compiler reads from that name. A crate with `std` built with this configuration (the split
+# form's additional library) still links the C runtime, which this linker finds where Visual
+# Studio is installed.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=lld-link"]
+
+[target.i686-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = ["-C", "linker-flavor=lld-link"]

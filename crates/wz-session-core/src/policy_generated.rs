@@ -961,7 +961,7 @@ impl Default for HandshakeCookie {
 /// hold it. Every node that holds the dictionary reads an id only the dictionary names,
 /// whatever its own value. The value is the session's, and an endpoint the configuration
 /// dials or listens on may be stated a value of its own (wz/key-ids/links,
-/// wz_ext_config_key_wire_form_for), which every link to or from that endpoint takes. A
+/// zext_config_key_wire_form_for), which every link to or from that endpoint takes. A
 /// session opened with `shared`, for itself or an endpoint, and no dictionary is refused,
 /// and so is one whose value is not `declared` in a build without the capability, and a
 /// router node, whose faces read no id of a dictionary, with any value but `declared`.

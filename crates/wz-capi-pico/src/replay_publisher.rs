@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_replay_publisher_*`: the replay cache of a publisher, from C. The program records the
+//! `zext_replay_publisher_*`: the replay cache of a publisher, from C. The program records the
 //! frames of one message as it sends them, into a ring per instance over its own storage; the
 //! cache answers a query on the message's key plus the suffix the program states with what the
 //! rings hold, oldest first, and, under the session's policy, holds the message's sends while it
 //! answers.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `replay-cache` capability implies `unstable-api`. The ring, the
 //! answer's order and the held sends are [`wz_session_core::replay_publisher`]'s; this file is
 //! the pico ABI's names, result codes, queryable and ownership around it.
@@ -21,7 +21,7 @@
 //!
 //! # Storage, session and publisher
 //!
-//! The rings are the program's byte area, `wz_ext_replay_publisher_storage_size` long, which the
+//! The rings are the program's byte area, `zext_replay_publisher_storage_size` long, which the
 //! cache writes when it is made and owns until it is dropped. Past the rings the same area holds
 //! what an answer is copied into, so an answer allocates nothing: the order of the cells, a copy of
 //! every frame and one frame's room for the release of the held sends. The cache is bound to the session it
@@ -66,42 +66,42 @@ use crate::query::{
 };
 use crate::replay_subscriber::quota_of_count;
 use crate::result::{
-    ZResult, WZ_EXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID,
-    Z_ERR_NULL, Z_ERR_SESSION_CLOSED, Z_OK,
+    ZResult, ZEXT_ERR_UNSUPPORTED, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_ERR_NULL,
+    Z_ERR_SESSION_CLOSED, Z_OK,
 };
 use crate::session::z_loaned_session_t;
 use crate::sized::{Out, SizedOut};
 
 /// A send of a message sent on a period: while sends are held, only the latest of its instance
 /// is kept.
-pub const WZ_EXT_REPLAY_SEND_PERIODIC: u8 = 0;
+pub const ZEXT_REPLAY_SEND_PERIODIC: u8 = 0;
 /// A send of an event: while sends are held, it waits in a queue of max(1, depth/2).
-pub const WZ_EXT_REPLAY_SEND_EVENT: u8 = 1;
+pub const ZEXT_REPLAY_SEND_EVENT: u8 = 1;
 
 /// The frame went out.
-pub const WZ_EXT_REPLAY_SENT: u8 = 0;
+pub const ZEXT_REPLAY_SENT: u8 = 0;
 /// A periodic frame is held as its instance's latest.
-pub const WZ_EXT_REPLAY_HELD: u8 = 1;
+pub const ZEXT_REPLAY_HELD: u8 = 1;
 /// A periodic frame is held, and the one it replaced will not go out.
-pub const WZ_EXT_REPLAY_HELD_REPLACED: u8 = 2;
+pub const ZEXT_REPLAY_HELD_REPLACED: u8 = 2;
 /// An event frame waits in the queue.
-pub const WZ_EXT_REPLAY_DEFERRED: u8 = 3;
+pub const ZEXT_REPLAY_DEFERRED: u8 = 3;
 /// An event frame waits in the queue, which gave up its oldest frame for it.
-pub const WZ_EXT_REPLAY_DEFERRED_OVERWROTE: u8 = 4;
+pub const ZEXT_REPLAY_DEFERRED_OVERWROTE: u8 = 4;
 
 /// No answer is in progress, and nothing held is waiting.
-pub const WZ_EXT_REPLAY_SERVING_IDLE: u8 = 0;
+pub const ZEXT_REPLAY_SERVING_IDLE: u8 = 0;
 /// An answer is in progress.
-pub const WZ_EXT_REPLAY_SERVING_ANSWERING: u8 = 1;
+pub const ZEXT_REPLAY_SERVING_ANSWERING: u8 = 1;
 /// The last answer ended and the held frames are going out.
-pub const WZ_EXT_REPLAY_SERVING_RELEASING: u8 = 2;
-/// What `wz_ext_replay_publisher_phase` answers for a null cache or the gravestone.
-pub const WZ_EXT_REPLAY_NO_CACHE: u8 = 255;
+pub const ZEXT_REPLAY_SERVING_RELEASING: u8 = 2;
+/// What `zext_replay_publisher_phase` answers for a null cache or the gravestone.
+pub const ZEXT_REPLAY_NO_CACHE: u8 = 255;
 
 /// How a cache is laid out.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_replay_shape_t {
+pub struct zext_replay_shape_t {
     /// The longest frame the cache keeps, in bytes, at least 1.
     pub frame_max: usize,
     /// How many frames each instance's ring keeps, 1 to the session's `REPLAY_DEPTH_MAX`.
@@ -113,7 +113,7 @@ pub struct wz_ext_replay_shape_t {
 /// What a cache counted, written into a struct the program sized (`crate::sized`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_replay_publisher_counts_t {
+pub struct zext_replay_publisher_counts_t {
     /// The bytes of the struct the program was compiled with; the door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
@@ -127,7 +127,7 @@ pub struct wz_ext_replay_publisher_counts_t {
     pub answers: u64,
 }
 
-impl Default for wz_ext_replay_publisher_counts_t {
+impl Default for zext_replay_publisher_counts_t {
     /// Nothing counted, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -141,7 +141,7 @@ impl Default for wz_ext_replay_publisher_counts_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_replay_publisher_counts_t {
+unsafe impl SizedOut for zext_replay_publisher_counts_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -156,7 +156,7 @@ unsafe impl SizedOut for wz_ext_replay_publisher_counts_t {
 /// numbering alike (`wz_app_frame::replay_pieces`).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct wz_ext_replay_serve_options_t {
+pub struct zext_replay_serve_options_t {
     pub segment_profile: *const c_char,
     pub segment_values: *const c_char,
     pub first_transfer: u64,
@@ -165,20 +165,20 @@ pub struct wz_ext_replay_serve_options_t {
 
 /// An owned cache: the handle in its one word, null for the gravestone.
 #[repr(C)]
-pub struct wz_ext_owned_replay_publisher_t {
+pub struct zext_owned_replay_publisher_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned cache: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_replay_publisher_t {
+pub struct zext_loaned_replay_publisher_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved cache (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_replay_publisher_t {
-    pub(crate) _this: wz_ext_owned_replay_publisher_t,
+pub struct zext_moved_replay_publisher_t {
+    pub(crate) _this: zext_owned_replay_publisher_t,
 }
 
 /// What the queryable's callback and the doors share.
@@ -211,7 +211,7 @@ unsafe impl Sync for Shared {}
 /// frames are released through: the order of the ring cells an answer lists, the length of each
 /// frame it copies, a copy of every frame in that order, and one frame's room. The replies go out
 /// after the cache's lock is let go, while a record may write the rings, so the answer reads its
-/// copy; it lies in the storage the program sized (`wz_ext_replay_publisher_storage_size`), so an
+/// copy; it lies in the storage the program sized (`zext_replay_publisher_storage_size`), so an
 /// answer allocates nothing. One answer at a time holds it.
 ///
 /// zenoh-pico answers its cache the same way: one outbox for each cache, held for the whole answer,
@@ -318,7 +318,7 @@ struct Handle {
     queryable: Mutex<Option<z_owned_queryable_t>>,
 }
 
-impl wz_ext_owned_replay_publisher_t {
+impl zext_owned_replay_publisher_t {
     fn null_value() -> Self {
         Self {
             handle: core::ptr::null_mut(),
@@ -330,7 +330,7 @@ impl wz_ext_owned_replay_publisher_t {
 ///
 /// # Safety
 /// `this_` is null or a loaned cache of this library.
-unsafe fn handle_of<'a>(this_: *const wz_ext_loaned_replay_publisher_t) -> Option<&'a Handle> {
+unsafe fn handle_of<'a>(this_: *const zext_loaned_replay_publisher_t) -> Option<&'a Handle> {
     if this_.is_null() {
         return None;
     }
@@ -342,7 +342,7 @@ unsafe fn handle_of<'a>(this_: *const wz_ext_loaned_replay_publisher_t) -> Optio
 }
 
 /// The shape a C shape names.
-fn shape_of(shape: &wz_ext_replay_shape_t) -> Shape {
+fn shape_of(shape: &zext_replay_shape_t) -> Shape {
     Shape {
         depth: shape.depth as usize,
         instances: shape.instances as usize,
@@ -358,7 +358,7 @@ fn create_text(refusal: CreateRefused) -> &'static str {
         CreateRefused::FrameMaxOutOfRange => "frame_max: at least 1 and below 2^32 - 1",
         CreateRefused::TooLarge => "the shape's storage does not fit the address space",
         CreateRefused::StorageShort => {
-            "storage: shorter than wz_ext_replay_publisher_storage_size gives"
+            "storage: shorter than zext_replay_publisher_storage_size gives"
         }
     }
 }
@@ -373,20 +373,20 @@ fn record_code(refusal: RecordRefused) -> ZResult {
 /// The C form of what a send did.
 fn dispatch_code(dispatch: Dispatch) -> u8 {
     match dispatch {
-        Dispatch::Now => WZ_EXT_REPLAY_SENT,
-        Dispatch::Held { replaced: false } => WZ_EXT_REPLAY_HELD,
-        Dispatch::Held { replaced: true } => WZ_EXT_REPLAY_HELD_REPLACED,
-        Dispatch::Deferred { overwrote: false } => WZ_EXT_REPLAY_DEFERRED,
-        Dispatch::Deferred { overwrote: true } => WZ_EXT_REPLAY_DEFERRED_OVERWROTE,
+        Dispatch::Now => ZEXT_REPLAY_SENT,
+        Dispatch::Held { replaced: false } => ZEXT_REPLAY_HELD,
+        Dispatch::Held { replaced: true } => ZEXT_REPLAY_HELD_REPLACED,
+        Dispatch::Deferred { overwrote: false } => ZEXT_REPLAY_DEFERRED,
+        Dispatch::Deferred { overwrote: true } => ZEXT_REPLAY_DEFERRED_OVERWROTE,
     }
 }
 
 /// The C form of a phase.
 fn phase_code(phase: Phase) -> u8 {
     match phase {
-        Phase::Idle => WZ_EXT_REPLAY_SERVING_IDLE,
-        Phase::Serving => WZ_EXT_REPLAY_SERVING_ANSWERING,
-        Phase::Releasing => WZ_EXT_REPLAY_SERVING_RELEASING,
+        Phase::Idle => ZEXT_REPLAY_SERVING_IDLE,
+        Phase::Serving => ZEXT_REPLAY_SERVING_ANSWERING,
+        Phase::Releasing => ZEXT_REPLAY_SERVING_RELEASING,
     }
 }
 
@@ -528,8 +528,8 @@ unsafe extern "C" fn on_query_drop(context: *mut c_void) {
 /// # Safety
 /// `shape` is null or valid.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
-    shape: *const wz_ext_replay_shape_t,
+pub unsafe extern "C" fn zext_replay_publisher_storage_size(
+    shape: *const zext_replay_shape_t,
 ) -> usize {
     guard_val(|| {
         if shape.is_null() {
@@ -553,7 +553,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
 /// Returns `Z_ERR_NULL` for a null `this_`, session, publisher, shape or storage;
 /// `Z_ERR_SESSION_CLOSED` for a closed session; `_Z_ERR_CONFIG_INVALID_VALUE` for a shape out of
 /// range (a depth past the session's `REPLAY_DEPTH_MAX` among them) or storage shorter than
-/// `wz_ext_replay_publisher_storage_size`; `WZ_EXT_ERR_UNSUPPORTED` for a session whose replay
+/// `zext_replay_publisher_storage_size`; `ZEXT_ERR_UNSUPPORTED` for a session whose replay
 /// policy has a value this door does not know (a core of a later extension interface); `Z_OK`
 /// otherwise.
 ///
@@ -562,13 +562,13 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_storage_size(
 /// the cache is dropped; `storage` is writable for `storage_len` bytes, left to the cache until it
 /// is dropped; `shape` is null or valid; `refusal` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_new(
-    this_: *mut wz_ext_owned_replay_publisher_t,
+pub unsafe extern "C" fn zext_replay_publisher_new(
+    this_: *mut zext_owned_replay_publisher_t,
     session: *const z_loaned_session_t,
     publisher: *const z_loaned_publisher_t,
     storage: *mut u8,
     storage_len: usize,
-    shape: *const wz_ext_replay_shape_t,
+    shape: *const zext_replay_shape_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -576,7 +576,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
         if this_.is_null() {
             return Z_ERR_NULL;
         }
-        *this_ = wz_ext_owned_replay_publisher_t::null_value();
+        *this_ = zext_owned_replay_publisher_t::null_value();
         if publisher.is_null() || shape.is_null() || storage.is_null() {
             return Z_ERR_NULL;
         }
@@ -588,7 +588,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
             return Z_ERR_SESSION_CLOSED;
         }
         let Some(policy) = ReplayPolicies::of(&facts) else {
-            return WZ_EXT_ERR_UNSUPPORTED;
+            return ZEXT_ERR_UNSUPPORTED;
         };
         let shape = shape_of(&*shape);
         let area: &'static mut [u8] = core::slice::from_raw_parts_mut(storage, storage_len);
@@ -655,8 +655,8 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_new(
 /// # Safety
 /// `this_` is null or a loaned cache; `frame` is readable for `len` bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_record(
-    this_: *const wz_ext_loaned_replay_publisher_t,
+pub unsafe extern "C" fn zext_replay_publisher_record(
+    this_: *const zext_loaned_replay_publisher_t,
     instance: usize,
     time_ms: u64,
     frame: *const u8,
@@ -682,9 +682,9 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_record(
 
 /// Record `frame`, sent at `time_ms` on instance `instance`, and put it on the cache's publisher,
 /// or, while an answer is served under `replay-serve-holds-sends = on`, hold it: a
-/// `WZ_EXT_REPLAY_SEND_PERIODIC` frame as its instance's latest, a `WZ_EXT_REPLAY_SEND_EVENT` one
+/// `ZEXT_REPLAY_SEND_PERIODIC` frame as its instance's latest, a `ZEXT_REPLAY_SEND_EVENT` one
 /// in the queue. A held frame goes out once the last answer is over. `dispatch` may be null; it
-/// receives a `WZ_EXT_REPLAY_SENT`, `_HELD`, `_HELD_REPLACED`, `_DEFERRED` or `_DEFERRED_OVERWROTE`
+/// receives a `ZEXT_REPLAY_SENT`, `_HELD`, `_HELD_REPLACED`, `_DEFERRED` or `_DEFERRED_OVERWROTE`
 /// value.
 ///
 /// Under `replay-reply-shape = segmented` the frame goes out as the pieces of the segment profile
@@ -702,8 +702,8 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_record(
 /// `this_` is null or a loaned cache; `frame` is readable for `len` bytes; `dispatch` is null or
 /// writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_put(
-    this_: *const wz_ext_loaned_replay_publisher_t,
+pub unsafe extern "C" fn zext_replay_publisher_put(
+    this_: *const zext_loaned_replay_publisher_t,
     instance: usize,
     time_ms: u64,
     frame: *const u8,
@@ -719,8 +719,8 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_put(
             return Z_ERR_NULL;
         }
         let kind = match kind {
-            WZ_EXT_REPLAY_SEND_PERIODIC => SendKind::Periodic,
-            WZ_EXT_REPLAY_SEND_EVENT => SendKind::Event,
+            ZEXT_REPLAY_SEND_PERIODIC => SendKind::Periodic,
+            ZEXT_REPLAY_SEND_EVENT => SendKind::Event,
             _ => return Z_EINVAL,
         };
         if !handle.shared.can_send() {
@@ -750,11 +750,11 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_put(
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_serve_options_default(
-    this_: *mut wz_ext_replay_serve_options_t,
+pub unsafe extern "C" fn zext_replay_serve_options_default(
+    this_: *mut zext_replay_serve_options_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_replay_serve_options_t {
+        *this_ = zext_replay_serve_options_t {
             segment_profile: core::ptr::null(),
             segment_values: core::ptr::null(),
             first_transfer: 0,
@@ -781,11 +781,11 @@ pub unsafe extern "C" fn wz_ext_replay_serve_options_default(
 /// NUL-terminated C string; `options` is null or valid, its texts null or NUL-terminated;
 /// `refusal` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
-    this_: *const wz_ext_loaned_replay_publisher_t,
+pub unsafe extern "C" fn zext_replay_publisher_serve(
+    this_: *const zext_loaned_replay_publisher_t,
     keyexpr: *const z_loaned_keyexpr_t,
     suffix: *const c_char,
-    options: *const wz_ext_replay_serve_options_t,
+    options: *const zext_replay_serve_options_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -872,22 +872,22 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_serve(
     })
 }
 
-/// Where the cache stands: `WZ_EXT_REPLAY_SERVING_IDLE`, `_ANSWERING` or `_RELEASING`, or
-/// `WZ_EXT_REPLAY_NO_CACHE` for a null cache or the gravestone.
+/// Where the cache stands: `ZEXT_REPLAY_SERVING_IDLE`, `_ANSWERING` or `_RELEASING`, or
+/// `ZEXT_REPLAY_NO_CACHE` for a null cache or the gravestone.
 ///
 /// # Safety
 /// `this_` is null or a loaned cache.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_phase(
-    this_: *const wz_ext_loaned_replay_publisher_t,
+pub unsafe extern "C" fn zext_replay_publisher_phase(
+    this_: *const zext_loaned_replay_publisher_t,
 ) -> u8 {
     guard_val(|| {
         let Some(handle) = handle_of(this_) else {
-            return WZ_EXT_REPLAY_NO_CACHE;
+            return ZEXT_REPLAY_NO_CACHE;
         };
         match locked(&handle.shared.cache).as_ref() {
             Some(cache) => phase_code(cache.phase()),
-            None => WZ_EXT_REPLAY_NO_CACHE,
+            None => ZEXT_REPLAY_NO_CACHE,
         }
     })
 }
@@ -898,9 +898,9 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_phase(
 /// # Safety
 /// `this_` is null or a loaned cache; `out` is null or a struct of `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_counts(
-    this_: *const wz_ext_loaned_replay_publisher_t,
-    out: *mut wz_ext_replay_publisher_counts_t,
+pub unsafe extern "C" fn zext_replay_publisher_counts(
+    this_: *const zext_loaned_replay_publisher_t,
+    out: *mut zext_replay_publisher_counts_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
@@ -914,7 +914,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_counts(
             Some(cache) => cache.counts(),
             None => return Z_ERR_NULL,
         };
-        out.put(&wz_ext_replay_publisher_counts_t {
+        out.put(&zext_replay_publisher_counts_t {
             struct_size: 0,
             recorded: counts.recorded,
             deferred_overwritten: counts.deferred_overwritten,
@@ -930,21 +930,21 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_counts(
 /// # Safety
 /// `this_` is null or an owned cache.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_loan(
-    this_: *const wz_ext_owned_replay_publisher_t,
-) -> *const wz_ext_loaned_replay_publisher_t {
-    this_.cast::<wz_ext_loaned_replay_publisher_t>()
+pub unsafe extern "C" fn zext_replay_publisher_loan(
+    this_: *const zext_owned_replay_publisher_t,
+) -> *const zext_loaned_replay_publisher_t {
+    this_.cast::<zext_loaned_replay_publisher_t>()
 }
 
-/// The moved form of a cache, for `wz_ext_replay_publisher_drop`: a cast, which nulls nothing.
+/// The moved form of a cache, for `zext_replay_publisher_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned cache.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_move(
-    this_: *mut wz_ext_owned_replay_publisher_t,
-) -> *mut wz_ext_moved_replay_publisher_t {
-    this_.cast::<wz_ext_moved_replay_publisher_t>()
+pub unsafe extern "C" fn zext_replay_publisher_move(
+    this_: *mut zext_owned_replay_publisher_t,
+) -> *mut zext_moved_replay_publisher_t {
+    this_.cast::<zext_moved_replay_publisher_t>()
 }
 
 /// Stop serving, release the cache and leave the gravestone: the queryable is undeclared, and the
@@ -954,7 +954,7 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_move(
 /// # Safety
 /// `this_` is null or a moved cache.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_replay_publisher_drop(this_: *mut wz_ext_moved_replay_publisher_t) {
+pub unsafe extern "C" fn zext_replay_publisher_drop(this_: *mut zext_moved_replay_publisher_t) {
     let _ = guarded(|| {
         if this_.is_null() {
             return Z_OK;
@@ -979,11 +979,11 @@ pub unsafe extern "C" fn wz_ext_replay_publisher_drop(this_: *mut wz_ext_moved_r
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_replay_publisher_null(
-    this_: *mut wz_ext_owned_replay_publisher_t,
+pub unsafe extern "C" fn zext_internal_replay_publisher_null(
+    this_: *mut zext_owned_replay_publisher_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_owned_replay_publisher_t::null_value();
+        *this_ = zext_owned_replay_publisher_t::null_value();
     }
 }
 
@@ -992,8 +992,8 @@ pub unsafe extern "C" fn wz_ext_internal_replay_publisher_null(
 /// # Safety
 /// `this_` is null or an owned cache.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_replay_publisher_check(
-    this_: *const wz_ext_owned_replay_publisher_t,
+pub unsafe extern "C" fn zext_internal_replay_publisher_check(
+    this_: *const zext_owned_replay_publisher_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -1008,10 +1008,10 @@ mod tests {
     /// read. Turned red by a write before the size is read.
     #[test]
     fn counts_short_of_their_struct_are_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_replay_publisher_counts_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_replay_publisher_counts_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size; no cache is named.
-                unsafe { wz_ext_replay_publisher_counts(core::ptr::null(), out) }
+                unsafe { zext_replay_publisher_counts(core::ptr::null(), out) }
             },
             Z_EINVAL,
         );
@@ -1070,11 +1070,11 @@ mod tests {
         assert_eq!(
             codes,
             [
-                WZ_EXT_REPLAY_SENT,
-                WZ_EXT_REPLAY_HELD,
-                WZ_EXT_REPLAY_HELD_REPLACED,
-                WZ_EXT_REPLAY_DEFERRED,
-                WZ_EXT_REPLAY_DEFERRED_OVERWROTE
+                ZEXT_REPLAY_SENT,
+                ZEXT_REPLAY_HELD,
+                ZEXT_REPLAY_HELD_REPLACED,
+                ZEXT_REPLAY_DEFERRED,
+                ZEXT_REPLAY_DEFERRED_OVERWROTE
             ]
         );
     }
@@ -1083,7 +1083,7 @@ mod tests {
     /// by a size that leaves the area out.
     #[test]
     fn the_storage_size_is_the_rings_and_the_answers_area_and_zero_for_a_shape_refused() {
-        let shape = wz_ext_replay_shape_t {
+        let shape = zext_replay_shape_t {
             frame_max: 12,
             depth: 3,
             instances: 2,
@@ -1097,18 +1097,18 @@ mod tests {
         // SAFETY: a local shape, and a null one.
         unsafe {
             assert_eq!(
-                wz_ext_replay_publisher_storage_size(&shape),
+                zext_replay_publisher_storage_size(&shape),
                 model.storage_bytes().unwrap() + AnswerArea::bytes(&model).unwrap()
             );
-            assert_eq!(wz_ext_replay_publisher_storage_size(core::ptr::null()), 0);
-            let none = wz_ext_replay_shape_t { depth: 0, ..shape };
-            assert_eq!(wz_ext_replay_publisher_storage_size(&none), 0);
+            assert_eq!(zext_replay_publisher_storage_size(core::ptr::null()), 0);
+            let none = zext_replay_shape_t { depth: 0, ..shape };
+            assert_eq!(zext_replay_publisher_storage_size(&none), 0);
         }
     }
 
     #[test]
     fn a_cache_with_no_session_is_refused_and_leaves_the_gravestone() {
-        let shape = wz_ext_replay_shape_t {
+        let shape = zext_replay_shape_t {
             frame_max: 4,
             depth: 1,
             instances: 1,
@@ -1117,11 +1117,11 @@ mod tests {
         let mut stale = 0u8;
         // SAFETY: every pointer is null or a local the call may write; no session is named.
         unsafe {
-            let mut this = wz_ext_owned_replay_publisher_t {
+            let mut this = zext_owned_replay_publisher_t {
                 handle: core::ptr::addr_of_mut!(stale).cast::<c_void>(),
             };
             assert_eq!(
-                wz_ext_replay_publisher_new(
+                zext_replay_publisher_new(
                     &mut this,
                     core::ptr::null(),
                     core::ptr::null(),
@@ -1132,14 +1132,14 @@ mod tests {
                 ),
                 Z_ERR_NULL
             );
-            assert!(!wz_ext_internal_replay_publisher_check(&this));
+            assert!(!zext_internal_replay_publisher_check(&this));
             assert_eq!(
-                wz_ext_replay_publisher_phase(wz_ext_replay_publisher_loan(&this)),
-                WZ_EXT_REPLAY_NO_CACHE
+                zext_replay_publisher_phase(zext_replay_publisher_loan(&this)),
+                ZEXT_REPLAY_NO_CACHE
             );
             assert_eq!(
-                wz_ext_replay_publisher_record(
-                    wz_ext_replay_publisher_loan(&this),
+                zext_replay_publisher_record(
+                    zext_replay_publisher_loan(&this),
                     0,
                     0,
                     b"x".as_ptr(),
@@ -1147,8 +1147,8 @@ mod tests {
                 ),
                 Z_ERR_NULL
             );
-            wz_ext_replay_publisher_drop(wz_ext_replay_publisher_move(&mut this));
-            wz_ext_replay_publisher_drop(core::ptr::null_mut());
+            zext_replay_publisher_drop(zext_replay_publisher_move(&mut this));
+            zext_replay_publisher_drop(core::ptr::null_mut());
         }
     }
 }

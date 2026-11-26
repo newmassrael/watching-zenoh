@@ -187,7 +187,9 @@ impl LivelinessCall {
         Self { call }
     }
 
-    /// Whether `other` is a call of the same row.
+    /// Whether `other` is a call of the same row. Read by the round's token call (`calls`), and
+    /// compiled where that module is.
+    #[cfg(any(wz_round, feature = "query", feature = "queryable"))]
     pub(crate) fn same_row(&self, other: &Self) -> bool {
         self.call.0 == other.call.0
     }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! What the fuzz targets of the pico C ABI's own doors (`wz_ext_*`) share: a reader that turns
+//! What the fuzz targets of the pico C ABI's own doors (`zext_*`) share: a reader that turns
 //! the fuzzer's bytes into a door's arguments, the reading of a string a door hands out, and the
 //! check of a door's answer against the codes its documentation states.
 //!

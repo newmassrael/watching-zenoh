@@ -628,7 +628,7 @@ SESSIONS_DOCUMENT = """{
 """
 
 PICO_DRIVER = Driver("pico_session.c", ("crates/wz-capi-pico/include", "crates/wz-capi-core/include"),
-                     door="device-requires", door_call="wz_ext_config_device_requires")
+                     door="device-requires", door_call="zext_config_device_requires")
 C_DRIVER = Driver("c_session.c", door="config-verdict", door_call="wz_capi_c_config_device_requires")
 
 SCENARIOS = {

@@ -2,9 +2,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
 //! The doors that state a config's policies, limits and key ids from code and from a zenoh
-//! document (`wz_ext_config_policy`, `_profile`, `_document`, `wz_ext_runtime_limits_document`,
-//! `wz_ext_config_key_ids`, `_key_wire_form_for`), and the door that reads what an open of the
-//! config would ask of the system (`wz_ext_config_device_requires`), over one config the fuzzer
+//! document (`zext_config_policy`, `_profile`, `_document`, `zext_runtime_limits_document`,
+//! `zext_config_key_ids`, `_key_wire_form_for`), and the door that reads what an open of the
+//! config would ask of the system (`zext_config_device_requires`), over one config the fuzzer
 //! states things to.
 //!
 //! Input: the operations, each a unit behind its two-byte little-endian length whose first byte
@@ -30,13 +30,12 @@
 
 use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::config_policy::{
-    wz_ext_config_document, wz_ext_config_policy, wz_ext_config_profile,
-    wz_ext_runtime_limits_document,
+    zext_config_document, zext_config_policy, zext_config_profile, zext_runtime_limits_document,
 };
-use wz_capi_pico::device_requires::wz_ext_config_device_requires;
-use wz_capi_pico::key_ids::{wz_ext_config_key_ids, wz_ext_config_key_wire_form_for};
+use wz_capi_pico::device_requires::zext_config_device_requires;
+use wz_capi_pico::key_ids::{zext_config_key_ids, zext_config_key_wire_form_for};
 use wz_capi_pico::result::{
-    ZResult, WZ_EXT_ERR_POLICY_OFF, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_OK,
+    ZResult, ZEXT_ERR_POLICY_OFF, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_INVALID, Z_OK,
 };
 use wz_capi_pico::{
     z_config_clone, z_config_default, z_config_drop, z_config_loan, z_config_loan_mut,
@@ -72,7 +71,7 @@ fuzz_target!(|data: &[u8]| {
                     &[Z_OK, Z_ERR_CONFIG_INVALID_VALUE],
                     || {
                         // SAFETY: `loan` is a live config; `text` is NUL-terminated.
-                        unsafe { wz_ext_config_document(loan, text.as_ptr()) }
+                        unsafe { zext_config_document(loan, text.as_ptr()) }
                     },
                 );
             }
@@ -80,7 +79,7 @@ fuzz_target!(|data: &[u8]| {
                 let (policy, value) = (r.c_field(), r.c_field());
                 twice("config_policy", &[Z_OK, Z_ERR_CONFIG_INVALID_VALUE], || {
                     // SAFETY: as above.
-                    unsafe { wz_ext_config_policy(loan, policy.as_ptr(), value.as_ptr()) }
+                    unsafe { zext_config_policy(loan, policy.as_ptr(), value.as_ptr()) }
                 });
             }
             2 => {
@@ -90,7 +89,7 @@ fuzz_target!(|data: &[u8]| {
                     &[Z_OK, Z_ERR_CONFIG_INVALID_VALUE],
                     || {
                         // SAFETY: as above.
-                        unsafe { wz_ext_config_profile(loan, profile.as_ptr()) }
+                        unsafe { zext_config_profile(loan, profile.as_ptr()) }
                     },
                 );
             }
@@ -99,10 +98,10 @@ fuzz_target!(|data: &[u8]| {
                 let (locator, form) = (r.c_field(), r.c_field());
                 let rc = twice(
                     "config_key_wire_form_for",
-                    &[Z_OK, Z_ERR_INVALID, WZ_EXT_ERR_POLICY_OFF],
+                    &[Z_OK, Z_ERR_INVALID, ZEXT_ERR_POLICY_OFF],
                     // SAFETY: as above.
                     || unsafe {
-                        wz_ext_config_key_wire_form_for(loan, locator.as_ptr(), form.as_ptr())
+                        zext_config_key_wire_form_for(loan, locator.as_ptr(), form.as_ptr())
                     },
                 );
                 if locator.as_bytes().is_empty() {
@@ -121,7 +120,7 @@ fuzz_target!(|data: &[u8]| {
                     &[Z_OK, Z_ERR_CONFIG_INVALID_VALUE],
                     || {
                         // SAFETY: `text` is NUL-terminated.
-                        unsafe { wz_ext_runtime_limits_document(text.as_ptr()) }
+                        unsafe { zext_runtime_limits_document(text.as_ptr()) }
                     },
                 );
             }
@@ -184,7 +183,7 @@ fn key_ids(loan: *mut z_loaned_config_t, r: &mut Reader<'_>) {
     let pointers: Vec<_> = keys.iter().map(|key| key.as_ptr()).collect();
     let rc = twice("config_key_ids", &[Z_OK, Z_ERR_INVALID], || {
         // SAFETY: `ids` and `pointers` hold `count` entries each, every key NUL-terminated.
-        unsafe { wz_ext_config_key_ids(loan, ids.as_ptr(), pointers.as_ptr(), count) }
+        unsafe { zext_config_key_ids(loan, ids.as_ptr(), pointers.as_ptr(), count) }
     });
     if count == 0 {
         assert_eq!(
@@ -198,7 +197,7 @@ fn key_ids(loan: *mut z_loaned_config_t, r: &mut Reader<'_>) {
 fn requirement(config: *const z_loaned_config_t) -> (ZResult, String) {
     let mut out = empty_string();
     // SAFETY: `config` is a live loaned config; `out` is writable.
-    let rc = unsafe { wz_ext_config_device_requires(config, &mut out) };
+    let rc = unsafe { zext_config_device_requires(config, &mut out) };
     let text = unsafe { take_string("config_device_requires", &mut out) };
     if rc == Z_OK {
         assert!(

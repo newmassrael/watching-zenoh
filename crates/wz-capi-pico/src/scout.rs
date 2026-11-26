@@ -116,7 +116,7 @@ mod window {
     use crate::config::ConfigState;
     use crate::result::ZResult;
     #[cfg(not(feature = "engine-tokio"))]
-    use crate::result::WZ_EXT_ERR_SCOUT_REENTERED;
+    use crate::result::ZEXT_ERR_SCOUT_REENTERED;
 
     /// The process's one table of a cooperative window's Hellos, and the buffer the window reads
     /// each datagram into: in the library's static memory, reserved when it is built, never on a
@@ -227,14 +227,14 @@ mod window {
 
     /// The table for a window of `budget_ms` on `clock`, and what is left of the budget once it
     /// is held; `None` when another thread's window held it for the whole budget, which is a window
-    /// nobody answered, and `WZ_EXT_ERR_SCOUT_REENTERED` for a scout asked from a scout's callback.
+    /// nobody answered, and `ZEXT_ERR_SCOUT_REENTERED` for a scout asked from a scout's callback.
     #[cfg(not(feature = "engine-tokio"))]
     fn hold_table(clock: &Clock, budget_ms: u64) -> Result<Option<(table::Claim, u64)>, ZResult> {
         use wz_capi_coop::ClockSource;
         match table::Claim::within(budget_ms, || clock.now_us() / 1000) {
             Ok(held) => Ok(Some(held)),
             Err(table::Unclaimed::Expired) => Ok(None),
-            Err(table::Unclaimed::Reentered) => Err(WZ_EXT_ERR_SCOUT_REENTERED),
+            Err(table::Unclaimed::Reentered) => Err(ZEXT_ERR_SCOUT_REENTERED),
         }
     }
 

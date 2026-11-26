@@ -113,7 +113,7 @@ and its feature is measured by a sibling program; it is never retried until it p
 
 ```
   C program
-     │  z_* / zp_* / wz_ext_*            L4  façade        wz-capi-pico (one crate per preset ABI)
+     │  z_* / zp_* / zext_*            L4  façade        wz-capi-pico (one crate per preset ABI)
      ▼
   session core: entities, keys, routing  L3  session       wz-session-core (one table set)
      ▼
@@ -676,6 +676,239 @@ measurement:
 
 This is not the fast path of one face 8.12 rejects: every face is in the one walk, and a face is
 passed over by what its own slot says, whatever the session's preset.
+
+### 8.14 The quiet read: a face read to its deadline, its life looked at once a deadline
+
+Status: design, 2026-11-26. Nothing here is built. Every expected number is to be read by the main
+session on the subprofile of 8.13 and on the window harness of
+[ir-receive](win-budget/ir-receive.md). For the read of a face this section replaces the first
+bullet of that document's section 3.2 (a read task per face, blocked in its own `recv`); that
+document is brought in line in its own commit.
+
+#### 8.14.1 Where a message's driving goes, and the row that removes each part
+
+The receive still loses to zenoh-pico by about 1.05 (window harness: W 4,246 to 4,293 against
+P 4,049). The last reading by function is 8.13's (5,687 a message, P 2,723 in the same run). The
+records alone are already under zenoh-pico's whole message; every other part is driving:
+
+| part (8.13) | a message | paid because | row (8.14.6) | left after |
+|---|---:|---|---|---:|
+| the records (`take_input`): decode, dispatch, hand out, callback | 2,512 | the work | none here: [ir-receive](win-budget/ir-receive.md) stages 3 to 7 | 2,512 |
+| the receive outside the records (`recv_with`, the framing's front) | 268 | once a receive | none here: ir-receive stage 2 | 268 |
+| the step outside the receive | 461 | the pump's deadlines gathered again after every step (`step_pump`, `crates/wz-capi-coop/src/engine/direct.rs:2255-2257`, into `keepalive_deadlines`, which reads a clock of its own, `crates/wz-session-core/src/drive.rs:4182`), the facts told whether they moved or not (`direct.rs:868-893`), the lend | Q3 | about 150 |
+| the looks at the faces' lives | 1,110 | every read takes the session's lock and looks at the face's life (`life_turn`, `direct.rs:2083-2197`) though the link is up and nothing of the life moves | Q2 | about 0: once a deadline |
+| the wait | 782 | worked out under the session's lock each read (`link_wait`, `direct.rs:2028-2055`; `LinkSupervisor::idle_wait`, `crates/wz-runtime-coop/src/faces.rs:2652-2776`) and its `pollfd` set written anew each wait (`crates/wz-runtime-posix/src/net.rs:132-180`) | Q2, Q4 | about 120 |
+| the read's own lines and the task's loop | 554 | a whole read for each batch: the face table walked three times, the groups, the deliveries entered, the wait handed back, the ports and the jobs asked (`read_faces`, `direct.rs:1657-1755`) | Q2, Q4 | about 100 |
+| total | 5,687 | | | about 3,150 |
+
+#### 8.14.2 What zenoh-pico pays a message
+
+The pico arm of the harness is a listening peer. Its read task
+(`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_z_fut_fn_result_t _zp_unicast_read_task_fn(void *ztu_arg, _z_executor_t *executor) {`)
+pays, for each batch:
+
+- one `select` over every peer's socket, its `fd_set` built anew each turn by a walk of the peer
+  list (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `return _z_socket_wait_readable(&iter, Z_CONFIG_SOCKET_TIMEOUT);`,
+  `vendor/zenoh-pico/src/system/unix/network.c` @ `int result = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);`);
+- one take of the peers' mutex (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_z_transport_peer_mutex_lock(&ztu->_common);`)
+  and one `recv` for each ready peer (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `int res = _z_unicast_peer_read(ztu, curr_peer, &to_read);`),
+  a part of a batch kept in the peer's own flow buffer for the next ready
+  (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `peer->flow_buff = _z_zbuf_make(peer->flow_curr_size);`);
+- every message of the batch and of what the receive left behind it processed in place
+  (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `_Z_RETURN_IF_ERR(_z_unicast_handle_remaining_data(ztu, curr_peer, extra_data, &to_read,`);
+- one store that marks the peer heard (`vendor/zenoh-pico/src/transport/unicast/read.c` @ `peer->common._received = true;`),
+  which the lease task, a task of its own, reads and clears
+  (`vendor/zenoh-pico/src/transport/unicast/lease.c` @ `if (curr_peer->common._received) {`);
+- the executor's pass that runs the task again.
+
+No clock is read, no deadline gathered and no life looked at for a message. The driving's own costs
+in 8.13's run are 399 (the task 129, `_z_socket_wait_readable` 127, `select` 91, the peer walk 52),
+with the mutex pair and the executor's pass beside them. Its accept is a task of its own
+(`vendor/zenoh-pico/src/transport/unicast/accept.c` @ `z_result_t ret = _z_tcp_accept(&listen_socket, &con_socket);`),
+so its read waits on peers alone. A client's read is one blocking `recv` on a socket whose
+receive timeout is the configuration's
+(`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `ssize_t rb = recv(sock._fd, ptr, len, 0);`,
+set on an accepted socket too: `vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @ `if (setsockopt(con_socket, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv)) < 0) {`).
+
+#### 8.14.3 The structure: the multicast lane's D10, for a face
+
+The multicast lane (`mcast-perf`, its `docs/win-budget/ir-multicast.md` sections 7.6 to 7.9) took a
+group's receive from 5,548 to 3,096 a message (0.877 of zenoh-pico) with two rows. D7b
+(`88710f3c2`): the read waits with the session's lock let go. D10 (`ba5926333`): once its turn is
+taken, the read reads its group to the read's deadline in that one read, each datagram waited for
+and stepped alone, its turn taken again only at the deadline, at a wait that kept nothing, or where
+it owes the session its turn, the one question asked under the lock (`read_owed` and
+`read_awaited` on that lane). The same for a face:
+
+- A read makes its whole turn as today (`read_faces`, `direct.rs:1657-1755`; `read_dial`,
+  `direct.rs:1613-1640`). The face's look at its life (`life_turn`) decides, under the session's
+  lock it already holds, whether the face is quiet (8.14.4), and writes the face's quiet mark and
+  the run's deadline.
+- A read whose face is quiet does not return to its caller: it reads that face to the deadline
+  (`CoopEngine::read_quiet`). Each pass: a wait on the run's kept set with nothing held (8.14.5);
+  one reading of the clock; the face's slot taken; one step of its pump with no look at the life
+  (`take_held_input`, `direct.rs:2273-2290`, the Router lent as `step_pump` lends it,
+  `direct.rs:2250-2252`; the pump's `service_due` only when the pump is due or owes out of
+  band, `direct.rs:2245-2249`); the slot let go; what the step left handed out; the facts of
+  8.14.4 read.
+- The run ends at its deadline; at a wait that found a port or the wake ready; at a step that ended
+  the link, ran the pump's service, or left the face owing a write; where a continuation fact moved;
+  where the face's slot is held by another thread's read; and where the session closed or the read
+  task's run moved on (`ReaderBody::run`, `crates/wz-capi-coop/src/engine.rs:2501-2515`). The
+  next read's turn is a whole one.
+- It is not a burst read, which 8.13 measured void in this harness: each batch is waited for, as
+  each datagram is in D10. It is not the fast path of one face 8.12 rejects: the run is entered by
+  what each face's own facts say, in every preset, and Q5 takes it to every face.
+
+#### 8.14.4 The quiet condition, and who writes each fact
+
+Entry, judged by the face's look at the end of `life_turn` (`direct.rs:2181-2196`), under the
+session's lock and with the face's slot held:
+
+1. The face's life is up and its link's session established; no dial, no opened link, nothing
+   the life brought up (`brought_up` false) and no change of the face's place owed (`site_owed`
+   none, `direct.rs:834`).
+2. Its link gives a wait of its own (`input_wait` some) that no port and no other face shares, and
+   its look is `WireLook::Quiet` (no held input, no write owed, no buffer waited for;
+   `faces.rs:203-212`). A link that waits in its own loop (`own_loop`, `faces.rs:2695-2705`: a secure channel,
+   whose bytes the socket's wait does not see, `crates/wz-runtime-coop/src/stream_link.rs:158-165`) and a face
+   on a UDP port its other faces share are never quiet.
+3. Every other face rests (`DirectFace::rests`, `direct.rs:1198-1206`), every port gives a wait
+   (`listening.on` some, `faces.rs:2720-2740`) and no group is joined (Q2; Q5 lifts the first
+   and the last).
+4. The ledger is not owed once the look settled it, no job is due, no token's retraction is owed
+   and no replay's turn falls before the deadline.
+5. The read is the read task's or the program's, not a callback's (`read_direct`,
+   `direct.rs:1559-1561`), and the session is open.
+
+The deadline is the earliest of the face's own due (`DirectSlot::due_us`, its life and its
+pump, `direct.rs:858-860`), its Router's chains, the ledger's next due (which holds the gets'
+deadlines, `crates/wz-capi-coop/src/engine/ledger.rs:81-92`), the next job, the next replay turn,
+and the look's reading plus `idle_wait_ms`. The last bound keeps every latency the read has
+today: a stop of the read task (`stop_reader`, `engine.rs:9715-9732`) and whatever the next
+wait would have seen wait at most one wait bound, as now.
+
+What `life_turn` does under the lock, and the fact that stands for it in the run:
+
+| `life_turn` (`direct.rs`) | in the quiet run | written by, and when | why one writer |
+|---|---|---|---|
+| `end_closed_facts` (2094-2098) | the step's own `ended` and `records.actions.is_established()`, read off the slot | the read, in its step | the slot is held by one thread at a time (8.3) |
+| `waited(wait)` (2099-2101) | nothing to hand back: the run never takes the session's buffer of waits (`faces.rs:2659`); a port or the wake found ready ends the run, and the full read's wait finds it ready again, readiness being level | none | none |
+| the clock and `ms_at` (2102-2103) | one reading a receive of the slot's copy of the session's clock; its milliseconds by the epoch copied beside it (`CoopTime::ms_at` is `now_us.saturating_sub(epoch_us) / 1000`, `crates/wz-runtime-coop/src/time.rs:120-124`) | the slot's making | the slot |
+| `next_input` (2104, 1029-1074) | the face's quiet mark (a new `AtomicBool` of `DirectFace`) and `EndFlags::over` (`direct.rs:86-88`) | the mark: the face's look alone, which sets and clears it; `ended`: the read's step (`direct.rs:2213`); `asked`: `DirectEnd::abort` (`direct.rs:120-122`); both reset by `ready` at a new link, made under the slot | the mark has one writer, the slot's holder. The two end flags only go from false to true in a link's life, so a run that read false acts on true at its next pass, and their reset is made by the slot's holder, which is the run itself |
+| the Router's chains (2105) | `slot.router.due_ms()`, read off the slot after each step | the step, the Router lent to it | the slot |
+| the life's own time (2108, 2152-2155) | `life_due_us`, in the deadline | the look | the slot |
+| `ledger.owes` (2113; `ledger.rs:60-62`) | Q2: asked under the session's lock once a receive, as D10's `read_owed`. Q4: the ledger's `owed` and `next_due_us` and the two counts `Core::seen` reads (`links.moves`, `registry.faces_written`; `engine.rs:4930-4935`) held as atomics, read with no lock | every writer through `&mut`: `owe` (`ledger.rs:66-68`), `owe_leg_due` (74-78), `settle` (81-92), the moves of the face table, the registry's count of written tables | `&mut Core` exists only inside a hold of the session's lock, so its writers are one at a time; the run reads with acquire and sees a write at its next pass, one batch later at most, the bound a full read has today |
+| the gets' sweep, `read_matching`, `settle_ledger` (2119, 2148-2151, 2181) | not run: an owed ledger ends the run, and the full look runs them | none | none |
+| `rests`, `note_due`, `link_due_us` (2158-2180) | unchanged in the run; the face's due is noted once as it ends | the look | the slot |
+| `jobs_due_at` (2183; `engine.rs:5991-5997`) | Q2: under the lock with the ledger; Q4: the tickers' next due held as an atomic | the ticker table's `&mut` methods (a job started, stopped, run) | as the ledger |
+| `retracting` (2186; `crates/wz-capi-coop/src/engine/registry.rs:1964-1970`) | Q2: under the lock; Q4: every write that leaves a retraction owed owes the ledger too | `&mut Core` | as the ledger |
+| `ports_to_ask` (2195; `faces.rs:2193-2199`) | the ports' handles in the run's set; a port whose wait goes moves the face table's count (`faces.rs:2724-2726`, `2732-2734`), which the ledger's counts read | the session's wait, under the lock | as the ledger |
+| `face_turn`: `pay_site` (1985) | nothing owed: `site_owed` is written only by a look, and no look runs in the run | the look | the slot |
+| `face_turn`: `hand_lost_tokens` (1993-1995) | as `retracting` | | |
+| `face_turn`: `turn_replay` (2001-2006) | none due before the deadline at entry; a replay a declaration begins owes the ledger | `&mut Core` | as the ledger |
+| a face given to a row (`hold_face`, `direct.rs:1433-1451`) | a count of the faces' changes beside `held_rows`, moved by `hold_face` | the holders of the session's lock that attach, accept or remove a face | the lock |
+| the close | `CoopEngine::closed` (`engine.rs:11601-11602`, `direct.rs:2142`) and the read task's run (`engine.rs:9723`) | the close; `stop_reader` | monotone words |
+
+So a pass reads, with no lock but the dispatch's own takes of it (8.4): `closed`, the run's word,
+the face's quiet mark and its end flags, the clock against the deadline, the ledger's word (Q4) or
+the one question under the lock (Q2), the faces' count, and whether the face owes a write
+(`SiteFacts`, `written` against `drained`, `faces.rs:875-880`, written by every send that
+leaves bytes owed and by the read).
+
+#### 8.14.5 The wait: a kept poll set, not a blocking receive
+
+The run waits by `poll` over a set it keeps for its whole length (the face's link, every port, the
+clock's wake where the session has one), built once at entry into the read's own frame (no heap;
+the host's set holds `WAIT_SET_SOCKETS`, `crates/wz-runtime-posix/src/lib.rs:101`), not
+written anew for each wait as `PosixWaits` writes it today (`net.rs:132-180`). The stack's waits
+gain a kept form beside `wait_ready` (`LinkWaits`, `crates/wz-runtime-coop/src/session_drive.rs:334-372`),
+whose provided body is today's, so a stack that keeps no set (the lwIP, FreeRTOS and Zephyr waits)
+reads quietly with its own wait.
+
+Why not a blocking `recv` bounded by `SO_RCVTIMEO`, as D7b's receive and zenoh-pico's client are:
+
+- **The listening form has more than one input.** The shipped preset listens, and its read waits on
+  its port beside its face (`faces.rs:2717-2740`; the test `a_lone_stream_link_is_waited_on_with_its_port_as_a_listener_is`,
+  `crates/wz-capi-coop/src/tests/listen.rs:809`). A receive blocked on the face's socket does not
+  see a connection, a stop or the clock's wake until its timeout. D7b blocks only where the group is
+  the read's one input; zenoh-pico's peer read waits on its peers by `select` too, its accept being
+  a task of its own, which wz's read task does not have and should not grow (the RSS row, 1.15).
+- **The syscall is not the cost.** Callgrind counts the instructions a program runs, and a `poll`
+  of a kept set is its wrapper's few tens; the 782 of the wait were the lock, the gathering and the
+  set's writing, which the run takes away whichever call waits.
+- **Windows** (pc3-win). A stream socket there does not block (`ioctlsocket(FIONBIO)` at its
+  connect and its accept, `crates/wz-runtime-posix/src/windows/mod.rs:285-291`,
+  `crates/wz-runtime-posix/src/windows/stream.rs:392-407`), and its sends rely on that
+  (`WSAEWOULDBLOCK` is nothing taken, `windows/stream.rs:324-351`). A receive timeout does not
+  apply to such a socket, the mode is the socket's and not the call's, so a blocking receive on
+  the read would make another thread's send wait; and Winsock's documentation of `SO_RCVTIMEO`
+  leaves a socket whose receive timed out in an indeterminate state, which a stream cannot afford.
+  The run's wait there is `WSAPoll` over the kept set, as `poll_readable` waits today
+  (`windows/mod.rs:310-321`); zenoh-pico's read on Windows is a `select`
+  (`vendor/zenoh-pico/src/system/windows/network.c` @ `int result = select(0, &read_fds, NULL, NULL, &timeout);`).
+  pc3-win measures the run's time and CPU a message against zenoh-pico's; callgrind is not there.
+- **A stream's part of a batch.** A step that finds part of a batch moves it to the front and reads
+  the rest with the non-blocking read (`stream_link.rs:1070-1108`); none come, it keeps the part
+  (`Behind::Part`) and holds no whole batch (`holds_input`, `stream_link.rs:1487-1489`), so
+  the run's next wait is for input, which the kernel reports only once new bytes came, and the step
+  after it finishes the batch where it lies. Nothing spins on a part, and the POSIX read stays the
+  one `recv` with `MSG_DONTWAIT` on a blocking socket (`crates/wz-runtime-posix/src/stream.rs:362-379`,
+  the socket made blocking at its accept, `stream.rs:260-269`), whose sends do not wait either
+  (`stream.rs:49-56`). A UDP face's datagram is whole by its receive (`net.rs:1170-1176`).
+
+The blocking receive stays a measured option for one form (Q6): POSIX, a read whose one input is
+its face's link (a client, a peer with no port), the receive deposited where the step reads it, as
+D7b keeps its datagram. It is kept only if its gain, about the `poll` wrapper a message, beats the
+text of a second wait path (the text row, 1.27).
+
+#### 8.14.6 Steps, and what each is expected to read
+
+Each lands on its own, builds and passes its tests; each is judged by the subprofile's driving and
+the window harness's ratio. The 5,687 of 8.13 is the baseline; the window figures are the main
+session's to read.
+
+| step | change | removes | expected a message |
+|---|---|---|---:|
+| Q1 | the quiet mark of a face and the run's deadline, written by the look (no run yet) | nothing; adds a few stores a look | about 5,690 |
+| Q2 | the run: the read reads its quiet face to the deadline, waiting on its kept set with nothing held, one clock reading a receive, a step with no look, the owed question under the lock once a receive (D10's form) | the looks, 1,110; the wait's lock, gathering and set, 782 to about 220; the read's loop, 554 to about 100 | about 3,560 |
+| Q3 | the step keeps the pump's due between its services: the lease's and the keep-alive's deadlines only move later by what is read (the lease by what is heard, the keep-alive by what is written, `drive.rs:4196`), and a timer a record arms is said by a count the pump keeps; the facts told only when they moved | the step's own, 461 to about 150 | about 3,250 |
+| Q4 | the owed question off atomics (8.14.4's table); the deliveries entered only where a step's drain left one | about 100 | about 3,150 |
+| Q5 | every face with a link and every group in the run's one set, each stepped where its handle is ready, each slot taken in turn (8.4: no two read slots held), the groups read as D10 reads them | the full turn a read of several faces takes for each batch | its own harness: a listener of several peers, a peer in a group |
+| Q6 | measured option, POSIX: the blocking receive of 8.14.5 for a read whose one input is its face | the `poll` wrapper | about 3,100 on a client |
+
+What remains above zenoh-pico's driving after Q4 is one clock reading a receive (about 70: the run
+judges its deadline by it; the heard flag of ir-receive section 3.2 is a later row of stage 8) and
+the dispatch's takes of the session's lock (8.4), against pico's mutex pair and its executor's pass.
+At about 3,150 against P 2,723 in that run, what is left is the records' (ir-receive stages 2 to 7),
+not the driving's.
+
+#### 8.14.7 The contracts the run can break, and the tests that hold them
+
+| contract | how the run keeps it | tests now | tests the steps add (red when) |
+|---|---|---|---|
+| a blocking publish that waits for a slot a slow link holds is sent, not lost, once the slow stream takes the rest, woken by the room and not by a clock | the run waits on input alone and is entered only where the face owes no write; a face left owing one ends it, and the full read waits on input and room (`faces.rs:2697-2701`); a slow face is a second face with a link, which Q2 does not enter | `a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_does_not`, `a_droppable_publish_of_one_thread_is_dropped_while_a_slow_link_holds_the_slot` (`tests/tx_pool.rs:78`, `265`); `a_droppable_publish_is_not_held_behind_a_blocking_one_on_a_full_link` (`tests/congestion.rs:642`) | `a_write_left_owed_on_the_quiet_face_ends_the_quiet_read` (red if the pass stops reading `SiteFacts`) |
+| the keep-alive leaves on time under a stream of batches; a silent peer's lease ends its face | the pump's due is in the deadline, and the step runs its service when it is due | `a_stream_of_batches_still_sends_the_keep_alive_on_time` (`tests/direct_receive.rs:533`); `a_lease_on_the_programs_clock_runs_on_that_clock_alone`, `a_lease_on_the_systems_clock_runs_out_with_the_wall_clock` (`tests/program_clock.rs:59`, `89`) | `a_quiet_step_keeps_a_due_no_later_than_the_pumps_own` (Q3; red if a step that armed a timer keeps the older due) |
+| a get, a snapshot, a job end at their time | their deadlines are the ledger's and the tickers', in the deadline; one asked meanwhile owes the ledger, which ends the run | `a_get_nobody_answers_ends_at_its_deadline`, `a_get_between_long_reads_ends_at_its_deadline` (`tests/get.rs:279`, `312`); `a_snapshot_nobody_answers_ends_at_its_deadline` (`tests/snapshot.rs:146`) | `a_get_asked_during_a_quiet_read_ends_at_its_deadline` (red if `owe_leg_due` moves no word the run reads) |
+| a close ends the read, from a callback or another thread, and lets the link go once | `closed` and the run's word read each pass; the deadline is at most one wait bound | `a_close_from_a_callback_ends_the_read_and_lets_the_link_go_once`, `a_callback_that_closes_its_session_reads_its_key_until_it_returns` (`tests/direct_receive.rs:340`, `399`); `the_close_lets_go_of_every_rows_callback` (`tests/closure_drops.rs:122`) | `a_close_from_another_thread_ends_a_quiet_read_within_one_wait_bound` (red if the deadline loses its `idle_wait_ms` bound) |
+| an attached dial is dialled, and given up in its time | `hold_face` moves the faces' count, which ends the run at its next pass; the deadline bounds a run with no batch | `a_row_a_face_left_wakes_for_the_face_an_attach_gives_it` (`tests/listen.rs:782`); `a_dial_under_way_holds_neither_the_session_nor_its_close`, `an_attached_dial_never_answered_is_given_up_in_its_time` (`tests/dial_in_flight.rs:117`, `257`) | `an_attach_during_a_quiet_read_is_dialled_at_its_next_pass` (red if `hold_face` stops moving the count) |
+| a full listener closes a connection past its faces unread, and takes a lost face's place once its lease ends | the port is in the run's set; a connection ends the run and the full read accepts or refuses it | `a_connection_past_max_faces_is_closed_unread`, `a_full_listener_takes_a_lost_faces_place_once_its_lease_ends_and_not_before`, `a_connection_past_accept_pending_is_closed_unread` (`tests/listen.rs:242`, `275`, `371`) | `a_connection_arriving_during_a_quiet_read_is_taken_at_once` (red if the kept set leaves the port out) |
+| a callback's read reads nothing; a record is handed out with its slot held | the step holds the slot as `face_turn` does; the wait holds none, as `read_faces` waits today | `a_read_goes_on_with_the_input_its_step_left_held` (`tests/listen.rs:598`) | `a_read_from_a_callback_inside_a_quiet_read_reads_nothing` |
+| the run is entered, and pays its look once a deadline | Q2 | `a_listeners_read_passes_over_its_resting_dial_face` (`tests/listen.rs:696`) | `a_quiet_read_turns_its_face_once_a_deadline_not_once_a_batch` (counts `Takes::face_turns` against the batches; red if the look's mark is never set) |
+| a batch cut across two receives is read whole | 8.14.5 | `the_puts_of_one_stream_batch_are_handed_where_they_lie_in_a_few_reads` (`tests/listen.rs:518`) | `a_batch_cut_across_two_receives_is_read_whole_in_a_quiet_read` |
+| the refusals | a link that waits in its own loop, a face on a shared UDP port, a build of one thread (the program's read runs the same body), a stack with no kept set (its own wait) | `a_udp_listener_takes_each_client_as_a_face_of_its_own` (`tests/listen.rs:418`) | `a_link_that_waits_in_its_own_loop_is_never_read_quietly`, `a_face_on_a_shared_udp_port_is_never_read_quietly`, `a_read_of_one_thread_reads_its_face_quietly_too`; on pc3-win, `a_quiet_wait_names_its_sockets_to_wsapoll` |
+| Q4's words say what the fields say | each writer through `&mut` writes the word with the field | none | `the_ledgers_word_moves_with_every_writer_of_its_counts` (red if a writer of `links.moves` or of the registry's count leaves the word behind) |
+
+#### 8.14.8 Rejected alternatives
+
+- **A read task for each face**, blocked in its own receive: a thread and its stack for each face,
+  against the RSS row, and the listening form still waits on its port somewhere.
+- **A blocking receive for the listening form**: it cannot see the port, the stop or the clock's
+  wake (8.14.5).
+- **The attempts of this lane that moved the look and did not remove it**: the burst read (one batch
+  a receive here, 8.13), the resting face passed over, one `try_lock` of the slots a read, and the
+  replay's hold out of line. Each left a look under the lock for each batch; the run leaves one for
+  each deadline.
 
 
 ## 9. The win budget: heap, RSS, text and instructions per message under zenoh-pico

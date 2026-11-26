@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_e2e_receiver_*`: the RECEIVING judge of end-to-end protected frames, from C. Every frame
+//! `zext_e2e_receiver_*`: the RECEIVING judge of end-to-end protected frames, from C. Every frame
 //! the program hands over is judged in the state the receiver keeps for each stream, or for each
 //! sender, and the verdict is written beside the payload, which is reported whatever it says.
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `e2e-receiver` capability implies `unstable-api`. Its sender slots
 //! are `e2e-sender-demux`; a build without them refuses sender keying by name
-//! (`WZ_EXT_ERR_UNSUPPORTED`). The judge is [`wz_app_frame::e2e_receiver`]; ownership and threads
+//! (`ZEXT_ERR_UNSUPPORTED`). The judge is [`wz_app_frame::e2e_receiver`]; ownership and threads
 //! are as `crate::e2e` describes.
 
 use alloc::format;
@@ -27,73 +27,73 @@ use crate::result::{ZResult, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE, Z_ERR_NULL, Z
 use crate::sized::{Out, SizedOut};
 
 /// The caller names the stream of every frame: one per message, or per instance of it.
-pub const WZ_EXT_E2E_KEYING_INDEXED: u8 = 0;
+pub const ZEXT_E2E_KEYING_INDEXED: u8 = 0;
 /// One stream per sender, slots taken in arrival order by intact frames (`e2e-sender-demux`).
-pub const WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL: u8 = 1;
+pub const ZEXT_E2E_KEYING_SENDERS_ARRIVAL: u8 = 1;
 /// One stream per sender, slots bound to the listed senders (`e2e-sender-demux`).
-pub const WZ_EXT_E2E_KEYING_SENDERS_BOUND: u8 = 2;
+pub const ZEXT_E2E_KEYING_SENDERS_BOUND: u8 = 2;
 
 /// Intact, and the next frame of its stream.
-pub const WZ_EXT_E2E_OK: u8 = 0;
+pub const ZEXT_E2E_OK: u8 = 0;
 /// Intact, and the first of its stream: the baseline.
-pub const WZ_EXT_E2E_FIRST: u8 = 1;
+pub const ZEXT_E2E_FIRST: u8 = 1;
 /// Intact, and the same counter again.
-pub const WZ_EXT_E2E_REPEATED: u8 = 2;
+pub const ZEXT_E2E_REPEATED: u8 = 2;
 /// Intact, and a step above the largest gap.
-pub const WZ_EXT_E2E_OUT_OF_RANGE: u8 = 3;
+pub const ZEXT_E2E_OUT_OF_RANGE: u8 = 3;
 /// A repetition or a step out of range, under a profile that reports the two as one.
-pub const WZ_EXT_E2E_COUNTER_ERROR: u8 = 4;
+pub const ZEXT_E2E_COUNTER_ERROR: u8 = 4;
 /// Not intact: `failed` says which check.
-pub const WZ_EXT_E2E_INTEGRITY: u8 = 5;
+pub const ZEXT_E2E_INTEGRITY: u8 = 5;
 /// Of a sender no slot holds, so judged in no stream; `unslotted` says why.
-pub const WZ_EXT_E2E_UNSLOTTED: u8 = 6;
+pub const ZEXT_E2E_UNSLOTTED: u8 = 6;
 
 /// The bits of `failed`.
-pub const WZ_EXT_E2E_FAILED_CRC: u8 = wz_app_frame::e2e_receiver::FAILED_CRC;
-pub const WZ_EXT_E2E_FAILED_IDENT: u8 = wz_app_frame::e2e_receiver::FAILED_IDENT;
-pub const WZ_EXT_E2E_FAILED_LENGTH: u8 = wz_app_frame::e2e_receiver::FAILED_LENGTH;
-pub const WZ_EXT_E2E_FAILED_SHORT: u8 = wz_app_frame::e2e_receiver::FAILED_SHORT;
+pub const ZEXT_E2E_FAILED_CRC: u8 = wz_app_frame::e2e_receiver::FAILED_CRC;
+pub const ZEXT_E2E_FAILED_IDENT: u8 = wz_app_frame::e2e_receiver::FAILED_IDENT;
+pub const ZEXT_E2E_FAILED_LENGTH: u8 = wz_app_frame::e2e_receiver::FAILED_LENGTH;
+pub const ZEXT_E2E_FAILED_SHORT: u8 = wz_app_frame::e2e_receiver::FAILED_SHORT;
 
 /// The values of `unslotted`.
-pub const WZ_EXT_E2E_SLOTTED: u8 = 0;
-pub const WZ_EXT_E2E_NOT_LISTED: u8 = 1;
-pub const WZ_EXT_E2E_SLOTS_FULL: u8 = 2;
+pub const ZEXT_E2E_SLOTTED: u8 = 0;
+pub const ZEXT_E2E_NOT_LISTED: u8 = 1;
+pub const ZEXT_E2E_SLOTS_FULL: u8 = 2;
 
 /// The bits of `has`: which of the optional numbers of a verdict hold a value.
-pub const WZ_EXT_E2E_HAS_COUNTER: u8 = 1;
-pub const WZ_EXT_E2E_HAS_STEP: u8 = 2;
-pub const WZ_EXT_E2E_HAS_KIND: u8 = 4;
-pub const WZ_EXT_E2E_HAS_RESULT: u8 = 8;
-pub const WZ_EXT_E2E_HAS_SENDER: u8 = 16;
-pub const WZ_EXT_E2E_HAS_STREAM: u8 = 32;
-pub const WZ_EXT_E2E_HAS_SILENCE: u8 = 64;
+pub const ZEXT_E2E_HAS_COUNTER: u8 = 1;
+pub const ZEXT_E2E_HAS_STEP: u8 = 2;
+pub const ZEXT_E2E_HAS_KIND: u8 = 4;
+pub const ZEXT_E2E_HAS_RESULT: u8 = 8;
+pub const ZEXT_E2E_HAS_SENDER: u8 = 16;
+pub const ZEXT_E2E_HAS_STREAM: u8 = 32;
+pub const ZEXT_E2E_HAS_SILENCE: u8 = 64;
 
 /// An owned receiver: the handle in its one word, null for the gravestone.
 #[repr(C)]
-pub struct wz_ext_owned_e2e_receiver_t {
+pub struct zext_owned_e2e_receiver_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A loaned receiver: the owned layout, so the loan is a pointer cast.
 #[repr(C)]
-pub struct wz_ext_loaned_e2e_receiver_t {
+pub struct zext_loaned_e2e_receiver_t {
     pub(crate) handle: *mut c_void,
 }
 
 /// A moved receiver (pico's `z_moved_*_t` shape).
 #[repr(C)]
-pub struct wz_ext_moved_e2e_receiver_t {
-    pub(crate) _this: wz_ext_owned_e2e_receiver_t,
+pub struct zext_moved_e2e_receiver_t {
+    pub(crate) _this: zext_owned_e2e_receiver_t,
 }
 
 /// How a receiver is made.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_e2e_receiver_options_t {
+pub struct zext_e2e_receiver_options_t {
     /// The largest gap, in place of the profile's own and at most its ceiling; 0 for the
     /// profile's.
     pub max_gap: u64,
-    /// The senders the slots are bound to, for `WZ_EXT_E2E_KEYING_SENDERS_BOUND`; BORROWED for the
+    /// The senders the slots are bound to, for `ZEXT_E2E_KEYING_SENDERS_BOUND`; BORROWED for the
     /// call.
     pub senders: *const u64,
     /// How many `senders` there are.
@@ -101,18 +101,18 @@ pub struct wz_ext_e2e_receiver_options_t {
     /// How many streams (indexed keying) or sender slots (sender keying), at least 1. The storage
     /// is allocated once, here.
     pub streams: usize,
-    /// A `WZ_EXT_E2E_KEYING_*` value.
+    /// A `ZEXT_E2E_KEYING_*` value.
     pub keying: u8,
 }
 
-impl Default for wz_ext_e2e_receiver_options_t {
+impl Default for zext_e2e_receiver_options_t {
     fn default() -> Self {
         Self {
             max_gap: 0,
             senders: core::ptr::null(),
             senders_len: 0,
             streams: 1,
-            keying: WZ_EXT_E2E_KEYING_INDEXED,
+            keying: ZEXT_E2E_KEYING_INDEXED,
         }
     }
 }
@@ -121,20 +121,20 @@ impl Default for wz_ext_e2e_receiver_options_t {
 /// (`crate::sized`). A number whose `has` bit is clear is 0.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct wz_ext_e2e_verdict_t {
+pub struct zext_e2e_verdict_t {
     /// The bytes of the struct the program was compiled with; a door sets it to the bytes it
     /// wrote.
     pub struct_size: usize,
-    /// A `WZ_EXT_E2E_*` status.
+    /// A `ZEXT_E2E_*` status.
     pub status: u8,
-    /// The `WZ_EXT_E2E_FAILED_*` bits of the integrity checks the frame failed.
+    /// The `ZEXT_E2E_FAILED_*` bits of the integrity checks the frame failed.
     pub failed: u8,
-    /// The `WZ_EXT_E2E_HAS_*` bits.
+    /// The `ZEXT_E2E_HAS_*` bits.
     pub has: u8,
     /// 1 when the silence before the frame exceeded the profile's timeout; never under a profile
     /// whose `timeout_ms` is 0, which states no timeout.
     pub timeout: u8,
-    /// For `WZ_EXT_E2E_UNSLOTTED`, why: `WZ_EXT_E2E_NOT_LISTED` or `_SLOTS_FULL`.
+    /// For `ZEXT_E2E_UNSLOTTED`, why: `ZEXT_E2E_NOT_LISTED` or `_SLOTS_FULL`.
     pub unslotted: u8,
     pub reserved: [u8; 3],
     /// The counter the frame carries.
@@ -155,7 +155,7 @@ pub struct wz_ext_e2e_verdict_t {
     pub payload_len: usize,
 }
 
-impl Default for wz_ext_e2e_verdict_t {
+impl Default for zext_e2e_verdict_t {
     /// No verdict, in a struct of this build's size.
     fn default() -> Self {
         Self {
@@ -180,7 +180,7 @@ impl Default for wz_ext_e2e_verdict_t {
 }
 
 // SAFETY: `#[repr(C)]`, `struct_size` first.
-unsafe impl SizedOut for wz_ext_e2e_verdict_t {
+unsafe impl SizedOut for zext_e2e_verdict_t {
     const BASE: usize = core::mem::size_of::<Self>();
 }
 
@@ -191,23 +191,23 @@ pub(crate) const SLOT_LIMIT: usize = wz_session_core::caps::E2E_SENDER_SLOTS;
 pub(crate) const SLOT_LIMIT: usize = 0;
 
 /// The handle word of a loaned receiver.
-fn word(this_: *const wz_ext_loaned_e2e_receiver_t) -> *const *mut c_void {
+fn word(this_: *const zext_loaned_e2e_receiver_t) -> *const *mut c_void {
     this_.cast::<*mut c_void>()
 }
 
 /// Box a made receiver behind the caller's handle word.
-pub(crate) fn adopt_receiver(this_: &mut wz_ext_owned_e2e_receiver_t, receiver: Receiver) {
+pub(crate) fn adopt_receiver(this_: &mut zext_owned_e2e_receiver_t, receiver: Receiver) {
     this_.handle = adopt(receiver);
 }
 
-/// The sender keying the options state; `WZ_EXT_ERR_UNSUPPORTED` in a build without the
+/// The sender keying the options state; `ZEXT_ERR_UNSUPPORTED` in a build without the
 /// receiver's sender slots.
 ///
 /// # Safety
 /// `options.senders` is null or readable for `options.senders_len` values.
 #[cfg(feature = "e2e-sender-demux")]
-unsafe fn sender_keying(options: &wz_ext_e2e_receiver_options_t) -> Result<Keying, ZResult> {
-    let bound = if options.keying == WZ_EXT_E2E_KEYING_SENDERS_BOUND {
+unsafe fn sender_keying(options: &zext_e2e_receiver_options_t) -> Result<Keying, ZResult> {
+    let bound = if options.keying == ZEXT_E2E_KEYING_SENDERS_BOUND {
         if options.senders.is_null() && options.senders_len != 0 {
             return Err(Z_EINVAL);
         }
@@ -227,8 +227,8 @@ unsafe fn sender_keying(options: &wz_ext_e2e_receiver_options_t) -> Result<Keyin
 }
 
 #[cfg(not(feature = "e2e-sender-demux"))]
-unsafe fn sender_keying(_options: &wz_ext_e2e_receiver_options_t) -> Result<Keying, ZResult> {
-    Err(crate::result::WZ_EXT_ERR_UNSUPPORTED)
+unsafe fn sender_keying(_options: &zext_e2e_receiver_options_t) -> Result<Keying, ZResult> {
+    Err(crate::result::ZEXT_ERR_UNSUPPORTED)
 }
 
 /// Fill in the default receiver options: one stream named by the caller, the profile's gap.
@@ -236,11 +236,11 @@ unsafe fn sender_keying(_options: &wz_ext_e2e_receiver_options_t) -> Result<Keyi
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_options_default(
-    this_: *mut wz_ext_e2e_receiver_options_t,
+pub unsafe extern "C" fn zext_e2e_receiver_options_default(
+    this_: *mut zext_e2e_receiver_options_t,
 ) {
     if !this_.is_null() {
-        *this_ = wz_ext_e2e_receiver_options_t::default();
+        *this_ = zext_e2e_receiver_options_t::default();
     }
 }
 
@@ -255,7 +255,7 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_options_default(
 ///
 /// Returns `Z_ERR_NULL` for a null `this_` or `profile_json`; `Z_EINVAL` for text that is not
 /// UTF-8, a keying this library does not know, or a null `senders` with a length;
-/// `WZ_EXT_ERR_UNSUPPORTED` for sender keying in a build without `e2e-sender-demux`;
+/// `ZEXT_ERR_UNSUPPORTED` for sender keying in a build without `e2e-sender-demux`;
 /// `_Z_ERR_CONFIG_INVALID_VALUE` for a profile, expected values or option that is refused (no
 /// stream, a gap above the profile's ceiling, sender keying under a profile whose cell names no
 /// sender, more slots than `E2E_SENDER_SLOTS`, a bound list that does not fit); `Z_OK` otherwise.
@@ -265,11 +265,11 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_options_default(
 /// `options` is null or valid, its `senders` readable for `senders_len` values; `refusal` is null
 /// or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_new(
-    this_: *mut wz_ext_owned_e2e_receiver_t,
+pub unsafe extern "C" fn zext_e2e_receiver_new(
+    this_: *mut zext_owned_e2e_receiver_t,
     profile_json: *const c_char,
     expected_json: *const c_char,
-    options: *const wz_ext_e2e_receiver_options_t,
+    options: *const zext_e2e_receiver_options_t,
     refusal: *mut z_owned_string_t,
 ) -> ZResult {
     guarded(|| {
@@ -293,15 +293,15 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_new(
             Some(text)
         };
         let options = if options.is_null() {
-            wz_ext_e2e_receiver_options_t::default()
+            zext_e2e_receiver_options_t::default()
         } else {
             *options
         };
         let keying = match options.keying {
-            WZ_EXT_E2E_KEYING_INDEXED => Keying::Indexed {
+            ZEXT_E2E_KEYING_INDEXED => Keying::Indexed {
                 streams: options.streams,
             },
-            WZ_EXT_E2E_KEYING_SENDERS_ARRIVAL | WZ_EXT_E2E_KEYING_SENDERS_BOUND => {
+            ZEXT_E2E_KEYING_SENDERS_ARRIVAL | ZEXT_E2E_KEYING_SENDERS_BOUND => {
                 match sender_keying(&options) {
                     Ok(keying) => keying,
                     Err(code) => return code,
@@ -339,27 +339,27 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_new(
 
 /// The C form of a verdict; the instance keys' judging door writes it too, and the replay
 /// subscriber hands its samples on with it.
-pub(crate) fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
-    let mut out = wz_ext_e2e_verdict_t {
+pub(crate) fn to_c(verdict: &Verdict) -> zext_e2e_verdict_t {
+    let mut out = zext_e2e_verdict_t {
         status: match verdict.status {
-            Status::Ok => WZ_EXT_E2E_OK,
-            Status::First => WZ_EXT_E2E_FIRST,
-            Status::Repeated => WZ_EXT_E2E_REPEATED,
-            Status::OutOfRange => WZ_EXT_E2E_OUT_OF_RANGE,
-            Status::CounterError => WZ_EXT_E2E_COUNTER_ERROR,
-            Status::Integrity => WZ_EXT_E2E_INTEGRITY,
-            Status::Unslotted => WZ_EXT_E2E_UNSLOTTED,
+            Status::Ok => ZEXT_E2E_OK,
+            Status::First => ZEXT_E2E_FIRST,
+            Status::Repeated => ZEXT_E2E_REPEATED,
+            Status::OutOfRange => ZEXT_E2E_OUT_OF_RANGE,
+            Status::CounterError => ZEXT_E2E_COUNTER_ERROR,
+            Status::Integrity => ZEXT_E2E_INTEGRITY,
+            Status::Unslotted => ZEXT_E2E_UNSLOTTED,
         },
         failed: verdict.failed,
         timeout: u8::from(verdict.timeout),
         unslotted: match verdict.unslotted {
-            None => WZ_EXT_E2E_SLOTTED,
-            Some(Unslotted::NotListed) => WZ_EXT_E2E_NOT_LISTED,
-            Some(Unslotted::Full) => WZ_EXT_E2E_SLOTS_FULL,
+            None => ZEXT_E2E_SLOTTED,
+            Some(Unslotted::NotListed) => ZEXT_E2E_NOT_LISTED,
+            Some(Unslotted::Full) => ZEXT_E2E_SLOTS_FULL,
         },
         payload_offset: verdict.payload_offset,
         payload_len: verdict.payload_bytes,
-        ..wz_ext_e2e_verdict_t::default()
+        ..zext_e2e_verdict_t::default()
     };
     let mut has = 0u8;
     let mut take = |bit: u8, value: Option<u64>| {
@@ -368,14 +368,14 @@ pub(crate) fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
         }
         value.unwrap_or(0)
     };
-    out.counter = take(WZ_EXT_E2E_HAS_COUNTER, verdict.counter);
-    out.step = take(WZ_EXT_E2E_HAS_STEP, verdict.step);
-    out.kind = take(WZ_EXT_E2E_HAS_KIND, verdict.kind);
-    out.result = take(WZ_EXT_E2E_HAS_RESULT, verdict.result);
-    out.sender = take(WZ_EXT_E2E_HAS_SENDER, verdict.sender);
-    out.silence_ms = take(WZ_EXT_E2E_HAS_SILENCE, verdict.silence_ms);
+    out.counter = take(ZEXT_E2E_HAS_COUNTER, verdict.counter);
+    out.step = take(ZEXT_E2E_HAS_STEP, verdict.step);
+    out.kind = take(ZEXT_E2E_HAS_KIND, verdict.kind);
+    out.result = take(ZEXT_E2E_HAS_RESULT, verdict.result);
+    out.sender = take(ZEXT_E2E_HAS_SENDER, verdict.sender);
+    out.silence_ms = take(ZEXT_E2E_HAS_SILENCE, verdict.silence_ms);
     if let Some(stream) = verdict.stream {
-        has |= WZ_EXT_E2E_HAS_STREAM;
+        has |= ZEXT_E2E_HAS_STREAM;
         out.stream = stream;
     }
     out.has = has;
@@ -394,20 +394,20 @@ pub(crate) fn to_c(verdict: &Verdict) -> wz_ext_e2e_verdict_t {
 /// `this_` is null or a loaned receiver; `frame` is readable for `len` bytes; `out` is null or
 /// a struct of `struct_size` writable bytes.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_judge(
-    this_: *const wz_ext_loaned_e2e_receiver_t,
+pub unsafe extern "C" fn zext_e2e_receiver_judge(
+    this_: *const zext_loaned_e2e_receiver_t,
     stream: usize,
     frame: *const u8,
     len: usize,
     now_ms: u64,
-    out: *mut wz_ext_e2e_verdict_t,
+    out: *mut zext_e2e_verdict_t,
 ) -> ZResult {
     guarded(|| {
         let out = match Out::of(out) {
             Ok(out) => out,
             Err(code) => return code,
         };
-        out.put(&wz_ext_e2e_verdict_t::default());
+        out.put(&zext_e2e_verdict_t::default());
         let Some(receiver) = behind::<Receiver>(word(this_)) else {
             return Z_ERR_NULL;
         };
@@ -432,8 +432,8 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_judge(
 /// `this_` is null or a loaned receiver; `not_listed` and `full` are null or writable.
 #[cfg(feature = "e2e-sender-demux")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_counts(
-    this_: *const wz_ext_loaned_e2e_receiver_t,
+pub unsafe extern "C" fn zext_e2e_receiver_counts(
+    this_: *const zext_loaned_e2e_receiver_t,
     not_listed: *mut u64,
     full: *mut u64,
 ) -> ZResult {
@@ -459,8 +459,8 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_counts(
 /// `this_` is null or a loaned receiver; `out` is null or writable.
 #[cfg(feature = "e2e-sender-demux")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_slot_sender(
-    this_: *const wz_ext_loaned_e2e_receiver_t,
+pub unsafe extern "C" fn zext_e2e_receiver_slot_sender(
+    this_: *const zext_loaned_e2e_receiver_t,
     slot: usize,
     out: *mut u64,
 ) -> bool {
@@ -484,21 +484,21 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_slot_sender(
 /// # Safety
 /// `this_` is null or an owned receiver.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_loan(
-    this_: *const wz_ext_owned_e2e_receiver_t,
-) -> *const wz_ext_loaned_e2e_receiver_t {
-    this_.cast::<wz_ext_loaned_e2e_receiver_t>()
+pub unsafe extern "C" fn zext_e2e_receiver_loan(
+    this_: *const zext_owned_e2e_receiver_t,
+) -> *const zext_loaned_e2e_receiver_t {
+    this_.cast::<zext_loaned_e2e_receiver_t>()
 }
 
-/// The moved form of a receiver, for `wz_ext_e2e_receiver_drop`: a cast, which nulls nothing.
+/// The moved form of a receiver, for `zext_e2e_receiver_drop`: a cast, which nulls nothing.
 ///
 /// # Safety
 /// `this_` is null or an owned receiver.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_move(
-    this_: *mut wz_ext_owned_e2e_receiver_t,
-) -> *mut wz_ext_moved_e2e_receiver_t {
-    this_.cast::<wz_ext_moved_e2e_receiver_t>()
+pub unsafe extern "C" fn zext_e2e_receiver_move(
+    this_: *mut zext_owned_e2e_receiver_t,
+) -> *mut zext_moved_e2e_receiver_t {
+    this_.cast::<zext_moved_e2e_receiver_t>()
 }
 
 /// Release a receiver and leave the gravestone. A second drop, and a drop of the gravestone, do
@@ -507,7 +507,7 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_move(
 /// # Safety
 /// `this_` is null or a moved receiver.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_e2e_receiver_drop(this_: *mut wz_ext_moved_e2e_receiver_t) {
+pub unsafe extern "C" fn zext_e2e_receiver_drop(this_: *mut zext_moved_e2e_receiver_t) {
     let _ = guarded(|| {
         if !this_.is_null() {
             release::<Receiver>(core::ptr::addr_of_mut!((*this_)._this.handle));
@@ -521,9 +521,7 @@ pub unsafe extern "C" fn wz_ext_e2e_receiver_drop(this_: *mut wz_ext_moved_e2e_r
 /// # Safety
 /// `this_` is null or writable.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_e2e_receiver_null(
-    this_: *mut wz_ext_owned_e2e_receiver_t,
-) {
+pub unsafe extern "C" fn zext_internal_e2e_receiver_null(this_: *mut zext_owned_e2e_receiver_t) {
     if !this_.is_null() {
         (*this_).handle = core::ptr::null_mut();
     }
@@ -534,8 +532,8 @@ pub unsafe extern "C" fn wz_ext_internal_e2e_receiver_null(
 /// # Safety
 /// `this_` is null or an owned receiver.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_internal_e2e_receiver_check(
-    this_: *const wz_ext_owned_e2e_receiver_t,
+pub unsafe extern "C" fn zext_internal_e2e_receiver_check(
+    this_: *const zext_owned_e2e_receiver_t,
 ) -> bool {
     guard_val(|| !this_.is_null() && !(*this_).handle.is_null())
 }
@@ -548,11 +546,11 @@ mod tests {
     /// is read. Turned red by a write before the size is read.
     #[test]
     fn a_verdict_short_of_its_struct_is_refused_untouched() {
-        crate::sized::a_short_struct_is_refused_untouched::<wz_ext_e2e_verdict_t, _>(
+        crate::sized::a_short_struct_is_refused_untouched::<zext_e2e_verdict_t, _>(
             |out| {
                 // SAFETY: `out` is a live struct of this build's size; no receiver or frame is named.
                 unsafe {
-                    wz_ext_e2e_receiver_judge(core::ptr::null(), 0, core::ptr::null(), 0, 0, out)
+                    zext_e2e_receiver_judge(core::ptr::null(), 0, core::ptr::null(), 0, 0, out)
                 }
             },
             Z_EINVAL,

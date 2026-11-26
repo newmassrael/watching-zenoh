@@ -475,19 +475,21 @@ fn a_read_from_a_callback_of_the_sessions_own_put_reads_nothing() {
     );
 }
 
-/// A put of the session's own hands each subscriber it reaches the sample with the session free,
-/// one row at a time: a row the first callback undeclared before the put reached it is handed
-/// nothing, and the put counts the first alone. The CONTROL is the first subscriber, handed the
-/// sample. Turned red by a put that begins a call on every row it reaches under one lock before
-/// the first callback runs.
+/// A put of the session's own hands every subscriber the one hold that read it found the sample,
+/// each callback with the session free: a row the first callback undeclared before its turn came
+/// is still handed it, as zenoh-pico calls each subscription of the list it took under its lock,
+/// and the put counts both. The CONTROL is the first subscriber, handed the sample. Turned red by
+/// a delivery that passes over a row it pinned once its subscriber was undeclared, or that holds
+/// the session while it calls.
 #[cfg(all(feature = "local-subscriber", not(wz_round)))]
 #[test]
-fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
+fn a_put_of_the_sessions_own_hands_every_row_its_hold_found() {
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let seen: Arc<Mutex<Vec<(u8, bool)>>> = Arc::default();
     let later: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::default();
     let session = EngineHold::downgrade(&engine);
+    let second = EngineHold::downgrade(&engine);
     engine
         .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
             let (seen, later) = (seen.clone(), later.clone());
@@ -506,7 +508,10 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
         .declare_subscriber_on_wire("demo/own", WireKey::literal(), Locality::Any, None, {
             let seen = seen.clone();
             SubscriberSink::shared(move |_: &dyn SampleView| {
-                seen.lock().unwrap().push((2, true));
+                let free = second
+                    .upgrade()
+                    .is_some_and(|engine| engine.session_is_free());
+                seen.lock().unwrap().push((2, free));
             })
         })
         .expect("the session declares the second subscriber")
@@ -515,13 +520,13 @@ fn a_put_of_the_sessions_own_hands_its_subscribers_one_row_at_a_time() {
     let own = PublishOptions::put().with_locality(Locality::SessionLocal);
     assert_eq!(
         engine.publish_on_wire_all("demo/own", &WireKey::literal(), b"v", &own),
-        Ok(1),
-        "the put reached the row undeclared before it got there"
+        Ok(2),
+        "the put passed over the row undeclared before its turn came"
     );
     assert_eq!(
         *seen.lock().unwrap(),
-        [(1, true)],
-        "the first callback ran with the session held, or the undeclared row was handed the put"
+        [(1, true), (2, true)],
+        "a callback ran with the session held, or the undeclared row was not handed the put"
     );
 }
 
@@ -736,6 +741,70 @@ fn a_steady_stream_runs_no_bookkeeping_per_batch() {
         engine.services() - before,
         0,
         "the bookkeeping ran during a stream that changed nothing it follows"
+    );
+}
+
+/// A session whose lease is short, read while nothing but keep-alives crosses its link: it sends
+/// the keep-alive the router's lease of it needs at each turn of that lease, and runs its
+/// bookkeeping at none of them, since neither its keep-alive's verdict nor a lease it stamps
+/// changes anything the bookkeeping follows. CONTROL: the session is still open after several of
+/// its leases. Turned red by a timer's verdict dispatched to the face's tables (`DirectSink`),
+/// which counts as a write of them and owes the bookkeeping at the next look.
+#[cfg(not(wz_round))]
+#[test]
+fn a_keep_alive_runs_no_bookkeeping() {
+    const LEASE_MS: u64 = 600;
+    let router = Router::start(CatchAll::None);
+    let engine = open_with(CoopConfig {
+        lease_ms: LEASE_MS,
+        ..config(&router)
+    });
+    // Whatever the open left owed is served by the reads right after it.
+    let settled = Instant::now() + Duration::from_millis(LEASE_MS / 2);
+    while Instant::now() < settled {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    let before = engine.services();
+    let quiet = Instant::now() + Duration::from_millis(4 * LEASE_MS);
+    while Instant::now() < quiet {
+        let _ = SessionDrive::read(&*engine, false);
+    }
+    assert!(
+        !SessionDrive::is_closed(&*engine),
+        "CONTROL: the router's lease of the session ran out"
+    );
+    assert_eq!(
+        engine.services() - before,
+        0,
+        "the bookkeeping ran at a keep-alive"
+    );
+}
+
+/// A look that runs the bookkeeping for what the router declared, the link up and its replay told
+/// whole, owes the link no turn of the replay, and holds no face's send place for one: a droppable
+/// publish on another thread would find that place held and be dropped. CONTROL: the look ran the
+/// bookkeeping. Turned red by a look that holds every face's send place for a replay turn that is
+/// not due (`replays` in `CoopEngine::life_turn`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_look_with_no_replay_turn_due_holds_no_send_place_for_one() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let holds = || engine.takes.replay_holds.load(Ordering::SeqCst);
+    let (services, before) = (engine.services(), holds());
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(
+        &engine,
+        "CONTROL: the bookkeeping of the declaration",
+        || engine.services() > services,
+    );
+    assert_eq!(
+        holds() - before,
+        0,
+        "a look held the send places for a replay turn not due"
     );
 }
 

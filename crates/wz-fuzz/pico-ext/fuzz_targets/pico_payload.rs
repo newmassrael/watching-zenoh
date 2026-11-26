@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The message payloads of the pico C ABI (`wz_ext_payload_schema_*`, `wz_ext_message_payload_*`):
+//! The message payloads of the pico C ABI (`zext_payload_schema_*`, `zext_message_payload_*`):
 //! a schema read from a `FileDescriptorSet` the fuzzer writes, a payload of a message of the
 //! catalog the reader's tests use, and bytes the fuzzer writes decoded into it, values set and read
 //! at paths it writes, and the payload encoded again.
@@ -41,8 +41,8 @@ use libfuzzer_sys::fuzz_target;
 use wz_capi_pico::message_catalog::*;
 use wz_capi_pico::message_payload::*;
 use wz_capi_pico::result::{
-    ZResult, WZ_EXT_ERR_PAYLOAD_ABSENT, WZ_EXT_ERR_PAYLOAD_PATH, WZ_EXT_ERR_PAYLOAD_RANGE,
-    WZ_EXT_ERR_PAYLOAD_TYPE, WZ_EXT_ERR_PAYLOAD_WIRE, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE,
+    ZResult, ZEXT_ERR_PAYLOAD_ABSENT, ZEXT_ERR_PAYLOAD_PATH, ZEXT_ERR_PAYLOAD_RANGE,
+    ZEXT_ERR_PAYLOAD_TYPE, ZEXT_ERR_PAYLOAD_WIRE, Z_EINVAL, Z_ERR_CONFIG_INVALID_VALUE,
     Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK,
 };
 use wz_fuzz_ingress_common::units;
@@ -54,16 +54,16 @@ const CATALOG: &str = include_str!("../../../wz-app-frame/catalog/synthetic.json
 
 /// The codes a refused call on a payload answers with, each of which leaves its reason.
 const REFUSALS: [ZResult; 7] = [
-    WZ_EXT_ERR_PAYLOAD_PATH,
-    WZ_EXT_ERR_PAYLOAD_TYPE,
-    WZ_EXT_ERR_PAYLOAD_RANGE,
-    WZ_EXT_ERR_PAYLOAD_ABSENT,
-    WZ_EXT_ERR_PAYLOAD_WIRE,
+    ZEXT_ERR_PAYLOAD_PATH,
+    ZEXT_ERR_PAYLOAD_TYPE,
+    ZEXT_ERR_PAYLOAD_RANGE,
+    ZEXT_ERR_PAYLOAD_ABSENT,
+    ZEXT_ERR_PAYLOAD_WIRE,
     Z_ERR_OVERFLOW,
     Z_ERR_CONFIG_INVALID_VALUE,
 ];
 
-type Payload = wz_ext_owned_message_payload_t;
+type Payload = zext_owned_message_payload_t;
 
 /// The values and the bytes a payload holds: few enough that the fuzzer reaches a storage with no
 /// room left.
@@ -78,26 +78,21 @@ fuzz_target!(|data: &[u8]| {
     let ops = r.rest();
 
     let catalog_text = CString::new(CATALOG).expect("the catalog holds no NUL");
-    let mut catalog: wz_ext_owned_message_catalog_t = unsafe { core::mem::zeroed() };
+    let mut catalog: zext_owned_message_catalog_t = unsafe { core::mem::zeroed() };
     // SAFETY: `catalog` is writable; the text is NUL-terminated; no refusal is asked for.
     let rc = unsafe {
-        wz_ext_message_catalog_new(&mut catalog, catalog_text.as_ptr(), core::ptr::null_mut())
+        zext_message_catalog_new(&mut catalog, catalog_text.as_ptr(), core::ptr::null_mut())
     };
     assert_eq!(
         rc, Z_OK,
         "the synthetic catalog is refused ({rc}): the harness is wrong"
     );
 
-    let mut schema: wz_ext_owned_payload_schema_t = unsafe { core::mem::zeroed() };
+    let mut schema: zext_owned_payload_schema_t = unsafe { core::mem::zeroed() };
     let mut refusal = empty_string();
     // SAFETY: `schema` is writable; `set` is readable for its length; `refusal` is writable.
     let rc = unsafe {
-        wz_ext_payload_schema_from_descriptor_set(
-            &mut schema,
-            set.as_ptr(),
-            set.len(),
-            &mut refusal,
-        )
+        zext_payload_schema_from_descriptor_set(&mut schema, set.as_ptr(), set.len(), &mut refusal)
     };
     let why = unsafe { take_string("payload_schema_new", &mut refusal) };
     stated(
@@ -106,7 +101,7 @@ fuzz_target!(|data: &[u8]| {
         &[Z_OK, Z_ERR_CONFIG_INVALID_VALUE],
     );
     assert_eq!(
-        unsafe { wz_ext_internal_payload_schema_check(&schema) },
+        unsafe { zext_internal_payload_schema_check(&schema) },
         rc == Z_OK
     );
     if rc == Z_OK {
@@ -123,10 +118,10 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let index = usize::from(choices & 3).min(2);
-    let catalog_loan = unsafe { wz_ext_message_catalog_loan(&catalog) };
+    let catalog_loan = unsafe { zext_message_catalog_loan(&catalog) };
     // The program's storage, which outlives the payload: it is dropped after the payload is.
-    let mut storage = vec![0u8; wz_ext_message_payload_storage_size(FIELDS, BYTES)];
-    let options = wz_ext_message_payload_options_t {
+    let mut storage = vec![0u8; zext_message_payload_storage_size(FIELDS, BYTES)];
+    let options = zext_message_payload_options_t {
         storage: storage.as_mut_ptr(),
         storage_len: storage.len(),
         fields: FIELDS,
@@ -137,19 +132,19 @@ fuzz_target!(|data: &[u8]| {
     // SAFETY: every handle is owned or the gravestone; `message` is NUL-terminated; the storage
     // is writable for its length until the payload is dropped below.
     let rc = unsafe {
-        wz_ext_message_payload_new(
+        zext_message_payload_new(
             &mut payload,
             catalog_loan,
             index,
-            wz_ext_payload_schema_loan(&schema),
+            zext_payload_schema_loan(&schema),
             message.as_ptr(),
             &options,
             &mut refusal,
         )
     };
     let _ = unsafe { take_string("message_payload_new", &mut refusal) };
-    let schema_held = unsafe { wz_ext_internal_payload_schema_check(&schema) };
-    if index >= unsafe { wz_ext_message_catalog_len(catalog_loan) } {
+    let schema_held = unsafe { zext_internal_payload_schema_check(&schema) };
+    if index >= unsafe { zext_message_catalog_len(catalog_loan) } {
         assert_eq!(
             rc, Z_ERR_INVALID,
             "message_payload_new: a message the catalog has not answered {rc}"
@@ -167,7 +162,7 @@ fuzz_target!(|data: &[u8]| {
         );
     }
     assert_eq!(
-        unsafe { wz_ext_internal_message_payload_check(&payload) },
+        unsafe { zext_internal_message_payload_check(&payload) },
         rc == Z_OK
     );
 
@@ -188,23 +183,23 @@ fuzz_target!(|data: &[u8]| {
     drop(storage);
     drop_schema(&mut schema);
     // SAFETY: an owned catalog slot, dropped once.
-    unsafe { wz_ext_message_catalog_drop(wz_ext_message_catalog_move(&mut catalog)) };
+    unsafe { zext_message_catalog_drop(zext_message_catalog_move(&mut catalog)) };
 });
 
-fn loan(p: &Payload) -> *const wz_ext_loaned_message_payload_t {
+fn loan(p: &Payload) -> *const zext_loaned_message_payload_t {
     // SAFETY: a cast of an owned payload slot.
-    unsafe { wz_ext_message_payload_loan(p) }
+    unsafe { zext_message_payload_loan(p) }
 }
 
-fn key_is_the_catalogs(p: &Payload, catalog: *const wz_ext_loaned_message_catalog_t, index: usize) {
-    let mut entry = wz_ext_message_entry_t::default();
+fn key_is_the_catalogs(p: &Payload, catalog: *const zext_loaned_message_catalog_t, index: usize) {
+    let mut entry = zext_message_entry_t::default();
     // SAFETY: `catalog` is a live loaned catalog; `entry` is writable.
     assert_eq!(
-        unsafe { wz_ext_message_catalog_entry(catalog, index, &mut entry) },
+        unsafe { zext_message_catalog_entry(catalog, index, &mut entry) },
         Z_OK
     );
     // SAFETY: `p` is a live payload.
-    let key = unsafe { wz_ext_message_payload_key_expr(loan(p)) };
+    let key = unsafe { zext_message_payload_key_expr(loan(p)) };
     assert!(!key.is_null(), "a live payload has no key");
     // SAFETY: both are NUL-terminated keys their handles keep.
     let (key, expected) = unsafe { (CStr::from_ptr(key), CStr::from_ptr(entry.key_expr)) };
@@ -219,14 +214,14 @@ fn key_is_the_catalogs(p: &Payload, catalog: *const wz_ext_loaned_message_catalo
 fn encode(p: &Payload) -> Result<Vec<u8>, ZResult> {
     let mut size = usize::MAX;
     // SAFETY: `p` is a live payload; a null `out` with no capacity asks for the size.
-    let rc = unsafe { wz_ext_message_payload_encode(loan(p), core::ptr::null_mut(), 0, &mut size) };
+    let rc = unsafe { zext_message_payload_encode(loan(p), core::ptr::null_mut(), 0, &mut size) };
     stated(
         "message_payload_encode",
         rc,
         &[
             Z_OK,
             Z_ERR_OVERFLOW,
-            WZ_EXT_ERR_PAYLOAD_ABSENT,
+            ZEXT_ERR_PAYLOAD_ABSENT,
             Z_ERR_CONFIG_INVALID_VALUE,
         ],
     );
@@ -250,8 +245,7 @@ fn encode(p: &Payload) -> Result<Vec<u8>, ZResult> {
     let mut out = vec![0u8; size];
     let mut written = usize::MAX;
     // SAFETY: `out` is writable for `size` bytes.
-    let rc =
-        unsafe { wz_ext_message_payload_encode(loan(p), out.as_mut_ptr(), size, &mut written) };
+    let rc = unsafe { zext_message_payload_encode(loan(p), out.as_mut_ptr(), size, &mut written) };
     assert_eq!(
         rc, Z_OK,
         "message_payload_encode: the {size} bytes it asked for answered {rc}"
@@ -267,7 +261,7 @@ fn encode(p: &Payload) -> Result<Vec<u8>, ZResult> {
 fn refusal_of(p: &Payload) -> String {
     let mut out = empty_string();
     // SAFETY: `p` is a live payload; `out` is writable.
-    let rc = unsafe { wz_ext_message_payload_refusal(loan(p), &mut out) };
+    let rc = unsafe { zext_message_payload_refusal(loan(p), &mut out) };
     assert_eq!(
         rc, Z_OK,
         "message_payload_refusal: a live payload answered {rc}"
@@ -300,7 +294,7 @@ fn operate(p: &Payload, op: u8, rest: &[u8]) {
     let mut r = Reader::new(rest);
     if op >= 16 {
         // SAFETY: `p` is a live payload.
-        let rc = unsafe { wz_ext_message_payload_reset(loan(p)) };
+        let rc = unsafe { zext_message_payload_reset(loan(p)) };
         assert_eq!(
             rc, Z_OK,
             "message_payload_reset: a live payload answered {rc}"
@@ -318,14 +312,14 @@ fn operate(p: &Payload, op: u8, rest: &[u8]) {
     if op >= 8 {
         let before = encode(p);
         // SAFETY: `p` is a live payload; `path` is NUL-terminated.
-        let rc = unsafe { wz_ext_message_payload_clear(loan(p), path.as_ptr()) };
+        let rc = unsafe { zext_message_payload_clear(loan(p), path.as_ptr()) };
         stated(
             "message_payload_clear",
             rc,
             &[
                 Z_OK,
-                WZ_EXT_ERR_PAYLOAD_PATH,
-                WZ_EXT_ERR_PAYLOAD_RANGE,
+                ZEXT_ERR_PAYLOAD_PATH,
+                ZEXT_ERR_PAYLOAD_RANGE,
                 Z_EINVAL,
             ],
         );
@@ -333,9 +327,9 @@ fn operate(p: &Payload, op: u8, rest: &[u8]) {
     }
     let sets = [
         Z_OK,
-        WZ_EXT_ERR_PAYLOAD_PATH,
-        WZ_EXT_ERR_PAYLOAD_TYPE,
-        WZ_EXT_ERR_PAYLOAD_RANGE,
+        ZEXT_ERR_PAYLOAD_PATH,
+        ZEXT_ERR_PAYLOAD_TYPE,
+        ZEXT_ERR_PAYLOAD_RANGE,
         Z_ERR_OVERFLOW,
         Z_EINVAL,
     ];
@@ -343,17 +337,17 @@ fn operate(p: &Payload, op: u8, rest: &[u8]) {
     let at = path.as_ptr();
     let rc = match op % 8 {
         // SAFETY (each arm): `p` is a live payload and `at` a NUL-terminated path.
-        1 => unsafe { wz_ext_message_payload_set_int(loan(p), at, r.u64() as i64) },
-        2 => unsafe { wz_ext_message_payload_set_uint(loan(p), at, r.u64()) },
-        3 => unsafe { wz_ext_message_payload_set_double(loan(p), at, f64::from_bits(r.u64())) },
-        4 => unsafe { wz_ext_message_payload_set_bool(loan(p), at, r.u8() & 1 != 0) },
+        1 => unsafe { zext_message_payload_set_int(loan(p), at, r.u64() as i64) },
+        2 => unsafe { zext_message_payload_set_uint(loan(p), at, r.u64()) },
+        3 => unsafe { zext_message_payload_set_double(loan(p), at, f64::from_bits(r.u64())) },
+        4 => unsafe { zext_message_payload_set_bool(loan(p), at, r.u8() & 1 != 0) },
         5 => {
             let value = r.c_field();
-            unsafe { wz_ext_message_payload_set_string(loan(p), at, value.as_ptr()) }
+            unsafe { zext_message_payload_set_string(loan(p), at, value.as_ptr()) }
         }
         6 => {
             let value = r.rest();
-            unsafe { wz_ext_message_payload_set_bytes(loan(p), at, value.as_ptr(), value.len()) }
+            unsafe { zext_message_payload_set_bytes(loan(p), at, value.as_ptr(), value.len()) }
         }
         _ => {
             read_every_kind(p, &path);
@@ -367,11 +361,11 @@ fn operate(p: &Payload, op: u8, rest: &[u8]) {
 fn decode(p: &Payload, bytes: &[u8]) {
     let before = encode(p);
     // SAFETY: `p` is a live payload; `bytes` is readable.
-    let rc = unsafe { wz_ext_message_payload_decode(loan(p), bytes.as_ptr(), bytes.len()) };
+    let rc = unsafe { zext_message_payload_decode(loan(p), bytes.as_ptr(), bytes.len()) };
     stated(
         "message_payload_decode",
         rc,
-        &[Z_OK, WZ_EXT_ERR_PAYLOAD_WIRE, Z_ERR_OVERFLOW],
+        &[Z_OK, ZEXT_ERR_PAYLOAD_WIRE, Z_ERR_OVERFLOW],
     );
     if rc == Z_ERR_OVERFLOW {
         // Values the storage has no room for leave the payload empty, not as it was.
@@ -382,7 +376,7 @@ fn decode(p: &Payload, bytes: &[u8]) {
         let emptied = encode(p);
         assert!(
             matches!(emptied, Ok(ref bytes) if bytes.is_empty())
-                || emptied == Err(WZ_EXT_ERR_PAYLOAD_ABSENT),
+                || emptied == Err(ZEXT_ERR_PAYLOAD_ABSENT),
             "message_payload_decode: a decode past the storage left values: {emptied:?}"
         );
         return;
@@ -396,7 +390,7 @@ fn decode(p: &Payload, bytes: &[u8]) {
         return;
     };
     // SAFETY: `first` is readable.
-    let rc = unsafe { wz_ext_message_payload_decode(loan(p), first.as_ptr(), first.len()) };
+    let rc = unsafe { zext_message_payload_decode(loan(p), first.as_ptr(), first.len()) };
     assert_eq!(
         rc, Z_OK,
         "message_payload_decode: refused ({rc}) the bytes the payload encoded: {first:02x?}"
@@ -411,10 +405,10 @@ fn decode(p: &Payload, bytes: &[u8]) {
 fn read_every_kind(p: &Payload, path: &CString) {
     let reads = [
         Z_OK,
-        WZ_EXT_ERR_PAYLOAD_PATH,
-        WZ_EXT_ERR_PAYLOAD_TYPE,
-        WZ_EXT_ERR_PAYLOAD_RANGE,
-        WZ_EXT_ERR_PAYLOAD_ABSENT,
+        ZEXT_ERR_PAYLOAD_PATH,
+        ZEXT_ERR_PAYLOAD_TYPE,
+        ZEXT_ERR_PAYLOAD_RANGE,
+        ZEXT_ERR_PAYLOAD_ABSENT,
         Z_EINVAL,
     ];
     let at = path.as_ptr();
@@ -423,11 +417,11 @@ fn read_every_kind(p: &Payload, path: &CString) {
     // SAFETY (each): `p` is a live payload, `at` a NUL-terminated path, the outs writable.
     let answers = unsafe {
         [
-            wz_ext_message_payload_get_int(loan(p), at, &mut i),
-            wz_ext_message_payload_get_uint(loan(p), at, &mut u),
-            wz_ext_message_payload_get_double(loan(p), at, &mut d),
-            wz_ext_message_payload_get_bool(loan(p), at, &mut b),
-            wz_ext_message_payload_count(loan(p), at, &mut n),
+            zext_message_payload_get_int(loan(p), at, &mut i),
+            zext_message_payload_get_uint(loan(p), at, &mut u),
+            zext_message_payload_get_double(loan(p), at, &mut d),
+            zext_message_payload_get_bool(loan(p), at, &mut b),
+            zext_message_payload_count(loan(p), at, &mut n),
         ]
     };
     for rc in answers {
@@ -444,9 +438,9 @@ fn read_whole(door: &str, p: &Payload, path: &CString, text: bool) {
         // SAFETY: `p` is a live payload, `path` NUL-terminated, `out` writable for `capacity`.
         unsafe {
             if text {
-                wz_ext_message_payload_get_string(loan(p), path.as_ptr(), out.cast(), capacity, len)
+                zext_message_payload_get_string(loan(p), path.as_ptr(), out.cast(), capacity, len)
             } else {
-                wz_ext_message_payload_get_bytes(loan(p), path.as_ptr(), out, capacity, len)
+                zext_message_payload_get_bytes(loan(p), path.as_ptr(), out, capacity, len)
             }
         }
     };
@@ -458,10 +452,10 @@ fn read_whole(door: &str, p: &Payload, path: &CString, text: bool) {
         &[
             Z_OK,
             Z_ERR_OVERFLOW,
-            WZ_EXT_ERR_PAYLOAD_PATH,
-            WZ_EXT_ERR_PAYLOAD_TYPE,
-            WZ_EXT_ERR_PAYLOAD_RANGE,
-            WZ_EXT_ERR_PAYLOAD_ABSENT,
+            ZEXT_ERR_PAYLOAD_PATH,
+            ZEXT_ERR_PAYLOAD_TYPE,
+            ZEXT_ERR_PAYLOAD_RANGE,
+            ZEXT_ERR_PAYLOAD_ABSENT,
             Z_EINVAL,
         ],
     );
@@ -490,32 +484,32 @@ fn read_whole(door: &str, p: &Payload, path: &CString, text: bool) {
     }
 }
 
-fn drop_schema(schema: &mut wz_ext_owned_payload_schema_t) {
+fn drop_schema(schema: &mut zext_owned_payload_schema_t) {
     // SAFETY: an owned schema slot, dropped twice; the second is a documented no-op.
     unsafe {
-        wz_ext_payload_schema_drop(wz_ext_payload_schema_move(schema));
+        zext_payload_schema_drop(zext_payload_schema_move(schema));
         assert!(
-            !wz_ext_internal_payload_schema_check(schema),
+            !zext_internal_payload_schema_check(schema),
             "a dropped schema is still held"
         );
-        wz_ext_payload_schema_drop(wz_ext_payload_schema_move(schema));
+        zext_payload_schema_drop(zext_payload_schema_move(schema));
     }
 }
 
 fn drop_payload(p: &mut Payload) {
     // SAFETY: an owned payload slot, dropped twice; the second is a documented no-op.
     unsafe {
-        wz_ext_message_payload_drop(wz_ext_message_payload_move(p));
+        zext_message_payload_drop(zext_message_payload_move(p));
         assert!(
-            !wz_ext_internal_message_payload_check(p),
+            !zext_internal_message_payload_check(p),
             "a dropped payload is still held"
         );
-        wz_ext_message_payload_drop(wz_ext_message_payload_move(p));
+        zext_message_payload_drop(zext_message_payload_move(p));
         assert!(
-            wz_ext_message_payload_key_expr(loan(p)).is_null(),
+            zext_message_payload_key_expr(loan(p)).is_null(),
             "a dropped payload has a key"
         );
-        let rc = wz_ext_message_payload_decode(loan(p), core::ptr::null(), 0);
+        let rc = zext_message_payload_decode(loan(p), core::ptr::null(), 0);
         assert_eq!(
             rc, Z_ERR_NULL,
             "message_payload_decode: a dropped payload answered {rc}"

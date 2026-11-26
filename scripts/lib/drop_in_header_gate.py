@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
-"""R3440 (no register item) -- a drop-in header carries upstream's symbols only; wz's own are wz_ext_.
+"""R3440 (no register item) -- a drop-in header carries upstream's symbols only; wz's own are zext_.
 
 Drop-in and extension are separate namespaces: a drop-in header declares only what its upstream
-header declares, and a door wz has and upstream does not is `wz_ext_*`, declared in `wz_ext.h`.
+header declares, and a door wz has and upstream does not is `zext_*`, declared in `wz_ext.h`.
 Then "drop-in" is a claim a compiler can check: a program that includes the drop-in header and
 not `wz_ext.h` is portable to the upstream library, and one that needs `wz_ext.h` says so.
 
@@ -24,7 +24,7 @@ UPSTREAM  the functions zenoh-pico's own header declares at the pinned source
           needed, and the header is read under three configurations whose union is the set:
           upstream's defaults, every switch on, and every switch on but single-threaded (the
           thread switch changes which functions exist rather than adding some).
-EXT       the functions `crates/wz-capi-core/include/wz_ext.h` declares, every one `wz_ext_*`.
+EXT       the functions `crates/wz-capi-core/include/wz_ext.h` declares, every one `zext_*`.
 
 A switch whose header needs a library the pinned source does not carry is left off in the
 all-on configuration, and is listed with the reason. The list is held too: a switch on it that
@@ -32,7 +32,7 @@ now preprocesses is a finding, since leaving it off would hide its functions fro
 
 zenoh-c has no drop-in header of wz's: a program includes upstream's `zenoh.h`, and
 `crates/wz-capi-c/include/wz_capi_c.h` declares only wz's own doors (`capi_c_wz_door_header.py`).
-Those doors keep the `wz_capi_c_` prefix they were published with; moving them to `wz_ext_`
+Those doors keep the `wz_capi_c_` prefix they were published with; moving them to `zext_`
 is a change a consumer must be told of first.
 
 An empty set on either side fails: a reader that stopped matching reads as a header with
@@ -55,7 +55,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PICO = ROOT / "vendor" / "zenoh-pico"
 DROP_IN = ROOT / "crates" / "wz-capi-pico" / "include" / "wz_capi_pico.h"
 EXT = ROOT / "crates" / "wz-capi-core" / "include" / "wz_ext.h"
-EXT_PREFIX = "wz_ext_"
+EXT_PREFIX = "zext_"
 # The switches whose headers need what the pinned source does not carry.
 NEEDS_A_LIBRARY = {
     "Z_FEATURE_LINK_TLS": "link/transport/tls_stream.h includes Mbed TLS (mbedtls/ssl.h)",
@@ -218,7 +218,7 @@ def cmd_selftest() -> int:
             '#if Z_FEATURE_LINK_TLS == 1\n#include "mbedtls/ssl.h"\n#endif\n', encoding="utf-8")
         drop_in = root / "drop.h"
         ext = root / "wz_ext.h"
-        ext.write_text("int wz_ext_watch(void);\n", encoding="utf-8")
+        ext.write_text("int zext_watch(void);\n", encoding="utf-8")
 
         def findings(drop_text: str) -> list[str]:
             drop_in.write_text(drop_text, encoding="utf-8")
@@ -230,13 +230,13 @@ def cmd_selftest() -> int:
         expect("a function upstream does not declare is a finding",
                any("z_invented" in f for f in findings(clean + "int z_invented(void);\n")))
         expect("a wz door in the drop-in header is pointed to wz_ext.h",
-               any("belongs in wz_ext.h" in f for f in findings(clean + "int wz_ext_watch(void);\n")))
+               any("belongs in wz_ext.h" in f for f in findings(clean + "int zext_watch(void);\n")))
         expect("an empty drop-in header is a finding, not a pass",
                any("declares no function" in f for f in findings("/* nothing */\n")))
         ext.write_text("int wz_watch(void);\n", encoding="utf-8")
         expect("a function in wz_ext.h without the prefix is a finding",
-               any("not wz_ext_*" in f for f in findings(clean)))
-        ext.write_text("int wz_ext_watch(void);\n", encoding="utf-8")
+               any("not zext_*" in f for f in findings(clean)))
+        ext.write_text("int zext_watch(void);\n", encoding="utf-8")
         (pico / "include" / "zenoh-pico.h").write_text(
             (pico / "include" / "zenoh-pico.h").read_text().replace('#include "mbedtls/ssl.h"\n', ""),
             encoding="utf-8")

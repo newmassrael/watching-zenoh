@@ -3,8 +3,8 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
  * End-to-end protection across a session: the publishing side protects each payload with
- * a sender (wz_ext_e2e_sender_*), the subscribing side judges each frame it is handed with
- * a receiver (wz_ext_e2e_receiver_*), both under one profile.
+ * a sender (zext_e2e_sender_*), the subscribing side judges each frame it is handed with
+ * a receiver (zext_e2e_receiver_*), both under one profile.
  *
  * The profile is SYNTHETIC, made up for this example and unlike any deployed one: a two-byte
  * counter, a two-byte identifier XORed with a constant, a two-byte length of the whole
@@ -52,7 +52,7 @@ static const char *const VALUES = "{\"ident\": 4660}";
 #define FRAMES 6
 #define PAYLOAD "reading-0042"
 
-static wz_ext_owned_e2e_receiver_t receiver;
+static zext_owned_e2e_receiver_t receiver;
 static z_clock_t started;
 
 static struct {
@@ -76,9 +76,9 @@ static void on_sample(z_loaned_sample_t *sample, void *arg) {
         z_slice_drop(z_slice_move(&slice));
         return;
     }
-    wz_ext_e2e_verdict_t verdict = {.struct_size = sizeof(wz_ext_e2e_verdict_t)};
+    zext_e2e_verdict_t verdict = {.struct_size = sizeof(zext_e2e_verdict_t)};
     uint64_t now_ms = (uint64_t)z_clock_elapsed_ms(&started);
-    z_result_t rc = wz_ext_e2e_receiver_judge(wz_ext_e2e_receiver_loan(&receiver), 0, data, len, now_ms, &verdict);
+    z_result_t rc = zext_e2e_receiver_judge(zext_e2e_receiver_loan(&receiver), 0, data, len, now_ms, &verdict);
     z_mutex_lock(z_mutex_loan_mut(&judged.lock));
     if (rc == Z_OK && judged.count < FRAMES) {
         int n = judged.count++;
@@ -119,37 +119,37 @@ int main(void) {
     z_mutex_init(&judged.lock);
     ex_counter_init(&probes);
 
-    wz_ext_owned_e2e_sender_t sender;
+    zext_owned_e2e_sender_t sender;
     z_owned_string_t refusal;
-    z_result_t rc = wz_ext_e2e_sender_new(&sender, PROFILE, VALUES, NULL, &refusal);
-    show_refusal("wz_ext_e2e_sender_new", &refusal);
+    z_result_t rc = zext_e2e_sender_new(&sender, PROFILE, VALUES, NULL, &refusal);
+    show_refusal("zext_e2e_sender_new", &refusal);
     CHECK(rc == Z_OK, "the sender was refused (rc %d)", (int)rc);
-    rc = wz_ext_e2e_receiver_new(&receiver, PROFILE, VALUES, NULL, &refusal);
-    show_refusal("wz_ext_e2e_receiver_new", &refusal);
+    rc = zext_e2e_receiver_new(&receiver, PROFILE, VALUES, NULL, &refusal);
+    show_refusal("zext_e2e_receiver_new", &refusal);
     CHECK(rc == Z_OK, "the receiver was refused (rc %d)", (int)rc);
-    if (!wz_ext_internal_e2e_sender_check(&sender) || !wz_ext_internal_e2e_receiver_check(&receiver)) {
+    if (!zext_internal_e2e_sender_check(&sender) || !zext_internal_e2e_receiver_check(&receiver)) {
         return ex_finish();
     }
-    const wz_ext_loaned_e2e_sender_t *tx = wz_ext_e2e_sender_loan(&sender);
+    const zext_loaned_e2e_sender_t *tx = zext_e2e_sender_loan(&sender);
 
     /* The refused cases, before anything is sent. A buffer too small takes nothing and
      * consumes no counter; a stream the receiver does not have is no verdict. */
     size_t frame_size = 0;
-    CHECK(wz_ext_e2e_sender_frame_size(tx, strlen(PAYLOAD), &frame_size) == Z_OK, "frame_size");
+    CHECK(zext_e2e_sender_frame_size(tx, strlen(PAYLOAD), &frame_size) == Z_OK, "frame_size");
     CHECK(frame_size == strlen(PAYLOAD) + 8, "a frame of this profile is the payload and 8 header bytes, not %zu",
           frame_size);
     uint8_t small[4] = {0};
     size_t written = 0;
-    rc = wz_ext_e2e_sender_protect(tx, 0, (const uint8_t *)PAYLOAD, strlen(PAYLOAD), small, sizeof small,
+    rc = zext_e2e_sender_protect(tx, 0, (const uint8_t *)PAYLOAD, strlen(PAYLOAD), small, sizeof small,
                                    &written, NULL, &refusal);
-    show_refusal("wz_ext_e2e_sender_protect", &refusal);
+    show_refusal("zext_e2e_sender_protect", &refusal);
     CHECK(rc == _Z_ERR_OVERFLOW, "a buffer too small for the frame was not refused with _Z_ERR_OVERFLOW (rc %d)",
           (int)rc);
     uint64_t next = 99;
-    CHECK(wz_ext_e2e_sender_next(tx, 0, &next) && next == 0, "a refused protect consumed a counter (next %llu)",
+    CHECK(zext_e2e_sender_next(tx, 0, &next) && next == 0, "a refused protect consumed a counter (next %llu)",
           (unsigned long long)next);
-    wz_ext_e2e_verdict_t none = {.struct_size = sizeof(wz_ext_e2e_verdict_t)};
-    CHECK(wz_ext_e2e_receiver_judge(wz_ext_e2e_receiver_loan(&receiver), 5, small, sizeof small, 0, &none) ==
+    zext_e2e_verdict_t none = {.struct_size = sizeof(zext_e2e_verdict_t)};
+    CHECK(zext_e2e_receiver_judge(zext_e2e_receiver_loan(&receiver), 5, small, sizeof small, 0, &none) ==
               Z_EINVAL,
           "a stream the receiver does not have was judged");
 
@@ -182,9 +182,9 @@ int main(void) {
             uint8_t frame[64];
             uint64_t counter = 0;
             for (int n = 0; n < 4; n++) {
-                rc = wz_ext_e2e_sender_protect(tx, 0, (const uint8_t *)PAYLOAD, strlen(PAYLOAD), frame,
+                rc = zext_e2e_sender_protect(tx, 0, (const uint8_t *)PAYLOAD, strlen(PAYLOAD), frame,
                                                sizeof frame, &written, &counter, &refusal);
-                show_refusal("wz_ext_e2e_sender_protect", &refusal);
+                show_refusal("zext_e2e_sender_protect", &refusal);
                 CHECK(rc == Z_OK && counter == (uint64_t)n, "frame %d: rc %d, counter %llu", n, (int)rc,
                       (unsigned long long)counter);
                 if (n == 3) {
@@ -201,8 +201,8 @@ int main(void) {
             for (int i = 0; i < 500 && judged_count() < FRAMES; i++) z_sleep_ms(10);
             CHECK(judged_count() == FRAMES, "%d of %d frames were judged", judged_count(), FRAMES);
 
-            static const uint8_t expected[FRAMES] = {WZ_EXT_E2E_FIRST,     WZ_EXT_E2E_OK, WZ_EXT_E2E_OK,
-                                                     WZ_EXT_E2E_INTEGRITY, WZ_EXT_E2E_OK, WZ_EXT_E2E_REPEATED};
+            static const uint8_t expected[FRAMES] = {ZEXT_E2E_FIRST,     ZEXT_E2E_OK, ZEXT_E2E_OK,
+                                                     ZEXT_E2E_INTEGRITY, ZEXT_E2E_OK, ZEXT_E2E_REPEATED};
             z_mutex_lock(z_mutex_loan_mut(&judged.lock));
             for (int n = 0; n < judged.count; n++) {
                 CHECK(judged.status[n] == expected[n], "frame %d: status %u, expected %u", n,
@@ -210,7 +210,7 @@ int main(void) {
                 CHECK(judged.payload_ok[n], "frame %d: the payload view is not the payload", n);
             }
             if (judged.count > 3) {
-                CHECK(judged.failed[3] & WZ_EXT_E2E_FAILED_CRC, "the flipped frame did not fail its CRC (failed %u)",
+                CHECK(judged.failed[3] & ZEXT_E2E_FAILED_CRC, "the flipped frame did not fail its CRC (failed %u)",
                       (unsigned)judged.failed[3]);
             }
             z_mutex_unlock(z_mutex_loan_mut(&judged.lock));
@@ -220,8 +220,8 @@ int main(void) {
         ex_close(&listener);
     }
 
-    wz_ext_e2e_sender_drop(wz_ext_e2e_sender_move(&sender));
-    wz_ext_e2e_receiver_drop(wz_ext_e2e_receiver_move(&receiver));
+    zext_e2e_sender_drop(zext_e2e_sender_move(&sender));
+    zext_e2e_receiver_drop(zext_e2e_receiver_move(&receiver));
     ex_counter_drop(&probes);
     z_mutex_drop(z_mutex_move(&judged.lock));
     return ex_finish();

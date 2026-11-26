@@ -11,7 +11,7 @@
 //! A run starts two processes of one build, a subscriber that listens and a publisher that dials,
 //! and the publisher's link goes through a relay in this test process. The relay is what injects
 //! the fault, so the control and the subject see the same fault from the same code: a transport
-//! the program supplies (`wz_ext_transport_*`) is a wz door that zenoh-pico does not have, and a
+//! the program supplies (`zext_transport_*`) is a wz door that zenoh-pico does not have, and a
 //! fault injected there could not be given to the control at all.
 //!
 //! The control runs first in every test. A control that fails says the harness (or this host)

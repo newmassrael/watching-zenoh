@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! A listening session opened on a time base the program supplies (`wz_ext_time_base_*`) gives
+//! A listening session opened on a time base the program supplies (`zext_time_base_*`) gives
 //! an inbound link the accept timeout the build states of the PROGRAM's time, not of the wall
 //! clock: a client that connects and says nothing is kept for as long as the program's time stands
 //! still, however long the wall clock runs, and dropped once the program's time passes the bound
@@ -21,9 +21,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use wz_capi_pico::time_base::{
-    wz_ext_config_time_base, wz_ext_owned_time_base_t, wz_ext_time_base_advanced,
-    wz_ext_time_base_drop, wz_ext_time_base_loan, wz_ext_time_base_move, wz_ext_time_base_new,
-    wz_ext_time_base_t,
+    zext_config_time_base, zext_owned_time_base_t, zext_time_base_advanced, zext_time_base_drop,
+    zext_time_base_loan, zext_time_base_move, zext_time_base_new, zext_time_base_t,
 };
 use wz_capi_pico::{
     z_close, z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
@@ -64,15 +63,15 @@ fn a_silent_link_is_dropped_when_the_programs_time_passes_the_accept_timeout() {
     // The program's time, standing still until the test moves it; it outlives the session.
     let time = Box::new(AtomicU64::new(0));
 
-    let mut time_base: wz_ext_owned_time_base_t = unsafe { std::mem::zeroed() };
+    let mut time_base: zext_owned_time_base_t = unsafe { std::mem::zeroed() };
     let mut session: z_owned_session_t = unsafe { std::mem::zeroed() };
     unsafe {
-        let calls = wz_ext_time_base_t {
+        let calls = zext_time_base_t {
             context: &*time as *const AtomicU64 as *mut c_void,
             now_ns: Some(now_ns),
             drop: None,
         };
-        assert_eq!(wz_ext_time_base_new(&mut time_base, &calls), Z_OK);
+        assert_eq!(zext_time_base_new(&mut time_base, &calls), Z_OK);
         let mut config: z_owned_config_t = std::mem::zeroed();
         assert_eq!(z_config_default(&mut config), Z_OK);
         assert_eq!(
@@ -84,9 +83,9 @@ fn a_silent_link_is_dropped_when_the_programs_time_passes_the_accept_timeout() {
             Z_OK
         );
         assert_eq!(
-            wz_ext_config_time_base(
+            zext_config_time_base(
                 z_config_loan_mut(&mut config),
-                wz_ext_time_base_loan(&time_base)
+                zext_time_base_loan(&time_base)
             ),
             Z_OK
         );
@@ -114,7 +113,7 @@ fn a_silent_link_is_dropped_when_the_programs_time_passes_the_accept_timeout() {
         Ordering::SeqCst,
     );
     assert_eq!(
-        unsafe { wz_ext_time_base_advanced(wz_ext_time_base_loan(&time_base)) },
+        unsafe { zext_time_base_advanced(zext_time_base_loan(&time_base)) },
         Z_OK
     );
     let until = Instant::now() + Duration::from_secs(5);
@@ -133,7 +132,7 @@ fn a_silent_link_is_dropped_when_the_programs_time_passes_the_accept_timeout() {
     unsafe {
         z_close(z_session_loan_mut(&mut session), std::ptr::null());
         z_session_drop(z_session_move(&mut session));
-        wz_ext_time_base_drop(wz_ext_time_base_move(&mut time_base));
+        zext_time_base_drop(zext_time_base_move(&mut time_base));
     }
     drop(time);
 }

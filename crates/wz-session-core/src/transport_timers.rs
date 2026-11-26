@@ -15,7 +15,9 @@
 //! step: a step whose input only moves them later (a receipt, a frame sent) reads none. What can
 //! bring one earlier (a duty armed, a handshake deadline that stood and no longer does, a stamp
 //! changed through its door, a lease adopted) is what the timers compare at every step, and a
-//! change there has them read the deadlines again at once.
+//! change there has them read the deadlines again at once. The wait a loop asks for and the
+//! check it hands the time to keep one reading: the loop's question answers the first instant
+//! as last read, which is never later than the deadline itself.
 //!
 //! [`TransportTimers::next_due_ms`]: crate::transport_timers::TransportTimers::next_due_ms
 //! [`TransportTimers::fire_due`]: crate::transport_timers::TransportTimers::fire_due
@@ -39,7 +41,7 @@ pub struct TransportTimers {
     /// The first instant at which the lease's or the keep-alive's check can fall due, as the
     /// timers last read the link's deadlines: none runs before it while what they were read under
     /// holds. A deadline that moved later since is found when this instant comes. 0 until the
-    /// first read and after a check, so the step after reads them again.
+    /// first read and after a check that judged one, so the step after reads them again.
     link_due_ms: u64,
     /// What the link's deadlines were last read under; `None` before the first read.
     read_under: Option<ReadUnder>,
@@ -102,6 +104,12 @@ impl TransportTimers {
     /// keep-alive's and the application layer's. `None` when none is armed. A state the timers
     /// see for the first time has its handshake deadline armed from the end of the millisecond
     /// `now_ms` names.
+    ///
+    /// Outside a handshake the lease's and the keep-alive's are the first of them as the timers
+    /// last read it, at a check ([`Self::fire_due`]) or at a wait that found no reading to hold,
+    /// while what it was read under holds: a receipt or a write since moved them only later,
+    /// which the check finds when its instant comes, so a step between reads no stamp and no
+    /// clock for them. A wait that reads them anew keeps that reading for the check.
     pub fn next_due_ms<R: SessionRuntime, T: TimeSource>(
         &mut self,
         engine: &SessionEngine<R, T>,
@@ -112,19 +120,59 @@ impl TransportTimers {
             .handshake
             .poll(engine.get_current_state(), now_ms)
             .map(|(deadline_ms, _event)| deadline_ms);
+        let link_ms = match self.link_due_held(actions, handshake.is_some()) {
+            Some(held_ms) => held_ms,
+            None => self.read_link_due(actions, handshake.is_some()),
+        };
+        let link = (link_ms != u64::MAX).then_some(link_ms);
+        [handshake, link, actions.app_wake_deadline_ms()]
+            .into_iter()
+            .flatten()
+            .min()
+    }
+
+    /// The first instant at which the lease's or the keep-alive's check can fall due, as the
+    /// timers last read it, `u64::MAX` for neither armed, while that reading holds: no handshake
+    /// deadline stands, no check judged one since, and what it was read under is unchanged.
+    /// `None` where they are to be read anew.
+    fn link_due_held<R: SessionRuntime, T: TimeSource>(
+        &self,
+        actions: &SessionLinkActions<R, T>,
+        handshake: bool,
+    ) -> Option<u64> {
+        if handshake || self.link_due_ms == 0 {
+            return None;
+        }
+        self.read_under?
+            .holds_under(ReadUnder::of(actions, false))
+            .then_some(self.link_due_ms)
+    }
+
+    /// The first instant at which the lease's or the keep-alive's check can fall due, read now,
+    /// `u64::MAX` for neither armed. Outside a handshake the reading is held as a check's is, so
+    /// a receipt after it is found by the check at its instant and not by the next wait; under
+    /// one it is not held, since the check there leaves the lease out.
+    fn read_link_due<R: SessionRuntime, T: TimeSource>(
+        &mut self,
+        actions: &SessionLinkActions<R, T>,
+        handshake: bool,
+    ) -> u64 {
+        // Read before the deadlines, so the reading held sees every write the count names.
+        let under = (!handshake).then(|| ReadUnder::of(actions, false));
         #[cfg(feature = "transport-keepalive")]
         let keepalive = keepalive_wake_deadline(actions);
         #[cfg(not(feature = "transport-keepalive"))]
         let keepalive: Option<u64> = None;
-        [
-            handshake,
-            lease_wake_deadline(actions),
-            keepalive,
-            actions.app_wake_deadline_ms(),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
+        let due_ms = lease_wake_deadline(actions)
+            .into_iter()
+            .chain(keepalive)
+            .min()
+            .unwrap_or(u64::MAX);
+        if let Some(under) = under {
+            self.read_under = Some(under);
+            self.link_due_ms = due_ms;
+        }
+        due_ms
     }
 
     /// Give the session the time `now_ms` and raise what has fallen due by it: the handshake

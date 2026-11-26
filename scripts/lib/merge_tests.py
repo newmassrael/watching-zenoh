@@ -34,7 +34,7 @@ A file is NOT merged when it must be its own process or cannot be a module:
   * it sets or removes an environment variable or changes the working directory
     (`PROCESS_WRITE`): every other file of a shared executable would run under what it set, as
     the key log of a TLS test set by `SSLKEYLOGFILE` collected every neighbour's sessions;
-  * it calls into a registry the process owns (`PROCESS_REGISTRY`: the `wz_ext_*` clock, event
+  * it calls into a registry the process owns (`PROCESS_REGISTRY`: the `zext_*` clock, event
     log, supervisor, sampler and snapshot of the C ABI library), or says of itself that it needs
     "a process of its own" (`PROCESS_OWN`): a neighbour in the same process would read its state;
   * it starts or reads the mbedtls channel library (`PROCESS_TLS_LIBRARY`: it names
@@ -108,11 +108,11 @@ IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 PROCESS_WRITE = re.compile(r"\benv::(set_var|remove_var)\s*\(|\bset_current_dir\s*\(")
 # A call into a registry the PROCESS owns, which one executable per file kept apart: the observation
 # plane's clock source, event log, supervisor, resource sampler and snapshot are statics of the C
-# ABI library (`wz_ext_*` doors of `wz-capi-pico`), so two files that read or set them in one
+# ABI library (`zext_*` doors of `wz-capi-pico`), so two files that read or set them in one
 # executable read each other's state. Measured 2026-11-06: exactly the seven files that had been
 # kept by hand call them, and no other file of the C ABI crates does. The object pools
-# (`wz_ext_object_pool_*`) are the process's too: a neighbour's objects would be taken from them.
-PROCESS_REGISTRY = re.compile(r"\bwz_ext_(?:clock|event|supervision|snapshot|resource|object_pool)_\w+")
+# (`zext_object_pool_*`) are the process's too: a neighbour's objects would be taken from them.
+PROCESS_REGISTRY = re.compile(r"\bzext_(?:clock|event|supervision|snapshot|resource|object_pool)_\w+")
 # The mbedtls channel library (`wz-tls-mbedtls`) is started ONCE per process on one arena, and its
 # key store, arena peak and error state are statics of that process: a file that names the channel
 # or includes the crate's shared test helper starts it (or reads what it measured), and two such
@@ -310,7 +310,7 @@ def classify(
         elif re.search(r"(?m)^(pub )?fn main\s*\(", text):
             stay.append((name, "has its own fn main"))
         elif PROCESS_REGISTRY.search(text):
-            stay.append((name, "reads or sets a registry the process owns (`wz_ext_*` clock, event "
+            stay.append((name, "reads or sets a registry the process owns (`zext_*` clock, event "
                                "log, supervisor, sampler, snapshot), which every file of a shared "
                                "executable would share"))
         elif PROCESS_TLS_LIBRARY.search(text):
@@ -629,11 +629,11 @@ def selftest() -> int:
             "9bad": "#[test] fn t() {}\n",
             "envset": '#[test] fn t() { std::env::set_var("SSLKEYLOGFILE", "x"); }\n',
             "envread": '#[test] fn t() { let _ = std::env::var("HOME"); }\n',
-            "registry": "#[test] fn t() { unsafe { wz_ext_event_emit(0); } }\n",
+            "registry": "#[test] fn t() { unsafe { zext_event_emit(0); } }\n",
             "ownproc": "//! One test, in a process of its own, because the log is the process's.\n"
                        "#[test] fn t() {}\n",
             "tlslib": "use wz_tls_mbedtls::channel::start;\n#[test] fn t() {}\n",
-            "prose": "//! The doors wz_ext are described in the book.\n#[test] fn t() {}\n",
+            "prose": "//! The doors zext are described in the book.\n#[test] fn t() {}\n",
             "lwipup": "#[test] fn t() { let r = run_acceptor_e2e(C, E, || {}); }\n",
             "lwipgate": "#[test] fn t() { let (_g, link) = wz_link_lwip::lwip_test_link(); }\n",
         }.items():

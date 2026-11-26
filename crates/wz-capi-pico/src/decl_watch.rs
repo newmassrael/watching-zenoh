@@ -1,24 +1,24 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! `wz_ext_decl_watch_declare` and `wz_ext_decl_watch_drop`: what the peers of a session declare
+//! `zext_decl_watch_declare` and `zext_decl_watch_drop`: what the peers of a session declare
 //! and retract, told to a C program (the declaration watch).
 //!
-//! A door wz has and zenoh-pico does not, so each is `wz_ext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
 //! extension namespace, apart from the drop-in headers). It is in a build with either of the
 //! capabilities `remote-declaration-watch` and `declarations-synced-event`, both off by default:
 //!
 //! * every build with the door tells a watch each subscriber, queryable or liveliness token a
-//!   peer declares (`WZ_EXT_DECL_DECLARED`, with the id the peer declared it under and its key
-//!   expression) and each one it retracts (`WZ_EXT_DECL_UNDECLARED`, with the id; the wire names
+//!   peer declares (`ZEXT_DECL_DECLARED`, with the id the peer declared it under and its key
+//!   expression) and each one it retracts (`ZEXT_DECL_UNDECLARED`, with the id; the wire names
 //!   no key);
 //! * with `remote-declaration-watch` each event names the peer, as the zenoh id its link's
 //!   handshake gave (`zid` and `zid_len`); without it `zid_len` is 0, the peer unknown;
 //! * with `declarations-synced-event` a watch is told once per establishment of a link that the
-//!   peer has sent everything it held when the link came up (`WZ_EXT_DECL_SYNCED`); without it
+//!   peer has sent everything it held when the link came up (`ZEXT_DECL_SYNCED`); without it
 //!   that event is never told;
 //! * a watch whose events the library had no room to hold is told how many it lost
-//!   (`WZ_EXT_DECL_LOST`, the count in `id`) ahead of its next event.
+//!   (`ZEXT_DECL_LOST`, the count in `id`) ahead of its next event.
 //!
 //! What a watch hears, and what it does not, is the port's ([`wz_capi_port::decl_watch`]): of
 //! subscribers and queryables, what each peer holds when the watch is declared, told first as
@@ -32,7 +32,7 @@
 //! under a lock of the library, so it may call into the session; the event and the key it points
 //! to are valid only for the call. `drop(context)` runs once, after the last call: when the watch
 //! is dropped, or when the session is closed if that comes first. A program may free what the
-//! callback reads once `wz_ext_decl_watch_drop` returns, as after an undeclare of pico's own
+//! callback reads once `zext_decl_watch_drop` returns, as after an undeclare of pico's own
 //! entities; dropped from inside the callback, the drop runs when the callback returns.
 
 use core::ffi::{c_char, c_void};
@@ -51,29 +51,29 @@ use crate::result::{
 use crate::session::{engine_held, session_handle, z_loaned_session_t, EngineHold};
 
 /// The peer declared an entity.
-pub const WZ_EXT_DECL_DECLARED: u8 = 0;
+pub const ZEXT_DECL_DECLARED: u8 = 0;
 /// The peer retracted an entity it had declared.
-pub const WZ_EXT_DECL_UNDECLARED: u8 = 1;
+pub const ZEXT_DECL_UNDECLARED: u8 = 1;
 /// The peer has sent every declaration it held when its link came up.
-pub const WZ_EXT_DECL_SYNCED: u8 = 2;
+pub const ZEXT_DECL_SYNCED: u8 = 2;
 /// The library had no room to hold events the watch was owed: `id` counts those lost.
-pub const WZ_EXT_DECL_LOST: u8 = 3;
+pub const ZEXT_DECL_LOST: u8 = 3;
 
 /// A watch of the peers' subscribers.
-pub const WZ_EXT_DECL_SUBSCRIBER: u8 = 0;
+pub const ZEXT_DECL_SUBSCRIBER: u8 = 0;
 /// A watch of the peers' queryables.
-pub const WZ_EXT_DECL_QUERYABLE: u8 = 1;
+pub const ZEXT_DECL_QUERYABLE: u8 = 1;
 /// A watch of the peers' liveliness tokens.
-pub const WZ_EXT_DECL_TOKEN: u8 = 2;
+pub const ZEXT_DECL_TOKEN: u8 = 2;
 
 /// One event of a declaration watch, as the callback reads it. 48 bytes on a 64-bit target, 40 on
 /// a 32-bit one; the reserved bytes are zero.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
-pub struct wz_ext_decl_event_t {
-    /// `WZ_EXT_DECL_DECLARED`, `_UNDECLARED`, `_SYNCED` or `_LOST`.
+pub struct zext_decl_event_t {
+    /// `ZEXT_DECL_DECLARED`, `_UNDECLARED`, `_SYNCED` or `_LOST`.
     pub kind: u8,
-    /// The kind of entity the watch was declared for: `WZ_EXT_DECL_SUBSCRIBER`, `_QUERYABLE` or
+    /// The kind of entity the watch was declared for: `ZEXT_DECL_SUBSCRIBER`, `_QUERYABLE` or
     /// `_TOKEN`.
     pub entity: u8,
     /// How many bytes of `zid` name the peer; 0 when the peer is not known (a build without
@@ -84,9 +84,9 @@ pub struct wz_ext_decl_event_t {
     /// Zero.
     pub reserved2: u32,
     /// The id the peer declared the entity under, which its undeclaration names again; 0 for
-    /// `WZ_EXT_DECL_SYNCED`; how many events were lost for `WZ_EXT_DECL_LOST`.
+    /// `ZEXT_DECL_SYNCED`; how many events were lost for `ZEXT_DECL_LOST`.
     pub id: u64,
-    /// The key expression of a `WZ_EXT_DECL_DECLARED`, not NUL-terminated and valid only for the
+    /// The key expression of a `ZEXT_DECL_DECLARED`, not NUL-terminated and valid only for the
     /// call; null for the other kinds.
     pub keyexpr: *const c_char,
     /// The length of `keyexpr` in bytes; 0 when it is null.
@@ -96,17 +96,17 @@ pub struct wz_ext_decl_event_t {
 }
 
 /// What a watch tells: called with the program's `context` and the event.
-pub type wz_ext_decl_watch_fn =
-    unsafe extern "C" fn(context: *mut c_void, event: *const wz_ext_decl_event_t);
+pub type zext_decl_watch_fn =
+    unsafe extern "C" fn(context: *mut c_void, event: *const zext_decl_event_t);
 
 /// What runs once when a watch lets go of the program's `context`.
-pub type wz_ext_decl_watch_drop_fn = unsafe extern "C" fn(context: *mut c_void);
+pub type zext_decl_watch_drop_fn = unsafe extern "C" fn(context: *mut c_void);
 
 /// An owned declaration watch: `_val` is null when it holds none. Dropping it with
-/// `wz_ext_decl_watch_drop` stops the watch. The field is the program's to read, as the header
+/// `zext_decl_watch_drop` stops the watch. The field is the program's to read, as the header
 /// declares it, and the library's alone to write.
 #[repr(C)]
-pub struct wz_ext_owned_decl_watch_t {
+pub struct zext_owned_decl_watch_t {
     pub _val: *mut c_void,
 }
 
@@ -114,9 +114,9 @@ pub struct wz_ext_owned_decl_watch_t {
 /// and called there by the raw callback the engine holds ([`watch_sink_at`]). The engine calls it
 /// where the session dispatches what its links receive, and lets it go after its last call, which
 /// runs the program's `drop(context)` once.
-type WatchClosure = CClosure<Option<wz_ext_decl_watch_fn>>;
+type WatchClosure = CClosure<Option<zext_decl_watch_fn>>;
 
-/// Behind a [`wz_ext_owned_decl_watch_t`]: the engine the watch is declared on and its id there,
+/// Behind a [`zext_owned_decl_watch_t`]: the engine the watch is declared on and its id there,
 /// which the watch's drop retracts. It lies in the watch's place, a place of the session's own for
 /// the kind (`crate::object_slot::Kind::DeclWatch`).
 pub(crate) struct WatchState {
@@ -138,21 +138,21 @@ pub(crate) type WatchPlace = Answering<WatchState, WatchKept>;
 /// The plane an entity code names, or `None` for a code that is none of the three.
 fn plane_of(entity: u8) -> Option<DeclPlane> {
     match entity {
-        WZ_EXT_DECL_SUBSCRIBER => Some(DeclPlane::Subscribers),
-        WZ_EXT_DECL_QUERYABLE => Some(DeclPlane::Queryables),
-        WZ_EXT_DECL_TOKEN => Some(DeclPlane::Tokens),
+        ZEXT_DECL_SUBSCRIBER => Some(DeclPlane::Subscribers),
+        ZEXT_DECL_QUERYABLE => Some(DeclPlane::Queryables),
+        ZEXT_DECL_TOKEN => Some(DeclPlane::Tokens),
         _ => None,
     }
 }
 
 /// The record the callback is handed for `event`, on a watch of `entity`. Its key points into
 /// `event`, so it is valid for as long as the event is borrowed.
-fn record_of(entity: u8, event: &DeclWatchEvent<'_>) -> wz_ext_decl_event_t {
+fn record_of(entity: u8, event: &DeclWatchEvent<'_>) -> zext_decl_event_t {
     let kind = match event {
-        DeclWatchEvent::Declared { .. } => WZ_EXT_DECL_DECLARED,
-        DeclWatchEvent::Undeclared { .. } => WZ_EXT_DECL_UNDECLARED,
-        DeclWatchEvent::Synced { .. } => WZ_EXT_DECL_SYNCED,
-        DeclWatchEvent::Lost { .. } => WZ_EXT_DECL_LOST,
+        DeclWatchEvent::Declared { .. } => ZEXT_DECL_DECLARED,
+        DeclWatchEvent::Undeclared { .. } => ZEXT_DECL_UNDECLARED,
+        DeclWatchEvent::Synced { .. } => ZEXT_DECL_SYNCED,
+        DeclWatchEvent::Lost { .. } => ZEXT_DECL_LOST,
     };
     let (keyexpr, keyexpr_len) = match event.keyexpr() {
         Some(key) => (key.as_ptr().cast::<c_char>(), key.len()),
@@ -162,7 +162,7 @@ fn record_of(entity: u8, event: &DeclWatchEvent<'_>) -> wz_ext_decl_event_t {
         Some(zid) => (zid.to_padded(), zid.as_slice().len() as u8),
         None => ([0u8; ZID_MAX], 0),
     };
-    wz_ext_decl_event_t {
+    zext_decl_event_t {
         kind,
         entity,
         zid_len,
@@ -191,13 +191,13 @@ fn tell(closure: &WatchClosure, entity: u8, event: &DeclWatchEvent<'_>) {
 }
 
 /// Watch what the peers of `session` declare and retract of the kind `entity` names
-/// (`WZ_EXT_DECL_SUBSCRIBER`, `_QUERYABLE` or `_TOKEN`), telling each event to `call` with
+/// (`ZEXT_DECL_SUBSCRIBER`, `_QUERYABLE` or `_TOKEN`), telling each event to `call` with
 /// `context`, and write the watch to `watch`.
 ///
 /// The library takes `context` on every path: on a refusal `drop(context)` runs (when `drop` is
 /// not null) before this returns, and `watch` is left null. `Z_ERR_NULL` for a null `watch`,
 /// `call` or session; `Z_ERR_INVALID` for an `entity` that is none of the three;
-/// `Z_ERR_SESSION_CLOSED` for a closed session; `WZ_EXT_ERR_UNSUPPORTED` when the session's engine
+/// `Z_ERR_SESSION_CLOSED` for a closed session; `ZEXT_ERR_UNSUPPORTED` when the session's engine
 /// does not watch, or this build hears no declaration of that kind; `_Z_ERR_SYSTEM_OUT_OF_MEMORY`
 /// when the session holds as many watches as its `MAX_DECL_WATCHES` admits, or as many observers
 /// of what a peer declares as its bound allows.
@@ -207,12 +207,12 @@ fn tell(closure: &WatchClosure, entity: u8, event: &DeclWatchEvent<'_>) {
 /// `drop` are safe to call as the module doc says, with `context`, for as long as the watch holds
 /// it.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_decl_watch_declare(
+pub unsafe extern "C" fn zext_decl_watch_declare(
     session: *const z_loaned_session_t,
-    watch: *mut wz_ext_owned_decl_watch_t,
+    watch: *mut zext_owned_decl_watch_t,
     entity: u8,
-    call: Option<wz_ext_decl_watch_fn>,
-    drop: Option<wz_ext_decl_watch_drop_fn>,
+    call: Option<zext_decl_watch_fn>,
+    drop: Option<zext_decl_watch_drop_fn>,
     context: *mut c_void,
 ) -> ZResult {
     guarded(|| {
@@ -280,7 +280,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_declare(
 /// # Safety
 /// `watch` is null or a watch this library wrote.
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_decl_watch_drop(watch: *mut wz_ext_owned_decl_watch_t) {
+pub unsafe extern "C" fn zext_decl_watch_drop(watch: *mut zext_owned_decl_watch_t) {
     let _ = guarded(|| {
         if watch.is_null() {
             return Z_OK;
@@ -289,7 +289,7 @@ pub unsafe extern "C" fn wz_ext_decl_watch_drop(watch: *mut wz_ext_owned_decl_wa
         if val.is_null() {
             return Z_OK;
         }
-        // A non-null `_val` is the object `wz_ext_decl_watch_declare` placed, let go of once: the
+        // A non-null `_val` is the object `zext_decl_watch_declare` placed, let go of once: the
         // slot is null from the line above.
         let object = val.cast::<WatchState>();
         wz_capi_port::SessionEngine::undeclare_decl_watch(
@@ -346,26 +346,23 @@ mod tests {
     #[test]
     fn the_event_has_the_layout_the_header_declares() {
         use core::mem::{offset_of, size_of};
-        assert_eq!(size_of::<wz_ext_decl_event_t>(), 48);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, kind), 0);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, entity), 1);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, zid_len), 2);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, reserved2), 4);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, id), 8);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, keyexpr), 16);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, keyexpr_len), 24);
-        assert_eq!(offset_of!(wz_ext_decl_event_t, zid), 32);
-        assert_eq!(size_of::<wz_ext_owned_decl_watch_t>(), 8);
+        assert_eq!(size_of::<zext_decl_event_t>(), 48);
+        assert_eq!(offset_of!(zext_decl_event_t, kind), 0);
+        assert_eq!(offset_of!(zext_decl_event_t, entity), 1);
+        assert_eq!(offset_of!(zext_decl_event_t, zid_len), 2);
+        assert_eq!(offset_of!(zext_decl_event_t, reserved2), 4);
+        assert_eq!(offset_of!(zext_decl_event_t, id), 8);
+        assert_eq!(offset_of!(zext_decl_event_t, keyexpr), 16);
+        assert_eq!(offset_of!(zext_decl_event_t, keyexpr_len), 24);
+        assert_eq!(offset_of!(zext_decl_event_t, zid), 32);
+        assert_eq!(size_of::<zext_owned_decl_watch_t>(), 8);
     }
 
     #[test]
     fn each_entity_code_names_its_plane_and_no_other_code_names_one() {
-        assert_eq!(
-            plane_of(WZ_EXT_DECL_SUBSCRIBER),
-            Some(DeclPlane::Subscribers)
-        );
-        assert_eq!(plane_of(WZ_EXT_DECL_QUERYABLE), Some(DeclPlane::Queryables));
-        assert_eq!(plane_of(WZ_EXT_DECL_TOKEN), Some(DeclPlane::Tokens));
+        assert_eq!(plane_of(ZEXT_DECL_SUBSCRIBER), Some(DeclPlane::Subscribers));
+        assert_eq!(plane_of(ZEXT_DECL_QUERYABLE), Some(DeclPlane::Queryables));
+        assert_eq!(plane_of(ZEXT_DECL_TOKEN), Some(DeclPlane::Tokens));
         assert_eq!(plane_of(3), None);
         assert_eq!(plane_of(u8::MAX), None);
     }
@@ -374,15 +371,15 @@ mod tests {
     fn a_declaration_is_told_with_its_key_and_its_peer() {
         let key = "demo/watch/sub";
         let record = record_of(
-            WZ_EXT_DECL_QUERYABLE,
+            ZEXT_DECL_QUERYABLE,
             &DeclWatchEvent::Declared {
                 id: 41,
                 keyexpr: key,
                 peer: Some(&PEER),
             },
         );
-        assert_eq!(record.kind, WZ_EXT_DECL_DECLARED);
-        assert_eq!(record.entity, WZ_EXT_DECL_QUERYABLE);
+        assert_eq!(record.kind, ZEXT_DECL_DECLARED);
+        assert_eq!(record.entity, ZEXT_DECL_QUERYABLE);
         assert_eq!(record.id, 41);
         assert_eq!(record.keyexpr, key.as_ptr().cast::<c_char>());
         assert_eq!(record.keyexpr_len, key.len());
@@ -395,10 +392,10 @@ mod tests {
     #[test]
     fn an_undeclaration_and_a_sync_name_no_key_and_an_unknown_peer_has_no_bytes() {
         let undeclared = record_of(
-            WZ_EXT_DECL_SUBSCRIBER,
+            ZEXT_DECL_SUBSCRIBER,
             &DeclWatchEvent::Undeclared { id: 7, peer: None },
         );
-        assert_eq!(undeclared.kind, WZ_EXT_DECL_UNDECLARED);
+        assert_eq!(undeclared.kind, ZEXT_DECL_UNDECLARED);
         assert_eq!(undeclared.id, 7);
         assert!(undeclared.keyexpr.is_null());
         assert_eq!(undeclared.keyexpr_len, 0);
@@ -406,17 +403,17 @@ mod tests {
         assert_eq!(undeclared.zid, [0u8; ZID_MAX]);
 
         let synced = record_of(
-            WZ_EXT_DECL_TOKEN,
+            ZEXT_DECL_TOKEN,
             &DeclWatchEvent::Synced { peer: Some(&PEER) },
         );
-        assert_eq!(synced.kind, WZ_EXT_DECL_SYNCED);
-        assert_eq!(synced.entity, WZ_EXT_DECL_TOKEN);
+        assert_eq!(synced.kind, ZEXT_DECL_SYNCED);
+        assert_eq!(synced.entity, ZEXT_DECL_TOKEN);
         assert_eq!(synced.id, 0, "a sync is about no one declaration");
         assert!(synced.keyexpr.is_null());
         assert_eq!(usize::from(synced.zid_len), PEER.len());
 
         let not_a_zid = record_of(
-            WZ_EXT_DECL_TOKEN,
+            ZEXT_DECL_TOKEN,
             &DeclWatchEvent::Synced {
                 peer: Some(&[0, 0, 0]),
             },
@@ -429,9 +426,9 @@ mod tests {
 
     #[test]
     fn a_loss_is_told_with_its_count_and_no_key_or_peer() {
-        let lost = record_of(WZ_EXT_DECL_QUERYABLE, &DeclWatchEvent::Lost { count: 5 });
-        assert_eq!(lost.kind, WZ_EXT_DECL_LOST);
-        assert_eq!(lost.entity, WZ_EXT_DECL_QUERYABLE);
+        let lost = record_of(ZEXT_DECL_QUERYABLE, &DeclWatchEvent::Lost { count: 5 });
+        assert_eq!(lost.kind, ZEXT_DECL_LOST);
+        assert_eq!(lost.entity, ZEXT_DECL_QUERYABLE);
         assert_eq!(lost.id, 5, "the count of events lost");
         assert!(lost.keyexpr.is_null());
         assert_eq!(lost.keyexpr_len, 0);
@@ -448,10 +445,10 @@ mod tests {
         use core::sync::atomic::{AtomicUsize, Ordering};
         static SEEN: AtomicUsize = AtomicUsize::new(0);
         static DROPS: AtomicUsize = AtomicUsize::new(0);
-        unsafe extern "C" fn on_event(ctx: *mut c_void, event: *const wz_ext_decl_event_t) {
+        unsafe extern "C" fn on_event(ctx: *mut c_void, event: *const zext_decl_event_t) {
             if ctx as usize == 0x5a
-                && (*event).entity == WZ_EXT_DECL_QUERYABLE
-                && (*event).kind == WZ_EXT_DECL_UNDECLARED
+                && (*event).entity == ZEXT_DECL_QUERYABLE
+                && (*event).kind == ZEXT_DECL_UNDECLARED
                 && (*event).id == 3
             {
                 SEEN.fetch_add(1, Ordering::SeqCst);
@@ -471,7 +468,7 @@ mod tests {
                     Some(on_event),
                     Some(on_drop),
                 ),
-                entity: WZ_EXT_DECL_QUERYABLE,
+                entity: ZEXT_DECL_QUERYABLE,
             },
         );
         // SAFETY: `place` holds an `Answering<u8, WatchKept>` that outlives the callback, whose
@@ -497,7 +494,7 @@ mod tests {
         };
         use core::sync::atomic::{AtomicUsize, Ordering};
         static DROPS: AtomicUsize = AtomicUsize::new(0);
-        unsafe extern "C" fn on_event(_: *mut c_void, _: *const wz_ext_decl_event_t) {}
+        unsafe extern "C" fn on_event(_: *mut c_void, _: *const zext_decl_event_t) {}
         unsafe extern "C" fn on_drop(_: *mut c_void) {
             DROPS.fetch_add(1, Ordering::SeqCst);
         }
@@ -516,13 +513,13 @@ mod tests {
         };
         let places = free(&engine);
         assert!(places >= 1, "the session's limit admits a watch");
-        let declare = |watch: &mut wz_ext_owned_decl_watch_t| {
+        let declare = |watch: &mut zext_owned_decl_watch_t| {
             // SAFETY: a live session, a local watch and functions that touch no context.
             unsafe {
-                wz_ext_decl_watch_declare(
+                zext_decl_watch_declare(
                     loaned,
                     watch,
-                    WZ_EXT_DECL_SUBSCRIBER,
+                    ZEXT_DECL_SUBSCRIBER,
                     Some(on_event),
                     Some(on_drop),
                     core::ptr::null_mut(),
@@ -530,7 +527,7 @@ mod tests {
             }
         };
 
-        let mut watch = wz_ext_owned_decl_watch_t {
+        let mut watch = zext_owned_decl_watch_t {
             _val: core::ptr::null_mut(),
         };
         assert_eq!(declare(&mut watch), Z_OK);
@@ -539,7 +536,7 @@ mod tests {
         // Every place held, the next declare is refused and lets go of the program's context.
         let held: alloc::vec::Vec<Slot<u64>> =
             core::iter::from_fn(|| Slot::<u64>::take_entity(&engine, Kind::DeclWatch)).collect();
-        let mut refused = wz_ext_owned_decl_watch_t {
+        let mut refused = zext_owned_decl_watch_t {
             _val: core::ptr::null_mut(),
         };
         assert_eq!(declare(&mut refused), Z_ERR_SYSTEM_OUT_OF_MEMORY);
@@ -552,7 +549,7 @@ mod tests {
         drop(held);
 
         // SAFETY: `watch` holds the watch declared above.
-        unsafe { wz_ext_decl_watch_drop(&mut watch) };
+        unsafe { zext_decl_watch_drop(&mut watch) };
         assert!(watch._val.is_null());
         assert_eq!(
             DROPS.load(Ordering::SeqCst),
@@ -573,7 +570,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         static DROPS: AtomicUsize = AtomicUsize::new(0);
-        unsafe extern "C" fn on_event(_: *mut c_void, _: *const wz_ext_decl_event_t) {}
+        unsafe extern "C" fn on_event(_: *mut c_void, _: *const zext_decl_event_t) {}
         unsafe extern "C" fn on_drop(_: *mut c_void) {
             DROPS.fetch_add(1, Ordering::SeqCst);
         }
@@ -582,14 +579,14 @@ mod tests {
         let mut stale = 0u8;
         // SAFETY: every pointer is null or a local the call may write; no session is named.
         unsafe {
-            let mut watch = wz_ext_owned_decl_watch_t {
+            let mut watch = zext_owned_decl_watch_t {
                 _val: core::ptr::addr_of_mut!(stale).cast::<c_void>(),
             };
             assert_eq!(
-                wz_ext_decl_watch_declare(
+                zext_decl_watch_declare(
                     core::ptr::null(),
                     &mut watch,
-                    WZ_EXT_DECL_SUBSCRIBER,
+                    ZEXT_DECL_SUBSCRIBER,
                     Some(on_event),
                     Some(on_drop),
                     core::ptr::null_mut(),
@@ -601,10 +598,10 @@ mod tests {
             assert_eq!(DROPS.load(Ordering::SeqCst), 1);
 
             assert_eq!(
-                wz_ext_decl_watch_declare(
+                zext_decl_watch_declare(
                     core::ptr::null(),
                     &mut watch,
-                    WZ_EXT_DECL_SUBSCRIBER,
+                    ZEXT_DECL_SUBSCRIBER,
                     None,
                     Some(on_drop),
                     core::ptr::null_mut(),
@@ -615,10 +612,10 @@ mod tests {
             assert_eq!(DROPS.load(Ordering::SeqCst), 2);
 
             assert_eq!(
-                wz_ext_decl_watch_declare(
+                zext_decl_watch_declare(
                     core::ptr::null(),
                     core::ptr::null_mut(),
-                    WZ_EXT_DECL_SUBSCRIBER,
+                    ZEXT_DECL_SUBSCRIBER,
                     Some(on_event),
                     Some(on_drop),
                     core::ptr::null_mut(),
@@ -629,8 +626,8 @@ mod tests {
             assert_eq!(DROPS.load(Ordering::SeqCst), 3);
 
             // A null watch and an empty one are left as they are.
-            wz_ext_decl_watch_drop(core::ptr::null_mut());
-            wz_ext_decl_watch_drop(&mut watch);
+            zext_decl_watch_drop(core::ptr::null_mut());
+            zext_decl_watch_drop(&mut watch);
             assert!(watch._val.is_null());
             assert_eq!(DROPS.load(Ordering::SeqCst), 3);
         }

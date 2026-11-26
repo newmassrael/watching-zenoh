@@ -135,7 +135,7 @@ unsafe fn declare(
 #[test]
 fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
     let _program = crate::programs::admit();
-    use wz_capi_pico::config_policy::wz_ext_config_document;
+    use wz_capi_pico::config_policy::zext_config_document;
     use wz_capi_pico::matching::{
         z_matching_listener_move, z_publisher_declare_background_matching_listener,
         z_undeclare_matching_listener,
@@ -152,7 +152,7 @@ fn a_listener_past_the_sessions_table_is_out_of_memory_and_its_slot_null() {
     // SAFETY: every handle is made here and let go of once; `drops` outlives every closure.
     unsafe {
         let mut cfg = listening_config();
-        let stated = wz_ext_config_document(
+        let stated = zext_config_document(
             z_config_loan_mut(&mut cfg),
             c"{ wz: { limits: { MAX_MATCHING_LISTENERS: 1 } } }".as_ptr(),
         );

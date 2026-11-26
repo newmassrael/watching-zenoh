@@ -222,10 +222,10 @@ PROGRAM_LOCATOR = "tcp/192.0.2.1:7447"
 #: its handshake (its open fails with _Z_ERR_TRANSPORT_RX_DURATION_EXPIRED, -120):
 #: `vendor/zenoh-pico/src/transport/unicast/accept.c` @ `_z_tcp_accept(`
 NOT_APPLICABLE = {
-    ("P", "program"): "zenoh-pico has no transport a program supplies (wz_ext_transport_* is wz's own door)",
+    ("P", "program"): "zenoh-pico has no transport a program supplies (zext_transport_* is wz's own door)",
     ("P", "udp"): "a zenoh-pico peer accepts streams only, so a udp/ listener answers no dialling peer "
                   "(its open fails with -120, the handshake's receive timeout)",
-    ("X", "program"): "a library of the pico API has no transport a program supplies (wz_ext_transport_* is "
+    ("X", "program"): "a library of the pico API has no transport a program supplies (zext_transport_* is "
                       "wz's own door)",
 }
 
@@ -698,7 +698,7 @@ PROBE_ROLES = ("ping", "pong", "pub", "sub")
 
 def probe_session_limits(source: str) -> dict[str, int]:
     """The counts the probe's PROBE_LIMITS_MACRO states, by limit id, as wz_ext.h reads the value of
-    WZ_EXT_CONFIG_LIMITS_KEY (NAME=count items, comma separated). ValueError for a source that defines it
+    ZEXT_CONFIG_LIMITS_KEY (NAME=count items, comma separated). ValueError for a source that defines it
     other than once, or an item that is no NAME=count."""
     found = re.findall(rf'^#define {PROBE_LIMITS_MACRO} "([^"]*)"$', source, re.M)
     if len(found) != 1:
@@ -730,9 +730,9 @@ def probe_role_holds(source: str) -> dict[str, dict[str, int]]:
 
 def probe_states_limits(source: str) -> bool:
     """Whether the probe, built with WZ_PROBE_SWITCH, hands PROBE_LIMITS_MACRO to its config under
-    WZ_EXT_CONFIG_LIMITS_KEY before it opens its session."""
+    ZEXT_CONFIG_LIMITS_KEY before it opens its session."""
     stated = re.search(rf"^#ifdef {WZ_PROBE_SWITCH}\n(?:(?!^#endif).)*?zp_config_insert\([^;]*"
-                       rf"WZ_EXT_CONFIG_LIMITS_KEY, {PROBE_LIMITS_MACRO}\)", source, re.M | re.S)
+                       rf"ZEXT_CONFIG_LIMITS_KEY, {PROBE_LIMITS_MACRO}\)", source, re.M | re.S)
     opened = source.find("z_open(&session")
     return stated is not None and opened != -1 and stated.end() < opened
 

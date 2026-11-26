@@ -30,6 +30,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::thread::ThreadId;
 
+use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::get::{
     z_closure_reply, z_closure_reply_move, z_get, z_loaned_reply_t, z_owned_closure_reply_t,
 };
@@ -67,6 +68,16 @@ unsafe fn open_alone() -> z_owned_session_t {
             z_config_loan_mut(&mut cfg),
             Z_CONFIG_LISTEN_KEY,
             endpoint.as_ptr()
+        ),
+        Z_OK
+    );
+    // A test here holds two subscribers, or two publishers and a subscriber on their keys, past
+    // what a session opens with.
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            ZEXT_CONFIG_LIMITS_KEY,
+            c"MAX_SUBSCRIPTIONS=2,MAX_PUBLISHERS=2,MAX_DECLARED_KEYEXPRS=4".as_ptr()
         ),
         Z_OK
     );

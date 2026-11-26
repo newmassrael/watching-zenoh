@@ -19,7 +19,8 @@
 //! the same code for an object and for a payload's bytes. A session of the cooperative engine
 //! lies in its own arena, not here, and so do its entities, each in a place its open laid out
 //! under the session's own limit (`crate::object_slot::held_places`): a count of the pools' for
-//! an entity does not apply there.
+//! an entity does not apply there. Where the doors are, such a session's open takes a seat here,
+//! a slot that holds nothing, so the count of sessions bounds the sessions open at once.
 //!
 //! The pools are in every library without the tokio engine, the C library's form with no heap, and
 //! in one with it that has the doors which let a program reserve them itself (`object-pool`,
@@ -105,12 +106,15 @@ const LARGEST_MESSAGE: usize = larger(
     caps::PICO_MULTICAST_BATCH_BYTES,
 );
 
-/// The bytes of each block of the largest pool of payload blocks: the largest message and the
-/// head of the block it lies in, so every payload a session hands a program has a block that holds
-/// it, whatever the counts. A build whose longest key is longer than its largest message sizes the
-/// block by the key: a kept sample's key takes a block of its own.
-pub(crate) const LARGEST_BLOCK: usize =
-    block_of(larger(LARGEST_MESSAGE, caps::MAX_KEYEXPR_BYTES).saturating_add(crate::bytes::HEAD));
+/// The bytes of each block of the largest pool of payload blocks: the largest message, the longest
+/// key a session holds and the head of the block they lie in, so every payload a session hands a
+/// program has a block that holds it, whatever the counts, and a sample kept past its callback
+/// copies its key and the message's bytes it reads into one block (`crate::pubsub::SampleParts`).
+pub(crate) const LARGEST_BLOCK: usize = block_of(
+    LARGEST_MESSAGE
+        .saturating_add(caps::MAX_KEYEXPR_BYTES)
+        .saturating_add(crate::bytes::HEAD),
+);
 
 /// The bytes of each block of the three pools of payload blocks, in the order their counts are
 /// stated: the two the limits state, and the largest.
@@ -757,11 +761,17 @@ impl Plan {
             sizes: [0; POOLS],
         }
         .with_payloads(&objects.payload_blocks);
-        // A session of the cooperative engine lies in its own arena; its pool is the program's to
-        // reserve where the doors are.
-        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        // A session of the tokio engine lies in its slot. One of the cooperative engine lies in
+        // its own arena, and where the doors are its slot is the seat its open takes, which holds
+        // nothing (`crate::session::SessionSeat`): the sessions the program reserved bound the
+        // sessions open at once on either engine.
+        #[cfg(feature = "engine-tokio")]
         {
             plan = plan.with::<crate::session::SessionPlace>(Kind::Session, objects.sessions);
+        }
+        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
+        {
+            plan = plan.with::<crate::session::SessionSeat>(Kind::Session, objects.sessions);
         }
         // An entity of the cooperative engine lies in its own session's arena, as many as the
         // limit that session opened under admits (`crate::object_slot::held_places`): a pool of
@@ -787,7 +797,7 @@ impl Plan {
                 objects.liveliness_subscribers,
             );
         }
-        plan = plan.with::<crate::pubsub::SampleMarshal>(Kind::Sample, objects.samples);
+        plan = plan.with::<crate::pubsub::KeptSample>(Kind::Sample, objects.samples);
         #[cfg(feature = "query")]
         {
             plan = plan.with::<crate::get::ReplyMarshal>(Kind::Reply, objects.replies);
@@ -2079,17 +2089,17 @@ mod tests {
         );
     }
 
-    /// The largest payload block holds the largest message a session hands a program and its
-    /// head, whichever of the rejoining ceiling and the two batches is the largest, and the longest
-    /// key the session holds should it be longer. Turned red by a largest block sized by one of
-    /// them alone, or without the head.
+    /// The largest payload block holds the largest message a session hands a program, whichever
+    /// of the rejoining ceiling and the two batches is the largest, the longest key the session
+    /// holds beside it, and its head. Turned red by a largest block sized by the message or the
+    /// key alone, or without the head.
     #[test]
     fn the_largest_block_holds_the_largest_message_and_its_head() {
         let message = caps::PICO_FRAG_MAX_BYTES
             .max(caps::PICO_UNICAST_BATCH_BYTES)
             .max(caps::PICO_MULTICAST_BATCH_BYTES);
         assert_eq!(LARGEST_MESSAGE, message);
-        let largest = message.max(caps::MAX_KEYEXPR_BYTES);
+        let largest = message + caps::MAX_KEYEXPR_BYTES;
         assert!(LARGEST_BLOCK >= largest + crate::bytes::HEAD);
         assert!(LARGEST_BLOCK < largest + crate::bytes::HEAD + SLOT_ALIGN);
         assert_eq!(PAYLOAD_BLOCKS[PAYLOAD_CLASSES - 1], LARGEST_BLOCK);
@@ -2381,7 +2391,7 @@ mod tests {
             ..counts()
         };
         let plan = Plan::of(&objects).expect("three samples and two configs");
-        let sample_size = slot_size::<crate::pubsub::SampleMarshal>();
+        let sample_size = slot_size::<crate::pubsub::KeptSample>();
         let config_size = slot_size::<crate::config::ConfigState>();
         assert_eq!(plan.slots[Kind::Sample as usize], 3);
         assert_eq!(plan.sizes[Kind::Sample as usize], sample_size);
@@ -2646,11 +2656,17 @@ mod tests {
                  count={count:>4} unused={unused:>7} unused_exact={unused_exact:>7}"
             );
         };
-        #[cfg(any(feature = "engine-tokio", feature = "object-pool"))]
+        #[cfg(feature = "engine-tokio")]
         row(
             "session",
             Kind::Session,
             core::mem::size_of::<crate::session::SessionPlace>(),
+        );
+        #[cfg(all(not(feature = "engine-tokio"), feature = "object-pool"))]
+        row(
+            "session seat",
+            Kind::Session,
+            core::mem::size_of::<crate::session::SessionSeat>(),
         );
         row(
             "publisher",
@@ -2684,7 +2700,7 @@ mod tests {
         row(
             "sample",
             Kind::Sample,
-            core::mem::size_of::<crate::pubsub::SampleMarshal>(),
+            core::mem::size_of::<crate::pubsub::KeptSample>(),
         );
         #[cfg(feature = "query")]
         row(

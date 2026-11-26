@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
 // SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 
-//! The key ids every node of a deployment shares, from C: `wz_ext_config_key_ids` hands a config
-//! the dictionary, `wz_ext_config_key_wire_form_for` states the key-wire form of one endpoint apart
+//! The key ids every node of a deployment shares, from C: `zext_config_key_ids` hands a config
+//! the dictionary, `zext_config_key_wire_form_for` states the key-wire form of one endpoint apart
 //! from the session's, and the open hands both to the engine.
 //!
-//! Doors wz has and zenoh-pico does not, so they are `wz_ext_*`, declared in `wz_ext.h`, and part
+//! Doors wz has and zenoh-pico does not, so they are `zext_*`, declared in `wz_ext.h`, and part
 //! of the unstable surface: the `shared-key-ids` capability implies `unstable-api`. The dictionary
 //! and its rules are `wz_session_core::shared_key_ids`'s; both engines hold it, and each link of a
 //! session names its keys as the form stated for its endpoint, or the session's, says.
 //!
-//! A config handed a document (`wz_ext_config_document`, the `config-document` capability) may
+//! A config handed a document (`zext_config_document`, the `config-document` capability) may
 //! state the same in the document's `wz/key-ids`; what these doors state goes over it, as the
 //! policy doors go over the document's policies.
 //!
@@ -41,9 +41,9 @@ use crate::ffi::guarded;
 use crate::prelude::*;
 use crate::result::ZResult;
 #[cfg(not(feature = "shared-key-ids"))]
-use crate::result::WZ_EXT_ERR_UNSUPPORTED;
+use crate::result::ZEXT_ERR_UNSUPPORTED;
 #[cfg(feature = "shared-key-ids")]
-use crate::result::{WZ_EXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
+use crate::result::{ZEXT_ERR_POLICY_OFF, Z_ERR_INVALID, Z_ERR_NULL, Z_ERR_OVERFLOW, Z_OK};
 
 /// The config behind a loaned handle, or `None` for a null one.
 ///
@@ -62,7 +62,7 @@ unsafe fn state_of<'c>(config: *mut z_loaned_config_t) -> Option<&'c mut ConfigS
 /// `z_open` makes of the config holds the dictionary: it reads an id only the dictionary names,
 /// declares no key expression under one of its ids, and names a key by one as its key-wire form
 /// says. A `count` of 0 takes back a dictionary handed before. A dictionary handed here replaces
-/// the one the config's document states (`wz_ext_config_document`, `wz/key-ids`); with none
+/// the one the config's document states (`zext_config_document`, `wz/key-ids`); with none
 /// handed here, the document's stands.
 ///
 /// `Z_OK`; `Z_ERR_NULL` for a NULL config, a NULL array with entries, or a NULL key;
@@ -76,7 +76,7 @@ unsafe fn state_of<'c>(config: *mut z_loaned_config_t) -> Option<&'c mut ConfigS
 /// each point to `count` readable elements, and every non-null key to a NUL-terminated string.
 #[cfg(feature = "shared-key-ids")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_key_ids(
+pub unsafe extern "C" fn zext_config_key_ids(
     config: *mut z_loaned_config_t,
     ids: *const u16,
     keys: *const *const c_char,
@@ -123,7 +123,7 @@ pub unsafe extern "C" fn wz_ext_config_key_ids(
 /// its endpoint.
 ///
 /// `Z_OK`; `Z_ERR_NULL` for a NULL config, locator or form; `Z_ERR_INVALID` for text that is not
-/// UTF-8, an empty locator, or a form the policy has no value of; `WZ_EXT_ERR_POLICY_OFF` for a
+/// UTF-8, an empty locator, or a form the policy has no value of; `ZEXT_ERR_POLICY_OFF` for a
 /// form the build's domain of `key-wire-form` leaves out. A `shared` form needs the dictionary,
 /// which `z_open` checks: a config that states one with no dictionary is refused there with
 /// `Z_ERR_INVALID`. A refused call leaves the config as it was.
@@ -133,7 +133,7 @@ pub unsafe extern "C" fn wz_ext_config_key_ids(
 /// NUL-terminated strings.
 #[cfg(feature = "shared-key-ids")]
 #[no_mangle]
-pub unsafe extern "C" fn wz_ext_config_key_wire_form_for(
+pub unsafe extern "C" fn zext_config_key_wire_form_for(
     config: *mut z_loaned_config_t,
     locator: *const c_char,
     form: *const c_char,
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn wz_ext_config_key_wire_form_for(
             return Z_ERR_INVALID;
         };
         if !form_in_domain(form) {
-            return WZ_EXT_ERR_POLICY_OFF;
+            return ZEXT_ERR_POLICY_OFF;
         }
         state.key_ids.set_link(locator, form);
         Z_OK
@@ -166,8 +166,8 @@ pub unsafe extern "C" fn wz_ext_config_key_wire_form_for(
 }
 
 /// The key ids a session opened from `cfg` holds, or the code `z_open` answers. What the doors
-/// state (`wz_ext_config_key_ids`, `wz_ext_config_key_wire_form_for`) goes over what the
-/// `wz/key-ids` of the config's document states (`wz_ext_config_document`), the order the config's
+/// state (`zext_config_key_ids`, `zext_config_key_wire_form_for`) goes over what the
+/// `wz/key-ids` of the config's document states (`zext_config_document`), the order the config's
 /// policies are composed in: a dictionary handed through the door replaces the document's, and a
 /// form stated for an endpoint replaces the document's for that endpoint. A `count` of 0 at the
 /// door states no dictionary, so the document's stands.
@@ -192,14 +192,14 @@ pub(crate) fn admit_at_open(
 }
 
 /// See the twin with the capability. A build without it names keys as upstream does and no other
-/// way: any form but `declared` is [`WZ_EXT_ERR_UNSUPPORTED`]. A comparison the open makes in
+/// way: any form but `declared` is [`ZEXT_ERR_UNSUPPORTED`]. A comparison the open makes in
 /// line, and nothing at all where the build's domain of the policy is that one value.
 #[cfg(not(feature = "shared-key-ids"))]
 #[inline(always)]
 pub(crate) fn admit_at_open(cfg: &ConfigState, policy: &SessionPolicy) -> Result<(), ZResult> {
     let _ = cfg;
     if policy.key_wire_form() != KeyWireForm::Declared {
-        return Err(WZ_EXT_ERR_UNSUPPORTED);
+        return Err(ZEXT_ERR_UNSUPPORTED);
     }
     Ok(())
 }
@@ -254,7 +254,7 @@ mod tests {
         let ids = [40u16, 41];
         let keys = [c"lab/rig".as_ptr(), c"lab/rig/alpha".as_ptr()];
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), 2) },
+            unsafe { zext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), 2) },
             Z_OK
         );
         let held = state
@@ -267,7 +267,7 @@ mod tests {
 
         let mut config = loaned(&mut state);
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(&mut config, core::ptr::null(), core::ptr::null(), 0) },
+            unsafe { zext_config_key_ids(&mut config, core::ptr::null(), core::ptr::null(), 0) },
             Z_OK
         );
         assert!(state.key_ids.ids.is_none(), "a count of 0 takes it back");
@@ -280,12 +280,12 @@ mod tests {
         let good = [c"lab/rig".as_ptr(), c"lab/rig/alpha".as_ptr()];
         let mut config = loaned(&mut state);
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), good.as_ptr(), 2) },
+            unsafe { zext_config_key_ids(&mut config, ids.as_ptr(), good.as_ptr(), 2) },
             Z_OK
         );
         let call = |state: &mut ConfigState, ids: &[u16], keys: &[*const c_char]| {
             let mut config = loaned(state);
-            unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), ids.len()) }
+            unsafe { zext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), ids.len()) }
         };
         assert_eq!(
             call(&mut state, &[0, 41], &good),
@@ -316,11 +316,11 @@ mod tests {
         );
         let mut config = loaned(&mut state);
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), core::ptr::null(), 2) },
+            unsafe { zext_config_key_ids(&mut config, ids.as_ptr(), core::ptr::null(), 2) },
             Z_ERR_NULL
         );
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(core::ptr::null_mut(), ids.as_ptr(), good.as_ptr(), 2) },
+            unsafe { zext_config_key_ids(core::ptr::null_mut(), ids.as_ptr(), good.as_ptr(), 2) },
             Z_ERR_NULL
         );
         assert_eq!(
@@ -339,7 +339,7 @@ mod tests {
         let mut state = ConfigState::default();
         let state_for = |state: &mut ConfigState, locator: *const c_char, form: *const c_char| {
             let mut config = loaned(state);
-            unsafe { wz_ext_config_key_wire_form_for(&mut config, locator, form) }
+            unsafe { zext_config_key_wire_form_for(&mut config, locator, form) }
         };
         let endpoint = c"tcp/192.0.2.7:7447".as_ptr();
         assert_eq!(state_for(&mut state, endpoint, c"literal".as_ptr()), Z_OK);
@@ -369,11 +369,7 @@ mod tests {
         );
         assert_eq!(
             unsafe {
-                wz_ext_config_key_wire_form_for(
-                    core::ptr::null_mut(),
-                    endpoint,
-                    c"literal".as_ptr(),
-                )
+                zext_config_key_wire_form_for(core::ptr::null_mut(), endpoint, c"literal".as_ptr())
             },
             Z_ERR_NULL
         );
@@ -468,7 +464,7 @@ mod tests {
     fn hand_document(state: &mut ConfigState, text: &CStr) -> ZResult {
         let mut config = loaned(state);
         // SAFETY: a live config and a live string.
-        unsafe { crate::config_policy::wz_ext_config_document(&mut config, text.as_ptr()) }
+        unsafe { crate::config_policy::zext_config_document(&mut config, text.as_ptr()) }
     }
 
     #[cfg(feature = "config-document")]
@@ -495,7 +491,7 @@ mod tests {
         let mut config = loaned(&mut state);
         assert_eq!(
             unsafe {
-                wz_ext_config_key_wire_form_for(
+                zext_config_key_wire_form_for(
                     &mut config,
                     c"tcp/192.0.2.7:7447".as_ptr(),
                     c"declared".as_ptr(),
@@ -524,7 +520,7 @@ mod tests {
         let keys = [c"lab/other".as_ptr()];
         let mut config = loaned(&mut state);
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), 1) },
+            unsafe { zext_config_key_ids(&mut config, ids.as_ptr(), keys.as_ptr(), 1) },
             Z_OK
         );
         let at_open = admit_at_open(
@@ -543,7 +539,7 @@ mod tests {
 
         let mut config = loaned(&mut state);
         assert_eq!(
-            unsafe { wz_ext_config_key_ids(&mut config, core::ptr::null(), core::ptr::null(), 0) },
+            unsafe { zext_config_key_ids(&mut config, core::ptr::null(), core::ptr::null(), 0) },
             Z_OK
         );
         assert_eq!(

@@ -18,7 +18,7 @@
  *   1. from configs that state nothing: the build's own defaults. The library's build states
  *      them (WZ_POLICY_ENTITY_TIMESTAMP_OPT_IN when it is built, off unless stated), and the
  *      program reads the same variable to know which answer to expect;
- *   2. from configs handed the document DOC_UPSTREAM (wz_ext_config_document), which names the
+ *   2. from configs handed the document DOC_UPSTREAM (zext_config_document), which names the
  *      upstream profile: the timestamps are seen whatever the build's default;
  *   3. from configs handed DOC_OPT_IN, the upstream profile with the policy stated on in the
  *      document's wz/policies: no timestamp is seen.
@@ -140,13 +140,13 @@ static z_result_t open_session(z_owned_session_t *session, int dial, const char 
             zp_config_insert(z_config_loan_mut(&config), Z_CONFIG_LISTEN_KEY, locator);
         }
         if (document != NULL) {
-            z_result_t stated = wz_ext_config_document(z_config_loan_mut(&config), document);
+            z_result_t stated = zext_config_document(z_config_loan_mut(&config), document);
             if (stated != Z_OK) {
                 z_config_drop(z_config_move(&config));
                 return stated;
             }
             for (size_t i = 0; try_refused && i < sizeof REFUSED / sizeof REFUSED[0]; i++) {
-                z_result_t refused = wz_ext_config_document(z_config_loan_mut(&config), REFUSED[i]);
+                z_result_t refused = zext_config_document(z_config_loan_mut(&config), REFUSED[i]);
                 CHECK(refused == _Z_ERR_CONFIG_INVALID_VALUE, "the document %s was not refused (rc %d)", REFUSED[i],
                       (int)refused);
             }

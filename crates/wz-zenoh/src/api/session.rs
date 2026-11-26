@@ -12546,6 +12546,14 @@ mod tests {
             on(id, "", &format!(r#""{endpoint}""#))
         }
 
+        /// `locator` as a group endpoint on the host's loopback interface. A group left to the
+        /// default interface loops its members' datagrams back through a NIC, where a host
+        /// firewall that drops inbound multicast never delivers them; on the loopback they stay
+        /// on the host, as the crate's other group tests keep theirs.
+        fn on_the_loopback(locator: &str) -> String {
+            format!("{locator}#iface=lo")
+        }
+
         fn transports(session: &Session) -> Vec<Transport> {
             session.info().transports().wait().collect()
         }
@@ -12917,7 +12925,7 @@ mod tests {
         #[test]
         fn peers_that_listen_on_one_multicast_group_hear_each_other() {
             let group = |id: &str, endpoint: &str| on(id, &format!(r#""{endpoint}""#), "");
-            let first = group("a1b2e1", "udp/224.0.0.1:0");
+            let first = group("a1b2e1", &on_the_loopback("udp/224.0.0.1:0"));
             let locator = first
                 .info()
                 .locators()
@@ -12926,7 +12934,7 @@ mod tests {
                 .find(|locator| locator.protocol().as_str() == "udp")
                 .expect("the group is listed among the locators of the node")
                 .to_string();
-            let second = group("a1b2e2", &locator);
+            let second = group("a1b2e2", &on_the_loopback(&locator));
             let (sender, heard) = mpsc::channel();
             let sender = std::sync::Mutex::new(sender);
             let _subscriber = second
@@ -12976,7 +12984,7 @@ mod tests {
                 .wait()
                 .expect("opens")
             };
-            let first = member("a1b2f1", "udp/224.0.0.1:0");
+            let first = member("a1b2f1", &on_the_loopback("udp/224.0.0.1:0"));
             let locator = first
                 .info()
                 .locators()
@@ -12985,7 +12993,7 @@ mod tests {
                 .find(|locator| locator.protocol().as_str() == "udp")
                 .expect("the group is listed among the locators of the node")
                 .to_string();
-            let second = member("a1b2f2", &locator);
+            let second = member("a1b2f2", &on_the_loopback(&locator));
             let second_zid = serde_json::json!(second.zid().to_string());
             let root = format!("@/{}/peer", first.zid());
             let sessions_of_first = || -> Vec<serde_json::Value> {

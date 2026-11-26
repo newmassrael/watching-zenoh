@@ -486,14 +486,12 @@ where
         self.write_vle_u64(u64::from(v))
     }
 
-    // Out of line, so the narrower forms are a call to this body and not a copy of it. The trait's
-    // own writer appends a byte at a time, each a call through the buffer's trait object; the codec
-    // crate's encoder writes the same bytes on the stack, appended in one call, or refused whole.
+    // Out of line, so the narrower forms are a call to this body and not a copy of the trait's
+    // writer at each width. The trait's writer is the encoder: the whole VLE in one append, or
+    // refused whole.
     #[inline(never)]
     fn write_vle_u64(&mut self, v: u64) -> Result<(), CodecError> {
-        let mut bytes = [0u8; wz_codecs::vle::VLE_LEN];
-        let n = wz_codecs::vle::encode_zint(&mut bytes, v);
-        self.write_bytes(bytes.get(..n).unwrap_or(&bytes))
+        self.write_vle_inner(v, 64)
     }
 }
 
@@ -669,6 +667,12 @@ mod tests {
             let end = self.len + bytes.len();
             self.bytes[self.len..end].copy_from_slice(bytes);
             self.len = end;
+            Ok(())
+        }
+
+        fn write_u8(&mut self, b: u8) -> Result<(), CodecError> {
+            self.bytes[self.len] = b;
+            self.len += 1;
             Ok(())
         }
 

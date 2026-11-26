@@ -2862,6 +2862,105 @@ mod link_stamps {
         assert_eq!(step(100 + 1 + lease), [LeaseCheckOutcome::Expired]);
     }
 
+    /// The due a step is told is the one the timers hold, read again only where what it was read
+    /// under changed: a stamp changed through its door is answered at once; a receipt, which
+    /// moves the lease only later, leaves the held deadline answered, early and never late, until
+    /// the check at it reads the later one; and after that check a lease cut short through its
+    /// door, which counts no move, leaves the due the check read. The CONTROL is timers that read
+    /// the lease now: they answer the earlier wake. Turned red by a wait that keeps its deadline
+    /// across a door's move (the earlier expiry missed), by one that reads the stamps at every
+    /// call (the receipt's expiry answered before the check), or by a due that reads the stamps
+    /// and the clock at every step between checks.
+    #[test]
+    fn a_step_is_told_the_due_the_timers_hold() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(900));
+        let lease = actions.adopted_lease_ms();
+        assert!(900 < 10 + 1 + lease, "CONTROL: 900 is before either expiry");
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 900),
+            Some(900 + 1 + lease),
+            "the expiry read"
+        );
+        actions.link.fact_established_at(|slot| *slot = Some(10));
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 900),
+            Some(10 + 1 + lease),
+            "a door's move is read at once"
+        );
+        actions.link.note_received_at(950);
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 901),
+            Some(10 + 1 + lease),
+            "a receipt leaves the held expiry"
+        );
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 10 + 1 + lease).is_empty(),
+            "the check at it reads the later one and judges nothing"
+        );
+        let held = Some(950 + 1 + lease);
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 10 + 1 + lease),
+            held,
+            "and the wait answers the later one"
+        );
+        actions.fact_peer_open_lease_ms(|slot| *slot = Some(0));
+        let now = crate::drive::lease_wake_deadline(&*actions);
+        assert_ne!(now, held, "CONTROL: the lease cut short wakes earlier");
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 10 + 1 + lease),
+            held,
+            "the step was told a due read anew"
+        );
+        let mut fresh = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            fresh.next_due_ms(&engine, &*actions, 10 + 1 + lease),
+            now,
+            "CONTROL: timers that read the lease now answer its earlier wake"
+        );
+    }
+
+    /// A duty armed after a check is in the next step's due, though the store that armed it counts
+    /// no move: the due a step is told is never later than the duty's own. The CONTROL is the due
+    /// before the duty is armed: none. Turned red by a due that keeps what the last check read
+    /// after a duty was armed.
+    #[test]
+    fn a_duty_armed_after_a_check_is_in_the_next_steps_due() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert!(lease_checks(&mut timers, &mut engine, &actions, 100).is_empty());
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 100),
+            None,
+            "CONTROL: nothing is armed"
+        );
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        let wake = crate::drive::lease_wake_deadline(&*actions);
+        assert!(wake.is_some(), "CONTROL: the armed lease has a wake");
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 100),
+            wake,
+            "the step kept the due read before the duty was armed"
+        );
+    }
+
     /// The first event of the peer's declarations begins their watch, which gives the lease a
     /// deadline it did not have, and counts a move; a later one moves the watch only later and
     /// counts nothing. Turned red by a first event that counts no move, or a later one that does.
@@ -3499,8 +3598,13 @@ mod unicast_transport {
     /// bytes, one a lend, and the turn between says the link is to keep it. A kept datagram read
     /// to its end has nothing left, and finding so takes no lock. Turned red by a receive that
     /// reads a kept datagram from its start again, that does not say the link is to keep it, or
-    /// that notes where it stopped under a lock.
-    #[cfg(all(feature = "rx-in-place", feature = "alloc"))]
+    /// that notes where it stopped under a lock. A build that decodes no KeepAlive takes one for a
+    /// framing error and keeps no datagram, so the test needs the codec.
+    #[cfg(all(
+        feature = "rx-in-place",
+        feature = "alloc",
+        feature = "codec-keep-alive"
+    ))]
     #[test]
     fn a_kept_datagram_is_read_on_from_where_its_receive_noted_it_stopped() {
         use super::holds_in;

@@ -2337,6 +2337,17 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         Some(id)
     }
 
+    /// Retract every declaration's count at the session's close, each row left where it lies: a
+    /// holder that copies its hold from here on takes none ([`RowHoldRefused::Released`] at the
+    /// row's address), and one that gives its own back finds no count to take it from, so a hold
+    /// kept past the close is judged by its row's word alone, with no reach of the session. The
+    /// rows are not removed: a holder past the close still reads its count where it was.
+    pub fn close_keyexpr_counts(&self) {
+        for (handle, row) in self.keyexprs.iter() {
+            row.head.count.retract(handle);
+        }
+    }
+
     /// The declaration `declared` names: its row while that row still holds its id, and the
     /// declaration the id names otherwise ([`Self::keyexpr_by_id`]), as for a holder that knows no
     /// row. Ids are minted apart from every declared one, so either way finds the same row. `None`

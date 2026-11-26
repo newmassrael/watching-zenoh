@@ -277,9 +277,11 @@ fn a_claim_on_a_full_table_is_refused_counted_and_gives_back_its_socket() {
 }
 
 /// The pump in its cell does what the heap profile's pump does: a peer's JOIN, put on
-/// the group, is delivered over the lwIP loopback and admitted into the peer table
-/// (our own beacon, echoed back, is zid-filtered), and it runs as a task of a
-/// static runtime until its budget ends it, which frees the cell.
+/// the group from the peer's own socket, is delivered over the lwIP loopback and
+/// admitted into the peer table (our own beacon, which comes back on the group, is
+/// dropped by the link), and it runs as a task of a static runtime until its budget
+/// ends it, which frees the cell. Turned red by a link that drops a datagram of
+/// another member's socket as its own.
 #[test]
 fn the_pump_in_its_cell_admits_a_peer_over_the_loopback_as_a_task() {
     static GROUPS: Groups = MulticastSlots::new();
@@ -293,14 +295,18 @@ fn the_pump_in_its_cell_admits_a_peer_over_the_loopback_as_a_task() {
     let runtime = RUNTIME.start(Frozen).expect("the runtime starts once");
     let local = CoopLocalSet::try_new(&runtime).expect("the heap has room");
 
-    // The peer's JOIN is on the group before the pump exists, so the first pass reads it.
+    // The peer's JOIN is on the group before the pump exists, so the first pass reads it. It
+    // leaves from a socket of the peer's own, as a member on another node sends: a group's link
+    // drops what came from its own socket.
     let socket = bind_session_multicast_rx_in(link, group, port, &SOCKETS).expect("bind");
+    let member: wz_link_lwip::LwipUdpSocket =
+        wz_link_lwip::test_bind::bind(link, 0).expect("bind the peer's socket");
     let peer = params(&[0x01, 0x02, 0x03, 0x04]);
     let join = encode_join(
         &peer,
         &MulticastTxConduits::new(sn::mask_from_res(peer.seq_num_res)),
     );
-    socket.send_to(group, port, &join).expect("inject the JOIN");
+    member.send_to(group, port, &join).expect("inject the JOIN");
     let hand_session = MulticastSession {
         dispatcher: MulticastDispatcher::<4>::new(MulticastConfig::new(5_000)),
         driver: LwipMulticastDriver::new(socket, group, port),

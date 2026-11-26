@@ -6,7 +6,7 @@
 
 fn main() {
     // The conformance digest of this build, read from the configuration it was built with, which
-    // `wz_ext_conformance_digest` hands out (`src/conformance.rs`).
+    // `zext_conformance_digest` hands out (`src/conformance.rs`).
     wz_conformance_build::emit("pico");
     // The core alone, without the doors of the additional features, which a library of their own
     // carries (`wz-capi-pico-ext`): set by the build of that form on this crate's own compile

@@ -7,7 +7,7 @@
 // pico C ABI (a peer that listens on the locator, or a client that dials it), puts `v` on
 // `demo/x` every 100 ms for the given seconds, and closes the session: the run ends by itself,
 // through the library's own close. Before it opens, it prints what the library says the config
-// asks of the device (`wz_ext_config_device_requires`, of the unstable surface), which the oracle
+// asks of the device (`zext_config_device_requires`, of the unstable surface), which the oracle
 // holds the traced run to; the door is a capability of its own (`device-requires`), so the oracle
 // compiles that call only against a library built with it (WZ_DRIVER_STATES_REQUIREMENT). It exits
 // 0 when every call succeeded and names the one that did not otherwise.
@@ -50,8 +50,8 @@ int main(int argc, char **argv) {
     // What the library says this config asks of the device, on the line the oracle judges the run
     // by (`device_requires <json>`), before the open consumes the config.
     z_owned_string_t requirement;
-    rc = wz_ext_config_device_requires(z_config_loan(&config), &requirement);
-    if (rc != Z_OK) return failed("wz_ext_config_device_requires", rc);
+    rc = zext_config_device_requires(z_config_loan(&config), &requirement);
+    if (rc != Z_OK) return failed("zext_config_device_requires", rc);
     printf("device_requires %.*s\n", (int)z_string_len(z_string_loan(&requirement)),
            z_string_data(z_string_loan(&requirement)));
     fflush(stdout);

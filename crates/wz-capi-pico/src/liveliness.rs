@@ -51,7 +51,6 @@ use crate::prelude::*;
 use crate::pubsub::{
     fill_subscriber_place, liveliness_sink, settle_subscriber, z_moved_closure_sample_t,
     z_owned_closure_sample_t, z_owned_subscriber_t, CClosure, SubscriberState,
-    Z_SAMPLE_KIND_DELETE, Z_SAMPLE_KIND_PUT,
 };
 use crate::refusal::{refusal_code, Door};
 use crate::result::{ZResult, Z_ERR_NULL, Z_OK};
@@ -651,11 +650,14 @@ pub unsafe extern "C" fn z_liveliness_get(
     })
 }
 
-/// The pico sample kind for a wz liveliness event.
-pub(crate) fn liveliness_kind_of(kind: LivelinessSampleKind) -> crate::pubsub::z_sample_kind_t {
+/// The kind of the sample a wz liveliness event is handed as: a token appearing is a Put, one going
+/// away a Delete, which the sample's accessor answers as pico's kind.
+pub(crate) fn liveliness_sample_kind(
+    kind: LivelinessSampleKind,
+) -> wz_session_core::sample::SampleKind {
     match kind {
-        LivelinessSampleKind::Put => Z_SAMPLE_KIND_PUT,
-        LivelinessSampleKind::Delete => Z_SAMPLE_KIND_DELETE,
+        LivelinessSampleKind::Put => wz_session_core::sample::SampleKind::Put,
+        LivelinessSampleKind::Delete => wz_session_core::sample::SampleKind::Del,
     }
 }
 
@@ -699,6 +701,7 @@ pub unsafe extern "C" fn z_liveliness_declare_background_subscriber(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pubsub::Z_SAMPLE_KIND_DELETE;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use wz_session_core::declare::liveliness_sample::LivelinessSample;
 
