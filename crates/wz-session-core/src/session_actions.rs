@@ -13394,7 +13394,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 crate::sn::to_wire(sn),
                 crate::frame_encode::frame_flags(emit.reliable),
                 emit.ext_qos,
-                &crate::tx_buf::wire_body(encode_body),
+                crate::tx_buf::wire_body(encode_body),
             );
             match written {
                 Ok(()) => {}
