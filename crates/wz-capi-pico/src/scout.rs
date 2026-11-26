@@ -122,10 +122,11 @@ mod window {
     /// each datagram into: in the library's static memory, reserved when it is built, never on a
     /// stack and never on the heap. Neither has an initial value the library's file holds: the
     /// buffer is zero and the table is made where it lies for each window that holds it
-    /// ([`wz_session_core::scouting_host::HelloTable::init_in`]), so a process that never scouts never writes their pages. A window holds both for its run and its delivery. A window
-    /// that finds them held by another thread's window waits for them, at most its own budget, on
-    /// a condition variable the holder signals when it lets go; one that finds them held by its
-    /// own thread, a scout asked from inside a scout's callback, is refused at once.
+    /// ([`wz_session_core::scouting_host::HelloTable::init_in`]), so a process that never scouts
+    /// never writes their pages. A window holds both for its run and its delivery. A window that
+    /// finds them held by another thread's window waits for them, at most its own budget, on a
+    /// condition variable the holder signals when it lets go; one that finds them held by its own
+    /// thread, a scout asked from inside a scout's callback, is refused at once.
     #[cfg(not(feature = "engine-tokio"))]
     pub(in crate::scout) mod table {
         use core::cell::UnsafeCell;
