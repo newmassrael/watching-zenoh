@@ -2164,8 +2164,8 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
 
     /// [`Self::dispatch_iteration_event`] to the `ResponseFinal`s of a frame the copying receive
     /// decoded alone, for a caller that took each of its Responses itself
-    /// ([`Self::take_response`]), in their order, before this: a `Final` then ends its get after
-    /// every reply the frame carried. Any other event is a no-op.
+    /// (`Self::take_response`, with `codec-response` and `alloc`), in their order, before this: a
+    /// `Final` then ends its get after every reply the frame carried. Any other event is a no-op.
     #[cfg(feature = "storage-profile")]
     pub fn dispatch_finals_of(&mut self, event: IterationEvent<'_, '_>) {
         #[cfg(all(feature = "alloc", feature = "codec-response-final"))]

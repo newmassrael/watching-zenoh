@@ -104,7 +104,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> EngineHandle<Coop
 
     /// Whether the engine's session is open: the engine is in its row and no close or step ended
     /// the session. Read from the row's mark, with no lock and no count of the engine
-    /// ([`ReachEngine::is_current`]).
+    /// (`ReachEngine::is_current`).
     pub fn is_open(&self) -> bool {
         self.reach.is_current()
     }

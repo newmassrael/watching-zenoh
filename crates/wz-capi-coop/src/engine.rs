@@ -1935,8 +1935,8 @@ enum ToPublish<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 unsafe impl<T> Send for Confined<T> {}
 
 /// The network stacks an engine opens its links over: those that serve sessions whose handles are
-/// counted as [`SessionLock`] counts a link's parts ([`LinkCount`]), so the form's choice of lock
-/// reaches every stack the engine is built over.
+/// counted as the engine's `SessionLock` counts a link's parts ([`LinkCount`]), so the form's
+/// choice of lock reaches every stack the engine is built over.
 pub trait CoopLinks: SessionLinks<LinkCount> {}
 
 impl<L: SessionLinks<LinkCount> + ?Sized> CoopLinks for L {}
@@ -2540,7 +2540,14 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 }
 
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+/// Named where a task runs a link, and where the told rows read a face's link (`told`), which a
+/// build whose read steps the one link itself has too.
+#[cfg(any(
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "connectivity"
+))]
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
 /// How the session of a face's link ends: with its task, or, where the read steps the one link
@@ -4887,9 +4894,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
-                    return None;
-                };
+                let wire = face.link.wire()?;
                 let peer = decl_watch::named(|| wire.actions.peer_session_zid());
                 Some((registry.tables_of(face.id)?, peer))
             })

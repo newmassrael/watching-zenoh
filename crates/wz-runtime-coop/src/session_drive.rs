@@ -1515,10 +1515,10 @@ impl<
     /// and is gone when it returns.
     ///
     /// `rx-in-place` with `reassembly`: the session stages its fragments into a
-    /// reassembly table of its OWN, allocated here once
-    /// ([`PoolStorage::try_owned`]), and the pump is `None` when the heap has no
-    /// room for it; every other build always makes one. [`Self::with_reassembly_arena`] takes one the
-    /// image placed instead. Under `session-slot` that table is never the
+    /// reassembly table of its OWN, allocated here once (`PoolStorage::try_owned` of
+    /// `reassembly_rx`, with both features), and the pump is `None` when the heap has no
+    /// room for it; every other build always makes one. [`Self::with_reassembly_arena`] takes one
+    /// the image placed instead. Under `session-slot` that table is never the
     /// pump's own heap allocation, so with `reassembly` this constructor is absent
     /// and a pump is made by `PumpSlots::claim` (which places the table in the
     /// pump's cell) or by [`Self::with_reassembly_arena`].

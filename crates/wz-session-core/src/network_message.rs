@@ -1228,7 +1228,7 @@ pub fn request_without_superseded_exts(
 }
 
 /// [`without_superseded_exts`] for a Push, for the router's multicast ingress as
-/// [`request_without_superseded_exts`] is for a Request.
+/// `request_without_superseded_exts` (with `codec-request`) is for a Request.
 #[cfg(all(feature = "alloc", feature = "codec-push"))]
 pub fn push_without_superseded_exts(
     push: &PushOwned<WireStorage>,

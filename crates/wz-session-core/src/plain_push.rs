@@ -43,11 +43,11 @@ pub struct PlainPut {
     /// The QoS byte, when the record carries the extension.
     pub qos: Option<u8>,
     /// This record names the SAME key as the record before it in its frame: the same id in the
-    /// same mapping, and either no suffix on both or the same bytes. [`read_plain_puts`] sets it
-    /// as it reads, from the record's prefix when that repeats the one before it, so the layers
-    /// that follow it (the key's composition, its match against the subscribers, a subscriber's
-    /// list of keys) need not compare the same text again for every message of a stream. `false`
-    /// for the first record of a frame and for a record read alone.
+    /// same mapping, and either no suffix on both or the same bytes. `read_plain_puts` (with
+    /// `alloc`) sets it as it reads, from the record's prefix when that repeats the one before it,
+    /// so the layers that follow it (the key's composition, its match against the subscribers, a
+    /// subscriber's list of keys) need not compare the same text again for every message of a
+    /// stream. `false` for the first record of a frame and for a record read alone.
     pub repeats_key: bool,
 }
 

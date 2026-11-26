@@ -190,6 +190,27 @@ impl<'f> EntrySink<'f> for PushExts<'f> {
 
 impl<'f> PushExts<'f> {
     /// The next entry of the body's chain, whose attachment is of the identity `attachment`.
+    /// Read only by this sink's walk, so unread in the builds that read no Push lent, as
+    /// [`PushExts`] itself is (the same condition).
+    #[cfg_attr(
+        not(all(
+            any(
+                all(
+                    feature = "alloc",
+                    any(test, not(feature = "rx-lent-control"), feature = "routing-namespace")
+                ),
+                feature = "rx-push"
+            ),
+            any(
+                test,
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            ),
+            feature = "storage-profile",
+            any(feature = "pubsub-put", feature = "pubsub-delete")
+        )),
+        allow(dead_code)
+    )]
     #[inline(always)]
     fn body_entry(&mut self, entry: &ExtEntryView<'f>, attachment: u8) {
         let eid = crate::ext_header::ext_eid(entry.header);

@@ -12406,14 +12406,15 @@ layer_c1g_cargo_test_observer() {
         cargo test -p wz-session-core "${WZ_TEST_ARGS[@]}" --features codec-init-body,codec-open-body,codec-close,session-slot --quiet || return 1
     # S9d -- the slot profile lends the control records (a Declare, an Interest, a
     # ResponseFinal) where their frame lies: the walk of every kind against the owned
-    # walk, extension refusals included (4 = what that command PRINTED), and each
+    # walk, extension refusals included (7 = what that command PRINTED; 4 until f7b1d7b58 added
+    # the three tests of the pull that hands the walk's records over one at a time), and each
     # registry that consumes one fed the owned and the lent form and held to the same
     # answer. 41 = what that PRINTED: the filter is a substring, so it takes three
     # modules: declare::lent_tests (9, the registries; 8 until 72a366964),
     # peer_tables::lent_tests (13, since 60d0d8e31) and slot_observer::lent_tests (19,
     # since bf3d317d6), all of which need this registry set. Both need the whole set of
     # registries the slot profile carries, which is why they are not part of the leg above.
-    _runci_guarded_test C1g 4 \
+    _runci_guarded_test C1g 7 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,declare-final,codec-response-final,session-slot --quiet -- record_walk_tests::control || return 1
     _runci_guarded_test C1g 41 \
         cargo test -p wz-session-core --lib --no-default-features --features alloc,no_std,session-unicast,session-unicast-open,session-unicast-accept,codec-init-body,codec-open-body,codec-close,codec-frame,codec-keep-alive,transport-keepalive,codec-push,pubsub-put,keyexpr-wildcard-single,keyexpr-wildcard-double,keyexpr-includes,codec-declare,codec-request,codec-response,codec-response-final,declare-subscriber,declare-queryable,query-queryable,liveliness-token,liveliness-subscriber,liveliness-get,session-slot --quiet -- lent_tests || return 1

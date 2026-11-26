@@ -219,11 +219,24 @@ impl RegistryRegion {
         tables: &TableRows,
         delivery: RoundDelivery,
     ) -> Result<RegionField<Registry>, LendRefused> {
-        #[cfg(any(
-            feature = "remote-declaration-watch",
-            feature = "declarations-synced-event"
+        // The watches' events wait in the session's round where a read runs beside the program's
+        // calls; a read that hands each record out as it reads it hands them out itself.
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            any(feature = "threads", feature = "listen", feature = "group")
         ))]
         let decl_watches = DeclWatches::under(limits, &delivery.round)?;
+        #[cfg(all(
+            any(
+                feature = "remote-declaration-watch",
+                feature = "declarations-synced-event"
+            ),
+            not(any(feature = "threads", feature = "listen", feature = "group"))
+        ))]
+        let decl_watches = DeclWatches::under(limits)?;
         // SAFETY: the caller's contract. Every field of the registry is written here or holds its
         // empty value already: the application's tables, the sets' table and the count of the
         // faces' writes at zero bytes, each set and the session's own gets by `write_parts`, and

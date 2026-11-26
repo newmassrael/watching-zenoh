@@ -1741,8 +1741,10 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     "wz-runtime-coop|hook|app-link,host-lock|app_link::"
     # The cooperative engine's groups over raw Ethernet (`raweth`): the joiner's choice of device,
     # a datagram framed for its entry and a frame read from a named source, and the route of a
-    # fragment a full device left (`reassembly`). The filter is the module path.
-    "wz-runtime-coop|hook|raweth,reassembly|raweth_group::"
+    # fragment a full device left (`reassembly`). The filter is the module path. The mapping's
+    # entries are keyexprs, and the tests route by a `**` entry, which only a build with the
+    # double wildcard reads as one (`keyexpr-wildcard-double`).
+    "wz-runtime-coop|hook|raweth,reassembly,keyexpr-wildcard-double|raweth_group::"
     "wz-session-core|hook|declarations-synced-event|decl_sink::"
     # The in-place receive that delivers only what it can lend (`rx-lent-only`, a selector): a
     # Push or a Response the lent form cannot carry is refused where it lies and counted, which the

@@ -1894,9 +1894,9 @@ pub trait ShareValues: SessionRuntime {
 pub struct LocalHeld;
 
 /// The heap had no room for a value a runtime keeps behind its pointer
-/// ([`ShareValues::share`], [`SessionRuntime::wrap_actions`]). The same answer from every
-/// runtime: what asked for the value refuses what it was making (an open refuses the session),
-/// and the program goes on.
+/// ([`ShareValues::share`], `SessionRuntime::wrap_actions` with `alloc` and no `session-slot`).
+/// The same answer from every runtime: what asked for the value refuses what it was making (an
+/// open refuses the session), and the program goes on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HeapRefused;
 
