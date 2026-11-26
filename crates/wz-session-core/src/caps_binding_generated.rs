@@ -958,6 +958,18 @@ pub const TX_POOL_SLOTS: LimitBinding = LimitBinding {
     wire: Wire::None,
 };
 
+/// Where [`super::REASSEMBLY_CHAINS`] is bound.
+pub const REASSEMBLY_CHAINS: LimitBinding = LimitBinding {
+    kind: LimitKind::Bound,
+    driven: Some(Driven::Remote),
+    range: None,
+    storage: Storage::Both,
+    scope: &[Scope::Session],
+    binding_heap: Some(Binding::Open),
+    binding_fixed: Some(Binding::Open),
+    wire: Wire::None,
+};
+
 /// Where [`super::SESSION_MAX_PEER_KEYEXPR_ALIASES`] is bound.
 pub const SESSION_MAX_PEER_KEYEXPR_ALIASES: LimitBinding = LimitBinding {
     kind: LimitKind::Bound,

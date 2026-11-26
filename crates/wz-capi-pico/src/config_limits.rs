@@ -265,6 +265,28 @@ mod tests {
         assert_eq!(state(Some(past.as_str())), Err(Z_ERR_CONFIG_INVALID_VALUE));
     }
 
+    /// A session's reassembly buffers are stated by `REASSEMBLY_CHAINS` as any count of what its
+    /// open reserves: none, one, and the build's value itself, which the open lays out at; a count
+    /// past the build's value is refused where the build bounds it. Turned red by a statement the
+    /// door drops, or a name the door does not find among a session's limits.
+    #[test]
+    fn a_session_states_its_reassembly_buffers_up_to_the_builds_value() {
+        use wz_session_core::caps;
+
+        for count in [0, 1, caps::REASSEMBLY_CHAINS]
+            .into_iter()
+            .filter(|count| *count <= caps::REASSEMBLY_CHAINS)
+        {
+            let text = alloc::format!("REASSEMBLY_CHAINS={count}");
+            let stated = state(Some(text.as_str())).expect("a count up to the build's is stated");
+            assert_eq!(stated.limits.reassembly_chains(), Quota::at_most(count));
+        }
+        if let Some(bound) = SessionLimits::BUILD.reassembly_chains().most() {
+            let past = alloc::format!("REASSEMBLY_CHAINS={}", bound + 1);
+            assert_eq!(state(Some(past.as_str())), Err(Z_ERR_CONFIG_INVALID_VALUE));
+        }
+    }
+
     /// A name that is no limit of a session nor a held value, any other runtime limit included,
     /// a name one letter short or long of a limit's, an item with no count and a count that is
     /// no number are refused. Turned red by a door that skips what it does not know, or a name

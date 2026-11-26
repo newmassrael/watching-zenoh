@@ -4357,6 +4357,41 @@ value = 2
 reason = "zenoh-pico encodes every message of a unicast transport into the transport's one write buffer and writes it to its peers before it takes the next (`vendor/zenoh-pico/src/transport/unicast/transport.c` @ `ztu->_common._wbuf = _z_wbuf_make(wbuf_size, false);`, `vendor/zenoh-pico/src/transport/common/tx.c` @ `static z_result_t _z_transport_tx_flush_buffer(`): one slot written into and one held by a frame a stream took in part."
 
 [[limit]]
+id = "REASSEMBLY_CHAINS"
+kconfig = "WZ_LIMIT_REASSEMBLY_CHAINS"
+kind = "bound"
+open_count = true
+driven = "remote"
+on_heap = "advisory"
+default = 3
+storage = "both"
+scope = "session"
+binding_heap = "open"
+binding_fixed = "open"
+read = "snapshot"
+# `wire` is none: a chain refused for want of a buffer drops its message, as a chain past its
+# bound does, and no byte a peer is sent changes.
+wire = "none"
+help = '''
+How many buffers, each as long as PICO_FRAG_MAX_BYTES, the links of a session
+share to rejoin fragmented messages in when its engine lends them from the
+session's memory at open. A chain holds one from its first fragment until it
+ends, and the message it rejoined keeps it until its records are handed out.
+A first fragment that finds none free is refused and counted, and its message
+is dropped, as zenoh-pico drops one whose buffer it cannot allocate. The
+default holds a chain of each reliability and the message the last of them
+rejoined; 0 rejoins no fragmented message.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration states it: zenoh bounds the bytes of a rejoined message (transport/link/rx/max_message_size) and not how many messages are rejoined at once, and the count of the buffers a session's links share is wz's own."
+
+[limit.pico_open]
+value = 2
+reason = "zenoh-pico keeps a defragmentation buffer for each reliability of each peer (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @ `_z_wbuf_t _dbuf_best_effort;`), takes it when a chain's first fragment comes (`vendor/zenoh-pico/src/transport/unicast/rx.c` @ `*dbuf = _z_wbuf_make(Z_FRAG_MAX_SIZE, false);`) and decodes the rejoined message in it. Its parity programs publish reliably, so one chain is open at a time: one buffer for that chain and one for the message it rejoined while that message's records are handed out. The bound of three holds a chain of each reliability as well."
+
+[[limit]]
 id = "SESSION_MAX_PEER_KEYEXPR_ALIASES"
 kconfig = "WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES"
 kind = "bound"

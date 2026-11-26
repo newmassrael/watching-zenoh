@@ -400,6 +400,8 @@ pub struct LentStaging<const SLOTS: usize, const CAP: usize> {
     chains: usize,
     /// The longest chain: a buffer's length, at most `CAP`.
     capacity: usize,
+    /// The chains refused a buffer ([`Self::refused`]).
+    refused: u64,
 }
 
 /// One chain's staging in a [`LentStaging`]: which buffer, and how much of it is staged.
@@ -420,6 +422,7 @@ impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
             bufs: core::array::from_fn(|_| None),
             chains: chains.min(SLOTS),
             capacity: cells.size().min(CAP),
+            refused: 0,
         }
     }
 
@@ -431,6 +434,7 @@ impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
             bufs: core::array::from_fn(|_| None),
             chains: 0,
             capacity: 0,
+            refused: 0,
         }
     }
 
@@ -439,16 +443,22 @@ impl<const SLOTS: usize, const CAP: usize> LentStaging<SLOTS, CAP> {
         self.capacity
     }
 
+    /// How many chains this staging refused a buffer to since it was made: every buffer of its
+    /// table held, its own chains at their count, or no table to claim from. The Router answers
+    /// each as pool exhaustion and drops the chain's message, so this is the count a session
+    /// reads those drops by.
+    pub const fn refused(&self) -> u64 {
+        self.refused
+    }
+
     /// How many of its chains hold a buffer now.
     fn held(&self) -> usize {
         self.bufs.iter().filter(|buf| buf.is_some()).count()
     }
-}
 
-impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStaging<SLOTS, CAP> {
-    type Chain = LentChain;
-
-    fn acquire(&mut self) -> Option<Self::Chain> {
+    /// A buffer of the table for a chain that starts, at a place no open chain holds; `None`
+    /// where the table has none free or the staging's chains are at their count.
+    fn claim(&mut self) -> Option<LentChain> {
         let cells = self.cells?;
         // One walk of the places: how many hold a buffer, and the first that does not.
         let mut held = 0usize;
@@ -470,6 +480,18 @@ impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStag
             len: 0,
             reserved: 0,
         })
+    }
+}
+
+impl<const SLOTS: usize, const CAP: usize> ChainStaging<SLOTS, CAP> for LentStaging<SLOTS, CAP> {
+    type Chain = LentChain;
+
+    fn acquire(&mut self) -> Option<Self::Chain> {
+        let chain = self.claim();
+        if chain.is_none() {
+            self.refused = self.refused.saturating_add(1);
+        }
+        chain
     }
 
     fn release(&mut self, chain: Self::Chain) {

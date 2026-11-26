@@ -53,9 +53,11 @@
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
 //!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
-//!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
-//!   each reliability a peer has a chain open in, and one for the rejoined message the round
-//!   reads where its chain lay), each buffer claimed when a chain's first fragment arrives and
+//!   table for the session, as many as its `REASSEMBLY_CHAINS` (under the build's; by default one
+//!   for each reliability a peer has a chain open in and one for the rejoined message the round
+//!   reads where its chain lay, `SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`), a
+//!   first fragment that finds none free refused and counted (`LentStaging::refused` of
+//!   `wz_session_core::chain_staging`), each buffer claimed when a chain's first fragment arrives and
 //!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
@@ -120,7 +122,6 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
-use wz_runtime_coop::reassembly_rx::SESSION_CHAIN_BUFFERS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
@@ -376,8 +377,8 @@ impl ArenaPart {
             Self::RouterLend => ("router lend", ""),
             Self::LinkRooms => ("link rooms", ""),
             Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
-            Self::ReassemblyFlags => ("reassembly flags", "PICO_FRAG_MAX_BYTES"),
-            Self::ReassemblyBuffers => ("reassembly buffers", "PICO_FRAG_MAX_BYTES"),
+            Self::ReassemblyFlags => ("reassembly flags", "REASSEMBLY_CHAINS"),
+            Self::ReassemblyBuffers => ("reassembly buffers", "REASSEMBLY_CHAINS"),
             Self::HandedLegFlags => ("handed leg flags", "HANDED_LEG_BYTES"),
             Self::HandedLegPlaces => ("handed leg places", "HANDED_LEG_BYTES"),
             Self::HandedLegs => ("handed legs", "HANDED_LEG_BYTES"),
@@ -934,6 +935,7 @@ pub enum ArenaLimit {
     MaxPendingDeclares,
     RxPoolBuffers,
     TxPoolSlots,
+    ReassemblyChains,
     /// The config's limits are not those of the region the build laid out when it was compiled
     /// ([`ArenaRegion`]): the build lays out no arena for any other.
     LimitsDifferFromBuild,
@@ -988,6 +990,7 @@ impl ArenaLimit {
             Self::MaxPendingDeclares => "MAX_PENDING_DECLARES",
             Self::RxPoolBuffers => "RX_POOL_BUFFERS",
             Self::TxPoolSlots => "TX_POOL_SLOTS",
+            Self::ReassemblyChains => "REASSEMBLY_CHAINS",
             Self::LimitsDifferFromBuild => "LIMITS_DIFFER_FROM_BUILD",
             Self::ShapeDiffersFromBuild => "SHAPE_DIFFERS_FROM_BUILD",
         }
@@ -1215,7 +1218,7 @@ pub struct TransportRows {
     link_bytes: usize,
     /// The length of each buffer a link stages a fragmented message's chain in.
     reassembly_bytes: usize,
-    /// How many such buffers, in the one table the session's links share.
+    /// How many such buffers, in the one table the session's links share (`REASSEMBLY_CHAINS`).
     reassembly_chains: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
@@ -1727,7 +1730,7 @@ impl ArenaPlan {
             tx_slots: links,
             link_bytes,
             reassembly_bytes: 0,
-            reassembly_chains: SESSION_CHAIN_BUFFERS,
+            reassembly_chains: 0,
             endpoint_rows: (shape.dials, shape.listens),
             cell_bytes: NO_CELLS,
             cells_held: HeldBits(0),
@@ -1747,6 +1750,12 @@ impl ArenaPlan {
             limits.pico_frag_max_bytes(),
             caps::PICO_FRAG_MAX_BYTES,
         );
+        // The buffers of the session's one table of chains, as a report reads them
+        // (`link_buffers`).
+        match reassembly_chains(limits) {
+            Ok(chains) => self.transport.reassembly_chains = chains,
+            Err(refused) => self.refuse(refused),
+        }
         // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
         match pooled_buffers(links, limits) {
             Ok((rx_buffers, tx_slots)) => {
@@ -2646,12 +2655,21 @@ pub const fn link_buffers(
 ) -> Result<LinkBuffers, ArenaRefused> {
     let bytes = tried!(link_batch(batch, limits));
     let (receive, transmit) = tried!(pooled_buffers(links, limits));
+    let chains = tried!(reassembly_chains(limits));
     Ok(LinkBuffers {
         receive,
         transmit,
         bytes,
-        chains: SESSION_CHAIN_BUFFERS,
+        chains,
     })
+}
+
+/// The buffers of a session's one table of chains under `limits`, which its links share: its
+/// `REASSEMBLY_CHAINS`, held under the build's value, which a session lowers and never raises, so
+/// a value over it is refused under its own name. However many links the session holds, as a
+/// chain is claimed from the table and not from a link's own buffers.
+const fn reassembly_chains(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
+    lent::<{ caps::REASSEMBLY_CHAINS }>(ArenaLimit::ReassemblyChains, limits.reassembly_chains())
 }
 
 /// The receive buffers and the outbound slots of `links` links under `limits`. A build that
@@ -4244,6 +4262,7 @@ mod tests {
             MaxPendingDeclares,
             RxPoolBuffers,
             TxPoolSlots,
+            ReassemblyChains,
             LimitsDifferFromBuild,
             ShapeDiffersFromBuild,
         ];
