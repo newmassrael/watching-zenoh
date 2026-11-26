@@ -254,7 +254,9 @@ impl<const BODY: usize> Default for AdminReplyArena<BODY> {
     }
 }
 
-#[cfg(test)]
+// The tests collect what an answer delivers into a `String` and a `Vec`, so they compile only
+// where the heap is.
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use crate::adminspace::{

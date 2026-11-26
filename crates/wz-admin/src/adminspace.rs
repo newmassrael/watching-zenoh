@@ -1352,7 +1352,7 @@ pub struct AdminLeg {
 /// among them, and re-joins a schema with `;`), so deriving from it means a leg
 /// that changes encoding cannot change what the document says about it without
 /// the two disagreeing.
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 fn leg_encoding_name(hint: &wz_session_core::sample::EncodingHint) -> String {
     wz_session_core::encoding::encoding_to_mime(hint)
 }
@@ -2622,7 +2622,7 @@ fn starts_with_chunks(query: &str, prefix: &str) -> bool {
 
 /// [`key_intersects_query`] by the general rule alone, with none of the preparation: the
 /// reference the tests hold [`PreparedQuery`]'s shortcuts to, over every pair they build.
-#[cfg(test)]
+#[cfg(all(test, feature = "alloc"))]
 fn key_intersects_query_by_rule(query: &str, key: &str) -> bool {
     wz_session_core::keyexpr_match::keyexpr_intersects(query, key)
 }
@@ -4350,7 +4350,9 @@ fn push_json_str<W: TextOut + ?Sized>(s: &str, out: &mut W) {
     wz_session_core::json::escape_into(s, out);
 }
 
-#[cfg(test)]
+// The tests build their payloads and read their answers through the heap forms (`alloc::format`,
+// the `String` helpers, the owned rows), so they compile only where the heap is.
+#[cfg(all(test, feature = "alloc"))]
 mod tests {
     use super::*;
     use alloc::format;
