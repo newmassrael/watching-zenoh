@@ -487,6 +487,35 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     pub(super) fn reaches<L: CoopLinks + 'static>(&self, _link: &DirectWire<L, C>) -> bool {
         true
     }
+
+    /// Wait for room for a blocking message of `priority` on the link of the face a publish's
+    /// leg holds alone, with that face's send place held and nothing of the session
+    /// (`SessionLinkActions::wait_for_wire_room`). A hold that reaches every face, or a place
+    /// that holds no link, waits for nothing: the send answers for itself.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(super) fn wait_for_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<wz_session_core::session_actions::WireRoom, SendWireError> {
+        match self.held.filter(|_| self.alone).and_then(|held| held.wire) {
+            Some(wire) => wire.actions.wait_for_wire_room(priority),
+            None => Ok(wz_session_core::session_actions::WireRoom::Send),
+        }
+    }
+
+    /// Wait for room for a blocking message of `priority` on the dial role's link, with its send
+    /// place held and nothing of the session (`SessionLinkActions::wait_for_wire_room`). A place
+    /// that holds no link waits for nothing: the send answers for itself.
+    #[cfg(not(any(feature = "listen", feature = "group")))]
+    pub(super) fn wait_for_room(
+        &self,
+        priority: wz_session_core::qos::Priority,
+    ) -> Result<wz_session_core::session_actions::WireRoom, SendWireError> {
+        match self.wire {
+            Some(wire) => wire.actions.wait_for_wire_room(priority),
+            None => Ok(wz_session_core::session_actions::WireRoom::Send),
+        }
+    }
 }
 
 /// What an operation holds where the dial role's face is the only face

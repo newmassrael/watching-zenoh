@@ -3841,6 +3841,19 @@ fn kinds(kind: InterestKind) -> InterestKinds {
     }
 }
 
+/// Whether a face's link session stands, as a look at the face's place found it: a session the
+/// place lends stands while it is established, and a place that holds no link holds none. A place
+/// another holder has now stands: that holder (a blocking send waiting for its link's room, among
+/// them) is no sign the session ended, and the next look reads it again.
+#[cfg(not(wz_round))]
+fn session_stands(looked: Lend<bool>) -> bool {
+    match looked {
+        Lend::Lent(established) => established,
+        Lend::Held => true,
+        Lend::Empty => false,
+    }
+}
+
 /// What one send's failure means for a publish: a link that is down skips it, anything else is
 /// a message no link could have carried.
 fn leg_outcome(result: Result<(), SendWireError>) -> Result<usize, FanoutError> {
@@ -5066,7 +5079,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         // which a pass that ended no session must not make.
         for at in 0..self.transport.links.places() {
             let ended = self.transport.links.face(at).is_some_and(|face| {
-                face.facts().is_some() && !face.link.wire().is_some_and(|wire| wire.established())
+                face.facts().is_some()
+                    && !face.link.wire().is_some_and(|wire| {
+                        session_stands(wire.try_session(|session| session.established()))
+                    })
             });
             if !ended {
                 continue;
@@ -7535,6 +7551,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // with the default's, as the send reads it.
         let congestion = meta.qos.unwrap_or(QosLevel::DEFAULT).congestion();
         let droppable = face_send::droppable(opts.reliable_bool(), congestion);
+        // A blocking publish waits for its face's room with that face's send place held and
+        // nothing of the session, as zenoh-pico's blocking put waits under its transmit lock
+        // alone: a wait under the session's lock would hold up every other face's send and the
+        // read, up to `wait_before_close`. Where no other thread reaches the session, nothing
+        // waits behind it.
+        #[cfg(not(wz_round))]
+        if !droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
+            match tx.wait_for_room(opts.priority_band()) {
+                Ok(wz_session_core::session_actions::WireRoom::Send) => {}
+                // The drop the send would have made past its wait, settled by the wait.
+                Ok(wz_session_core::session_actions::WireRoom::Expired) => return Ok(0),
+                Err(error) => return leg_outcome(Err(error)),
+            }
+        }
         let mut core = match self.live_to_publish(droppable) {
             ToPublish::Live(core) => core,
             ToPublish::Closed => return Ok(0),
@@ -11879,6 +11909,26 @@ mod up_facts_tests {
         );
         up.ended = true;
         assert!(up.standing_while(true).is_none(), "a session seen to end");
+    }
+}
+
+#[cfg(all(test, not(wz_round)))]
+mod session_stands_tests {
+    use super::{session_stands, Lend};
+
+    /// A face whose place another holder has stands, as one whose session the place lends
+    /// established does; a session no longer established, or a place with no link, does not.
+    /// Turned red by a `Lend::Held` arm that reads the held place as an ended session, which
+    /// ends a face for good while a blocking publish waits for its room under its place.
+    #[test]
+    fn a_held_place_is_no_ended_session() {
+        assert!(session_stands(Lend::Lent(true)), "CONTROL: established");
+        assert!(!session_stands(Lend::Lent(false)), "no longer established");
+        assert!(!session_stands(Lend::Empty), "no link in the place");
+        assert!(
+            session_stands(Lend::Held),
+            "a place another holder has now is no end of its session"
+        );
     }
 }
 
