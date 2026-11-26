@@ -191,13 +191,9 @@ use wz_session_core::session_init_params::{
 use wz_session_core::session_timeouts::SessionTimeouts;
 #[cfg(feature = "shared-key-ids")]
 use wz_session_core::shared_key_ids::{KeyIdsAtOpen, KeyIdsRefused, LinkKeyForms, SharedKeyIds};
-#[cfg(any(
-    feature = "threads",
-    feature = "listen",
-    feature = "group",
-    feature = "liveliness",
-    feature = "queryable"
-))]
+// The round's sample delivery reads a row through it, as do the liveliness and queryable rows'
+// deliveries in every build.
+#[cfg(any(wz_round, feature = "liveliness", feature = "queryable"))]
 use wz_session_core::sink::RowAccess;
 use wz_session_core::sink::SampleRef;
 #[cfg(wz_round)]
@@ -7593,7 +7589,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             Then::Done => outcome,
             #[cfg(feature = "listen")]
             Then::WaitForSlots { left_us, .. } => {
-                self.wait_for_slots(&put, run, waits, left_us, outcome)
+                self.wait_for_slots(&put, run, waits, left_us, outcome, tx)
             }
             // Only a fan-out whose sends wait for no slot stops at a face, which a build that
             // listens on nothing never makes.
@@ -7633,7 +7629,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// takes what it owes, written by its step or by this publish, which has every link write what
     /// it owes before it tries again, so the slot is back. The faces before were sent it already, and are not again. Past the
     /// deadline, or with no link whose room can be waited on, the put is sent as any blocking send
-    /// past its wait is.
+    /// past its wait is. Each try sends through `tx`, what the publish holds of the faces: where
+    /// a publish holds one face's send place at a time (`direct`), that face's, which stays held
+    /// across the wait as a blocking send's transmit lock does.
     #[cfg(feature = "listen")]
     fn wait_for_slots(
         &self,
@@ -7642,6 +7640,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         mut waits: OwingWaits,
         mut left_us: u64,
         mut outcome: Result<usize, FanoutError>,
+        tx: LinkTx<'_, C>,
     ) -> Result<usize, FanoutError> {
         loop {
             let waited = !waits.is_empty();
@@ -7658,8 +7657,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let now_us = core.0.now_us();
             core.0.transport.links.write_owed_now();
             let pass = run.waited(waited, now_us);
-            let (more, again) =
-                self.fan_out_in(&mut core.0, put, None, pass, core::marker::PhantomData);
+            let (more, again) = self.fan_out_in(&mut core.0, put, None, pass, tx);
             if more.is_err() {
                 outcome = more;
             }
