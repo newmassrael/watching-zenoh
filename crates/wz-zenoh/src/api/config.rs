@@ -1134,6 +1134,23 @@ mod tests {
         assert!(!error.contains("`zext`"), "{error}");
     }
 
+    /// The member's `version` and `transport` resolve as on every ABI: the version this build
+    /// reads and the system's sockets open, and a transport of the program's, which this API is
+    /// never handed, is refused by the resolution. Turned red by a resolution that drops either.
+    #[cfg(feature = "engine-tokio")]
+    #[test]
+    fn the_version_and_the_transport_resolve_as_on_every_abi() {
+        let config =
+            Config::from_json5(r#"{ zext: { version: 1, transport: "system" } }"#).unwrap();
+        assert!(config.resolve_policies().is_ok());
+        let refused = Config::from_json5(r#"{ zext: { transport: "application" } }"#).unwrap();
+        let error = refused.resolve_policies().unwrap_err().to_string();
+        assert!(
+            error.contains("`zext/transport` = `application`"),
+            "{error}"
+        );
+    }
+
     /// The names and the refusal are those of the reader every ABI shares.
     #[cfg(feature = "engine-tokio")]
     #[test]

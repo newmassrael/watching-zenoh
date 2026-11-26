@@ -2345,6 +2345,25 @@ mod tests {
             }
         }
 
+        /// The member's `version` and `transport` reach the open through the insert door as a
+        /// document's do: the version this build reads and the system's sockets open, and another
+        /// version, or a transport of the program's, which this ABI is never handed, refuse the
+        /// open. Turned red by an open that drops either member.
+        #[test]
+        fn the_version_and_the_transport_reach_the_open() {
+            // SAFETY: configs built through the C doors, each dropped here.
+            unsafe {
+                let cfg = config_of(&[("zext/version", "1"), ("zext/transport", "\"system\"")]);
+                assert!(resolved_at_open(&cfg).is_some());
+                z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                for refused in [("zext/version", "2"), ("zext/transport", "\"application\"")] {
+                    let cfg = config_of(&[refused]);
+                    assert_eq!(resolved_at_open(&cfg), None, "{refused:?}");
+                    z_config_drop((&mut { cfg } as *mut z_owned_config_t).cast());
+                }
+            }
+        }
+
         /// The member under its retired name, stated by a document or by an insert, is no
         /// statement of the member: the door stores it as zenoh's keys, and the open refuses the
         /// config by the name of the member that is read. Turned red by a door that holds the

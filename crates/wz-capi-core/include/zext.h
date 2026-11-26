@@ -77,7 +77,14 @@ z_result_t zext_config_device_requires(const z_loaned_config_t *config,
  * limits of the session by their ids, each a whole number or "unbounded";
  * a limit the build does not have, a limit only the build decides, a limit
  * of a runtime and a value the build's domain leaves out refuse the
- * document, and the session opens under the limits it states. The member's
+ * document, and the session opens under the limits it states. The
+ * member's zext/version states the version of the document's format, 1,
+ * and any other refuses the document. Its zext/transport states what the
+ * links of the session open on: "system", the system's sockets, as when it
+ * is not stated, or "application", the transport zext_config_transport
+ * hands the config; z_open refuses with _Z_ERR_CONFIG_INVALID_VALUE a
+ * config whose document states "application" and that was handed none, and
+ * a library without the app-transport capability refuses the document. Its
  * zext/owned-address states the node's own IPv4 address ("192.0.2.7"),
  * which heads the zid the session derives under zid-derivation =
  * address-ports in place of the address of a listener, so a session that

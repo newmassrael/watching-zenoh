@@ -101,6 +101,53 @@ pub const EXT_MEMBER: &str = crate::ext_member!();
 /// the member that is read.
 pub const RETIRED_MEMBER: &str = "wz";
 
+/// The version of the document's format this build reads, which `zext/version` may state; a
+/// document that states another is refused ([`Reason::UnsupportedVersion`]), so a document
+/// written for a later format is never read by the rules of this one.
+pub const DOCUMENT_VERSION: u64 = 1;
+
+/// What a document's `zext/transport` states the links of its session open on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DocumentTransport {
+    /// The system's sockets, which a session opens its links on when nothing else is stated.
+    System,
+    /// The transport the program hands the open (`zext_config_transport`), on which every link
+    /// of the session opens: the document asks for one, and the open is refused without it
+    /// ([`Reason::TransportMissing`]).
+    Application,
+}
+
+impl DocumentTransport {
+    /// Every value, as a document states it.
+    pub const IDS: [&'static str; 2] = ["system", "application"];
+
+    /// The value a document states as `id`, or `None` for an id the document has no value for.
+    pub fn from_id(id: &str) -> Option<Self> {
+        match id {
+            "system" => Some(Self::System),
+            "application" => Some(Self::Application),
+            _ => None,
+        }
+    }
+
+    /// The id a document states the value by.
+    pub const fn id(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Application => "application",
+        }
+    }
+
+    /// Why an open is refused that a document states `self` for, when the open is handed a
+    /// transport of the program's (`program_transport`) or not; `None` when it may open.
+    pub const fn refusal(self, program_transport: bool) -> Option<Reason<'static>> {
+        match (self, program_transport) {
+            (Self::Application, false) => Some(Reason::TransportMissing),
+            _ => None,
+        }
+    }
+}
+
 /// Where a policy's value in a snapshot came from: the layer that stated it last.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -634,6 +681,22 @@ pub enum Reason<'a> {
     /// The document states [`RETIRED_MEMBER`], the name the extension member had before
     /// [`EXT_MEMBER`].
     RetiredMember,
+    /// `zext/version` states a version of the document's format other than
+    /// [`DOCUMENT_VERSION`].
+    UnsupportedVersion {
+        /// The version stated.
+        version: u64,
+    },
+    /// `zext/version` holds something other than a whole number.
+    NotAVersion,
+    /// `zext/transport` names no value of [`DocumentTransport`].
+    UnknownTransport {
+        /// The value stated.
+        transport: &'a str,
+    },
+    /// The document states `zext/transport` = `application`, and the open is handed no
+    /// transport of the program's.
+    TransportMissing,
     /// A member of the document's `zext` tree is stated more than once; JSON5 allows it, and a
     /// later one may not silently win.
     MemberStatedTwice {
@@ -979,8 +1042,32 @@ impl fmt::Display for Refusal<'_> {
             Reason::UnknownMember { member } => write!(
                 f,
                 "{layer} states `{EXT_MEMBER}/{member}`, which wz does not read (it reads \
-                 `{EXT_MEMBER}/profile`, `{EXT_MEMBER}/policies`, `{EXT_MEMBER}/limits`, \
-                 `{EXT_MEMBER}/key-ids` and `{EXT_MEMBER}/owned-address`)"
+                 `{EXT_MEMBER}/version`, `{EXT_MEMBER}/profile`, `{EXT_MEMBER}/policies`, \
+                 `{EXT_MEMBER}/limits`, `{EXT_MEMBER}/key-ids`, `{EXT_MEMBER}/owned-address` \
+                 and `{EXT_MEMBER}/transport`)"
+            ),
+            Reason::UnsupportedVersion { version } => write!(
+                f,
+                "{layer} states `{EXT_MEMBER}/version` = {version}, and this build reads version \
+                 {DOCUMENT_VERSION} of the document"
+            ),
+            Reason::NotAVersion => write!(
+                f,
+                "{layer} states `{EXT_MEMBER}/version` as something other than a whole number"
+            ),
+            Reason::UnknownTransport { transport } => {
+                write!(
+                    f,
+                    "{layer} states `{EXT_MEMBER}/transport` = `{transport}`, which is no \
+                     transport of the document (its transports: "
+                )?;
+                write_ids(f, DocumentTransport::IDS)?;
+                f.write_str(")")
+            }
+            Reason::TransportMissing => write!(
+                f,
+                "{layer} states `{EXT_MEMBER}/transport` = `application`, and the open is handed \
+                 no transport of the program's to open its links on"
             ),
             Reason::RetiredMember => write!(
                 f,
@@ -1678,8 +1765,9 @@ mod from_json5 {
     #[cfg(not(feature = "shared-key-ids"))]
     use super::KeyIdsReason;
     use super::{
-        compose_document, Base, DocumentLayers, LimitStatement, Origin, Overrides, Reason, Refusal,
-        Refusals, Resolved, Stated, StatedLimits, Statement, EXT_MEMBER, RETIRED_MEMBER,
+        compose_document, Base, DocumentLayers, DocumentTransport, LimitStatement, Origin,
+        Overrides, Reason, Refusal, Refusals, Resolved, Stated, StatedLimits, Statement,
+        DOCUMENT_VERSION, EXT_MEMBER, RETIRED_MEMBER,
     };
     use crate::json5::{number_as_u64, Json5Value};
     use crate::limit_binding::{LimitValue, UNBOUNDED};
@@ -1701,6 +1789,11 @@ mod from_json5 {
         /// the document states no such member.
         #[cfg(feature = "shared-key-ids")]
         pub key_ids: crate::shared_key_ids::KeyIdsAtOpen,
+        /// The version of the document's format `zext/version` states, if it states one; a
+        /// version this build does not read is refused.
+        pub version: Option<u64>,
+        /// What `zext/transport` states the links of the session open on, if it states it.
+        pub transport: Option<DocumentTransport>,
         /// The node's own IPv4 address `zext/owned-address` states, which heads a zid
         /// `zid-derivation = address-ports` derives; `None` when the document states none.
         pub owned_address: Option<[u8; 4]>,
@@ -1709,11 +1802,15 @@ mod from_json5 {
     /// The profile and the statements the `zext` member of `tree` states, or every refusal of its
     /// shape: a `zext`, `zext/policies` or `zext/limits` that is not an object, a policy's value
     /// that is not a string, a limit's value that is neither a whole number nor `unbounded`, a
-    /// member of `zext` other than `profile`, `policies`, `limits`, `key-ids` and
-    /// `owned-address`, a member stated twice, every refusal of `zext/key-ids`
-    /// ([`super::KeyIdsReason`]), and a `zext/owned-address` that is not a string or names no
-    /// IPv4 address of a node. A document with no `zext` member states nothing. Whether the
-    /// policies, the limits, the values and the profile exist is for [`resolve_document`].
+    /// `zext/version` other than [`DOCUMENT_VERSION`](super::DOCUMENT_VERSION), a
+    /// `zext/transport` that names no [`DocumentTransport`](super::DocumentTransport), a member of
+    /// `zext` other than `version`, `profile`, `policies`, `limits`, `key-ids`, `owned-address`
+    /// and `transport`, a member stated twice, every refusal of `zext/key-ids`
+    /// ([`super::KeyIdsReason`]), a `zext/owned-address` that is not a string or names no IPv4
+    /// address of a node, and a member under [`RETIRED_MEMBER`](super::RETIRED_MEMBER). A
+    /// document with no `zext` member states nothing. Whether the policies, the limits, the
+    /// values and the profile exist, and whether the open carries the transport stated, is for
+    /// [`resolve_document`].
     // The refusals are held inline because the core has no heap to box them in.
     #[allow(clippy::result_large_err)]
     pub fn statements_from_json5(
@@ -1773,6 +1870,17 @@ mod from_json5 {
             limits: StatedLimits::Read(&read.limits),
         };
         let resolved = compose_document(table, base, document, overrides, &mut refusals);
+        // The readers of a tree open their links on the system's sockets: none is handed a
+        // transport of the program's, so a document that asks for one is refused.
+        if let Some(reason) = read
+            .transport
+            .and_then(|transport| transport.refusal(false))
+        {
+            refusals.push(Refusal {
+                layer: Origin::Document,
+                reason,
+            });
+        }
         // The reader of `zext/key-ids` cannot count the dictionary against a limit the same
         // document may state; the composed limits can.
         #[cfg(feature = "shared-key-ids")]
@@ -1795,6 +1903,8 @@ mod from_json5 {
     #[derive(Default)]
     struct Seen {
         member: bool,
+        version: bool,
+        transport: bool,
         profile: bool,
         policies: bool,
         limits: bool,
@@ -1963,6 +2073,59 @@ mod from_json5 {
                         }
                     }
                 }
+                "version" => {
+                    if seen.version {
+                        refuse(
+                            refusals,
+                            Reason::MemberStatedTwice {
+                                member: crate::ext_member!("version"),
+                            },
+                        );
+                    }
+                    seen.version = true;
+                    match version_value(value) {
+                        Some(version) if version == DOCUMENT_VERSION => {
+                            if read.version.is_none() {
+                                read.version = Some(version);
+                            }
+                        }
+                        Some(version) => refuse(refusals, Reason::UnsupportedVersion { version }),
+                        None => refuse(refusals, Reason::NotAVersion),
+                    }
+                }
+                "transport" => {
+                    if seen.transport {
+                        refuse(
+                            refusals,
+                            Reason::MemberStatedTwice {
+                                member: crate::ext_member!("transport"),
+                            },
+                        );
+                    }
+                    seen.transport = true;
+                    match value {
+                        Json5Value::String(id) => match DocumentTransport::from_id(id) {
+                            Some(transport) => {
+                                if read.transport.is_none() {
+                                    read.transport = Some(transport);
+                                }
+                            }
+                            None => refuse(
+                                refusals,
+                                Reason::UnknownTransport {
+                                    transport: id.as_str(),
+                                },
+                            ),
+                        },
+                        _ => refuse(
+                            refusals,
+                            Reason::NotAString {
+                                within: EXT_MEMBER,
+                                member: "transport",
+                            },
+                        ),
+                    }
+                }
                 "owned-address" => {
                     if seen.owned_address {
                         refuse(
@@ -2000,6 +2163,15 @@ mod from_json5 {
                 }
                 other => refuse(refusals, Reason::UnknownMember { member: other }),
             }
+        }
+    }
+
+    /// The version a document's `zext/version` states: a whole number, read as every number of
+    /// the configuration is ([`number_as_u64`]). `None` for anything else.
+    fn version_value(value: &Json5Value) -> Option<u64> {
+        match value {
+            Json5Value::Number(text) => number_as_u64(text),
+            _ => None,
         }
     }
 
@@ -3244,8 +3416,107 @@ mod tests {
             assert_eq!(refusal.reason, Reason::UnknownMember { member: "colour" });
             assert_eq!(
                 format!("{refusal}"),
-                "the document states `zext/colour`, which wz does not read (it reads `zext/profile`, \
-                 `zext/policies`, `zext/limits`, `zext/key-ids` and `zext/owned-address`)"
+                "the document states `zext/colour`, which wz does not read (it reads \
+                 `zext/version`, `zext/profile`, `zext/policies`, `zext/limits`, `zext/key-ids`, \
+                 `zext/owned-address` and `zext/transport`)"
+            );
+        }
+
+        /// `zext/version` is read when it states the version this build reads, and refused when
+        /// it states another, something other than a whole number, or twice. Turned red by a
+        /// reader that takes any version, or refuses the member as one it does not read.
+        #[test]
+        fn the_version_this_build_reads_is_taken_and_any_other_refused() {
+            assert_eq!(DOCUMENT_VERSION, 1);
+            let tree = parse(r#"{ zext: { version: 1 } }"#).unwrap();
+            assert_eq!(statements_from_json5(&tree).unwrap().version, Some(1));
+            assert!(resolve_document(SessionPolicy::defaults(), &tree).is_ok());
+            let tree = parse(r#"{ zext: { version: 2 } }"#).unwrap();
+            let refusal = only(&statements_from_json5(&tree).unwrap_err());
+            assert_eq!(refusal.reason, Reason::UnsupportedVersion { version: 2 });
+            assert_eq!(
+                format!("{refusal}"),
+                "the document states `zext/version` = 2, and this build reads version 1 of the \
+                 document"
+            );
+            for document in [
+                r#"{ zext: { version: "1" } }"#,
+                r#"{ zext: { version: 1.5 } }"#,
+                r#"{ zext: { version: -1 } }"#,
+            ] {
+                let tree = parse(document).unwrap();
+                let refusal = only(&statements_from_json5(&tree).unwrap_err());
+                assert_eq!(refusal.reason, Reason::NotAVersion, "{document}");
+            }
+            let tree = parse(r#"{ zext: { version: 1, version: 1 } }"#).unwrap();
+            let refusal = only(&statements_from_json5(&tree).unwrap_err());
+            assert_eq!(
+                refusal.reason,
+                Reason::MemberStatedTwice {
+                    member: "zext/version"
+                }
+            );
+        }
+
+        /// `zext/transport` is read as one of its two values: `system` resolves, `application` is
+        /// refused by a reader of a tree, which is handed no transport of the program's, and any
+        /// other value, or one that is no string, is refused by name. Turned red by a reader that
+        /// opens on the system's sockets a document that asks for the program's transport.
+        #[test]
+        fn the_transport_is_read_and_application_needs_a_program_transport() {
+            assert_eq!(DocumentTransport::IDS, ["system", "application"]);
+            for (id, transport) in [
+                ("system", DocumentTransport::System),
+                ("application", DocumentTransport::Application),
+            ] {
+                assert_eq!(DocumentTransport::from_id(id), Some(transport));
+                assert_eq!(transport.id(), id);
+                let tree = parse(&format!(r#"{{ zext: {{ transport: "{id}" }} }}"#)).unwrap();
+                assert_eq!(
+                    statements_from_json5(&tree).unwrap().transport,
+                    Some(transport)
+                );
+            }
+            assert_eq!(DocumentTransport::from_id("System"), None);
+            assert_eq!(DocumentTransport::System.refusal(false), None);
+            assert_eq!(DocumentTransport::System.refusal(true), None);
+            assert_eq!(DocumentTransport::Application.refusal(true), None);
+            assert_eq!(
+                DocumentTransport::Application.refusal(false),
+                Some(Reason::TransportMissing)
+            );
+            let system = parse(r#"{ zext: { transport: "system" } }"#).unwrap();
+            assert!(resolve_document(SessionPolicy::defaults(), &system).is_ok());
+            let application = parse(r#"{ zext: { transport: "application" } }"#).unwrap();
+            let refusal =
+                only(&resolve_document(SessionPolicy::defaults(), &application).unwrap_err());
+            assert_eq!(refusal.reason, Reason::TransportMissing);
+            assert_eq!(
+                format!("{refusal}"),
+                "the document states `zext/transport` = `application`, and the open is handed no \
+                 transport of the program's to open its links on"
+            );
+            let tree = parse(r#"{ zext: { transport: "carrier-pigeon" } }"#).unwrap();
+            let refusal = only(&statements_from_json5(&tree).unwrap_err());
+            assert_eq!(
+                refusal.reason,
+                Reason::UnknownTransport {
+                    transport: "carrier-pigeon"
+                }
+            );
+            assert_eq!(
+                format!("{refusal}"),
+                "the document states `zext/transport` = `carrier-pigeon`, which is no transport \
+                 of the document (its transports: `system`, `application`)"
+            );
+            let tree = parse(r#"{ zext: { transport: 1 } }"#).unwrap();
+            let refusal = only(&statements_from_json5(&tree).unwrap_err());
+            assert_eq!(
+                refusal.reason,
+                Reason::NotAString {
+                    within: "zext",
+                    member: "transport"
+                }
             );
         }
 

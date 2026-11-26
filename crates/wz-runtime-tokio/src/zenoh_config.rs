@@ -5292,14 +5292,13 @@ pub fn admit_connect_list(
 }
 
 /// Whether `path` is a part of the document's [`EXT_MEMBER`] that the open reads: the member
-/// itself, `zext/profile`, `zext/policies`, `zext/policies/<id>` where `<id>` names a policy of the
-/// build, `zext/limits`, `zext/limits/<id>` where `<id>` names a limit a stage after the build may
-/// decide, of a session or of a runtime, whose machines read it from the snapshot,
-/// `zext/owned-address`, and, in a build with the `shared-key-ids` capability, `zext/key-ids` and
-/// its two lists. Any other path below the
-/// member, a limit only the build decides and a limit whose machines still read the build's value
-/// among them, is one the open refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is
-/// no key wz honours.
+/// itself, `zext/version`, `zext/transport`, `zext/profile`, `zext/policies`, `zext/policies/<id>`
+/// where `<id>` names a policy of the build, `zext/limits`, `zext/limits/<id>` where `<id>` names a
+/// limit a stage after the build may decide, of a session or of a runtime, whose machines read it
+/// from the snapshot, `zext/owned-address`, and, in a build with the `shared-key-ids` capability,
+/// `zext/key-ids` and its two lists. Any other path below the member, a limit only the build
+/// decides and a limit whose machines still read the build's value among them, is one the open
+/// refuses by name ([`ConfigIngestError::PoliciesRefused`]), and is no key wz honours.
 pub fn ext_member_path_is_read(path: &str) -> bool {
     if names_key_ids(path) {
         return cfg!(feature = "shared-key-ids");
@@ -5314,7 +5313,10 @@ pub fn ext_member_path_is_read(path: &str) -> bool {
         return false;
     };
     match below.split_once('/') {
-        None => matches!(below, "profile" | "policies" | "limits" | "owned-address"),
+        None => matches!(
+            below,
+            "version" | "transport" | "profile" | "policies" | "limits" | "owned-address"
+        ),
         Some(("policies", policy)) => crate::policy::POLICIES
             .iter()
             .any(|entry| entry.id() == policy),
@@ -15678,6 +15680,39 @@ mod wz_member_tests {
         );
     }
 
+    /// The member's `version` and `transport` are read: the version this build reads and the
+    /// system's sockets open, and another version, a transport of the program's, which a node is
+    /// never handed, and a transport the document has no value for fail the ingest, each named.
+    /// Turned red by an ingest that drops either member, or opens on the system's sockets a
+    /// document that asks for the program's transport.
+    #[test]
+    fn the_version_and_the_transport_of_the_member_are_read() {
+        let read = ZenohNodeConfig::from_json5(
+            r#"{ mode: "peer", zext: { version: 1, transport: "system" } }"#,
+        )
+        .unwrap_or_else(|error| panic!("{error}"));
+        assert!(read.ignored.is_empty(), "{:?}", read.ignored);
+        for (document, named) in [
+            (r#"{ zext: { version: 2 } }"#, "`zext/version` = 2"),
+            (
+                r#"{ zext: { transport: "application" } }"#,
+                "`zext/transport` = `application`",
+            ),
+            (
+                r#"{ zext: { transport: "carrier-pigeon" } }"#,
+                "`zext/transport` = `carrier-pigeon`",
+            ),
+        ] {
+            let error = ZenohNodeConfig::from_json5(document).unwrap_err();
+            assert!(
+                matches!(error, ConfigIngestError::PoliciesRefused { .. }),
+                "{document}: {error:?}"
+            );
+            let text = error.to_string();
+            assert!(text.contains(named), "{text}");
+        }
+    }
+
     /// A document that states the member under its retired name fails the ingest whatever that
     /// member holds, `null` too, and the refusal names the member that is read; no path below the
     /// retired name is one the open reads. Turned red by a `take_ext_member` that leaves the
@@ -15724,6 +15759,8 @@ mod wz_member_tests {
     fn the_paths_of_the_member_the_open_reads_are_honoured_and_no_others() {
         for path in [
             "zext",
+            "zext/version",
+            "zext/transport",
             "zext/profile",
             "zext/policies",
             "zext/policies/key-set",
@@ -15750,6 +15787,8 @@ mod wz_member_tests {
             "zext/policies/no-such-policy",
             "zext/policies/key-set/open",
             "zext/profile/standard",
+            "zext/version/1",
+            "zext/transport/system",
             "zext/",
             "wzx",
             "wzx/profile",

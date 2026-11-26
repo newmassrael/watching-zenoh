@@ -71,7 +71,9 @@ use wz_session_core::policy_document::{self, Overrides, PolicySet, Profile, Stat
 #[cfg(feature = "config-document")]
 use wz_session_core::policy_document::{DocumentLayers, LimitSet, LimitStatement, StatedLimits};
 #[cfg(feature = "config-document")]
-use wz_session_core::policy_document::{EXT_MEMBER, RETIRED_MEMBER};
+use wz_session_core::policy_document::{
+    DocumentTransport, DOCUMENT_VERSION, EXT_MEMBER, RETIRED_MEMBER,
+};
 
 #[cfg(feature = "config-policy")]
 use crate::abi::z_loaned_config_t;
@@ -131,6 +133,14 @@ impl PolicyStatements {
     /// `config-document`, which brings the doors, hands one.
     #[inline(always)]
     pub(crate) fn document_owned_address(&self) -> Option<[u8; 4]> {
+        None
+    }
+
+    /// No transport: a config handed no document states none.
+    #[cfg(feature = "app-transport")]
+    pub(crate) fn document_transport(
+        &self,
+    ) -> Option<wz_session_core::policy_document::DocumentTransport> {
         None
     }
 }
@@ -246,6 +256,22 @@ impl PolicyStatements {
         None
     }
 
+    /// What the `zext/transport` of the document `zext_config_document` was handed states the
+    /// links of the session open on, which the open holds to the transport the config is handed
+    /// (`crate::session::transport_refused`); none when the config was handed no document.
+    #[cfg(all(feature = "app-transport", feature = "config-document"))]
+    pub(crate) fn document_transport(&self) -> Option<DocumentTransport> {
+        self.document.transport
+    }
+
+    /// No transport: a build without the document door is handed no document to state one.
+    #[cfg(all(feature = "app-transport", not(feature = "config-document")))]
+    pub(crate) fn document_transport(
+        &self,
+    ) -> Option<wz_session_core::policy_document::DocumentTransport> {
+        None
+    }
+
     /// `policy` is to take `value` in the API layer; an earlier statement of the policy is
     /// replaced. A policy the build does not have, or a value the policy does not have, is
     /// `Z_ERR_CONFIG_INVALID_VALUE`, the code the open's resolution gives it.
@@ -300,6 +326,9 @@ struct DocumentRows {
     profile: Option<&'static str>,
     statements: PolicySet,
     limits: LimitSet,
+    /// What `zext/transport` states, which the open judges; a session's statement, so a runtime's
+    /// document that states it is refused.
+    transport: Option<DocumentTransport>,
     #[cfg(feature = "shared-key-ids")]
     key_ids: wz_session_core::shared_key_ids::KeyIdsAtOpen,
     owned_address: Option<[u8; 4]>,
@@ -378,6 +407,8 @@ impl From<Json5Error> for Refused {
 #[cfg(feature = "config-document")]
 #[derive(Default)]
 struct Seen {
+    version: bool,
+    transport: bool,
     profile: bool,
     policies: bool,
     limits: bool,
@@ -406,6 +437,16 @@ impl core::fmt::Write for AddressText {
         self.len = end;
         Ok(())
     }
+}
+
+/// `zext/version`: a whole number, the version of the document's format this build reads
+/// ([`DOCUMENT_VERSION`]); any other is refused, as the document's resolution refuses it.
+#[cfg(feature = "config-document")]
+fn read_version(lex: &mut Lexer<'_>) -> Result<(), Refused> {
+    if !lex.at_number() || number_as_u64(lex.number()?) != Some(DOCUMENT_VERSION) {
+        return Err(Refused);
+    }
+    Ok(())
 }
 
 /// The first reading of a member: a second one is refused, as the document's resolution refuses
@@ -477,7 +518,8 @@ impl DocumentRows {
         let stated = self.profile.is_some()
             || !self.statements.is_empty()
             || !self.limits.is_empty()
-            || self.owned_address.is_some();
+            || self.owned_address.is_some()
+            || self.transport.is_some();
         #[cfg(feature = "shared-key-ids")]
         let stated =
             stated || self.key_ids != wz_session_core::shared_key_ids::KeyIdsAtOpen::default();
@@ -514,6 +556,7 @@ impl DocumentRows {
         self.profile = None;
         self.statements = PolicySet::new();
         self.limits = LimitSet::new();
+        self.transport = None;
         #[cfg(feature = "shared-key-ids")]
         {
             self.key_ids = Default::default();
@@ -571,7 +614,13 @@ impl DocumentRows {
         open_object(lex)?;
         let mut seen = Seen::default();
         while let Some(name) = next_member(lex)? {
-            if name.eq_str("profile") {
+            if name.eq_str("version") {
+                first(&mut seen.version)?;
+                read_version(lex)?;
+            } else if name.eq_str("transport") {
+                first(&mut seen.transport)?;
+                self.read_transport(lex)?;
+            } else if name.eq_str("profile") {
                 first(&mut seen.profile)?;
                 self.read_profile(lex)?;
             } else if name.eq_str("policies") {
@@ -627,6 +676,28 @@ impl DocumentRows {
         let address =
             wz_session_core::zid_derivation::parse_owned_address(text).map_err(|_| Refused)?;
         self.owned_address = Some(address);
+        Ok(())
+    }
+
+    /// `zext/transport`: `system`, or `application` in a build that carries a transport of the
+    /// program's (`app-transport`); whether the open is handed one is the open's to judge. A build
+    /// without one refuses `application` here, as no open of it could carry it.
+    fn read_transport(&mut self, lex: &mut Lexer<'_>) -> Result<(), Refused> {
+        if !lex.at_string() {
+            return Err(Refused);
+        }
+        let id = lex.string()?;
+        let transport = DocumentTransport::IDS
+            .iter()
+            .copied()
+            .find(|known| id.eq_str(known))
+            .and_then(DocumentTransport::from_id)
+            .ok_or(Refused)?;
+        #[cfg(not(feature = "app-transport"))]
+        if transport == DocumentTransport::Application {
+            return Err(Refused);
+        }
+        self.transport = Some(transport);
         Ok(())
     }
 
@@ -809,8 +880,11 @@ pub unsafe extern "C" fn zext_config_profile(
 /// neither a whole number nor `unbounded`, a member wz does not read, `zext/key-ids` in a build
 /// without the capability, a member stated twice), a member `wz`, the name the `zext` member had
 /// before, a profile or a limit the build does not have, a limit only the build decides, a limit of
-/// a runtime, a statement the build refuses and a refused part of `zext/key-ids` are refused with
-/// `Z_ERR_CONFIG_INVALID_VALUE`, and the config is left as it was.
+/// a runtime, a statement the build refuses, a refused part of `zext/key-ids`, a `zext/version`
+/// other than the one this build reads, and a `zext/transport` that is neither `system` nor, in a
+/// build with the `app-transport` capability, `application` are refused with
+/// `Z_ERR_CONFIG_INVALID_VALUE`, and the config is left as it was. A document that states
+/// `application` opens only a config handed the program's transport (`zext_config_transport`).
 ///
 /// The door walks the document once and keeps no tree: what the `zext` member states is kept as
 /// the build's own ids, and a document nested deeper than `CONFIG_DOCUMENT_DEPTH` (the outermost
@@ -1047,6 +1121,7 @@ mod tests {
         let read = policy_document::statements_from_json5(&document)
             .map_err(|_| Z_ERR_CONFIG_INVALID_VALUE)?;
         let of_a_session = read.profile.is_some()
+            || read.transport.is_some()
             || !read.statements.is_empty()
             || read.limits.iter().any(|stated| {
                 SESSION_LIMITS
@@ -1328,6 +1403,58 @@ mod tests {
         );
         assert_eq!(config.document("{ wz: null }"), Z_ERR_CONFIG_INVALID_VALUE);
         assert_eq!(entry.value_in(&config.resolved().policy), value);
+    }
+
+    /// The document door takes the version this build reads and refuses any other, and takes
+    /// `zext/transport` as `system`, or as `application` in a build that carries the program's
+    /// transport; a value of neither, one that is no string, and either member stated twice are
+    /// refused. Turned red by a door that steps over either member, or takes a version it does
+    /// not read.
+    #[cfg(feature = "config-document")]
+    #[test]
+    fn the_document_door_reads_the_version_and_the_transport() {
+        let mut config = Config::new();
+        assert_eq!(config.document("{ zext: { version: 1 } }"), Z_OK);
+        assert_eq!(config.document("{ zext: { transport: \"system\" } }"), Z_OK);
+        for refused in [
+            "{ zext: { version: 2 } }",
+            "{ zext: { version: \"1\" } }",
+            "{ zext: { version: 1, version: 1 } }",
+            "{ zext: { transport: \"carrier-pigeon\" } }",
+            "{ zext: { transport: 1 } }",
+            "{ zext: { transport: \"system\", transport: \"system\" } }",
+        ] {
+            assert_eq!(
+                config.document(refused),
+                Z_ERR_CONFIG_INVALID_VALUE,
+                "{refused}"
+            );
+        }
+        let application = config.document("{ zext: { transport: \"application\" } }");
+        if cfg!(feature = "app-transport") {
+            assert_eq!(application, Z_OK);
+        } else {
+            assert_eq!(application, Z_ERR_CONFIG_INVALID_VALUE);
+        }
+    }
+
+    /// The open is refused for a document that asks for the program's transport while the config
+    /// is handed none, and not for one that states the system's sockets. Turned red by an open
+    /// that opens such a config on the system's sockets.
+    #[cfg(all(feature = "config-document", feature = "app-transport"))]
+    #[test]
+    fn an_open_without_the_program_transport_its_document_asks_for_is_refused() {
+        let mut config = Config::new();
+        assert_eq!(config.document("{ zext: { transport: \"system\" } }"), Z_OK);
+        assert_eq!(crate::session::transport_refused(config.state()), None);
+        assert_eq!(
+            config.document("{ zext: { transport: \"application\" } }"),
+            Z_OK
+        );
+        assert_eq!(
+            crate::session::transport_refused(config.state()),
+            Some(Z_ERR_CONFIG_INVALID_VALUE)
+        );
     }
 
     /// A build without the `shared-key-ids` capability refuses a document that states key ids,
@@ -1804,6 +1931,7 @@ mod tests {
             "{ zext: { policies: {} } }",
             "{ zext: { limits: {} } }",
             "{ zext: { limits: {} }, zext: null }",
+            "{ zext: { version: 1 } }",
         ]
         .into_iter()
         .map(String::from)
@@ -1818,6 +1946,8 @@ mod tests {
             "{ wz: {} }",
             "{ wz: null }",
             "{ zext: {}, wz: { limits: {} } }",
+            "{ zext: { transport: \"system\" } }",
+            "{ zext: { version: 2 } }",
             "{ zext: { \"key-ids\": { dictionary: [ { id: 1, key: \"lab/a\" } ] } } }",
         ]
         .into_iter()

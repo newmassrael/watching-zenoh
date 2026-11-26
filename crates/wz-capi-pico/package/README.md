@@ -217,6 +217,12 @@ name and value `config\wz-config.schema.json` lists:
 * `policies`: a policy's id mapped to one of its values' ids, over the profile.
 * `limits`: a session limit's id mapped to a whole number or `"unbounded"`, over the build's.
 * `key-ids`: the key ids every node of the deployment shares (the shared-key-ids capability).
+* `version`: the version of the document's format, `1`; a document that states another is
+  refused.
+* `transport`: what the links of the session open on, `"system"` (the system's sockets, as when
+  nothing is stated) or `"application"`, the transport the program hands the config
+  (`zext_config_transport`); `z_open` refuses a config whose document states `"application"` and
+  that was handed none, and a library without that door refuses the document.
 
 A session's policies are composed lowest first: this build's defaults, the profile
 (`zext_config_profile`'s, else the document's), the document's `policies`, then each

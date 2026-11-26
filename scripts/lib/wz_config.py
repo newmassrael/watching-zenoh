@@ -2227,6 +2227,11 @@ def wire_code_problems(pid: str, pol: dict, choices: list) -> list[str]:
 PROFILE_KEYS = {"id", "help", "policies"}
 # The profile that states every policy at upstream's behaviour, which each policy's `default` is.
 STANDARD_PROFILE = "standard"
+# The version of the document's format the readers read, and the values of `zext/transport`, the
+# first the one a document that states none opens on: `DOCUMENT_VERSION` and `DocumentTransport`
+# of crates/wz-session-core/src/policy_document.rs, which refuse any other.
+DOCUMENT_VERSION = 1
+DOCUMENT_TRANSPORTS = ("system", "application")
 
 
 def validate_profiles(profiles: list[dict], policies: list[dict]) -> list[str]:
@@ -3430,7 +3435,7 @@ def schema_annotations(row: dict, keys: tuple[str, ...]) -> dict:
 
 
 def emit_config_schema(decl: dict) -> str:
-    """The JSON Schema (draft 2020-12) of the run-time document: under `wz`, `policies` holds each
+    """The JSON Schema (draft 2020-12) of the run-time document: under `zext`, `policies` holds each
     policy a stage after the build decides (its `binding` is not `build`), as the enum of its
     values, and `limits` each limit that is not a capacity alone (`open_limits`) and that the
     build's machines read from a statement (`read = "snapshot"`; one read from the build would be
@@ -3440,8 +3445,9 @@ def emit_config_schema(decl: dict) -> str:
     document is checked against when it is applied, not here. `profile` is the enum of the
     declared profiles' ids, present only where the declaration states one. `key-ids` is the shape
     of the key ids every node shares, present where the declaration has `key-wire-form`.
-    `owned-address` is the node's own IPv4 address, which a zid the `address-ports` value of
-    `zid-derivation` derives is headed by."""
+    `version` is the version of the format the readers read, and `transport` what the links of a
+    session open on, both in every schema. `owned-address` is the node's own IPv4 address, which
+    a zid the `address-ports` value of `zid-derivation` derives is headed by."""
     policies = {}
     for pol in decl["policies"]:
         if pol["binding"] == "build":
@@ -3472,7 +3478,13 @@ def emit_config_schema(decl: dict) -> str:
             **schema_annotations(lim, ("kind", "driven", "storage", "scope", "binding_heap",
                                        "binding_fixed", "wire")),
         }
-    members: dict = {}
+    members: dict = {
+        "version": {
+            "description": ("The version of the document's format; this build reads version "
+                            f"{DOCUMENT_VERSION} and refuses any other."),
+            "const": DOCUMENT_VERSION,
+        },
+    }
     profiles = decl.get("profiles", [])
     if profiles:
         members["profile"] = {
@@ -3530,6 +3542,13 @@ def emit_config_schema(decl: dict) -> str:
                         "listener, so that a node that only dials derives one."),
         "type": "string",
         "format": "ipv4",
+    }
+    members["transport"] = {
+        "description": ("What the links of the session open on: the system's sockets, or the "
+                         "transport the program hands the open, which then refuses to open "
+                         "without it."),
+        "enum": list(DOCUMENT_TRANSPORTS),
+        "default": DOCUMENT_TRANSPORTS[0],
     }
     doc = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -6738,7 +6757,7 @@ def cmd_selftest() -> int:
     schema = json.loads(emit_config_schema(dict(pdecl, limits=sdecl["limits"])))
     spolicies = schema["properties"]["zext"]["properties"]["policies"]["properties"]
     slimits = schema["properties"]["zext"]["properties"]["limits"]["properties"]
-    expect("the schema is draft 2020-12 and closed under `wz`",
+    expect("the schema is draft 2020-12 and closed under `zext`",
            schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
            and schema["properties"]["zext"]["additionalProperties"] is False)
     expect("a policy the open or a running node decides is in the schema with its values and binding",
@@ -6868,7 +6887,7 @@ def cmd_selftest() -> int:
     pschema = json.loads(emit_config_schema(dict(profile_decl, limits=sdecl["limits"])))
     expect("the schema names the profiles a document may start from, before its policies",
            list(pschema["properties"]["zext"]["properties"])
-           == ["profile", "policies", "limits", "owned-address"]
+           == ["version", "profile", "policies", "limits", "owned-address", "transport"]
            and pschema["properties"]["zext"]["properties"]["profile"]["enum"] == ["standard", "quiet"])
     expect("the schema names the node's own address as a dotted IPv4 string",
            pschema["properties"]["zext"]["properties"]["owned-address"]["format"] == "ipv4"

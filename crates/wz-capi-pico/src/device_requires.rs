@@ -106,6 +106,14 @@ fn requirement_of(cfg: &ConfigState) -> Result<String, Refused> {
             "the open refuses this config: the build refuses a policy or limit it states",
         )
     })?;
+    #[cfg(feature = "app-transport")]
+    if let Some(code) = crate::session::transport_refused(cfg) {
+        return Err((
+            code,
+            "the open refuses this config: its document asks for the program's transport, and the \
+             config is handed none",
+        ));
+    }
     #[cfg(not(feature = "peer"))]
     if listen.is_some() || dial_whatami != WhatAmI::Client {
         return Err((
