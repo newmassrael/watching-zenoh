@@ -721,6 +721,14 @@ jobs:
               if [ "$built" = PASS ]; then
                 integrated=FAIL
                 (cd crates && cargo test -p "$crate" --tests -- --nocapture) && integrated=PASS
+                # wz-capi-pico's merged executable `it` requires the pools' door, `object-pool` (its
+                # Cargo.toml), so `--tests` above leaves it out and keeps the default build; it runs
+                # here on its own, with the door.
+                if [ "$crate" = wz-capi-pico ] && [ "$integrated" = PASS ]; then
+                  integrated=FAIL
+                  (cd crates && cargo test -p wz-capi-pico --features object-pool --test it \
+                    -- --nocapture) && integrated=PASS
+                fi
               fi
               verdict "$crate integration tests:" "$integrated"
               [ "$integrated" = PASS ] || overall=FAIL
@@ -1050,7 +1058,7 @@ jobs:
           # filter that selects nothing passes.
           rc=0
           out="$(cd crates && cargo test -p wz-capi-pico --no-default-features \
-            --features os-host,peer,multi-thread --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
+            --features os-host,peer,multi-thread,object-pool --test it files::coop_tcp_teardown:: 2>&1)" || rc=$?
           echo "$out"
           verdict=FAIL
           if [ "$rc" = 0 ] && grep -q '^test result: ok\. 2 passed' <<<"$out"; then verdict=PASS; fi

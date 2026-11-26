@@ -498,7 +498,7 @@ impl CoopConfig {
             limits,
         } = self;
         let config = CoopConfig {
-            endpoints: Counted(endpoints.len()),
+            endpoints: Counted::of(endpoints.iter().map(String::as_str)),
             whatami,
             zid,
             batch_size,
@@ -511,7 +511,7 @@ impl CoopConfig {
             open_timeout_ms,
             redial_ms,
             idle_wait_ms,
-            listen: Counted(listen.len()),
+            listen: Counted::of(listen.iter().map(String::as_str)),
             accept_pending,
             max_faces,
             groups,

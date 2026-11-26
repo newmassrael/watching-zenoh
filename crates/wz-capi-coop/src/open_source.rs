@@ -21,10 +21,22 @@ use wz_runtime_coop::faces::{EndpointRole, EndpointTextRefused, EndpointTexts};
 use crate::arena::ArenaRefused;
 use crate::engine::{CoopConfig, EndpointRefusal, OpenError, Refusal};
 
-/// What a config holds of a list of endpoints: how many there are, at least.
+/// What a config holds of a list of endpoints: how many there are, and how many of them are
+/// `udp/` ones.
 pub trait EndpointList {
     /// How many endpoints the list names.
     fn count(&self) -> usize;
+
+    /// How many of them are `udp/` endpoints: what a session that listens on the list binds a
+    /// udp port for, each port reading into the datagram slots its arena lends
+    /// (`crate::arena::PlanShape::udp_listens`).
+    fn udp(&self) -> usize;
+}
+
+/// Whether `endpoint` is a `udp/` one: the scheme the stack opens a udp port for when a session
+/// listens on it (`wz_runtime_coop::ip_stack`).
+pub fn is_udp(endpoint: &str) -> bool {
+    endpoint.starts_with("udp/")
 }
 
 /// The host's form: the texts themselves.
@@ -32,16 +44,42 @@ impl EndpointList for Vec<String> {
     fn count(&self) -> usize {
         self.len()
     }
+
+    fn udp(&self) -> usize {
+        self.iter().filter(|endpoint| is_udp(endpoint)).count()
+    }
 }
 
-/// A list of endpoints of which a config holds only how many there are: the texts are written by
-/// the config's source into the rows the open lent ([`OpenSource`]).
+/// A list of endpoints of which a config holds only how many there are and how many of them are
+/// `udp/` ones: the texts are written by the config's source into the rows the open lent
+/// ([`OpenSource`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Counted(pub usize);
+pub struct Counted {
+    /// How many endpoints the list names.
+    pub count: usize,
+    /// How many of them are `udp/` endpoints.
+    pub udp: usize,
+}
+
+impl Counted {
+    /// The count of `texts`.
+    pub fn of<'a>(texts: impl IntoIterator<Item = &'a str>) -> Self {
+        texts
+            .into_iter()
+            .fold(Self::default(), |counted, endpoint| Self {
+                count: counted.count.saturating_add(1),
+                udp: counted.udp.saturating_add(usize::from(is_udp(endpoint))),
+            })
+    }
+}
 
 impl EndpointList for Counted {
     fn count(&self) -> usize {
-        self.0
+        self.count
+    }
+
+    fn udp(&self) -> usize {
+        self.udp
     }
 }
 

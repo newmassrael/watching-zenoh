@@ -48,9 +48,10 @@
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
-//! - with `listen`, for a session that listens, the slots its udp ports read their datagrams into
-//!   and hold them in until the links of their peers take them (`UDP_PORT_SLOTS`, under the
-//!   build's), each a link's batch long, which the ports share, lent with the links' tables;
+//! - with `listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports read
+//!   their datagrams into and hold them in until the links of their peers take them
+//!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
+//!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session (`SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`: one for
 //!   each reliability a peer has a chain open in, and one for the rejoined message the round
@@ -1745,27 +1746,13 @@ impl ArenaPlan {
             limits.pico_frag_max_bytes(),
             caps::PICO_FRAG_MAX_BYTES,
         );
-        // The links read into a pool they share, a buffer held by a link only while it holds part
-        // of a batch or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`);
-        // a pool of more buffers than links would hold one no link can take. They encode their
-        // frames into a pool of slots they share as well, a slot held by a link from its grant to
-        // its send, or until a frame its stream took in part is written
-        // (`wz_runtime_coop::link_storage::PooledTx`). A build that only dials holds its dial and
-        // the faces it attaches, and lends each link a buffer and a slot of its own.
-        #[cfg(feature = "listen")]
-        {
-            let rx_buffers = self.lent(
-                ArenaLimit::RxPoolBuffers,
-                Quota::at_most(limits.rx_pool_buffers()),
-                caps::RX_POOL_BUFFERS,
-            );
-            self.transport.rx_buffers = least(rx_buffers, links);
-            let tx_slots = self.lent(
-                ArenaLimit::TxPoolSlots,
-                Quota::at_most(limits.tx_pool_slots()),
-                caps::TX_POOL_SLOTS,
-            );
-            self.transport.tx_slots = least(tx_slots, links);
+        // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
+        match pooled_buffers(links, limits) {
+            Ok((rx_buffers, tx_slots)) => {
+                self.transport.rx_buffers = rx_buffers;
+                self.transport.tx_slots = tx_slots;
+            }
+            Err(refused) => self.refuse(refused),
         }
         #[cfg(wz_round)]
         {
@@ -1845,7 +1832,7 @@ impl ArenaPlan {
         // The slots the udp ports of a session that listens read their datagrams into and hold
         // them in until the links of their peers take them, lent with the links' tables
         // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
-        // session that listens on nothing holds none.
+        // session that listens on no `udp/` endpoint binds no port and holds none.
         #[cfg(feature = "listen")]
         {
             let slots = self.lent(
@@ -1853,26 +1840,28 @@ impl ArenaPlan {
                 Quota::at_most(limits.udp_port_slots()),
                 caps::UDP_PORT_SLOTS,
             );
-            let listens = shape.listens > 0;
-            let slots = if listens { slots } else { 0 };
-            self.transport.port_rx = (slots, link_bytes);
-            self.put_table(
-                [
-                    ArenaPart::LinkPortDatagramFlags,
-                    ArenaPart::LinkPortDatagramSlots,
-                ],
-                slots,
-                link_bytes,
-            );
-            // The ports' book of their peers, a row for each link the session may hold, and of
-            // the datagrams sorted for them, a row for each slot a datagram holds while it waits
-            // (`TransportRows::lent_from`).
-            let peers = if listens { links } else { 0 };
-            self.transport.port_peers = peers;
-            let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(peers));
-            self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
-            let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
-            self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+            // A plan of a session with no udp port lays none of the ports' rows out, as one that
+            // names no group lays out no group's: their tables are lent no rows and take no byte
+            // of the arena (`TransportRows::links_from`, `TransportRows::lent_from`).
+            if shape.udp_listens > 0 {
+                self.transport.port_rx = (slots, link_bytes);
+                self.put_table(
+                    [
+                        ArenaPart::LinkPortDatagramFlags,
+                        ArenaPart::LinkPortDatagramSlots,
+                    ],
+                    slots,
+                    link_bytes,
+                );
+                // The ports' book of their peers, a row for each link the session may hold, and
+                // of the datagrams sorted for them, a row for each slot a datagram holds while it
+                // waits (`TransportRows::lent_from`).
+                self.transport.port_peers = links;
+                let peer_rows = self.sized(Arena::table_bytes::<PortPeerRow>(links));
+                self.put(ArenaPart::UdpPortPeers, 1, peer_rows);
+                let queue_rows = self.sized(Arena::table_bytes::<QueuedDatagram>(slots));
+                self.put(ArenaPart::UdpPortQueue, 1, queue_rows);
+            }
         }
         // The round's tables (`crate::round::RoundRows::lent`): its records only where the arena
         // lends them, as a round of one thread keeps them in itself and is lent no byte of them.
@@ -2625,6 +2614,71 @@ const fn lent_under(
     }
 }
 
+/// Whether a session's links share a pool of receive buffers and one of outbound slots, as a build
+/// that listens lends them (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`), rather than each link holding a
+/// buffer and a slot of its own.
+pub const LINKS_SHARE_POOLS: bool = cfg!(feature = "listen");
+
+/// The buffers a session's links read their batches into and encode their frames into, and the
+/// buffers they stage the chains of fragmented messages in, as the session's plan lays them out
+/// ([`link_buffers`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LinkBuffers {
+    /// The receive buffers the plan lends the links.
+    pub receive: usize,
+    /// The outbound slots the plan lends the links.
+    pub transmit: usize,
+    /// The bytes of each receive buffer and of each slot: the batch the session advertises.
+    pub bytes: usize,
+    /// The reassembly buffers of the session's one table, which its links share.
+    pub chains: usize,
+}
+
+/// The buffers of the links of a session that holds `links` links at most and advertises `batch`
+/// under `limits`: what its plan lays out for them, from the same reckoning
+/// ([`ArenaPlan::lay_out`]), so a report of the session's memory reads what its open reserves.
+/// Refused as the plan refuses the batch or a pool's limit.
+pub const fn link_buffers(
+    links: usize,
+    batch: u16,
+    limits: &SessionLimits,
+) -> Result<LinkBuffers, ArenaRefused> {
+    let bytes = tried!(link_batch(batch, limits));
+    let (receive, transmit) = tried!(pooled_buffers(links, limits));
+    Ok(LinkBuffers {
+        receive,
+        transmit,
+        bytes,
+        chains: SESSION_CHAIN_BUFFERS,
+    })
+}
+
+/// The receive buffers and the outbound slots of `links` links under `limits`. A build that
+/// listens lends pools the links share, each holding a buffer only while it holds part of a batch
+/// or something it was asked to keep (`wz_runtime_coop::link_storage::PooledRx`) and a slot from
+/// its grant to its send, or until a frame its stream took in part is written
+/// (`wz_runtime_coop::link_storage::PooledTx`): the pool's limit, and no more than the links, as a
+/// buffer no link can take is memory nothing uses. A build that only dials holds its dial and the
+/// faces it attaches, and lends each link a buffer and a slot of its own.
+const fn pooled_buffers(
+    links: usize,
+    limits: &SessionLimits,
+) -> Result<(usize, usize), ArenaRefused> {
+    if LINKS_SHARE_POOLS {
+        let rx = tried!(lent::<{ caps::RX_POOL_BUFFERS }>(
+            ArenaLimit::RxPoolBuffers,
+            Quota::at_most(limits.rx_pool_buffers()),
+        ));
+        let tx = tried!(lent::<{ caps::TX_POOL_SLOTS }>(
+            ArenaLimit::TxPoolSlots,
+            Quota::at_most(limits.tx_pool_slots()),
+        ));
+        Ok((least(rx, links), least(tx, links)))
+    } else {
+        Ok((links, links))
+    }
+}
+
 /// The length of each link's receive buffer and of each of its slots: the batch `batch` a session
 /// advertises, which is the most a peer sends once the two have negotiated, held to the batch the
 /// session's `limits` state (`PICO_UNICAST_BATCH_BYTES`) under the build's. A batch over either
@@ -3114,6 +3168,11 @@ pub struct PlanShape {
     pub dials: usize,
     /// The endpoints it listens on (at most `MAX_ADMIN_LOCATORS`).
     pub listens: usize,
+    /// How many of those are `udp/` ones, each a udp port the stack binds, which read into the
+    /// datagram slots the arena lends (`UDP_PORT_SLOTS`): a session that listens on `tcp/` alone
+    /// binds no port and is lent none.
+    #[cfg(feature = "listen")]
+    pub udp_listens: usize,
     /// The multicast groups it joins.
     pub groups: usize,
     /// The faces it admits besides the dial role's ([`CoopConfig::max_faces`]).
@@ -3137,6 +3196,8 @@ impl PlanShape {
         Self {
             dials: config.endpoints.count(),
             listens: config.listen.count(),
+            #[cfg(feature = "listen")]
+            udp_listens: config.listen.udp(),
             groups: config.groups.len(),
             max_faces: config.max_faces,
             accept_pending: config.accept_pending,
@@ -3160,6 +3221,8 @@ impl PlanShape {
         Self {
             dials,
             listens: 0,
+            #[cfg(feature = "listen")]
+            udp_listens: 0,
             groups: 0,
             max_faces: 0,
             accept_pending: 0,

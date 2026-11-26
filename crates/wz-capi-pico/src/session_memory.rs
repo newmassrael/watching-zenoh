@@ -16,13 +16,19 @@
 //! - each link's transmit storage, each batch at most the batch the session advertises
 //!   (`PICO_UNICAST_BATCH_BYTES`), as no batch the two sides of a link agree on is larger: on the
 //!   tokio engine as many batches as the queue sizes the snapshot states, one size for each
-//!   priority (`PICO_TX_QUEUE_SIZE`); on the cooperative engine the slots its arena lends each
-//!   link (`LINK_TX_SLOTS`), which a frame is encoded into and sent from with no queue behind;
-//! - each link's receive buffer, the read storage the open states (upstream's default, one buffer
-//!   of the widest batch, `RX_BUFFER_SIZE`), which no batch of the session's outgrows;
-//! - each link's reassembly: a message of at most `PICO_FRAG_MAX_BYTES` for each of the two
-//!   reliabilities a link rejoins apart, as upstream keeps one buffer for each; a snapshot that
-//!   states no bound leaves the row without a count.
+//!   priority (`PICO_TX_QUEUE_SIZE`); on the cooperative engine the slots its arena lends the
+//!   links, which a frame is encoded into and sent from with no queue behind: a pool the links
+//!   share in a build that listens (`TX_POOL_SLOTS`), a slot each (`LINK_TX_SLOTS`) otherwise;
+//! - the links' receive buffers: on the tokio engine each link's read storage the open states
+//!   (upstream's default, one buffer of the widest batch, `RX_BUFFER_SIZE`); on the cooperative
+//!   engine buffers of the advertised batch, which no batch the two sides of a link agree on
+//!   outgrows, as zenoh-pico reads into a buffer of its `BATCH_UNICAST_SIZE`: a pool the links
+//!   share in a build that listens (`RX_POOL_BUFFERS`), a buffer each otherwise;
+//! - the links' reassembly, each buffer a message of at most `PICO_FRAG_MAX_BYTES`: on the tokio
+//!   engine one for each of the two reliabilities a link rejoins apart, as upstream keeps one
+//!   buffer for each; on the cooperative engine the session's one table, which its links share
+//!   (`wz_capi_coop::arena::link_buffers`). A snapshot that states no bound leaves the row
+//!   without a count.
 //!
 //! Then the machines the process holds apart from any session, each counted once, from the rows
 //! the process's runtime limits lend them (`wz_capi_port::runtime_limits`), in a build with each:
@@ -53,7 +59,7 @@ use core::ffi::c_char;
 
 use wz_session_core::limits::SessionLimits;
 use wz_session_core::process_limits::ProcessRows;
-use wz_session_core::session_init_params::TxQueueConf;
+use wz_session_core::session_init_params::{LinkRxConf, TxQueueConf};
 use wz_session_core::session_memory::{session_tables, Captures, MemoryRow, SessionMemory};
 
 use crate::ffi::guarded;
@@ -112,15 +118,17 @@ pub struct wz_ext_session_memory_row_t {
 pub(crate) struct MemoryBasis {
     /// The limits the session runs under.
     pub(crate) limits: SessionLimits,
-    /// How many links the session holds at most; `None` where its open bounds them to none.
-    pub(crate) links: Option<usize>,
-    /// The batches one link holds to transmit from, every priority's together
-    /// (`link_tx_batches`).
-    pub(crate) queue_batches: usize,
+    /// The batches the session's links hold to transmit from (`MemoryBasis::of`); `None` where
+    /// its open bounds its links to none.
+    pub(crate) transmit: Option<usize>,
     /// The bytes of one batch: the batch the session advertises.
     pub(crate) batch_bytes: usize,
-    /// The bytes of one link's receive buffer.
+    /// The buffers the session's links receive into; `None` as `transmit`.
+    pub(crate) receive: Option<usize>,
+    /// The bytes of one receive buffer.
     pub(crate) rx_bytes: usize,
+    /// The buffers the session's links rejoin fragmented messages in; `None` as `transmit`.
+    pub(crate) reassembly: Option<usize>,
     /// The longest message one link rejoins from fragments; `None` where the limits state no bound.
     pub(crate) message_bytes: Option<usize>,
 }
@@ -131,11 +139,66 @@ impl Default for MemoryBasis {
     fn default() -> Self {
         Self {
             limits: SessionLimits::defaults(),
-            links: None,
-            queue_batches: 0,
+            transmit: None,
             batch_bytes: 0,
+            receive: None,
             rx_bytes: 0,
+            reassembly: None,
             message_bytes: None,
+        }
+    }
+}
+
+impl MemoryBasis {
+    /// The basis of a session opened under `limits` that holds `links` links at most
+    /// (`links_of`), advertises `batch` and opens each link with `tx_queue` and `rx`. On the
+    /// tokio engine each link holds every priority's queue of batches, a receive buffer of
+    /// `rx`'s size and a reassembly for each of the two reliabilities it rejoins apart.
+    #[cfg(feature = "engine-tokio")]
+    pub(crate) fn of(
+        limits: &SessionLimits,
+        links: Option<usize>,
+        batch: u16,
+        tx_queue: &TxQueueConf,
+        rx: &LinkRxConf,
+    ) -> Self {
+        let per_link = |items: usize| links.and_then(|links| links.checked_mul(items));
+        Self {
+            limits: *limits,
+            transmit: per_link(tx_queue.sizes.iter().sum()),
+            batch_bytes: usize::from(batch),
+            receive: per_link(1),
+            rx_bytes: rx.buffer_size,
+            reassembly: per_link(2),
+            message_bytes: limits.pico_frag_max_bytes().most(),
+        }
+    }
+
+    /// The basis of a session as [`Self::of`] states it on the cooperative engine, whose open
+    /// reserves its links' buffers in its arena: the receive buffers and the slots its plan lends
+    /// them, each of the advertised batch, which no batch the two sides of a link agree on is
+    /// larger than, and the reassembly buffers of the session's one table
+    /// (`wz_capi_coop::arena::link_buffers`, the plan's own reckoning). The engine queues no
+    /// batch and reads no stream into a buffer of `rx`'s size, so neither is read.
+    #[cfg(not(feature = "engine-tokio"))]
+    pub(crate) fn of(
+        limits: &SessionLimits,
+        links: Option<usize>,
+        batch: u16,
+        _tx_queue: &TxQueueConf,
+        _rx: &LinkRxConf,
+    ) -> Self {
+        let buffers =
+            links.and_then(|links| wz_capi_coop::arena::link_buffers(links, batch, limits).ok());
+        let bytes = buffers.map_or(usize::from(batch), |buffers| buffers.bytes);
+        Self {
+            limits: *limits,
+            transmit: buffers.map(|buffers| buffers.transmit),
+            batch_bytes: bytes,
+            receive: buffers.map(|buffers| buffers.receive),
+            rx_bytes: bytes,
+            reassembly: buffers.map(|buffers| buffers.chains),
+            message_bytes: limits.pico_frag_max_bytes().most(),
         }
     }
 }
@@ -194,27 +257,29 @@ pub(crate) fn links_of(listen: Option<&str>, dials: bool, limits: &SessionLimits
 }
 
 /// What sizes the transmit row's count: the queue sizes the snapshot states on the tokio engine,
-/// whose links queue their batches; the slots the cooperative engine's arena lends each link,
-/// whatever queue sizes the snapshot states, as no link of that engine queues a batch.
+/// whose links queue their batches; on the cooperative engine, whose links queue none, the slots
+/// its arena lends: the pool the links share in a build that listens, a slot for each link
+/// (`LINK_TX_SLOTS`) in one that only dials.
 #[cfg(feature = "engine-tokio")]
 const LINK_TX_BASIS: &core::ffi::CStr = c"PICO_TX_QUEUE_SIZE";
 #[cfg(not(feature = "engine-tokio"))]
-const LINK_TX_BASIS: &core::ffi::CStr = c"LINK_TX_SLOTS";
+const LINK_TX_BASIS: &core::ffi::CStr = if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+    c"TX_POOL_SLOTS"
+} else {
+    c"LINK_TX_SLOTS"
+};
 
-/// The batches each link of a session holds to transmit from, its open having built the queue
-/// `tx_queue` from its snapshot: on the tokio engine that queue, every priority's batches.
+/// What sizes the receive row: the read storage the tokio engine's open states for each link; on
+/// the cooperative engine the pool of buffers of the advertised batch the links share in a build
+/// that listens, a buffer of that batch for each link in one that only dials.
 #[cfg(feature = "engine-tokio")]
-pub(crate) fn link_tx_batches(tx_queue: &TxQueueConf) -> usize {
-    tx_queue.sizes.iter().sum()
-}
-
-/// The batches each link of a session holds to transmit from on the cooperative engine: the slots
-/// its arena lends each link (`LINK_TX_SLOTS`), which the open reserves whatever `tx_queue`
-/// states, as the engine sends a frame from its slot and queues none.
+const LINK_RX_BASIS: &core::ffi::CStr = c"RX_BUFFER_SIZE";
 #[cfg(not(feature = "engine-tokio"))]
-pub(crate) fn link_tx_batches(_tx_queue: &TxQueueConf) -> usize {
-    wz_capi_coop::arena::LINK_TX_SLOTS
-}
+const LINK_RX_BASIS: &core::ffi::CStr = if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+    c"RX_POOL_BUFFERS"
+} else {
+    c"PICO_UNICAST_BATCH_BYTES"
+};
 
 impl MemoryBasis {
     /// The session's report: the session core's rows for its limits, this ABI's, and those of the
@@ -226,7 +291,6 @@ impl MemoryBasis {
     /// [`Self::report`], the process's machines lent `process`.
     fn report_with(&self, process: &ProcessRows) -> SessionMemory {
         let mut memory = session_tables(&self.limits, &Captures::default());
-        let per_link = |items: usize| self.links.and_then(|links| links.checked_mul(items));
         let rows = [
             MemoryRow {
                 part: c"session handle",
@@ -239,23 +303,23 @@ impl MemoryBasis {
             MemoryRow {
                 part: c"link transmit queues",
                 basis: LINK_TX_BASIS,
-                count: per_link(self.queue_batches),
+                count: self.transmit,
                 entry_bytes: self.batch_bytes,
-                enforced: self.links.is_some(),
+                enforced: self.transmit.is_some(),
             },
             MemoryRow {
                 part: c"link receive buffers",
-                basis: c"RX_BUFFER_SIZE",
-                count: per_link(1),
+                basis: LINK_RX_BASIS,
+                count: self.receive,
                 entry_bytes: self.rx_bytes,
-                enforced: self.links.is_some(),
+                enforced: self.receive.is_some(),
             },
             MemoryRow {
                 part: c"link reassembly",
                 basis: c"PICO_FRAG_MAX_BYTES",
-                count: self.message_bytes.and(per_link(2)),
+                count: self.message_bytes.and(self.reassembly),
                 entry_bytes: self.message_bytes.unwrap_or(0),
-                enforced: self.links.is_some() && self.message_bytes.is_some(),
+                enforced: self.reassembly.is_some() && self.message_bytes.is_some(),
             },
         ];
         for row in rows {
@@ -609,14 +673,15 @@ mod tests {
         );
     }
 
-    /// The link rows are each link's queue, buffer and reassembly times the links.
+    /// The link rows are the counts of the basis, each of its entry's bytes.
     #[test]
-    fn the_link_rows_are_per_link() {
+    fn the_link_rows_are_the_counts_of_the_basis() {
         let basis = MemoryBasis {
-            links: Some(3),
-            queue_batches: 16,
+            transmit: Some(48),
             batch_bytes: 2048,
+            receive: Some(3),
             rx_bytes: 65535,
+            reassembly: Some(6),
             message_bytes: Some(4096),
             ..MemoryBasis::default()
         };
@@ -628,39 +693,110 @@ mod tests {
                 .find(|row| row.part == part)
                 .expect("the report has the part")
         };
-        assert_eq!(link(c"link transmit queues").total(), Some(3 * 16 * 2048));
+        assert_eq!(link(c"link transmit queues").total(), Some(48 * 2048));
         assert_eq!(link(c"link receive buffers").total(), Some(3 * 65535));
-        assert_eq!(link(c"link reassembly").total(), Some(3 * 2 * 4096));
+        assert_eq!(link(c"link reassembly").total(), Some(6 * 4096));
     }
 
-    /// The transmit row counts what the engine holds for each link: on the tokio engine the queue
-    /// the open builds from the snapshot, every priority's batches; on the cooperative engine the
-    /// arena's slots, whatever queue sizes the snapshot states. Its basis names which.
+    /// The batch a session of the build's limits advertises.
+    fn advertised(limits: &SessionLimits) -> u16 {
+        u16::try_from(limits.pico_unicast_batch_bytes()).expect("a batch is a u16")
+    }
+
+    /// The link rows count what the engine holds: on the tokio engine every priority's queue, a
+    /// buffer of the stated read storage and two reassemblies for each link; on the cooperative
+    /// engine what its arena's plan lends, a receive buffer and a slot of the advertised batch,
+    /// never the widest, and the session's one table of reassembly buffers. Turned red on the
+    /// cooperative engine by a receive row of `RX_BUFFER_SIZE` or a count for each link of a
+    /// build whose links share pools.
     #[test]
-    fn the_transmit_row_counts_what_the_engine_holds() {
+    fn the_link_rows_count_what_the_engine_holds() {
+        let limits = SessionLimits::defaults();
         let queue = TxQueueConf::pico_of_snapshot(
             &wz_session_core::policy::SessionPolicy::defaults(),
-            &SessionLimits::defaults(),
+            &limits,
+        );
+        let rx = LinkRxConf::default();
+        let batch = advertised(&limits);
+        let links = 11;
+        let memory = MemoryBasis::of(&limits, Some(links), batch, &queue, &rx).report();
+        let row = |part: &CStr| {
+            *memory
+                .rows()
+                .iter()
+                .find(|row| row.part == part)
+                .expect("the report has the part")
+        };
+        let (transmit, receive, reassembly) = (
+            row(c"link transmit queues"),
+            row(c"link receive buffers"),
+            row(c"link reassembly"),
+        );
+        assert_eq!(
+            (transmit.basis, receive.basis),
+            (LINK_TX_BASIS, LINK_RX_BASIS)
         );
         #[cfg(feature = "engine-tokio")]
-        let (slots, basis) = (queue.sizes.iter().sum::<usize>(), c"PICO_TX_QUEUE_SIZE");
-        #[cfg(not(feature = "engine-tokio"))]
-        let (slots, basis) = (wz_capi_coop::arena::LINK_TX_SLOTS, c"LINK_TX_SLOTS");
-        assert_eq!(link_tx_batches(&queue), slots);
-        let memory = MemoryBasis {
-            links: Some(2),
-            queue_batches: link_tx_batches(&queue),
-            batch_bytes: 2048,
-            ..MemoryBasis::default()
+        {
+            let queued: usize = queue.sizes.iter().sum();
+            assert_eq!(transmit.count, Some(links * queued));
+            assert_eq!(
+                (receive.count, receive.entry_bytes),
+                (Some(links), rx.buffer_size)
+            );
+            if reassembly.count.is_some() {
+                assert_eq!(reassembly.count, Some(links * 2));
+            }
         }
-        .report();
-        let row = *memory
-            .rows()
-            .iter()
-            .find(|row| row.part == c"link transmit queues")
-            .expect("the report has the part");
-        assert_eq!(row.basis, basis);
-        assert_eq!(row.total(), Some(2 * slots * 2048));
+        #[cfg(not(feature = "engine-tokio"))]
+        {
+            let buffers = wz_capi_coop::arena::link_buffers(links, batch, &limits)
+                .expect("the build's batch and pools");
+            assert_eq!(
+                (transmit.count, transmit.entry_bytes),
+                (Some(buffers.transmit), usize::from(batch))
+            );
+            assert_eq!(
+                (receive.count, receive.entry_bytes),
+                (Some(buffers.receive), usize::from(batch))
+            );
+            assert_ne!(
+                receive.entry_bytes,
+                wz_session_core::session_init_params::RX_BUFFER_SIZE,
+                "a link reads a batch it advertised, not the widest"
+            );
+            if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+                assert!(receive.count <= Some(limits.rx_pool_buffers().min(links)));
+            } else {
+                assert_eq!(receive.count, Some(links));
+            }
+            if reassembly.count.is_some() {
+                assert_eq!(reassembly.count, Some(buffers.chains));
+            }
+        }
+    }
+
+    /// A session whose links have no bound (a listener on the tokio engine, a group) reports no
+    /// count on any link row, so its report has no total.
+    #[test]
+    fn a_session_whose_links_have_no_bound_counts_no_link_row() {
+        let limits = SessionLimits::defaults();
+        let queue = TxQueueConf::pico_of_snapshot(
+            &wz_session_core::policy::SessionPolicy::defaults(),
+            &limits,
+        );
+        let basis = MemoryBasis::of(
+            &limits,
+            None,
+            advertised(&limits),
+            &queue,
+            &LinkRxConf::default(),
+        );
+        assert_eq!(
+            (basis.transmit, basis.receive, basis.reassembly),
+            (None, None, None)
+        );
+        assert_eq!(basis.report().total(), None);
     }
 
     /// A reassembly the limits hold to no bound has no count and is not enforced, so the report
@@ -669,10 +805,11 @@ mod tests {
     #[test]
     fn a_reassembly_with_no_bound_leaves_the_report_without_a_total() {
         let bounded = MemoryBasis {
-            links: Some(1),
-            queue_batches: 16,
+            transmit: Some(16),
             batch_bytes: 2048,
+            receive: Some(1),
             rx_bytes: 65535,
+            reassembly: Some(2),
             message_bytes: Some(4096),
             ..MemoryBasis::default()
         };

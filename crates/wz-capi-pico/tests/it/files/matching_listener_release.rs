@@ -12,7 +12,8 @@
 //!
 //! ```text
 //! cargo test -p wz-capi-pico --no-default-features \
-//!     --features os-host,peer,multi-thread --test it files::matching_listener_release::
+//!     --features os-host,peer,multi-thread,object-pool \
+//!     --test it files::matching_listener_release::
 //! ```
 #![cfg(all(feature = "os-host", feature = "peer", feature = "multi-thread"))]
 

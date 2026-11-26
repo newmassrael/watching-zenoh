@@ -169,7 +169,7 @@ fn a_blocking_publish_waits_for_a_slot_a_slow_link_holds_and_a_droppable_one_doe
 
     let takes_before = publisher.takes.core.load(Ordering::Relaxed);
     let blocking = {
-        let publisher = Arc::clone(&publisher);
+        let publisher = EngineHold::clone(&publisher);
         std::thread::spawn(move || {
             publisher.publish_on_wire_all(
                 "demo/pool/kept",

@@ -739,6 +739,15 @@ required-features = ["resource-snapshot", "admin-space", "peer", "query"]
 name = "clock_source_stamps"
 required-features = ["engine-tokio", "peer", "clock-source"]
 
+# The integration tests as one executable (`scripts/lib/merge_tests.py`). libtest runs its tests,
+# each a program of its own, at once in one process, whose pools are sized for one program, so the
+# harness states the share of the programs it runs through the pools' door before its first test
+# (`tests/it/programs.rs`): the target requires the door, and a lane that builds it names it.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
+required-features = ["object-pool"]
+
 # The object pools driven through their doors: a process of its own, as the pools are the
 # process's.
 [[test]]

@@ -8,7 +8,7 @@
 //! canon form, made the same way, so a refusal is the text's and not the view's.
 //!
 //! ```text
-//! cargo test -p wz-capi-pico --test it files::noncanon_keys_refused::
+//! cargo test -p wz-capi-pico --features object-pool --test it files::noncanon_keys_refused::
 //! ```
 #![cfg(feature = "peer")]
 

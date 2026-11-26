@@ -461,6 +461,9 @@ pub mod config;
 // (`wz_ext.h`) in a build with `config-policy`, which the zenoh-pico preset leaves out; without
 // them the open runs a session under the build's policies and limits.
 pub mod config_policy;
+// The limits a config states for its session through a numbered key (`wz_ext.h`), in every build:
+// a session opens its tables at a few and a program that holds more names them before the open.
+pub mod config_limits;
 #[cfg(feature = "connectivity")]
 pub mod connectivity;
 // The clock a program registers and the standing it reports: wz doors (`wz_ext.h`) of the unstable

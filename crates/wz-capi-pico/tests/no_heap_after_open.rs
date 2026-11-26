@@ -1474,9 +1474,28 @@ struct Bench {
     advanced: Advanced,
 }
 
+/// The counts the bench's sessions hold at once, past the few a session opens with: the listener's
+/// subscriber, queryable and token on three keys, and the dialler's publisher, querier, composed
+/// declarations and each round's own entity beside them. Each is at most the pico preset's
+/// value, the bound a build of the preset holds a statement to.
+unsafe fn bench_limits(config: &mut wz_capi_pico::z_owned_config_t) {
+    assert_eq!(
+        wz_capi_pico::zp_config_insert(
+            wz_capi_pico::z_config_loan_mut(config),
+            wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY,
+            c"MAX_SUBSCRIPTIONS=4,MAX_QUERYABLES=4,MAX_PUBLISHERS=4,MAX_QUERIERS=2,\
+              MAX_LOCAL_TOKENS=2,MAX_LIVELINESS_SUBSCRIPTIONS=2,MAX_MATCHING_LISTENERS=2,\
+              MAX_PENDING_QUERIES=2,MAX_DECLARED_KEYEXPRS=16"
+                .as_ptr()
+        ),
+        Z_OK,
+        "the bench states the counts its sessions hold"
+    );
+}
+
 impl Bench {
     unsafe fn open() -> Self {
-        let pair = Pair::open(true);
+        let pair = Pair::open_shaped(true, bench_limits);
         let batch_len =
             wz_session_core::caps::PICO_UNICAST_BATCH_BYTES.saturating_sub(BATCH_HEADROOM);
         assert!(batch_len > 0, "the build's batch leaves room for a payload");

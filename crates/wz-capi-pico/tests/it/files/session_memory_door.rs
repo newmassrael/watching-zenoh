@@ -108,7 +108,11 @@ fn queued_batches(_limits: &SessionLimits) -> usize {
 #[cfg(feature = "engine-tokio")]
 const TX_BASIS: &str = "PICO_TX_QUEUE_SIZE";
 #[cfg(not(feature = "engine-tokio"))]
-const TX_BASIS: &str = "LINK_TX_SLOTS";
+const TX_BASIS: &str = if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+    "TX_POOL_SLOTS"
+} else {
+    "LINK_TX_SLOTS"
+};
 
 /// Opens a listener and a session that dials it, runs `check` on both, and lets them go.
 fn with_two_sessions(check: impl FnOnce(*const z_loaned_session_t, *const z_loaned_session_t)) {
@@ -197,22 +201,33 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
                 limits.pico_unicast_batch_bytes()
             )
         );
+        let message = limits
+            .pico_frag_max_bytes()
+            .most()
+            .expect("the build bounds a rejoined message");
+        // The tokio engine rejoins the two reliabilities of its one link apart and reads into the
+        // read storage its open states; the cooperative engine stages chains in the session's one
+        // table and reads into a buffer of the batch it advertised, which no agreed batch outgrows.
+        #[cfg(feature = "engine-tokio")]
+        let (chains, rx_bytes) = (2, wz_session_core::session_init_params::RX_BUFFER_SIZE);
+        #[cfg(not(feature = "engine-tokio"))]
+        let (chains, rx_bytes) = (
+            wz_capi_coop::arena::link_buffers(
+                1,
+                u16::try_from(limits.pico_unicast_batch_bytes()).expect("a batch is a u16"),
+                &limits,
+            )
+            .expect("the preset's batch and pools")
+            .chains,
+            limits.pico_unicast_batch_bytes(),
+        );
         let reassembly = row(&dialled, "link reassembly");
         assert_eq!(
             (reassembly.door.count, reassembly.door.entry_bytes),
-            (
-                2,
-                limits
-                    .pico_frag_max_bytes()
-                    .most()
-                    .expect("the build bounds a rejoined message")
-            )
+            (chains, message)
         );
         let buffer = row(&dialled, "link receive buffers");
-        assert_eq!(
-            (buffer.door.count, buffer.door.entry_bytes),
-            (1, wz_session_core::session_init_params::RX_BUFFER_SIZE)
-        );
+        assert_eq!((buffer.door.count, buffer.door.entry_bytes), (1, rx_bytes));
 
         let (listening, listened) = unsafe { report(listener) };
         let reassembly = row(&listened, "link reassembly");
@@ -227,11 +242,31 @@ fn a_dialling_session_holds_one_link_and_a_listener_its_engines_bound() {
         #[cfg(not(feature = "engine-tokio"))]
         {
             let _ = listening;
-            assert_eq!(reassembly.door.bounded, 1);
-            assert!(
-                reassembly.door.count > 2,
-                "a listener holds more links than a dial"
+            assert_eq!(
+                (reassembly.door.bounded, reassembly.door.count),
+                (1, chains),
+                "a listener's links share the session's one table"
             );
+            // The listener's links read and encode into buffers of the advertised batch; where
+            // they share pools, the pools' and not one for each of the ten faces.
+            let batch = limits.pico_unicast_batch_bytes();
+            let (receive, transmit) = (
+                row(&listened, "link receive buffers"),
+                row(&listened, "link transmit queues"),
+            );
+            assert_eq!(
+                (receive.door.entry_bytes, transmit.door.entry_bytes),
+                (batch, batch)
+            );
+            if wz_capi_coop::arena::LINKS_SHARE_POOLS {
+                assert!(receive.door.count <= limits.rx_pool_buffers());
+                assert!(transmit.door.count <= limits.tx_pool_slots());
+                assert!(
+                    receive.door.total_bytes + transmit.door.total_bytes
+                        <= (limits.rx_pool_buffers() + limits.tx_pool_slots()) * batch,
+                    "the links' buffers are the pools' bytes"
+                );
+            }
         }
     });
 }

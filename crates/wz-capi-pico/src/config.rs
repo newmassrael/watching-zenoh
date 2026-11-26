@@ -325,8 +325,18 @@ impl ConfigState {
     }
 
     /// Record `value` under `key` (see [`ConfigEntries::insert`]): `Z_OK`, or
-    /// `Z_ERR_CONFIG_FAILED_INSERT` with the config as it was.
+    /// `Z_ERR_CONFIG_FAILED_INSERT` with the config as it was. A value of the limits key is
+    /// judged as the open will compose it, so a count the build refuses is refused here, with
+    /// `Z_ERR_CONFIG_INVALID_VALUE`, and the config keeps its earlier value: the one place a value
+    /// enters a config, so no door records one unjudged.
     pub(crate) fn insert(&mut self, key: u8, value: &str) -> ZResult {
+        if key == crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY {
+            // Judged over a copy of what an open composes from, which the judgement drops.
+            let mut probe = crate::config_limits::Stated::OPENING;
+            if let Err(code) = crate::config_limits::state_over(Some(value), &mut probe) {
+                return code;
+            }
+        }
         self.entries.insert(key, value)
     }
 
@@ -561,6 +571,61 @@ mod tests {
         let state = unsafe { &*(config.0.handle as *const ConfigState) };
         assert_eq!(state.get(Z_CONFIG_MODE_KEY), Some("client"));
         assert_eq!(state.get(Z_CONFIG_CONNECT_KEY), None);
+    }
+
+    /// A value of the limits key the build refuses is refused where it enters the config, through
+    /// the door and through the config's own insert alike, and the value before it stays; one the
+    /// build takes is recorded. Turned red by an insert that records the key unjudged.
+    #[test]
+    fn a_limits_value_the_build_refuses_is_not_recorded() {
+        use crate::config_limits::WZ_EXT_CONFIG_LIMITS_KEY as LIMITS;
+        use crate::result::Z_ERR_CONFIG_INVALID_VALUE;
+        let mut config = Config::new();
+        assert_eq!(config.insert(LIMITS, ""), Z_OK);
+        assert_eq!(
+            config.insert(LIMITS, "NO_SUCH_LIMIT=1"),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(config.text(LIMITS).as_deref(), Some(""));
+        // SAFETY: the config is live, holds a `ConfigState` and is borrowed nowhere else.
+        let state = unsafe { &mut *(config.0.handle as *mut ConfigState) };
+        assert_eq!(
+            state.insert(LIMITS, "MAX_SUBSCRIPTIONS"),
+            Z_ERR_CONFIG_INVALID_VALUE
+        );
+        assert_eq!(state.get(LIMITS), Some(""));
+    }
+
+    /// An open writes the counts of the limits key over the statement it is handed, under the
+    /// build's policies for a config that states none, and refuses a config the build refuses
+    /// without a policy. Turned red by an open that answers the statement it was handed unwritten.
+    #[test]
+    fn an_open_writes_the_limits_keys_counts_over_its_statement() {
+        use crate::config_limits::{state_over, Stated, WZ_EXT_CONFIG_LIMITS_KEY as LIMITS};
+        use wz_session_core::policy::SessionPolicy;
+        let Some(fewer) = Stated::OPENING
+            .limits
+            .max_subscriptions()
+            .most()
+            .and_then(|count| count.checked_sub(1))
+        else {
+            return;
+        };
+        let text = alloc::format!("MAX_SUBSCRIPTIONS={fewer}");
+        let mut expected = Stated::OPENING;
+        if state_over(Some(text.as_str()), &mut expected).is_err() || expected == Stated::OPENING {
+            return;
+        }
+        let mut config = Config::new();
+        assert_eq!(config.insert(LIMITS, &text), Z_OK);
+        // SAFETY: the config is live and holds a `ConfigState`.
+        let state = unsafe { &*(config.0.handle as *const ConfigState) };
+        let mut stated = Stated::OPENING;
+        assert_eq!(
+            crate::session::resolve_open(state, &mut stated),
+            Ok(SessionPolicy::defaults())
+        );
+        assert_eq!(stated, expected);
     }
 
     /// An empty value is its terminator alone: read back empty, and lent as a C string of no

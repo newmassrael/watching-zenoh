@@ -1316,4 +1316,135 @@ mod tests {
             );
         }
     }
+
+    /// What each part of a publisher's and a subscriber's place takes, printed for choosing which
+    /// part of the places their limits multiply is to be made smaller: the place, the object and
+    /// each value the object holds, in bytes. Run with `cargo test -p wz-capi-pico --lib
+    /// print_the_parts_of_the_publisher_and_subscriber_places -- --ignored --nocapture` under the
+    /// features of the build to read.
+    #[cfg(not(feature = "engine-tokio"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn print_the_parts_of_the_publisher_and_subscriber_places() {
+        use core::mem::size_of;
+        let parts: [(&str, usize); 23] = [
+            (
+                "publisher place",
+                InSession::<crate::pubsub::PublisherState>::LAYOUT.size(),
+            ),
+            (
+                "subscriber place",
+                InSession::<crate::pubsub::SubscriberState>::LAYOUT.size(),
+            ),
+            ("PublisherState", size_of::<crate::pubsub::PublisherState>()),
+            ("PlainPublisher", size_of::<crate::pubsub::PlainPublisher>()),
+            ("PublisherQos", size_of::<crate::pubsub::PublisherQos>()),
+            (
+                "Option<OwnedEncoding>",
+                size_of::<Option<crate::encoding::OwnedEncoding>>(),
+            ),
+            ("FilteredKey", size_of::<crate::write_filter::FilteredKey>()),
+            ("WriteFilter", size_of::<crate::write_filter::WriteFilter>()),
+            (
+                "DeclaredKeyexpr",
+                size_of::<crate::keyexpr::DeclaredKeyexpr>(),
+            ),
+            ("KeyText", size_of::<crate::keyexpr::KeyText>()),
+            ("HeldKey", size_of::<wz_capi_port::HeldKey>()),
+            (
+                "Option<WireDeclaration>",
+                size_of::<Option<crate::keyexpr::WireDeclaration>>(),
+            ),
+            ("KeyHold", size_of::<wz_capi_port::KeyHold>()),
+            ("WireKey", size_of::<wz_capi_port::WireKey>()),
+            (
+                "z_loaned_keyexpr_t",
+                size_of::<crate::abi::z_loaned_keyexpr_t>(),
+            ),
+            (
+                "SubscriberState",
+                size_of::<crate::pubsub::SubscriberState>(),
+            ),
+            (
+                "Option<DeclaredSubscriber>",
+                size_of::<Option<crate::pubsub::DeclaredSubscriber>>(),
+            ),
+            ("OpenClosures", size_of::<crate::ffi::OpenClosures>()),
+            ("Option<HeldIn>", size_of::<Option<crate::ffi::HeldIn>>()),
+            ("Lender", size_of::<Lender>()),
+            ("EntityPlace", size_of::<wz_capi_port::EntityPlace>()),
+            ("EngineHold", size_of::<crate::session::EngineHold>()),
+            ("EngineHandle", size_of::<crate::session::EngineHandle>()),
+        ];
+        for (part, bytes) in parts {
+            std::println!("place-part: {part:<28} {bytes:>5} B");
+        }
+    }
+
+    /// The arena a session that listens opens, row by row: its tables' rows and the ABI's places
+    /// as the open lays them out for a listener (and for a dialer) under the build's limits, each
+    /// row's limit, count and the bytes of one, and the bytes a real open of a listener reserved.
+    /// What that open reserved past the listener's rows is the engine's own holds: its links'
+    /// cells, the faces' rooms, the runtime's tables, the engine's place, its planes and the
+    /// admission. Run with `cargo test -p wz-capi-pico --lib
+    /// the_arena_a_listening_session_opens_by_row_measured -- --ignored --nocapture` under the
+    /// features and limits of the build to read.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    #[ignore = "a measurement printed for reading, not a check"]
+    fn the_arena_a_listening_session_opens_by_row_measured() {
+        use crate::session::{
+            engine_ref, listening_on_loopback, pico_unicast_batch, session_handle, z_session_drop,
+            z_session_loan, z_session_move, SessionPlace,
+        };
+        use wz_capi_coop::arena::{admitted_faces, admitted_handshakes, ArenaPlan, PlanShape};
+        use wz_session_core::limits::SessionLimits;
+
+        let print = |name: &str, plan: &ArenaPlan| {
+            std::println!("arena-rows: {name}");
+            for row in plan.rows() {
+                std::println!(
+                    "arena-rows:   {:<36} {:<52} {:>6} x {:>7} = {:>9}",
+                    row.part(),
+                    row.basis(),
+                    row.count,
+                    row.entry_bytes,
+                    row.bytes().unwrap_or(usize::MAX),
+                );
+            }
+            std::println!(
+                "arena-rows:   reserved {}",
+                plan.reserved_bytes().unwrap_or(usize::MAX)
+            );
+        };
+        let limits = SessionLimits::defaults();
+        let batch = pico_unicast_batch(&limits);
+        let held = held_places(SessionPlace::LAYOUT);
+        let listener = PlanShape {
+            listens: 1,
+            max_faces: admitted_faces(&limits).expect("the build admits its own faces"),
+            accept_pending: admitted_handshakes(&limits).expect("the build admits its handshakes"),
+            ..PlanShape::dial_only(0, batch)
+        };
+        let mut listens = ArenaPlan::planned(listener, &limits).expect("a listener's rows lay out");
+        listens.holding(&held).expect("the places lay out");
+        print("a listener's tables and places", &listens);
+        let mut dials =
+            ArenaPlan::planned(PlanShape::dial_only(1, batch), &limits).expect("a dial lays out");
+        dials.holding(&held).expect("the places lay out");
+        print("a dialer's tables and places", &dials);
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let handle = unsafe { session_handle(z_session_loan(&session)) };
+        let opened = engine_ref(handle.expect("an open session has its handle")).arena_bytes();
+        let rows = listens.reserved_bytes().unwrap_or(usize::MAX);
+        std::println!(
+            "arena-rows: a listener's open reserved {opened}, its rows {rows}, the engine's own \
+             holds {}",
+            opened.saturating_sub(rows)
+        );
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
 }
