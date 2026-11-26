@@ -69,6 +69,19 @@ description = "Phase W MCU profile runtime (R311av cooperative task pool; CoopRu
 name = "wz_runtime_coop"
 path = "src/lib.rs"
 
+# The configurations this crate has, which Layers C1bf and C1bz build in place of
+# `--all-features` (`scripts/lib/doc_feature_sets.py`). `session-slot` is a selector: it swaps
+# the heap forms for the static ones, so a build of every feature is the slot profile and compiles
+# none of the heap profile's links (`ip_stack::IpDial`, `ws_link::WsLinks`, `serial_link`'s,
+# `unixpipe_link`, `app_link`). Each profile is a set of its own, with every other feature.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap profile: every feature but the slot selector, every target.
+    { name = "heap", except = ["session-slot"] },
+    # The slot profile, with every other feature beside it: the build `--all-features` makes.
+    { name = "slot", except = [] },
+]
+
 # R311av — `alloc` feature gates the CoopRuntime + CoopTime + executor
 # + JoinHandle modules. Default-off keeps the R311au scope (C) sync-
 # alias build path (no_std, no alloc) intact: a `cargo build -p
