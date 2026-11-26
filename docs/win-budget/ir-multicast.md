@@ -391,7 +391,13 @@ its handling (its read task 572.0 with its one `recvfrom`, its executor 246.0).
    whenever the registry's count of written face tables moved (`Ledger::owes`), and every record
    dispatched moves it (`RegistryOf::split` counts each hand-out of a face's tables as a write).
    A read that dispatched a Push so sweeps the gets, reads the matching listeners again
-   (`read_matching`, 11,989 calls for 12,000 messages) and settles the ledger.
+   (`read_matching`, 11,989 calls for 12,000 messages) and settles the ledger. The Push itself is
+   handed out unwritten (`hand_lent_push`, 12,000 calls; `RegistryOf::split_unwritten` is the
+   form for it), but each datagram dispatches a second record beside it through
+   `FaceRecords::dispatch` (12,000 calls, 390.0 a message, `dispatch_event_to` 246.0 of it into
+   `dispatch_event_but_samples`), whose `split` is what counts the write. Which record that is
+   (an event of the frame, not a Push lent where it lies, by `DirectSink::event`'s last arm) is
+   for the next reading to name, with a count of `DirectSink::event`'s arms.
 3. The empty receive ends every burst.
 4. The step's own parts: the pump moved out of its slot and back (three copies a read, 37,410
    `memcpy` calls in 12,470 reads), the settle of the registry's held replies, the stop, the
@@ -468,7 +474,7 @@ where the concrete type belongs.
 | D7a | the group's transport split: its send half in the link cell the face shares, its receive half held by the pump alone | what lets D7b let the session's lock go around a blocking receive | `wz-runtime-coop/src/group_transport.rs`, `wz-runtime-posix/src/multicast.rs`, `group_drive/stage.rs`, `engine/group.rs`, every joiner | design |
 | D7b | the read of a threads build blocks in the group's receive half when the group is its only input and the stage holds nothing, the lock let go around the system call, each receive bounded by what is left of the read's deadline | receive: the wait 689.4, the face turn 698.7, the step's own 692.9 and the empty receive, once a deadline instead of once a datagram | `engine/direct.rs`, `group_drive.rs`, `wz-runtime-posix/src/multicast.rs`, `net.rs` | after D7a |
 | P1 | the own-sender drop of D7b's receive goes on to the next datagram within the bound | put: 2,163.4 of the read thread | `wz-runtime-posix/src/multicast.rs` | with D7b |
-| D9 | a dispatch counted as a write of a face's tables only where it writes them (a Push reads its face's subscriptions and writes none), so the ledger is not owed and the matching listeners not read again by it | receive: the face turn's bookkeeping (`read_matching` 60.9, the sweeps, the settle) | `engine/registry.rs` | design |
+| D9 | the record each datagram dispatches beside its Push (section 7.6, item 2) named, and dispatched where it writes no face's tables without `split`'s count, so the ledger is not owed and the matching listeners not read again by it | receive: that dispatch, 390.0, and the face turn's bookkeeping (`read_matching` 60.9, the sweeps, the settle) | `engine/direct.rs`, `engine/registry.rs`, `wz-session-core/src/multicast_rx.rs` | the record to name first |
 | P2 | a put of a session with no face whose link is up goes to the groups' leg alone | put: about 750 of the calling thread | `engine.rs`, `engine/direct.rs` | design |
 | T4 | the concrete transport, named by the receive half's type | tens of Ir a message | as section 7.4 | after D7a |
 
