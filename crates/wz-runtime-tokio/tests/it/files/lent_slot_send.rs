@@ -1372,3 +1372,147 @@ fn a_burst_inside_a_window_of_the_applications_leaves_that_window_open() {
     );
     link.assert_every_slot_home();
 }
+
+/// THE CLAIM of a reply hold (`SessionLinkActions::hold_replies`): the replies sent while it is
+/// raised wait in one open frame and leave in one send at its release, the frame a window of the
+/// same messages makes, where without the hold each is a send of its own.
+#[cfg(all(feature = "transport-batching", feature = "codec-response-final"))]
+#[test]
+fn held_replies_leave_in_one_send_at_the_release() {
+    use wz_session_core::sample::QosLevel;
+
+    // CONTROL: no hold, two Finals, two sends.
+    let alone = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(alone.clone());
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    actions.send_response_final(2, QosLevel::DEFAULT);
+    assert_eq!(alone.lent().len(), 2, "CONTROL: a send to each Final");
+
+    // CONTROL: the frame a window of both makes.
+    let windowed = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(windowed.clone());
+    actions.batch_start().expect("batch_start");
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    actions.send_response_final(2, QosLevel::DEFAULT);
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(
+        windowed.lent().len(),
+        1,
+        "CONTROL: a window makes one frame"
+    );
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    let raised = actions.hold_replies();
+    assert!(
+        raised,
+        "nothing held the replies, so this call raised the hold"
+    );
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    actions.send_response_final(2, QosLevel::DEFAULT);
+    assert!(
+        link.doors().is_empty(),
+        "nothing leaves while the replies are held"
+    );
+    actions.release_replies(raised);
+    assert_eq!(link.lent(), windowed.lent(), "one send, the window's frame");
+    assert!(link.heap().is_empty());
+    link.assert_every_slot_home();
+
+    // The release ended the hold: the next reply is a send of its own.
+    actions.send_response_final(3, QosLevel::DEFAULT);
+    assert_eq!(link.lent().len(), 2, "the hold is not left raised");
+}
+
+/// A message that is not a reply is not held: sent during a hold it leaves at once, and the frame
+/// the held reply left open leaves before it, so the wire is the one the two make with no hold,
+/// SN for SN.
+#[cfg(all(feature = "transport-batching", feature = "codec-response-final"))]
+#[test]
+fn a_put_during_a_reply_hold_leaves_at_once_after_the_held_frame() {
+    use wz_session_core::sample::QosLevel;
+
+    // CONTROL: the Final, then the put, each a send of its own.
+    let unheld = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(unheld.clone());
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    actions
+        .send_push_literal("home/batch", b"not held", true)
+        .expect("push");
+    assert_eq!(unheld.lent().len(), 2, "CONTROL: two sends");
+
+    let link = LendingLink::new(true, 2, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    let raised = actions.hold_replies();
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    assert!(link.doors().is_empty(), "CONTROL: the Final is held");
+    actions
+        .send_push_literal("home/batch", b"not held", true)
+        .expect("push");
+    assert_eq!(
+        link.lent(),
+        unheld.lent(),
+        "the held frame first, then the put, with the SNs they take unheld"
+    );
+    actions.release_replies(raised);
+    assert_eq!(
+        link.lent().len(),
+        2,
+        "the release found nothing left to send"
+    );
+    link.assert_every_slot_home();
+}
+
+/// A hold already raised is its raiser's: a second hold reports that it raised nothing, and its
+/// release sends nothing and leaves the replies held.
+#[cfg(all(feature = "transport-batching", feature = "codec-response-final"))]
+#[test]
+fn a_hold_inside_a_hold_leaves_the_replies_held() {
+    use wz_session_core::sample::QosLevel;
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    let raised = actions.hold_replies();
+    assert!(raised);
+    let inner = actions.hold_replies();
+    assert!(!inner, "the replies are held already");
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    actions.release_replies(inner);
+    assert!(
+        link.doors().is_empty(),
+        "a release of a hold that raised nothing sends nothing"
+    );
+    actions.release_replies(raised);
+    assert_eq!(link.lent().len(), 1, "the raiser's release sends the Final");
+    link.assert_every_slot_home();
+}
+
+/// A window the application opened is its own to drain: the replies held inside it join its
+/// frame, and the hold's release leaves that window open and gathering.
+#[cfg(all(feature = "transport-batching", feature = "codec-response-final"))]
+#[test]
+fn a_reply_hold_inside_a_window_of_the_applications_leaves_that_window_open() {
+    use wz_session_core::sample::QosLevel;
+
+    let link = LendingLink::new(true, 1, BATCH_SLOT, HEADROOM);
+    let actions = batching_session(link.clone());
+    actions.batch_start().expect("batch_start");
+    let raised = actions.hold_replies();
+    assert!(raised, "a window does not hold replies");
+    actions.send_response_final(1, QosLevel::DEFAULT);
+    actions.release_replies(raised);
+    assert!(
+        link.doors().is_empty(),
+        "the release does not drain the application's window"
+    );
+    actions
+        .send_push_literal("home/batch", b"more", true)
+        .expect("push");
+    actions.batch_stop().expect("batch_stop");
+    assert_eq!(
+        link.lent().len(),
+        1,
+        "the Final and the put left in the application's one frame"
+    );
+    link.assert_every_slot_home();
+}

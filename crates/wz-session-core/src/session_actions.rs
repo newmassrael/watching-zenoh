@@ -1029,6 +1029,11 @@ pub struct TxConduits<R: SessionRuntime> {
     /// close this one, which is the link's and not the caller's.
     #[cfg(feature = "transport-batching")]
     auto: R::Flag,
+    /// The face's read holds the replies it sends in their conduits' open frames
+    /// ([`SessionLinkActions::hold_replies`]). Read by replies alone: every other message is sent
+    /// at once, after what the replies left open, so a hold opens no window for them.
+    #[cfg(feature = "transport-batching")]
+    replies_held: R::Flag,
     /// A control message was left in the Control conduit's open frame, for the control messages
     /// after it to join, and a message staged on another conduit is to follow that frame out.
     /// Raised by the sender of the control message once it has staged it, lowered under the
@@ -1333,6 +1338,8 @@ impl<R: SessionRuntime> TxConduits<R> {
             #[cfg(feature = "transport-batching")]
             auto: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             #[cfg(feature = "transport-batching")]
+            replies_held: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
+            #[cfg(feature = "transport-batching")]
             control_open: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
             // A blocking sender keeps its conduit while it waits for room (a chain's fragments
             // keep their sequence numbers), and a probe takes it without waiting
@@ -1491,6 +1498,24 @@ impl<R: SessionRuntime> TxConduits<R> {
         );
     }
 
+    /// Whether the face's read holds its replies (the `replies_held` field).
+    #[cfg(feature = "transport-batching")]
+    fn replies_held(&self) -> bool {
+        crate::runtime_cell::FlagCell::load(
+            &self.replies_held,
+            core::sync::atomic::Ordering::SeqCst,
+        )
+    }
+
+    #[cfg(feature = "transport-batching")]
+    fn set_replies_held(&self, held: bool) {
+        crate::runtime_cell::FlagCell::store(
+            &self.replies_held,
+            held,
+            core::sync::atomic::Ordering::SeqCst,
+        );
+    }
+
     /// The caller's window alone (`zp_batch_start` .. `zp_batch_stop`), without the link's.
     /// While it is open the conduits hold what they stage until it is drained the ways pico
     /// drains it: an overflow, an express message, a transport message such as a keepalive,
@@ -1613,6 +1638,22 @@ struct BatchStage {
     /// here is still lent ([`crate::tx_lease::TxLease::pick_up`]).
     #[cfg(feature = "transport-tx-lend")]
     lent: Option<crate::tx_lease::OpenSlot>,
+}
+
+#[cfg(feature = "transport-batching")]
+impl BatchStage {
+    /// Whether a frame is open on this conduit, in a lent slot or on the heap.
+    fn is_open(&self) -> bool {
+        #[cfg(feature = "transport-tx-lend")]
+        if self.lent.is_some() {
+            return true;
+        }
+        #[cfg(not(feature = "tx-lend-only"))]
+        if !self.buf.is_empty() {
+            return true;
+        }
+        false
+    }
 }
 
 /// Why a batch frame was opened on the heap and not in a lent slot (the
@@ -3822,6 +3863,34 @@ pub struct BlockFirstJob {
 struct Conduit {
     priority: Priority,
     reliable: bool,
+    /// A reply that may wait in its conduit's open frame while the face's read holds its replies
+    /// ([`SessionLinkActions::hold_replies`]), so that it leaves with the `Final` after it.
+    #[cfg(feature = "transport-batching")]
+    held: bool,
+}
+
+#[cfg(any(
+    feature = "codec-push",
+    feature = "codec-request",
+    feature = "codec-response",
+    feature = "codec-response-final",
+    feature = "declare-keyexpr",
+    feature = "declare-subscriber",
+    feature = "declare-queryable",
+    feature = "declare-token",
+    feature = "declare-interest",
+    feature = "liveliness-token",
+))]
+impl Conduit {
+    /// The conduit of a message that is not held.
+    fn new(priority: Priority, reliable: bool) -> Self {
+        Self {
+            priority,
+            reliable,
+            #[cfg(feature = "transport-batching")]
+            held: false,
+        }
+    }
 }
 
 /// R2952 — which pass through [`SessionLinkActions::dispatch_network_message_at`]
@@ -4833,10 +4902,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit {
-                    priority: qos.priority(),
-                    reliable: true,
-                },
+                self.reply_conduit(qos.priority(), true),
                 qos,
                 size,
                 crate::stats::NetworkStatsClass::unread(),
@@ -4946,10 +5012,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         let _ = self
             .dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit {
-                    priority: Priority::Control,
-                    reliable: true,
-                },
+                Conduit::new(Priority::Control, true),
                 crate::sample::QosLevel::DEFAULT,
                 size_hint(|| {
                     crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id)
@@ -4989,10 +5052,7 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                 };
                 let _ = self.dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    Conduit {
-                        priority: Priority::Control,
-                        reliable: true,
-                    },
+                    Conduit::new(Priority::Control, true),
                     crate::sample::QosLevel::DEFAULT,
                     size_hint(|| crate::tx_buf::encoded_len(as_encoder(&reply))),
                     crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -7210,6 +7270,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Conduit {
             priority: route,
             reliable,
+            ..
         } = route;
         // Asked BEFORE the slot is taken, so a session with no hand-off never
         // holds a slot nothing would give back.
@@ -7296,7 +7357,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // session's own machinery.
         let _ = self.dispatch_network_message_at(
             DispatchStage::Scheduled,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             qos,
             body.len(),
             stats_class,
@@ -12947,7 +13008,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // Nothing of a lend-only build reads it: every frame asks for the batch budget.
         #[cfg(feature = "tx-lend-only")]
         let SizeHint = worst_case_payload;
-        let Conduit { priority, reliable } = conduit;
+        let Conduit {
+            priority, reliable, ..
+        } = conduit;
         // A send of its caller's own: every other stage's question is answered here.
         let stage = if STAGED { stage } else { DispatchStage::Fresh };
         let congestion = qos.congestion();
@@ -13161,7 +13224,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             && congestion == crate::qos::CongestionControl::BlockFirst
             && self.schedule_block_first(
                 message_priority,
-                Conduit { priority, reliable },
+                Conduit::new(priority, reliable),
                 qos,
                 worst_case_payload,
                 _stats_class,
@@ -13345,8 +13408,20 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // Whatever this sender does with the conduit, a wait for room included, is a send
             // in progress to a droppable message that finds the conduit held.
             let _sender = SenderInside::mark(self.tx_conduits.sender_flag(priority));
+            // A held reply joins its conduit's open frame as a message of a window does, and
+            // leaves with what follows it in that frame.
             #[cfg(feature = "transport-batching")]
-            if self.tx_conduits.is_active() {
+            let window =
+                self.tx_conduits.is_active() || (conduit.held && self.tx_conduits.replies_held());
+            // A frame held replies left open leaves before a message that does not join it takes
+            // the conduit's next SN: sent after that message, its earlier SN would read as stale
+            // to the peer's reliable channel.
+            #[cfg(feature = "transport-batching")]
+            if !window && batch.stage.is_open() {
+                self.flush_conduit(TxConduits::<R>::conduit_index(priority), priority, batch);
+            }
+            #[cfg(feature = "transport-batching")]
+            if window {
                 // The heap stage's helpers: under `tx-lend-only` the window's
                 // frame opens in a lent slot or the message is refused, so there
                 // is no vector to encode into and no frame prefix to write by hand.
@@ -14600,6 +14675,65 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         Err(SendWireError::FeatureDisabled)
     }
 
+    /// Hold the replies this face sends from now on in their conduits' open frames, until
+    /// [`Self::release_replies`]: the replies a queryable makes in its callback and the `Final`
+    /// owed after it then leave in one frame and one send, as a window of them would, where each
+    /// was a frame and a send of its own. No window opens: every message that is not a reply,
+    /// from this thread or another, is sent at once, and the frame the replies left open goes
+    /// out before it. Answers whether this call raised the hold, to be handed to the release; a
+    /// hold already raised is left to the call that raised it. Without `transport-batching`
+    /// nothing is held and this answers `false`.
+    pub fn hold_replies(&self) -> bool {
+        #[cfg(feature = "transport-batching")]
+        {
+            if self.tx_conduits.replies_held() {
+                return false;
+            }
+            self.tx_conduits.set_replies_held(true);
+            true
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        false
+    }
+
+    /// End the hold [`Self::hold_replies`] raised, when `raised`, and send what it held. Lowered
+    /// before the drain, so a reply racing the release joins no frame the drain has passed. A
+    /// window the caller or the link keeps open is theirs to drain, and the held frames, which
+    /// joined it, leave with it.
+    pub fn release_replies(&self, raised: bool) {
+        #[cfg(feature = "transport-batching")]
+        if raised {
+            self.tx_conduits.set_replies_held(false);
+            if !self.tx_conduits.caller_window_open() && !self.tx_conduits.is_auto() {
+                self.flush_open_batch();
+            }
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        let _ = raised;
+    }
+
+    /// The conduit a reply (a `Response` or a `ResponseFinal`) is sent on: held in its open frame
+    /// while the face holds its replies ([`Self::hold_replies`]).
+    #[cfg(any(
+        feature = "codec-response-final",
+        all(
+            feature = "codec-response",
+            any(feature = "storage-profile", feature = "alloc")
+        )
+    ))]
+    fn reply_conduit(&self, priority: Priority, reliable: bool) -> Conduit {
+        #[cfg(feature = "transport-batching")]
+        {
+            Conduit {
+                priority,
+                reliable,
+                held: self.tx_conduits.replies_held(),
+            }
+        }
+        #[cfg(not(feature = "transport-batching"))]
+        Conduit::new(priority, reliable)
+    }
+
     /// Open the batching window for good, because the link's writer pulls what the conduits
     /// stage ([`BoxedLinkDriver::set_idle_flush`] answered `true`): every network message is
     /// absorbed into its conduit's open frame, and the writer's flush at idle is what puts the
@@ -14656,7 +14790,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = self.outbound_push_class(&push);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             // R2923 — every arm's congestion control comes off the message's
             // OWN ext_qos, as upstream's `congestion_control()` reads it
             // (`commons/zenoh-protocol/src/network/mod.rs` @ `NetworkBodyRef::Push(msg) => msg.ext_qos.get_congestion_control(),`).
@@ -14684,7 +14818,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = crate::frame_encode::push_body(push);
         self.dispatch_network_message_at(
             stage,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             crate::declare_ext_qos::read_push_qos(push),
             // What THIS message can encode to, and not the codec's reserve hint for any message
             // (a delivered copy cost 2.4 KiB of buffer an eighteen-byte Put never filled).
@@ -15101,7 +15235,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let class = crate::stats::NetworkStatsClass::unread();
         let ended = self.dispatch_network_message_at(
             DispatchStage::Probe,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             encoded.qos(),
             size_hint(|| push.encoded_len()),
             class,
@@ -15701,10 +15835,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Declare = a control-plane message; zenoh `QoSType::DECLARE` = Control.
-            Conduit {
-                priority: Priority::Control,
-                reliable,
-            },
+            Conduit::new(Priority::Control, reliable),
             crate::declare_ext_qos::read_declare_qos(declare),
             len,
             // Control plane: `n_msgs` only, no payload cell (upstream's payload
@@ -15741,10 +15872,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     fn dispatch_declare_lent(&self, what: &LentDeclaration<'_>) -> Result<(), SendWireError> {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit {
-                priority: Priority::Control,
-                reliable: true,
-            },
+            Conduit::new(Priority::Control, true),
             crate::declare_ext_qos::QOS_DECLARE,
             size_hint(|| what.encoded_len()),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
@@ -15795,10 +15923,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // OAM = a control-plane message; zenoh `QoSType::OAM` = Control.
-            Conduit {
-                priority: Priority::Control,
-                reliable,
-            },
+            Conduit::new(Priority::Control, reliable),
             crate::declare_ext_qos::read_oam_qos(oam),
             len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Oam),
@@ -15845,10 +15970,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = size_hint(|| wz_codecs::request::RequestWire::measure(request).len());
         let ended = self.dispatch_network_message_at(
             stage,
-            Conduit {
-                priority: qos.priority(),
-                reliable,
-            },
+            Conduit::new(qos.priority(), reliable),
             qos,
             len,
             class,
@@ -15906,10 +16028,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let len = size_hint(|| wz_codecs::response::ResponseWire::measure(response).len());
         let ended = self.dispatch_network_message_at(
             stage,
-            Conduit {
-                priority: qos.priority(),
-                reliable,
-            },
+            self.reply_conduit(qos.priority(), reliable),
             qos,
             len,
             class,
@@ -15962,10 +16081,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         self.dispatch_network_message_at(
             stage,
-            Conduit {
-                priority: qos.priority(),
-                reliable,
-            },
+            self.reply_conduit(qos.priority(), reliable),
             qos,
             len,
             // A pure correlation marker — no key expression and no payload, so
@@ -16017,10 +16133,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             stage,
             // Interest carries `QoSType::DECLARE` = Control (zenoh interests.rs).
-            Conduit {
-                priority: Priority::Control,
-                reliable,
-            },
+            Conduit::new(Priority::Control, reliable),
             crate::declare_ext_qos::read_interest_qos(interest),
             len,
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
@@ -16046,10 +16159,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let encode_body = |sink: &mut crate::tx_buf::TxSink<'_>| interest.encode(sink);
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit {
-                priority: Priority::Control,
-                reliable: true,
-            },
+            Conduit::new(Priority::Control, true),
             qos,
             size_hint(|| crate::tx_buf::encoded_len(as_encoder(&encode_body))),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Interest),
@@ -16319,7 +16429,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         let sent = self.dispatch_network_message_at(
             stage,
-            Conduit { priority, reliable },
+            Conduit::new(priority, reliable),
             qos,
             size,
             class,
@@ -16457,7 +16567,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let size = size_hint(|| crate::tx_buf::encoded_len(encode));
             let sent = self.dispatch_network_message_at(
                 stage,
-                Conduit { priority, reliable },
+                Conduit::new(priority, reliable),
                 qos,
                 size,
                 crate::stats::NetworkStatsClass::unread(),
@@ -16558,7 +16668,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let class = crate::stats::NetworkStatsClass::unread();
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit { priority, reliable },
+                Conduit::new(priority, reliable),
                 // A Put built here carries no extension, so no `ext_qos`: the
                 // default QoS, which `read_push_qos` answers for the same message.
                 crate::sample::QosLevel::DEFAULT,
@@ -16782,10 +16892,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         {
             self.dispatch_network_message_at(
                 DispatchStage::Fresh,
-                Conduit {
-                    priority: Priority::DEFAULT,
-                    reliable,
-                },
+                Conduit::new(Priority::DEFAULT, reliable),
                 crate::sample::QosLevel::DEFAULT,
                 size_hint(|| crate::lent_push::literal_del_len(keyexpr_suffix)),
                 crate::stats::NetworkStatsClass::unread(),
@@ -18885,10 +18992,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         });
         let ended = self.dispatch_network_message_at(
             DispatchStage::Fresh,
-            Conduit {
-                priority: qos.priority(),
-                reliable: true,
-            },
+            Conduit::new(qos.priority(), true),
             qos,
             size,
             crate::stats::NetworkStatsClass::unread(),
@@ -18992,10 +19096,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             let _ = self
                 .dispatch_network_message_at(
                     DispatchStage::Fresh,
-                    Conduit {
-                        priority: qos.priority(),
-                        reliable: true,
-                    },
+                    self.reply_conduit(qos.priority(), true),
                     qos,
                     len,
                     crate::stats::NetworkStatsClass::control(
