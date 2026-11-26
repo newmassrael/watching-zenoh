@@ -37,6 +37,38 @@ repository.workspace = true
 readme.workspace = true
 description = "R311di proper — runtime-agnostic Session / SessionLinkActions / helper surface (Phase W §5.P + §5.C consumer)."
 
+# The configurations this crate has, which Layers C1bf and C1bz build in place of `--all-features`
+# (`scripts/lib/doc_feature_sets.py`). The fixed-memory selectors below are turned on by a final
+# MCU or C-library build and by no dependency line, and the heap engine builds without every one of
+# them; each replaces a heap form with a fixed one (growable collections, frames built on the heap,
+# the owned projection and walk of a received record, the session's growable storage, a link's own
+# key expression table, the domain of a parameter bound at the open, the core atomics), so a build
+# of every feature compiles none of those forms or the tests written for them. Each profile is a
+# set of its own, with every other feature. Both of them have the heap: the fixed set gives up
+# `alloc` and every feature that reaches it, so the library the slot profile ships with no
+# allocator is built by a lane, a `Vec` named outside `alloc` refused by the compiler and not by an
+# image's link. It builds the library alone (`clippy-targets`): the tests and the dev-dependencies
+# they are written over name the heap forms.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap profile: every feature but the selectors, every target.
+    { name = "heap", except = [
+        "session-slot",
+        "bounded-heapless",
+        "tx-lend-only",
+        "rx-lent-only",
+        "rx-lent-control",
+        "session-fixed-storage",
+        "session-keeps-keyexprs",
+        "limits-lent-at-open",
+        "no_std",
+    ] },
+    # The slot profile, with every other feature beside it: the build `--all-features` makes.
+    { name = "slot", except = [] },
+    # The slot profile without a heap: every feature that does not reach `alloc`, the library.
+    { name = "fixed", except = ["alloc"], clippy-targets = ["--lib"] },
+]
+
 [features]
 # Batteries-included default (standard Rust opt-out idiom, same shape as
 # `alloc`): the full keyexpr matcher ships by default so any

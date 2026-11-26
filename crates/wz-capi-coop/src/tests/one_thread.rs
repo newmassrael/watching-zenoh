@@ -8,6 +8,7 @@
 //! itself over loopback, or over a group the program's transport carries.
 
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+#[cfg(any(feature = "listen", all(feature = "group", feature = "app-transport")))]
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -29,7 +30,7 @@ pub(super) struct OwnThread<E: SessionDrive> {
 
 impl<E: SessionDrive> OwnThread<E> {
     /// The session `open` opens, on a thread of its own: back once it is open.
-    pub(super) fn open(open: impl FnOnce() -> Arc<E> + Send + 'static) -> Self {
+    pub(super) fn open(open: impl FnOnce() -> EngineHold<E> + Send + 'static) -> Self {
         let (calls, handed) = mpsc::channel::<Handed<E>>();
         let (opened, told) = mpsc::channel();
         let thread = std::thread::spawn(move || {
@@ -296,7 +297,7 @@ mod shared_key_ids {
 
     use super::super::{client_config, config_zid, Engine, LOOPBACK};
     use super::{eventually, hearing, OwnThread};
-    use crate::{CoopConfig, OpenKeyIds};
+    use crate::{CoopConfig, EngineHold, OpenKeyIds};
 
     /// A session of `config` holding a dictionary of a key and a key below it, which names keys
     /// by their ids on the wire.

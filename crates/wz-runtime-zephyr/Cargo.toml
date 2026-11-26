@@ -40,6 +40,19 @@ wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, featu
 # `SessionDatagramLink`; both are no_std. The session core's owned forms are `alloc`'s.
 wz-session-core = { path = "../wz-session-core", default-features = false, features = ["no_std"] }
 
+# The configurations this crate has, which Layers C1bf and C1bz build in place of `--all-features`
+# (`scripts/lib/doc_feature_sets.py`). `session-slot` names `wz-runtime-coop`'s selector, under
+# which the heap profile's link seams (`wz_runtime_coop::with_heap_link_seams!`) hold no item, so a
+# build of every feature compiles none of `links` (`ZephyrLinks`). Each profile is a set of its
+# own, with every other feature.
+[package.metadata.wz-docs]
+feature-sets = [
+    # The heap profile: every feature but the slot selector, every target.
+    { name = "heap", except = ["session-slot"] },
+    # The slot profile, with every other feature beside it: the build `--all-features` makes.
+    { name = "slot", except = [] },
+]
+
 [features]
 # The heap profile: the cooperative runtime's heap task pool, the session core's owned
 # forms, the kernel-heap allocator (`ZephyrAllocator`, which a firmware declares as its

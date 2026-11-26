@@ -966,6 +966,13 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # (`reassembly_rx::in_place_tests`), which only that feature builds.
     # MEASURED before widening: this row's listing with it passes 29 of 29 in
     # 16s, where it ran 23 without it.
+    #
+    # `listen` and `resource-snapshot` join. The heap set made the census list the faces of a
+    # session (`faces::tests`), and the ones that read a port, a node held by another face or
+    # the dial role standing by are built with `listen`, as is the Router two links share
+    # (`reassembly_rx::tests`); the reading a let-go link keeps is `resource-snapshot`'s. The
+    # row already names what `listen` implies (`session-unicast-accept`, `udp-listen`); the two
+    # add the faces' listening half and the links' counters, which those tests read.
     "wz-runtime-coop|hook|\
         alloc,\
         codec-close,\
@@ -978,7 +985,9 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         keyexpr-includes,\
         keyexpr-wildcard-double,\
         keyexpr-wildcard-single,\
+        listen,\
         reassembly,\
+        resource-snapshot,\
         rx-in-place,\
         scouting-static,\
         serial,\
@@ -1356,6 +1365,48 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |"
+    # The heap profile without the slim pool, which the heap set lists and no row above builds: the
+    # first row is slim and the second lends only. What only it reaches is the batching window that
+    # leaves as its lent slot (`session_drive::`, which the slim socket is too short for) and
+    # `tests/tx_allocations.rs` on the heap profile, where a ResponseFinal and a get with a QoS
+    # still cost nothing. The first row's features with `codec-close`, which the file requires,
+    # and without the two selectors; two filters over one build.
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        codec-push,\
+        codec-response,\
+        codec-response-final,\
+        liveliness-token,\
+        loopif-multicast,\
+        pubsub-put,\
+        query-queryable,\
+        reassembly,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        transport-multicast\
+        |session_drive::"
+    "wz-session-lwip|hook|\
+        adminspace-core,\
+        adminspace-write,\
+        codec-close,\
+        codec-push,\
+        codec-response,\
+        codec-response-final,\
+        liveliness-token,\
+        loopif-multicast,\
+        pubsub-put,\
+        query-queryable,\
+        reassembly,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        transport-multicast\
+        |--test=tx_allocations"
     # Round 3277 (fixed-memory step S7) -- the FIXED link storage, a SEPARATE row
     # on purpose, as `bounded-heapless` is for wz-session-core above:
     # `static-link-storage` is a selector, not an addition. It takes the
@@ -1613,8 +1664,20 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
     # `codec-push` the items; the row above is the slot profile, where none of this is built.
     "wz-session-mcu|hook|codec-push,transport-multicast|group_drive::"
     # And with `transport-stats`: what the pump receives and what it and the stage send are counted
-    # into the counters the holder attached, as the socket takes or hands in each datagram.
-    "wz-session-mcu|hook|codec-push,transport-multicast,transport-stats|group_drive::"
+    # into the counters the holder attached, as the socket takes or hands in each datagram. The
+    # stage's replies join it (`group_drive::stage::tests`): a reply handed or written as its parts
+    # is `codec-response`'s, with its final beside it as a group's reply always has, and a token's
+    # `liveliness-token`'s; and `resource-snapshot` is the meter the receives are spaced on. The
+    # heap set made the census list those tests, which no row built before.
+    "wz-session-mcu|hook|\
+        codec-push,\
+        codec-response,\
+        codec-response-final,\
+        liveliness-token,\
+        resource-snapshot,\
+        transport-multicast,\
+        transport-stats\
+        |group_drive::"
     # A node that declares liveliness tokens (`declare-token`): its tokens are declared after its
     # documents, mirrors and subscriptions, and more of them than the node declares stop it; without
     # the feature a token is refused by name. `slot_node` is built with `client-slot`.
@@ -2388,7 +2451,8 @@ if [[ "${1:-}" == "--census" ]]; then
         if [[ "$feats" == "@all" ]]; then
             argv+=(--all-features)
         elif [[ "$feats" == @args:* ]]; then
-            # A feature set a crate declares (`doc_feature_sets.py`), as its cargo arguments.
+            # A feature set a crate declares (`doc_feature_sets.py --tests`), as its cargo
+            # arguments: the test selectors its targets build, then its features.
             local -a set_argv
             read -r -a set_argv <<<"${feats#@args:}"
             argv+=("${set_argv[@]}")
@@ -2469,17 +2533,25 @@ if [[ "${1:-}" == "--census" ]]; then
         fi
 
         # A crate gate 7 checks once per feature set it declares (`sets`) cannot be listed with
-        # every feature on: its population is the union of what each declared set lists.
+        # every feature on: its population is the union of what each declared set lists, at the
+        # targets the set declares (`doc_feature_sets.py --tests`), the ones gate 7 and Layer
+        # C1bf build it at. A set narrowed to targets that build no test (its library alone) has
+        # no test to list, and is named rather than built.
         listed_all() {
             local set_lines label set_args
             if [[ "$tier" != "sets" ]]; then
                 list_names "$pkg" "@all" ""
                 return
             fi
-            set_lines="$(python3 "$here/doc_feature_sets.py" "$pkg")" || return 1
+            set_lines="$(python3 "$here/doc_feature_sets.py" --tests "$pkg")" || return 1
             [[ -n "$set_lines" ]] || return 1
             while read -r label set_args; do
                 [[ -n "$label" ]] || continue
+                if [[ -z "$set_args" ]]; then
+                    echo "  census: $pkg set $label builds no test target (its" \
+                         "clippy-targets), so it adds no test to the population" >&2
+                    continue
+                fi
                 list_names "$pkg" "@args:$set_args" "" || return 1
             done <<<"$set_lines" | sort -u
             return "${PIPESTATUS[0]}"

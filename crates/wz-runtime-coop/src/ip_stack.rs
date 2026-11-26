@@ -2943,7 +2943,7 @@ mod tests {
         const SYN: &[u8] = &[0x01, 0x09];
 
         /// A listener over a fresh [`Inbox`], with the queue the test fills and what was sent.
-        fn listener() -> (IpUdpListener<Inbox>, Queue, Sent) {
+        fn listener() -> (IpUdpListener<Inbox, OneTask>, Queue, Sent) {
             let queued = Queue::default();
             let sent = Sent::default();
             let socket = Inbox {

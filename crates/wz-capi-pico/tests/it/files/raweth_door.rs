@@ -12,7 +12,7 @@
 //! even where the socket cannot open, and with the capability the session opens.
 #![cfg(all(feature = "raweth-transport", target_os = "linux"))]
 
-use std::ffi::CString;
+use std::ffi::{c_int, CString};
 
 use wz_capi_pico::{
     z_config_default, z_config_loan_mut, z_config_move, z_open, z_owned_config_t,
@@ -22,9 +22,21 @@ use wz_capi_pico::{
 /// pico `_Z_ERR_TRANSPORT_OPEN_FAILED` (`utils/result.h`).
 const TRANSPORT_OPEN_FAILED: i8 = -102;
 
-/// Whether this process may open a raw packet socket on `lo`.
+/// Every protocol (`ETH_P_ALL`), in network byte order, as a packet socket names it.
+const ALL_PROTOCOLS: u16 = (libc::ETH_P_ALL as u16).to_be();
+
+/// Whether this process may open a raw packet socket: the kernel's answer to a bare `socket()`,
+/// which is the same on either engine, so the test asks no engine's socket type.
 fn may_open_a_raw_socket() -> bool {
-    wz_capi_core::runtime::raweth_socket::AfPacketSocket::open("lo").is_ok()
+    // SAFETY: three ints in, a descriptor or -1 out; the descriptor is closed below.
+    let probe =
+        unsafe { libc::socket(libc::AF_PACKET, libc::SOCK_RAW, c_int::from(ALL_PROTOCOLS)) };
+    if probe < 0 {
+        return false;
+    }
+    // SAFETY: `probe` is an open descriptor this test owns.
+    unsafe { libc::close(probe) };
+    true
 }
 
 #[test]

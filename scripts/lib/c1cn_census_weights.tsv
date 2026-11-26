@@ -40,7 +40,6 @@ wz-session-core               174
 wz-session-lwip                60   # split
 wz-session-mcu                 40
 wz-storage                     12
-wz-tls-mbedtls                  0   # excluded from all-features
 wz-tls-record                   9   # split with the next four
 zenoh                         155
 zenoh-buffers                   8   # split

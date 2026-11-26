@@ -30,6 +30,21 @@ description = "The admin space of a wz node: the keys a host reads a node's stat
 name = "wz_admin"
 path = "src/lib.rs"
 
+# The configurations this crate has, which Layers C1bf and C1bz and pre-push gate 7 build in place
+# of `--all-features` (`scripts/lib/doc_feature_sets.py`). A build of every feature has the heap, so
+# it compiles none of what the admin space of a node with no allocator must be: a `String` named by
+# code outside `alloc` compiles there and is refused only by the image's link. The fixed set gives
+# up `alloc` and every feature that reaches it, and builds the library alone: the unit tests are
+# written over the heap forms (their modules say so in their cfg), so they have no build there.
+[package.metadata.wz-docs]
+feature-sets = [
+    # Every feature, every target: the build `--all-features` makes.
+    { name = "all", except = [] },
+    # The fixed admin space (`adminspace-fixed`, `adminspace-write`) on the slot backing, the
+    # library alone.
+    { name = "fixed", except = ["alloc"], clippy-targets = ["--lib"] },
+]
+
 [features]
 # The core's own default set, so `cargo test -p wz-admin --features <admin feature>` builds what
 # `cargo test -p wz-session-core --features <admin feature>` built before the split, and
