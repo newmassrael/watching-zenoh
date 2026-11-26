@@ -167,22 +167,22 @@ fn under_the_pico_profile_a_held_session_drops_without_asking() {
     let rooms = rooms(&answers);
     rooms.hold(0, answers.face(10, true));
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(7), 1_000, None),
         Room::Held(7)
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Holder::Publish, 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Publish, 1_000, None),
         Room::Free,
         "a publish between its sends is tried again"
     );
     assert_eq!(
-        rooms.for_held(HeldDrop::DropAtOnce, Holder::Step, 1_000),
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Step, 1_000, None),
         Room::Stepping,
         "a holder that is not a publish is waited for"
     );
     assert!(answers.asked(10).is_empty(), "the link was asked for room");
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, None),
         Room::Free,
         "CONTROL: zenoh's profile asks the link"
     );
@@ -201,20 +201,65 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
     rooms.hold(0, answers.face(10, true));
     for profile in [HeldDrop::DropAtOnce, HeldDrop::WaitForRoom] {
         assert_eq!(
-            rooms.for_held(profile, Holder::Waiting, 1_000),
+            rooms.for_held(profile, Holder::Waiting, 1_000, None),
             Room::Free,
             "{profile:?} tries the session again"
         );
     }
     assert!(answers.asked(10).is_empty(), "no link was asked for room");
     assert_eq!(
-        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000),
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, None),
         Room::Free
     );
     assert_eq!(
         answers.asked(10),
         [1_000],
         "CONTROL: behind a read step zenoh's profile asks the link"
+    );
+}
+
+/// A leg that holds the send place of its one face answers behind a held session for that face
+/// alone: under zenoh's profile it asks that face, and no other, for room, and is dropped on it
+/// when it took none; under pico's it is dropped at once only behind a send on that face, and
+/// waits for the session behind a send on another. CONTROL: a publish that holds no face asks
+/// every face. Turned red by a leg that asks every face's room, where a full face it is not sent
+/// on drops it, or by one dropped behind another face's send.
+#[test]
+fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
+    use wz_session_core::session_init_params::HeldDrop;
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    rooms.hold(0, answers.face(10, false));
+    rooms.hold(1, answers.face(11, true));
+    assert_eq!(
+        rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, Some(1)),
+        Room::Free,
+        "the leg's own face has room"
+    );
+    assert!(
+        answers.asked(10).is_empty(),
+        "the full face the leg is not sent on was asked"
+    );
+    assert_eq!(answers.asked(11), [1_000]);
+    assert_eq!(
+        congested(rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, Some(0))),
+        Some(vec![0]),
+        "the leg's own face took no bytes"
+    );
+    assert_eq!(
+        congested(rooms.for_held(HeldDrop::WaitForRoom, Holder::Step, 1_000, None)),
+        Some(vec![0]),
+        "CONTROL: a publish that holds no face asks every face"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(0), 1_000, Some(1)),
+        Room::Stepping,
+        "behind a send on another face the leg waits for the session"
+    );
+    assert_eq!(
+        rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(1), 1_000, Some(1)),
+        Room::Held(1),
+        "behind a send on its own face the leg is dropped at once"
     );
 }
 

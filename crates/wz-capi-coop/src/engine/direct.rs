@@ -412,9 +412,10 @@ where
 pub(super) struct FaceTx<'a, C: ClockSource + 'static> {
     #[cfg(any(feature = "listen", feature = "group"))]
     held: Option<&'a HeldSend<'a, C>>,
-    /// Whether a publish's leg through it goes to the held face alone (`CoopEngine::on_faces`).
+    /// The place of the face a publish's leg through it holds alone (`CoopEngine::on_faces`);
+    /// `None` for an operation's hold, which reaches every face.
     #[cfg(any(feature = "listen", feature = "group"))]
-    alone: bool,
+    alone: Option<usize>,
     /// The dial role's wire while its place holds one; a place that holds none is not held, and
     /// a try of it would find no link either.
     #[cfg(not(any(feature = "listen", feature = "group")))]
@@ -477,7 +478,7 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     pub(super) fn reaches<L: CoopLinks + 'static>(&self, link: &DirectWire<L, C>) -> bool {
-        !self.alone || self.holds(link)
+        self.alone.is_none() || self.holds(link)
     }
 
     /// Every leg reaches the dial role's face where it is the only face: a publish hands a leg
@@ -488,30 +489,45 @@ impl<'a, C: ClockSource + 'static> FaceTx<'a, C> {
         true
     }
 
+    /// The wire of the face a publish's leg holds alone, while its place holds one: what the
+    /// leg's send writes with that face's send place held and nothing of the session. `None`
+    /// for a hold that reaches every face, or a place that holds no link.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(super) fn alone_wire(&self) -> Option<&'a Wire<C>> {
+        self.held
+            .filter(|_| self.alone.is_some())
+            .and_then(|held| held.wire)
+    }
+
+    /// The dial role's wire, while its place holds one: every leg holds that face alone.
+    #[cfg(not(any(feature = "listen", feature = "group")))]
+    pub(super) fn alone_wire(&self) -> Option<&'a Wire<C>> {
+        self.wire
+    }
+
+    /// The place of the face a publish's leg holds alone, which a droppable leg that finds the
+    /// session held answers for (`LinkRooms::for_held`); `None` for a hold that reaches every
+    /// face.
+    #[cfg(any(feature = "listen", feature = "group"))]
+    pub(super) fn leg_place(&self) -> Option<usize> {
+        self.alone
+    }
+
+    /// The dial role's face, at the first place, which every leg holds alone.
+    #[cfg(not(any(feature = "listen", feature = "group")))]
+    pub(super) fn leg_place(&self) -> Option<usize> {
+        Some(0)
+    }
+
     /// Wait for room for a blocking message of `priority` on the link of the face a publish's
     /// leg holds alone, with that face's send place held and nothing of the session
     /// (`SessionLinkActions::wait_for_wire_room`). A hold that reaches every face, or a place
     /// that holds no link, waits for nothing: the send answers for itself.
-    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) fn wait_for_room(
         &self,
         priority: wz_session_core::qos::Priority,
     ) -> Result<wz_session_core::session_actions::WireRoom, SendWireError> {
-        match self.held.filter(|_| self.alone).and_then(|held| held.wire) {
-            Some(wire) => wire.actions.wait_for_wire_room(priority),
-            None => Ok(wz_session_core::session_actions::WireRoom::Send),
-        }
-    }
-
-    /// Wait for room for a blocking message of `priority` on the dial role's link, with its send
-    /// place held and nothing of the session (`SessionLinkActions::wait_for_wire_room`). A place
-    /// that holds no link waits for nothing: the send answers for itself.
-    #[cfg(not(any(feature = "listen", feature = "group")))]
-    pub(super) fn wait_for_room(
-        &self,
-        priority: wz_session_core::qos::Priority,
-    ) -> Result<wz_session_core::session_actions::WireRoom, SendWireError> {
-        match self.wire {
+        match self.alone_wire() {
             Some(wire) => wire.actions.wait_for_wire_room(priority),
             None => Ok(wz_session_core::session_actions::WireRoom::Send),
         }
@@ -2150,7 +2166,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     &mut core.0,
                     FaceTx {
                         held: before,
-                        alone: false,
+                        alone: None,
                     },
                 );
             }
@@ -2191,7 +2207,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let sent = if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
                 self.try_leg(face, at, &mut leg)
             } else {
-                Self::wait_leg(face, &mut leg)
+                Self::wait_leg(face, at, &mut leg)
             };
             if let Some(Err(error)) = sent {
                 outcome = Err(error);
@@ -2200,12 +2216,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         outcome
     }
 
-    /// `leg` on `face` under a hold of its send place, which waits for whatever holds it now.
-    /// `None`, with `leg` not run, while the place holds no parts.
+    /// `leg` on `face`, the face at place `at`, under a hold of its send place, which waits for
+    /// whatever holds it now. `None`, with `leg` not run, while the place holds no parts.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(always)]
     fn wait_leg(
         face: &DirectFace<L, C>,
+        at: usize,
         leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Option<Result<usize, FanoutError>> {
         // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as `LinkTx`.
@@ -2217,14 +2234,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         Some(leg(FaceTx {
             held: Some(&held),
-            alone: true,
+            alone: Some(at),
         }))
     }
 
     /// `leg` of a droppable publish on `face`, the face at place `at`: its send place tried, and
-    /// while another holder has it, the face passed over or the place waited for as the queue
-    /// profile says (`Self::behind_held_place`). `None`, with `leg` not run, while the place
-    /// holds no parts.
+    /// while another send holds it, the face passed over or the place waited for as the queue
+    /// profile says (`Self::behind_held_place`). A place lent for a moment (a look at the face's
+    /// link, a debt paid) is tried again: only a send's hold is a transmit lock found taken, as
+    /// zenoh-pico's read takes no transmit lock to look at its transport. `None`, with `leg`
+    /// not run, while the place holds no parts.
     #[cfg(any(feature = "listen", feature = "group"))]
     #[inline(never)]
     fn try_leg(
@@ -2234,7 +2253,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         leg: &mut impl FnMut(LinkTx<'_, C>) -> Result<usize, FanoutError>,
     ) -> Option<Result<usize, FanoutError>> {
         loop {
-            let lent = face.site.try_lend(|parts| {
+            let lent = face.site.try_lend_send(|parts| {
                 // SAFETY: as in `Self::hold_faces_from`: `leg` reaches the send part only as
                 // `LinkTx`, a borrow of the lend that ends before it.
                 let wire = unsafe { parts.parts_mut() }.tx().as_ref();
@@ -2245,7 +2264,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 };
                 leg(FaceTx {
                     held: Some(&held),
-                    alone: true,
+                    alone: Some(at),
                 })
             });
             match lent {
@@ -2253,9 +2272,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Lend::Empty => return None,
                 Lend::Held => {}
             }
+            if !face.site.held_by_send() {
+                core::hint::spin_loop();
+                continue;
+            }
             match self.behind_held_place(at) {
                 Behind::TryAgain => core::hint::spin_loop(),
-                Behind::WaitForSession => return Self::wait_leg(face, leg),
+                Behind::WaitForSession => return Self::wait_leg(face, at, leg),
                 Behind::Dropped { told, .. } => return Some(self.dropped_on_face(told)),
             }
         }
@@ -2320,7 +2343,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // A place another thread holds is held only where there are other threads.
         if droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
             loop {
-                let lent = face.site.try_lend(|parts| {
+                let lent = face.site.try_lend_send(|parts| {
                     // SAFETY: as in `Self::hold_dial`: `leg` reaches the send part only as
                     // `LinkTx`, a borrow of the lend that ends before it.
                     let wire = unsafe { parts.parts_mut() }.tx().as_ref();
@@ -2330,6 +2353,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     Lend::Lent(sent) => return sent.map(|_| 0),
                     Lend::Empty => return Ok(0),
                     Lend::Held => {}
+                }
+                // A place lent for a moment is tried again, as `Self::try_leg` tries one.
+                if !face.site.held_by_send() {
+                    core::hint::spin_loop();
+                    continue;
                 }
                 // The dial role's face is at the first place.
                 match self.behind_held_place(0) {
@@ -2351,16 +2379,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         Ok(0)
     }
 
-    /// What a droppable publish does on the face at place `at`, whose send place another holder
-    /// has now, by the queue profile's `held_drop`, with nothing of the session held: pico's drops
-    /// it on the face at once and tells the caller, as pico's put fails when its try of the
+    /// What a droppable publish does on the face at place `at`, whose send place another send
+    /// holds now, by the queue profile's `held_drop`, with nothing of the session held: pico's
+    /// drops it on the face at once and tells the caller, as pico's put fails when its try of the
     /// transmit lock finds it held; zenoh's asks the face's link for room within
     /// `wait_before_drop`, tries the place again once the link took room and drops the publish on
     /// the face, untold, when it took none. A face that names no wait for its room is waited for.
-    fn behind_held_place(&self, at: usize) -> Behind<()> {
+    fn behind_held_place(&self, at: usize) -> Behind<DroppedOn> {
         let room = match self.held_drop {
-            HeldDrop::DropAtOnce => face_send::Room::Held(mark_of_place(at)),
-            HeldDrop::WaitForRoom => self.rooms.on_face(at, self.wait_before_drop_us),
+            HeldDrop::DropAtOnce => Room::Held(mark_of_place(at)),
+            HeldDrop::WaitForRoom => self.rooms.within_face(at, self.wait_before_drop_us),
         };
         room.behind()
     }

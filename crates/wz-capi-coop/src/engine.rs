@@ -1863,13 +1863,31 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// tries the session again ([`Room::Free`]); and behind a holder that is not a publish it waits
     /// for the session ([`Room::Stepping`]). Behind a read working out its wait both profiles try
     /// the session again, asking nothing.
-    pub(crate) fn for_held(&self, held_drop: HeldDrop, holder: Holder, wait_us: u64) -> Room {
+    ///
+    /// A leg that holds the send place of its one face, at place `leg`, answers for that face
+    /// alone, as each of zenoh's transports drops on its own queue: zenoh's profile asks that
+    /// face for room ([`Self::within_face`]), and pico's is dropped only behind a send on that
+    /// face, which a send on another face is not, as pico's put waits for a lock that is not its
+    /// transmit lock: it waits for the session.
+    pub(crate) fn for_held(
+        &self,
+        held_drop: HeldDrop,
+        holder: Holder,
+        wait_us: u64,
+        leg: Option<usize>,
+    ) -> Room {
         match (held_drop, holder) {
             // Under either profile: a read working out its wait waits on no face and lets go in a
             // moment, so no link is asked for room and nothing blocks on the session's lock.
             (_, Holder::Waiting) => Room::Free,
-            (HeldDrop::WaitForRoom, _) => self.within(wait_us),
-            (HeldDrop::DropAtOnce, Holder::Sending(face)) => Room::Held(face),
+            (HeldDrop::WaitForRoom, _) => match leg {
+                Some(at) => self.within_face(at, wait_us),
+                None => self.within(wait_us),
+            },
+            (HeldDrop::DropAtOnce, Holder::Sending(face)) => match leg {
+                Some(at) if mark_of_place(at) != face => Room::Stepping,
+                _ => Room::Held(face),
+            },
             (HeldDrop::DropAtOnce, Holder::Publish) => Room::Free,
             (HeldDrop::DropAtOnce, Holder::Step) => Room::Stepping,
         }
@@ -1920,18 +1938,20 @@ impl<W: LinkWaits> LinkRooms<W> {
     }
 
     /// Ask the face at place `at` alone for room within `wait_us`, with nothing of the session
-    /// held: what a droppable publish asks of a face whose send place another holder has, where
-    /// each face's place is taken on its own. `Unasked` when the place names no wait.
-    #[cfg(not(wz_round))]
-    pub(crate) fn on_face(&self, at: usize, wait_us: u64) -> face_send::Room<()> {
+    /// held: what a droppable leg asks of the one face it is sent on, where each face's place is
+    /// taken on its own, behind another send of that place or behind the session's holder
+    /// ([`Self::for_held`]). The face's place alone is named when it took none, and `Unasked`
+    /// answered when the place names no wait.
+    pub(crate) fn within_face(&self, at: usize, wait_us: u64) -> Room {
         let Some(Some(RoomPlace { on, .. })) = self.room_at(at) else {
-            return face_send::Room::Unasked;
+            return Room::Unasked;
         };
         if self.waits.wait_room(on, wait_us) {
-            face_send::Room::Free
-        } else {
-            face_send::Room::Congested(())
+            return Room::Free;
         }
+        let mut congested = DroppedOn::none(self.mark());
+        congested.insert(at);
+        Room::Congested(congested)
     }
 }
 
@@ -7083,7 +7103,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// would queue it behind the blocking one on the stage that one holds
     /// (`io/zenoh-transport/src/common/pipeline.rs` @ `let mut queue = zlock!(self.stage_in[idx]);`).
     /// So it takes the session when it is free, and while it is held asks the faces that are up
-    /// for room with nothing of the session held. A face with no room within `wait_before_drop`
+    /// for room with nothing of the session held, or the one face whose send place the leg holds,
+    /// at place `leg`, where each face's place is taken on its own. A face with no room within `wait_before_drop`
     /// is the congestion drop, which zenoh answers the put with success; room on every face means
     /// the holder is not waiting on one, and the session is tried again. A session whose faces
     /// give no wait to ask is waited for. Under the pico profile the publish is dropped at once on
@@ -7096,7 +7117,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// ([`ToPublish::DroppedOn`], [`Self::hand_off`]).
     // Out of line: the loop that asks the faces for room is taken only when the session is held.
     #[inline(never)]
-    fn live_to_publish(&self, droppable: bool) -> ToPublish<'_, L, C> {
+    fn live_to_publish(&self, droppable: bool, leg: Option<usize>) -> ToPublish<'_, L, C> {
         if !droppable {
             return self.live().map_or(ToPublish::Closed, ToPublish::Live);
         }
@@ -7117,9 +7138,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     lane: &self.samples,
                 });
             }
-            let room = self
-                .rooms
-                .for_held(self.held_drop, self.holder(), self.wait_before_drop_us);
+            let room =
+                self.rooms
+                    .for_held(self.held_drop, self.holder(), self.wait_before_drop_us, leg);
             let dropped = match room.behind() {
                 Behind::TryAgain => {
                     #[cfg(test)]
@@ -7565,7 +7586,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 Err(error) => return leg_outcome(Err(error)),
             }
         }
-        let mut core = match self.live_to_publish(droppable) {
+        #[cfg(not(wz_round))]
+        let leg = tx.leg_place();
+        #[cfg(wz_round)]
+        let leg = None;
+        let mut core = match self.live_to_publish(droppable, leg) {
             ToPublish::Live(core) => core,
             ToPublish::Closed => return Ok(0),
             ToPublish::DroppedOn {
@@ -7582,6 +7607,29 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 };
             }
         };
+        let put = Publication {
+            keyexpr,
+            wire,
+            payload,
+            opts,
+            meta: &meta,
+            plan,
+        };
+        // A blocking leg that holds its face alone is sent with that face's send place held and
+        // nothing of the session, as zenoh-pico's blocking put sends under its transmit lock
+        // alone: every wait of its send for the link's room (each fragment's of a chain) would
+        // otherwise hold up every other face's leg and the read. A session whose links share
+        // fewer outbound slots than they are waits for one its own way, below.
+        #[cfg(not(wz_round))]
+        if !droppable && <CoopForm as ThreadForm>::OTHER_THREADS {
+            #[cfg(feature = "listen")]
+            let short = core.0.transport.tx_pool_short;
+            #[cfg(not(feature = "listen"))]
+            let short = false;
+            if let Some(alone) = tx.alone_wire().filter(|_| !short) {
+                return self.publish_alone(core, &put, alone, tx);
+            }
+        }
         // Marked as the holder for as long as it holds the session: a droppable publish that
         // finds it held between this one's sends tries the session again, where one behind what
         // is not a publish waits for it.
@@ -7609,14 +7657,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if begin.hand_before {
             self.send_handed(&mut core.0);
         }
-        let put = Publication {
-            keyexpr,
-            wire,
-            payload,
-            opts,
-            meta: &meta,
-            plan,
-        };
         let (outcome, stuck) = self.fan_out_in(&mut core.0, &put, None, begin.pass, tx);
         // The clock is read only for a fan-out that stopped at a face, whose wait it bounds. Only
         // a send that waits for no slot stops one, which a build that listens on nothing never
@@ -7761,6 +7801,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         pass: Pass,
         tx: LinkTx<'_, C>,
     ) -> (Result<usize, FanoutError>, Option<u64>) {
+        // An empty key names nothing a link carries.
+        let Some(link_leg) = Self::leg_of(core, put) else {
+            return (Err(FanoutError::ExceedsCapacity), None);
+        };
+        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass, tx);
+        if stuck.is_some() {
+            return (outcome, stuck);
+        }
+        #[cfg(feature = "group")]
+        if let sent @ Err(_) = self.publish_to_groups(core, put, link_leg.send, skip) {
+            return (sent, None);
+        }
+        (outcome, None)
+    }
+
+    /// The put `put` as each link is sent it ([`LinkLeg`]), read off the session's tables:
+    /// `None` for a key that names nothing a link carries.
+    fn leg_of<'p>(core: &Core<L, C>, put: &Publication<'p>) -> Option<LinkLeg<'p>> {
         let Publication {
             keyexpr,
             wire,
@@ -7769,11 +7827,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             meta,
             plan,
         } = *put;
-        // The key as the session's tables name it: by the declaration the ABI named it by while
-        // that declaration stands, and whole otherwise. An empty key names nothing a link carries.
-        let Some(named) = tables(&core.session.registry).named_at(keyexpr, wire.declared()) else {
-            return (Err(FanoutError::ExceedsCapacity), None);
-        };
+        // The key as the session's tables name it, by the declaration the ABI named it by while
+        // that declaration stands, and whole otherwise.
+        let named = tables(&core.session.registry).named_at(keyexpr, wire.declared())?;
         let send = wz_session_core::session_actions::SendAs {
             reliable: opts.reliable_bool(),
             express: meta.is_express(),
@@ -7789,7 +7845,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .and_then(|handle| tables(&core.session.registry).write_filters().get(handle))
             .and_then(|row| row.plain())
             .and_then(|way| way.head);
-        let link_leg = LinkLeg {
+        Some(LinkLeg {
             named,
             payload,
             kind: opts.kind,
@@ -7797,17 +7853,33 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             send,
             head,
             planned: false,
-        };
-        let (outcome, stuck) = self.send_on_links(core, &link_leg, skip, pass, tx);
-        if stuck.is_some() {
-            return (outcome, stuck);
-        }
-        // And each group the session joined, which its task frames and sends.
-        #[cfg(feature = "group")]
-        let mut outcome = outcome;
-        #[cfg(feature = "group")]
+        })
+    }
+
+    /// Send `put` as `send` says to each group the session joined, which its task frames and
+    /// sends, but a group a dropped publish passes over (`skip`): what the last group that failed
+    /// came to, else `Ok(0)`.
+    #[cfg(feature = "group")]
+    fn publish_to_groups(
+        &self,
+        core: &mut Core<L, C>,
+        put: &Publication<'_>,
+        send: wz_session_core::session_actions::SendAs,
+        skip: Option<&DroppedOn>,
+    ) -> Result<usize, FanoutError> {
+        let Publication {
+            keyexpr,
+            wire,
+            payload,
+            opts,
+            meta,
+            ..
+        } = *put;
+        #[cfg(not(wz_round))]
+        let _ = skip;
+        let mut outcome = Ok(0);
         for group in &core.transport.groups {
-            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
+            #[cfg(wz_round)]
             if skip.is_some_and(|dropped| self.rooms.skips(dropped, group.at())) {
                 continue;
             }
@@ -7829,7 +7901,48 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 outcome = sent;
             }
         }
-        (outcome, None)
+        outcome
+    }
+
+    /// A blocking publish's leg on the one face `tx` holds alone, whose wire is `alone`
+    /// ([`Self::publish_to_link_on`]): the key named and the groups sent under `core`, which is
+    /// let go of before the face is sent the put, so the send waits for its link's room with
+    /// that face's send place held and nothing of the session. The face is sent it while the
+    /// session's record of it is up, as a fan-out sends only the faces that are.
+    #[cfg(not(wz_round))]
+    #[inline(never)]
+    fn publish_alone(
+        &self,
+        core: LiveCore<'_, L, C>,
+        put: &Publication<'_>,
+        alone: &Wire<C>,
+        tx: LinkTx<'_, C>,
+    ) -> Result<usize, FanoutError> {
+        let Some(leg) = Self::leg_of(&core.0, put) else {
+            return Err(FanoutError::ExceedsCapacity);
+        };
+        let up = core.0.up_wires_at().any(|(_, link)| tx.reaches(link));
+        #[cfg(feature = "group")]
+        let (core, groups) = {
+            let mut core = core;
+            let groups = self.publish_to_groups(&mut core.0, put, leg.send, None);
+            (core, groups)
+        };
+        drop(core);
+        let mut outcome = Ok(0);
+        if up {
+            let sent = leg.send_to(&alone.actions, FaceSend::Send);
+            #[cfg(test)]
+            if sent.planned {
+                self.takes.planned.fetch_add(1, Ordering::Relaxed);
+            }
+            outcome = sent.outcome;
+        }
+        #[cfg(feature = "group")]
+        if groups.is_err() {
+            outcome = groups;
+        }
+        outcome
     }
 
     /// Send `leg` to the session's links by `pass` (`Self::fan_out_in`), each face marked as the
