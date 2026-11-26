@@ -268,21 +268,27 @@ pub(crate) fn session_clock(time_base: Option<TimeBaseHold>) -> SessionClock {
     }
 }
 
-/// The program's word, as the cooperative engine's reads wait on it: the session's time base, and
-/// the one watch of it that wakes the wake the session's reads wait on beside their links.
+/// The program's word, as the cooperative engine's reads wait on it: the room the session set
+/// aside in its time base when it opened, and the one watch of it that wakes the wake the session's
+/// reads wait on beside their links.
 #[cfg(not(feature = "engine-tokio"))]
 struct TimeBaseMoves {
     watch: wz_capi_port::sync::Lock<Option<wz_node_time::time_base::MoveWatch>>,
-    time_base: TimeBaseHold,
+    room: wz_node_time::time_base::TimeBaseRoom,
 }
 
 #[cfg(not(feature = "engine-tokio"))]
 impl wz_capi_coop::ClockMoves for TimeBaseMoves {
     fn watch(&self, waker: core::task::Waker) {
-        let watch = self.time_base.watch(waker);
-        // The watch this takes the place of is let go after the lock: its drop takes the time base's.
-        let earlier = self.watch.with(|held| held.replace(watch));
+        // The watch this takes the place of goes first, so the room's one slot is free for this
+        // one, and after the lock: its drop takes the time base's.
+        let earlier = self.watch.with(Option::take);
         drop(earlier);
+        // A watch the room has no slot for is counted by the time base; the session's reads then
+        // end at their bound and read the clock again, as on a clock that moves by itself.
+        let watch = self.room.watch(waker).ok();
+        let displaced = self.watch.with(|held| core::mem::replace(held, watch));
+        drop(displaced);
     }
 }
 
@@ -305,17 +311,26 @@ pub(crate) fn open_bound(clock: &SessionClock) -> Option<wz_capi_coop::app_link:
 
 /// What tells a read of a cooperative session on `clock` that its clock moved on: the program's
 /// word, for a session on a time base; none for one on the host's clock, which moves by itself.
+///
+/// The one watch the open makes of it (`wz_capi_coop::ClockMoves::watch`) is set aside in the
+/// time base here, at the open, so no word of the program's after it takes memory; `NoMemory` when
+/// the heap refuses that room, which refuses the open.
 #[cfg(not(feature = "engine-tokio"))]
 pub(crate) fn clock_moves(
     clock: &SessionClock,
-) -> Option<alloc::sync::Arc<dyn wz_capi_coop::ClockMoves>> {
-    match clock {
-        SessionClock::Host(_) => None,
-        SessionClock::Program(time_base) => Some(alloc::sync::Arc::new(TimeBaseMoves {
+) -> Result<
+    Option<alloc::sync::Arc<dyn wz_capi_coop::ClockMoves>>,
+    wz_node_time::time_base::RoomRefused,
+> {
+    let SessionClock::Program(time_base) = clock else {
+        return Ok(None);
+    };
+    let moves: alloc::sync::Arc<dyn wz_capi_coop::ClockMoves> =
+        alloc::sync::Arc::new(TimeBaseMoves {
             watch: wz_capi_port::sync::Lock::new(None),
-            time_base: time_base.clone(),
-        })),
-    }
+            room: time_base.reserve(0, 1)?,
+        });
+    Ok(Some(moves))
 }
 
 #[cfg(test)]
@@ -574,13 +589,13 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         assert_eq!(clock.now_us(), 7_000, "the wall clock moved it");
         assert!(
-            clock_moves(&clock).is_some(),
+            matches!(clock_moves(&clock), Ok(Some(_))),
             "a session on a time base waits for the program's word"
         );
 
         let host = session_clock(None);
         assert!(
-            clock_moves(&host).is_none(),
+            matches!(clock_moves(&host), Ok(None)),
             "the host's clock moves by itself"
         );
         let before = host.now_us();
@@ -592,9 +607,10 @@ mod tests {
     }
 
     /// The word of a cooperative session on a time base wakes the one waker its engine watches
-    /// with, at each word; a later watch takes the place of an earlier, which is woken no more.
-    /// CONTROL: before the word no waker is woken. Turned red by a word that wakes no watch, or
-    /// two watches kept for one session.
+    /// with, at each word; a later watch takes the place of an earlier, which is woken no more, in
+    /// the one slot the session set aside. CONTROL: before the word no waker is woken. Turned red
+    /// by a word that wakes no watch, two watches kept for one session, or a later watch made
+    /// before the earlier is let go, which the room refuses.
     #[cfg(not(feature = "engine-tokio"))]
     #[test]
     fn the_word_wakes_the_one_watch_a_session_on_a_time_base_keeps() {
@@ -613,7 +629,9 @@ mod tests {
         // SAFETY: `program` outlives the clock and every hold of its time base.
         let time_base = unsafe { wz_capi_port::time_base::over_calls(context, read, None) };
         let clock = session_clock(Some(time_base.clone()));
-        let moves = clock_moves(&clock).expect("a session on a time base has the program's word");
+        let moves = clock_moves(&clock)
+            .expect("the heap gives the room of the word")
+            .expect("a session on a time base has the program's word");
         let (first, first_waker) = counted();
         moves.watch(first_waker);
         assert_eq!(first.0.load(Ordering::SeqCst), 0, "CONTROL: no word yet");
@@ -629,5 +647,10 @@ mod tests {
             "the watch taken the place of was woken"
         );
         assert_eq!(second.0.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            time_base.refused(),
+            0,
+            "the later watch took the slot the earlier gave back"
+        );
     }
 }
