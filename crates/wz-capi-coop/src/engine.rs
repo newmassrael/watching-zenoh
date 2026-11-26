@@ -1423,6 +1423,10 @@ pub(crate) struct Takes {
         not(any(feature = "threads", feature = "listen", feature = "group"))
     ))]
     pub(crate) pinned_queries: core::sync::atomic::AtomicUsize,
+    /// The turns of an answer that held their link's replies from the first reply and let them go
+    /// after the Final (`CoopEngine::answer`).
+    #[cfg(feature = "queryable")]
+    pub(crate) held_answers: core::sync::atomic::AtomicUsize,
     /// The holds of key expression declarations the session handed out (declared or retained)
     /// less those given back, counted whether the session is open or closed: a hold given back to
     /// a closed session is still one given back, and one never given back stays counted.
@@ -6185,6 +6189,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         self.takes.pinned_queries.load(Ordering::Relaxed)
     }
 
+    /// How many turns of an answer held their link's replies to leave with the Final in one send,
+    /// each counted where it let them go ([`Self::answer`]).
+    #[cfg(all(test, feature = "std", feature = "queryable"))]
+    pub(crate) fn answers_held(&self) -> usize {
+        self.takes.held_answers.load(Ordering::Relaxed)
+    }
+
     /// How often the list of the threads delivering beside the first was taken since the open
     /// ([`Deliveries`]): what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
@@ -6676,7 +6687,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             call.ask(query, &mut responder, &holder);
         }
-        self.answer(generation, query.rid(), query::Release::Hold);
+        self.answer(
+            generation,
+            query.rid(),
+            query::Release::Hold,
+            onward.raised(),
+        );
     }
 
     /// A publish's leg to the peers the session's faces reach, when its destination admits the
@@ -7613,9 +7629,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// the query's link, written into the link's transmit slot under the session's lock, or to the
     /// session's own get. Refused, sending nothing, when its payload or its attachment is longer
     /// than the session's `MAX_REPLY_PAYLOAD_BYTES`; dropped, as a lost link drops it, when the
-    /// session is closed or the query's link is no longer the session's.
+    /// session is closed or the query's link is no longer the session's. A reply onto a link holds
+    /// the link's replies unless `raised` says this turn of the answer holds them already, and
+    /// sets it when this one raised the hold, which the turn's end lets go of ([`Self::answer`]).
     #[cfg(feature = "queryable")]
-    fn send_reply(&self, generation: u64, parts: ReplyParts<'_>) -> Result<(), ReplyError> {
+    fn send_reply(
+        &self,
+        generation: u64,
+        parts: ReplyParts<'_>,
+        raised: &mut bool,
+    ) -> Result<(), ReplyError> {
         let Some(core) = self.live() else {
             return Ok(());
         };
@@ -7654,22 +7677,29 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return Ok(());
         }
         if let Some(route) = core.0.transport.answer_route(generation) {
+            // Held from the first reply, so the rest and the Final join its frame and the answer
+            // leaves in one send. A hold another turn raised is that turn's to let go of.
+            if !*raised {
+                *raised = route.hold_replies();
+            }
             route.send_reply_parts(parts);
         }
         Ok(())
     }
 
     /// One turn of the answer to the query `rid` on the link of `generation` has ended, its
-    /// replies sent as they were made ([`Self::send_reply`]): with `release`, let go of one hold
-    /// on its Final, sending the Final when it was owed and this was the last hold. Nothing is sent
-    /// on a link that is no longer the session's. On a group, what the replies staged there is
-    /// written by this call, on the calling thread.
+    /// replies written as they were made ([`Self::send_reply`]): with `release`, let go of one
+    /// hold on its Final, sending the Final when it was owed and this was the last hold, then let
+    /// go of the hold on the link's replies the turn raised (`replies`), so the replies and the
+    /// Final leave in one send. Nothing is sent on a link that is no longer the session's. On a
+    /// group, what the replies staged there is written by this call, on the calling thread.
     #[cfg(feature = "queryable")]
     fn answer(
         &self,
         generation: u64,
         rid: wz_session_core::wire_id::RequestId,
         release: query::Release,
+        replies: bool,
     ) {
         let Some(core) = self.live() else {
             return;
@@ -7699,8 +7729,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             self.deliver();
             return;
         }
-        if let (Some(qos), Some(route)) = (due, core.0.transport.answer_route(generation)) {
+        let route = core.0.transport.answer_route(generation);
+        if let (Some(qos), Some(route)) = (due, route) {
             route.send_response_final(rid, qos);
+        }
+        if let Some(route) = route {
+            route.release_replies(replies);
+        }
+        #[cfg(test)]
+        if replies {
+            self.takes.held_answers.fetch_add(1, Ordering::Relaxed);
         }
         // A group's sink only stages: a kept query answered from the program's own thread would
         // otherwise leave when the read task's wait ends, up to the group's tick a leg.
@@ -9821,7 +9859,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
 
     #[cfg(feature = "queryable")]
     fn release_held(&self, id: wz_capi_port::HeldQueryId) {
-        self.answer(id.generation, id.rid, query::Release::Kept);
+        self.answer(id.generation, id.rid, query::Release::Kept, false);
     }
     #[cfg(feature = "queryable")]
     fn undeclare_queryable(&self, id: QblId) {

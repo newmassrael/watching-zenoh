@@ -87,6 +87,15 @@ pub trait TxBuf {
         let _ = n;
         Ok(None)
     }
+
+    /// Take all the room left as a window the caller fills from its front, the length grown to
+    /// the buffer's end; the caller then gives back what it did not fill with [`Self::truncate`].
+    /// A writer that does not know its message's length writes it in one pass and has it where
+    /// it stopped. `None` for a buffer with no end of its own (a vector grows) or that hands out
+    /// no window: nothing was taken, and the writer measures and [`Self::reserve`]s instead.
+    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        None
+    }
 }
 
 #[cfg(feature = "alloc")]
@@ -197,6 +206,14 @@ impl TxBuf for SliceTxBuf<'_> {
             .ok_or(CodecError::BufferOverflow)?;
         self.len = end;
         Ok(Some(window))
+    }
+
+    fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        let end = self.storage.len();
+        // `len` never passes the storage's end, so the rest is a window, empty at worst.
+        let window = self.storage.get_mut(self.len..)?;
+        self.len = end;
+        Some(window)
     }
 }
 
@@ -385,6 +402,20 @@ impl<'a, B: TxBuf + ?Sized> TxSink<'a, B> {
     pub fn reserve(&mut self, n: usize) -> Result<Option<&mut [u8]>, B::Error> {
         self.buf.reserve(n)
     }
+
+    /// All the room the buffer has left as a window to fill from its front, or `None` (see
+    /// [`TxBuf::reserve_rest`]). The sink's position counts the whole window as written until
+    /// [`Self::rewind_to`] gives back what was not.
+    pub fn reserve_rest(&mut self) -> Option<&mut [u8]> {
+        self.buf.reserve_rest()
+    }
+
+    /// Keep only what this sink wrote up to `position` (its own count, as
+    /// [`SceSink::position`] reads it): the rest of a window [`Self::reserve_rest`] handed out,
+    /// or all of a message refused part way. A position at or past the sink's changes nothing.
+    pub fn rewind_to(&mut self, position: usize) {
+        self.buf.truncate(self.start.saturating_add(position));
+    }
 }
 
 impl<B: TxBuf + ?Sized> SceSink for TxSink<'_, B>
@@ -432,6 +463,46 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rest of a slice buffer is one window, up to its hold, which a sink counts as written
+    /// until it gives back what it did not fill. Turned red by a `reserve_rest` that leaves the
+    /// length where it was, or by a `rewind_to` that counts from the buffer's start and not the
+    /// sink's.
+    #[test]
+    fn the_rest_of_a_slice_buffer_is_one_window_and_its_unfilled_tail_is_given_back() {
+        let mut storage = [0u8; 8];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.append(&[1, 2]).unwrap();
+        buf.hold_to(6);
+        let mut sink = TxSink::over(&mut buf);
+        let window = sink.reserve_rest().expect("a slice hands its rest out");
+        assert_eq!(window.len(), 4, "the room up to the hold");
+        window[0] = 3;
+        assert_eq!(sink.position(), 4, "the window counts as written");
+        sink.rewind_to(1);
+        assert_eq!(sink.position(), 1);
+        assert_eq!(
+            buf.as_slice(),
+            &[1, 2, 3],
+            "the prefix and the one byte filled"
+        );
+        assert_eq!(buf.remaining(), 3);
+    }
+
+    /// A buffer with no end of its own hands no rest out, and a full one hands out an empty one.
+    #[test]
+    fn a_vector_hands_no_rest_out_and_a_full_slice_an_empty_one() {
+        #[cfg(feature = "alloc")]
+        {
+            let mut vector: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            assert!(vector.reserve_rest().is_none(), "a vector grows");
+        }
+        let mut storage = [0u8; 2];
+        let mut buf = SliceTxBuf::new(&mut storage);
+        buf.append(&[1, 2]).unwrap();
+        assert_eq!(buf.reserve_rest().map(|window| window.len()), Some(0));
+        assert_eq!(buf.len(), 2);
+    }
 
     #[test]
     fn a_slice_buffer_is_a_prefix_of_what_was_written() {
