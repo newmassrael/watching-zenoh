@@ -10,8 +10,7 @@
 //! ([`crate::pubsub::LocalSubscribers::epoch`]) moves on each. The answer is kept as a set of the
 //! places of the rows it reached ([`SubscriberSet`]) in a small direct-mapped memory of the
 //! peer's side ([`PeerMatches`]), so a message whose answer is kept is handed to its subscribers
-//! with no pattern matched, no key gate asked and no key text read; a key the gate refused keeps
-//! the refusal as its answer, counted again for each of its messages. Zenoh keeps the same answer
+//! with no pattern matched, no key gate asked and no key text read. Zenoh keeps the same answer
 //! on the resource a declared key names (`Resource::matches`), invalidated by the version of its
 //! routing tables.
 //!
@@ -154,10 +153,6 @@ pub struct MatchEntry {
     epoch: u64,
     /// The places of the rows the key reached.
     set: SubscriberSet,
-    /// When the answer is that the key gate refused the key: the counter it counted the refusal
-    /// in ([`crate::key_gate::Refusal::counter`]), which each message on the key is counted in
-    /// again with the gate not asked. `None`, all zero, for an answer of places.
-    refused: Option<core::num::NonZeroU8>,
 }
 
 impl MatchEntry {
@@ -167,23 +162,11 @@ impl MatchEntry {
         wire: 0,
         epoch: 0,
         set: SubscriberSet::EMPTY,
-        refused: None,
     };
 
-    /// The places the key reached, when that is the answer kept at the table's `epoch`: `None`
-    /// for an answer of another epoch, and for a key the gate refused.
+    /// The kept answer, when it was worked out at the table's `epoch`.
     pub fn answer(&self, epoch: u64) -> Option<&SubscriberSet> {
-        (self.kept && self.epoch == epoch && self.refused.is_none()).then_some(&self.set)
-    }
-
-    /// The counter of the key gate's refusal of the key, when that is the answer kept at the
-    /// table's `epoch`.
-    pub fn refusal(&self, epoch: u64) -> Option<core::num::NonZeroU8> {
-        if self.kept && self.epoch == epoch {
-            self.refused
-        } else {
-            None
-        }
+        (self.kept && self.epoch == epoch).then_some(&self.set)
     }
 
     /// Keep `set` as the answer of this entry's key at `epoch`.
@@ -191,17 +174,6 @@ impl MatchEntry {
         self.kept = true;
         self.epoch = epoch;
         self.set = set;
-        self.refused = None;
-    }
-
-    /// Keep, as the answer of this entry's key at `epoch`, that the key gate refused it and
-    /// counted the refusal in `counter`: the gate's answer changes only with the gate, which moves
-    /// the epoch, or with the peer's class, which forgets the memory.
-    pub fn keep_refused(&mut self, epoch: u64, counter: core::num::NonZeroU8) {
-        self.kept = true;
-        self.epoch = epoch;
-        self.set = SubscriberSet::EMPTY;
-        self.refused = Some(counter);
     }
 }
 
@@ -290,25 +262,6 @@ mod tests {
         entry.keep(7, set);
         assert_eq!(entry.answer(7), Some(&set));
         assert_eq!(entry.answer(8), None);
-    }
-
-    /// A refusal kept is read back at its epoch alone, as a refusal and not as an empty set of
-    /// places, and an answer of places kept over it is read as places. Turned red by a refusal read
-    /// as the set it keeps, or read past its epoch.
-    #[test]
-    fn a_kept_refusal_is_read_at_its_epoch_alone_and_never_as_places() {
-        let counter = core::num::NonZeroU8::MIN;
-        let mut entry = MatchEntry::NONE;
-        assert_eq!(entry.refusal(0), None, "all zero keeps nothing");
-        entry.keep_refused(4, counter);
-        assert_eq!(entry.refusal(4), Some(counter));
-        assert_eq!(entry.answer(4), None, "a refusal is no set of places");
-        assert_eq!(entry.refusal(5), None, "another epoch");
-        let mut set = SubscriberSet::EMPTY;
-        assert!(set.insert(2));
-        entry.keep(5, set);
-        assert_eq!(entry.answer(5), Some(&set));
-        assert_eq!(entry.refusal(5), None, "places kept over the refusal");
     }
 
     #[test]
