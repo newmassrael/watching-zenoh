@@ -101,7 +101,9 @@ started afresh, the server side (pong, sub) pinned to --server-cpus and the clie
 The client side of every cell declares its publisher a second after its open, as upstream's z_pub_thr
 does, and on tcp, udp and the program transport puts nothing it counts until that publisher matches the
 server side's subscriber (perf_probe.c -M): a zenoh-pico publisher that knows of no subscriber sends
-nothing and still counts the put. Both arms run the same arguments.
+nothing and still counts the put. Both arms run the same arguments. Built against wz, the probe states the
+counts its roles hold on their session at once (perf_probe.c, PERF_WZ_ARM), past the few a session of the
+pico ABI opens its tables at; the selftest counts the roles' declarations against them.
 
   * rtt  pong, then ping: --pings round trips of the size after --warmup-ms, each waited for up to
          --timeout-ms. Figures: the percentiles p50, p90 and p99 and the mean and extremes (microseconds),
@@ -166,6 +168,7 @@ import math
 import os
 import pathlib
 import random
+import re
 import shutil
 import socket
 import statistics
@@ -239,6 +242,8 @@ SUB_END_KEYS = ("total", "last_growth_ns", "peers")
 SUB_MARK_KEYS = ("pub_sent", "received_before_end")
 #: The last line of a role that ran (perf_probe.c): the program's own peak resident set.
 USAGE_KEYS = ("peak_rss_kib",)
+#: How that line starts. Every role prints it as it ends, so it says nothing of why a role ended.
+USAGE_PREFIX = "perf_probe usage "
 #: The transports whose links are reliable streams: a put under congestion control block is delivered there or
 #: refused, so one that answered success and never arrived loses its cell (`delivery`). A zenoh-pico peer, whose
 #: stream sockets do not block, leaves a batch it could not write whole to no one and answers success
@@ -301,9 +306,11 @@ def fields(text: str, role: str, keys: tuple[str, ...]) -> dict[str, str] | None
 
 
 def last_words(text: str) -> str:
-    """What a program said last, for the reason of a lost cell."""
+    """What a program said last, for the reason of a lost cell: its last line before the usage line it ends
+    with (USAGE_PREFIX), or that line when it said nothing else."""
     lines = [line for line in text.splitlines() if line.strip()]
-    return lines[-1][:160] if lines else "nothing"
+    said = [line for line in lines if not line.startswith(USAGE_PREFIX)] or lines
+    return said[-1][:160] if said else "nothing"
 
 
 @dataclass(frozen=True)
@@ -431,6 +438,68 @@ def binary_name(arm: str, transport: str) -> str | None:
     if (arm, transport) in NOT_APPLICABLE:
         return None
     return "perf_probe_Wapp" if transport == "program" else f"perf_probe_{arm}"
+
+
+#: The probe's source, and the switch of its builds against wz's library, which state before the open the
+#: counts PROBE_LIMITS_MACRO names: a session of the pico ABI opens its tables at fewer.
+PROBE_SOURCE = HERE / "perf_probe.c"
+WZ_PROBE_SWITCH = "PERF_WZ_ARM"
+PROBE_LIMITS_MACRO = "PERF_SESSION_LIMITS"
+#: The roles of the probe (`run_<role>` in perf_probe.c).
+PROBE_ROLES = ("ping", "pong", "pub", "sub")
+
+
+def probe_session_limits(source: str) -> dict[str, int]:
+    """The counts the probe's PROBE_LIMITS_MACRO states, by limit id, as wz_ext.h reads the value of
+    WZ_EXT_CONFIG_LIMITS_KEY (NAME=count items, comma separated). ValueError for a source that defines it
+    other than once, or an item that is no NAME=count."""
+    found = re.findall(rf'^#define {PROBE_LIMITS_MACRO} "([^"]*)"$', source, re.M)
+    if len(found) != 1:
+        raise ValueError(f"perf_probe.c defines {PROBE_LIMITS_MACRO} {len(found)} time(s), not once")
+    stated: dict[str, int] = {}
+    for item in found[0].split(","):
+        name, eq, count = item.partition("=")
+        if not eq or not name or not count.isdigit():
+            raise ValueError(f"{PROBE_LIMITS_MACRO} item `{item}` is no NAME=count")
+        stated[name] = int(count)
+    return stated
+
+
+def probe_role_holds(source: str) -> dict[str, dict[str, int]]:
+    """What each role's body (`static int run_<role>(` to its closing brace) declares on its session: its
+    subscribers (`declare_subscriber(`), its publishers (`declare_publisher(` and `client_publisher(`), and the
+    keys they name, one each. ValueError for a role whose body is not found once."""
+    holds: dict[str, dict[str, int]] = {}
+    for role in PROBE_ROLES:
+        bodies = re.findall(rf"^static int run_{role}\(.*?^\}}$", source, re.M | re.S)
+        if len(bodies) != 1:
+            raise ValueError(f"perf_probe.c has {len(bodies)} body(ies) of run_{role}, not one")
+        subscribers = bodies[0].count("declare_subscriber(")
+        publishers = bodies[0].count("declare_publisher(") + bodies[0].count("client_publisher(")
+        holds[role] = {"MAX_SUBSCRIPTIONS": subscribers, "MAX_PUBLISHERS": publishers,
+                       "MAX_DECLARED_KEYEXPRS": subscribers + publishers}
+    return holds
+
+
+def probe_states_limits(source: str) -> bool:
+    """Whether the probe, built with WZ_PROBE_SWITCH, hands PROBE_LIMITS_MACRO to its config under
+    WZ_EXT_CONFIG_LIMITS_KEY before it opens its session."""
+    stated = re.search(rf"^#ifdef {WZ_PROBE_SWITCH}\n(?:(?!^#endif).)*?zp_config_insert\([^;]*"
+                       rf"WZ_EXT_CONFIG_LIMITS_KEY, {PROBE_LIMITS_MACRO}\)", source, re.M | re.S)
+    opened = source.find("z_open(&session")
+    return stated is not None and opened != -1 and stated.end() < opened
+
+
+def probe_builds(script: str) -> dict[str, str]:
+    """The words after each `perf_probe_build "$dir" <arm>` of scripts/pico-compare.sh, by arm, its
+    continuation lines joined."""
+    joined = script.replace("\\\n", " ")
+    builds: dict[str, str] = {}
+    for line in joined.splitlines():
+        words = line.split()
+        if len(words) >= 3 and words[:2] == ["perf_probe_build", '"$dir"']:
+            builds[words[2]] = " ".join(words[3:])
+    return builds
 
 
 def pico_sys_include(lines: list[str]) -> str:
@@ -2013,6 +2082,40 @@ def cmd_selftest() -> int:
            binary_name("P", "udp") is None and binary_name("W", "udp") == "perf_probe_W")
     expect("every arm and transport has a program or a reason it has none",
            all(binary_name(a, t) is not None or (a, t) in NOT_APPLICABLE for a in ARMS for t in TRANSPORTS))
+
+    expect("a lost cell is named by what a program said before its usage line, the usage line when it said "
+           "nothing else",
+           last_words("perf_probe ping: unable to declare the stop publisher\nperf_probe usage peak_rss_kib=3296\n")
+           == "perf_probe ping: unable to declare the stop publisher"
+           and last_words("perf_probe usage peak_rss_kib=3296\n") == "perf_probe usage peak_rss_kib=3296"
+           and last_words("\n") == "nothing")
+    probe = PROBE_SOURCE.read_text(encoding="utf-8")
+    stated = probe_session_limits(probe)
+    holds = probe_role_holds(probe)
+    expect("CONTROL: the roles' declarations are counted, and two of them hold more than one entity of a kind",
+           set(holds) == set(PROBE_ROLES) and holds["pong"]["MAX_SUBSCRIPTIONS"] == 2
+           and holds["ping"]["MAX_PUBLISHERS"] == 2 and holds["pong"]["MAX_DECLARED_KEYEXPRS"] == 3)
+    expect("the probe states, against wz, at least what each role declares on its session at once",
+           all(stated.get(limit, 0) >= count for role in holds.values() for limit, count in role.items()))
+    expect("the probe hands those counts to its config before it opens, in its build against wz alone",
+           probe_states_limits(probe)
+           and not probe_states_limits(probe.replace(f"#ifdef {WZ_PROBE_SWITCH}\n    if (zp_config_insert",
+                                                     "    if (zp_config_insert")))
+    expect("a statement that is no NAME=count, or none, is refused",
+           lost_value(lambda: probe_session_limits(f'#define {PROBE_LIMITS_MACRO} "MAX_PUBLISHERS"\n'))
+           and lost_value(lambda: probe_session_limits("")))
+    builds = probe_builds((ROOT / "scripts" / "pico-compare.sh").read_text(encoding="utf-8"))
+    expect("both wz probes are built with the switch and wz_ext.h, and the reference's without the switch",
+           set(builds) == {"P", "W", "Wapp"}
+           and all(f"-D{WZ_PROBE_SWITCH}" in builds[arm] and "crates/wz-capi-core/include" in builds[arm]
+                   for arm in ("W", "Wapp"))
+           and f"-D{WZ_PROBE_SWITCH}" not in builds["P"])
+    windows = (HERE / "windows" / "perf_matrix.ps1").read_text(encoding="utf-8").splitlines()
+    windows_arms = {arm: [line for line in windows if f"@{{ Arm = '{arm}';" in line] for arm in ("P", "W")}
+    expect("the Windows matrix builds arm W's probe with the switch and the reference's without it",
+           all(len(found) == 1 for found in windows_arms.values())
+           and f"/D{WZ_PROBE_SWITCH}" in windows_arms["W"][0] and f"/D{WZ_PROBE_SWITCH}" not in windows_arms["P"][0]
+           and any("$cl + $arm.Defines" in line for line in windows))
 
     built = json.dumps({"reason": "build-script-executed", "package_id": "path+file:///x#zenoh-pico-sys@1.0",
                         "out_dir": "/o/one"})

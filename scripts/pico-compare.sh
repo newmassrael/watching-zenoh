@@ -1471,7 +1471,8 @@ parity() {
 # by the gate's rule for that form), perf_probe_W against that wz-capi-pico build and perf_probe_Wapp against it
 # with the `app-transport` capability, the one arm that carries the program transport cell; both wz builds are
 # made as the size gate makes the case of their form (perf_matrix.py wz-arm). Each arm's library is copied
-# beside it (lib-<arm>), so a later build of the same crate does not change what a run measured.
+# beside it (lib-<arm>), so a later build of the same crate does not change what a run measured. Both wz probes
+# are built with PERF_WZ_ARM and wz_ext.h, so their sessions state the counts the roles hold (perf_probe.c).
 # PICO_CMP_NO_BUILD=1 runs the programs already there.
 
 perf_fail() {
@@ -1620,8 +1621,9 @@ perf_matrix() {
         perf_matrix_wz_arm "$dir" W ""
         perf_matrix_wz_arm "$dir" Wapp app-transport
         perf_probe_build "$dir" P zenohpico
-        perf_probe_build "$dir" W wz_capi_pico
-        perf_probe_build "$dir" Wapp wz_capi_pico -DPERF_PROGRAM_TRANSPORT -I"$root/crates/wz-capi-core/include"
+        perf_probe_build "$dir" W wz_capi_pico -DPERF_WZ_ARM -I"$root/crates/wz-capi-core/include"
+        perf_probe_build "$dir" Wapp wz_capi_pico -DPERF_WZ_ARM -DPERF_PROGRAM_TRANSPORT \
+            -I"$root/crates/wz-capi-core/include"
         perf_external_arm "$dir"
     else
         stamped_engine "$(recorded_engine "$dir/reference.json")"
