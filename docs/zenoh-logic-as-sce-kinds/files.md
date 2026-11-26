@@ -209,6 +209,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-coop/src/tests/admission_heap.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/arena.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/closure_drops.rs` | excluded: test | Test-only file by its name. |
+| `crates/wz-capi-coop/src/tests/direct_runtime.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/congestion.rs` | excluded: test | Test-only file by its name. |
 | `crates/wz-capi-coop/src/tests/decl_watch.rs` | S7 | |
 | `crates/wz-capi-coop/src/tests/dial_in_flight.rs` | excluded: test | Test-only file by its name. |
