@@ -199,9 +199,9 @@
       "debt": null
     },
     "time-base-advanced": {
-      "allocs_per_round": null,
-      "locked": false,
-      "debt": "debt-TBD"
+      "allocs_per_round": 0,
+      "locked": true,
+      "debt": null
     },
     "transport-events-listener": {
       "allocs_per_round": 0,
