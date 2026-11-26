@@ -172,14 +172,18 @@ ratio and fails: its rules give that side none of its code.
 `--explain` reads the same case as `--measure` (the same builds, so after a measure it builds
 nothing again) and says, for each area, what holds its bytes, and how many bytes the symbol reading
 gives it, and how many bytes of inlined language runtime code it counts by their caller's file and
-how many bytes of no source line by their frame's: on the wz side the owner modules and the source files by bytes, the bodies by their bytes
-in the area with the name each is shown by and how many other names its address carries, and the
-generic functions with more than one copy (a demangled name with every generic argument list
-removed is one function); on the zenoh-pico side the source files by bytes. The unclassified and
-the unattributed bytes are explained as two areas of their own. The tables print the head of each
-list; the whole lists go to `size-ledger/explain-<case>.json` under the cost gate's target
-directory, with every source file of each side, its owner and how the owner was read, and the
-report it replaces is kept beside it as `explain-<case>.previous.json`, so two measurements diff.
+how many bytes of no source line by their frame's: on the wz side the owner modules and the source
+files by bytes, the bodies by their bytes in the area with the name each is shown by and how many
+other names its address carries, and the generic functions with more than one copy (a demangled
+name with every generic argument list removed is one function); on the zenoh-pico side the source
+files by bytes. Each owner (a wz module, a zenoh-pico file) also names the bodies that hold its
+bytes, by its bytes in each: the largest few in the JSON with the sum of the rest, the largest
+three in the tables, so code inlined into another owner's function is found by that function's
+name. The unclassified and the unattributed bytes are explained as two areas of their own. The
+tables print the head of each list; the whole lists go to `size-ledger/explain-<case>.json`
+under the cost gate's target directory, with every source file of each side, its owner and how the
+owner was read, and the report it replaces is kept beside it as `explain-<case>.previous.json`, so
+two measurements diff.
 Names are demangled by `c++filt` (binutils, beside the `nm` this gate reads with), and shown
 mangled when it cannot.
 
@@ -261,7 +265,11 @@ EXPLAIN_SYMBOLS = 40
 EXPLAIN_GENERICS = 30
 EXPLAIN_FILES = 20
 EXPLAIN_NAME_WIDTH = 140
-EXPLAIN_SCHEMA = 4
+# --explain: how many of an owner's bodies its row in the JSON names, largest first (the rest are
+# summed so the row still adds up to the owner's bytes), and how many of them the tables print.
+EXPLAIN_OWNER_SYMBOLS = 20
+EXPLAIN_OWNER_SYMBOLS_SHOWN = 3
+EXPLAIN_SCHEMA = 5
 DEMANGLER = "c++filt"
 EXPLAIN_DIR = "size-ledger"
 UNCLASSIFIED_AREA = "(unclassified)"
@@ -2346,6 +2354,20 @@ def _ranked(groups: Mapping[str, Mapping[int, int]], key: str) -> list[dict]:
     return sorted(rows, key=lambda row: (-row["bytes"], row[key]))
 
 
+def owner_symbols(sizes: Mapping[int, int], names: Mapping[int, str],
+                  limit: int = EXPLAIN_OWNER_SYMBOLS) -> dict:
+    """Which bodies hold an owner's bytes, since a body holds the inlined code of owners besides
+    its own: `sizes` maps a body (by address) to the owner's bytes in it, `names` a body to the
+    name it is shown by. Gives the name of the body `largest` counts (`largest_symbol`), the `limit` bodies
+    that hold the most of the owner's bytes with those bytes, largest first, and the bytes and
+    bodies of the rest, so the list and the rest add up to the owner's bytes."""
+    rows = sorted(({"symbol": names[address], "bytes": size} for address, size in sizes.items()),
+                  key=lambda row: (-row["bytes"], row["symbol"]))
+    rest = rows[limit:]
+    return {"largest_symbol": rows[0]["symbol"] if rows else None, "symbols": rows[:limit],
+            "symbols_rest": sum(row["bytes"] for row in rest), "symbols_rest_bodies": len(rest)}
+
+
 def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str],
                  by_symbol: int | None) -> dict:
     """What holds one side's bytes of one area: its owners (a wz module, a zenoh-pico file), its
@@ -2356,7 +2378,8 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
     bodies, `framed` the bytes of no source line counted in it by the file of the frame that
     holds them (`frame_file`), in `framed_bodies` bodies, and `symbol_placed` the bytes of no
     source line and no frame counted in it by its body's symbols (`symbol_piece`), in
-    `symbol_placed_bodies` bodies."""
+    `symbol_placed_bodies` bodies. Each owner's row also names the bodies that hold its bytes
+    (`owner_symbols`)."""
     owners: dict[str, dict[int, int]] = {}
     files: dict[str, dict[int, int]] = {}
     generics: dict[str, dict[int, int]] = {}
@@ -2387,11 +2410,16 @@ def explain_area(side: str, pieces: Iterable[Piece], demangled: Mapping[str, str
                 "name": demangled.get(body.lead.name, body.lead.name)}
                for body, by_owner in held.values()]
     symbols.sort(key=lambda row: (-row["bytes"], row["name"]))
+    names = {address: demangled.get(body.lead.name, body.lead.name)
+             for address, (body, _) in held.items()}
+    ranked_owners = _ranked(owners, "owner")
+    for row in ranked_owners:
+        row.update(owner_symbols(owners[row["owner"]], names))
     out = {"bytes": total, "by_symbol": by_symbol, "bodies": len(symbols),
            "inlined": sum(inlined.values()), "inlined_bodies": len(inlined),
            "framed": sum(framed.values()), "framed_bodies": len(framed),
            "symbol_placed": sum(placed.values()), "symbol_placed_bodies": len(placed),
-           "owners": _ranked(owners, "owner"), "symbols": symbols}
+           "owners": ranked_owners, "symbols": symbols}
     if side == "wz":
         out["files"] = _ranked(files, "file")
         out["generics"] = [row for row in _ranked(generics, "function") if row["bodies"] > 1]
@@ -2466,6 +2494,24 @@ def explain_table(title: str, rows: list[dict], shown: int, columns: tuple[str, 
     return out
 
 
+def explain_owner_bodies(title: str, rows: list[dict], owners: int,
+                         shown: int = EXPLAIN_OWNER_SYMBOLS_SHOWN) -> list[str]:
+    """Under each of the `owners` first rows of `rows` (`explain_area`'s owners), the `shown`
+    bodies that hold the most of its bytes, then what its other bodies hold."""
+    if not rows:
+        return [f"    {title}: none"]
+    out = [f"    {title}, the largest {shown} bodies of each of the largest "
+           f"{min(owners, len(rows))} of {len(rows)}:"]
+    for row in rows[:owners]:
+        out.append(f"      {fit(row['owner'])}: {row['bytes']} B in {row['bodies']} bodies")
+        listed = row["symbols"][:shown]
+        out += [f"      {symbol['bytes']:>8}  {fit(symbol['symbol'])}" for symbol in listed]
+        rest = row["bytes"] - sum(symbol["bytes"] for symbol in listed)
+        if rest:
+            out.append(f"      {rest:>8}  in {row['bodies'] - len(listed)} other bodies")
+    return out
+
+
 def explain_lines(report: dict, previous: object) -> list[str]:
     """The head of each list of `report`, each area's bytes against `previous`'s when it has
     them."""
@@ -2496,6 +2542,8 @@ def explain_lines(report: dict, previous: object) -> list[str]:
                      f"{pico.get('symbol_placed_bodies', 0)} bodies")
         lines += explain_table("wz modules", wz["owners"], EXPLAIN_OWNERS,
                                ("bytes", "bodies"), lambda row: row["owner"])
+        lines += explain_owner_bodies("wz modules by the bodies that hold their bytes",
+                                      wz["owners"], EXPLAIN_OWNERS)
         lines += explain_table("wz source files", wz["files"], EXPLAIN_OWNERS,
                                ("bytes", "bodies"), lambda row: row["file"])
         lines += explain_table("wz bodies (bytes in this area; aliases: the other names of its "
@@ -2507,6 +2555,8 @@ def explain_lines(report: dict, previous: object) -> list[str]:
                                lambda row: row["function"])
         lines += explain_table("zenoh-pico files", pico["owners"], EXPLAIN_FILES,
                                ("bytes", "bodies"), lambda row: row["owner"])
+        lines += explain_owner_bodies("zenoh-pico files by the bodies that hold their bytes",
+                                      pico["owners"], EXPLAIN_FILES)
     return lines
 
 
@@ -3614,6 +3664,56 @@ def cmd_selftest() -> int:
                         None)["owners"][0]["owner"] == f"{NO_OWNER} /s/z.c"
            and explain_area("wz", [p for p in xpieces if piece_area(p) == UNATTRIBUTED_AREA],
                             xnames, None)["owners"][0]["owner"] == NO_LINE)
+    yrules = Rules((), {"wz_y": "y"}, "::")
+    ybodies, _ = place_bodies([Symbol(0x10, 20, "_Re", ("wz_y::s::f",)),
+                               Symbol(0x40, 64, "_Rf", ("wz_y::s::g",))], yrules, ["y"])
+    ypieces, _ = attribute(
+        ybodies, [Span(0x10, 0x24, "/s/r.rs"), Span(0x40, 0x4C, "/s/r.rs"),
+                  Span(0x4C, 0x80, "/s/s.rs")],
+        {"/s/r.rs": ("wz_y::r", BY_PATH), "/s/s.rs": ("wz_y::s", BY_PATH)}, yrules, ["y"])
+    ywz = explain_area("wz", [p for p in ypieces if piece_area(p) == "y"],
+                       {"_Re": "wz_y::s::f", "_Rf": "wz_y::s::g"}, None)
+    yrows = {row["owner"]: row for row in ywz["owners"]}
+    expect("an owner split over two bodies names both by its bytes in each, largest first, and "
+           "they add up to its bytes",
+           [row["owner"] for row in ywz["owners"]] == ["wz_y::s", "wz_y::r"]
+           and yrows["wz_y::r"] == {"owner": "wz_y::r", "bytes": 32, "bodies": 2, "largest": 20,
+                                    "largest_symbol": "wz_y::s::f",
+                                    "symbols": [{"symbol": "wz_y::s::f", "bytes": 20},
+                                                {"symbol": "wz_y::s::g", "bytes": 12}],
+                                    "symbols_rest": 0, "symbols_rest_bodies": 0}
+           and list(yrows["wz_y::r"])[:4] == ["owner", "bytes", "bodies", "largest"]
+           and yrows["wz_y::s"]["symbols"] == [{"symbol": "wz_y::s::g", "bytes": 52}]
+           and all(sum(s["bytes"] for s in row["symbols"]) + row["symbols_rest"] == row["bytes"]
+                   for row in ywz["owners"] + xwz["owners"]))
+    expect("an owner's bodies inlined into another owner's body are named by that body",
+           [(o["owner"], o["largest_symbol"], [s["bytes"] for s in o["symbols"]])
+            for o in xwz["owners"]]
+           == [("wz_x::m", "wz_x::n::big", [52, 40, 24]), ("wz_x::n", "wz_x::n::big", [48])])
+    many = owner_symbols({i: i + 1 for i in range(EXPLAIN_OWNER_SYMBOLS + 1)},
+                         {i: f"s{i:03d}" for i in range(EXPLAIN_OWNER_SYMBOLS + 1)})
+    expect("an owner's row names its largest bodies up to the limit and sums the rest",
+           owner_symbols({0x10: 7, 0x20: 30, 0x30: 12, 0x40: 7},
+                         {0x10: "c", 0x20: "a", 0x30: "b", 0x40: "d"}, 2)
+           == {"largest_symbol": "a", "symbols": [{"symbol": "a", "bytes": 30},
+                                                  {"symbol": "b", "bytes": 12}],
+               "symbols_rest": 14, "symbols_rest_bodies": 2}
+           and owner_symbols({0x10: 5, 0x20: 5}, {0x10: "z", 0x20: "y"})["symbols"]
+           == [{"symbol": "y", "bytes": 5}, {"symbol": "z", "bytes": 5}]
+           and len(many["symbols"]) == EXPLAIN_OWNER_SYMBOLS
+           and many["symbols"][0] == {"symbol": f"s{EXPLAIN_OWNER_SYMBOLS:03d}",
+                                      "bytes": EXPLAIN_OWNER_SYMBOLS + 1}
+           and (many["symbols_rest"], many["symbols_rest_bodies"]) == (1, 1))
+    expect("the tables print each owner's largest bodies and what its other bodies hold",
+           explain_owner_bodies("t", ywz["owners"], 2, 1)
+           == ["    t, the largest 1 bodies of each of the largest 2 of 2:",
+               "      wz_y::s: 52 B in 1 bodies", "            52  wz_y::s::g",
+               "      wz_y::r: 32 B in 2 bodies", "            20  wz_y::s::f",
+               "            12  in 1 other bodies"]
+           and explain_owner_bodies("t", ywz["owners"], 1)
+           == ["    t, the largest 3 bodies of each of the largest 1 of 2:",
+               "      wz_y::s: 52 B in 1 bodies", "            52  wz_y::s::g"]
+           and explain_owner_bodies("t", [], 2) == ["    t: none"])
     prules = Rules((), {"src": "x"}, "/")
     psymbols = [Symbol(0x10, 30, "_z_a", ("src/a.c",)), Symbol(0x30, 12, "_z_b", ("src/b.c",))]
     psources = {"/p/src/a.c": ("src/a.c", BY_PATH), "/p/src/b.c": ("src/b.c", BY_PATH)}
@@ -3624,6 +3724,10 @@ def cmd_selftest() -> int:
     expect("the zenoh-pico owners are files, with no file or generic list beside them",
            [(o["owner"], o["bytes"]) for o in xpico["owners"]] == [("src/a.c", 30), ("src/b.c", 12)]
            and "generics" not in xpico and "files" not in xpico)
+    expect("a zenoh-pico file's row names the functions that hold its bytes",
+           [(o["largest_symbol"], o["symbols"]) for o in xpico["owners"]]
+           == [("_z_a", [{"symbol": "_z_a", "bytes": 30}]),
+               ("_z_b", [{"symbol": "_z_b", "bytes": 12}])])
     xreport = explain_report(
         "c", "p", "cc 1", "2026-11-25", ["x"], {"wz": xpieces, "pico": ppieces}, xnames,
         {"wz": tally(sum((list(b.names) for b in xbodies), []), xrules, ["x"]),
@@ -3651,6 +3755,9 @@ def cmd_selftest() -> int:
            and "  size-ledger explain: (unattributed): wz 4 B in 1 bodies, zenoh-pico 0 B in 0 "
                "bodies" in xlines
            and not any("since the previous" in line for line in explain_lines(xreport, None))
+           and "    wz modules by the bodies that hold their bytes, the largest "
+               f"{EXPLAIN_OWNER_SYMBOLS_SHOWN} bodies of each of the largest 2 of 2:" in xlines
+           and "      wz_x::m: 116 B in 3 bodies" in xlines
            and previous_bytes({"areas": {"x": {"wz": {"bytes": "200"}}}}, "x", "wz") is None)
     expect("a table prints the head of its list and says how long the list is",
            explain_table("t", [{"bytes": 3, "k": "a"}, {"bytes": 2, "k": "b"},
