@@ -771,20 +771,30 @@ fn a_payload_label_index_runs_in_label_order() {
     );
 }
 
+/// A payload counted by the label-keyed reference: its labels, its size and the keys it is counted
+/// under.
+type PayloadEvent = (
+    StatSpace,
+    Priority,
+    MessageLabel,
+    bool,
+    u64,
+    &'static [&'static str],
+);
+
 /// The payload family kept at its label index and the per-key rows write the series a map keyed
 /// by the labels wrote, in the same order and with the same values: payloads met out of label
 /// order, over every axis, under two keys, under none, and under one key twice. A label set no
-/// key counted held an empty per-key series there, which wrote no sample, and has none here.
-/// Turned red by an index out of label order or a per-key row counted under another key.
+/// key counted held an empty per-key series there, which wrote no sample, and has none here. A
+/// key takes its build's `STATS_KEY_SERIES` label sets in the order they meet it; the reference
+/// refuses one past them as the rows do, so the test holds at any bound (the events give a key
+/// three label sets). Turned red by an index out of label order, a per-key row counted under
+/// another key, or a refusal the reference does not make.
 #[test]
 fn the_label_indexed_payload_families_export_what_label_keyed_maps_did() {
-    assert!(
-        caps::STATS_KEY_SERIES >= 3,
-        "the events give a key three label sets; fewer rows is the overflow test's case"
-    );
     let filters = StatsKeyFilters::new(["b/**", "a/**"].map(String::from).to_vec())
         .expect("two keys are within the list's capacity");
-    let events: [(StatSpace, Priority, MessageLabel, bool, u64, &[&str]); 7] = [
+    let events: [PayloadEvent; 7] = [
         (
             StatSpace::User,
             Priority::Background,
@@ -847,6 +857,8 @@ fn the_label_indexed_payload_families_export_what_label_keyed_maps_did() {
         metrics.set_key_filters(filters.clone());
         let mut payload: BTreeMap<NetworkMessagePayloadLabels, PayloadHistogram> = BTreeMap::new();
         let mut per_key: BTreeMap<NetworkMessagePayloadLabels, PerKeyHistogram> = BTreeMap::new();
+        let mut claimed: BTreeMap<&str, BTreeSet<NetworkMessagePayloadLabels>> = BTreeMap::new();
+        let mut refused = 0u64;
         for (space, priority, message, shm, size, keys) in events {
             let labels = NetworkMessagePayloadLabels {
                 space,
@@ -861,10 +873,17 @@ fn the_label_indexed_payload_families_export_what_label_keyed_maps_did() {
                 keys.iter().copied(),
             );
             payload.entry(labels.clone()).or_default().observe(size);
-            per_key
-                .entry(labels)
-                .or_default()
-                .observe(keys.iter().copied(), size);
+            let mut held = Vec::new();
+            for key in keys {
+                let rows = claimed.entry(*key).or_default();
+                if rows.contains(&labels) || rows.len() < caps::STATS_KEY_SERIES {
+                    rows.insert(labels.clone());
+                    held.push(*key);
+                } else {
+                    refused += 1;
+                }
+            }
+            per_key.entry(labels).or_default().observe(held, size);
         }
         let ours: Vec<_> = payload_cells(&metrics, direction)
             .into_iter()
@@ -883,8 +902,8 @@ fn the_label_indexed_payload_families_export_what_label_keyed_maps_did() {
         assert_eq!(ours, theirs, "the per-key family, {direction:?}");
         assert_eq!(
             metrics.per_key_refused(direction),
-            0,
-            "CONTROL: every key is in the list and within its rows"
+            refused,
+            "every key is in the list; only a label set past its key's rows is refused"
         );
     }
 }
