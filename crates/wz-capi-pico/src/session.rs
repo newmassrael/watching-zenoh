@@ -2218,7 +2218,11 @@ unsafe fn open_on_coop(zs: *mut z_owned_session_t, request: OpenRequest) -> ZRes
     let links = links.with_groups(joiner);
     // The word that the program's clock moved on, read before the clock is handed to the engine.
     #[cfg(feature = "time-base")]
-    let clock_moves = crate::time_base::clock_moves(&clock);
+    let clock_moves = match crate::time_base::clock_moves(&clock) {
+        Ok(moves) => moves,
+        // The heap refused the room the open sets aside for the program's word.
+        Err(_) => return crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY,
+    };
     #[cfg(not(feature = "time-base"))]
     let clock_moves: Option<wz_capi_coop::ClockMovesWord> = None;
     // The engine's config, made by the engine inside its open (`CoopEngine::open_made_in`): this
