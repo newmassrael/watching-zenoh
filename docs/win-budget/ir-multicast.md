@@ -80,12 +80,11 @@ M1 at 7,980.8 against 3,532.1 and M2 at 5,764.7 against 2,555.0, both 2.26 of ze
 of the paced loop 5,599.7 against 2,390.0, 2.34): the two readings differ by 247.1 a received
 message and 608.3 a put, which R4 and T3 are the changes between, and section 7 reads where the rest lies.
 
-The rows that reach the receive path's executor turn and system
-calls (R1, R2, R3) and T4 rest on the round-5a lane's rewrite of `engine/group.rs`,
-`group_drive.rs` and the engine's read, which does not merge onto this lane as it stands: the
-engine's get issuing, declarations and query answers were rewritten on both sides (round-5a's
-link place taken before the session, main's one hold per operation and replies held to their
-Final), a conflict whose resolution is a choice of lock order that belongs to those lanes.
+The rows that reach the receive path's executor turn and system calls (R1, R2, R3) and T4 rest
+on the round-5a lane's rewrite of `engine/group.rs`, `group_drive.rs` and the engine's read,
+which this lane has merged, with the lock order round-5a settled (a read slot, then a face's
+send place in the order of the faces' table, then the session, then a row's latch;
+[c-abi-architecture.md](../c-abi-architecture.md) section 8.4).
 
 ## 2. The send path
 
@@ -289,16 +288,26 @@ zenoh-pico's read task reads a datagram and handles every message of it before i
 | D2 | the read of a threads build steps each group where it lies, as it steps its faces | the engine step's task pass for a group | `engine/direct.rs` | round-5a (`9578dc50d`, `82c085fb1`) |
 | D3 | the step reads a burst: up to a bound of datagrams, its fixed part once (`MulticastPump::step_reading`) | cause 2 for every datagram past the first of a burst | `group_drive.rs` | this lane |
 | D4 | the due a step tells its holder said from the deadlines the pump keeps on the clock's epoch, no reading taken (`CoopTime::us_at_ms`) | two clock readings a step | `group_drive.rs`, `wz-runtime-coop/src/time.rs` | this lane |
-| D5 | a datagram's records handed out inside the step that read it, the round's lending ended before the next receive, so the gate has room for the next datagram of the burst | cause 3; the burst of D3 reads on | `engine/direct.rs`, `round.rs` | after the merge of round-5a |
-| D6 | the mark of a group's input said by the step: the holder steps again only when the step's burst ended on its bound, not on a receive that found none | cause 4's empty step and its `EAGAIN` | `engine/group.rs` (`Watched`, `took_input`) | after the merge of round-5a |
+| D5 | a datagram's records handed out inside the step that read it, before the next receive, so the burst of D3 reads on | cause 3; the burst of D3 reads on | `engine/direct.rs`, `engine/group.rs` | this lane (`GroupPump::step` reads to `GROUP_READS_PER_MOVE` in one step) |
+| D6 | the mark of a group's input said by the step: the holder steps again only when the step's burst ended on its bound, not on a receive that found none | cause 4's empty step | `engine/group.rs` (`Watched`, `took_input`), `group_drive.rs` (`read_to_bound`) | this lane |
 | D7 | the read of a threads build blocks in the group's receive, with the socket's receive timeout as its tick, when the group is the only input it waits on | the wait's system call | `engine/direct.rs`, `wz-runtime-posix/src/multicast.rs` | after D6 |
-| D8 | the holder's clock reading handed to the step (a step at a reading), so a burst read by an engine step reads the clock once | one clock reading a step | `group_drive.rs`, `engine/direct.rs` | after D2 |
+| D8 | the holder's clock reading handed to the step (a step at a reading), so a burst read by an engine step reads the clock once | one clock reading a step | `group_drive.rs`, `engine/direct.rs` | this lane (the read's last face turn's reading) |
 
-D3 and D4 are on this lane and change nothing a holder does until it asks for them: `step` reads
-one datagram as before, and a holder reads a burst by calling `step_reading` with its bound, the
-deploy's `GROUP_READS_PER_MOVE` where the read of round-5a now steps the pump that many times
-(`engine/direct.rs`, `82c085fb1`). The change there is one call, made where the read steps the
-group, after the merge.
+`step` reads one datagram at a reading of its own, as before; the read of the C ABI
+(`CoopEngine::step_groups`, `engine/direct.rs`) calls `step_reading` once a read with the
+deploy's `GROUP_READS_PER_MOVE` and the reading of the read's last face turn, where it stepped
+the pump up to that many times. Each datagram's records are handed out by the step's `on_event`
+before the next receive, so no gate holds the burst back: the read hands every record out as it
+is read and keeps no round. A threads build whose form has no lock of its own for each value
+(`wz_round`, `build.rs`) keeps the group's session as a task and its records in the round;
+there the round's gate (`round::takes_a_group_read`) still refuses a datagram while a record
+lies in the one the transport lent, which is what keeps the lent bytes from being written over,
+and that form reads a datagram a step as before.
+
+Per received message where the receiver keeps up, the read now costs one step of the pump, its
+fixed part once, and no clock reading of the step's own; the system calls are still the wait,
+the datagram's `recvfrom` and the `recvfrom` that answers `EAGAIN` and ends the burst. D7 is
+what takes the wait, and is not made yet.
 
 Expected, by the counts of section 7.1 and to be read on the arm: D1 and D2 take the executor's
 pass (976.9) and most of the engine step's own work; D4 takes two of the clock's readings a step
@@ -332,8 +341,13 @@ code; a filter that names a test of a module the build leaves out runs none and 
   `group_drive::stage`, the heap profile's (`alloc`, not `session-slot`, `codec-push`):
   `--all-features` turns `session-slot` on and leaves it out.
   `cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib a_push_onto_empty_lanes`.
-* D3 and D4: `cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib group_drive::tests`
+* D3, D4, D6 and D8: `cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib group_drive::tests`
   (`a_step_reads_up_to_its_bound_of_datagrams_with_one_beacon`,
   `a_burst_ends_where_the_holders_gate_has_no_room`,
-  `the_pump_says_when_it_is_next_due_with_no_reading_of_its_clock`), and
+  `the_pump_says_when_it_is_next_due_with_no_reading_of_its_clock`,
+  `a_step_says_whether_its_reads_ended_on_its_bound`,
+  `a_step_at_the_holders_reading_measures_by_it_and_reads_no_clock`), and
+  D5 and D6 through the read of the C ABI, a threads build whose form gives each value a lock of
+  its own (the host's `std`):
+  `cargo test -p wz-capi-coop --features group,app-transport --lib a_burst_of_a_members_datagrams_moves_the_links_once`, and
   `cargo test -p wz-runtime-coop --lib time_us_at_ms_is_the_reading_at_which_that_millisecond_starts`.
