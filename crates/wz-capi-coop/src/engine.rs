@@ -2536,7 +2536,14 @@ impl<C: ClockSource + 'static> TransportSession<C, SessionLock> for LinkSession<
 }
 
 /// One link of the session: its session half ([`LinkSession`]) and what the driver holds of it.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+/// Named where a task runs a link, and where the told rows read a face's link (`told`), which a
+/// build whose read steps the one link itself has too.
+#[cfg(any(
+    feature = "threads",
+    feature = "listen",
+    feature = "group",
+    feature = "connectivity"
+))]
 type Wire<C> = wz_runtime_coop::faces::Wire<LinkSession<C>, FaceEnd, LinkCount>;
 
 /// How the session of a face's link ends: with its task, or, where the read steps the one link
