@@ -75,7 +75,12 @@ in the step's fixed part (R2), a walk of the member table, which `next_due_us` r
 to know whether a sweep is due (C7).
 
 Rows taken on this lane since that reading, each to be read again on the arm: R4 (the member count
-kept) and T3 (write through). The rows that reach the receive path's executor turn and system
+kept) and T3 (write through). The second reading (the lane's tip `9dffd9436`, the same arm) reads
+M1 at 7,980.8 against 3,532.1 and M2 at 5,764.7 against 2,555.0, both 2.26 of zenoh-pico's (M2 net
+of the paced loop 5,599.7 against 2,390.0, 2.34): the two readings differ by 247.1 a received
+message and 608.3 a put, which R4 and T3 are the changes between, and section 7 reads where the rest lies.
+
+The rows that reach the receive path's executor turn and system
 calls (R1, R2, R3) and T4 rest on the round-5a lane's rewrite of `engine/group.rs`,
 `group_drive.rs` and the engine's read, which does not merge onto this lane as it stands: the
 engine's get issuing, declarations and query answers were rewritten on both sides (round-5a's
@@ -214,3 +219,121 @@ red.
 The cells are judged by the performance matrix again after steps 2 and 3: the target of this
 document is every multicast `thr` cell at a cost ratio of 1.0 or under, and the `rtt` p50
 interval inside [0.7, 1.3].
+
+## 7. The receive read, function by function
+
+### 7.1 Where a received message's instructions go
+
+The second reading's subscriber window (section 1.2), callgrind's functions by their inclusive Ir
+per received message. Each row of wz is a layer the next row runs inside; the differences between
+two rows are derived from those figures, not read off a tool.
+
+| layer (wz) | function | Ir per message | the layer alone |
+|---|---|---:|---:|
+| the read thread | `wz_host_sync::unix::entry` | 7,980.8 | 602.5 |
+| the read task's body: its wait, its hand-out | `run_body` of `start_read_task` | 7,378.3 | 623.1 |
+| the engine's step | `CoopEngine::step_after` | 6,755.2 | 1,007.8 |
+| the executor's pass of the session's tasks | `Core::run_tasks_at`, `ExecutorState::run_among` | 5,747.4 | 976.9 |
+| the group's task, one step of its pump | `poll_erased::<multicast_session_task_seeded>` | 4,770.5 | 1,174.6 |
+| the receive through `GroupLink` and `Watched` | `recv_with` (`group_transport.rs`) | 3,595.9 | 62.5 |
+| the host's receive: its system calls, the own-sender check | `HostGroupTransport::recv_with` | 3,533.4 | 557.4 |
+| the round's lending around the datagram | `Watched::recv_with`'s closure | 2,976.0 | 24.0 |
+| the walk: the member, the SN gate, the frame | `MulticastPump::step`'s receive closure | 2,952.0 | 950.0 |
+| the records decoded and delivered | `walk_lent_payload` | 2,002.0 | 2,002.0 |
+
+The functions that cost the most by themselves (exclusive Ir per message): `run_among` 500.4, the
+group task's `poll_erased` 468.6 (the pump's step is inlined in it), the clock 373.3 (`now_us`
+231.7 and `clock_gettime` 141.6), `answering_asks` 200.0, the host's `recv_with` 179.9,
+`step_after` 168.8, `dispatch_event_among` 142.0, `recvfrom` 108.2, `read_push` 90.0,
+`receive` 79.4, `classify` 77.4, `deliver_ref` 66.0, `hand_out` 62.9, `poll_on` 62.7.
+
+| layer (zenoh-pico) | function | Ir per message | the layer alone |
+|---|---|---:|---:|
+| the background executor | `_z_executor_spin` | 3,510.1 | 246.0 |
+| the read task: `recvfrom`, the transport message decoded | `_zp_multicast_read_task_fn` | 3,264.0 | 572.0 |
+| the transport message handled | `_z_multicast_handle_transport_message` | 2,692.0 | 1,114.0 |
+| the network message handled and delivered | `_z_handle_network_message` | 1,578.0 | 1,578.0 |
+
+What decodes and delivers the records costs wz 2,002.0 against zenoh-pico's 2,380 (its network
+message decoded, 802, and handled, 1,578): the excess of 4,448.7 is the layers above the walk.
+Of it the read thread, the engine's step and the executor's pass are 3,210.3, the pump's step
+outside the receive 1,174.6, and the receive 557.4 against pico's one `recvfrom`. The clock is
+read on each of those layers: by the engine's step, by the pump's step, and twice by the due the
+pump tells its holder after each step.
+
+### 7.2 Why each layer runs per message
+
+1. The group's session is a task of the executor (`multicast_session_task_seeded`), so the read
+   reaches a datagram through an engine step, a pass of the session's tasks and a poll of the
+   task's future, which returns after one step and wakes itself to be polled again.
+2. A step of the pump reads one datagram, and every step runs its fixed part: the stop asked, the
+   carrier, the clock, what the socket refused before, the beacon, the stage's writer, the service
+   and the gate. After each step the task tells its holder when it is next due.
+3. A build of threads hands out the records of a datagram after the step that read it, from the
+   round, and the next datagram waits while a record lies in the one lent (`Round::has_room`):
+   the group's input gate refuses it. A second datagram is so never read in the step of the first.
+4. The holder knows the group took a datagram by the mark its transport leaves (`Watched`'s
+   `took`), which says nothing of the socket holding more; the read steps the group again at once,
+   and that step's receive answers `EAGAIN`. A message received where the reader keeps up so
+   costs two steps of the pump, two passes of the executor and three system calls (the wait, the
+   datagram, the empty receive), against zenoh-pico's one blocking `recvfrom`.
+
+### 7.3 The design: the read task reads the group directly
+
+zenoh-pico's read task reads a datagram and handles every message of it before it reads the next
+(section 3.1). The same shape for wz, layer by layer, each the change that takes one cause:
+
+| row | change | takes | where | state |
+|---|---|---|---|---|
+| D1 | the group's session held in a place its holder steps, not a task of the executor (`MulticastSessionPlace`) | layer 1's executor pass, 976.9 | `group_drive.rs` | round-5a (`f2bf7a05b`) |
+| D2 | the read of a threads build steps each group where it lies, as it steps its faces | the engine step's task pass for a group | `engine/direct.rs` | round-5a (`9578dc50d`, `82c085fb1`) |
+| D3 | the step reads a burst: up to a bound of datagrams, its fixed part once (`MulticastPump::step_reading`) | cause 2 for every datagram past the first of a burst | `group_drive.rs` | this lane |
+| D4 | the due a step tells its holder said from the deadlines the pump keeps on the clock's epoch, no reading taken (`CoopTime::us_at_ms`) | two clock readings a step | `group_drive.rs`, `wz-runtime-coop/src/time.rs` | this lane |
+| D5 | a datagram's records handed out inside the step that read it, the round's lending ended before the next receive, so the gate has room for the next datagram of the burst | cause 3; the burst of D3 reads on | `engine/direct.rs`, `round.rs` | after the merge of round-5a |
+| D6 | the mark of a group's input said by the step: the holder steps again only when the step's burst ended on its bound, not on a receive that found none | cause 4's empty step and its `EAGAIN` | `engine/group.rs` (`Watched`, `took_input`) | after the merge of round-5a |
+| D7 | the read of a threads build blocks in the group's receive, with the socket's receive timeout as its tick, when the group is the only input it waits on | the wait's system call | `engine/direct.rs`, `wz-runtime-posix/src/multicast.rs` | after D6 |
+| D8 | the holder's clock reading handed to the step (a step at a reading), so a burst read by an engine step reads the clock once | one clock reading a step | `group_drive.rs`, `engine/direct.rs` | after D2 |
+
+D3 and D4 are on this lane and change nothing a holder does until it asks for them: `step` reads
+one datagram as before, and a holder reads a burst by calling `step_reading` with its bound, the
+deploy's `GROUP_READS_PER_MOVE` where the read of round-5a now steps the pump that many times
+(`engine/direct.rs`, `82c085fb1`). The change there is one call, made where the read steps the
+group, after the merge.
+
+Expected, by the counts of section 7.1 and to be read on the arm: D1 and D2 take the executor's
+pass (976.9) and most of the engine step's own work; D4 takes two of the clock's readings a step
+(the clock costs 373.3 a message in all; how many readings that is, M5's call counts say); D5 with D3 takes the second
+step of each message, which is a pump step outside the receive (1,174.6 less its receive) and an
+`EAGAIN` `recvfrom`; D7 takes the wait. What then stays above the walk is the read task's
+`recvfrom` and the step's fixed part once a burst, the shape of zenoh-pico's read task.
+
+### 7.4 The concrete transport (T4)
+
+The group's transport is a `Box<dyn GroupTransport>` from the joiner
+(`GroupJoiner::join`, `wz-runtime-coop/src/group_transport.rs`) to `Watched`, so every call the
+step makes of it (the carrier, the service, the gate's lending, the receive, each send) is a call
+through a vtable, two of them on the receive. The concrete form: the joiner names the transport it
+makes as an associated type (`type Transport: GroupTransport`), `HostGroups` names
+`HostGroupTransport<S>`, and `Watched` is generic over it, so the shipped preset, which joins
+only UDP groups over the host's sockets, makes no indirect call on the group's path. A build that
+composes joiners (`RawethJoiner` beside `HostGroups`) names an enum of their transports, as
+`either_links` composes links. Every file of it but the joiner's is `engine/group.rs`, which
+round-5a rewrites, so it is a row after that merge; its measure is the `dyn` calls of M4 and M5.
+
+### 7.5 The unit tests of the rows and how they run
+
+Each test is compiled only where the code it tests is, so a filter names the features of that
+code; a filter that names a test of a module the build leaves out runs none and still passes.
+
+* `wz-session-core` `the_member_count_follows_every_admission_and_departure` (R4) is in
+  `multicast_dispatch`, which is `session-multicast`'s:
+  `cargo test -p wz-session-core --features session-multicast --lib the_member_count_follows_every_admission_and_departure`.
+* `wz-session-mcu` `a_push_onto_empty_lanes_leaves_from_where_it_was_written` (T3) is in
+  `group_drive::stage`, the heap profile's (`alloc`, not `session-slot`, `codec-push`):
+  `--all-features` turns `session-slot` on and leaves it out.
+  `cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib a_push_onto_empty_lanes`.
+* D3 and D4: `cargo test -p wz-session-mcu --features transport-multicast,codec-push --lib group_drive::tests`
+  (`a_step_reads_up_to_its_bound_of_datagrams_with_one_beacon`,
+  `a_burst_ends_where_the_holders_gate_has_no_room`,
+  `the_pump_says_when_it_is_next_due_with_no_reading_of_its_clock`), and
+  `cargo test -p wz-runtime-coop --lib time_us_at_ms_is_the_reading_at_which_that_millisecond_starts`.
