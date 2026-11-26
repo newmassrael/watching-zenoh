@@ -1399,11 +1399,33 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// loop handled one per iteration. That is what bounds how long a group
     /// under a flood can keep the thread from a sibling session: one datagram,
     /// then the step returns and the task yields.
+    #[inline]
     pub fn step<'s, 'g, F, G>(
         &mut self,
         on_event: &mut F,
         next_tx: &mut G,
         should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+    ) -> Option<MulticastOutcome>
+    where
+        F: FnMut(IterationEvent<'_, '_>),
+        G: FnMut() -> Option<MulticastTxOffer<'g>>,
+    {
+        self.step_reading(on_event, next_tx, should_stop, core::num::NonZeroUsize::MIN)
+    }
+
+    /// [`Self::step`], reading up to `most` inbound datagrams where it reads one: the stop, the
+    /// carrier, the clock, the beacon and the writes are done once for all of them, so a holder
+    /// that reads a burst of the group's datagrams on one turn pays them once a burst and not once
+    /// a datagram. The reads end at the first receive that finds none, at the holder's input gate,
+    /// which is asked before each datagram, and at a walk the holder had no room to finish. `most`
+    /// is what bounds how long a flood keeps the thread from a sibling session; the burst is one
+    /// iteration of the test budget, and the sweep runs on a step that read none, as with one.
+    pub fn step_reading<'s, 'g, F, G>(
+        &mut self,
+        on_event: &mut F,
+        next_tx: &mut G,
+        should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+        most: core::num::NonZeroUsize,
     ) -> Option<MulticastOutcome>
     where
         F: FnMut(IterationEvent<'_, '_>),
@@ -1702,21 +1724,24 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             runtime.run_until_idle();
         }
 
-        // Inbound datagram? Classify + dispatch, then loop promptly for the
-        // next (the busy-poll equivalent of the AP loop's RX select arm). A holder with no room
-        // for what the group delivers is handed nothing: the datagram waits in the transport.
-        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        let held_back = gate.is_some_and(|gate| !gate.takes());
-        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
-        let held_back = false;
+        // Inbound datagrams? Classify + dispatch each, up to `most` of them, then loop promptly
+        // for the next (the busy-poll equivalent of the AP loop's RX select arm). A holder with no
+        // room for what the group delivers is handed nothing: the datagram waits in the transport.
         // A transport that keeps its datagram lets the walk stop where the holder has no room,
         // and lends the same datagram again at the next step.
         #[cfg(feature = "reassembly")]
         let may_stop = transport.keeps_input();
-        #[cfg(feature = "reassembly")]
-        let mut stopped = None;
-        let received = !held_back
-            && transport.recv_with(&mut |bytes, src| {
+        let mut received = false;
+        for _ in 0..most.get() {
+            // Asked before each datagram: a transport that lends its datagram until its next
+            // receive is not asked for another while the holder still reads the one it lent.
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            if gate.is_some_and(|gate| !gate.takes()) {
+                break;
+            }
+            #[cfg(feature = "reassembly")]
+            let mut stopped = None;
+            let took = transport.recv_with(&mut |bytes, src| {
                 // R311lv/R311mf/R311mh — the shared RX dispatch SSOTs: JOIN admit /
                 // Frame admit-and-fan / KeepAlive refresh PLUS the reassembly-
                 // divergent tail (out-of-order-chain abort + Fragment reassembly +
@@ -1774,10 +1799,17 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                     });
                 }
             });
-        #[cfg(feature = "reassembly")]
-        if let Some(stopped) = stopped {
-            transport.keep();
-            *resume = Some(stopped);
+            #[cfg(feature = "reassembly")]
+            if let Some(stopped) = stopped {
+                transport.keep();
+                *resume = Some(stopped);
+                received |= took;
+                break;
+            }
+            if !took {
+                break;
+            }
+            received = true;
         }
         if received {
             return None;
@@ -3201,6 +3233,20 @@ mod tests {
         }
     }
 
+    /// A JOIN of the member whose zid is `01 02 03 04`, as it sends it.
+    fn their_join(params: &MulticastParams) -> Vec<u8> {
+        let mut theirs = params.clone();
+        theirs.zid = wz_session_core::session_zid::SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
+        let mut join = [0u8; JOIN_MAX_BYTES];
+        let len = encode_join_into_slice(
+            &theirs,
+            &MulticastTxConduits::new(mask_from_res(theirs.seq_num_res)),
+            &mut join,
+        )
+        .expect("a JOIN");
+        join[..len].to_vec()
+    }
+
     /// The pump says when it is next due with no reading of its clock, its deadlines being kept on
     /// the clock's epoch: the beacon a second past the reading the pump was made at, on a clock
     /// that does not stand at zero. Turned red by a `next_due_us` that reads the clock, or one
@@ -3234,5 +3280,116 @@ mod tests {
         let reads = COUNTED_READS.load(Relaxed);
         assert_eq!(pump.next_due_us(), 7_250 + 1_000_000, "the next beacon");
         assert_eq!(COUNTED_READS.load(Relaxed), reads, "no reading taken");
+    }
+
+    /// A step that may read several datagrams reads each the socket holds, up to its bound, with
+    /// the step's fixed part done once: one beacon for the burst. It ends at the first receive
+    /// that finds none. The CONTROL is the plain step, which reads one. Turned red by a burst that
+    /// beacons per datagram, reads past its bound or stops after the first.
+    #[test]
+    fn a_step_reads_up_to_its_bound_of_datagrams_with_one_beacon() {
+        use core::num::NonZeroUsize;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let join = their_join(&params);
+        wire.borrow_mut().inbound = core::iter::repeat_n(join, 6).collect();
+        let inbound = |wire: &RefCell<Wire>| wire.borrow().inbound.len();
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(inbound(&wire), 5, "CONTROL: the plain step reads one");
+        assert_eq!(taken(&wire), ["join"]);
+
+        let three = NonZeroUsize::new(3).expect("three is not zero");
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, three)
+            .is_none());
+        assert_eq!(inbound(&wire), 2, "three read in one step");
+        assert_eq!(
+            taken(&wire),
+            ["join", "join"],
+            "with one beacon for the three"
+        );
+
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, three)
+            .is_none());
+        assert_eq!(
+            inbound(&wire),
+            0,
+            "the two left, the next receive finding none"
+        );
+        assert_eq!(
+            pump.dispatcher().active_peers(),
+            1,
+            "every JOIN read was the one member's"
+        );
+    }
+
+    /// The holder's input gate is asked before each datagram of a burst: a gate with room for two
+    /// ends the burst at the third, which waits in the socket for a later step. The CONTROL is the
+    /// same burst once the gate has room again, which reads the rest. Turned red by a burst that
+    /// asks the gate once, or not at all.
+    #[test]
+    fn a_burst_ends_where_the_holders_gate_has_no_room() {
+        use core::cell::Cell;
+        use core::num::NonZeroUsize;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let join = their_join(&params);
+        wire.borrow_mut().inbound = core::iter::repeat_n(join, 4).collect();
+        let inbound = |wire: &RefCell<Wire>| wire.borrow().inbound.len();
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        let room = Rc::new(Cell::new(2_usize));
+        let left = Rc::clone(&room);
+        pump.attach_input_gate(super::GroupInputGate::new(move || {
+            let has = left.get();
+            left.set(has.saturating_sub(1));
+            has > 0
+        }));
+        let eight = NonZeroUsize::new(8).expect("eight is not zero");
+
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, eight)
+            .is_none());
+        assert_eq!(inbound(&wire), 2, "two read, the room the gate had");
+
+        room.set(8);
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, eight)
+            .is_none());
+        assert_eq!(inbound(&wire), 0, "CONTROL: room again, the rest read");
     }
 }
