@@ -5918,9 +5918,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                if face.link.wire().is_none() {
-                    return None;
-                }
+                face.link.wire()?;
                 // A link in its handshake names no peer yet: its facts come with it up.
                 let up = face.up().is_some();
                 let peer = decl_watch::named(|| {
@@ -5952,9 +5950,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                if face.link.wire().is_none() {
-                    return None;
-                }
+                face.link.wire()?;
                 // A link in its handshake names no peer yet: its facts come with it up.
                 let up = face.up().is_some();
                 let peer = decl_watch::named(|| {
