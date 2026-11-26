@@ -683,7 +683,7 @@ where
         FramedBody {
             meta: message.framing.meta(params),
             worst_case: message.size,
-            body: message.body,
+            body: crate::tx_buf::wire_body(message.body),
         },
         tx_sn,
         params,
@@ -900,7 +900,8 @@ pub fn multicast_tx_encode_into(
     #[cfg(feature = "transport-tx-lend")]
     {
         let mut slot = crate::tx_buf::SliceTxBuf::new(out);
-        body(&mut crate::tx_buf::TxSink::new(&mut slot)).ok()?;
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut slot))
+            .ok()?;
         Some(crate::tx_buf::TxBuf::len(&slot))
     }
     // A build whose encoders write a vector has no other buffer to write into: the bytes are
@@ -908,7 +909,8 @@ pub fn multicast_tx_encode_into(
     #[cfg(not(feature = "transport-tx-lend"))]
     {
         let mut bytes = Vec::new();
-        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).ok()?;
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+            .ok()?;
         out.get_mut(..bytes.len())?.copy_from_slice(&bytes);
         Some(bytes.len())
     }
@@ -936,7 +938,7 @@ where
         FramedBody {
             meta: meta.0,
             worst_case: size,
-            body,
+            body: crate::tx_buf::wire_body(body),
         },
         tx_sn,
         params,
@@ -986,7 +988,7 @@ fn encoded_size(body: &crate::frame_encode::BodyEncoder<'_>) -> Option<usize> {
     #[cfg(not(feature = "transport-tx-lend"))]
     let size = {
         let mut bytes = Vec::new();
-        match body(&mut crate::tx_buf::TxSink::new(&mut bytes)) {
+        match body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes)) {
             Ok(()) => bytes.len(),
             Err(_) => 0,
         }
@@ -4243,7 +4245,8 @@ mod group_declarations_written_from_parts {
     /// The bytes `body` writes.
     fn written(body: &crate::frame_encode::BodyEncoder<'_>) -> Vec<u8> {
         let mut bytes = Vec::new();
-        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).expect("written");
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+            .expect("written");
         bytes
     }
 
@@ -4438,7 +4441,8 @@ mod group_publications_written_from_parts {
     /// The bytes `body` writes.
     fn written(body: &crate::frame_encode::BodyEncoder<'_>) -> Vec<u8> {
         let mut bytes = Vec::new();
-        body(&mut crate::tx_buf::TxSink::new(&mut bytes)).expect("written");
+        body.write_body(&mut crate::tx_buf::TxSink::new(&mut bytes))
+            .expect("written");
         bytes
     }
 
