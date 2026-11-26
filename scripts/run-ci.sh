@@ -28880,6 +28880,12 @@ layer_e18_zenoh_family_conformance() {
     _runci_guarded_test "Layer E18 (differential, zenoh push put chain)" 2 \
         cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
         --test zenoh_push_put_chain || return 1
+    # A timestamp, a timestamp stack, a responder and a source info whose length is one byte longer
+    # and one byte shorter than their fields: upstream reads across the body's end, a wz participant
+    # refuses the extension as malformed. Four tests, one an extension.
+    _runci_guarded_test "Layer E18 (differential, zenoh ext body extent)" 4 \
+        cargo test --locked --manifest-path ../conformance/differential/Cargo.toml \
+        --test zenoh_ext_body_extent || return 1
     # A batch of several transport messages (Frames of both reliabilities, a KeepAlive behind a
     # Frame), written by upstream's codec: the observer's reader and the participant's read the
     # same messages, in the same Frames and order, as upstream's reader. Two tests, one a reader.
