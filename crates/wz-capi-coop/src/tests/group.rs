@@ -1890,11 +1890,12 @@ mod in_place {
         SessionDrive::close(&*session);
     }
 
-    /// A burst of a member's datagrams is read by one read, each a step of its own, and the links
-    /// are moved once, by the step that finds the group's socket empty, as one receive of a link's
-    /// is read. Turned red by a step that moves the links after each group datagram (the group's
-    /// `Stepped::Read` return taken out of `CoopEngine::step`): a build of threads then ends the
-    /// read after the first datagram, and one of a single thread moves the links once a datagram.
+    /// A burst of a member's datagrams is read by one read, each a step of the group's session of
+    /// its own, and the links are moved once at most for it, as one receive of a link's is read:
+    /// a step of a group moves no face's link, and the read looks at the faces' lives once, which
+    /// moves a link only where one is due or brought something. Turned red by a read that leaves
+    /// the datagrams after the first to the next read (the step after a datagram taken cut out of
+    /// `CoopEngine::step_groups`), or by one that moves the links once a datagram.
     #[test]
     fn a_burst_of_a_members_datagrams_moves_the_links_once() {
         const FRAMES: u64 = 8;
@@ -1931,10 +1932,9 @@ mod in_place {
             1 + FRAMES as usize,
             "every datagram of the burst, by the one read"
         );
-        assert_eq!(
-            session.link_polls() - polls,
-            1,
-            "one move of the links for the burst"
+        assert!(
+            session.link_polls() - polls <= 1,
+            "one move of the links at most for the burst"
         );
         SessionDrive::close(&*session);
     }
