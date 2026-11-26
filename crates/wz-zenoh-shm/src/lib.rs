@@ -41,7 +41,11 @@ macro_rules! tested_crate_module {
     };
 }
 
-use std::{any::Any, num::NonZeroUsize, sync::atomic::Ordering};
+use std::{
+    any::Any,
+    num::NonZeroUsize,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use api::{
     buffer::{
@@ -224,6 +228,24 @@ impl ShmBufInner {
         self.metadata.owned.header().refcount.load(Ordering::SeqCst)
     }
 
+    /// Whether a holder of this buffer may convert it to a mutable one: upstream's condition for
+    /// `TryFrom<&mut zshm> for &mut zshmmut`, asked by the transport of the crates of this
+    /// repository, which hands a received buffer to a C program as a chunk the program may write
+    /// once it is the only holder. Hidden from the documentation for the reason
+    /// `release_reference` is.
+    #[doc(hidden)]
+    pub fn is_writable(&self) -> bool {
+        self.is_unique() && self.is_valid()
+    }
+
+    /// The address of the first byte of the buffer, through which it may be written while
+    /// `is_writable` holds. Valid for as long as the buffer lives. Hidden from the documentation
+    /// for the reason `release_reference` is.
+    #[doc(hidden)]
+    pub fn data_ptr(&self) -> *mut u8 {
+        self.buf.ptr().cast_mut()
+    }
+
     /// Increments buffer's reference count
     ///
     /// # Safety
@@ -259,11 +281,7 @@ impl ShmBufInner {
     /// You should understand what you are doing, as underestimation
     /// of the reference counter can lead to memory being stalled or double-freed.
     unsafe fn dec_ref_count(&self) {
-        self.metadata
-            .owned
-            .header()
-            .refcount
-            .fetch_sub(1, Ordering::SeqCst);
+        release_one_reference(&self.metadata.owned.header().refcount);
     }
 
     /// Gives back the reference [`Self::inc_ref_count`] took, for the transport of the crate that
@@ -303,6 +321,16 @@ impl ShmBufInner {
         let len = self.readable_len();
         unsafe { std::slice::from_raw_parts_mut(self.buf.ptr_mut(), len) }
     }
+}
+
+/// Give one reference of a header back, never going below zero.
+///
+/// The original's release is a plain `fetch_sub`, which wraps. A header lies in a segment another
+/// process made, so a stranger's mistake or a replayed descriptor would send a wrapped count to
+/// four billion, a chunk its provider never takes back; stopping at zero costs nothing a correct
+/// holder can see.
+pub(crate) fn release_one_reference(refcount: &AtomicU32) {
+    let _ = refcount.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
 }
 
 impl Drop for ShmBufInner {

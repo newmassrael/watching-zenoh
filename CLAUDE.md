@@ -73,8 +73,11 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   Code" / emoji.
 - **Push to `main` only with `bash scripts/land.sh`** (owner, 2026-10-27). It
   submits HEAD to the landing queue (`bx --land`, `[land]` in `bx.toml`) and
-  waits; the queue's one integrator rebases it, files its ledger round with the
+  waits; the queue's one integrator merges it, files its ledger round with the
   number the store gives it there, judges it with the pre-push hook and pushes.
+  It runs no lane first: the lanes a landing moved run once, by digest, with
+  `bash scripts/verify-once.sh` (receipts; `--plan` shows them), and a red
+  re-runs only that lane (`--only-red`). Never chain the whole gate by hand.
   Append-round arguments after `--` (no `--entry-id`) become a round
   descriptor committed under `docs/rounds/pending/` (`scripts/file-round.sh`).
   Pre-push gate 0p refuses a push to main from any clone but the integrator's
@@ -95,6 +98,18 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   ONCE there and the branch is pushed ONCE with one acknowledgement row. Do not
   hold work waiting for a hosted run; read its result when it arrives. Never
   skip a failing gate and never bypass the hooks.
+
+## A change keeps its name
+
+Every commit carries a `Change-Id:` trailer (`COMMIT_FORMAT.md` §3a; the
+commit-msg hook writes it). A branch's work is judged merged by that name when
+its patch differs on main (bx RFC 0087), so:
+
+- take another branch's work with `git cherry-pick`, never by retyping it;
+- a commit that writes another commit's work again carries
+  `Supersedes: <that commit's Change-Id>`;
+- work that will not land is abandoned on the record
+  (`bx-wt abandon <name> --reason "..." --apply`), not left as a branch.
 
 ## License + SPDX header policy
 

@@ -89,7 +89,7 @@
 //! zenoh installs no downsampler on a multicast transport at all
 //! (`new_transport_multicast` / `new_peer_multicast` both return `None`,
 //! `:156-165`). wz consults the chain only from the per-FACE unicast admission
-//! points (`linkstate_forward.rs:883-908`, `router_forward.rs:1233-1255`); the
+//! points (`router_forward.rs` @ `fn admit_inbound` and @ `fn admit_outbound`); the
 //! multicast ingress path (`route_mcast_ingress`) never reaches `admit`. The two
 //! agree, so this is not a gap.
 
@@ -283,7 +283,7 @@ struct RuleState {
 /// R311y452 — that per-flow independence carries NO test, deliberately. It is
 /// structurally guaranteed and therefore untestable here:
 /// [`InterceptorConfig::build_chain`](super::InterceptorConfig::build_chain) is
-/// called once per flow (`linkstate_forward.rs:865-866`) and each call
+/// called once per flow (`router_forward.rs` @ `fn set_interceptors`) and each call
 /// constructs fresh timers, so there is no shared state for a leak to travel
 /// through. That was CHECKED, not assumed — a candidate test was written and
 /// then removed after no damage to either this module or `build_chain` could

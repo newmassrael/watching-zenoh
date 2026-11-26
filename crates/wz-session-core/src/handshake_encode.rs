@@ -623,7 +623,12 @@ pub fn encode_open_into(
         feature = "codec-open-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ),
-    all(test, feature = "codec-init-body", feature = "codec-open-body")
+    all(
+        test,
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    )
 ))]
 // Out of line: the lend-only Open writes its head from two arms (an echoed cookie and none).
 #[inline(never)]
@@ -652,7 +657,12 @@ pub(crate) fn encode_open_head_into(
         any(feature = "session-unicast-open", feature = "session-unicast-accept"),
         wz_ext_chains
     ),
-    all(test, feature = "codec-init-body", feature = "codec-open-body")
+    all(
+        test,
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    )
 ))]
 pub(crate) fn encode_held_chain_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -688,7 +698,12 @@ pub(crate) fn encode_held_chain_into(
         feature = "codec-open-body",
         feature = "session-unicast-open"
     ),
-    all(test, feature = "codec-init-body", feature = "codec-open-body")
+    all(
+        test,
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    )
 ))]
 pub(crate) fn encode_open_bound_into(
     buf: &mut crate::tx_buf::EncodeBuf<'_>,
@@ -720,7 +735,12 @@ pub(crate) fn encode_open_bound_into(
         feature = "codec-open-body",
         any(feature = "session-unicast-open", feature = "session-unicast-accept")
     ),
-    all(test, feature = "codec-init-body", feature = "codec-open-body")
+    all(
+        test,
+        feature = "alloc",
+        feature = "codec-init-body",
+        feature = "codec-open-body"
+    )
 ))]
 fn open_head_byte(message: &OpenMessage<'_, '_>, has_ext: bool) -> u8 {
     let mut header = TransportOpenSource::header(message);
@@ -1304,7 +1324,7 @@ mod tests {
             Err(e) => panic!("expected Open, got parse error {e:?}"),
         }
     }
-    #[cfg(feature = "codec-open-body")]
+    #[cfg(all(feature = "alloc", feature = "codec-open-body"))]
     use wz_codecs::wire_const;
 
     /// The Open the lend-only send writes in two steps, the head and then the

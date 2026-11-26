@@ -31,6 +31,8 @@ use wz_capi_port::group::{GroupDeclarations, GroupJoin};
 use wz_capi_port::{FanoutError, FilterId, FilterPlane, WireKey};
 #[cfg(wz_round)]
 use wz_runtime_coop::executor::SpawnRefusal;
+#[cfg(not(wz_round))]
+use wz_runtime_coop::group_transport::GroupReceive;
 use wz_runtime_coop::group_transport::{GroupSend, GroupTransport};
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 use wz_runtime_coop::transport::GroupRecord;
@@ -389,14 +391,18 @@ impl MemberEvents {
     }
 }
 
-/// The stack's group transport as the group's task holds it, marked each time it hands the task
-/// a datagram: the task takes one datagram a step, as the group's loop always has, so a group
-/// that took one may hold more, and the session's read steps it again at once rather than after
-/// a tick. A transport that leaves what it lends where it lies until its next receive lends it to
-/// the session's round of deliveries, whose records read it there, and the buffer it gives back
-/// as the group is left goes back through the round ([`Round::keep_rx`]).
+/// The stack's group transport as the group's session holds it. Where the group's session is a
+/// task (`wz_round`) it is marked each time it hands the task a datagram: the task takes one
+/// datagram a step, as the group's loop always has, so a group that took one may hold more, and
+/// the session's read steps it again at once rather than after a tick; a transport that leaves
+/// what it lends where it lies until its next receive lends it to the session's round of
+/// deliveries, whose records read it there, and the buffer it gives back as the group is left
+/// goes back through the round ([`Round::keep_rx`]). Where the read steps the session itself,
+/// the step says whether the socket may hold more (`GroupPump::step`), and the receive is the
+/// stack's own.
 struct Watched {
     inner: alloc::boxed::Box<dyn GroupTransport>,
+    #[cfg(wz_round)]
     took: Rc<Cell<bool>>,
     /// The session's round of deliveries.
     #[cfg(wz_round)]
@@ -453,10 +459,14 @@ impl GroupTransport for Watched {
         self.inner.input_wait()
     }
 
+    #[cfg(not(wz_round))]
+    #[inline]
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        #[cfg(not(wz_round))]
-        let took = self.inner.recv_with(f);
-        #[cfg(wz_round)]
+        self.inner.recv_with(f)
+    }
+
+    #[cfg(wz_round)]
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
         let took = if self.inner.lends_until_next_receive() {
             let lane = &self.lane;
             self.inner.recv_with(&mut |datagram, from| {
@@ -492,6 +502,143 @@ impl GroupTransport for Watched {
 
     fn frame_budget(&self) -> Option<u16> {
         self.inner.frame_budget()
+    }
+}
+
+/// The group's transport as its session holds it.
+#[cfg(wz_round)]
+type SessionLink = GroupLink<Watched>;
+
+/// The group's transport as its session holds it.
+#[cfg(not(wz_round))]
+type SessionLink = GroupSide;
+
+/// The group's transport as its session holds it where the read steps the session itself: the
+/// half that sends in the cell the group's face shares (`GroupLink`), which a publish on any
+/// thread writes through, and the half that receives held by the session alone, which a receive
+/// reads without reaching that cell. A transport whose halves are one receives through the cell.
+#[cfg(not(wz_round))]
+pub(super) struct GroupSide {
+    link: GroupLink<Watched>,
+    rx: ReceiveHalf,
+}
+
+/// The receive half of a group's transport, which its session reads and its read slot waits in
+/// (`GroupPump::await_input`): both are stepped by the one thread that holds the slot.
+#[cfg(not(wz_round))]
+type ReceiveHalf = Rc<RefCell<alloc::boxed::Box<dyn GroupReceive>>>;
+
+#[cfg(not(wz_round))]
+impl GroupSide {
+    /// The session's side of `link`, receiving through `rx`, the half split out of the
+    /// transport, or through the cell where the transport split none.
+    fn new(link: &GroupLink<Watched>, rx: Option<alloc::boxed::Box<dyn GroupReceive>>) -> Self {
+        let rx = rx.unwrap_or_else(|| alloc::boxed::Box::new(ThroughCell(link.clone())));
+        Self {
+            link: link.clone(),
+            rx: Rc::new(RefCell::new(rx)),
+        }
+    }
+}
+
+/// Whether a read may wait in the receive of `rx` (`GroupReceive::await_input`) for what it
+/// would wait on as `wait`: the half's own input, on a half whose receive waits.
+#[cfg(not(wz_round))]
+fn awaits_on(rx: &dyn GroupReceive, wait: &LinkWait) -> bool {
+    rx.awaits_input()
+        && rx
+            .input_wait()
+            .is_some_and(|on| LinkWait::input(on) == *wait)
+}
+
+/// The receive of a transport whose halves are one: through the cell the face shares.
+#[cfg(not(wz_round))]
+struct ThroughCell(GroupLink<Watched>);
+
+#[cfg(not(wz_round))]
+impl GroupReceive for ThroughCell {
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        GroupTransport::recv_with(&mut self.0, f)
+    }
+
+    fn keeps_input(&self) -> bool {
+        GroupTransport::keeps_input(&self.0)
+    }
+
+    fn keep(&mut self) {
+        GroupTransport::keep(&mut self.0);
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        GroupTransport::lends_until_next_receive(&self.0)
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        GroupTransport::input_wait(&self.0)
+    }
+
+    // The cell's close closes the transport whole, and its carrier says whether it failed.
+    fn close(&mut self) {}
+}
+
+#[cfg(not(wz_round))]
+impl GroupTransport for GroupSide {
+    fn open(&mut self) -> bool {
+        self.link.open()
+    }
+
+    fn close(&mut self) {
+        self.link.close();
+        self.rx.borrow_mut().close();
+    }
+
+    fn service(&self) {
+        self.link.service();
+    }
+
+    fn carrier_up(&self) -> bool {
+        self.link.carrier_up() && !self.rx.borrow().failed()
+    }
+
+    fn send_to_group(&mut self, datagram: &[u8]) {
+        self.link.send_to_group(datagram);
+    }
+
+    fn try_send_to_group(&mut self, datagram: &[u8]) -> GroupSend {
+        self.link.try_send_to_group(datagram)
+    }
+
+    fn wait_for_room(&self, timeout_us: u64) -> bool {
+        self.link.wait_for_room(timeout_us)
+    }
+
+    fn room_wait(&self) -> Option<WaitOn> {
+        self.link.room_wait()
+    }
+
+    fn input_wait(&self) -> Option<WaitOn> {
+        self.rx.borrow().input_wait()
+    }
+
+    #[inline]
+    fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+        self.rx.borrow_mut().recv_with(f)
+    }
+
+    fn keeps_input(&self) -> bool {
+        self.rx.borrow().keeps_input()
+    }
+
+    fn keep(&mut self) {
+        self.rx.borrow_mut().keep();
+    }
+
+    fn lends_until_next_receive(&self) -> bool {
+        self.rx.borrow().lends_until_next_receive()
+    }
+
+    fn frame_budget(&self) -> Option<u16> {
+        self.link.frame_budget()
     }
 }
 
@@ -591,6 +738,9 @@ pub(super) struct GroupFace<W> {
     /// ([`Self::take_outcome`]), the transport then dropped with what it holds of the session's
     /// (its receive buffer, one of the groups' table), so a join of the group again finds it free.
     link: Option<GroupLink<Watched>>,
+    /// The receive half of this join, until the join's read slot takes it (`GroupSeat`).
+    #[cfg(not(wz_round))]
+    rx: Option<ReceiveHalf>,
     /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
     /// The waits of the session's stack, which the group's socket is waited on with.
@@ -709,6 +859,7 @@ impl<W: LinkWaits> GroupFace<W> {
         let end = Rc::new(GroupEnd::default());
         face.end = Some(Rc::clone(&end));
         let reads = GroupReads {
+            took: Rc::clone(&face.took),
             members: Rc::clone(&face.members),
             keyexprs: Rc::clone(&face.keyexprs),
             join_ask: face.join_ask.clone(),
@@ -731,6 +882,7 @@ impl<W: LinkWaits> GroupFace<W> {
             seed,
             reads,
             records,
+            rx: face.rx.take(),
         };
         (face, seat)
     }
@@ -740,10 +892,7 @@ impl<W: LinkWaits> GroupFace<W> {
     fn made(
         joining: GroupJoining,
         waits: W,
-    ) -> (
-        Self,
-        MulticastSessionSeed<GroupLink<Watched>, GROUP_MEMBERS>,
-    ) {
+    ) -> (Self, MulticastSessionSeed<SessionLink, GROUP_MEMBERS>) {
         let GroupJoining {
             face,
             join,
@@ -789,17 +938,32 @@ impl<W: LinkWaits> GroupFace<W> {
         // The session core's config for a group, the tokio engine's group face's too, with each
         // member's declarations kept apart: the group's events feed one session's tables.
         let config = MulticastConfig::of_group(&params, true);
+        // The receive half, where the transport has one apart, is the session's alone: a receive
+        // then reaches nothing a publish on another thread reaches.
+        #[cfg(not(wz_round))]
+        let (transport, rx) = {
+            let mut transport = transport;
+            let rx = transport.split_receive();
+            (transport, rx)
+        };
         // Shared by the session, which opens it as its link, and the face, which writes on it
         // what the session pushes.
         let link = GroupLink::new(Watched {
             inner: transport,
+            #[cfg(wz_round)]
             took: Rc::clone(&took),
             #[cfg(wz_round)]
             lane,
         });
-        let seed = MulticastSessionSeed::<GroupLink<Watched>, GROUP_MEMBERS>::new(
+        #[cfg(not(wz_round))]
+        let session_link = GroupSide::new(&link, rx);
+        #[cfg(not(wz_round))]
+        let half = Rc::clone(&session_link.rx);
+        #[cfg(wz_round)]
+        let session_link = link.clone();
+        let seed = MulticastSessionSeed::<SessionLink, GROUP_MEMBERS>::new(
             config,
-            link.clone(),
+            session_link,
             params,
             policy,
             u64::from(GROUP_TICK_MS),
@@ -834,6 +998,8 @@ impl<W: LinkWaits> GroupFace<W> {
             next_request: Cell::new(0),
             tx,
             link: Some(link),
+            #[cfg(not(wz_round))]
+            rx: Some(half),
             pace,
             waits,
             room,
@@ -874,12 +1040,15 @@ impl<W: LinkWaits> GroupFace<W> {
     ///
     /// The face writes what the push put on the stage on the caller's thread, before this returns,
     /// as zenoh-pico's put writes it (`vendor/zenoh-pico/src/transport/common/tx.c` @
-    /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a batch window that holds the
-    /// message puts nothing on a lane, and its flush writes it.
+    /// `static z_result_t _z_transport_tx_send_n_msg_inner(`); a datagram of it that finds nothing
+    /// queued or held ahead of it is offered to the socket from where it was written and put on no
+    /// lane ([`GroupLink::push_encoded`]). A batch window that holds the message puts nothing on a
+    /// lane, and its flush writes it.
     fn push_lent(&self, message: &MulticastTxEncoded<'_>) -> PushOutcome {
-        let outcome = self.tx.push_encoded(message, self);
-        self.write_staged();
-        outcome
+        match &self.link {
+            Some(link) => link.push_encoded(&self.tx, message, self),
+            None => self.tx.push_encoded(message, self),
+        }
     }
 
     /// Write what the group's stage holds on the group's socket, on this thread, until the stage
@@ -933,7 +1102,7 @@ impl<W: LinkWaits> GroupFace<W> {
 
     /// How many messages of `priority` the session put on the group were dropped for want of room.
     /// Read only by `CoopEngine::group_congestion_drops`, and compiled where it is.
-    #[cfg(all(test, feature = "app-transport", feature = "threads"))]
+    #[cfg(all(test, feature = "std", feature = "app-transport", feature = "threads"))]
     pub(super) fn congestion_drops(&self, priority: Priority) -> u32 {
         self.tx.drops(priority)
     }
@@ -966,7 +1135,13 @@ impl<W: LinkWaits> GroupFace<W> {
 
     /// The group's stage, as its dispatch stages a reply on it. Read only by
     /// `CoopEngine::stage_group_replies`, and compiled where it is.
-    #[cfg(all(test, feature = "app-transport", feature = "transport-stats"))]
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "app-transport",
+        feature = "threads",
+        feature = "transport-stats"
+    ))]
     pub(super) fn reply_stage(&self) -> &GroupTxStage {
         &self.tx
     }
@@ -1124,7 +1299,8 @@ impl<W: LinkWaits> GroupFace<W> {
         self.rejoin_at_us.is_some_and(|at_us| now_us >= at_us)
     }
 
-    /// Whether the group's task took a datagram since this was last asked.
+    /// Whether the group's socket may hold a datagram not yet read, since this was last asked:
+    /// its task took one (`wz_round`), or the read's last step of it read to its bound.
     pub(super) fn took_input(&self) -> bool {
         self.took.replace(false)
     }
@@ -1529,10 +1705,12 @@ pub(super) struct GroupEnd {
     outcome: RefCell<Option<MulticastOutcome>>,
 }
 
-/// What the read of a group shares with the group's face: the members, the keyexpr asks, the JOIN
-/// ask, the stage, its stop, and where its end is left.
+/// What the read of a group shares with the group's face: the mark of input the socket may still
+/// hold, the members, the keyexpr asks, the JOIN ask, the stage, its stop, and where its end is
+/// left.
 #[cfg(not(wz_round))]
 struct GroupReads {
+    took: Rc<Cell<bool>>,
     members: Rc<RefCell<MemberRows>>,
     keyexprs: Rc<RefCell<GroupKeyexprAnswers>>,
     join_ask: JoinAsk,
@@ -1547,9 +1725,10 @@ struct GroupReads {
 /// the read notes each event against, and what it hands each record out with.
 #[cfg(not(wz_round))]
 pub(super) struct GroupSeat {
-    seed: MulticastSessionSeed<GroupLink<Watched>, GROUP_MEMBERS>,
+    seed: MulticastSessionSeed<SessionLink, GROUP_MEMBERS>,
     reads: GroupReads,
     records: FaceRecords<GroupReplies>,
+    rx: Option<ReceiveHalf>,
 }
 
 /// The read slot of a group (`docs/c-abi-architecture.md` 8.8): the group's session, in the
@@ -1563,11 +1742,13 @@ pub(super) struct GroupSeat {
 /// with the place kept (`Self::let_go`), and each join again builds its session there.
 #[cfg(not(wz_round))]
 pub(super) struct GroupPump<C: ClockSource + 'static> {
-    place: MulticastSessionPlace<C, GroupLink<Watched>, GROUP_MEMBERS>,
+    place: MulticastSessionPlace<C, SessionLink, GROUP_MEMBERS>,
     reads: GroupReads,
     /// What each record is handed out with: the group's face, the sink of its replies, and the
     /// generation a member's query is answered under.
     records: FaceRecords<GroupReplies>,
+    /// The receive half of the session's transport, which a read waits in before a step.
+    rx: Option<ReceiveHalf>,
 }
 
 #[cfg(not(wz_round))]
@@ -1579,11 +1760,13 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             seed,
             reads,
             records,
+            rx,
         } = seat;
         Self {
             place: MulticastSessionPlace::new(runtime, seed),
             reads,
             records,
+            rx,
         }
     }
 
@@ -1594,10 +1777,48 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             seed,
             reads,
             records,
+            rx,
         } = seat;
         self.place.rejoin(seed);
         self.reads = reads;
         self.records = records;
+        self.rx = rx;
+    }
+
+    /// Whether a read may wait in the group's receive for what it would wait on as `wait`
+    /// (`Self::await_input`): the session runs, and `wait` is its receive half's own input, on a
+    /// half whose receive waits.
+    pub(super) fn awaits(&self, wait: &LinkWait) -> bool {
+        self.holds_session()
+            && self
+                .rx
+                .as_ref()
+                .is_some_and(|rx| awaits_on(&**rx.borrow(), wait))
+    }
+
+    /// Whether the group's receive half waits in its receive (`Self::await_input`).
+    pub(super) fn awaits_input(&self) -> bool {
+        self.rx
+            .as_ref()
+            .is_some_and(|rx| rx.borrow().awaits_input())
+    }
+
+    /// Wait in the group's receive, for at most `timeout_us` of the session's clock past its
+    /// reading `since_us`, for a member's datagram, kept for the step that follows to read first;
+    /// what the group's own sender sent is dropped inside the wait (`GroupReceive::await_input`).
+    /// Whether one was kept.
+    pub(super) fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool {
+        let Some(rx) = &self.rx else {
+            return false;
+        };
+        let place = &self.place;
+        rx.borrow_mut()
+            .await_input(timeout_us, since_us, &mut || place.now_us())
+    }
+
+    /// Whether the last step read as many datagrams as it was bound to.
+    pub(super) fn read_to_bound(&self) -> bool {
+        self.place.read_to_bound()
     }
 
     /// Whether the slot holds a session a read steps: from a join to the session's end.
@@ -1606,9 +1827,12 @@ impl<C: ClockSource + 'static> GroupPump<C> {
     }
 
     /// Let go of the session, which ended: its transport goes now, so the group's next join finds
-    /// what it held of the stack's free, and the place stays for that join.
+    /// what it held of the stack's free, and the place stays for that join. The receive half goes
+    /// with it: it holds the transport's socket and receive buffer (or, for a transport whose
+    /// halves are one, the transport itself), which the next join claims again.
     pub(super) fn let_go(&mut self) {
         self.place.leave();
+        self.rx = None;
     }
 
     /// What the group's records are handed out with, which the read ends a step's records with.
@@ -1616,12 +1840,24 @@ impl<C: ClockSource + 'static> GroupPump<C> {
         &mut self.records
     }
 
-    /// One step of the group's session: each event it yields noted against the group (its
-    /// members, the asks of its members) and then handed to `hand` with the group's records, as
-    /// it is read. Whether the session ended at this step, its end left for the session to read.
+    /// A reading of the session's clock, for a step with none at hand.
+    pub(super) fn now_us(&self) -> u64 {
+        self.place.now_us()
+    }
+
+    /// One step of the group's session at the read's reading `now_us` of the session's clock,
+    /// reading up to `most` of the group's datagrams: each event it yields noted against the
+    /// group (its members, the asks of its members) and then handed to `hand` with the group's
+    /// records, as it is read, so each datagram's records are handed out before the next is
+    /// received. The group's mark of input (`GroupFace::took_input`) is left where the reads
+    /// ended on `most`, the socket then maybe holding more, and cleared where they ended on a
+    /// receive that found none. Whether the session ended at this step, its end left for the
+    /// session to read.
     pub(super) fn step(
         &mut self,
         hand: &mut dyn FnMut(&mut FaceRecords<GroupReplies>, IterationEvent<'_, '_>),
+        most: core::num::NonZeroUsize,
+        now_us: u64,
     ) -> bool {
         let reads = &self.reads;
         let records = &mut self.records;
@@ -1638,12 +1874,15 @@ impl<C: ClockSource + 'static> GroupPump<C> {
         let mut should_stop = || reads.stop.get();
         // Everything the group sends is pushed onto its stage, which the face and the session
         // write from: the session's pull seam yields nothing.
-        let outcome = self.place.step(
+        let outcome = self.place.step_reading(
             &mut on_event,
             &mut || None,
             Some(&mut should_stop as &mut dyn FnMut() -> bool),
+            most,
+            now_us,
         );
         let Some(outcome) = outcome else {
+            reads.took.set(self.place.read_to_bound());
             return false;
         };
         *reads.end.outcome.borrow_mut() = Some(outcome);
@@ -1659,7 +1898,12 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             return;
         }
         self.reads.stop.set(true);
-        let _ = self.step(&mut |_records, _event| {});
+        let now_us = self.now_us();
+        let _ = self.step(
+            &mut |_records, _event| {},
+            core::num::NonZeroUsize::MIN,
+            now_us,
+        );
     }
 }
 
@@ -1840,6 +2084,7 @@ struct Announced {
 }
 
 /// One publication the session puts on its groups.
+#[derive(Clone, Copy)]
 pub(super) struct GroupPut<'a> {
     pub(super) keyexpr: &'a str,
     /// How the session's peers were told the key, which a group told the session's keyexprs is
@@ -2006,5 +2251,308 @@ mod told_tests {
         );
         joined.forget(ToldPlane::Links, 2);
         assert_eq!(joined.rows.len(), 0);
+    }
+}
+
+/// What a read that waits in a group's receive does with the group between two turns of its own
+/// ([`read_awaited`]): the group's pump, stepped by the read's engine.
+#[cfg(not(wz_round))]
+pub(super) trait AwaitedReads {
+    /// Wait in the group's receive for at most `timeout_us` past the reading `since_us`
+    /// ([`GroupPump::await_input`]): whether a member's datagram was kept.
+    fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool;
+
+    /// A reading of the session's clock.
+    fn now_us(&mut self) -> u64;
+
+    /// A step of the group at `now_us`, reading up to `most` datagrams: whether its session
+    /// ended.
+    fn step(&mut self, most: core::num::NonZeroUsize, now_us: u64) -> bool;
+
+    /// Whether the last step read as many datagrams as it was bound to.
+    fn read_to_bound(&self) -> bool;
+
+    /// Whether the read owes the session a turn of its own at `now_us` (its bookkeeping, a
+    /// periodic job), which only the read's turn takes.
+    fn owed(&mut self, now_us: u64) -> bool;
+}
+
+/// The reads of a group that is the one input its read waits on, on a receive half whose receive
+/// waits (`GroupPump::awaits`), up to `deadline_us`, the end of the read's wait, from the read's
+/// reading `since_us`: each a wait in the group's receive for what is left of the time, then a
+/// step that reads the datagram the wait kept, as zenoh-pico's read task handles a datagram a
+/// receive (`vendor/zenoh-pico/src/transport/multicast/read.c` @
+/// `ret = _z_transport_message_decode(&t_msg, &zbuf);`). The read's own turn and its wait are so
+/// paid once a deadline and not once a datagram. The reads end at a wait that kept nothing, which
+/// is stepped with `most` as a read with no wait of its own steps, at the session's end, at a step
+/// that read nothing, at the deadline, and where the read owes the session a turn, which the read
+/// then takes: a datagram that wrote the face's tables, or a job that fell due, waits for no later
+/// datagram. Whether the session ended.
+#[cfg(not(wz_round))]
+pub(super) fn read_awaited(
+    reads: &mut impl AwaitedReads,
+    most: core::num::NonZeroUsize,
+    deadline_us: u64,
+    since_us: u64,
+) -> bool {
+    let mut now_us = since_us;
+    loop {
+        let kept = reads.await_input(deadline_us.saturating_sub(now_us), now_us);
+        now_us = reads.now_us();
+        if !kept {
+            return reads.step(most, now_us);
+        }
+        // One datagram a step: the next is waited for in the receive, where a step's own receive
+        // would find none and cost a system call that answers nothing, when the reader keeps up.
+        if reads.step(core::num::NonZeroUsize::MIN, now_us) {
+            return true;
+        }
+        if !reads.read_to_bound() || now_us >= deadline_us || reads.owed(now_us) {
+            return false;
+        }
+    }
+}
+
+#[cfg(all(test, not(wz_round)))]
+mod side_tests {
+    use super::*;
+
+    /// The address a member's datagrams come from.
+    fn member() -> SocketAddr {
+        SocketAddr::from(([192, 0, 2, 7], 7447))
+    }
+
+    /// A receive half that lends `b"half"` at every receive, and says whether it failed.
+    struct Half {
+        failed: bool,
+    }
+
+    impl GroupReceive for Half {
+        fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            f(b"half", member());
+            true
+        }
+
+        fn failed(&self) -> bool {
+            self.failed
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// A transport whose receive half is `half` until it is taken out, and whose own receive
+    /// lends `b"whole"`.
+    struct Joined {
+        half: Option<alloc::boxed::Box<dyn GroupReceive>>,
+    }
+
+    impl GroupTransport for Joined {
+        fn open(&mut self) -> bool {
+            true
+        }
+
+        fn close(&mut self) {}
+
+        fn service(&self) {}
+
+        fn carrier_up(&self) -> bool {
+            true
+        }
+
+        fn send_to_group(&mut self, _datagram: &[u8]) {}
+
+        fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            f(b"whole", member());
+            true
+        }
+
+        fn split_receive(&mut self) -> Option<alloc::boxed::Box<dyn GroupReceive>> {
+            self.half.take()
+        }
+    }
+
+    /// The session's side of a group over a transport that splits `half` out, as a join makes it.
+    fn side(half: Option<alloc::boxed::Box<dyn GroupReceive>>) -> GroupSide {
+        let mut transport: alloc::boxed::Box<dyn GroupTransport> =
+            alloc::boxed::Box::new(Joined { half });
+        let rx = transport.split_receive();
+        let link = GroupLink::new(Watched { inner: transport });
+        GroupSide::new(&link, rx)
+    }
+
+    /// What one receive of `side` lent.
+    fn received(side: &mut GroupSide) -> alloc::vec::Vec<u8> {
+        let mut seen = alloc::vec::Vec::new();
+        assert!(side.recv_with(&mut |bytes, _| seen = bytes.to_vec()));
+        seen
+    }
+
+    /// The session's side of a group receives on the half split out of its transport, and through
+    /// the cell the group's face shares only where the transport split none; a receive half that
+    /// failed ends the link as a lost carrier does. Turned red by a side that receives through the
+    /// cell whatever the transport split (`GroupSide::new` passing `rx` over), or a carrier that
+    /// does not read the half (`GroupSide::carrier_up`).
+    #[test]
+    fn a_groups_session_receives_on_the_half_split_out_of_its_transport() {
+        let mut split = side(Some(alloc::boxed::Box::new(Half { failed: false })));
+        assert_eq!(received(&mut split), b"half");
+        assert!(split.carrier_up());
+        let mut whole = side(None);
+        assert_eq!(
+            received(&mut whole),
+            b"whole",
+            "CONTROL: a transport whose halves are one"
+        );
+        let failed = side(Some(alloc::boxed::Box::new(Half { failed: true })));
+        assert!(!failed.carrier_up(), "a failed receive half ends the link");
+    }
+
+    /// A receive half on socket 7, whose receive waits or not.
+    struct Waiting(bool);
+
+    impl GroupReceive for Waiting {
+        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            false
+        }
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            Some(WaitOn::Socket(7))
+        }
+
+        fn awaits_input(&self) -> bool {
+            self.0
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// A read waits in a group's receive only for the half's own input, on a half whose receive
+    /// waits; it waits on any other input, or on a half whose receive returns at once, as it did.
+    /// Turned red by a read that waits in a receive that returns at once (`awaits_on` without
+    /// `GroupReceive::awaits_input`), which would turn the read with no wait at all, or in the
+    /// receive of a group for another socket's input.
+    #[test]
+    fn a_read_waits_in_a_groups_receive_only_for_its_own_input() {
+        let own = LinkWait::input(WaitOn::Socket(7));
+        assert!(awaits_on(&Waiting(true), &own));
+        assert!(
+            !awaits_on(&Waiting(false), &own),
+            "a receive that returns at once"
+        );
+        assert!(
+            !awaits_on(&Waiting(true), &LinkWait::input(WaitOn::Socket(8))),
+            "another socket's input"
+        );
+    }
+
+    /// A group whose waits keep what `kept` says in turn, whose clock reads `clock` in turn, whose
+    /// read is owed a turn from the reading `owed_at` on, and whose steps end the session or read
+    /// to their bound as `ends` and `reads` say; each wait and step is noted with what it was asked.
+    struct Script {
+        kept: alloc::vec::Vec<bool>,
+        clock: alloc::vec::Vec<u64>,
+        owed_at: u64,
+        ends: bool,
+        reads: bool,
+        waits: alloc::vec::Vec<(u64, u64)>,
+        steps: alloc::vec::Vec<(usize, u64)>,
+    }
+
+    impl Script {
+        fn new(kept: &[bool], clock: &[u64]) -> Self {
+            Self {
+                kept: kept.to_vec(),
+                clock: clock.to_vec(),
+                owed_at: u64::MAX,
+                ends: false,
+                reads: true,
+                waits: alloc::vec::Vec::new(),
+                steps: alloc::vec::Vec::new(),
+            }
+        }
+    }
+
+    impl AwaitedReads for Script {
+        fn await_input(&mut self, timeout_us: u64, since_us: u64) -> bool {
+            self.waits.push((timeout_us, since_us));
+            !self.kept.is_empty() && self.kept.remove(0)
+        }
+
+        fn now_us(&mut self) -> u64 {
+            if self.clock.is_empty() {
+                u64::MAX
+            } else {
+                self.clock.remove(0)
+            }
+        }
+
+        fn step(&mut self, most: core::num::NonZeroUsize, now_us: u64) -> bool {
+            self.steps.push((most.get(), now_us));
+            self.ends
+        }
+
+        fn read_to_bound(&self) -> bool {
+            self.reads
+        }
+
+        fn owed(&mut self, now_us: u64) -> bool {
+            now_us >= self.owed_at
+        }
+    }
+
+    /// The bound of a read's steps in these tests.
+    const MOST: core::num::NonZeroUsize = core::num::NonZeroUsize::MIN.saturating_add(7);
+
+    /// A read that waits in a group's receive steps each datagram a wait kept, one a step, at the
+    /// reading taken after its wait, and waits again for what is left of its time, measured from
+    /// that reading; a wait that keeps nothing is stepped with the read's bound, and ends the
+    /// reads. Turned red by reads that return to the read after the first datagram
+    /// (`read_awaited` without its loop), which pays the read's turn once a datagram, or by a
+    /// wait asked for its whole time again.
+    #[test]
+    fn a_waiting_read_steps_each_kept_datagram_and_waits_on_for_what_is_left() {
+        let mut script = Script::new(&[true, true, true, false], &[10, 20, 30, 40]);
+        assert!(!read_awaited(&mut script, MOST, 100, 0));
+        assert_eq!(script.waits, [(100, 0), (90, 10), (80, 20), (70, 30)]);
+        assert_eq!(script.steps, [(1, 10), (1, 20), (1, 30), (8, 40)]);
+    }
+
+    /// The reads end at the deadline, where the read owes the session a turn, at the session's
+    /// end, and at a step that read nothing, each after the step of the datagram kept. Turned red
+    /// by reads that wait past the read's deadline, that leave a turn owed to a later datagram, or
+    /// that wait again on a session that ended or a datagram no step took.
+    #[test]
+    fn a_waiting_read_ends_at_its_deadline_a_turn_owed_an_end_and_a_step_that_read_none() {
+        let mut deadline = Script::new(&[true, true, true], &[50, 100, 150]);
+        assert!(!read_awaited(&mut deadline, MOST, 100, 0));
+        assert_eq!(
+            deadline.steps,
+            [(1, 50), (1, 100)],
+            "none past the deadline"
+        );
+        assert_eq!(deadline.waits, [(100, 0), (50, 50)]);
+
+        let mut owed = Script::new(&[true, true, true], &[10, 20, 30]);
+        owed.owed_at = 20;
+        assert!(!read_awaited(&mut owed, MOST, 100, 0));
+        assert_eq!(
+            owed.steps,
+            [(1, 10), (1, 20)],
+            "the turn owed is the read's next"
+        );
+
+        let mut ended = Script::new(&[true, true], &[10, 20]);
+        ended.ends = true;
+        assert!(read_awaited(&mut ended, MOST, 100, 0), "the session ended");
+        assert_eq!(ended.steps, [(1, 10)]);
+
+        let mut none = Script::new(&[true, true], &[10, 20]);
+        none.reads = false;
+        assert!(!read_awaited(&mut none, MOST, 100, 0));
+        assert_eq!(
+            none.waits,
+            [(100, 0)],
+            "no wait again for a datagram no step took"
+        );
     }
 }

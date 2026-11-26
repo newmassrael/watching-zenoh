@@ -25,7 +25,7 @@
 //! ## The legs
 //!
 //! ```text
-//!   zenoh z_pub_shm --connect--> [ wz acceptor, PosixShmResolver ]   (leg 1, control)
+//!   zenoh z_pub_shm --connect--> [ wz acceptor, ShmReaderResolver ]   (leg 1, control)
 //!   [ wz dialer, publish_shm ] --connect--> zenoh z_sub_shm --listen (leg 2, 3)
 //! ```
 //!
@@ -85,8 +85,12 @@ use wz_runtime_tokio::session_open::{
 };
 use wz_runtime_tokio::shm_backend::{AllocAlignment, MemoryLayout};
 use wz_runtime_tokio::shm_provider::{
-    chunk_position, confirmed_chunks, data_segment_maps, is_invalidated, reference_state,
-    AllocPolicy, ChunkHold, PosixShmResolver, ReferenceState, ShmBackedPayload, ShmProvider,
+    chunk_position, confirmed_chunks, is_invalidated, reference_state, AllocPolicy, ReferenceState,
+    ShmBackedPayload, ShmProvider,
+};
+use wz_runtime_tokio::shm_reader::{
+    PosixShmClient, ProtocolID, SegmentID, ShmBufInner, ShmClient, ShmClientStorage,
+    ShmReaderResolver, ShmSegment, WithProtocolID, ZResult,
 };
 use wz_runtime_tokio_test_support::zenoh_interop_session_init_params;
 use wz_session_core::extshm::{ShmDescriptor, ShmResolver};
@@ -116,7 +120,7 @@ const ZENOH_SAW_SHM: &str = "[SHM (";
 /// A resolver that counts what the registry asked it to resolve, so a leg can
 /// tell a payload that crossed as SHM from one that merely arrived.
 struct CountingResolver {
-    inner: PosixShmResolver,
+    inner: ShmReaderResolver,
     resolved: Arc<AtomicUsize>,
     refused: Arc<AtomicUsize>,
     /// Every descriptor the registry asked about, so a leg can read the OTHER
@@ -167,6 +171,26 @@ impl ShmResolver for CountingResolver {
     }
 }
 
+/// The default client set's POSIX client, counting the data segments it attaches, so a leg reads
+/// how many mappings the reader made for the chunks it was handed.
+#[derive(Debug)]
+struct CountingPosix {
+    attaches: Arc<AtomicUsize>,
+}
+
+impl WithProtocolID for CountingPosix {
+    fn id(&self) -> ProtocolID {
+        PosixShmClient.id()
+    }
+}
+
+impl ShmClient for CountingPosix {
+    fn attach(&self, segment: SegmentID) -> ZResult<Arc<dyn ShmSegment>> {
+        self.attaches.fetch_add(1, Ordering::SeqCst);
+        PosixShmClient.attach(segment)
+    }
+}
+
 /// How the resolver of a zenoh-to-wz run treats the descriptors it is shown.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RunMode {
@@ -188,7 +212,8 @@ enum RunMode {
 /// the hold kept; every other one is linked and let go at once, which confirms it
 /// a single time and gives its reference back, and is refused.
 struct HoldingResolver {
-    held: Arc<StdMutex<Option<ChunkHold>>>,
+    reader: ShmReaderResolver,
+    held: Arc<StdMutex<Option<Arc<ShmBufInner>>>>,
     seen: Arc<StdMutex<Vec<ShmDescriptor>>>,
 }
 
@@ -198,14 +223,14 @@ impl ShmResolver for HoldingResolver {
         seen.push(*descriptor);
         let first = seen.len() == 1;
         drop(seen);
-        let hold = ChunkHold::link(descriptor)?;
+        let buffer = self.reader.read(descriptor)?;
         if !first {
             // Dropped here: confirmed once, released, and nothing confirms it again.
             return None;
         }
-        let bytes = hold.read();
-        *self.held.lock().expect("held") = Some(hold);
-        bytes
+        let bytes = AsRef::<[u8]>::as_ref(&*buffer).to_vec();
+        *self.held.lock().expect("held") = Some(buffer);
+        Some(bytes)
     }
 }
 
@@ -348,7 +373,15 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
         );
         return None;
     };
-    let maps_before = data_segment_maps();
+    // The reader of the run, over a storage of its own whose POSIX client counts what it attaches.
+    let maps = Arc::new(AtomicUsize::new(0));
+    let reader = ShmReaderResolver::new(Arc::new(
+        ShmClientStorage::builder()
+            .with_client(Arc::new(CountingPosix {
+                attaches: maps.clone(),
+            }))
+            .build(),
+    ));
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("local addr").port();
     let (_guard, mut zenoh_log) = spawn_zenoh(
@@ -411,12 +444,12 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
     let resolved = Arc::new(AtomicUsize::new(0));
     let refused = Arc::new(AtomicUsize::new(0));
     let seen: Arc<StdMutex<Vec<ShmDescriptor>>> = Arc::default();
-    let held: Arc<StdMutex<Option<ChunkHold>>> = Arc::default();
+    let held: Arc<StdMutex<Option<Arc<ShmBufInner>>>> = Arc::default();
     let segments: Arc<StdMutex<std::collections::BTreeSet<u32>>> = Arc::default();
     match mode {
         RunMode::Resolving | RunMode::RetainedSample => {
             session.set_shm_resolver(Box::new(CountingResolver {
-                inner: PosixShmResolver,
+                inner: reader.clone(),
                 resolved: resolved.clone(),
                 refused: refused.clone(),
                 seen: seen.clone(),
@@ -424,6 +457,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
             }))
         }
         RunMode::WatchdogProbe => session.set_shm_resolver(Box::new(HoldingResolver {
+            reader: reader.clone(),
             held: held.clone(),
             seen: seen.clone(),
         })),
@@ -565,7 +599,7 @@ async fn zenoh_publishes_to_wz_in(offer_shm: bool, mode: RunMode) -> Option<Zeno
         uninvalidated,
         watchdog,
         kept_given_back,
-        data_segment_maps: data_segment_maps().saturating_sub(maps_before),
+        data_segment_maps: maps.load(Ordering::SeqCst),
         segments_served,
         zenoh_log: read_captured(&mut zenoh_log),
     })

@@ -12,8 +12,8 @@ not counted); the reason for each is next to it.
 
 ## 1. The question
 
-The twelve lower crates of the family (`zenoh-result` to `zenoh-config`) are landed, each equal to
-upstream's by its surface and by differential tests. The thirteenth, `zenoh`, is behaviour: a
+The fourteen lower crates of the family (`zenoh-result` to `zenoh-sync`) are landed, each equal to
+upstream's by its surface and by differential tests. The top one, `zenoh`, is behaviour: a
 session that opens, scouts, publishes, subscribes, queries, answers and watches liveliness. C13a
 says it is an upstream-shaped surface over wz's own session engine and never a second
 implementation of upstream's session beside it. This note answers where exactly the surface ends

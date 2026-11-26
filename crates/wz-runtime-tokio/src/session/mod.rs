@@ -779,6 +779,48 @@ pub enum WireRoom {
     NoRoom,
 }
 
+/// Room on a group's lanes that `Session::reserve_on_group` promised one publish: the room of
+/// every datagram its Push can take, the Push built and judged by the egress chain as the group's
+/// publish builds and judges it. While it lives no other sender is given that room, and the
+/// publish sent under it (`Session::publish_on_group_reserved`) asks for none. Dropping it, sent
+/// under or not, gives the room back.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+#[must_use = "a reservation that is dropped at once promises nothing: send under it, or do not ask"]
+#[derive(Debug)]
+pub struct GroupReservation {
+    /// `None` for a publish that owes the group nothing: one that may not go remote, or whose
+    /// message the egress chain consumed.
+    held: Option<crate::multicast_pipeline::MulticastTxReservation>,
+}
+
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+impl GroupReservation {
+    /// Whether the reservation holds room of the group's lanes, and not the empty promise of a
+    /// publish that owes the group nothing.
+    pub fn is_held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    /// How many datagrams of room the reservation holds: every one the publish can take, the
+    /// fragments of a payload past the group's batch included.
+    pub fn datagrams(&self) -> usize {
+        self.held.as_ref().map_or(
+            0,
+            crate::multicast_pipeline::MulticastTxReservation::datagrams,
+        )
+    }
+}
+
+/// What `Session::reserve_on_group` found on a group's lanes.
+#[cfg(all(feature = "transport-multicast", feature = "codec-push"))]
+#[derive(Debug)]
+pub enum GroupRoom {
+    /// The lanes promised room for every datagram of the publish.
+    Granted(GroupReservation),
+    /// The lane cannot take every datagram of the publish now. Nothing was reserved or pushed.
+    NoRoom,
+}
+
 /// R3069 -- how a chunk publish holds the payload it hands to its LOCAL leg: borrowed from a
 /// caller that goes on holding it, or handed over by one that gave it up. See
 /// [`Session::deliver_shm_local_owned`] for why the second exists.
@@ -3129,7 +3171,7 @@ impl<R: SessionRuntime, T: TimeSource, Tp: TransportState<R, T>> Session<R, T, T
     }
 
     /// transport-shm — install the AP SHM resolver onto the subscriber registry
-    /// (the std mmap-open `PosixShmResolver`). Call once at bring-up so an inbound
+    /// (`crate::shm_reader::ShmReaderResolver`, zenoh-shm's reader). Call once at bring-up so an inbound
     /// SHM Put's descriptor can be resolved off /dev/shm; absent the resolver an
     /// SHM Put drops. The registry forwarder (the `set_own_zid` sibling).
     #[cfg(feature = "transport-shm")]
@@ -3603,6 +3645,92 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Multicast> {
     ) -> Result<usize, PublishError> {
         let band = opts.priority_band();
         self.publish_named(keyexpr, key, payload, opts, band)
+    }
+
+    /// Promise this group's lanes the room of every datagram of the publish of `payload` on
+    /// `keyexpr` with `opts`, without waiting and without marking a lane congested: the first
+    /// phase of a publish that reaches all of its links or none, which a group takes part in as a
+    /// unicast link does (`Session::reserve_wire_chain`). The key is named on the group as
+    /// [`Self::publish_named_on_group`] names it when `key` is given, and by the literal
+    /// otherwise.
+    ///
+    /// The Push is built, stamped and judged by the egress chain here, as the group's publish
+    /// does it, and measured in datagrams at the group's frame budget: a payload past the batch
+    /// is the room of its whole fragment chain, promised at once or not at all
+    /// ([`GroupRoom::NoRoom`]). A publish that may not go remote, or whose message the chain
+    /// consumes, owes the group nothing and is granted a reservation that holds nothing.
+    ///
+    /// A group with no link, or whose namespace makes the key too long for the codec, is
+    /// [`PublishError::TransportUnavailable`]: a push of the message would be dropped there, so
+    /// the group takes no part, as a link that is down takes none. A message the codec refuses is
+    /// the refusal it would be on every link.
+    #[cfg(feature = "codec-push")]
+    pub fn reserve_on_group(
+        &self,
+        keyexpr: &str,
+        key: Option<GroupKey<'_>>,
+        payload: &[u8],
+        opts: &PublishOptions,
+    ) -> Result<GroupRoom, PublishError> {
+        use wz_session_core::multicast_tx::MulticastTxItem;
+        use wz_session_core::network_message::NetworkMessage;
+        if !opts.allowed_destination.allows_remote() {
+            return Ok(GroupRoom::Granted(GroupReservation { held: None }));
+        }
+        let mut opts = opts.clone();
+        self.resolve_publish_timestamp(&mut opts);
+        let reliable = opts.reliable_bool();
+        let meta = opts.push_metadata();
+        let express = meta.is_express();
+        let priority = opts.priority_band();
+        let wire = key.unwrap_or(GroupKey::literal(keyexpr));
+        let push = build_publish_push(opts.kind, keyexpr, wire, payload, &meta)?;
+        let Some((msg, _, priority)) = self.egress_stage(
+            NetworkMessage::Push(Box::new(push)),
+            reliable,
+            express,
+            priority,
+        )?
+        else {
+            return Ok(GroupRoom::Granted(GroupReservation { held: None }));
+        };
+        let push = match msg {
+            NetworkMessage::Push(push) => push,
+            // The egress chain hands back the kind of message it was handed.
+            _ => {
+                return Err(
+                    wz_session_core::send_wire_error::SendWireError::UnsupportedVariant.into(),
+                )
+            }
+        };
+        match self.transport.tx.try_reserve(MulticastTxItem::Push {
+            push,
+            reliable,
+            priority,
+        }) {
+            Ok(Some(held)) => Ok(GroupRoom::Granted(GroupReservation { held: Some(held) })),
+            Ok(None) => Ok(GroupRoom::NoRoom),
+            Err(_) => Err(PublishError::TransportUnavailable),
+        }
+    }
+
+    /// The wire leg of [`Self::publish_named_on_group`], pushed under the room `reservation`
+    /// holds ([`Self::reserve_on_group`]): the Push the reservation was measured for goes onto
+    /// the group's lanes without asking for room, every datagram of it, and is never a congestion
+    /// drop. It waits for its conduit's stage where a droppable push would give up, since a
+    /// promise that a held stage could drop would break what the reservation was taken for. Only
+    /// the wire leg runs. The reservation is given back when this returns.
+    #[cfg(feature = "codec-push")]
+    pub fn publish_on_group_reserved(
+        &self,
+        reservation: GroupReservation,
+    ) -> Result<(), PublishError> {
+        let Some(held) = reservation.held else {
+            return Ok(());
+        };
+        Ok(transport::group_sent(
+            self.transport.tx.push_reserved(held),
+        )?)
     }
 
     /// zenoh-pico `zp_batch_start` on a multicast transport: open the group's batch window
@@ -4172,7 +4300,7 @@ impl<R: SessionRuntime, T: TimeSource> Session<R, T, Unicast> {
         // (R311y516), so installing the reader for every session admits
         // nothing that negotiation did not.
         #[cfg(feature = "transport-shm")]
-        session.set_shm_resolver(Box::new(crate::shm_provider::PosixShmResolver));
+        session.set_shm_resolver(Box::new(crate::shm_reader::ShmReaderResolver::global()));
         session
     }
 
@@ -9736,3 +9864,6 @@ mod probe_tests;
 
 #[cfg(all(test, feature = "transport-unicast", feature = "codec-push"))]
 mod reserve_tests;
+
+#[cfg(all(test, feature = "transport-multicast", feature = "codec-push"))]
+mod group_reserve_tests;

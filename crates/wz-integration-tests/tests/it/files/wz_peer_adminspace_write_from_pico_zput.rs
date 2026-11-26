@@ -303,8 +303,9 @@ fn spawn_pico_pub(addr: &str, n: u32) -> ChildGuard {
 // against the OLD chain. Barrier 3 is a Put from the STILL-RUNNING pico publisher
 // hitting the new one. So the drop can only happen if the swap INVALIDATED that
 // table — a stale hit would keep relaying, which is precisely what removing the
-// version bump in `set_interceptors` produces (it reds the two unit legs in
-// linkstate_forward). The E6 build line names the feature, so the cache is compiled
+// version bump in `set_interceptors` produces (it reds the router_forward unit
+// leg `the_router_ingress_interceptor_cache_is_invalidated_by_a_live_reconfigure`
+// and its egress twin). The E6 build line names the feature, so the cache is compiled
 // in rather than the atom's name riding an elided path.
 // wz-proves: config-mutate-runtime pico->wz
 // wz-proves: routing-interceptor-hotreload pico->wz

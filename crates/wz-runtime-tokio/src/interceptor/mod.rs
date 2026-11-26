@@ -64,8 +64,8 @@ pub mod qos_overwrite;
 
 use std::any::Any;
 // The policy engine's types, nameable from the seam that takes them: `InterceptorConfig::with_acl`
-// is public, and a caller that cannot name its argument cannot call it. They were reachable only
-// through `linkstate_forward`, which is a routing build, so a host that governs a SESSION (the
+// is public, and a caller that cannot name its argument cannot call it. Without this they are
+// reachable only through `routing_policy`, which is a routing build, so a host that governs a SESSION (the
 // multicast one, say) had to depend on the routing plane or on the engine crate directly.
 #[cfg(feature = "access-acl")]
 pub use wz_access_control::{

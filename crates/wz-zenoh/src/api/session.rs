@@ -571,7 +571,7 @@ pub(crate) struct RouterAdminViews {
     /// What the faces declared, by kind, folded by tier as the pin folds them.
     pub(crate) declarations: wz_runtime_tokio::router_forward::RouterDeclarationsView,
     /// The graph of the north region: the routers.
-    pub(crate) routers: wz_runtime_tokio::linkstate_forward::LinkstateNetView,
+    pub(crate) routers: wz_runtime_tokio::router_forward::LinkstateNetView,
     /// Where the router's listeners can be reached.
     pub(crate) locators: Vec<String>,
 }

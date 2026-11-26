@@ -62,7 +62,7 @@
 //!
 //! So here: [`ShmBackedPayload::wire_reference`](crate::shm_provider::ShmBackedPayload::wire_reference)
 //! is the serialization point,
-//! [`PosixShmResolver::resolve`](crate::shm_provider::PosixShmResolver) releases the reference the sender took for it,
+//! the reader of the process (`crate::shm_reader`) releases the reference the sender took for it,
 //! the owner's `Drop` releases its own and parks the data segment on a busy list
 //! instead of unlinking it, and the busy list is collected at the next
 //! allocation and at every owner drop. The data segment stays mapped and locked
@@ -78,11 +78,9 @@
 //! CONFIRMS the bit while it holds, and the provider VALIDATES it every 100 ms,
 //! marking a chunk whose bit no one set in the whole window as invalidated.
 //! Here the owner's handle confirms for as long as it lives, the store validates
-//! what it provides on the watchdog thread's clock, and a receiver's
-//! [`ChunkHold`] confirms for as long as it holds
-//! and releases its reference when it drops, which is upstream's received buffer
-//! as a lifecycle, with the bytes still to come. Metadata segments a receiver
-//! opens are kept, by id, and let go of once their name names another object.
+//! what it provides on the watchdog thread's clock, and a receiver's buffer, which
+//! is `zenoh-shm`'s (`crate::shm_reader`), confirms for as long as it is held and
+//! releases its reference when it drops.
 //!
 //! # R3056 — a PROVIDER, and a pool
 //!
@@ -121,22 +119,23 @@
 //!   congestion drop after the send call returned) is never released, which is
 //!   upstream's behaviour too.
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
+#[cfg(feature = "session-extshm")]
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use wz_session_core::extshm::{ShmDescriptor, ShmReservation, ShmResolver, ShmSendBuffer};
-use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
+use wz_session_core::link::RxBytes;
 
-use crate::posix_shm::{
-    next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw, SegmentObject,
-};
+use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment};
+#[cfg(feature = "session-extshm")]
+use crate::posix_shm::{PeerSegmentRw, SegmentObject};
 use crate::shm_backend::{
     AllocError, AllocatedChunk, ChunkDescriptor, LayoutAllocError, LayoutError, MemoryLayout,
     PtrInSegment, ShmProviderBackend,
 };
-use crate::shm_clients::{ShmClientSet, ShmDataSegment};
 use crate::shm_posix_backend::PosixShmProviderBackend;
 use crate::shm_watchdog::{confirmator, Confirmed, WatchdogBit};
 
@@ -201,8 +200,9 @@ fn metadata_of(bytes: &[u8]) -> Option<&Metadata> {
 /// `None` when it is too short or misaligned to be one.
 ///
 /// The writable twin of `metadata_of`, and the reason it exists is the
-/// reference count: a receiver releases a buffer by writing the provider's
-/// header, which a read-only view cannot do.
+/// watchdog: a sender keeps a chunk it sent confirmed by writing the provider's
+/// watchdog word, which a read-only view cannot do.
+#[cfg(feature = "session-extshm")]
 fn metadata_of_rw(segment: &PeerSegmentRw) -> Option<&Metadata> {
     if segment.len() < core::mem::size_of::<Metadata>()
         || segment
@@ -278,6 +278,7 @@ fn own_bit(segment: &Arc<OwnedSegment>, slot: u16) -> WatchdogBit {
 
 /// `slot`'s watchdog bit in a metadata segment a PEER made, or `None` when the
 /// segment is not a metadata segment.
+#[cfg(feature = "session-extshm")]
 fn peer_bit(segment: &Arc<PeerSegmentRw>, slot: u16) -> Option<WatchdogBit> {
     let metadata = metadata_of_rw(segment)?;
     if slot as usize >= METADATA_SLOTS {
@@ -1285,11 +1286,15 @@ impl ShmBackedPayload {
     ///
     /// `None` when the descriptor cannot be resolved, in which case the reference taken for
     /// it has been returned and the caller falls back to the bytes.
+    ///
+    /// The reader is one of its own and not the process's: the process's storage keeps every
+    /// segment it mapped for its whole life, and this provider's pool must go when its last
+    /// chunk comes home.
     pub fn receiver_view(&self) -> Option<RxBytes> {
         let wire = self.wire_reference();
         let descriptor = wire.descriptor();
         wire.commit();
-        PosixShmResolver.resolve_shared(&descriptor)
+        crate::shm_reader::ShmReaderResolver::of_default_set().resolve_shared(&descriptor)
     }
 
     /// Whether this owner is the chunk's ONLY holder: no descriptor of it is in flight and
@@ -1424,18 +1429,20 @@ impl Drop for ShmBackedPayload {
     }
 }
 
-/// The metadata segments this process has opened as a reader, by id, so a
-/// receiver maps a provider's segment once and not once per sample: upstream
-/// links a metadata segment the first time it sees it and keeps the mapping
+/// The metadata segments this process has opened to keep a chunk it sent confirmed
+/// (`confirm_sent_chunk`), by id, so a sender maps a provider's segment once and not once
+/// per buffer: upstream links a metadata segment the first time it sees it and keeps the mapping
 /// (`commons/zenoh-shm/src/metadata/subscription.rs` @
 /// `pub fn link(&self, descriptor: &MetadataDescriptor) -> ZResult<OwnedMetadataDescriptor> {`).
+#[cfg(feature = "session-extshm")]
 fn peer_metadata_cache() -> &'static Mutex<HashMap<u64, Arc<PeerSegmentRw>>> {
     static CACHE: OnceLock<Mutex<HashMap<u64, Arc<PeerSegmentRw>>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// The provider's metadata segment named `id`, mapped WRITABLE (a release is a
+/// The provider's metadata segment named `id`, mapped WRITABLE (a confirmation is a
 /// write), from the cache while the provider of its entry is live.
+#[cfg(feature = "session-extshm")]
 fn peer_metadata(id: u16) -> Option<Arc<PeerSegmentRw>> {
     let id = u64::from(id);
     let mut cache = peer_metadata_cache().lock().ok()?;
@@ -1466,17 +1473,20 @@ fn peer_metadata(id: u16) -> Option<Arc<PeerSegmentRw>> {
 /// liveness to judge, so it would be judged by its name, and a cache entry would itself keep
 /// that name alive: a dead provider's segment mapped for good. An object in this set is served
 /// and never cached.
+#[cfg(feature = "session-extshm")]
 fn gone_objects() -> &'static Mutex<HashSet<SegmentObject>> {
     static GONE: OnceLock<Mutex<HashSet<SegmentObject>>> = OnceLock::new();
     GONE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+#[cfg(feature = "session-extshm")]
 fn note_gone(object: SegmentObject) {
     if let Ok(mut gone) = gone_objects().lock() {
         gone.insert(object);
     }
 }
 
+#[cfg(feature = "session-extshm")]
 fn was_gone(object: SegmentObject) -> bool {
     gone_objects()
         .lock()
@@ -1484,77 +1494,28 @@ fn was_gone(object: SegmentObject) -> bool {
         .unwrap_or(false)
 }
 
-/// The data segments this process has mounted as a reader, by id, so a receiver maps a pool's
-/// segment once and not once per payload: upstream mounts a data segment the first time a
-/// descriptor names it and keeps it for the reader's life
-/// (`commons/zenoh-shm/src/reader.rs` @ `// fastest path: try to get access to already mounted SHM segment`).
-fn peer_data_cache() -> &'static Mutex<HashMap<u64, Arc<PeerSegment>>> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, Arc<PeerSegment>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// How many times this process has mapped a data segment since it started. A diagnostic, like
-/// [`reference_state`]: the witness that a segment is mapped once for the chunks it serves and
-/// not once per chunk is this count staying at the number of segments.
-static DATA_SEGMENT_MAPS: AtomicUsize = AtomicUsize::new(0);
-
-/// The number of data segment mappings this process has made since it started.
-pub fn data_segment_maps() -> usize {
-    DATA_SEGMENT_MAPS.load(Ordering::SeqCst)
-}
-
-/// The data segment named `id`, mapped read-only, from the cache while the provider of its entry
-/// is live. The same trust as [`peer_metadata`]: a mapping of a dead provider's pool would serve
-/// its bytes as a live chunk's.
-///
-/// A dead provider's object opened again under its id is served and not cached (see
-/// [`gone_objects`]).
-fn peer_data(id: u64) -> Option<Arc<PeerSegment>> {
-    let mut cache = peer_data_cache().lock().ok()?;
-    let mut evicted = None;
-    if let Some(segment) = cache.get(&id) {
-        if segment.provider_is_live() {
-            return Some(segment.clone());
-        }
-        note_gone(segment.object());
-        evicted = cache.remove(&id);
-    }
-    let segment = Arc::new(PeerSegment::open(id).ok()?);
-    DATA_SEGMENT_MAPS.fetch_add(1, Ordering::SeqCst);
-    if !was_gone(segment.object()) {
-        cache.insert(id, segment.clone());
-    }
-    drop(evicted);
-    Some(segment)
-}
-
-/// Let go of cached mappings whose provider is gone, so a provider that exited does not stay
-/// mapped and locked in this process: the name lives for as long as anyone maps the object,
+/// Let go of cached metadata mappings whose provider is gone, so a provider that exited does not
+/// stay mapped and locked in this process: the name lives for as long as anyone maps the object,
 /// so the name alone would keep a dead provider's segment here for good. Run by the watchdog
-/// thread; a hold in use keeps its own reference to its mapping, and the last holder to let go
-/// removes the name. Metadata segments and data segments alike. The remembered dead objects
-/// are forgotten once their names no longer name them.
+/// thread; a confirmation in use keeps its own reference to its mapping, and the last holder to
+/// let go removes the name. The remembered dead objects are forgotten once their names no longer
+/// name them. A build without the handshake keeps no such mapping: nothing confirms a chunk for a
+/// receiver there.
 pub(crate) fn sweep_peer_segments() {
-    if let Ok(mut cache) = peer_metadata_cache().lock() {
-        cache.retain(|_, segment| {
-            let live = segment.provider_is_live();
-            if !live {
-                note_gone(segment.object());
-            }
-            live
-        });
-    }
-    if let Ok(mut cache) = peer_data_cache().lock() {
-        cache.retain(|_, segment| {
-            let live = segment.provider_is_live();
-            if !live {
-                note_gone(segment.object());
-            }
-            live
-        });
-    }
-    if let Ok(mut gone) = gone_objects().lock() {
-        gone.retain(SegmentObject::is_named);
+    #[cfg(feature = "session-extshm")]
+    {
+        if let Ok(mut cache) = peer_metadata_cache().lock() {
+            cache.retain(|_, segment| {
+                let live = segment.provider_is_live();
+                if !live {
+                    note_gone(segment.object());
+                }
+                live
+            });
+        }
+        if let Ok(mut gone) = gone_objects().lock() {
+            gone.retain(SegmentObject::is_named);
+        }
     }
 }
 
@@ -1580,20 +1541,11 @@ pub(crate) fn confirm_sent_chunk(descriptor: &ShmDescriptor) -> Option<Confirmed
 }
 
 /// How many chunks this process is keeping confirmed right now: the watchdog bits it holds, an
-/// owner's, a receiver's and a sender's kept for a receiver that has not yet acknowledged. A
-/// diagnostic, like [`data_segment_maps`]: the witness that a confirmation kept for a receiver is
+/// owner's and a sender's kept for a receiver that has not yet acknowledged (a receiver's are
+/// `zenoh-shm`'s, confirmed by its reader). A diagnostic, like [`reference_state`]: the witness that a confirmation kept for a receiver is
 /// let go of once the receiver acknowledges is this count returning to where it started.
 pub fn confirmed_chunks() -> usize {
     confirmator().held()
-}
-
-/// Whether the reader's cache holds the data segment named `id`. A diagnostic for the sweep's
-/// witness.
-#[cfg(all(test, target_os = "linux"))]
-fn is_cached_data_segment(id: u64) -> bool {
-    peer_data_cache()
-        .lock()
-        .is_ok_and(|cache| cache.contains_key(&id))
 }
 
 /// One validation pass over what this process provides: the watchdog thread's
@@ -1607,428 +1559,6 @@ pub(crate) fn validate_tick() {
     // A provider whose handle is gone is collected by the process, and this is the clock
     // that does it for a chunk whose receiver lets go after its owner has.
     sweep_orphans();
-}
-
-/// A receiver's hold on one chunk: upstream's received `ShmBufInner`, as the
-/// lifecycle of a buffer and not yet its bytes.
-///
-/// While it lives the chunk's watchdog bit is confirmed (the holder is alive),
-/// and when it drops it gives back the reference the sender took for it. Both
-/// are what upstream's buffer does, and holding the bytes of a delivered sample
-/// without copying them is the same thing with the bytes added.
-///
-/// Linking a descriptor takes nothing from the chunk: the sender took the
-/// reference when it serialized the descriptor, and a read takes none
-/// (`commons/zenoh-shm/src/reader.rs` @
-/// `// Read does not increment the reference count as it is assumed`).
-pub struct ChunkHold {
-    metadata: Arc<PeerSegmentRw>,
-    descriptor: ShmDescriptor,
-    /// R3065 -- the reader's clients, when it holds a set of its own. `None` is the default
-    /// reader, which resolves POSIX alone and allocates nothing for the privilege.
-    clients: Option<Arc<ShmClientSet>>,
-    /// Declared after `metadata` on purpose: the bit it confirms is in that
-    /// mapping, and the confirmator keeps its own reference to the mapping, so
-    /// either order is sound; this one only reads as the order they are made in.
-    _confirmed: Option<Confirmed>,
-}
-
-impl ChunkHold {
-    /// Link a received descriptor: open (or reuse) the provider's metadata
-    /// segment, check that the header at the descriptor's slot is still of the
-    /// descriptor's generation, and attach to the chunk's watchdog before doing
-    /// anything else, as upstream's reader does ("attach to the watchdog before
-    /// doing other things").
-    ///
-    /// `None` when the metadata segment cannot be opened, or when the slot's
-    /// generation is not the descriptor's: that reference is not this receiver's
-    /// to give back, so nothing is touched.
-    pub fn link(descriptor: &ShmDescriptor) -> Option<Self> {
-        Self::link_with(descriptor, None)
-    }
-
-    /// R3065 -- [`Self::link`] for a reader that holds a set of clients: the chunk is mapped
-    /// through the client its header's protocol names, and a protocol the set holds none for is
-    /// refused, as it is by upstream's reader. Everything else is `link`'s.
-    pub fn link_through(descriptor: &ShmDescriptor, clients: &Arc<ShmClientSet>) -> Option<Self> {
-        Self::link_with(descriptor, Some(Arc::clone(clients)))
-    }
-
-    fn link_with(descriptor: &ShmDescriptor, clients: Option<Arc<ShmClientSet>>) -> Option<Self> {
-        let metadata = peer_metadata(descriptor.metadata_id)?;
-        let header = metadata_of_rw(&metadata)?
-            .headers
-            .get(descriptor.metadata_index as usize)?;
-        if header.generation.load(Ordering::SeqCst) != descriptor.generation {
-            return None;
-        }
-        let confirmed =
-            peer_bit(&metadata, descriptor.metadata_index).map(|bit| confirmator().add(bit));
-        Some(Self {
-            metadata,
-            descriptor: *descriptor,
-            clients,
-            _confirmed: confirmed,
-        })
-    }
-
-    fn header(&self) -> Option<&ChunkHeader> {
-        metadata_of_rw(&self.metadata)?
-            .headers
-            .get(self.descriptor.metadata_index as usize)
-    }
-
-    /// Whether the chunk is still the buffer the descriptor names and has not
-    /// been invalidated: upstream's `is_valid`
-    /// (`commons/zenoh-shm/src/lib.rs` @ `fn is_valid(&self) -> bool {`).
-    pub fn is_valid(&self) -> bool {
-        match self.header() {
-            Some(header) => {
-                !header.watchdog_invalidated.load(Ordering::SeqCst)
-                    && header.generation.load(Ordering::SeqCst) == self.descriptor.generation
-            }
-            None => false,
-        }
-    }
-
-    /// The chunk's data segment, mapped, and where in it the chunk's bytes lie, or
-    /// `None` when the chunk is not valid, names a protocol this node does not
-    /// speak, claims more than its length, its data segment will not open, or the
-    /// window does not lie inside the segment.
-    fn window(&self) -> Option<(ChunkData, std::ops::Range<usize>)> {
-        let header = self.header()?;
-        if header.watchdog_invalidated.load(Ordering::Acquire) {
-            return None;
-        }
-        let protocol = header.protocol.load(Ordering::Relaxed);
-        let data_len = self.descriptor.data_len as usize;
-        let chunk = header.chunk.load(Ordering::Relaxed) as usize;
-        if data_len > header.len.load(Ordering::Relaxed) {
-            return None;
-        }
-        let segment_id = header.segment.load(Ordering::Relaxed);
-        // POSIX is the built-in client and keeps its own mapping, which also serves the writable
-        // second mapping; a reader built without it cannot resolve POSIX memory at all.
-        let resolves_posix = self
-            .clients
-            .as_ref()
-            .is_none_or(|clients| clients.resolves_posix());
-        if protocol == POSIX_PROTOCOL_ID && resolves_posix {
-            let segment = u64::from(segment_id);
-            let data = peer_data(segment)?;
-            let end = chunk.checked_add(data_len)?;
-            data.bytes().get(chunk..end)?;
-            return Some((ChunkData::Posix { data, segment }, chunk..end));
-        }
-        // Any other protocol is read through the client the reader holds for it, or refused when
-        // it holds none. The default reader holds none, so it refuses every protocol but POSIX.
-        let segment = self.clients.as_ref()?.mount(protocol, segment_id)?;
-        let ptr = segment.map(u32::try_from(chunk).ok()?);
-        if ptr.is_null() {
-            return None;
-        }
-        Some((
-            ChunkData::Foreign {
-                _segment: segment,
-                ptr,
-                len: data_len,
-            },
-            0..data_len,
-        ))
-    }
-
-    /// Whether this hold is the ONLY reference to the chunk: the count in the slot's
-    /// header reads one, which is the reference the sender took for this receiver.
-    /// The owner's own is given back when it lets go of the buffer, so a count of
-    /// one means nobody else reads the chunk, and it is upstream's `is_unique`
-    /// (`commons/zenoh-shm/src/api/buffer/zshmmut.rs` @
-    /// `impl TryFrom<&mut zshm> for &mut zshmmut {`) read the same way, off the
-    /// metadata slot.
-    pub fn is_unique(&self) -> bool {
-        match self.header() {
-            Some(header) => {
-                header.refcount.load(Ordering::SeqCst) == 1
-                    && header.generation.load(Ordering::SeqCst) == self.descriptor.generation
-            }
-            None => false,
-        }
-    }
-
-    /// Copy the chunk's bytes out of the shared page (the bounded scoped copy
-    /// into an owned buffer), or `None` when the chunk has no readable window (see
-    /// `window`).
-    pub fn read(&self) -> Option<Vec<u8>> {
-        let (data, window) = self.window()?;
-        Some(data.bytes()[window].to_vec())
-    }
-
-    /// The chunk's bytes as they lie on the shared page, with this hold kept for as
-    /// long as any range of them lives (R3049): the delivered payload IS the page,
-    /// and the reference the sender took for this receiver goes back, and the
-    /// watchdog bit stops being confirmed, when the last range drops and not before.
-    ///
-    /// Upstream's receiver is the same: its `ShmBuf` reads straight out of the
-    /// mapped segment and gives the reference back in `Drop for ShmBufInner`.
-    /// `None` when the chunk has no readable window, and then `self` drops here, so the
-    /// reference goes back on that way out as it does for a copy.
-    pub fn into_shared(self) -> Option<RxBytes> {
-        let (data, window) = self.window()?;
-        let len = window.len();
-        let storage: Arc<dyn RxStorage> = Arc::new(SharedChunk {
-            data,
-            writable: OnceLock::new(),
-            window,
-            hold: self,
-        });
-        RxBytes::shared(storage, 0..len)
-    }
-
-    /// The chunk as a buffer that can be sent on: [`Self::into_shared`]'s storage, kept as the
-    /// chunk and not narrowed to a range of its bytes. `None` when the chunk has no readable
-    /// window, and then `self` drops here and the reference goes back, as it does there.
-    fn into_chunk(self) -> Option<SharedChunk> {
-        let (data, window) = self.window()?;
-        Some(SharedChunk {
-            data,
-            writable: OnceLock::new(),
-            window,
-            hold: self,
-        })
-    }
-
-    /// One more reference to the chunk, taken for a receiver this node is about to send the
-    /// descriptor to: upstream's `inc_ref_count`, which serializing a buffer's descriptor does
-    /// (`commons/zenoh-codec/src/core/zbuf.rs` @ `unsafe { shmb.inc_ref_count() };`). The hold's
-    /// own reference is not touched. `false` when the header is gone (the provider's metadata
-    /// segment no longer maps), and then no reference was taken.
-    fn take_reference(&self) -> bool {
-        match self.header() {
-            Some(header) => {
-                header.refcount.fetch_add(1, Ordering::SeqCst);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Give back a reference [`Self::take_reference`] took and no receiver was sent.
-    fn return_reference(&self) {
-        if let Some(header) = self.header() {
-            release_reference(header);
-        }
-    }
-
-    /// The shared-memory protocol the chunk's own header names: the one a peer must list to be
-    /// sent its descriptor.
-    fn protocol(&self) -> u32 {
-        self.header().map_or(POSIX_PROTOCOL_ID, |header| {
-            header.protocol.load(Ordering::Relaxed)
-        })
-    }
-}
-
-/// A chunk a peer sent, held to be sent ON (see [`ShmResolver::hold`]): what a router keeps of a
-/// message while it routes it. The bytes are the page the chunk lies on, the protocol is the one
-/// its header names, and a reservation is a reference taken on the chunk's header for one more
-/// receiver, on top of the reference the hold itself carries.
-impl ShmSendBuffer for SharedChunk {
-    fn bytes(&self) -> &[u8] {
-        &self.data.bytes()[self.window.clone()]
-    }
-
-    fn protocol(&self) -> u32 {
-        self.hold.protocol()
-    }
-
-    /// `None`: a forwarder does not deliver the chunk to a subscriber of its own, and a view
-    /// would be a second hold on a chunk this value already holds.
-    fn receiver_view(&self) -> Option<RxBytes> {
-        None
-    }
-
-    fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
-        let taken = self.hold.take_reference();
-        Box::new(ForwardedReference {
-            chunk: self,
-            taken,
-            committed: false,
-        })
-    }
-}
-
-/// The reference [`SharedChunk::reserve_for_receiver`] took for one more receiver, and the
-/// descriptor that names it. The same contract as [`OwnedWireReference`]: given back unless
-/// [`ShmReservation::commit`] says the frame left. It owns the chunk, so it may outlive the
-/// handle it was taken from, and the chunk is not released while a reservation is outstanding.
-struct ForwardedReference {
-    chunk: Arc<SharedChunk>,
-    /// Whether a reference was taken at all; a header that would not map takes none, and
-    /// gives none back.
-    taken: bool,
-    committed: bool,
-}
-
-impl ShmReservation for ForwardedReference {
-    fn descriptor(&self) -> ShmDescriptor {
-        self.chunk.hold.descriptor
-    }
-
-    fn commit(mut self: Box<Self>) {
-        self.committed = true;
-    }
-}
-
-impl Drop for ForwardedReference {
-    fn drop(&mut self) {
-        if self.taken && !self.committed {
-            self.chunk.hold.return_reference();
-        }
-    }
-}
-
-/// The storage a received shared-memory payload is a range of: a chunk's data
-/// segment, mapped, and the hold that keeps the chunk the sender's until the last
-/// range of it drops.
-///
-/// The fields drop in the order they are declared and the order is the point: the
-/// handle on the mapping goes first, so nothing can read the page after the sender is
-/// free to reuse it, and the hold goes last and gives the reference back. The mapping
-/// itself may outlive the chunk, in the reader's cache of data segments; no bytes can
-/// be reached through it once the chunk is gone, because a range of the page is only
-/// ever handed out by the chunk that owns the handle.
-struct SharedChunk {
-    data: ChunkData,
-    /// The POSIX segment mapped WRITABLE, made the first time a host asks for a pointer
-    /// it may write through (R3052) and not before: a payload that is only read
-    /// never needs it, and `None` is a segment that would not map writable. A chunk of a
-    /// client's protocol has no second mapping: its client's pointer is the writable one.
-    writable: OnceLock<Option<PeerSegmentRw>>,
-    window: std::ops::Range<usize>,
-    hold: ChunkHold,
-}
-
-/// R3065 -- where a received chunk's bytes are: a POSIX segment this module maps, or a segment a
-/// CLIENT of another protocol attached.
-enum ChunkData {
-    /// The chunk's data segment mapped read-only, shared with every other chunk of the same
-    /// segment through the reader's cache, and its id, to map it a second time writable.
-    Posix {
-        data: Arc<PeerSegment>,
-        segment: u64,
-    },
-    /// The chunk at `ptr` in a segment the reader's client for the chunk's protocol attached. The
-    /// segment is held for as long as the chunk is, which is what keeps `ptr` valid.
-    Foreign {
-        _segment: Arc<dyn ShmDataSegment>,
-        ptr: *mut u8,
-        len: usize,
-    },
-}
-
-// SAFETY: `ptr` is an address inside `_segment`, which the value owns, and the client contract
-// ([`ShmDataSegment::map`]) keeps it valid while the segment is alive. The bytes it names are
-// shared memory read by any holder of the chunk, which is what the type is for.
-unsafe impl Send for ChunkData {}
-// SAFETY: as above; nothing in the value is mutated through a shared reference.
-unsafe impl Sync for ChunkData {}
-
-impl ChunkData {
-    /// The bytes of the whole segment mapping for POSIX, and of the chunk alone for a client's.
-    fn bytes(&self) -> &[u8] {
-        match self {
-            ChunkData::Posix { data, .. } => data.bytes(),
-            // SAFETY: `ptr` names `len` bytes of `_segment`, which `self` holds alive; the length
-            // is the descriptor's, which the header's own length bounds (`window` checked it).
-            ChunkData::Foreign { ptr, len, .. } => unsafe {
-                std::slice::from_raw_parts(*ptr as *const u8, *len)
-            },
-        }
-    }
-}
-
-impl RxStorage for SharedChunk {
-    fn as_slice(&self) -> &[u8] {
-        &self.data.bytes()[self.window.clone()]
-    }
-
-    fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
-        Some(self)
-    }
-}
-
-impl ShmChunkView for SharedChunk {
-    fn is_unique(&self) -> bool {
-        self.hold.is_unique()
-    }
-
-    fn writable_ptr(&self) -> Option<*mut u8> {
-        let segment = match &self.data {
-            ChunkData::Posix { segment, .. } => *segment,
-            // The client mapped the chunk through a pointer it owns the write side of.
-            ChunkData::Foreign { ptr, .. } => return Some(*ptr),
-        };
-        let mapped = self
-            .writable
-            .get_or_init(|| PeerSegmentRw::open(segment).ok())
-            .as_ref()?;
-        if mapped.len() < self.window.end {
-            return None;
-        }
-        // SAFETY: the window lies inside the mapping, as just checked.
-        Some(unsafe { mapped.base().add(self.window.start) })
-    }
-}
-
-impl Drop for ChunkHold {
-    fn drop(&mut self) {
-        if let Some(header) = self.header() {
-            release_reference(header);
-        }
-    }
-}
-
-/// The reader-side resolver: the AP impl of the no_std [`ShmResolver`] seam.
-///
-/// Follows a descriptor as upstream's reader does: [`ChunkHold::link`] it, then
-/// either read the bytes off the shared page into an owned buffer and let the hold
-/// go (`resolve`), or hand the bytes up where they lie and keep the hold until the
-/// last range of them drops (`resolve_shared`, which is the path a delivered sample
-/// takes, R3050).
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PosixShmResolver;
-
-impl ShmResolver for PosixShmResolver {
-    /// R3038 -- the receiver's end of the reference count: the descriptor was
-    /// sent with one reference taken for this reader, and this call gives it
-    /// back after it has read, which is what upstream's `Drop for ShmBufInner`
-    /// does when the received buffer is let go.
-    ///
-    /// The release is made exactly once on every way out once the header's
-    /// generation shows that reference is ours (a read that finds the chunk
-    /// invalidated, a length that does not fit, a protocol this node does not
-    /// speak, a data segment that will not open all still release, as upstream's
-    /// does by dropping the buffer it built). A header of ANOTHER generation is
-    /// another buffer's and its count is not ours to touch, so that one returns
-    /// without a release; upstream would decrement it, which is its defect and
-    /// not copied.
-    fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
-        let hold = ChunkHold::link(descriptor)?;
-        hold.read()
-    }
-
-    /// R3049 -- the bytes where they lie on the shared page, the reference given
-    /// back when the last range of them drops (see [`ChunkHold::into_shared`]).
-    fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
-        ChunkHold::link(descriptor)?.into_shared()
-    }
-
-    /// The chunk held to be sent on: the reference the descriptor carried is the handle's, and
-    /// goes back when the last clone of the handle drops; a reservation taken from it is one
-    /// more (see the `ShmSendBuffer` of the received chunk).
-    fn hold(&self, descriptor: &ShmDescriptor) -> Option<wz_session_core::extshm::ShmSendHandle> {
-        let chunk = ChunkHold::link(descriptor)?.into_chunk()?;
-        Some(wz_session_core::extshm::ShmSendHandle::new(Arc::new(chunk)))
-    }
 }
 
 /// Where a descriptor's chunk lies, as its own header names it: the data segment's id and
@@ -2070,6 +1600,10 @@ pub fn is_invalidated(descriptor: &ShmDescriptor) -> Option<bool> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+    use crate::shm_reader::{
+        ChunkID, PosixShmClient, ProtocolID, SegmentID, ShmClient, ShmClientStorage,
+        ShmReaderResolver, ShmSegment, WithProtocolID, ZResult,
+    };
     use core::mem::{offset_of, size_of};
 
     /// R2862 — the header's byte layout, pinned. Upstream's `ChunkHeaderType`
@@ -2107,6 +1641,13 @@ mod tests {
         assert_eq!(u64::from(payload.descriptor().metadata_id), first);
     }
 
+    /// A reader of its own over the default client set, which is the process's reader as a
+    /// session reads with it, except that the segments it maps go with it: a test that waits for a
+    /// segment's name to go is not held up by a mapping the process's reader keeps.
+    fn reader() -> crate::shm_reader::ShmReaderResolver {
+        crate::shm_reader::ShmReaderResolver::of_default_set()
+    }
+
     /// A descriptor sent the way production sends one: the reference is taken
     /// for the receiver and the frame is treated as having left.
     fn sent(payload: &ShmBackedPayload) -> ShmDescriptor {
@@ -2135,7 +1676,7 @@ mod tests {
         let descriptor = sent(&payload);
         assert_eq!(descriptor.data_len as usize, data.len());
 
-        let resolved = PosixShmResolver.resolve(&descriptor).expect("resolve");
+        let resolved = reader().resolve(&descriptor).expect("resolve");
         assert_eq!(resolved, data, "the resolver reads the owner's bytes");
     }
 
@@ -2176,7 +1717,7 @@ mod tests {
             Some(ReferenceState::Reclaimed),
             "the owner's reference was the last, so the chunk was collected"
         );
-        assert!(PosixShmResolver.resolve(&descriptor).is_none());
+        assert!(reader().resolve(&descriptor).is_none());
     }
 
     /// R3038 -- THE LIFECYCLE ARM: an owner that lets go while a receiver holds a
@@ -2210,7 +1751,7 @@ mod tests {
         );
 
         assert_eq!(
-            PosixShmResolver.resolve(&descriptor).as_deref(),
+            reader().resolve(&descriptor).as_deref(),
             Some(&b"held"[..]),
             "and a receiver that comes after the owner is gone reads it byte-exact"
         );
@@ -2239,7 +1780,7 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(PosixShmResolver.resolve(&descriptor).is_none());
+        assert!(reader().resolve(&descriptor).is_none());
     }
 
     /// R3038 -- a resolve gives back exactly ONE reference, however many were
@@ -2252,9 +1793,9 @@ mod tests {
         let second = sent(&payload);
         assert_eq!(reference_state(&first), Some(ReferenceState::Held(3)));
 
-        assert!(PosixShmResolver.resolve(&first).is_some());
+        assert!(reader().resolve(&first).is_some());
         assert_eq!(reference_state(&first), Some(ReferenceState::Held(2)));
-        assert!(PosixShmResolver.resolve(&second).is_some());
+        assert!(reader().resolve(&second).is_some());
         assert_eq!(reference_state(&first), Some(ReferenceState::Held(1)));
 
         drop(payload);
@@ -2422,7 +1963,7 @@ mod tests {
         payload.write(b"before!!");
         let descriptor = sent(&payload);
 
-        let shared = PosixShmResolver
+        let shared = reader()
             .resolve_shared(&descriptor)
             .expect("resolve_shared");
         assert_eq!(shared.as_slice(), b"before!!");
@@ -2480,7 +2021,7 @@ mod tests {
         let descriptor = sent(&payload);
         assert_eq!(reference_state(&descriptor), Some(ReferenceState::Held(2)));
 
-        let shared = PosixShmResolver
+        let shared = reader()
             .resolve_shared(&descriptor)
             .expect("resolve_shared");
         assert_eq!(
@@ -2517,7 +2058,7 @@ mod tests {
 
         lies.data_len += 1_000_000;
         assert!(
-            PosixShmResolver.resolve_shared(&lies).is_none(),
+            reader().resolve_shared(&lies).is_none(),
             "a length past the chunk's own is refused"
         );
         assert_eq!(
@@ -2536,7 +2077,7 @@ mod tests {
         payload.write(b"page");
         let descriptor = sent(&payload);
 
-        let shared = PosixShmResolver
+        let shared = reader()
             .resolve_shared(&descriptor)
             .expect("resolve_shared");
         assert!(shared.is_shared_memory());
@@ -2559,7 +2100,7 @@ mod tests {
         let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
         payload.write(b"uniq");
         let descriptor = sent(&payload);
-        let shared = PosixShmResolver
+        let shared = reader()
             .resolve_shared(&descriptor)
             .expect("resolve_shared");
         let view = shared.shm_chunk().expect("a shared-memory chunk");
@@ -2583,7 +2124,7 @@ mod tests {
         let mut payload = ShmBackedPayload::alloc(4).expect("alloc");
         payload.write(b"abcd");
         let descriptor = sent(&payload);
-        let shared = PosixShmResolver
+        let shared = reader()
             .resolve_shared(&descriptor)
             .expect("resolve_shared");
         drop(payload);
@@ -2651,13 +2192,13 @@ mod tests {
         let live = sent(&payload);
         let mut stale = live;
         stale.generation = stale.generation.wrapping_sub(1);
-        assert!(PosixShmResolver.resolve(&stale).is_none());
+        assert!(reader().resolve(&stale).is_none());
         assert_eq!(
             reference_state(&live),
             Some(ReferenceState::Held(2)),
             "the refused descriptor released nothing"
         );
-        assert!(PosixShmResolver.resolve(&live).is_some());
+        assert!(reader().resolve(&live).is_some());
         assert_eq!(reference_state(&live), Some(ReferenceState::Held(1)));
     }
 
@@ -2670,7 +2211,7 @@ mod tests {
         let descriptor = sent(&payload);
         // Three resolves against two references: the third has nothing to give.
         for _ in 0..3 {
-            let _ = PosixShmResolver.resolve(&descriptor);
+            let _ = reader().resolve(&descriptor);
         }
         assert!(
             matches!(
@@ -2767,23 +2308,32 @@ mod tests {
             .load(Ordering::SeqCst));
     }
 
-    /// R3039 -- A RECEIVER'S HOLD IS WHAT KEEPS A CHUNK ITS PROVIDER NO LONGER
+    /// R3039 -- A RECEIVER'S BUFFER IS WHAT KEEPS A CHUNK ITS PROVIDER NO LONGER
     /// HOLDS VALID, and letting go gives the reference back.
     ///
     /// The descriptor points into a private store, so the validation windows are
-    /// this test's to drive. Linking confirms at once; the hold stays confirmed
-    /// across windows by the confirmator's pass; and once it drops nothing
-    /// confirms, so the provider invalidates the chunk, and the reference the
-    /// sender took for it is back.
+    /// this test's to drive. Reading confirms at once; the buffer stays confirmed
+    /// across windows by the confirmator of `zenoh-shm`, whose reader the process
+    /// reads with; and once it drops nothing confirms, so the provider invalidates
+    /// the chunk, and the reference the sender took for it is back.
+    ///
+    /// Turned red by a reader that does not attach a buffer to the watchdog for as
+    /// long as it is held, or that does not give the reference back when it drops.
     #[test]
-    fn a_hold_keeps_its_chunk_confirmed_until_it_lets_go_and_releases_on_drop() {
+    fn a_read_keeps_its_chunk_confirmed_until_it_lets_go_and_releases_on_drop() {
         let mut store = MetadataStore::create().expect("a private store");
         let slot = watched_slot(&mut store);
+        let data = OwnedSegment::create(4, || u64::from(next_candidate_id())).expect("data");
         // Through the segment's own handle, so the header is not a borrow of the
         // store the windows below need to drive mutably.
         let segment = store.segment.clone();
         let header = header_of(&segment, slot);
         header.protocol.store(POSIX_PROTOCOL_ID, Ordering::Relaxed);
+        header.segment.store(
+            u32::try_from(data.id()).expect("candidate ids are 32 bits"),
+            Ordering::Relaxed,
+        );
+        header.chunk.store(0, Ordering::Relaxed);
         header.len.store(4, Ordering::Relaxed);
         // The owner is gone; the descriptor's reference is the only one.
         let descriptor = ShmDescriptor {
@@ -2794,36 +2344,32 @@ mod tests {
         };
         // Nothing has confirmed since the slot was watched.
 
-        let hold =
-            ChunkHold::link(&descriptor).expect("the header is of the descriptor's generation");
-        assert_eq!(store.validate(), 0, "linking confirmed before any tick");
-        assert!(hold.is_valid());
-
-        confirmator().tick();
-        assert_eq!(
-            store.validate(),
-            0,
-            "the pass confirms a held chunk each window"
-        );
-        confirmator().tick();
-        assert_eq!(store.validate(), 0);
+        let buffer = reader()
+            .read(&descriptor)
+            .expect("the header is of the descriptor's generation");
+        assert_eq!(store.validate(), 0, "reading confirmed before any window");
+        for _ in 0..2 {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            assert_eq!(
+                store.validate(),
+                0,
+                "the confirmator confirms a held buffer each window"
+            );
+        }
         assert_eq!(
             header.refcount.load(Ordering::SeqCst),
             1,
-            "linking takes no reference"
+            "reading takes no reference"
         );
 
-        drop(hold);
+        drop(buffer);
         assert_eq!(
             header.refcount.load(Ordering::SeqCst),
             0,
             "letting go gave the sender's reference back"
         );
-        // The last pass may have left the bit set; the window after it cannot.
-        // Each window is a real one, longer than the watchdog thread's confirm
-        // period: a hold that left its bit tracked would be confirmed again by
-        // that thread between the two validations, and back-to-back validations
-        // would never give it the chance to.
+        // The confirmator may confirm once more before it learns the buffer is
+        // gone; the window after that cannot be confirmed.
         let mut invalidated = 0;
         for _ in 0..2 {
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -2833,10 +2379,13 @@ mod tests {
         assert!(header.watchdog_invalidated.load(Ordering::SeqCst));
     }
 
-    /// R3039 -- a hold on a header of ANOTHER generation links nothing and touches
+    /// R3039 -- a read of a header of ANOTHER generation reads nothing and touches
     /// nothing: that reference is another buffer's.
+    ///
+    /// Turned red by a reader that builds the buffer before it checks the
+    /// generation, whose drop then gives back the other buffer's reference.
     #[test]
-    fn a_hold_of_the_wrong_generation_links_nothing() {
+    fn a_read_of_the_wrong_generation_touches_nothing() {
         let mut store = MetadataStore::create().expect("a private store");
         let slot = watched_slot(&mut store);
         let header = header_of(&store.segment, slot);
@@ -2846,7 +2395,7 @@ mod tests {
             metadata_index: slot,
             generation: header.generation.load(Ordering::SeqCst).wrapping_add(1),
         };
-        assert!(ChunkHold::link(&descriptor).is_none());
+        assert!(reader().read(&descriptor).is_none());
         assert_eq!(
             header.refcount.load(Ordering::SeqCst),
             1,
@@ -2891,6 +2440,7 @@ mod tests {
     }
 
     /// The client for [`Relabelled`]'s protocol: it attaches the POSIX segment by id, and counts.
+    #[derive(Debug)]
     struct RelabelledClient {
         id: u32,
         attaches: AtomicUsize,
@@ -2898,31 +2448,55 @@ mod tests {
 
     struct MappedSegment(PeerSegment);
 
-    impl ShmDataSegment for MappedSegment {
-        fn map(&self, chunk: u32) -> *mut u8 {
-            self.0.bytes().as_ptr().wrapping_add(chunk as usize) as *mut u8
+    impl std::fmt::Debug for MappedSegment {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("MappedSegment")
         }
     }
 
-    impl crate::shm_clients::ShmDataClient for RelabelledClient {
-        fn protocol(&self) -> u32 {
+    impl ShmSegment for MappedSegment {
+        fn map(&self, chunk: ChunkID) -> ZResult<*mut u8> {
+            Ok(self.0.bytes().as_ptr().wrapping_add(chunk as usize) as *mut u8)
+        }
+    }
+
+    impl WithProtocolID for RelabelledClient {
+        fn id(&self) -> ProtocolID {
             self.id
         }
-        fn attach(&self, segment: u32) -> Option<Arc<dyn ShmDataSegment>> {
+    }
+
+    impl ShmClient for RelabelledClient {
+        fn attach(&self, segment: SegmentID) -> ZResult<Arc<dyn ShmSegment>> {
             self.attaches.fetch_add(1, Ordering::SeqCst);
-            let mapped = PeerSegment::open(u64::from(segment)).ok()?;
-            Some(Arc::new(MappedSegment(mapped)))
+            let mapped = PeerSegment::open(u64::from(segment))?;
+            Ok(Arc::new(MappedSegment(mapped)))
         }
+    }
+
+    /// A storage of `clients`, with the default client set when `default_set`.
+    fn storage_of(default_set: bool, clients: &[Arc<dyn ShmClient>]) -> Arc<ShmClientStorage> {
+        let builder = ShmClientStorage::builder();
+        Arc::new(if default_set {
+            builder
+                .with_default_client_set()
+                .with_clients(clients)
+                .build()
+        } else {
+            builder.with_clients(clients).build()
+        })
     }
 
     /// R3065 -- THE READER READS A CHUNK THROUGH THE CLIENT ITS HEADER'S PROTOCOL NAMES, and only
-    /// that: the default reader refuses a protocol it holds no client for, a set that holds the
-    /// client reads the chunk as bytes AND as the page itself, the segment is attached once for
-    /// every buffer of it, and a set built without the built-in POSIX client cannot read POSIX.
+    /// that: the default reader refuses a protocol it holds no client for, a storage that holds
+    /// the client reads the chunk as bytes AND as the page itself, the segment is attached once
+    /// for every buffer of it, and a storage built without the default client set cannot read
+    /// POSIX.
+    ///
+    /// Turned red by a reader that maps a chunk without asking the client of its protocol, or
+    /// that attaches a segment once per buffer.
     #[test]
     fn a_chunk_of_another_protocol_is_read_through_its_client_and_only_through_it() {
-        use crate::shm_clients::{ShmClientResolver, ShmClientSet};
-
         const PROTOCOL: u32 = 100500;
         let provider = ShmProvider::new(Arc::new(Relabelled {
             inner: PosixShmProviderBackend::new(&layout(4096)).expect("a pool"),
@@ -2940,35 +2514,29 @@ mod tests {
             id: PROTOCOL,
             attaches: AtomicUsize::new(0),
         });
-        let with_client = Arc::new(
-            ShmClientSet::new(
-                true,
-                [client.clone() as Arc<dyn crate::shm_clients::ShmDataClient>],
-            )
-            .expect("a client beside POSIX"),
-        );
-        let reader = ShmClientResolver::new(with_client);
+        let with_client =
+            ShmReaderResolver::new(storage_of(true, &[client.clone() as Arc<dyn ShmClient>]));
 
         // The default reader holds no client for the protocol: it refuses, and gives the
         // reference back, as it does for a protocol it does not speak.
         let (_kept_a, refused) = chunk(b"refused by the default reader");
         assert!(
-            PosixShmResolver.resolve(&refused).is_none(),
+            reader().resolve(&refused).is_none(),
             "the default reader resolves POSIX alone"
         );
 
-        // A set that holds the client reads the bytes ...
+        // A storage that holds the client reads the bytes ...
         let (_kept_b, copied) = chunk(b"read through the client");
-        let copy = reader.resolve(&copied).expect("the client's protocol");
+        let copy = with_client.resolve(&copied).expect("the client's protocol");
         assert_eq!(
             copy.len(),
             64,
             "the chunk is the 64 bytes that were allocated"
         );
         assert!(copy.starts_with(b"read through the client"));
-        // ... and hands the page up where it lies, keeping the hold with it.
+        // ... and hands the page up where it lies, keeping the buffer with it.
         let (_kept_c, shared) = chunk(b"the page itself");
-        let bytes = reader.resolve_shared(&shared).expect("shared bytes");
+        let bytes = with_client.resolve_shared(&shared).expect("shared bytes");
         assert_eq!(bytes.as_slice().len(), 64);
         assert!(bytes.as_slice().starts_with(b"the page itself"));
         assert!(
@@ -2981,29 +2549,21 @@ mod tests {
             "the pool's one segment is attached once however many buffers are read from it"
         );
 
-        // A set holding POSIX alone refuses the protocol it holds no client for.
-        let (_kept_d, other) = chunk(b"no client for this");
-        let posix_only = ShmClientResolver::new(Arc::new(ShmClientSet::posix_only()));
-        assert!(posix_only.resolve(&other).is_none());
-
-        // A set built WITHOUT the built-in POSIX client cannot read POSIX memory, and a set
+        // A storage built WITHOUT the default client set cannot read POSIX memory, and one
         // with it can.
         let mut plain = ShmBackedPayload::alloc(5).expect("a POSIX chunk");
         plain.write(b"posix");
         let (posix_without, posix_with) = (sent(&plain), sent(&plain));
-        let custom_only = ShmClientResolver::new(Arc::new(
-            ShmClientSet::new(
-                false,
-                [client.clone() as Arc<dyn crate::shm_clients::ShmDataClient>],
-            )
-            .expect("a set without POSIX"),
-        ));
+        let custom_only =
+            ShmReaderResolver::new(storage_of(false, &[client.clone() as Arc<dyn ShmClient>]));
         assert!(
             custom_only.resolve(&posix_without).is_none(),
             "a reader built without the default client set cannot read POSIX memory"
         );
         assert_eq!(
-            reader.resolve(&posix_with).expect("POSIX is in the set"),
+            with_client
+                .resolve(&posix_with)
+                .expect("POSIX is in the storage"),
             b"posix"
         );
     }
@@ -3050,15 +2610,36 @@ mod tests {
             off_a > 0 && off_b > 0,
             "the allocator keeps its bins at the front, so no chunk starts at offset 0"
         );
-        let read_a = PosixShmResolver.resolve(&da).expect("read a");
-        let read_b = PosixShmResolver.resolve(&db).expect("read b");
+        let read_a = reader().resolve(&da).expect("read a");
+        let read_b = reader().resolve(&db).expect("read b");
         assert!(read_a.iter().all(|&byte| byte == 0xA1));
         assert!(read_b.iter().all(|&byte| byte == 0xB2));
     }
 
+    /// The default client set's POSIX client, counting its attaches.
+    #[derive(Debug)]
+    struct CountingPosix {
+        attaches: AtomicUsize,
+    }
+
+    impl WithProtocolID for CountingPosix {
+        fn id(&self) -> ProtocolID {
+            POSIX_PROTOCOL_ID
+        }
+    }
+
+    impl ShmClient for CountingPosix {
+        fn attach(&self, segment: SegmentID) -> ZResult<Arc<dyn ShmSegment>> {
+            self.attaches.fetch_add(1, Ordering::SeqCst);
+            PosixShmClient.attach(segment)
+        }
+    }
+
     /// A receiver maps a pool's data segment ONCE for the chunks it serves, as upstream's reader
     /// does, and not once per payload: two chunks of one pool, held at the same moment, are read
-    /// through the same mapping.
+    /// through one attach of the segment.
+    ///
+    /// Turned red by a reader that attaches a segment for each buffer it reads.
     #[test]
     fn two_chunks_of_one_pool_are_read_through_one_mapping() {
         let provider = ShmProvider::pool(&layout(4096)).expect("a pool");
@@ -3072,103 +2653,22 @@ mod tests {
         b.write(&[0xB2; 1024]);
         let (da, db) = (sent(&a), sent(&b));
 
-        let (first, _) = ChunkHold::link(&da)
-            .expect("link the first")
-            .window()
-            .expect("window of the first");
-        let (second, _) = ChunkHold::link(&db)
-            .expect("link the second")
-            .window()
-            .expect("window of the second");
-        let (ChunkData::Posix { data: first, .. }, ChunkData::Posix { data: second, .. }) =
-            (first, second)
-        else {
-            panic!("a POSIX chunk is read through a POSIX mapping");
-        };
-        assert!(
-            Arc::ptr_eq(&first, &second),
-            "the second chunk was read through a mapping of its own, not the one the first made"
-        );
-    }
-
-    /// The reader's cache is trusted only while the provider of its mapping is live. Once the
-    /// provider is gone the cached mapping is not served: the object, opened again for a payload
-    /// still in flight, is served once and not kept. And a segment made again under the id once
-    /// every holder has let go is mapped as the new object it is.
-    #[test]
-    fn a_cached_data_segment_is_not_served_after_its_provider_is_gone() {
-        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
-        let id = owner.id();
-        let first = peer_data(id).expect("the owner's segment maps");
-        let again = peer_data(id).expect("and maps again");
-        assert!(
-            Arc::ptr_eq(&first, &again),
-            "the second ask is served from the cache"
-        );
-        drop(again);
-
-        drop(owner);
-        let late = peer_data(id).expect("the dead provider's object, for a payload in flight");
-        assert!(
-            !Arc::ptr_eq(&first, &late),
-            "the cache served the mapping of a provider that is gone"
-        );
-        assert!(
-            !is_cached_data_segment(id),
-            "a dead provider's object was kept in the cache"
-        );
-
-        drop(first);
-        drop(late);
-        assert!(
-            !crate::posix_shm::segment_path(id).exists(),
-            "the last holder to let go left the name"
-        );
-        let successor = OwnedSegment::create(32, || id).expect("make another segment of that id");
-        let other = peer_data(id).expect("the new object maps");
+        let posix = Arc::new(CountingPosix {
+            attaches: AtomicUsize::new(0),
+        });
+        let one = ShmReaderResolver::new(storage_of(false, &[posix.clone() as Arc<dyn ShmClient>]));
+        let first = one.read(&da).expect("read the first");
+        let second = one.read(&db).expect("read the second");
+        assert!(AsRef::<[u8]>::as_ref(&*first)
+            .iter()
+            .all(|&byte| byte == 0xA1));
+        assert!(AsRef::<[u8]>::as_ref(&*second)
+            .iter()
+            .all(|&byte| byte == 0xB2));
         assert_eq!(
-            other.bytes().len(),
-            32,
-            "the mapping is not of the new object"
-        );
-        drop(other);
-        drop(successor);
-    }
-
-    /// A reader that maps a segment keeps its name after the provider lets go, and lets go itself
-    /// when the provider's liveness lapses: the sweep drops the mapping, and the last holder out
-    /// removes the name.
-    #[test]
-    fn the_sweep_lets_go_of_a_data_segment_whose_provider_is_gone() {
-        let owner = OwnedSegment::create(64, || u64::from(next_candidate_id())).expect("create");
-        let id = owner.id();
-        let held = peer_data(id).expect("the owner's segment maps");
-        assert!(is_cached_data_segment(id));
-
-        sweep_peer_segments();
-        assert!(
-            is_cached_data_segment(id),
-            "a segment whose provider lives is kept"
-        );
-
-        drop(owner);
-        assert!(
-            crate::posix_shm::segment_path(id).exists(),
-            "the provider's drop removed a name a reader still maps"
-        );
-        sweep_peer_segments();
-        assert!(
-            !is_cached_data_segment(id),
-            "a segment whose provider is gone stays mapped and locked in the reader"
-        );
-        assert!(
-            crate::posix_shm::segment_path(id).exists(),
-            "the hold still in use keeps the name"
-        );
-        drop(held);
-        assert!(
-            !crate::posix_shm::segment_path(id).exists(),
-            "the last holder to let go left the name"
+            posix.attaches.load(Ordering::SeqCst),
+            1,
+            "the second chunk was read through an attach of its own, not the one the first made"
         );
     }
 
@@ -3234,7 +2734,7 @@ mod tests {
                 .is_err(),
             "and the held chunk's room is NOT another chunk's"
         );
-        assert!(PosixShmResolver.resolve(&descriptor).is_some());
+        assert!(reader().resolve(&descriptor).is_some());
         assert_eq!(provider.garbage_collect(), 1024, "now nobody holds it");
         assert!(provider
             .alloc(layout(1024), &AllocPolicy::JustAlloc)
@@ -3316,7 +2816,7 @@ mod tests {
         drop(chunk);
 
         assert_eq!(
-            PosixShmResolver.resolve(&descriptor).as_deref(),
+            reader().resolve(&descriptor).as_deref(),
             Some(&b"still here after the provider went"[..][..32]),
             "a receiver that comes after both are gone reads it"
         );
@@ -3475,7 +2975,7 @@ mod tests {
             !payload.is_unique(),
             "a descriptor is in flight and holds the second reference"
         );
-        let shared = PosixShmResolver
+        let shared = reader()
             .resolve_shared(&descriptor)
             .expect("resolve_shared");
         assert!(!payload.is_unique(), "the receiver holds it");
@@ -3531,7 +3031,7 @@ mod tests {
         }
         // Give the reference back so the chunk can be collected.
         assert!(
-            PosixShmResolver.resolve(&descriptor).is_none(),
+            reader().resolve(&descriptor).is_none(),
             "invalidated, so refused"
         );
     }

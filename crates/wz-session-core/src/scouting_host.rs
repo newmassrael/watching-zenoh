@@ -377,7 +377,7 @@ impl HelloRow {
     pub const EMPTY: Self = Self {
         version: 0,
         whatami: None,
-        zid: SessionZid::from_array([1]),
+        zid: PLACEHOLDER_ZID,
         ends: [0; caps::SCOUT_HELLO_LOCATORS],
         kept: 0,
         skipped: 0,
@@ -515,6 +515,10 @@ impl HelloFacts for HelloRow {
     }
 }
 
+/// The zid of a row no Hello was decoded into: a zid is never zero, and no read of a table reaches
+/// a row's before a Hello is decoded into it.
+const PLACEHOLDER_ZID: SessionZid = SessionZid::from_array([1]);
+
 /// The Hellos a window records, in arrival order, in a table of `MAX_SCOUT_HELLOS` rows and one
 /// more the next Hello is decoded into: what a host with no heap lends its window
 /// ([`ScoutingActions::over_table`]). It is made where the host keeps the scout's state, never on
@@ -544,6 +548,30 @@ impl HelloTable {
             held: 0,
             refused: 0,
             locator_len: RuntimeLimits::BUILD.max_locator_len_held(),
+        }
+    }
+
+    /// [`Self::new`] made in `place`, whatever it held, and lent back, with no table made beside it
+    /// and copied in. A host that keeps the table in a static of no initial value makes it there
+    /// for each window, so the library's file holds none of it and only a scout writes its memory.
+    /// The bytes are zeroed, and then the fields whose zero is no value of theirs are written: each
+    /// row's role and zid, and the locator quota.
+    pub fn init_in(place: &mut MaybeUninit<Self>) -> &mut Self {
+        let at = place.as_mut_ptr();
+        // SAFETY: `at` is valid for writes of a table, borrowed through `place`. Zero is a value of
+        // every field but a row's role and zid and the quota, which are written before the table is
+        // lent: it then holds what `Self::new` makes.
+        unsafe {
+            at.write_bytes(0, 1);
+            let rows = core::ptr::addr_of_mut!((*at).rows).cast::<HelloRow>();
+            for i in 0..caps::MAX_SCOUT_HELLOS + 1 {
+                let row = rows.add(i);
+                core::ptr::addr_of_mut!((*row).whatami).write(None);
+                core::ptr::addr_of_mut!((*row).zid).write(PLACEHOLDER_ZID);
+            }
+            core::ptr::addr_of_mut!((*at).locator_len)
+                .write(RuntimeLimits::BUILD.max_locator_len_held());
+            place.assume_init_mut()
         }
     }
 

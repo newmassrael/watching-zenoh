@@ -207,35 +207,10 @@ pub fn nonce_from_os_entropy() -> Result<u64, getrandom::Error> {
     Ok(u64::from_le_bytes(buf))
 }
 
-/// R311y819 — the AP profile's implementation of the §2.5 plugin-tier entropy
-/// port ([`wz_session_core::entropy::EntropySource`]): OS-backed
-/// cryptographic entropy via `getrandom`.
-///
-/// A unit struct because the source is a syscall, not a peripheral — there is
-/// no handle a board would own. It exists so the port has an implementor on
-/// BOTH profiles rather than only the one that needed it: the MCU construction
-/// seam takes an `EntropySource`, and a port with a single implementor is a
-/// shape nobody has checked composes. It is also what lets an MCU board's own
-/// source be diffed against the AP one, since the trait fixes the byte order
-/// of `try_next_u64`.
-///
-/// The AP's own `new_session_actions` draws through this, so the two profiles'
-/// construction seams differ in their SOURCE and in nothing else — which is
-/// the asymmetry that produced the MCU constant in the first place.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OsEntropy;
-
-impl wz_session_core::entropy::EntropySource for OsEntropy {
-    /// Delegates to `getrandom`, which fills completely or fails — the
-    /// no-partial-fill half of the port's contract, satisfied by the source
-    /// rather than re-checked here.
-    fn try_fill_bytes(
-        &mut self,
-        buf: &mut [u8],
-    ) -> Result<(), wz_session_core::entropy::EntropyUnavailable> {
-        getrandom::getrandom(buf).map_err(|_| wz_session_core::entropy::EntropyUnavailable)
-    }
-}
+// The AP profile's entropy source is defined beside the profile's `SessionRuntime` binding,
+// which names it as the session's `EntropyDraw` in every build whose session core declares
+// that item, `transport-unicast` or not; this module is `transport-unicast`'s.
+pub use crate::runtime_impl::OsEntropy;
 
 // R311dl — the wire_const re-import moved into the test module: after the
 // outbound builders (push/declare/interest/handshake) hoisted to
@@ -292,7 +267,7 @@ pub use wz_session_core::link::BoxedLinkDriver;
 // outcome type to name its return.
 pub use wz_session_core::link::{LinkDropCause, LinkSendOutcome};
 // R2259 (open-debt item 593) — the two link facts the C link-events plane
-// reports, beside the trait that produces them. `linkstate_forward` already
+// reports, beside the trait that produces them. `routing_policy` also
 // re-exports `InterceptorLink`, but it is a ROUTING module and a consumer that
 // needs the link's protocol has no business depending on the routing tier; the
 // pair belongs where `BoxedLinkDriver::link_ends` is named.
@@ -5607,6 +5582,101 @@ mod batch_tx_tests {
         assert_eq!(frames, [1, 1, 1], "each message left as a frame of its own");
     }
 
+    /// A session over the reconnect swap seam batches as one over a plain link does, on every
+    /// link the seam installs: the seam takes the session's flush and offers it to each link
+    /// swapped in, so a burst staged on a link that pulls leaves as one frame, and on a link
+    /// that refuses the flush the seam runs it after each send, where such a link writes. Turned
+    /// red by a seam that keeps the trait's refusal of the flush (the session never batches and
+    /// the first link is handed each message at once), or by one that passes the staged notice
+    /// on to a link that refused the flush (that link is handed nothing).
+    #[test]
+    fn a_session_over_the_swap_seam_batches_on_every_link_it_is_swapped_to() {
+        use crate::runtime_impl::{TokioRuntime, TokioTime};
+        use wz_session_core::reconnect::SwappableLink;
+
+        fn pulling_link() -> std::sync::Arc<IdleFlushLink> {
+            std::sync::Arc::new(IdleFlushLink {
+                frames: std::sync::Mutex::new(Vec::new()),
+                flush: std::sync::Mutex::new(None),
+            })
+        }
+
+        /// The writer of `link` falls idle: the messages of each frame it was handed since.
+        fn idle(link: &IdleFlushLink) -> Vec<usize> {
+            let flush = link
+                .flush
+                .lock()
+                .expect("flush")
+                .clone()
+                .expect("the seam offered the session's flush");
+            let _ = flush();
+            link.frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .map(|frame| decode_frame(frame).1.len())
+                .collect()
+        }
+
+        let first = pulling_link();
+        let seam = std::sync::Arc::new(SwappableLink::<TokioRuntime>::new(first.clone()));
+        let actions = super::new_session_actions(
+            seam.clone(),
+            fixture_session_init_params(),
+            TokioTime::new(),
+        )
+        .expect("the heap has room");
+        actions.enter_established();
+        let puts = || {
+            for i in 0..3u8 {
+                actions
+                    .send_push_literal("home/batching", &[i], /*reliable=*/ true)
+                    .expect("push");
+            }
+        };
+
+        puts();
+        assert!(
+            first.frames.lock().expect("frames").is_empty(),
+            "the session batches: the burst waits for the writer"
+        );
+        assert_eq!(
+            idle(&first),
+            [3],
+            "the burst left as one frame of three messages"
+        );
+
+        let second = pulling_link();
+        let _ = seam.swap(second.clone());
+        puts();
+        assert_eq!(
+            idle(&second),
+            [3],
+            "the link swapped in pulls the burst as one frame"
+        );
+
+        let refusing = crate::test_fixtures::recording_driver();
+        let _ = seam.swap(refusing.clone());
+        puts();
+        let per_frame: Vec<usize> = (0..refusing.frame_count())
+            .map(|i| decode_frame(&refusing.frame_bytes(i)).1.len())
+            .collect();
+        assert_eq!(
+            per_frame,
+            [1, 1, 1],
+            "the seam flushed each staged message on the sender's thread"
+        );
+        assert!(
+            refusing.staged_requests().is_empty(),
+            "a link that refused the flush is not asked to pull"
+        );
+        assert_eq!(
+            first.frames.lock().expect("frames").len(),
+            1,
+            "a link swapped out is handed nothing more"
+        );
+    }
+
     /// On a link that pulls what the session stages, the caller's window asks the link for
     /// nothing while it is open, and its stop asks the link to pull before the session hands a
     /// frame over itself: the link can then write the window from the stopping thread, where a
@@ -8395,6 +8465,113 @@ mod reconnect_tx_tests {
         assert!(!first.writer_only(), "a link swapped out before the ask");
         assert!(live.writer_only(), "the live link is asked");
         assert!(later.writer_only(), "a link swapped in after is asked too");
+    }
+
+    /// Both swap seams own the session's idle flush: they take it whatever the live link
+    /// answers, offer it to the live link and to every link a later swap installs, and while the
+    /// live link refuses it they run it themselves when the session says it staged frames. A
+    /// seam no flush was handed to passes the notice on to the live link. Turned red by a seam
+    /// that offers the flush to the live link alone (the link swapped in is never offered it),
+    /// or by one that passes the notice on to a link that refused the flush (nothing pulls).
+    #[test]
+    fn both_swap_seams_keep_the_idle_flush_for_every_link_they_install() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use wz_session_core::link::{BoxedLinkDriver, IdleFlush, LinkSendOutcome};
+        use wz_session_core::reconnect::LocalSwappableLink;
+        use wz_session_core::reliability::Reliability;
+
+        type Flush = Arc<dyn Fn() -> IdleFlush + Send + Sync>;
+
+        /// A link that takes the session's flush when `pulls`, and counts the flushes offered
+        /// to it and the notices that the session staged.
+        struct Writer {
+            pulls: bool,
+            offered: AtomicUsize,
+            woken: AtomicUsize,
+        }
+        impl Writer {
+            fn new(pulls: bool) -> Arc<Self> {
+                Arc::new(Self {
+                    pulls,
+                    offered: AtomicUsize::new(0),
+                    woken: AtomicUsize::new(0),
+                })
+            }
+            fn offered(&self) -> usize {
+                self.offered.load(Ordering::SeqCst)
+            }
+            fn woken(&self) -> usize {
+                self.woken.load(Ordering::SeqCst)
+            }
+        }
+        impl BoxedLinkDriver for Writer {
+            fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+                LinkSendOutcome::Sent
+            }
+            fn open_blocking(&self) {}
+            fn close_blocking(&self) {}
+            fn set_idle_flush(&self, _hook: Flush) -> bool {
+                self.offered.fetch_add(1, Ordering::SeqCst);
+                self.pulls
+            }
+            fn tx_staged(&self) {
+                self.woken.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        /// The same course through either seam, which `swap` installs a link behind.
+        fn course(seam: &dyn BoxedLinkDriver, first: &Writer, swap: impl Fn(Arc<Writer>)) {
+            seam.tx_staged();
+            assert_eq!(
+                first.woken(),
+                1,
+                "with no flush the notice reaches the live link"
+            );
+
+            let runs = Arc::new(AtomicUsize::new(0));
+            let counted = Arc::clone(&runs);
+            let flush: Flush = Arc::new(move || {
+                counted.fetch_add(1, Ordering::SeqCst);
+                IdleFlush::Drained
+            });
+            assert!(seam.set_idle_flush(flush), "the seam takes the flush");
+            assert_eq!(first.offered(), 1, "and offers it to the live link");
+
+            let refusing = Writer::new(false);
+            swap(refusing.clone());
+            assert_eq!(refusing.offered(), 1, "the link swapped in is offered it");
+            seam.tx_staged();
+            assert_eq!(
+                runs.load(Ordering::SeqCst),
+                1,
+                "the seam ran the flush the refusing link has no writer for"
+            );
+            assert_eq!(refusing.woken(), 0);
+
+            let pulling = Writer::new(true);
+            swap(pulling.clone());
+            assert_eq!(pulling.offered(), 1);
+            seam.tx_staged();
+            assert_eq!(pulling.woken(), 1, "a link that took the flush is woken");
+            assert_eq!(runs.load(Ordering::SeqCst), 1, "and the seam runs nothing");
+            assert_eq!(
+                first.offered(),
+                1,
+                "a link swapped out is offered nothing more"
+            );
+        }
+
+        let first = Writer::new(true);
+        let shared = SwappableLink::<TokioRuntime>::new(first.clone());
+        course(&shared, &first, |next| {
+            let _ = shared.swap(next);
+        });
+
+        let first = Writer::new(true);
+        let local = LocalSwappableLink::<TokioRuntime>::new(first.clone());
+        course(&local, &first, |next| {
+            let _ = local.swap(next);
+        });
     }
 
     /// A reservation is the live link's, through both swap seams: a link with room gives a permit

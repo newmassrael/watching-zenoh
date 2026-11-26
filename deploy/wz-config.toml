@@ -3511,6 +3511,34 @@ zenoh = "none"
 reason = "No key of upstream's configuration states it: the key-id dictionary every node of a deployment shares is wz's own."
 
 [[limit]]
+id = "STATS_KEY_SERIES"
+kconfig = "WZ_LIMIT_STATS_KEY_SERIES"
+kind = "bound"
+driven = "remote"
+default = 8
+# A capacity of the heap profile alone: the per-key series are kept only with `transport-stats`,
+# which a build with no allocator cannot ask for. The rows are reserved when a session's filter
+# list is set, before it carries data, so counting a payload takes no memory.
+storage = "capacity"
+scope = "session"
+binding_heap = "build"
+binding_fixed = "none"
+wire = "none"
+help = '''
+The per-key payload series one stats/filters key of a session holds in each
+direction: the label sets (space, priority, message kind, shared memory) of
+the payloads counted under it. The rows of every key of the list are
+reserved when the list is set. A payload of a label set past its key's
+rows, or one counted under a key the list does not hold, is counted under
+no key and is counted as refused; its other series are counted as ever.
+The payload family itself is not bounded by it: it holds every label set.
+'''
+
+[limit.upstream]
+zenoh = "none"
+reason = "No key of upstream's configuration bounds it: zenoh makes a per-key series on its heap the first time a payload of a label set meets a configured key, with no count. wz reserves a fixed number of rows for each key when the filter list is set, so a label set past them is counted as refused where zenoh would make one more series."
+
+[[limit]]
 id = "MAX_REMOTE_DECLS"
 kconfig = "WZ_LIMIT_MAX_REMOTE_DECLS"
 kind = "bound"
@@ -5837,9 +5865,10 @@ counts no drop. A link that is down or was never told the key takes no part and
 does not stop the others. A payload too long to be sent whole reserves the room
 of every frame of its chain on every link before any frame is sent, links that
 share a queue counted together, and no frame of the chain asks for room again,
-so the chain reaches every link whole or no link at all. A multicast group
-takes no reservation: it is sent the frame only once every link promised room,
-and nothing when the publish delivered to nobody. A link whose frames are
+so the chain reaches every link whole or no link at all. A multicast group is
+reserved as a link is: it promises room for every datagram of the chain in the
+same first phase, and a group that has none ends the publish for every link
+and every group; a group with no link takes no part. A link whose frames are
 written in slots of a pool may still wait for a slot. A publish from shared
 memory reserves nothing and is refused when it asks. Only the tokio engine
 reads this policy; the others refuse a publish that asks.

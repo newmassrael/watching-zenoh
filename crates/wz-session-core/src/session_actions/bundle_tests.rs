@@ -329,13 +329,16 @@ fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
 /// [`bundle`] with its link established ([`SessionLinkActions::enter_established`]): the
 /// bundle a data or reply send is made on, since the data-send gate opens only there. A test of
 /// what a send does is made on this one; a test of the gate itself starts from [`bundle`].
-/// Compiled with the sends its tests make: a plain put, a gated reply, a staged reply.
+/// Compiled with the sends its tests make: a plain put, a gated reply, a staged reply, a counted
+/// get.
 #[cfg(any(
     all(feature = "codec-push", not(feature = "tx-lend-only")),
     all(feature = "reply-egress-gate", feature = "codec-response"),
+    all(feature = "codec-response", not(feature = "tx-lend-only")),
     all(
-        feature = "codec-response",
-        not(feature = "transport-stats"),
+        feature = "transport-stats",
+        feature = "codec-request",
+        feature = "storage-profile",
         not(feature = "tx-lend-only")
     )
 ))]
@@ -346,6 +349,40 @@ fn established_bundle() -> (
     let (actions, link) = bundle();
     actions.enter_established();
     (actions, link)
+}
+
+/// What `send` adds to the transmit counters of a new established session
+/// ([`established_bundle`]): its network messages, and the messages and the payload bytes it
+/// counts as `message` in `space`. The CONTROL is the link handed a write.
+#[cfg(all(
+    feature = "transport-stats",
+    not(feature = "tx-lend-only"),
+    any(
+        all(feature = "codec-request", feature = "storage-profile"),
+        feature = "codec-response"
+    )
+))]
+fn counted_as(
+    message: crate::stats::StatMessage,
+    space: crate::stats::StatSpace,
+    send: impl FnOnce(&SessionLinkActions<PlainRuntime, StillClock>),
+) -> (usize, usize, usize) {
+    use crate::stats::{DirectionReport, StatMedium};
+    let (actions, link) = established_bundle();
+    let before = actions.stats_report().tx;
+    send(&actions);
+    assert_ne!(
+        link.written.load(Ordering::SeqCst),
+        0,
+        "CONTROL: the send reached the link"
+    );
+    let after = actions.stats_report().tx;
+    let payload = |report: &DirectionReport| report.payload_of(message, space);
+    (
+        after.n_msgs_on(StatMedium::Net) - before.n_msgs_on(StatMedium::Net),
+        payload(&after).msgs - payload(&before).msgs,
+        payload(&after).pl_bytes - payload(&before).pl_bytes,
+    )
 }
 
 /// The halves a holder writes where it keeps them are the halves the bundle is made of: the link's
@@ -1891,18 +1928,14 @@ fn a_plain_put_past_its_key_bound_is_refused_and_not_sent() {
     );
 }
 
-/// A staged reply leaves through the writer of its parts in a build that reads no owned reply (no
-/// statistics; no policy or namespace is installed here): one the writer takes is written, and one
-/// it refuses is skipped with nothing built. The responder identity of no bytes is the case the
-/// owned builder asserts against, so a refused reply that fell back to the owned record would panic
-/// here.
+/// A staged reply leaves through the writer of its parts in a session that reads no owned reply (no
+/// policy or namespace is installed here), whether the build counts its transports or not: one the
+/// writer takes is written, and one it refuses is skipped with nothing built. The responder
+/// identity of no bytes is the case the owned builder asserts against, so a refused reply that fell
+/// back to the owned record would panic here.
 ///
 /// Turned red by a `send_reply_parts` that sends a reply the writer refuses as an owned one.
-#[cfg(all(
-    feature = "codec-response",
-    not(feature = "transport-stats"),
-    not(feature = "tx-lend-only")
-))]
+#[cfg(all(feature = "codec-response", not(feature = "tx-lend-only")))]
 mod staged_replies {
     use core::sync::atomic::Ordering;
 
@@ -1946,13 +1979,156 @@ mod staged_replies {
             "CONTROL: a reply the writer takes is written"
         );
     }
+
+    /// A staged reply written from its parts is counted once, as the owned reply of the same parts
+    /// is counted by a session that sends that record: one network message, one reply in the space
+    /// of the key it is stamped with, by its payload.
+    ///
+    /// Turned red by a `send_reply_parts` that hands its dispatch no class
+    /// (`NetworkStatsClass::unread` there), or by a class of the parts that reads another space or
+    /// another payload than the owned reply's (`network_message::reply_parts_stats_class`).
+    #[cfg(feature = "transport-stats")]
+    #[test]
+    fn a_staged_reply_is_counted_once_as_its_owned_reply_is() {
+        use super::counted_as;
+        use crate::stats::{StatMessage, StatSpace};
+        for (keyexpr, space) in [
+            ("demo/asked", StatSpace::User),
+            ("@/demo/asked", StatSpace::Admin),
+        ] {
+            let parts = staged(keyexpr, Some((&[1, 2, 3, 4], 5)));
+            let lent = counted_as(StatMessage::Reply, space, |actions| {
+                actions.send_reply_parts(parts);
+            });
+            let owned = counted_as(StatMessage::Reply, space, |actions| {
+                let response = crate::query::QueryReply::from_parts(&parts)
+                    .into_response()
+                    .expect("the owned reply");
+                actions.send_response(response);
+            });
+            assert_eq!(lent, owned, "{keyexpr}: counted as its owned reply is");
+            assert_eq!(
+                lent,
+                (1, 1, b"answer".len()),
+                "{keyexpr}: one reply in its key's space, by its payload"
+            );
+        }
+    }
+}
+
+/// A get written from its parts is counted once, as the owned `Request` of the same parts is
+/// counted by a session that sends that message: one network message, one query in the space of
+/// its key, by the payload of its value and its attachment as far as the build writes them.
+///
+/// Turned red by a `send_get_parts` that hands its dispatch no class (`NetworkStatsClass::unread`
+/// there), or by a get class that reads a declared key's space from another table than the owned
+/// send resolves it through (`SessionLinkActions::with_outbound_mapping`).
+#[cfg(all(
+    feature = "transport-stats",
+    feature = "codec-request",
+    feature = "storage-profile",
+    not(feature = "tx-lend-only")
+))]
+mod counted_gets {
+    use super::{counted_as, PlainRuntime, StillClock};
+    use crate::query_parts::{GetParts, QueryParts};
+    use crate::reply_stage::EncodingParts;
+    use crate::session_actions::SessionLinkActions;
+    use crate::stats::{StatMessage, StatSpace};
+    use crate::wire_key::WireKey;
+
+    /// What `parts` adds to the counters of a session that sends them as they are and of one that
+    /// sends their owned `Request`, each prepared by `prepare` first.
+    fn both_ways(
+        parts: GetParts<'_>,
+        space: StatSpace,
+        prepare: impl Fn(&SessionLinkActions<PlainRuntime, StillClock>),
+    ) -> [(usize, usize, usize); 2] {
+        let lent = counted_as(StatMessage::Query, space, |actions| {
+            prepare(actions);
+            assert_eq!(actions.send_get_parts(parts), Ok(()), "{parts:?}");
+        });
+        let owned = counted_as(StatMessage::Query, space, |actions| {
+            prepare(actions);
+            let request = parts.owned_request().expect("the owned request");
+            assert_eq!(actions.dispatch_request(request, true), Ok(()), "{parts:?}");
+        });
+        [lent, owned]
+    }
+
+    #[test]
+    fn a_get_sent_from_its_parts_is_counted_once_as_its_owned_request_is() {
+        let query = QueryParts {
+            value: Some((
+                EncodingParts {
+                    packed_id: 0,
+                    schema: None,
+                },
+                b"payload".as_slice(),
+            )),
+            attachment: b"attached",
+            ..QueryParts::PLAIN
+        };
+        // The value and the attachment count where the build writes them.
+        let value = if cfg!(feature = "query-value") {
+            "payload".len()
+        } else {
+            0
+        };
+        let attachment = if cfg!(feature = "query-attachment") {
+            "attached".len()
+        } else {
+            0
+        };
+        for (key, space) in [
+            (WireKey::literal("demo/asked"), StatSpace::User),
+            (WireKey::literal("@/demo/asked"), StatSpace::Admin),
+        ] {
+            let parts = GetParts {
+                rid: 3,
+                key: key.expect("a literal"),
+                query,
+            };
+            let [lent, owned] = both_ways(parts, space, |_| {});
+            assert_eq!(lent, owned, "{parts:?}: counted as its owned Request is");
+            assert_eq!(
+                lent,
+                (1, 1, value + attachment),
+                "{parts:?}: one query in its key's space, by its payload"
+            );
+        }
+    }
+
+    /// A get whose key is named by a declaration of the session's own is counted in the space of
+    /// the declared key, read where the declaration lies, as the owned send resolves it. A build
+    /// whose session keeps its declarations off the link (`session-keeps-keyexprs`) resolves
+    /// neither, and counts both in the user space.
+    #[cfg(feature = "declare-keyexpr")]
+    #[test]
+    fn a_get_named_by_a_declaration_is_counted_in_the_declared_keys_space() {
+        let parts = GetParts {
+            rid: 3,
+            key: WireKey::from_parts(5, Some("/asked")).expect("an id and a suffix"),
+            query: QueryParts::PLAIN,
+        };
+        let space = if cfg!(feature = "session-keeps-keyexprs") {
+            StatSpace::User
+        } else {
+            StatSpace::Admin
+        };
+        let [lent, owned] = both_ways(parts, space, |actions| {
+            actions.with_facts(|facts| facts.own_keyexprs.sent_declaration(5, "@/demo"));
+        });
+        assert_eq!(lent, owned, "counted as its owned Request is");
+        assert_eq!(lent, (1, 1, 0), "one query in the declared key's space");
+    }
 }
 
 /// The session's facts are one row under one lock: what a door writes is what the whole row reads,
 /// and a reopen empties the handshake's part of it and keeps what is not the handshake's.
 mod facts_lock {
     use super::bundle;
-    // Only the Open's admissions count their holds here.
+    // The tests that count holds read an admitted Open (`codec-open-body`).
     #[cfg(feature = "codec-open-body")]
     use super::holds_in;
 

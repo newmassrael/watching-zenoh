@@ -277,38 +277,21 @@ mod host_std {
 #[cfg(feature = "host-lock-sys")]
 mod host_sys {
     use core::cell::UnsafeCell;
-    use core::sync::atomic::{AtomicUsize, Ordering};
 
-    use wz_host_sync::{current_thread, RawLock};
+    use wz_host_sync::{process_section, RawLock};
 
     use super::CriticalSection;
 
-    /// The process's critical section.
-    static LOCK: RawLock = RawLock::new();
-    /// The thread inside the section, 0 when none is (no thread's number is 0). A thread writes
-    /// its own number here only while it holds `LOCK` and clears it before letting go, so a thread
-    /// that reads its own number back is the one inside, in a nested section.
-    static OWNER: AtomicUsize = AtomicUsize::new(0);
-    /// How deep the owner is in sections. Only the thread that holds `LOCK` reads or writes it, and
-    /// the lock orders one owner's writes before the next one's reads.
-    static DEPTH: AtomicUsize = AtomicUsize::new(0);
-
-    /// One level of this thread's critical sections, from [`Section::enter`] to drop. Entered and
-    /// left out of line, for the reason the module above gives.
+    /// One level of this thread's critical sections, from [`Section::enter`] to drop: a level of
+    /// the process's one section (`wz_host_sync::process_section`), whose words lie beside the
+    /// first thread record, so the read thread's spawn and every section write one page of them.
+    /// Entered and left out of line, for the reason the module above gives.
     struct Section;
 
     impl Section {
         #[inline(never)]
         fn enter() -> Self {
-            let me = current_thread();
-            if OWNER.load(Ordering::Relaxed) != me {
-                LOCK.lock();
-                OWNER.store(me, Ordering::Relaxed);
-            }
-            DEPTH.store(
-                DEPTH.load(Ordering::Relaxed).saturating_add(1),
-                Ordering::Relaxed,
-            );
+            process_section().enter();
             Self
         }
     }
@@ -316,15 +299,9 @@ mod host_sys {
     impl Drop for Section {
         #[inline(never)]
         fn drop(&mut self) {
-            // A section is made only by `enter`, so the count is at least one here.
-            let depth = DEPTH.load(Ordering::Relaxed).saturating_sub(1);
-            DEPTH.store(depth, Ordering::Relaxed);
-            if depth == 0 {
-                // The outermost section ends: the lock goes, its owner cleared first.
-                OWNER.store(0, Ordering::Relaxed);
-                // SAFETY: this thread took `LOCK` at its outermost section, which ends here.
-                unsafe { LOCK.unlock() };
-            }
+            // SAFETY: a section is made only by `enter`, which entered the process's section on
+            // this thread, and this drop leaves that level once.
+            unsafe { process_section().leave() };
         }
     }
 
@@ -430,9 +407,9 @@ mod host_sys {
 
     pub(super) fn with<R>(f: impl FnOnce(CriticalSection<'_>) -> R) -> R {
         let section = Section::enter();
-        // SAFETY: this thread holds `LOCK`, taken at its outermost section, and keeps it until
-        // that section ends; every critical section of this crate is entered through `with`, so
-        // no other thread holds a token while this one does.
+        // SAFETY: this thread holds the process's section, taken at its outermost level, and keeps
+        // it until that level ends; every critical section of this crate is entered through `with`,
+        // so no other thread holds a token while this one does.
         let token = unsafe { CriticalSection::new() };
         let result = f(token);
         drop(section);

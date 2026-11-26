@@ -105,10 +105,11 @@ and it is the one `Session::get_shm_provider` hands out.
 | descriptor, body marker, establishment codecs, `ShmAuthDispatch` | `wz_session_core::extshm` | the no_std half: the wire and the state machine of section 3, and the seams `ShmSendBuffer`, `ShmReservation`, `ShmResolver`, `ShmHandoff` |
 | receive state of a registry | `wz_session_core::extshm::ShmReceiveState` | the negotiated flag, the resolver, the handoff, the drop counters, the un-swap of a Put, a value and a reply |
 | auth segment and handoff counters | `wz_runtime_tokio::shm_auth_segment`, `shm_watchdog` | the transport's own segment, the counters, and their poll |
-| the engine's POSIX provider and reader | `wz_runtime_tokio::shm_provider`, `shm_backend`, `shm_posix_backend`, `posix_shm`, `shm_clients` | what the C ABI allocates from and reads with |
+| the engine's POSIX provider | `wz_runtime_tokio::shm_provider`, `shm_backend`, `shm_posix_backend`, `posix_shm` | what the C ABI allocates from |
+| the reader of the process | `wz_runtime_tokio::shm_reader` (`ShmReaderResolver`) | `zenoh-shm`'s `ShmReader` over a `ShmClientStorage`, as the engine's `ShmResolver`: what every session reads a descriptor with, the engine's, the C ABI's (whose client storages are `ShmClientStorage`s of `ShmClient`s, as zenoh-c's are) and the top crate's |
 | the router's relay pass | `wz_runtime_tokio::shm_relay` | holds the chunks of a message while it is routed and re-expresses them per face |
-| `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the Rust API's provider, buffers and reader |
-| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, `ShmReader` as its resolver, and `Promoter`, the implicit optimisation of a put, a query value and a reply, copying into the family crate's provider |
+| `zenoh-shm` | `crates/wz-zenoh-shm` | upstream's crate, by its name and surface: the Rust API's provider and buffers, and the reader and client storage of the process |
+| the top crate's adapter | `zenoh::api::shm::transport` (`crates/wz-zenoh/src/api/shm.rs`) | a `ZBytes` slice as the engine's send buffer, and `Promoter`, the implicit optimisation of a put, a query value and a reply, copying into the family crate's provider; its sessions read with the reader of the process, and a received buffer is handed to the application as the `ZShm` it is |
 | what a session applies itself | `wz_capi_core::session_defaults` | `ShmInit` (the subsystem made at the end of every open, a node's as well, `init_shared_memory`), `ShmPromotion` (which payloads are copied, the one decision the top crate and the C ABI take), and `transport_copy`, the transport's copy into an engine provider, which the C ABI's session provider makes for a large put |
 
 What crosses a link without a copy, by path (registry = the registry of faces, node = a router node):
@@ -239,12 +240,12 @@ one.
 
 The process holds two implementations of upstream's segment protocol: the family crate `zenoh-shm`,
 whose types the application holds, and the engine's (`shm_provider`, `shm_backend`,
-`shm_posix_backend`, `posix_shm`, `shm_clients`, the segment watchdog of `shm_watchdog`), which the C
-ABI allocates from. They agree on the segments, the metadata slots, the reference counts and the
+`shm_posix_backend`, `posix_shm`, the segment watchdog of `shm_watchdog`), which the C ABI
+allocates from. They agree on the segments, the metadata slots, the reference counts and the
 descriptor, so a buffer of either is carried by the engine through the seams of section 2 and never
 converted. That is correct, and it is still two of everything: two metadata storages and two
-watchdogs in a process that uses both APIs, two readers with two client storages, and every repair of
-the protocol (a reference count, a generation check, a watchdog race) to be made twice.
+watchdogs in a process that uses both APIs, and every repair of the protocol (a reference count, a
+generation check, a watchdog race) to be made twice. The reader is already one (step 2 below).
 
 The structure this ends in is upstream's own: one implementation of segments, metadata, watchdog,
 provider, reader and client storage in the process, and it is `zenoh-shm`, because that crate carries
@@ -260,7 +261,23 @@ The order, each step landing whole with its tests:
 
 1. Measure what each system holds in a process (threads, segments created, lines, the C images'
    sizes with shared memory), so that the result can be compared.
+   Measured on 2026-11-26 at the tree before step 2 (one build host, `cargo build --profile ship -p
+   wz-capi-c` with and without `zenoh-c-shared-memory`, `size -A`): the C library's `.text` is
+   8,790,752 bytes and 9,131,760 with the shared-memory arm (total 11,556,494 and 11,998,520). The
+   engine's half is 5,196 lines (`shm_provider` 3,538, `shm_posix_backend` 497, `shm_backend` 447,
+   `shm_clients` 330, `shm_watchdog` 304, `posix_shm` 80), `zenoh-shm` 6,970. A process that uses
+   both APIs runs three threads for them: the engine's watchdog, one thread that confirms and
+   validates (`shm_watchdog`), and `zenoh-shm`'s confirmator and validator, a periodic task each;
+   each system creates its own metadata segments. After step 2, by the same command, the arm's
+   `.text` is 9,267,456 (+135,696): `zenoh-shm`'s reader is linked beside the engine's provider,
+   allocator and watchdog until steps 3 and 4 take those out.
 2. The reader: the engine's resolver becomes `ShmReader` over `ShmClientStorage`; `shm_clients` goes.
+   Landed: `wz_runtime_tokio::shm_reader` is the one `ShmResolver`, the engine's, the C ABI's and the
+   top crate's, and a session not given a storage reads through the process's global one. The
+   repairs the engine's reader had are made in `zenoh-shm`'s: the generation is checked before the
+   header is touched, the reference is given back on every failure once it is the reader's, and a
+   release stops at zero. One is not: the reader keeps a data segment it mapped for the life of its
+   storage, as upstream's does, where the engine's let go of the segment of a provider that was gone.
 3. The provider: the C ABI allocates from `ShmProvider`; `shm_provider`'s allocator, `shm_backend`,
    `shm_posix_backend` and `posix_shm` go.
 4. The watchdog: the segment watchdog of `shm_watchdog` goes in favour of `zenoh-shm`'s confirmator
@@ -280,7 +297,7 @@ memory are measured again in the step that moves them.
 | S3 | a reply of a queryable a node hosts as the buffer (`send_hosted_replies`): the chunk is adopted into the relay pass and the response names its descriptor (`QueryReply::into_response_naming`), as `publish_shm_with` does for a put, so that each face is sent the descriptor or the bytes; the node's own get is handed the buffer (`ReplyRead`) | landed |
 | S4 | the implicit optimisation of a query's value and of a reply, by `messages` (`Promoter::lists`), with the copy the transport's so that a receiver of the session itself is handed the bytes (section 4); a put takes the same path, in one publication where it took two | landed |
 | S5 | an error reply in shared memory | decided: its bytes, section 4, rule 7 |
-| S6 | one shared-memory system per process (section 6) | owed |
+| S6 | one shared-memory system per process (section 6) | owed: step 2, the reader, landed |
 | S7 | the cross-implementation differential over TCP (`conformance/differential-shm/tests/zenoh_transport_shm.rs`): sessions of both crates in one process, each pair of crates with either one listening, as a peer and as a router (a wz listener is a node, a wz dialler the registry), each direction, for a put, the value of a get and a reply, held equal to what two upstream sessions hand each other, with shared memory off on the dialler as the control (the bytes) | landed |
 | S7g | the same differential over a multicast group, for a put between two members that join it, two peers and a router with a peer each way (a wz router there is a node, a wz peer the registry): each pair of crates held equal to two upstream members with the sender's shared memory on and off, and the member without shared memory (section 1.2) held by name, upstream's handed no data and wz's handed nothing | landed |
 | S8 | a session in router mode with shared memory: it offers shared memory and reads a descriptor as its configuration says, as every other session of the top crate does (`Engine::open`), since upstream's transport manager makes its shared-memory context whatever the mode (`io/zenoh-transport/src/manager.rs` @ `let shm_context = ShmContext::new(self.shm, self.shm_reader)?;`) | landed |

@@ -18,6 +18,12 @@
 #   5. No protected vocabulary: the term list the push gate reads
 #      (scripts/lib/nda-scan.sh), applied here so the refusal comes while
 #      the message can still be reworded.
+#   6. The change's identity (COMMIT_FORMAT.md §3a, bx RFC 0087): the
+#      message ends with a trailer paragraph of `Change-Id: I<40 hex>` and
+#      `Supersedes: I<40 hex>` lines. `bx-change-id` (installed with bx)
+#      writes the Change-Id first when there is none; a commit made where it
+#      is not installed (the landing queue's integrator account, whose
+#      commits land on main directly) keeps what the message has.
 #
 # Install via `git config core.hooksPath .githooks` (one-time per clone).
 set -euo pipefail
@@ -34,6 +40,18 @@ fi
 # commit; they are stripped before commit lands, so the hook should not see
 # them as content).
 mapfile -t lines < <(grep -v '^#' "$msg_file")
+
+# --- Rule 6, first: the change's identity is written before the message is judged ---
+case "$first_line" in "fixup! "*|"squash! "*|"amend! "*) ;; *)
+    if ! grep -qE '^Change-Id: I[0-9a-f]{40}$' "$msg_file"; then
+        if command -v bx-change-id >/dev/null 2>&1; then
+            bx-change-id "$msg_file" || { echo "commit-msg: bx-change-id could not write a Change-Id" >&2; exit 1; }
+        else
+            echo "commit-msg: no bx-change-id on PATH (install bx): this commit gets no Change-Id (COMMIT_FORMAT.md §3a)" >&2
+        fi
+    fi
+    mapfile -t lines < <(grep -v '^#' "$msg_file") ;;
+esac
 
 errors=()
 
@@ -72,11 +90,26 @@ if [[ "$last_nonempty" -ge 1 && -n "${lines[1]:-}" ]]; then
     errors+=("Line 2: must be blank (separator between subject and body)")
 fi
 
+# The trailer paragraph (Rule 6): the last paragraph when every line of it is a
+# Change-Id or a Supersedes, after a blank line; the body ends before it.
+trailer_re='^(Change-Id|Supersedes): I[0-9a-f]{40}$'
+body_end=$last_nonempty
+t=$last_nonempty
+while (( t >= 2 )) && [[ "${lines[t]}" =~ $trailer_re ]]; do t=$((t-1)); done
+if (( t < last_nonempty )) && [[ -z "${lines[t]}" ]]; then
+    body_end=$((t-1))
+fi
+for ((i=2; i<=body_end; i++)); do
+    if [[ "${lines[i]:-}" =~ ^(Change-Id|Supersedes): ]]; then
+        errors+=("Line $((i+1)): a trailer outside the last paragraph (COMMIT_FORMAT.md §3a)")
+    fi
+done
+
 # --- Rule 3: Body lines (lines 3+) ---
 # Body is `- ` bullets only — no prose lead paragraph — at most 3.
 prev_was_bullet=0
 bullet_count=0
-for ((i=2; i<=last_nonempty; i++)); do
+for ((i=2; i<=body_end; i++)); do
     line="${lines[i]:-}"
     line_num=$((i+1))
 

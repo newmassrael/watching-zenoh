@@ -1167,6 +1167,8 @@ pub struct MulticastPump<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS:
     // `None` while no datagram is kept.
     #[cfg(feature = "reassembly")]
     resume: Option<GroupResume>,
+    // Whether the last step's reads ended on its bound, where the socket may hold more.
+    read_to_bound: bool,
     // Whether the holder has room for what the group delivers; `None` for one that is always
     // handed what arrives.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
@@ -1324,6 +1326,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             },
             #[cfg(feature = "reassembly")]
             resume: None,
+            read_to_bound: false,
             #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
             input_gate: None,
             #[cfg(feature = "transport-stats")]
@@ -1342,7 +1345,8 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// in microseconds: its JOIN beacon, and its sweep tick while the group holds a member or the
     /// socket holds back a datagram of the data emit. A sweep evicts members, and each step offers
     /// the socket what it refused; a group with neither has nothing to do on the tick. A host that
-    /// waits for the group's input waits no longer than this.
+    /// waits for the group's input waits no longer than this. A time already passed is a reading
+    /// at or before the clock's present one: the pump is due at once.
     pub fn next_due_us(&self) -> u64 {
         // The datagram the transport keeps is read on at the next step, and no wait on the
         // group's socket would see it.
@@ -1356,11 +1360,17 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         } else {
             self.next_join_ms
         };
-        let left_ms = due_ms.saturating_sub(self.clock.now_monotonic_ms());
-        self.runtime
-            .clock()
-            .now_us()
-            .saturating_add(left_ms.saturating_mul(1_000))
+        // The deadlines are kept on the clock's epoch, so the reading they fall at is known with
+        // no reading taken: a holder asks this after every step, a datagram's among them.
+        self.clock.us_at_ms(due_ms)
+    }
+
+    /// Whether the last step's reads ended on its bound ([`Self::step_reading`]'s `most`) and
+    /// not on a receive that found none, on the holder's gate or on a walk the holder had no room
+    /// to finish: the socket may hold more, which a holder that waits on it would not wait for.
+    /// A step that reads one datagram ([`Self::step`]) ends on its bound when it read one.
+    pub fn read_to_bound(&self) -> bool {
+        self.read_to_bound
     }
 
     /// Whether the socket had no room for a datagram of the data emit that the pump holds for its
@@ -1400,11 +1410,46 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
     /// loop handled one per iteration. That is what bounds how long a group
     /// under a flood can keep the thread from a sibling session: one datagram,
     /// then the step returns and the task yields.
+    #[inline]
     pub fn step<'s, 'g, F, G>(
         &mut self,
         on_event: &mut F,
         next_tx: &mut G,
         should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+    ) -> Option<MulticastOutcome>
+    where
+        F: FnMut(IterationEvent<'_, '_>),
+        G: FnMut() -> Option<MulticastTxOffer<'g>>,
+    {
+        let now_us = self.runtime.clock().now_us();
+        self.step_reading(
+            on_event,
+            next_tx,
+            should_stop,
+            core::num::NonZeroUsize::MIN,
+            now_us,
+        )
+    }
+
+    /// [`Self::step`], reading up to `most` inbound datagrams where it reads one: the stop, the
+    /// carrier, the clock, the beacon and the writes are done once for all of them, so a holder
+    /// that reads a burst of the group's datagrams on one turn pays them once a burst and not once
+    /// a datagram. The reads end at the first receive that finds none, at the holder's input gate,
+    /// which is asked before each datagram, and at a walk the holder had no room to finish. `most`
+    /// is what bounds how long a flood keeps the thread from a sibling session; the burst is one
+    /// iteration of the test budget, and the sweep runs on a step that read none, as with one.
+    /// Whether the reads ended on `most` is told by [`Self::read_to_bound`].
+    ///
+    /// `now_us` is the holder's reading of the runtime's clock, which the step's beacon, sweep
+    /// and member stamps are measured by: a holder that read the clock for its own turn hands that
+    /// reading on, so the step takes none.
+    pub fn step_reading<'s, 'g, F, G>(
+        &mut self,
+        on_event: &mut F,
+        next_tx: &mut G,
+        should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+        most: core::num::NonZeroUsize,
+        now_us: u64,
     ) -> Option<MulticastOutcome>
     where
         F: FnMut(IterationEvent<'_, '_>),
@@ -1441,6 +1486,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
         let reasm = &mut self.reasm;
         #[cfg(feature = "reassembly")]
         let resume = &mut self.resume;
+        let read_to_bound = &mut self.read_to_bound;
         #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
         let gate = self.input_gate.as_ref();
         #[cfg(feature = "transport-stats")]
@@ -1572,7 +1618,7 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             *iter = (*iter).saturating_add(1);
         }
 
-        let now = clock.now_monotonic_ms();
+        let now = clock.ms_at(now_us);
         // What the socket had no room for at an earlier step goes first. A JOIN waits behind it:
         // the beacon advertises the sequence numbers those datagrams carry as sent, and a member
         // that read it first would drop them as stale when they came.
@@ -1703,21 +1749,25 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
             runtime.run_until_idle();
         }
 
-        // Inbound datagram? Classify + dispatch, then loop promptly for the
-        // next (the busy-poll equivalent of the AP loop's RX select arm). A holder with no room
-        // for what the group delivers is handed nothing: the datagram waits in the transport.
-        #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-        let held_back = gate.is_some_and(|gate| !gate.takes());
-        #[cfg(not(all(feature = "alloc", not(feature = "session-slot"))))]
-        let held_back = false;
+        // Inbound datagrams? Classify + dispatch each, up to `most` of them, then loop promptly
+        // for the next (the busy-poll equivalent of the AP loop's RX select arm). A holder with no
+        // room for what the group delivers is handed nothing: the datagram waits in the transport.
         // A transport that keeps its datagram lets the walk stop where the holder has no room,
         // and lends the same datagram again at the next step.
         #[cfg(feature = "reassembly")]
         let may_stop = transport.keeps_input();
-        #[cfg(feature = "reassembly")]
-        let mut stopped = None;
-        let received = !held_back
-            && transport.recv_with(&mut |bytes, src| {
+        let mut received = false;
+        let mut read: usize = 0;
+        while read < most.get() {
+            // Asked before each datagram: a transport that lends its datagram until its next
+            // receive is not asked for another while the holder still reads the one it lent.
+            #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+            if gate.is_some_and(|gate| !gate.takes()) {
+                break;
+            }
+            #[cfg(feature = "reassembly")]
+            let mut stopped = None;
+            let took = transport.recv_with(&mut |bytes, src| {
                 // R311lv/R311mf/R311mh — the shared RX dispatch SSOTs: JOIN admit /
                 // Frame admit-and-fan / KeepAlive refresh PLUS the reassembly-
                 // divergent tail (out-of-order-chain abort + Fragment reassembly +
@@ -1775,11 +1825,20 @@ impl<'a, C: ClockSource, T: GroupTransport, const MAX_PEERS: usize>
                     });
                 }
             });
-        #[cfg(feature = "reassembly")]
-        if let Some(stopped) = stopped {
-            transport.keep();
-            *resume = Some(stopped);
+            #[cfg(feature = "reassembly")]
+            if let Some(stopped) = stopped {
+                transport.keep();
+                *resume = Some(stopped);
+                received |= took;
+                break;
+            }
+            if !took {
+                break;
+            }
+            received = true;
+            read = read.saturating_add(1);
         }
+        *read_to_bound = read == most.get();
         if received {
             return None;
         }
@@ -2579,6 +2638,20 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         self.pump_ref().map(|pump| pump.tx_lost())
     }
 
+    /// Whether the session's last step read to its bound ([`MulticastPump::read_to_bound`]);
+    /// `false` while the place holds no session.
+    pub fn read_to_bound(&self) -> bool {
+        self.pump_ref().is_some_and(|pump| pump.read_to_bound())
+    }
+
+    /// A reading of the clock of the runtime the place's sessions run on, for a holder that has
+    /// none of its own at hand to step the session at ([`Self::step_reading`]).
+    pub fn now_us(&self) -> u64 {
+        // SAFETY: the runtime lies outside the cells a step borrows, and is never written after
+        // the place is made.
+        unsafe { self.cell.as_ref() }.runtime.clock().now_us()
+    }
+
     /// Advance the session by one step ([`MulticastPump::step`]): a JOIN the holder asked for is
     /// sent at it, and a step that leaves the session running says when it is next due.
     /// `Some(outcome)` once the session is finished; a place that holds no session steps nothing
@@ -2593,6 +2666,33 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         F: FnMut(IterationEvent<'_, '_>),
         G: FnMut() -> Option<MulticastTxOffer<'g>>,
     {
+        self.advance(|pump| pump.step(on_event, next_tx, should_stop))
+    }
+
+    /// [`Self::step`], reading up to `most` of the group's datagrams at the holder's reading
+    /// `now_us` of the runtime's clock ([`MulticastPump::step_reading`]).
+    pub fn step_reading<'s, 'g, F, G>(
+        &mut self,
+        on_event: &mut F,
+        next_tx: &mut G,
+        should_stop: Option<&mut (dyn FnMut() -> bool + 's)>,
+        most: core::num::NonZeroUsize,
+        now_us: u64,
+    ) -> Option<MulticastOutcome>
+    where
+        F: FnMut(IterationEvent<'_, '_>),
+        G: FnMut() -> Option<MulticastTxOffer<'g>>,
+    {
+        self.advance(|pump| pump.step_reading(on_event, next_tx, should_stop, most, now_us))
+    }
+
+    /// The one body of both steps: the JOIN the holder asked for made due, `step` taken on the
+    /// pump, and the due of a session that runs on published.
+    #[inline(always)]
+    fn advance(
+        &mut self,
+        step: impl FnOnce(&mut MulticastPump<'static, C, T, MAX_PEERS>) -> Option<MulticastOutcome>,
+    ) -> Option<MulticastOutcome> {
         let asked = self.join_ask.as_ref().is_some_and(JoinAsk::take);
         let Some(pump) = self.pump() else {
             return Some(MulticastOutcome::Stopped);
@@ -2600,7 +2700,7 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         if asked {
             pump.join_now();
         }
-        let outcome = pump.step(on_event, next_tx, should_stop);
+        let outcome = step(&mut *pump);
         let running_due_us = outcome.is_none().then(|| pump.next_due_us());
         if let (Some(due_us), Some(due)) = (running_due_us, &self.due) {
             due.publish(due_us);
@@ -3593,5 +3693,294 @@ mod tests {
         assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
         assert_eq!(taken(&wire), ["join", "join", "join", "first", "join"]);
         assert!(matches_the_wire(), "the held put once, as it left");
+    }
+
+    /// A clock that stands at one reading past its zero and counts how often it is read.
+    #[derive(Clone, Default)]
+    struct Counted;
+
+    static COUNTED_READS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+    impl ClockSource for Counted {
+        fn now_us(&self) -> u64 {
+            COUNTED_READS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            7_250
+        }
+    }
+
+    /// A JOIN of the member whose zid is `01 02 03 04`, as it sends it.
+    fn their_join(params: &MulticastParams) -> Vec<u8> {
+        let mut theirs = params.clone();
+        theirs.zid = wz_session_core::session_zid::SessionZid::from_array([0x01, 0x02, 0x03, 0x04]);
+        let mut join = [0u8; JOIN_MAX_BYTES];
+        let len = encode_join_into_slice(
+            &theirs,
+            &MulticastTxConduits::new(mask_from_res(theirs.seq_num_res)),
+            &mut join,
+        )
+        .expect("a JOIN");
+        join[..len].to_vec()
+    }
+
+    /// The pump says when it is next due with no reading of its clock, its deadlines being kept on
+    /// the clock's epoch: the beacon a second past the reading the pump was made at, on a clock
+    /// that does not stand at zero. Turned red by a `next_due_us` that reads the clock, or one
+    /// that leaves the epoch out.
+    #[test]
+    fn the_pump_says_when_it_is_next_due_with_no_reading_of_its_clock() {
+        use core::sync::atomic::Ordering::Relaxed;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let mut params = params();
+        params.join_interval_ms = 1_000;
+        let runtime = CoopRuntime::try_new(Counted).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(taken(&wire), ["join"], "the first beacon");
+        let reads = COUNTED_READS.load(Relaxed);
+        assert_eq!(pump.next_due_us(), 7_250 + 1_000_000, "the next beacon");
+        assert_eq!(COUNTED_READS.load(Relaxed), reads, "no reading taken");
+    }
+
+    /// A step that may read several datagrams reads each the socket holds, up to its bound, with
+    /// the step's fixed part done once: one beacon for the burst. It ends at the first receive
+    /// that finds none. The CONTROL is the plain step, which reads one. Turned red by a burst that
+    /// beacons per datagram, reads past its bound or stops after the first.
+    #[test]
+    fn a_step_reads_up_to_its_bound_of_datagrams_with_one_beacon() {
+        use core::num::NonZeroUsize;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let join = their_join(&params);
+        wire.borrow_mut().inbound = core::iter::repeat_n(join, 6).collect();
+        let inbound = |wire: &RefCell<Wire>| wire.borrow().inbound.len();
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert_eq!(inbound(&wire), 5, "CONTROL: the plain step reads one");
+        assert_eq!(taken(&wire), ["join"]);
+
+        let three = NonZeroUsize::new(3).expect("three is not zero");
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, three, 0)
+            .is_none());
+        assert_eq!(inbound(&wire), 2, "three read in one step");
+        assert_eq!(
+            taken(&wire),
+            ["join", "join"],
+            "with one beacon for the three"
+        );
+
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, three, 0)
+            .is_none());
+        assert_eq!(
+            inbound(&wire),
+            0,
+            "the two left, the next receive finding none"
+        );
+        assert_eq!(
+            pump.dispatcher().active_peers(),
+            1,
+            "every JOIN read was the one member's"
+        );
+    }
+
+    /// The holder's input gate is asked before each datagram of a burst: a gate with room for two
+    /// ends the burst at the third, which waits in the socket for a later step. The CONTROL is the
+    /// same burst once the gate has room again, which reads the rest. Turned red by a burst that
+    /// asks the gate once, or not at all.
+    #[test]
+    fn a_burst_ends_where_the_holders_gate_has_no_room() {
+        use core::cell::Cell;
+        use core::num::NonZeroUsize;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let join = their_join(&params);
+        wire.borrow_mut().inbound = core::iter::repeat_n(join, 4).collect();
+        let inbound = |wire: &RefCell<Wire>| wire.borrow().inbound.len();
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        let room = Rc::new(Cell::new(2_usize));
+        let left = Rc::clone(&room);
+        pump.attach_input_gate(super::GroupInputGate::new(move || {
+            let has = left.get();
+            left.set(has.saturating_sub(1));
+            has > 0
+        }));
+        let eight = NonZeroUsize::new(8).expect("eight is not zero");
+
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, eight, 0)
+            .is_none());
+        assert_eq!(inbound(&wire), 2, "two read, the room the gate had");
+
+        room.set(8);
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, eight, 0)
+            .is_none());
+        assert_eq!(inbound(&wire), 0, "CONTROL: room again, the rest read");
+    }
+
+    /// A step says whether its reads ended on its bound, where the socket may hold more: a burst
+    /// that read as many as it may did, and one that ended on a receive that found none did not.
+    /// The CONTROL is the plain step, whose bound is one datagram. Turned red by a mark set on
+    /// every datagram taken, or one never set.
+    #[test]
+    fn a_step_says_whether_its_reads_ended_on_its_bound() {
+        use core::num::NonZeroUsize;
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let params = params();
+        let join = their_join(&params);
+        wire.borrow_mut().inbound = core::iter::repeat_n(join, 6).collect();
+        let runtime = CoopRuntime::try_new(Frozen).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        assert!(!pump.read_to_bound(), "no step yet");
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert!(pump.read_to_bound(), "CONTROL: the plain step read its one");
+
+        let three = NonZeroUsize::new(3).expect("three is not zero");
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, three, 0)
+            .is_none());
+        assert!(pump.read_to_bound(), "three of the five read");
+
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, three, 0)
+            .is_none());
+        assert_eq!(wire.borrow().inbound.len(), 0, "the two left read");
+        assert!(
+            !pump.read_to_bound(),
+            "the burst ended on a receive that found none"
+        );
+
+        assert!(pump.step(&mut quiet, &mut next_tx, None).is_none());
+        assert!(!pump.read_to_bound(), "a plain step that read none");
+    }
+
+    /// A step at the holder's reading measures by it and reads no clock of its own: on a clock
+    /// that stands still, the beacon a second after the first is sent by a step at a reading two
+    /// seconds on, and none of the steps reads the clock. The CONTROL is the step half a second
+    /// on, which sends no beacon. Turned red by a step that reads the clock, or one that measures
+    /// by a reading of its own.
+    #[test]
+    fn a_step_at_the_holders_reading_measures_by_it_and_reads_no_clock() {
+        use alloc::sync::Arc;
+        use core::num::NonZeroUsize;
+        use core::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+        /// A clock that stands at one reading and counts how often it is read.
+        #[derive(Clone)]
+        struct Reads(Arc<AtomicUsize>);
+
+        impl ClockSource for Reads {
+            fn now_us(&self) -> u64 {
+                self.0.fetch_add(1, Relaxed);
+                7_250
+            }
+        }
+
+        let wire = Rc::new(RefCell::new(Wire::default()));
+        let mut socket = Socket(Rc::clone(&wire));
+        let mut params = params();
+        params.join_interval_ms = 1_000;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let runtime = CoopRuntime::try_new(Reads(Arc::clone(&reads))).expect("the heap has room");
+        let mut dispatcher = MulticastDispatcher::<4>::new(MulticastConfig::new(5_000));
+        let mut next_tx = || None::<MulticastTxItem>;
+        let mut quiet = |_event: IterationEvent<'_, '_>| {};
+        let mut pump = MulticastPump::new(
+            &mut dispatcher,
+            MulticastDriveConfig {
+                params: &params,
+                tick_ms: 5,
+                max_iters: None,
+            },
+            &SessionPolicy::defaults(),
+            &runtime,
+            &mut socket,
+        );
+        let one = NonZeroUsize::MIN;
+        let made = reads.load(Relaxed);
+
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, one, 7_250)
+            .is_none());
+        assert_eq!(taken(&wire), ["join"], "the first beacon");
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, one, 7_250 + 500_000)
+            .is_none());
+        assert_eq!(taken(&wire), ["join"], "CONTROL: none due half a second on");
+        assert!(pump
+            .step_reading(&mut quiet, &mut next_tx, None, one, 7_250 + 2_000_000)
+            .is_none());
+        assert_eq!(
+            taken(&wire),
+            ["join", "join"],
+            "the beacon due by the holder's reading"
+        );
+        assert_eq!(reads.load(Relaxed), made, "no reading of the clock taken");
     }
 }

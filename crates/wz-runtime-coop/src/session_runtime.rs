@@ -197,7 +197,10 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     #[cfg(feature = "session-slot")]
     type EntropyDraw = SessionEntropy;
 
-    #[cfg(not(feature = "session-slot"))]
+    // Bound where the session core declares it, which its metadata says (`wz_wrap_actions`,
+    // `build.rs`): this crate's `session-slot` turns the core's on, which takes the item away,
+    // but another crate of the graph can turn the core's on without this crate's.
+    #[cfg(wz_wrap_actions)]
     fn wrap_actions<T: TimeSource>(
         actions: SessionLinkActions<Self, T>,
     ) -> Result<Self::ActionsHandle<T>, HeapRefused> {
@@ -766,5 +769,35 @@ mod local_access_tests {
             Ok(1),
             "the refused access wrote nothing"
         );
+    }
+}
+
+// `wrap_actions` named through the trait for the heap profile, in every build whose session
+// core declares it.
+#[cfg(all(test, wz_wrap_actions))]
+mod wrap_actions_tests {
+    use super::*;
+
+    /// A frozen clock, so the runtime names a type without a board.
+    #[derive(Clone, Copy)]
+    struct StoppedClock;
+
+    impl ClockSource for StoppedClock {
+        fn now_us(&self) -> u64 {
+            0
+        }
+    }
+
+    type Runtime = CoopRuntime<StoppedClock>;
+    type Time = CoopTime<StoppedClock>;
+    type Handle = <Runtime as SessionRuntime>::ActionsHandle<Time>;
+
+    /// `wrap_actions` is the trait's in every build whose session core declares it. Turned red
+    /// (E0046, the build of this test fails) by binding it under a cfg narrower than
+    /// `wz_wrap_actions`.
+    #[test]
+    fn wrap_actions_is_bound_where_the_core_declares_it() {
+        let _wrap: fn(SessionLinkActions<Runtime, Time>) -> Result<Handle, HeapRefused> =
+            <Runtime as SessionRuntime>::wrap_actions::<Time>;
     }
 }
