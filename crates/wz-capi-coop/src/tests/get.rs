@@ -11,10 +11,12 @@ use std::time::{Duration, Instant};
 
 use wz_capi_port::cancellation::{register_fan, CancellableFan, CancellationToken, TokenRef};
 use wz_capi_port::lodge::Strong;
-use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, WireKey};
+use wz_capi_port::{Refusal, ReplyCallback, SessionDrive, SessionEngine, SubscriberSink, WireKey};
 use wz_session_core::limit_binding::Quota;
+use wz_session_core::locality::Locality;
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
+use wz_session_core::sink::SampleView;
 
 use super::{open, until, CatchAll, Command, Engine, Router};
 use crate::EngineHold;
@@ -126,6 +128,44 @@ fn a_get_is_answered_and_ends_with_its_final() {
         vec![(ReplyKind::Put, "demo/g/a".to_owned(), b"r".to_vec())]
     );
     assert_eq!(router.seen(|s| s.queries), 1);
+}
+
+/// A reply read where its frame lies is handed to the session's gets alone, by its kind, as a Push
+/// is handed to the subscribers alone: the reply reaches its leg and its Final ends the get, each
+/// through that one dispatch, and a subscriber on the reply's key is handed no sample of either.
+/// Turned red by the kind's arm left out of the link's dispatch, which offers both to every plane.
+#[test]
+fn a_reply_is_handed_to_the_gets_alone_by_its_kind() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    let samples = Arc::new(AtomicUsize::new(0));
+    let count = samples.clone();
+    engine
+        .declare_subscriber_on_wire(
+            "demo/g/**",
+            WireKey::literal(),
+            Locality::Any,
+            None,
+            SubscriberSink::shared(move |_sample: &dyn SampleView| {
+                count.fetch_add(1, Ordering::SeqCst);
+            }),
+        )
+        .expect("the session declares the subscriber");
+    settle(&router, &engine, Command::Answer("demo/g/**", b"r"));
+    let before = engine.reply_dispatches();
+    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
+    assert_eq!(issued, Ok(1), "one leg: the link's peer");
+    until(&engine, "the leg to end", || leg.lock().unwrap().ended);
+    assert_eq!(
+        leg.lock().unwrap().replies,
+        vec![(ReplyKind::Put, "demo/g/a".to_owned(), b"r".to_vec())]
+    );
+    assert_eq!(
+        engine.reply_dispatches() - before,
+        2,
+        "the Response and its Final, each to the gets alone"
+    );
+    assert_eq!(samples.load(Ordering::SeqCst), 0, "no sample of a reply");
 }
 
 /// A get that keeps the latest reply of each key holds its replies to its Final and hands each to

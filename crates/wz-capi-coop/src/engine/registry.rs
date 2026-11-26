@@ -620,6 +620,10 @@ pub(super) struct RegistryOf<H: Holders> {
     /// what a test of the cost of one received sample counts.
     #[cfg(all(test, feature = "std"))]
     pushes: (usize, usize, usize),
+    /// The lent Responses and ResponseFinals handed to the pending gets alone
+    /// ([`Self::dispatch_reply`]): what a test of a reply's dispatch counts.
+    #[cfg(all(test, feature = "std", feature = "query"))]
+    replies_alone: usize,
     /// How often a run of Pushes was drained before a later record of its own frame
     /// ([`Self::count_drain_within_frame`]): what tells a test that a Push and the record after
     /// it came in one frame.
@@ -850,6 +854,8 @@ impl<H: Holders> RegistryOf<H> {
             set_reads: core::cell::Cell::new(0),
             #[cfg(all(test, feature = "std"))]
             pushes: (0, 0, 0),
+            #[cfg(all(test, feature = "std", feature = "query"))]
+            replies_alone: 0,
             #[cfg(all(test, feature = "std", feature = "queryable"))]
             drains_within_frames: 0,
         };
@@ -894,6 +900,12 @@ impl<H: Holders> RegistryOf<H> {
     #[cfg(all(test, feature = "std"))]
     pub(super) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.pushes
+    }
+
+    /// The lent Responses and ResponseFinals handed to the pending gets alone.
+    #[cfg(all(test, feature = "std", feature = "query"))]
+    pub(super) fn reply_dispatches(&self) -> usize {
+        self.replies_alone
     }
 
     /// One more run of Pushes drained before a later record of its own frame.
@@ -1545,6 +1557,25 @@ impl<H: Holders> RegistryOf<H> {
         }
         #[cfg(all(test, feature = "std"))]
         self.counted_push(looked);
+    }
+
+    /// A Response or a ResponseFinal of face `face` lent where its frame lies
+    /// ([`super::lent_reply`]), handed to the face's pending gets alone, the one plane that reads
+    /// a reply, as a Push is handed to the subscribers' plane alone ([`Self::dispatch_push`]):
+    /// what follows the dispatch is put off to the end of the run of such records
+    /// ([`Self::settle`]). A face the session no longer holds hears nothing.
+    #[cfg(all(
+        feature = "query",
+        any(feature = "threads", feature = "listen", feature = "group")
+    ))]
+    pub(super) fn dispatch_reply(&mut self, face: HeldFace, event: IterationEvent<'_, '_>) {
+        if let Some(Split { app, face, .. }) = self.split(self.place(face)) {
+            app.dispatch_reply(&face.peer, &mut face.gets, event);
+        }
+        #[cfg(all(test, feature = "std"))]
+        {
+            self.replies_alone += 1;
+        }
     }
 
     /// A Push of face `face` lent where its frame lies, read into the sample its subscribers are

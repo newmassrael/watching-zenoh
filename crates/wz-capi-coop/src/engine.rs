@@ -3252,6 +3252,21 @@ fn lent_push(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bo
     )
 }
 
+/// Whether `event` is a Response or a ResponseFinal lent where its frame lies: what the pending
+/// gets alone read, so a link's dispatch hands it there and to no other plane
+/// (`Registry::dispatch_reply`), as zenoh-pico's dispatch picks a reply's handler by the
+/// message's kind (`vendor/zenoh-pico/src/session/rx.c` @ `case _Z_N_RESPONSE_FINAL:`).
+#[cfg(all(
+    feature = "query",
+    any(feature = "threads", feature = "listen", feature = "group")
+))]
+fn lent_reply(event: &wz_session_core::driver_loop::IterationEvent<'_, '_>) -> bool {
+    matches!(
+        event,
+        wz_session_core::driver_loop::IterationEvent::InPlace(record) if record.is_reply()
+    )
+}
+
 /// The `on_event` of a link's session: the registry's dispatch for the face the link serves. A
 /// value of a type that can be named, so the task the link's session runs as can be
 /// (`RouterSessionTask`), and the runtime reserves its cells at the open in the bytes that task
@@ -3276,7 +3291,8 @@ pub(crate) struct FaceDispatch<C: ClockSource + 'static> {
     /// The session's round of deliveries: told where a rejoined message lies while its records are
     /// dispatched, and, in a debug build, that what is offered waited for room (`Gated`).
     lane: PlacedRef<Round>,
-    /// Whether Pushes were dispatched whose drains are still owed ([`EventSink::end_records`]).
+    /// Whether Pushes or replies, each handed to its one plane, were dispatched whose drains are
+    /// still owed ([`EventSink::end_records`]).
     after_pushes: bool,
 }
 
@@ -3293,6 +3309,19 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             let dispatched = self
                 .registry
                 .with(|registry| registry.dispatch_push(face, event));
+            debug_assert!(dispatched.is_some(), "{UNLENT}");
+            self.after_pushes = true;
+            return;
+        }
+        // A Response or a ResponseFinal is read by the pending gets alone: it is handed to them by
+        // its kind, as a Push is to the subscribers, and what follows it is put off alike.
+        #[cfg(feature = "query")]
+        if lent_reply(&event) {
+            #[cfg(debug_assertions)]
+            let _gated = Gated::over(&self.lane);
+            let dispatched = self
+                .registry
+                .with(|registry| registry.dispatch_reply(face, event));
             debug_assert!(dispatched.is_some(), "{UNLENT}");
             self.after_pushes = true;
             return;
@@ -3346,6 +3375,19 @@ impl<C: ClockSource + 'static> EventSink for FaceDispatch<C> {
             let dispatched = self
                 .registry
                 .with(|registry| registry.dispatch_push(face, event));
+            debug_assert!(dispatched.is_some(), "{UNLENT}");
+            self.after_pushes = true;
+            return;
+        }
+        // A Response or a ResponseFinal is read by the pending gets alone: it is handed to them by
+        // its kind, as a Push is to the subscribers, and what follows it is put off alike.
+        #[cfg(feature = "query")]
+        if lent_reply(&event) {
+            #[cfg(debug_assertions)]
+            let _gated = Gated::over(&self.lane);
+            let dispatched = self
+                .registry
+                .with(|registry| registry.dispatch_reply(face, event));
             debug_assert!(dispatched.is_some(), "{UNLENT}");
             self.after_pushes = true;
             return;
@@ -6202,6 +6244,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn push_dispatches(&self) -> (usize, usize, usize) {
         self.core.lock().0.session.registry.push_dispatches()
+    }
+
+    /// The lent Responses and ResponseFinals the session's links handed to the pending gets alone
+    /// (`Registry::dispatch_reply`).
+    #[cfg(all(test, feature = "std", feature = "query"))]
+    pub(crate) fn reply_dispatches(&self) -> usize {
+        self.core.lock().0.session.registry.reply_dispatches()
     }
 
     /// How often the session's links drained a run of Pushes before a later record of its own
