@@ -264,6 +264,9 @@ struct Seen {
     declares: usize,
     /// The id of each subscriber the router was declared, in the order the declarations arrived.
     subscribers: Vec<u64>,
+    /// The place among the declarations of each `DeclareFinal` of the initial interest the router
+    /// was told: the count of declarations that had arrived with it, itself included.
+    initial_finals: Vec<usize>,
     interests: usize,
     /// The Interest each subscriber declaration that answers one names, in the order they arrived.
     #[cfg(feature = "interest-answer")]
@@ -582,6 +585,16 @@ fn run_router(
                             {
                                 seen.subscribers.push(subscriber.id);
                             }
+                            if declare.interest_id
+                                == Some(wz_session_core::extbound::INITIAL_INTEREST_ID)
+                                && matches!(
+                                    &declare.body,
+                                    wz_codecs::declare::DeclareOwnedVariant::CodecZenohDeclFinal(_)
+                                )
+                            {
+                                let at = seen.declares;
+                                seen.initial_finals.push(at);
+                            }
                             #[cfg(feature = "interest-answer")]
                             if let Some(interest) = declare.interest_id {
                                 use wz_codecs::declare::DeclareOwnedVariant as Body;
@@ -656,6 +669,15 @@ fn run_router(
                         &declare.body
                     {
                         seen.subscribers.push(subscriber.id);
+                    }
+                    if declare.interest_id == Some(wz_session_core::extbound::INITIAL_INTEREST_ID)
+                        && matches!(
+                            &declare.body,
+                            wz_codecs::lent::DeclareVariant::CodecZenohDeclFinal(_)
+                        )
+                    {
+                        let at = seen.declares;
+                        seen.initial_finals.push(at);
                     }
                     #[cfg(feature = "interest-answer")]
                     if let Some(interest) = declare.interest_id {

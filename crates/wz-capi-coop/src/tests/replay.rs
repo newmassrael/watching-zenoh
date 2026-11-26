@@ -3,6 +3,8 @@
 //! is told once, in its turn, a retraction is sent only if the peer was told of the entry, a
 //! replay is not resumed on another link, and an unpaced one is a single turn. Both forms tell a
 //! new peer the same declarations in the same order, in a build of either domain of the policy.
+//! A replay to a peer the session meets as the peer hat's two north-bound peers ends, when the
+//! config says so, with the `DeclareFinal` of the initial interest, once and after the last turn.
 
 use crate::EngineHold;
 use std::time::{Duration, Instant};
@@ -11,8 +13,9 @@ use wz_capi_port::{PeerLists, SessionDrive, SessionEngine, SubId, SubscriberSink
 use wz_session_core::locality::Locality;
 use wz_session_core::replay_pacing::ReplayPacing;
 use wz_session_core::sink::SampleView;
+use wz_session_core::WhatAmI;
 
-use super::{config, open_with, until, CatchAll, Command, Engine, Router};
+use super::{config, open_with, router_port, until, CatchAll, Command, Engine, Router, ROUTER_ZID};
 use crate::CoopConfig;
 
 /// Declare a subscriber on `key` that hears nothing, for the declaration it makes.
@@ -382,4 +385,178 @@ fn a_pace_the_build_cannot_reach_is_refused_and_changes_nothing() {
         "every build sends the declarations in one turn"
     );
     SessionDrive::close(&*engine);
+}
+
+/// The places among the declarations `router` was told of each `DeclareFinal` of the initial
+/// interest, in the order they arrived.
+fn initial_finals(router: &Router) -> Vec<usize> {
+    router.seen(|seen| seen.initial_finals.clone())
+}
+
+/// A stand-in on `port` that announces itself a peer, which a peer session meets as the peer hat's
+/// two north-bound peers.
+fn peer_on(port: u16) -> Router {
+    Router::start_announcing(port, ROUTER_ZID, WhatAmI::Peer, CatchAll::None)
+}
+
+/// A peer session's config for `router` that ends a new face's replay with the Final of the
+/// initial interest as `initial_interest` says.
+fn peer_config(router: &Router, initial_interest: bool) -> CoopConfig {
+    CoopConfig {
+        whatami: WhatAmI::Peer,
+        initial_interest,
+        ..config(router)
+    }
+}
+
+/// A peer session that ends its replays with the Final, holding `keys` as subscribers, whose link
+/// to a peer is lost and dialled again with the declarations paced as `pacing` says: the new
+/// peer and the session, as soon as the new link's first turn is sent. The CONTROL is that the
+/// first peer was told every subscriber and one Final.
+fn reconnected_peer(keys: &[&str], pacing: Option<ReplayPacing>) -> (Router, EngineHold<Engine>) {
+    let first = peer_on(router_port());
+    let port = first.port;
+    let engine = open_with(CoopConfig {
+        redial_ms: Some(50),
+        open_timeout_ms: 300,
+        ..peer_config(&first, true)
+    });
+    for key in keys {
+        subscribe(&engine, key);
+    }
+    until(
+        &engine,
+        "the first peer to be told every subscriber and the Final",
+        || told(&first) == keys.len() + 1,
+    );
+    assert_eq!(
+        initial_finals(&first).len(),
+        1,
+        "the first peer was sent one Final"
+    );
+    first.send(Command::Close);
+    drop(first);
+    until(&engine, "the link to be lost", || {
+        engine.peer_identities().is_empty()
+    });
+    engine
+        .set_replay_pacing(pacing)
+        .expect("a test states a pace only where the build reaches one");
+    let second = peer_on(port);
+    until(&engine, "the first turn of the replay", || {
+        told(&second) >= 1
+    });
+    (second, engine)
+}
+
+/// A link that comes up to a peer the session meets as a peer is told the Final of the initial
+/// interest once, after every declaration the replay owed it, and a declaration the session makes
+/// later is followed by no second Final. Turned red by a Final sent before the replay
+/// (`end_initial_interest` called before the turn), not sent at all, or sent again by a later
+/// declaration.
+#[test]
+fn a_peer_face_is_sent_the_initial_final_once_after_its_replay() {
+    let (router, engine) = reconnected_peer(&["g/1", "g/2"], None);
+    until(&engine, "the replay and its Final", || told(&router) == 3);
+    step_for(&engine, Duration::from_millis(100));
+    assert_eq!(
+        initial_finals(&router),
+        vec![3],
+        "the Final follows both subscribers, once"
+    );
+    subscribe(&engine, "g/3");
+    until(&engine, "the later subscriber", || told(&router) == 4);
+    step_for(&engine, Duration::from_millis(100));
+    assert_eq!(
+        initial_finals(&router),
+        vec![3],
+        "a later declaration is followed by no second Final"
+    );
+    SessionDrive::close(&*engine);
+}
+
+/// A paced replay sends the Final only in the turn that tells its last declaration: none while
+/// turns are owed, and one after the last. Turned red by a Final sent by the first turn of a
+/// paced replay.
+#[test]
+fn a_paced_replay_sends_the_initial_final_after_its_last_turn() {
+    // A build that reaches no pace replays in one lap whatever is stated.
+    if !ReplayPacing::REACHABLE {
+        return;
+    }
+    let (router, engine) = reconnected_peer(&["h/1", "h/2", "h/3"], ReplayPacing::new(1, 300));
+    assert!(
+        initial_finals(&router).is_empty(),
+        "two turns are still owed"
+    );
+    until(&engine, "the replay to finish", || {
+        engine.declarations_synced()
+    });
+    until(&engine, "the Final", || told(&router) == 4);
+    step_for(&engine, Duration::from_millis(400));
+    assert_eq!(
+        initial_finals(&router),
+        vec![4],
+        "the Final follows the last turn, once"
+    );
+    SessionDrive::close(&*engine);
+}
+
+/// No Final goes to a face the peer hat does not push to, nor from a session whose config does not
+/// end a push so: a client meeting a peer, a peer meeting a router, and a peer meeting a peer with
+/// the switch off are each told the subscriber alone. The CONTROL is the peer meeting a peer with
+/// the switch on, told the Final beside it. Turned red by a Final sent without reading the switch
+/// (`config.initial_interest` in `begin_link_replay`) or the roles
+/// (`meets_remote_as_peer_hat`).
+#[test]
+fn no_initial_final_goes_to_a_face_that_is_not_a_peer_or_when_the_switch_is_off() {
+    let cases = [
+        (
+            "a client meeting a peer",
+            WhatAmI::Client,
+            WhatAmI::Peer,
+            true,
+        ),
+        (
+            "a peer meeting a router",
+            WhatAmI::Peer,
+            WhatAmI::Router,
+            true,
+        ),
+        (
+            "a peer with the switch off",
+            WhatAmI::Peer,
+            WhatAmI::Peer,
+            false,
+        ),
+        (
+            "CONTROL: a peer meeting a peer",
+            WhatAmI::Peer,
+            WhatAmI::Peer,
+            true,
+        ),
+    ];
+    for (what, role, remote, initial_interest) in cases {
+        let router = Router::start_announcing(router_port(), ROUTER_ZID, remote, CatchAll::None);
+        let engine = open_with(CoopConfig {
+            whatami: role,
+            initial_interest,
+            ..config(&router)
+        });
+        subscribe(&engine, "i/1");
+        until(&engine, "the subscriber", || told(&router) >= 1);
+        step_for(&engine, Duration::from_millis(100));
+        let owed = role == WhatAmI::Peer && remote == WhatAmI::Peer && initial_interest;
+        assert_eq!(
+            initial_finals(&router).len(),
+            usize::from(owed),
+            "{what}: a Final only where both ends are peers and the switch is on"
+        );
+        assert_eq!(
+            told(&router),
+            1 + usize::from(owed),
+            "{what}: the subscriber, and the Final where it is owed"
+        );
+        SessionDrive::close(&*engine);
+    }
 }
