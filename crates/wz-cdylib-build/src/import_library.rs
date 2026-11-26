@@ -253,8 +253,13 @@ mod tests {
         stack_bytes: 16,
     };
 
+    /// One archive member: where its header starts, its header name and its data.
+    type Member = (usize, String, Vec<u8>);
+    /// One symbol of the archive's table: its name and the offset of the member holding it.
+    type Symbol = (String, usize);
+
     /// The archive's members as (header name, data), and its symbol table as (name, offset).
-    fn read(archive: &[u8]) -> (Vec<(usize, String, Vec<u8>)>, Vec<(String, usize)>) {
+    fn read(archive: &[u8]) -> (Vec<Member>, Vec<Symbol>) {
         assert_eq!(&archive[..8], b"!<arch>\n");
         let mut at = 8;
         let mut members = Vec::new();
