@@ -36,6 +36,7 @@ use alloc::vec::Vec;
     ),
     all(feature = "codec-fragment", feature = "reassembly")
 ))]
+#[cfg(test)]
 use sce_forge_runtime::codec::CodecError;
 #[cfg(feature = "alloc")]
 use sce_forge_runtime::codec::VecSink;
@@ -1342,7 +1343,7 @@ pub enum FragmentBody<'a> {
     feature = "alloc",
     all(feature = "transport-fragmentation", feature = "transport-tx-lend")
 ))]
-pub type BodyEncoder<'f> = dyn Fn(&mut TxSink<'_>) -> Result<(), CodecError> + 'f;
+pub type BodyEncoder<'f> = dyn crate::tx_buf::WireWrite + 'f;
 
 /// Write ONE fragment of `body` (the range `span` names) into `buf`: the header
 /// `write_fragment_head` writes, then the payload. The one producer of a
@@ -1383,7 +1384,7 @@ pub fn write_fragment(
             let mut window = BodyWindow::new(&mut *buf, span.start, span.end);
             {
                 let mut sink = TxSink::new(&mut window);
-                encode(&mut sink)?;
+                encode.write_body(&mut sink)?;
             }
             // An encoder that wrote less than the plan was cut from is not the
             // message the plan measured: refuse rather than send a short
