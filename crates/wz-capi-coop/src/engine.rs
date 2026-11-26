@@ -1431,6 +1431,10 @@ pub(crate) struct Takes {
     /// its pump (`direct`).
     #[cfg(not(wz_round))]
     pub(crate) face_turns: core::sync::atomic::AtomicUsize,
+    /// The turns of a face whose look held every face's send place for a turn of its replay
+    /// (`direct`).
+    #[cfg(not(wz_round))]
+    pub(crate) replay_holds: core::sync::atomic::AtomicUsize,
     /// The deliveries entered (`CoopEngine::deliver`): a read enters one, after every face and
     /// group it stepped (`direct`).
     #[cfg(not(wz_round))]

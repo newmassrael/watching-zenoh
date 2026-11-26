@@ -775,6 +775,34 @@ fn a_keep_alive_runs_no_bookkeeping() {
     );
 }
 
+/// A look that runs the bookkeeping for what the router declared, the link up and its replay told
+/// whole, owes the link no turn of the replay, and holds no face's send place for one: a droppable
+/// publish on another thread would find that place held and be dropped. CONTROL: the look ran the
+/// bookkeeping. Turned red by a look that holds every face's send place for a replay turn that is
+/// not due (`replays` in `CoopEngine::life_turn`).
+#[cfg(not(wz_round))]
+#[test]
+fn a_look_with_no_replay_turn_due_holds_no_send_place_for_one() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "the declarations to be told", || {
+        engine.declarations_synced()
+    });
+    let holds = || engine.takes.replay_holds.load(Ordering::SeqCst);
+    let (services, before) = (engine.services(), holds());
+    router.send(Command::DeclareSubscriber(1, "demo/**"));
+    until(
+        &engine,
+        "CONTROL: the bookkeeping of the declaration",
+        || engine.services() > services,
+    );
+    assert_eq!(
+        holds() - before,
+        0,
+        "a look held the send places for a replay turn not due"
+    );
+}
+
 /// The records of one frame are read in one take of the link's input, each handed out as it is
 /// read, and no pass of a task runs for them: the read steps the link itself. Turned red by a read
 /// that stops the walk of a frame at each record and reads the rest of it again at a later take,

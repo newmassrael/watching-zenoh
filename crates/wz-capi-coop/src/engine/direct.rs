@@ -2183,6 +2183,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // every operation's send takes it, so the look's lock is let go of first. A turn that
             // ended the link has the life looked at by the next read, at once.
             let at = slot.at();
+            #[cfg(test)]
+            if turn.replays {
+                self.takes.replay_holds.fetch_add(1, Ordering::Relaxed);
+            }
             if turn.replays
                 && self.live_on_link(|core, tx| self.turn_replay(core, at, turn.now_us, tx))
                     == Some(TurnEnd::EndsLink)
@@ -2315,9 +2319,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             match moved {
                 // A link the look brought up is owed the replay's first turn, and a paced
-                // replay the turn that may be due.
+                // replay the turn that is due, on the replay's own clock (`Self::turn_replay`).
+                // A look that owes neither holds no face's send place: a droppable publish on
+                // another thread would find it held and be dropped.
                 Ok(()) => {
-                    replays = slot.brought_up || ReplayPacing::REACHABLE;
+                    replays = slot.brought_up
+                        || core
+                            .transport
+                            .links
+                            .face(slot.at())
+                            .is_some_and(|row| row.replay.turn_due(now_us / 1000));
                     #[cfg(any(
                         all(test, feature = "std"),
                         all(feature = "threads", any(feature = "listen", feature = "group"))
