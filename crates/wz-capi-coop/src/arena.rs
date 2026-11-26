@@ -53,9 +53,10 @@
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
 //!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
-//!   table for the session, as many as its `REASSEMBLY_CHAINS` (under the build's; by default one
-//!   for each reliability a peer has a chain open in and one for the rejoined message the round
-//!   reads where its chain lay, `SESSION_CHAIN_BUFFERS` of `wz_runtime_coop::reassembly_rx`), a
+//!   table for the session, as many as its `REASSEMBLY_CHAINS` for each face read where it lies
+//!   (under the build's; by default one for each reliability a peer has a chain open in and one for
+//!   the rejoined message the round reads where its chain lay, `SESSION_CHAIN_BUFFERS` of
+//!   `wz_runtime_coop::reassembly_rx`), a face's chains open at once held to that share, a
 //!   first fragment that finds none free refused and counted (`LentStaging::refused` of
 //!   `wz_session_core::chain_staging`), each buffer claimed when a chain's first fragment arrives and
 //!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
@@ -122,6 +123,7 @@ use core::ptr::NonNull;
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
 use wz_runtime_coop::link_storage::LinkTables;
+use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(feature = "listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
@@ -143,7 +145,7 @@ use wz_session_core::locator_directory::LocatorText;
 #[cfg(feature = "runtime-plan")]
 use wz_session_core::peer_tables::PeerTables;
 use wz_session_core::peer_tables::{PeerPoolRows, PeerRows, SHARES_ROWS};
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 use wz_session_core::policy::HeldPublishDrop;
 #[cfg(all(feature = "query", feature = "runtime-plan"))]
 use wz_session_core::reply_sink::ConsolidatingSink;
@@ -163,10 +165,7 @@ use crate::engine::LegHold;
 use crate::engine::LegSink;
 #[cfg(any(feature = "listen", feature = "group"))]
 use crate::engine::HELD_SET_BYTES;
-#[cfg(all(
-    feature = "runtime-plan",
-    any(feature = "threads", feature = "listen", feature = "group")
-))]
+#[cfg(all(feature = "runtime-plan", wz_round))]
 use crate::engine::REGISTRY_LEND_BYTES;
 #[cfg(feature = "runtime-plan")]
 use crate::engine::ROOM_PLACE_BYTES;
@@ -263,6 +262,7 @@ pub enum ArenaPart {
     DeliveryRound,
     RegistryLend,
     RouterLend,
+    DirectFaces,
     LinkRooms,
     RoomPlaces,
     ReassemblyFlags,
@@ -375,6 +375,7 @@ impl ArenaPart {
             Self::DeliveryRound => ("delivery round", ""),
             Self::RegistryLend => ("registry lend", ""),
             Self::RouterLend => ("router lend", ""),
+            Self::DirectFaces => ("direct faces", "MAX_FACES"),
             Self::LinkRooms => ("link rooms", ""),
             Self::RoomPlaces => ("room places", "MAX_FACES + 1"),
             Self::ReassemblyFlags => ("reassembly flags", "REASSEMBLY_CHAINS"),
@@ -507,22 +508,25 @@ const LANE_ROWS: usize =
 const LANE_ROWS: usize = 0;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
-const STEP_LEND_ROWS: usize = cfg!(feature = "runtime-plan") as usize
-    * (1 + cfg!(any(
-        feature = "threads",
-        feature = "listen",
-        feature = "group"
-    )) as usize);
+const STEP_LEND_ROWS: usize =
+    cfg!(feature = "runtime-plan") as usize * (1 + cfg!(wz_round) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
+/// The read slots and send places of the faces past the dial role's, where each face is read where
+/// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
+/// does one that listens on no port (`listen`), the one role that reads a face past the dial
+/// role's where it lies (`read_faces`).
+const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
 /// rows of the peers the ports took and of the datagrams sorted for them (`listen`).
 const PORT_RX_ROWS: usize = 4 * cfg!(feature = "listen") as usize;
 /// The places of the publishes the session keeps for its other faces, their flags and the rows
-/// beside them (`listen` or `group`): a build of the dial face alone owes no other face.
-const HANDED_ROWS: usize = 3 * cfg!(any(feature = "listen", feature = "group")) as usize;
+/// beside them (`listen` or `group`, in the work form, `wz_round`): a build of the dial face
+/// alone owes no other face, nor does one that sends each face its own leg (`direct`).
+const HANDED_ROWS: usize =
+    3 * cfg!(all(wz_round, any(feature = "listen", feature = "group"))) as usize;
 /// The application's tables apart from the session's one table set: the declaration watchers,
 /// where the arena lends them (`runtime-plan`).
 const OBSERVER_ROWS: usize = cfg!(feature = "runtime-plan") as usize;
@@ -582,6 +586,7 @@ pub const ARENA_ROWS: usize = ENDPOINT_ROWS
     + LANE_ROWS
     + STEP_LEND_ROWS
     + REASSEMBLY_ROWS
+    + DIRECT_FACE_ROWS
     + GROUP_RX_ROWS
     + PORT_RX_ROWS
     + HANDED_ROWS
@@ -1102,10 +1107,15 @@ impl FacePeers {
     /// no rows for the dial face of a session that dials nothing, which holds the first place of
     /// the faces as every session's dial face does (`engine::registry::Registry::new`).
     pub const fn sets(&self) -> usize {
-        let sets = if self.dial {
-            self.tables
+        Self::sets_of(self.tables, self.dial)
+    }
+
+    /// [`Self::sets`] of `tables` faces' tables, the first the dial role's face's when `dial`.
+    const fn sets_of(tables: usize, dial: bool) -> usize {
+        let sets = if dial {
+            tables
         } else {
-            self.tables.saturating_add(1)
+            tables.saturating_add(1)
         };
         if sets == 0 {
             1
@@ -1237,6 +1247,8 @@ pub struct TransportRows {
     reassembly_bytes: usize,
     /// How many such buffers, in the one table the session's links share (`REASSEMBLY_CHAINS`).
     reassembly_chains: usize,
+    /// The most chains one face's Router holds open at once (`face_chains`).
+    face_chains: usize,
     /// The rows of the texts of the endpoints the session dials, and of those it listens on.
     endpoint_rows: (usize, usize),
     /// The bytes of the cell each link's driver, its gates and its actions are placed in, none
@@ -1247,7 +1259,7 @@ pub struct TransportRows {
     cells_held: HeldBits,
     /// How many publishes the session keeps for its other faces at once, each in a place of a
     /// link's batch (`HANDED_LEG_BYTES`).
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     handed_legs: usize,
     /// The receive buffers of the groups the session may join: how many, and the bytes of each.
     #[cfg(feature = "group")]
@@ -1274,10 +1286,12 @@ pub(crate) struct TransportTables {
     pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
     /// The reassembly buffers the links share.
     pub(crate) reassembly: LentByteCells,
+    /// The most chains one face's Router holds open at once in `reassembly`.
+    pub(crate) face_chains: usize,
     /// The rows of the endpoints' texts, none written.
     pub(crate) endpoints: EndpointTexts,
     /// The places of the publishes the session keeps for its other faces.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) handed: HandedTable,
     /// The rows the session's udp ports keep their peers and the datagrams sorted for them in.
     #[cfg(feature = "listen")]
@@ -1293,10 +1307,11 @@ impl TransportRows {
         link_bytes: 0,
         reassembly_bytes: 0,
         reassembly_chains: 0,
+        face_chains: 0,
         endpoint_rows: (0, 0),
         cell_bytes: NO_CELLS,
         cells_held: HeldBits(0),
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         handed_legs: 0,
         #[cfg(feature = "group")]
         group_rx: (0, 0),
@@ -1316,8 +1331,9 @@ impl TransportRows {
             // A chain's buffer is claimed when its first fragment arrives and given back when it
             // ends; the session holds the table for its life.
             reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
+            face_chains: self.face_chains,
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed: HandedTable::over(
                 lend.byte_cells(self.link_bytes, self.handed_legs),
                 lend.table(self.handed_legs),
@@ -1369,6 +1385,10 @@ impl TransportRows {
         lend: &mut TableLender<'_>,
     ) -> LinkTables<LinkCellFlag> {
         let (slots, bytes) = self.port_rx;
+        // A plan that listens on nothing laid no table of them out.
+        if slots == 0 {
+            return tables;
+        }
         tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
@@ -1812,10 +1832,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             link_bytes,
             reassembly_bytes: 0,
             reassembly_chains: 0,
+            face_chains: 0,
             endpoint_rows: (shape.dials, shape.listens),
             cell_bytes: NO_CELLS,
             cells_held: HeldBits(0),
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             handed_legs: 0,
             #[cfg(feature = "group")]
             group_rx: (0, 0),
@@ -1830,12 +1851,16 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             ArenaLimit::PicoFragMaxBytes,
             limits.pico_frag_max_bytes(),
         );
-        // The buffers of the session's one table of chains, as a report reads them
-        // (`link_buffers`).
-        match reassembly_chains(limits) {
-            Ok(chains) => self.transport.reassembly_chains = chains,
-            Err(refused) => self.refuse(refused),
-        }
+        // A face's share of the session's one table of chains, which bounds the chains its Router
+        // holds open; the table is laid out once the faces are counted.
+        let share = match reassembly_chains(limits) {
+            Ok(share) => share,
+            Err(refused) => {
+                self.refuse(refused);
+                0
+            }
+        };
+        self.transport.face_chains = face_chains(share);
         // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
         match pooled_buffers(links, limits) {
             Ok((rx_buffers, tx_slots)) => {
@@ -1866,6 +1891,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             Quota::at_most(limits.key_arena_bytes()),
         );
         let faces = self.sized(shape.faces());
+        // The table of chains, as a report reads it (`link_buffers`).
+        match chain_table(share, FacePeers::sets_of(faces, shape.dial_role())) {
+            Some(chains) => self.transport.reassembly_chains = chains,
+            None => self.refuse(ArenaRefused::TooLarge),
+        }
         // The texts of the endpoints the session dials and listens on, a text a row of one table
         // each, written once when it opens and named by place after
         // (`TransportRows::lent_from`): one row of the plan, the two tables' spans.
@@ -1983,10 +2013,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // The places the session lends its registry and its Router in for a step, a place each
         // (`crate::engine::StepPlaces`); a read that steps its one link itself dispatches under the
         // session's lock and lends no registry.
-        #[cfg(all(
-            feature = "runtime-plan",
-            any(feature = "threads", feature = "listen", feature = "group")
-        ))]
+        #[cfg(all(feature = "runtime-plan", wz_round))]
         self.put(ArenaPart::RegistryLend, 1, REGISTRY_LEND_BYTES);
         #[cfg(feature = "runtime-plan")]
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
@@ -2000,7 +2027,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // place of a link's batch: a publish longer than one is dropped on every face, as one
         // that finds every place held is. Under `every-face` a publish that finds the session
         // held is dropped on every face, and the session reserves no place for one.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
         {
             let bytes = self.lent_to::<{ caps::HANDED_LEG_BYTES }>(
                 ArenaLimit::HandedLegBytes,
@@ -2639,6 +2666,17 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         let _ = planes;
     }
 
+    /// Lay out the read slots and send places of the faces past the dial role's, a row of `bytes`
+    /// for each face read where it lies after the first (`read_faces`): the dial role's lies in
+    /// the engine's place. Laid out once, at the open, the plan not settled.
+    #[cfg(not(wz_round))]
+    pub(crate) fn lay_direct_faces(&mut self, bytes: usize) {
+        let rows = read_faces(self.session.peers.sets()).saturating_sub(1);
+        if rows != 0 {
+            self.put(ArenaPart::DirectFaces, rows, bytes);
+        }
+    }
+
     /// Lay out the place of `bytes` the admission of a session that listens lies in, which the
     /// session's state owns and its links' leases reach by handles that count nothing. Laid out
     /// once, at the open, the plan not settled: a refusal is kept for `Self::settled`.
@@ -2716,22 +2754,30 @@ pub struct LinkBuffers {
     pub transmit: usize,
     /// The bytes of each receive buffer and of each slot: the batch the session advertises.
     pub bytes: usize,
-    /// The reassembly buffers of the session's one table, which its links share.
+    /// The reassembly buffers of the session's one table, which its links share: its stated
+    /// share for each face read where it lies.
     pub chains: usize,
 }
 
-/// The buffers of the links of a session that holds `links` links at most and advertises `batch`
-/// under `limits`: what its plan lays out for them, from the same reckoning
+/// The buffers of the links of a session that holds `links` links at most, admits `beside` faces
+/// besides its dial role's (its [`CoopConfig::max_faces`] and the groups it joins) and
+/// advertises `batch` under `limits`: what its plan lays out for them, from the same reckoning
 /// ([`ArenaPlan::lay_out`]), so a report of the session's memory reads what its open reserves.
-/// Refused as the plan refuses the batch or a pool's limit.
+/// Refused as the plan refuses the batch, a pool's limit or the table of chains.
 pub const fn link_buffers(
     links: usize,
+    beside: usize,
     batch: u16,
     limits: &SessionLimits,
 ) -> Result<LinkBuffers, ArenaRefused> {
     let bytes = tried!(link_batch(batch, limits));
     let (receive, transmit) = tried!(pooled_buffers(links, limits));
-    let chains = tried!(reassembly_chains(limits));
+    let share = tried!(reassembly_chains(limits));
+    // The face table's places: the dial role's, whether or not it dials, and one for each face
+    // besides (`FacePeers::sets`).
+    let Some(chains) = chain_table(share, beside.saturating_add(1)) else {
+        return Err(ArenaRefused::TooLarge);
+    };
     Ok(LinkBuffers {
         receive,
         transmit,
@@ -2740,10 +2786,10 @@ pub const fn link_buffers(
     })
 }
 
-/// The buffers of a session's one table of chains under `limits`, which its links share: its
-/// `REASSEMBLY_CHAINS`, held under the build's value, which a session lowers and never raises, so
-/// a value over it is refused under its own name. However many links the session holds, as a
-/// chain is claimed from the table and not from a link's own buffers.
+/// A face's share of the session's one table of chains under `limits`: its `REASSEMBLY_CHAINS`,
+/// held under the build's value, which a session lowers and never raises, so a value over it is
+/// refused under its own name. However many links the face holds, as a chain is claimed from the
+/// table and not from a link's own buffers.
 const fn reassembly_chains(limits: &SessionLimits) -> Result<usize, ArenaRefused> {
     lent::<{ caps::REASSEMBLY_CHAINS }>(ArenaLimit::ReassemblyChains, limits.reassembly_chains())
 }
@@ -3148,6 +3194,38 @@ pub const fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefuse
 /// its dial role's face alone (`wz_runtime_coop::faces::OneFace`).
 pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "group"));
 
+/// The faces of the face table's `sets` places that are read where they lie, each with a read
+/// slot, a send place and a share of the chain buffers of its own (`crate::engine::direct`):
+/// every place where the session listens, whose ports' connections and attaches take the places
+/// past the dial role's, and the dial role's alone otherwise. A group's place is read through the
+/// group's own session, which stages its chains itself, so it is lent neither. Where the links
+/// are tasks (`wz_round`) they stage into the session's one Router, which reads them all.
+const fn read_faces(sets: usize) -> usize {
+    if cfg!(feature = "listen") && !cfg!(wz_round) {
+        sets
+    } else {
+        1
+    }
+}
+
+/// The buffers of the session's one table of chains: `share` for each face read where it lies
+/// among the face table's `sets` places (`read_faces`), so the chains of one face never take
+/// another's buffers. `None` past the address space. The one reckoning of the plan's table and of
+/// a report's (`link_buffers`).
+const fn chain_table(share: usize, sets: usize) -> Option<usize> {
+    share.checked_mul(read_faces(sets))
+}
+
+/// The most chains one face's Router holds open at once where its share of the session's one
+/// table is `share` buffers: the share, up to the chains a Router stages at once
+/// (`LENT_CHAINS`). The build's share is one more than those, for the rejoined message a face's
+/// read keeps out of the table while it reads it where it lies (`SESSION_CHAIN_BUFFERS` of
+/// `wz_runtime_coop::reassembly_rx`); a share a session lowers bounds the chains themselves, so
+/// a session that states one rejoins one chain at a time.
+const fn face_chains(share: usize) -> usize {
+    least(share, LENT_CHAINS)
+}
+
 /// The inbound links in their handshake at once that `limits` admit: the session's
 /// `MAX_ACCEPT_PENDING`, under the build's. What an ABI states as
 /// [`CoopConfig::accept_pending`], which [`ArenaPlan::of`] holds the config of a session that
@@ -3217,11 +3295,11 @@ pub(crate) const FACE_SLOT_WORDS: usize = MAX_FACE_SETS.div_ceil(u64::BITS as us
 pub(crate) type DroppedOn = wz_runtime_coop::handed::FaceSlots<FACE_SLOT_WORDS>;
 
 /// The publishes a session keeps for the faces they were not dropped on.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 pub(crate) type HandedTable = wz_runtime_coop::handed::HandedLegs<FACE_SLOT_WORDS>;
 
 /// One publish a session keeps for its other faces.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 pub(crate) type Handed = wz_runtime_coop::handed::HandedLeg<FACE_SLOT_WORDS>;
 
 /// The groups a session's plan counts at most: as many as its task cells hold in a build that
@@ -3291,7 +3369,7 @@ pub struct PlanShape {
     pub group_batch: usize,
     /// Whether its policy keeps a publish that found the session held for the faces it was not
     /// dropped on (`held-faces`), which a place of the arena then holds.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub keeps_handed: bool,
 }
 
@@ -3314,7 +3392,7 @@ impl PlanShape {
                 .map(|join| usize::from(join.profile.batch_size))
                 .max()
                 .unwrap_or(0),
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             keeps_handed: keeps_handed(&crate::engine::resolve_policy(config)),
         }
     }
@@ -3334,7 +3412,7 @@ impl PlanShape {
             batch,
             #[cfg(feature = "group")]
             group_batch: 0,
-            #[cfg(any(feature = "listen", feature = "group"))]
+            #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             keeps_handed: keeps_handed(&wz_session_core::policy::SessionPolicy::defaults()),
         }
     }
@@ -3374,7 +3452,7 @@ impl PlanShape {
 
 /// Whether `policy` keeps a publish that found the session held for the faces it was not dropped
 /// on.
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
 const fn keeps_handed(policy: &wz_session_core::policy::SessionPolicy) -> bool {
     matches!(policy.held_publish_drop(), HeldPublishDrop::HeldFaces)
 }

@@ -84,18 +84,12 @@ impl LockForm for Threads {
     // Several threads drive the session's faces: each value a link's session is lent has a lock of
     // its own, what the faces share is counted across threads, and a link's own handles are
     // counted for one task and move between threads with their face whole. A host lock is what
-    // makes those locks; a build with none keeps every value under the session's one lock.
-    #[cfg(all(
-        any(feature = "std", feature = "host-sys"),
-        target_has_atomic = "8",
-        target_has_atomic = "64"
-    ))]
+    // makes those locks; a build with none keeps every value under the session's one lock. The
+    // terms are the build script's (`wz_value_locks`), which names the runtime's kind here, so a
+    // script that says a lock per value where the runtime builds none does not compile.
+    #[cfg(wz_value_locks)]
     type SessionLock = wz_runtime_coop::sync::ManyThreads;
-    #[cfg(not(all(
-        any(feature = "std", feature = "host-sys"),
-        target_has_atomic = "8",
-        target_has_atomic = "64"
-    )))]
+    #[cfg(not(wz_value_locks))]
     type SessionLock = Confined<UnderCoreLock>;
 
     #[inline]

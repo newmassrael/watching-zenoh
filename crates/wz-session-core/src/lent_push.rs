@@ -240,7 +240,42 @@ pub fn plain_put_len(
     value: &[u8],
     qos: crate::sample::QosLevel,
 ) -> usize {
-    if refuses(suffix, value) {
+    plain_push_len(mapping_id, suffix, true, value, qos)
+}
+
+/// The bytes [`write_publication`] writes for the same arguments, worked out from the parts with
+/// nothing written, for a publication that carries no body field and starts no timestamp stack
+/// (the plain Put or Del a stream of samples sends): `Some` of that length, zero for one the
+/// writer refuses, as [`plain_put_len`] counts a refused Put. `None` where a field rides, whose
+/// length is the writer's to count.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+pub fn publication_len(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    kind: crate::sample::SampleKind,
+    value: &[u8],
+    meta: &crate::metadata::PushMetadata,
+) -> Option<usize> {
+    let put = kind == crate::sample::SampleKind::Put;
+    let body = BodyParts::of(put, meta);
+    if !body.is_plain() || body.has_stack() {
+        return None;
+    }
+    let qos = meta.qos.unwrap_or(crate::sample::QosLevel::DEFAULT);
+    Some(plain_push_len(mapping_id, suffix, put, value, qos))
+}
+
+/// The bytes [`write_push`] writes for a Put (`put`) or a Del with no body field, worked out from
+/// the parts; zero for one it refuses.
+#[cfg(all(feature = "storage-profile", feature = "alloc"))]
+fn plain_push_len(
+    mapping_id: crate::wire_id::ExprId,
+    suffix: Option<&str>,
+    put: bool,
+    value: &[u8],
+    qos: crate::sample::QosLevel,
+) -> usize {
+    if refuses(suffix, put, value) {
         return 0;
     }
     // Saturating, not checked: the parts are a slice's length and a few bytes of fields, which no
@@ -258,18 +293,22 @@ pub fn plain_put_len(
             .saturating_add(1)
             .saturating_add(vle_len(u64::from(qos.raw)));
     }
-    // The Put header, the payload's length and the payload.
-    len.saturating_add(1)
-        .saturating_add(vle_len(value.len() as u64))
-        .saturating_add(value.len())
+    // The body's header, then a Put's payload with its length; a Del carries none.
+    len = len.saturating_add(1);
+    if put {
+        len = len
+            .saturating_add(vle_len(value.len() as u64))
+            .saturating_add(value.len());
+    }
+    len
 }
 
-/// Whether [`write_plain_put`] refuses a Put on `suffix` carrying `value`: a key past the
-/// protocol's `u16` length or a payload past its `u32` length.
+/// Whether [`write_push`] refuses a Put (`put`) or a Del on `suffix` with no body field: a key
+/// past the protocol's `u16` length, or a Put's payload past its `u32` length.
 #[cfg(all(feature = "storage-profile", feature = "alloc"))]
-fn refuses(suffix: Option<&str>, value: &[u8]) -> bool {
+fn refuses(suffix: Option<&str>, put: bool, value: &[u8]) -> bool {
     suffix.is_some_and(|text| text.len() > usize::from(u16::MAX))
-        || u32::try_from(value.len()).is_err()
+        || (put && u32::try_from(value.len()).is_err())
 }
 
 /// Whether the QoS extension rides a plain Put: `pubsub-qos` is built and the byte is not the
@@ -1199,6 +1238,79 @@ mod tests {
             "CONTROL: the counted measure is a run of the writer"
         );
         assert_eq!(len, count.len());
+    }
+
+    /// The length a group's publication is pushed with, worked out from its parts, is the bytes its
+    /// writer writes: a Put and a Del, on a literal key and on ids of each VLE width, with and
+    /// without a suffix, with QoS bytes that ride and the one that does not, and payloads whose
+    /// lengths take one, two and three VLE bytes; zero for a key the writer refuses; and `None`,
+    /// the writer's own count, where a body field the build writes rides. Turned red by a worked-out
+    /// length that differs from the written one in a byte (`plain_push_len`), or by one given for a
+    /// publication whose field it does not count (`publication_len`).
+    #[test]
+    fn a_publications_worked_out_length_is_the_written_one() {
+        use crate::metadata::PushMetadata;
+        use crate::sample::{QosLevel, SampleKind};
+        let counted = |id: crate::wire_id::ExprId,
+                       suffix: Option<&str>,
+                       kind: SampleKind,
+                       payload: &[u8],
+                       meta: &PushMetadata<'_>| {
+            let mut count = sce_forge_runtime::codec::CountSink::new();
+            match write_publication(&mut count, id, suffix, kind, payload, meta) {
+                Ok(()) => count.len(),
+                Err(_) => 0,
+            }
+        };
+        let mut compared = 0usize;
+        for kind in [SampleKind::Put, SampleKind::Del] {
+            for id in [0u16, 1, 128, 16_384] {
+                for suffix in [None, Some("a"), Some("demo/thr")] {
+                    for raw in [QosLevel::DEFAULT.raw, 0x05, 0x1a] {
+                        let meta = PushMetadata {
+                            qos: Some(QosLevel::from_raw(raw)),
+                            ..PushMetadata::default()
+                        };
+                        for payload in [&b""[..], &b"x"[..], &[7u8; 128][..], &[9u8; 16_384][..]] {
+                            let len = publication_len(id, suffix, kind, payload, &meta)
+                                .expect("no body field rides");
+                            assert_eq!(
+                                len,
+                                counted(id, suffix, kind, payload, &meta),
+                                "{kind:?} id {id} suffix {suffix:?} qos {raw:#04x} {} bytes",
+                                payload.len()
+                            );
+                            assert!(len > 0);
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(compared, 2 * 4 * 3 * 3 * 4);
+        let past = "k".repeat(usize::from(u16::MAX) + 1);
+        let plain = PushMetadata::default();
+        for kind in [SampleKind::Put, SampleKind::Del] {
+            assert_eq!(
+                publication_len(3, Some(&past), kind, b"x", &plain),
+                Some(0),
+                "a key past its bound, refused by the writer"
+            );
+            assert_eq!(counted(3, Some(&past), kind, b"x", &plain), 0);
+        }
+        let attached = PushMetadata {
+            attachment: Some(&b"att"[..]),
+            ..PushMetadata::default()
+        };
+        let len = publication_len(7, None, SampleKind::Put, b"x", &attached);
+        assert_eq!(
+            len.is_none(),
+            cfg!(feature = "pubsub-attachment"),
+            "an attachment the build writes is the writer's to count"
+        );
+        if let Some(len) = len {
+            assert_eq!(len, counted(7, None, SampleKind::Put, b"x", &attached));
+        }
     }
 
     /// A key past the protocol's `u16` length is refused with `LengthOutOfRange` by every

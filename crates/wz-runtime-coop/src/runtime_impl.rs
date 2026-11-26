@@ -1208,6 +1208,32 @@ mod tests {
         );
     }
 
+    /// A deadline in milliseconds on an instance's epoch is the clock's reading at that
+    /// millisecond's start: the epoch is the construction's reading, not the clock's zero, and the
+    /// reading a microsecond before it is the millisecond before. Turned red by a conversion that
+    /// leaves the epoch out or rounds.
+    #[test]
+    fn time_us_at_ms_is_the_reading_at_which_that_millisecond_starts() {
+        let clock = TestClock::new();
+        clock.tick_us(40_250);
+        let rt = CoopRuntime::try_new(clock.clone()).expect("the heap has room");
+        let time = CoopTime::new(&rt);
+        assert_eq!(time.us_at_ms(0), 40_250, "the epoch");
+        assert_eq!(time.us_at_ms(3), 43_250);
+        assert_eq!(time.ms_at(time.us_at_ms(3)), 3);
+        assert_eq!(
+            time.ms_at(time.us_at_ms(3) - 1),
+            2,
+            "the millisecond before"
+        );
+        clock.tick_us(3_000);
+        assert_eq!(
+            time.now_monotonic_ms(),
+            3,
+            "the clock at that reading reads the millisecond"
+        );
+    }
+
     #[test]
     fn sleep_completes_when_clock_advances_past_deadline() {
         // R311bc: SleepFuture registers its waker on the timer

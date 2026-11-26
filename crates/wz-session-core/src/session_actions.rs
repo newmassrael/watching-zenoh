@@ -4429,6 +4429,19 @@ impl Probed {
     }
 }
 
+/// What a blocking message's wait for room on its link, made before its send
+/// ([`SessionLinkActions::wait_for_wire_room`]), came to.
+#[cfg(all(feature = "codec-push", feature = "alloc"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WireRoom {
+    /// Send it: the link has room, or what it lacks is the send's own to answer (an outbound slot
+    /// another link's frame holds, a link that is down, a close already ordered, a deferral).
+    Send,
+    /// No room within `wait_before_close`: the message is the congestion drop the send would
+    /// have made, counted and its expiry settled as the send settles it, and is not sent.
+    Expired,
+}
+
 /// How a message's encoder reaches [`SessionLinkActions::dispatch_network_message_at`]: a trait
 /// object, so the dispatch (some 7 KB on a host, 1.3 KB on the slot profile) is one copy and not
 /// one per kind of message sent, at the cost of one call through a pointer per message. The object
@@ -14890,6 +14903,55 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             link.link_driver()
                 .try_reserve_room_for(reliability, priority)
         }))
+    }
+
+    /// Wait for room for a blocking message of `priority` on the link it leaves by, within
+    /// `wait_before_close`, as the send asks before its sequence number is minted: what a sender
+    /// that holds this link's send part and nothing else asks, so that it takes the locks its send
+    /// needs only once the link has room and its wait holds up no other link and no reader. The
+    /// send asks again and finds the room at once, since only a holder of the send part writes the
+    /// link.
+    ///
+    /// No room in that time is settled here as the send settles it: counted as a congestion drop
+    /// and the expiry judged by the `tx-expiry-keeps-session` policy, answered `Expired` where the
+    /// session closes and [`SendWireError::TransportUnavailable`] where it is kept, as the send
+    /// answers then. A link with no outbound slot claimable is `Send`: its stack is not what it
+    /// waits for, and the sender's own send finds the slot or waits for it its own way.
+    #[cfg(all(feature = "codec-push", feature = "alloc"))]
+    pub fn wait_for_wire_room(&self, priority: Priority) -> Result<WireRoom, SendWireError> {
+        if self.congestion_close_ordered() || !self.session_send_available() {
+            return Ok(WireRoom::Send);
+        }
+        // A deferred send waits for no room here, so it is not waited for ahead of it either.
+        #[cfg(not(feature = "tx-lend-only"))]
+        if self.deferred_sends.engaged() {
+            return Ok(WireRoom::Send);
+        }
+        let message_priority = priority;
+        let priority = self.conduit_priority(priority);
+        // A message that may not be dropped is a reliable one.
+        let reliability = Reliability::from_reliable_bool(true);
+        let deadline = PushDeadline::new(false, &self.params.tx_queue);
+        let answer = self.with_conduit_link(reliability, priority, |link| {
+            link.link_driver()
+                .wait_for_room_for(reliability, priority, deadline.ask())
+        });
+        if answer.room != crate::link::LinkRoom::Congested || !self.tx_slot_claimable() {
+            return Ok(WireRoom::Send);
+        }
+        #[cfg(feature = "transport-stats")]
+        self.count_congestion_drop(
+            reliability,
+            priority,
+            message_priority,
+            &crate::stats::NetworkStatsClass::unread(),
+        );
+        #[cfg(not(feature = "transport-stats"))]
+        let _ = message_priority;
+        if self.settle_blocking_expiry() == TxExpiry::Kept {
+            return Err(SendWireError::TransportUnavailable);
+        }
+        Ok(WireRoom::Expired)
     }
 
     /// [`Self::send_network_message_qos`] for a message whose sender already holds the room it

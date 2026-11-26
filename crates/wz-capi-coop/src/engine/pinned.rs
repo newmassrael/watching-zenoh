@@ -5,13 +5,15 @@
 //! steps its one link itself (`direct`): a Push read where its frame lies, and a put of the
 //! session's own.
 //!
-//! The record is read into its sample under the session's lock, and the first subscriber its key
-//! reaches is pinned there: a call begun on its row. The lock is let go of, the sample is handed
-//! to the callback, and the call is ended with no lock held; a row undeclared meanwhile whose last
-//! call that was is let go of under the lock and dropped after it. The next row is pinned under
-//! the lock again, from the place after the last, so a callback finds the session free and what
-//! it did is seen by the rows after its own. The walk's place and the key lie in this frame; the
-//! tables keep nothing of a delivery under way.
+//! The record is read into its sample under the session's lock, and every subscriber its key
+//! reaches is pinned there: a call begun on each one's row, the rows as that one hold of the lock
+//! finds them, as zenoh-pico's delivery takes the subscriptions a key reaches under its lock
+//! (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_subscription_get_infos`). The lock is
+//! let go of, and the sample is handed to each callback in the table's order, each call ended with
+//! no lock held, so a callback finds the session free; a row undeclared meanwhile keeps its slot
+//! until its last call ended, and is then let go of under the lock and dropped after it. A
+//! subscriber a callback declares is handed the next sample, not this one. The calls and the key
+//! lie in this frame; the tables keep nothing of a delivery under way.
 //!
 //! The key is not copied: it is the frame's, the face's peer's literal, or a buffer of the face's
 //! peer or of this frame. The peer and its buffer are written only by the dispatch of the face's
@@ -24,7 +26,7 @@ use super::*;
 
 use wz_session_core::driver_loop::{InPlaceRecord, OwedToProjection};
 use wz_session_core::sample::Sample;
-use wz_session_core::session_tables::PinnedFanOut;
+use wz_session_core::session_tables::{PinnedFanOut, PinnedSubscribers};
 #[cfg(feature = "liveliness")]
 use {
     wz_session_core::declare::liveliness_subscriber::TokenNews,
@@ -89,9 +91,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// frame's dispatch takes it. What the frame's other planes take follows
     /// (`Planes::BesideSubscribers`). A session closed meanwhile takes no record after the one
     /// whose callback closed it.
-    pub(super) fn hand_copied_records(
+    pub(super) fn hand_copied_records<A: super::direct::RecordActions>(
         &self,
-        records: &super::direct::FaceRecords<C>,
+        records: &super::direct::FaceRecords<A>,
         messages: &[wz_session_core::network_message::NetworkMessage],
         reliable: bool,
     ) {
@@ -112,7 +114,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 held.0
                     .session
                     .registry
-                    .dispatch_declare_message(face, message, || records.actions.peer_session_zid());
+                    .dispatch_declare_message(face, message, || records.actions.record_peer());
                 drop(held);
                 self.deliver();
                 let Some(again) = self.live() else {
@@ -267,10 +269,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Hand the peer token `news` tells of to each liveliness subscriber it reaches, one call at
-    /// a time with the session let go of, as a Push's sample is handed (`Self::hand_row_by_row`):
-    /// each row is pinned under the session's lock, from the place after the last, so a callback
-    /// finds the session free and a row undeclared by an earlier call is passed. A closed session
-    /// pins no row, unless `past_close`: the retractions of a link whose loss ended the session.
+    /// a time with the session let go of: each row is pinned under the session's lock, from the
+    /// place after the last, so a callback finds the session free and a row undeclared by an
+    /// earlier call is passed. A closed session pins no row, unless `past_close`: the retractions
+    /// of a link whose loss ended the session.
     #[cfg(feature = "liveliness")]
     pub(super) fn hand_token_row_by_row(&self, news: &TokenNews, past_close: bool) {
         let sample = news.sample();
@@ -294,33 +296,54 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         });
     }
 
-    /// Hand `sample` to each subscriber `fan` reaches, the first pinned under `held`, one call at
-    /// a time with the session let go of: how many were handed it. A row undeclared by an earlier
-    /// call is passed, and one whose last call this was is let go of with no lock held.
+    /// Hand `sample` to each subscriber `fan` reaches, one call at a time with the session let go
+    /// of: how many were handed it. Every row it reaches is pinned under `held`, a call begun on
+    /// each, and the calls are made after the lock in the table's order, as zenoh-pico's delivery
+    /// takes the subscriptions a key reaches under its lock and calls each of them after it
+    /// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_subscription_get_infos` and
+    /// `_z_trigger_subscriptions_impl`). So a subscriber a callback declares is handed the samples
+    /// after this one and not this one, and one a callback undeclares is still handed this one, its
+    /// row kept in its slot until that call ended and let go of then with no lock held. A callback
+    /// that closes the session leaves the rows after its own unhanded.
     fn hand_row_by_row(
         &self,
         mut held: LiveCore<'_, L, C>,
         sample: &SampleRef<'_>,
         fan: &mut PinnedFanOut<'_>,
     ) -> usize {
-        let mut next = tables_mut(&mut held.0.session.registry).pin_next_subscriber(fan);
+        let mut calls = PinnedSubscribers::<CoopRows>::new_static();
+        let mut whole = tables_mut(&mut held.0.session.registry).pin_subscribers(fan, &mut calls);
         drop(held);
         let mut reached: usize = 0;
+        let mut drained = false;
         // A read a callback makes reads nothing, so no record is handed out inside another's call.
         self.deliveries.within(|_| {
-            while let Some(call) = next.take() {
-                let call = SubscriberCall::new(call);
-                call.hand(sample);
-                reached = reached.saturating_add(1);
-                if call.end() {
-                    self.let_go_of_drained(|tables, cursor| {
-                        tables
-                            .release_drained_subscriber(cursor)
-                            .map(|row| row.into_callback())
-                    });
+            loop {
+                // Pinned in the table's order, and taken from the back.
+                calls.reverse();
+                while let Some(call) = calls.pop() {
+                    let call = SubscriberCall::new(call);
+                    if !self.closed.load(Ordering::Acquire) {
+                        call.hand(sample);
+                        reached = reached.saturating_add(1);
+                    }
+                    drained |= call.end();
                 }
-                next = self.live().and_then(|mut held| {
-                    tables_mut(&mut held.0.session.registry).pin_next_subscriber(fan)
+                if whole {
+                    break;
+                }
+                // Room for a call on every row the table can hold, so only a table past its
+                // build's bound would leave rows to pin again.
+                let Some(mut held) = self.live() else {
+                    break;
+                };
+                whole = tables_mut(&mut held.0.session.registry).pin_subscribers(fan, &mut calls);
+            }
+            if drained {
+                self.let_go_of_drained(|tables, cursor| {
+                    tables
+                        .release_drained_subscriber(cursor)
+                        .map(|row| row.into_callback())
                 });
             }
         });

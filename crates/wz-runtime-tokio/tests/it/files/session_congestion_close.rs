@@ -161,3 +161,87 @@ async fn a_blocking_message_on_a_congested_link_ends_the_running_session_without
         "no byte was written to the link after the request"
     );
 }
+
+/// An outbound link whose every lane has room.
+#[cfg(feature = "codec-push")]
+struct RoomyLink;
+
+#[cfg(feature = "codec-push")]
+impl BoxedLinkDriver for RoomyLink {
+    fn send_blocking(&self, _bytes: &[u8], _reliability: Reliability) -> LinkSendOutcome {
+        LinkSendOutcome::Sent
+    }
+    fn wait_for_room(&self, _priority: Priority, _wait: RoomWait) -> RoomAnswer {
+        RoomAnswer::at_once(LinkRoom::Free)
+    }
+    fn open_blocking(&self) {}
+    fn close_blocking(&self) {}
+}
+
+/// A blocking sender that waits for its link's room before its send, holding nothing else, is
+/// told to send where the link has room and settled as the send would settle it where the link
+/// has none: the expiry closes the session, and the wait itself writes nothing to the link. Once
+/// the close is ordered the send answers for itself and the wait asks nothing. The CONTROL is the
+/// link with room, whose session no close is ordered of. Turned red by a wait that answers
+/// `Send` on a congested link (the send would then wait out `wait_before_close` again under
+/// whatever its sender holds), or that leaves the expiry unsettled.
+#[cfg(feature = "codec-push")]
+#[tokio::test]
+async fn a_wait_for_room_ahead_of_a_blocking_send_settles_what_the_send_would() {
+    use wz_session_core::session_actions::WireRoom;
+    let established = |outbound: Arc<dyn BoxedLinkDriver + Send + Sync>| {
+        let actions =
+            new_session_actions(outbound, fixture_session_init_params(), TokioTime::new())
+                .expect("the heap has room");
+        {
+            let mut engine = new_session_engine(&actions);
+            engine.initialize().unwrap_or_else(|never| match never {});
+            engine.process_event(SessionFsmUnicastEvent::OutboundStart);
+            engine.process_event(SessionFsmUnicastEvent::LinkOpened);
+            engine.process_event(SessionFsmUnicastEvent::InitAckReceived);
+            engine.process_event(SessionFsmUnicastEvent::OpenAckReceived);
+            assert_eq!(
+                engine.get_current_state(),
+                SessionFsmUnicastState::Established,
+                "the walk to Established is this witness's premise, not its claim"
+            );
+        }
+        actions
+    };
+
+    let roomy = established(Arc::new(RoomyLink));
+    assert_eq!(
+        roomy.wait_for_wire_room(Priority::DEFAULT),
+        Ok(WireRoom::Send),
+        "CONTROL: a link with room is sent to"
+    );
+    assert!(
+        !roomy.congestion_close_ordered(),
+        "CONTROL: and no close is ordered"
+    );
+
+    let written = Arc::new(AtomicUsize::new(0));
+    let full = established(Arc::new(FullLink {
+        written: written.clone(),
+    }));
+    let written_before = written.load(Ordering::SeqCst);
+    assert_eq!(
+        full.wait_for_wire_room(Priority::DEFAULT),
+        Ok(WireRoom::Expired),
+        "a link with no room within the wait is the drop the send would have made"
+    );
+    assert!(
+        full.congestion_close_ordered(),
+        "the expiry is settled as the send settles it: the session's close is ordered"
+    );
+    assert_eq!(
+        written.load(Ordering::SeqCst),
+        written_before,
+        "the wait wrote nothing to the link"
+    );
+    assert_eq!(
+        full.wait_for_wire_room(Priority::DEFAULT),
+        Ok(WireRoom::Send),
+        "once the close is ordered the send refuses itself, and the wait asks nothing"
+    );
+}

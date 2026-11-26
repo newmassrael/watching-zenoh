@@ -19,21 +19,22 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     type Lock = SessionLock;
     type Links = L;
     type Session = LinkSession<C>;
+    type Wire = FaceLink<C, L>;
     type Face = Self;
     // A build that takes no face beside its dial role's holds that one alone, so its walks over
     // the faces are one face and no place is looked up (`crate::arena::TAKES_FACES`).
     #[cfg(any(feature = "listen", feature = "group"))]
-    type Places = wz_runtime_coop::faces::ManyFaces<Self>;
+    type Places = wz_runtime_coop::faces::ManyFaces<Self, L::Dial>;
     #[cfg(not(any(feature = "listen", feature = "group")))]
-    type Places = wz_runtime_coop::faces::OneFace<Self>;
+    type Places = wz_runtime_coop::faces::OneFace<Self, L::Dial>;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
     type RouterPlace = super::RouterPlace;
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     type Router = SessionReassembly;
     // The Router lies beside the one link the read steps itself, apart from the session's state
     // (`super::direct`).
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     type Router = ();
 }
 

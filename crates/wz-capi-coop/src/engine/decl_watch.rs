@@ -49,41 +49,41 @@ use wz_session_core::declare::MatchingReport;
 use wz_session_core::key_arena::KeyRef;
 use wz_session_core::limit_binding::Quota;
 use wz_session_core::limits::SessionLimits;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 use wz_session_core::placed::PlacedRef;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 use wz_session_core::round::Owing;
 use wz_session_core::round::{DeclEvent, DeclEventKind};
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 use wz_session_core::row_callback::ThreadForm;
 use wz_session_core::session_zid::SessionZid;
 use wz_session_core::slot_observer::{ObserverSinks, SlotObserverOf};
 
 use super::lock;
 use super::registry::FaceTables;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 use crate::form::CoopForm;
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 use crate::round::Round;
 
 /// Whether a watch is told its catch-up in parts: a round of one thread is handed out after each
 /// message and holds the records of one alone, so it takes a catch-up a declaration a round.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 const IN_PARTS: bool = !<CoopForm as ThreadForm>::OTHER_THREADS;
 
 /// The watch events the dispatch of one message makes at most: the one declaration or retraction
 /// a `Declare` applies, which its table tells its observers once, and the end of the peer's
 /// initial declarations, told after the dispatch of the message that ends them.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 const MESSAGE_EVENTS: usize = 2;
 
 /// How many events the room holds until the delivery after the dispatch hands them out: those of
 /// one message, so the dispatch of a lent record, which is one message, never finds it full.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 const HEARD_EVENTS: usize = MESSAGE_EVENTS;
 
 // A declaration or a retraction and the end of the initial declarations: one of each a message.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 const _: () = assert!(
     matches!(1usize.checked_add(1), Some(made) if made <= HEARD_EVENTS),
     "the room holds every event one message makes"
@@ -130,7 +130,7 @@ fn port_event(event: DeclEvent<'_>) -> DeclWatchEvent<'_> {
 }
 
 /// The loss of `count` events, which names no declaration and no peer.
-#[cfg(any(test, any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(any(test, wz_round))]
 fn lost(count: u64) -> DeclEvent<'static> {
     DeclEvent {
         kind: DeclEventKind::Lost,
@@ -203,7 +203,7 @@ impl WatchCall {
     }
 
     /// Whether `other` is a call of the same watch.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     pub(crate) fn same_row(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.cell, &other.cell)
     }
@@ -325,7 +325,7 @@ struct Table {
     hearing: Option<Hearing>,
     /// What the dispatch of the last record held for the watches, until the delivery after it
     /// hands it out.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     room: Room,
 }
 
@@ -342,7 +342,7 @@ impl Table {
             observers: PlaneObservers::default(),
             next_id: 0,
             hearing: None,
-            #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+            #[cfg(not(wz_round))]
             room: Room::empty(),
         }
     }
@@ -357,7 +357,7 @@ impl Table {
 /// the links are read by a task or a listener.
 struct Shared {
     table: Mutex<Table>,
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     round: PlacedRef<Round>,
 }
 
@@ -408,7 +408,7 @@ fn held_of(
 }
 
 /// How many declarations of `plane` the peer of `tables` holds now.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
     let mut count: usize = 0;
     held_of(plane, tables, |_, _, _| count = count.saturating_add(1));
@@ -420,7 +420,7 @@ fn held(plane: DeclPlane, tables: &FaceTables) -> usize {
 ///
 /// # Safety
 /// The caller holds the session's lock.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 unsafe fn tell_lost(round: &Round, watch: &mut Watch, cell: &Arc<Cell>) {
     if watch.lost == 0 {
         return;
@@ -437,7 +437,7 @@ unsafe fn tell_lost(round: &Round, watch: &mut Watch, cell: &Arc<Cell>) {
 ///
 /// # Safety
 /// The caller holds the session's lock.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 unsafe fn tell_held<'f, I>(
     round: &Round,
     watch: &mut Watch,
@@ -475,7 +475,7 @@ where
 
 /// Tell `round` whether a watch of `table` is still owed its catch-up, in a round that takes it in
 /// parts ([`IN_PARTS`]): while one is, no link is read, so nothing a link brings overtakes it.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 fn owe_catch_up(round: &Round, table: &Table) {
     if IN_PARTS {
         round.owe(
@@ -491,7 +491,7 @@ fn owe_catch_up(round: &Round, table: &Table) {
 ///
 /// # Safety
 /// The caller holds the session's lock.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 unsafe fn offer(
     round: &Round,
     table: &mut Table,
@@ -521,7 +521,7 @@ unsafe fn offer(
 ///
 /// # Safety
 /// The caller holds the session's lock: the observers are told as a frame is dispatched.
-#[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+#[cfg(wz_round)]
 unsafe fn heard(
     shared: &Shared,
     kind: DeclEventKind,
@@ -546,7 +546,7 @@ unsafe fn heard(
 
 /// One event as a watch is handed it, its key copied out of what the session holds, so it is
 /// handed with no lock held.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[derive(Clone)]
 pub(super) struct Told {
     kind: DeclEventKind,
@@ -556,7 +556,7 @@ pub(super) struct Told {
     len: usize,
 }
 
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 impl Default for Told {
     /// No event yet: where a delivery copies each event it hands.
     fn default() -> Self {
@@ -570,7 +570,7 @@ impl Default for Told {
     }
 }
 
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 impl Told {
     /// `kind` of the declaration `id` on `keyexpr`, from `peer`: whether its key fits, as
     /// every key the session holds does. One that does not leaves the event as it was.
@@ -618,7 +618,7 @@ impl Told {
 }
 
 /// An event the dispatch held for the watches of `plane`.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 struct Heard {
     plane: DeclPlane,
     told: Told,
@@ -626,14 +626,14 @@ struct Heard {
 
 /// The events the dispatch of one record held, in the order it held them, and the row the first
 /// is handed to next.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 struct Room {
     heard: [Heard; HEARD_EVENTS],
     len: usize,
     row: usize,
 }
 
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 impl Room {
     /// A room that holds no event.
     fn empty() -> Self {
@@ -691,7 +691,7 @@ impl Room {
 
 /// Copy into `told`, as its face's peer's, the declaration of `plane` at `at` in the order the
 /// peers of `faces` hand theirs: whether its key fits, `None` past the last one.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 fn nth_held<'f, I>(
     plane: DeclPlane,
     faces: &impl Fn() -> I,
@@ -721,7 +721,7 @@ where
 /// dispatched for the delivery after the record to hand to the watches it reaches; a group's is
 /// held for no one. One the room has no place for is counted as lost for each watch it reaches.
 /// A watch still owed its catch-up is reached by none.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 fn heard(shared: &Shared, kind: DeclEventKind, plane: DeclPlane, id: u64, keyexpr: &str) {
     let mut table = lock(&shared.table);
     let Some(Hearing { peer }) = table.hearing else {
@@ -749,7 +749,7 @@ fn heard(shared: &Shared, kind: DeclEventKind, plane: DeclPlane, id: u64, keyexp
 impl DeclWatches {
     /// No watch, and room for as many watches as the session's `MAX_DECL_WATCHES` admits under the
     /// build's, their events held in `round`, the session's round of deliveries.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     pub(super) fn under(
         limits: &SessionLimits,
         round: &PlacedRef<Round>,
@@ -759,7 +759,7 @@ impl DeclWatches {
     }
 
     /// No watch, and room for `watches` of them, at most the build's, their events held in `round`.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     fn holding(watches: usize, round: &PlacedRef<Round>) -> Self {
         let shared = Arc::<Shared>::new_uninit();
         let at = Arc::as_ptr(&shared).cast_mut().cast::<Shared>();
@@ -778,14 +778,14 @@ impl DeclWatches {
 
     /// No watch, and room for as many watches as the session's `MAX_DECL_WATCHES` admits under the
     /// build's.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     pub(super) fn under(limits: &SessionLimits) -> Result<Self, LendRefused> {
         let watches = rows_under::<{ caps::MAX_DECL_WATCHES }>(limits.max_decl_watches())?;
         Ok(Self::holding(watches))
     }
 
     /// No watch, and room for `watches` of them, at most the build's.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     fn holding(watches: usize) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -858,7 +858,7 @@ impl DeclWatches {
     /// of the last record held. What a delivery asks once it has emptied the round.
     pub(super) fn owes(&self) -> bool {
         let table = lock(&self.shared.table);
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        #[cfg(not(wz_round))]
         if table.room.len != 0 {
             return true;
         }
@@ -882,7 +882,7 @@ impl DeclWatches {
     /// of it: what the room holds is in the tables the catch-up reads already. The read reads no
     /// record until nothing is owed, so the tables a catch-up is read off a declaration at a time
     /// hold still between its calls.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     pub(super) fn next_call<'f, I>(
         &self,
         faces: impl Fn() -> I,
@@ -950,7 +950,7 @@ impl DeclWatches {
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     pub(super) unsafe fn tell_owed<'f, I>(&self, faces: impl Fn() -> I)
     where
         I: Iterator<Item = (&'f FaceTables, Option<SessionZid>)>,
@@ -1039,7 +1039,7 @@ impl DeclWatches {
                 uninstall(app, observers);
             }
         }
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         owe_catch_up(&self.shared.round, &table);
         drop(table);
         Some(sink)
@@ -1052,7 +1052,7 @@ impl DeclWatches {
     pub(super) fn close(&self) -> impl Iterator<Item = DeclWatchSink> {
         let mut table = lock(&self.shared.table);
         table.hearing = None;
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        #[cfg(not(wz_round))]
         table.room.clear();
         let sinks: [Option<DeclWatchSink>; caps::MAX_DECL_WATCHES] = core::array::from_fn(|at| {
             let row = table.rows.get_mut(at)?;
@@ -1061,7 +1061,7 @@ impl DeclWatches {
             slot.gone = true;
             slot.sink.take()
         });
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         owe_catch_up(&self.shared.round, &table);
         drop(table);
         sinks.into_iter().flatten()
@@ -1087,10 +1087,7 @@ impl DeclWatches {
     ///
     /// # Safety
     /// The caller holds the session's lock.
-    #[cfg(all(
-        feature = "declarations-synced-event",
-        any(feature = "threads", feature = "listen", feature = "group")
-    ))]
+    #[cfg(all(feature = "declarations-synced-event", wz_round))]
     pub(super) unsafe fn heard_synced(&self) {
         // SAFETY: the caller's contract.
         unsafe {
@@ -1107,10 +1104,7 @@ impl DeclWatches {
 
     /// The face whose frame was just dispatched told that its peer ended its initial
     /// declarations.
-    #[cfg(all(
-        feature = "declarations-synced-event",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(all(feature = "declarations-synced-event", not(wz_round)))]
     pub(super) fn heard_synced(&self) {
         heard(
             &self.shared,
@@ -1139,7 +1133,7 @@ const _: () = assert!(
 
 impl DeclSink for WatchObserver {
     fn on_declared(&mut self, decl: &dyn DeclView) {
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        #[cfg(not(wz_round))]
         heard(
             &self.shared,
             DeclEventKind::Declared,
@@ -1147,7 +1141,7 @@ impl DeclSink for WatchObserver {
             decl.id(),
             decl.keyexpr(),
         );
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         // SAFETY: the application layer tells its observers as a frame is dispatched, under the
         // session's lock.
         unsafe {
@@ -1165,9 +1159,9 @@ impl DeclSink for WatchObserver {
 
 impl UndeclSink for WatchObserver {
     fn on_undeclared(&mut self, id: u64) {
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        #[cfg(not(wz_round))]
         heard(&self.shared, DeclEventKind::Undeclared, self.plane, id, "");
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         // SAFETY: as `on_declared`.
         unsafe {
             heard(
@@ -1301,11 +1295,7 @@ mod tests {
         any(feature = "query", feature = "queryable")
     ))]
     use crate::arena::{AllocatorMemory, SessionArena};
-    #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(any(feature = "query", feature = "queryable", not(wz_round)))]
     use wz_session_core::decl_sink::BorrowedDecl;
     #[cfg(all(
         feature = "runtime-plan",
@@ -1325,11 +1315,7 @@ mod tests {
     /// observers are the watches' own ([`WatchObserver`]), as the registry's are.
     type SlotObserver = SlotObserverOf<CoopSinks>;
 
-    #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(any(feature = "query", feature = "queryable", not(wz_round)))]
     const PEER: [u8; 4] = [0xc3; 4];
 
     /// A sink that records each event it is told, as the port's event prints.
@@ -1348,39 +1334,39 @@ mod tests {
     }
 
     /// As many watches as the build holds, their events held in a round of `events` records.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     fn over(events: usize) -> (DeclWatches, PlacedRef<Round>) {
         let round = crate::round::leaked(events);
         (DeclWatches::holding(caps::MAX_DECL_WATCHES, &round), round)
     }
 
     /// No watch, and room for `rows` of them, at most the build's.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     fn watches_of(rows: usize) -> DeclWatches {
         DeclWatches::holding(rows, &crate::round::leaked(2))
     }
 
     /// No watch, and room for `rows` of them, at most the build's.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     fn watches_of(rows: usize) -> DeclWatches {
         DeclWatches::holding(rows)
     }
 
     /// The watches the session's `limits` admit.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     fn under(limits: &SessionLimits) -> Result<DeclWatches, LendRefused> {
         DeclWatches::under(limits, &crate::round::leaked(1))
     }
 
     /// The watches the session's `limits` admit.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     fn under(limits: &SessionLimits) -> Result<DeclWatches, LendRefused> {
         DeclWatches::under(limits)
     }
 
     /// Hand out every call the watches are owed now, as the delivery after a record does: how
     /// many calls were made.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     fn hand_all(watches: &DeclWatches) -> usize {
         let mut told = Told::default();
         let mut calls: usize = 0;
@@ -1412,18 +1398,18 @@ mod tests {
             Ok(id) => id,
             Err((refused, _)) => panic!("a table with room refused the watch: {refused:?}"),
         };
-        #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+        #[cfg(wz_round)]
         // SAFETY: the test is the session's one thread, as a holder of its lock is.
         unsafe {
             watches.tell_owed(no_faces)
         };
-        #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+        #[cfg(not(wz_round))]
         hand_all(watches);
         id
     }
 
     /// Seal the round and hand it out: whether it held anything.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     fn hand(round: &Round) -> bool {
         // SAFETY: the test is the session's one thread, as a holder of its lock is.
         unsafe { round.seal() };
@@ -1431,11 +1417,7 @@ mod tests {
     }
 
     /// The declaration `id` of `plane` on `keyexpr`, told as an observer is told it.
-    #[cfg(any(
-        feature = "query",
-        feature = "queryable",
-        not(any(feature = "threads", feature = "listen", feature = "group"))
-    ))]
+    #[cfg(any(feature = "query", feature = "queryable", not(wz_round)))]
     fn declared(watches: &DeclWatches, plane: DeclPlane, id: u64, keyexpr: &str) {
         observer(plane, &watches.shared).on_declared(&BorrowedDecl {
             id,
@@ -1453,7 +1435,7 @@ mod tests {
     /// kind, named as the link's peer where the build names peers; one a group's frame told is
     /// held for no one.
     #[cfg(any(feature = "query", feature = "queryable"))]
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn a_links_event_reaches_the_watches_of_its_kind_and_a_groups_none() {
         let (watches, round) = over(4);
@@ -1492,7 +1474,7 @@ mod tests {
 
     /// A link's frame reads no peer while no watch is declared, and what it tells is held for no
     /// one.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn a_frame_no_watch_hears_reads_no_peer_and_holds_nothing() {
         let (watches, round) = over(2);
@@ -1504,7 +1486,7 @@ mod tests {
     }
 
     /// One event a frame told takes one record of the round, which every watch it reaches joins.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn one_record_holds_an_event_for_every_watch_it_reaches() {
         let (watches, round) = over(2);
@@ -1529,7 +1511,7 @@ mod tests {
 
     /// An event the round has no room for is told as a loss ahead of the watch's next event, and a
     /// loss no event follows is told by the next round that has room for it.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn an_event_with_no_room_is_told_as_a_loss_by_the_next_round() {
         let (watches, round) = over(2);
@@ -1582,7 +1564,7 @@ mod tests {
     /// A watch declared while the round is handed out (from inside a callback) is declared, owed
     /// its catch-up, which the next round that has room for it holds; until then it is told no live
     /// event, which the catch-up, read off the peers' tables then, holds.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn a_watch_declared_while_the_round_is_handed_out_is_caught_up_by_the_next() {
         let (watches, round) = over(4);
@@ -1626,7 +1608,7 @@ mod tests {
 
     /// An undeclared watch is handed nothing the round still holds for it, the observers of its
     /// kind leave with the last watch of that kind, and a second undeclare finds none.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn an_undeclared_watch_is_handed_nothing_and_takes_its_observers_with_it() {
         let (watches, round) = over(2);
@@ -1694,7 +1676,7 @@ mod tests {
     }
 
     /// A close hands back every sink, and the round hands nothing it still held to them.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn a_close_gives_back_every_sink_and_hands_nothing_more() {
         let (watches, round) = over(2);
@@ -1784,7 +1766,7 @@ mod tests {
 
     /// A row a call of its undeclared watch is still owed on is not taken by another watch until
     /// the round has made the call.
-    #[cfg(any(feature = "threads", feature = "listen", feature = "group"))]
+    #[cfg(wz_round)]
     #[test]
     fn a_row_is_not_taken_while_a_call_of_its_last_watch_is_owed() {
         let round = crate::round::leaked(2);
@@ -1947,7 +1929,7 @@ mod tests {
     ///
     /// The key the observer was told is let go of before the delivery: a room that kept a borrow
     /// of it, and not a copy, would not hand `demo/s`.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     #[test]
     fn a_links_event_is_copied_and_handed_to_each_watch_it_reaches_after_the_record() {
         let watches = watches_of(caps::MAX_DECL_WATCHES);
@@ -1986,7 +1968,7 @@ mod tests {
 
     /// A link's frame reads no peer while no watch is declared, and what it tells is held for no
     /// one.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     #[test]
     fn a_frame_no_watch_hears_reads_no_peer_and_holds_nothing_for_the_read() {
         let watches = watches_of(caps::MAX_DECL_WATCHES);
@@ -2004,7 +1986,7 @@ mod tests {
     ///
     /// A room that took one event more than `HEARD_EVENTS`, or a loss told ahead of the events it
     /// came after, changes the order the log holds.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     #[test]
     fn an_event_past_the_room_is_told_as_a_loss_after_what_it_took() {
         let watches = watches_of(caps::MAX_DECL_WATCHES);
@@ -2031,7 +2013,7 @@ mod tests {
     }
 
     /// A key past the bytes the room copies is counted as lost, not cut.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     #[test]
     fn a_key_past_the_rooms_bytes_is_told_as_a_loss() {
         let watches = watches_of(caps::MAX_DECL_WATCHES);
@@ -2049,7 +2031,7 @@ mod tests {
     /// A watch declared while the room is handed out (from inside a call) is told none of what it
     /// holds, which the catch-up it is owed reads off the peers' tables, and the next record's
     /// events once it is caught up.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     #[test]
     fn a_watch_declared_while_the_room_is_handed_out_is_told_none_of_it() {
         let watches = watches_of(caps::MAX_DECL_WATCHES);
@@ -2096,7 +2078,7 @@ mod tests {
 
     /// A watch undeclared before the delivery is handed nothing the room holds for it, and a close
     /// lets go of what the room holds.
-    #[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+    #[cfg(not(wz_round))]
     #[test]
     fn an_undeclared_watch_and_a_close_are_handed_nothing_of_the_room() {
         let watches = watches_of(caps::MAX_DECL_WATCHES);

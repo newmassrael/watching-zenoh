@@ -9,7 +9,10 @@
 // It uses only the zenoh-pico C API the upstream examples use, so the SAME source is built once against
 // zenoh-pico and once against libwz_capi_pico (scripts/pico-compare.sh nodrop).
 //
-//   paced_pub -m peer -e tcp/127.0.0.1:PORT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-u] [-a START]
+//   paced_pub -m peer (-e ENDPOINT | -l ENDPOINT) -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-u] [-a START]
+//
+// -e connects to the subscriber's endpoint; -l listens on one instead, which is how both sides of a multicast
+// group are given it (udp/224.0.0.224:PORT#iface=lo: scripts/pico-compare.sh, PICO_CMP_TRANSPORT=multicast).
 //
 // With -b the puts of one slot are one batch (`zp_batch_start` before them and `zp_batch_stop` after, which
 // flushes it), as the upstream throughput example does for its whole run: it is how zenoh-pico reaches its
@@ -78,7 +81,7 @@ int main(int argc, char **argv) {
     z_owned_config_t config;
     z_config_default(&config);
     int opt;
-    while ((opt = getopt(argc, argv, "k:e:m:s:r:t:g:a:bdwnu")) != -1) {
+    while ((opt = getopt(argc, argv, "k:e:l:m:s:r:t:g:a:bdwnu")) != -1) {
         switch (opt) {
             case 'u':
                 best_effort = 1;
@@ -111,6 +114,9 @@ int main(int argc, char **argv) {
             case 'e':
                 BENCH_CONFIG_INSERT(config, Z_CONFIG_CONNECT_KEY, optarg);
                 break;
+            case 'l':
+                BENCH_CONFIG_INSERT(config, Z_CONFIG_LISTEN_KEY, optarg);
+                break;
             case 'm':
                 BENCH_CONFIG_INSERT(config, Z_CONFIG_MODE_KEY, optarg);
                 break;
@@ -124,7 +130,7 @@ int main(int argc, char **argv) {
                 seconds = (unsigned)strtoul(optarg, NULL, 10);
                 break;
             default:
-                fprintf(stderr, "usage: paced_pub -m peer -e ENDPOINT -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n] [-u] [-a START]\n");
+                fprintf(stderr, "usage: paced_pub -m peer (-e ENDPOINT | -l ENDPOINT) -s SIZE -r RATE -t SECONDS [-k KEY] [-b] [-d] [-w] [-g MS] [-n] [-u] [-a START]\n");
                 return 2;
         }
     }

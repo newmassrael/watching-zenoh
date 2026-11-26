@@ -845,6 +845,7 @@ fn memory_basis(
     crate::session_memory::MemoryBasis::of(
         limits,
         crate::session_memory::links_of(listen, dials, limits),
+        dials,
         pico_unicast_batch(limits),
         tx_queue,
         &pico_link_rx(limits),
@@ -3884,7 +3885,7 @@ mod build_numbers {
                 let chains = 2;
                 #[cfg(not(feature = "engine-tokio"))]
                 let chains =
-                    wz_capi_coop::arena::link_buffers(1, pico_unicast_batch(&limits), &limits)
+                    wz_capi_coop::arena::link_buffers(1, 0, pico_unicast_batch(&limits), &limits)
                         .expect("the snapshot's batch")
                         .chains;
                 assert_eq!(

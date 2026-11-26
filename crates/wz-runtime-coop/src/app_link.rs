@@ -778,7 +778,7 @@ impl StreamDial for AppStreamDial {
 pub struct AppDial<N: CountKind = OneTask>(AppDialing<N>);
 
 /// Where an [`AppDial`] stands.
-// Held by value in its face's link, as `ip_stack::IpDial` is: a link being made is not boxed.
+// Held by value in its face's row of the dials, as `ip_stack::IpDial` is: not boxed.
 #[allow(clippy::large_enum_variant)]
 enum AppDialing<N: CountKind> {
     Made(Dialled<HeapLink<N>, N>),

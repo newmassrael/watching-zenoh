@@ -2862,6 +2862,76 @@ mod link_stamps {
         assert_eq!(step(100 + 1 + lease), [LeaseCheckOutcome::Expired]);
     }
 
+    /// Between two checks a step is told the due the last check read, not one read anew: the
+    /// lease cut short through its door, which counts no move, leaves the due the timers answer
+    /// at the expiry they hold. The CONTROL is timers that read the lease now: they answer the
+    /// earlier wake. Turned red by a due that reads the stamps and the clock at every step.
+    #[test]
+    fn a_step_between_checks_is_told_the_due_the_last_check_read() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let held = crate::drive::lease_wake_deadline(&*actions);
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 100).is_empty(),
+            "CONTROL: nothing is due at the establishment"
+        );
+        actions.fact_peer_open_lease_ms(|slot| *slot = Some(0));
+        let now = crate::drive::lease_wake_deadline(&*actions);
+        assert_ne!(now, held, "CONTROL: the lease cut short wakes earlier");
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 100),
+            held,
+            "the step was told a due read anew"
+        );
+        let mut fresh = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            fresh.next_due_ms(&engine, &*actions, 100),
+            now,
+            "CONTROL: timers that read the lease now answer its earlier wake"
+        );
+    }
+
+    /// A duty armed after a check is in the next step's due, though the store that armed it counts
+    /// no move: the due a step is told is never later than the duty's own. The CONTROL is the due
+    /// before the duty is armed: none. Turned red by a due that keeps what the last check read
+    /// after a duty was armed.
+    #[test]
+    fn a_duty_armed_after_a_check_is_in_the_next_steps_due() {
+        use crate::session_timeouts::SessionTimeouts;
+        use crate::transport_timers::TransportTimers;
+
+        let (actions, _link) = bundle();
+        let mut engine = machine(&actions);
+        actions.link.fact_established_at(|slot| *slot = Some(100));
+        let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert!(lease_checks(&mut timers, &mut engine, &actions, 100).is_empty());
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 100),
+            None,
+            "CONTROL: nothing is armed"
+        );
+        actions
+            .link
+            .lease_armed
+            .store(true, core::sync::atomic::Ordering::SeqCst);
+        let wake = crate::drive::lease_wake_deadline(&*actions);
+        assert!(wake.is_some(), "CONTROL: the armed lease has a wake");
+        assert_eq!(
+            timers.next_due_ms(&engine, &*actions, 100),
+            wake,
+            "the step kept the due read before the duty was armed"
+        );
+    }
+
     /// The first event of the peer's declarations begins their watch, which gives the lease a
     /// deadline it did not have, and counts a move; a later one moves the watch only later and
     /// counts nothing. Turned red by a first event that counts no move, or a later one that does.

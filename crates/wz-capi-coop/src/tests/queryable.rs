@@ -59,12 +59,13 @@ fn a_query_is_answered_and_its_final_follows_the_reply() {
     assert_eq!(router.seen(|s| s.answers.clone()), vec!["reply", "final"]);
 }
 
-/// A turn of an answer holds its link's replies from its first reply and lets them go after its
-/// Final, so the replies and the Final leave in one send, in the order they were made. A read
-/// that steps its one link itself holds them across its callbacks instead (`queries`), so the
-/// count is read where the query is handed out of the round. The CONTROL is the order: two
-/// replies, then the Final. Turned red by a first reply that raises no hold (the count stays
-/// where it was), or by an answer that never lets it go (the Final then never reaches the router).
+/// A turn of an answer holds its link's replies once and lets them go after its Final, so the
+/// replies and the Final leave in one send, in the order they were made: from its first reply
+/// where the query is handed out of the round, and across its callbacks where the read hands the
+/// query out itself (`queries`), whose replies then raise none of their own. The CONTROL is the
+/// order: two replies, then the Final. Turned red by a turn that raises no hold (the count stays
+/// where it was), a reply that raises another beside the read's, or an answer that never lets it
+/// go (the Final then never reaches the router).
 #[cfg(all(
     feature = "std",
     any(feature = "threads", feature = "listen", feature = "group")

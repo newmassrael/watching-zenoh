@@ -252,7 +252,7 @@ fn a_history_subscriber_is_told_the_tokens_alive_when_it_asked() {
 /// as the session numbers its entities in turn; the declaration's own id is checked to be that
 /// one. The CONTROL is the call itself: the history handed the callback the token the probe
 /// heard. Turned red by a history call whose end lets go of no row.
-#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+#[cfg(not(wz_round))]
 #[test]
 fn a_history_subscriber_undeclared_from_its_history_is_let_go_of_before_its_declaration_returns() {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};

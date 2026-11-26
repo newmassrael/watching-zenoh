@@ -128,6 +128,11 @@ pub trait LockKind: 'static {
         f: impl FnOnce(&mut T) -> U,
     ) -> Option<U>;
 
+    /// Whether [`Self::with`] can wait for a hold another thread has: a lock of the value's own
+    /// can, a kind whose values one engine's lock keeps to one thread ([`Confined`]) never does.
+    /// A face's place asks it before a lend that waits ([`FacePlace::lend`]).
+    const WAITS: bool = true;
+
     /// How the handles on the parts of one link of a session of this kind are counted (its pump,
     /// its actions, its sink): each such handle is held by its face alone, so they are counted for
     /// one task even where several threads drive the session's faces, whose parts then move
@@ -304,8 +309,13 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
         mutex.with(f)
     }
 
-    /// No other thread reaches the value (`O`'s contract), so there is never a holder to find and
-    /// `f` always runs.
+    // No other thread reaches the value (`O`'s contract), so a lend never waits on one.
+    const WAITS: bool = false;
+
+    /// No other thread reaches the value (`O`'s contract), so there is never another holder to
+    /// find and `f` always runs. The one holder a try could meet is a hold of the value the
+    /// calling thread is inside, which the session's code never tries; a face's place, whose
+    /// handles do, marks its own lends ([`FacePlace::try_lend`]).
     #[inline]
     fn try_with<T: Send + 'static, U>(
         mutex: &Self::Mutex<T>,
@@ -316,6 +326,35 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
 
     #[cfg(feature = "session-unicast")]
     one_task_holders!();
+}
+
+/// A kind whose hold of a value can be a value of its own, let go of as it drops, beside the
+/// closure [`LockKind::with`] runs the value in: what a holder that keeps the value across
+/// calls of its own takes ([`FacePlace::hold_lent`]). A kind whose hold is a section of the
+/// whole program, entered and left around a closure, has none.
+#[cfg(feature = "runtime")]
+pub trait HoldKind: LockKind {
+    /// A hold of a value of `T`, which reaches it until it drops.
+    type Hold<'a, T>: core::ops::DerefMut<Target = T>
+    where
+        T: Send + 'static;
+
+    /// Hold the value of `mutex`, waiting for whatever holds it now, as [`LockKind::with`]
+    /// waits.
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> Self::Hold<'_, T>;
+}
+
+#[cfg(feature = "runtime")]
+impl<O: ConfinedOwner> HoldKind for Confined<O> {
+    type Hold<'a, T>
+        = OwnerHold<'a, T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> OwnerHold<'_, T> {
+        mutex.hold()
+    }
 }
 
 /// Several threads of a host, each reaching a session's values on its own: each value has its own
@@ -392,12 +431,33 @@ impl LockKind for ManyThreads {
     }
 }
 
+/// A hold of a value of several threads is a hold of the value's own lock, let go of as it drops.
+#[cfg(all(
+    feature = "runtime",
+    feature = "host-lock",
+    target_has_atomic = "8",
+    target_has_atomic = "64"
+))]
+impl HoldKind for ManyThreads {
+    type Hold<'a, T>
+        = crate::cs::HostHold<'a, T>
+    where
+        T: Send + 'static;
+
+    #[inline]
+    fn hold<T: Send + 'static>(mutex: &Self::Mutex<T>) -> crate::cs::HostHold<'_, T> {
+        mutex.hold()
+    }
+}
+
 /// A value of a session reached only under the lock of the engine `O` that owns the session, and
 /// so taking no lock of its own: [`Self::with`] is the closure called on the value.
 ///
 /// A value is never taken inside its own hold: the session's code does not nest one value in
 /// itself (a lock of the value would wait on itself there). A debug build checks it, and fails at
-/// the nested take instead of handing out a second `&mut`.
+/// the nested take instead of handing out a second `&mut`. A release build keeps no mark of a
+/// hold on the value, so its every take is the closure's call alone; the one value whose handles
+/// try it from inside its own hold, a face's place, keeps its own ([`FacePlace::try_lend`]).
 #[cfg(feature = "runtime")]
 pub struct OwnerHeld<T, O: ConfinedOwner> {
     value: UnsafeCell<T>,
@@ -407,9 +467,9 @@ pub struct OwnerHeld<T, O: ConfinedOwner> {
     owner: PhantomData<fn() -> O>,
 }
 
-// SAFETY: the value is reached only inside `with`, and `O`'s `unsafe impl ConfinedOwner` states
-// that `with` is called by one thread at a time, which is what `Sync` asks of a value that is
-// `Send`. The debug build's flag is read and written inside the same calls.
+// SAFETY: the value is reached only inside `with` and a hold, and `O`'s `unsafe impl
+// ConfinedOwner` states that they are made by one thread at a time, which is what `Sync` asks of
+// a value that is `Send`. The debug build's flag is read and written inside the same calls.
 #[cfg(feature = "runtime")]
 unsafe impl<T: Send, O: ConfinedOwner> Sync for OwnerHeld<T, O> {}
 
@@ -433,6 +493,51 @@ impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
         // inside its own hold (checked in a debug build), so no other reference to it lives while
         // `f` runs.
         f(unsafe { &mut *self.value.get() })
+    }
+}
+
+/// A hold of an [`OwnerHeld`] value as a value of its own ([`OwnerHeld::hold`]): the value is
+/// reached through it until it drops, and not taken again meanwhile, as inside
+/// [`OwnerHeld::with`] (checked in a debug build).
+#[cfg(feature = "runtime")]
+pub struct OwnerHold<'a, T> {
+    value: &'a UnsafeCell<T>,
+    #[cfg(debug_assertions)]
+    _inside: Inside<'a>,
+}
+
+#[cfg(feature = "runtime")]
+impl<T, O: ConfinedOwner> OwnerHeld<T, O> {
+    /// [`Self::with`] as a value, let go of as it drops.
+    #[inline]
+    pub fn hold(&self) -> OwnerHold<'_, T> {
+        OwnerHold {
+            value: &self.value,
+            #[cfg(debug_assertions)]
+            _inside: Inside::enter(&self.inside),
+        }
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl<T> core::ops::Deref for OwnerHold<'_, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &T {
+        // SAFETY: as in `OwnerHeld::with`: one thread at a time reaches the value (`O`'s
+        // contract), and it is not taken again while the hold lives (checked in a debug build),
+        // so no other reference to it is made meanwhile; the borrow is the hold's own.
+        unsafe { &*self.value.get() }
+    }
+}
+
+#[cfg(feature = "runtime")]
+impl<T> core::ops::DerefMut for OwnerHold<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `Deref`, the hold borrowed mutably, so this is the one reference.
+        unsafe { &mut *self.value.get() }
     }
 }
 
@@ -470,6 +575,11 @@ impl Drop for Inside<'_> {
 ))]
 pub struct FacePlace<K: LockKind, X: Send + 'static> {
     place: K::Mutex<Option<X>>,
+    /// Whether a lend of the place is under way (`LentMark`), marked only for a kind whose lend
+    /// never waits ([`LockKind::WAITS`]): such a kind's values are reached by one thread,
+    /// so the one holder a try can meet is a lend of the calling thread, which the kind's own try
+    /// does not see. A lock's try finds its holder itself, and its kind marks nothing here.
+    lent: core::sync::atomic::AtomicBool,
 }
 
 /// What a lend of a [`FacePlace`] that does not wait came to ([`FacePlace::try_lend`]).
@@ -483,7 +593,8 @@ pub enum Lend<U> {
     Lent(U),
     /// The face holds no transport: its link is not up. Nothing ran.
     Empty,
-    /// Another thread holds the face now. Nothing ran, and nothing waited.
+    /// Another thread holds the face now, or the calling thread is inside a hold of it. Nothing
+    /// ran, and nothing waited.
     Held,
 }
 
@@ -496,6 +607,7 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
     pub fn empty() -> Self {
         Self {
             place: K::wrap(None),
+            lent: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -509,21 +621,168 @@ impl<K: LockKind, X: Send + 'static> FacePlace<K, X> {
         K::with(&self.place, Option::take)
     }
 
+    /// `f` on the place itself, waiting for whatever holds it now: a change of the transport
+    /// made together with what lies beside the place, with no holder of the transport between.
+    pub fn with_place<U>(&self, f: impl FnOnce(&mut Option<X>) -> U) -> U {
+        K::with(&self.place, f)
+    }
+
     /// Lend the transport to `f` when no other thread holds the face now, and wait for nothing:
     /// a droppable send that finds the face held is dropped on this face alone, as zenoh-pico
     /// drops one that finds its transmit lock held
     /// (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
-    /// `return _z_mutex_try_lock(&ztc->_mutex_tx);`).
+    /// `return _z_mutex_try_lock(&ztc->_mutex_tx);`). A try made inside a lend of the place on
+    /// the calling thread finds it held, on every kind: a handle that reaches the place from inside
+    /// the holder's own step (a read of the face's facts) tries it.
     pub fn try_lend<U>(&self, f: impl FnOnce(&mut X) -> U) -> Lend<U> {
-        match K::try_with(&self.place, |place| place.as_mut().map(f)) {
+        if !K::WAITS && self.lent.load(core::sync::atomic::Ordering::Relaxed) {
+            return Lend::Held;
+        }
+        let lent = K::try_with(&self.place, |place| {
+            let _lent = LentMark::enter::<K>(&self.lent);
+            place.as_mut().map(f)
+        });
+        match lent {
             None => Lend::Held,
             Some(None) => Lend::Empty,
             Some(Some(answer)) => Lend::Lent(answer),
         }
     }
+
+    /// Run `f` on what the place holds, a transport or none, when no other thread holds the face
+    /// now, and wait for nothing: `None`, with `f` not run, while another thread holds it or the
+    /// calling thread is inside a hold of it, as [`Self::try_lend`] finds it. What a holder that
+    /// must not wait for the face (one that holds the session's lock) puts in the place or takes
+    /// out of it goes through here.
+    pub fn try_with_place<U>(&self, f: impl FnOnce(&mut Option<X>) -> U) -> Option<U> {
+        if !K::WAITS && self.lent.load(core::sync::atomic::Ordering::Relaxed) {
+            return None;
+        }
+        K::try_with(&self.place, |place| {
+            let _lent = LentMark::enter::<K>(&self.lent);
+            f(place)
+        })
+    }
+
+    /// Lend the transport to `f`, waiting for whatever holds the face now; `None`, with `f` not
+    /// run, while the place holds none. A debug build fails a wait made under a lock that bars
+    /// one ([`NoFaceWait`]): the session's lock is waited on inside a face's lend, so its holder
+    /// only tries a face. A kind whose lend never waits ([`LockKind::WAITS`]) is lent anywhere.
+    #[inline]
+    pub fn lend<U>(&self, f: impl FnOnce(&mut X) -> U) -> Option<U> {
+        debug_assert!(
+            !(K::WAITS && NoFaceWait::any_here()),
+            "a face's place is waited on under a lock that bars it"
+        );
+        K::with(&self.place, |place| {
+            let _lent = LentMark::enter::<K>(&self.lent);
+            place.as_mut().map(f)
+        })
+    }
 }
 
-/// A face's place lends its transport under the face's lock, waiting for whatever holds it.
+/// A lend of a [`FacePlace`] under way, marked in the place from its making to its drop, on return
+/// and on unwind alike, for a kind whose lend never waits ([`FacePlace::try_lend`]); nothing is
+/// marked for any other kind.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+struct LentMark<'a>(Option<&'a core::sync::atomic::AtomicBool>);
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<'a> LentMark<'a> {
+    /// Mark `lent`, a place's, for a lend of kind `K`.
+    #[inline(always)]
+    fn enter<K: LockKind>(lent: &'a core::sync::atomic::AtomicBool) -> Self {
+        if K::WAITS {
+            return Self(None);
+        }
+        // Read by the one thread that reaches the place's values, the one writing it.
+        lent.store(true, core::sync::atomic::Ordering::Relaxed);
+        Self(Some(lent))
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl Drop for LentMark<'_> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        if let Some(lent) = self.0 {
+            lent.store(false, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// A hold of a [`FacePlace`]'s values as a value of its own ([`FacePlace::hold_lent`]): the
+/// kind's hold of them, and the place's mark of a lend under way, both let go of as it drops, the
+/// mark first.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+pub struct PlaceHold<'a, K: HoldKind, X: Send + 'static> {
+    _lent: LentMark<'a>,
+    hold: K::Hold<'a, Option<X>>,
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: HoldKind, X: Send + 'static> core::ops::Deref for PlaceHold<'_, K, X> {
+    type Target = Option<X>;
+
+    #[inline]
+    fn deref(&self) -> &Option<X> {
+        &self.hold
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: HoldKind, X: Send + 'static> core::ops::DerefMut for PlaceHold<'_, K, X> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Option<X> {
+        &mut self.hold
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl<K: HoldKind, X: Send + 'static> FacePlace<K, X> {
+    /// [`Self::lend`] as a value: the transport, held until the hold drops, waiting for
+    /// whatever holds the face now; `None`, let go of at once, while the place holds none. A
+    /// debug build fails a wait made under a lock that bars one, as [`Self::lend`] does.
+    #[inline]
+    pub fn hold_lent(&self) -> Option<PlaceHold<'_, K, X>> {
+        debug_assert!(
+            !(K::WAITS && NoFaceWait::any_here()),
+            "a face's place is waited on under a lock that bars it"
+        );
+        let hold = K::hold(&self.place);
+        if hold.is_none() {
+            return None;
+        }
+        Some(PlaceHold {
+            _lent: LentMark::enter::<K>(&self.lent),
+            hold,
+        })
+    }
+}
+
+/// A face's place lends its transport under the face's lock, waiting for whatever holds it
+/// ([`FacePlace::lend`]).
 #[cfg(all(
     feature = "session-unicast",
     any(feature = "alloc", feature = "session-slot")
@@ -535,7 +794,108 @@ impl<K: LockKind, X: Send + 'static> wz_session_core::transport_place::Transport
 
     #[inline]
     fn lend<U>(&mut self, f: impl FnOnce(&mut X) -> U) -> Option<U> {
-        K::with(&self.place, |place| place.as_mut().map(f))
+        FacePlace::lend(self, f)
+    }
+}
+
+/// The mark of a lock held on the calling thread under which no face's place is waited on, from
+/// [`Self::enter`] to drop, on return and on unwind alike: the session's state lock, whose holder
+/// lends a face by [`FacePlace::try_lend`] alone. A read waits for that lock inside its face's
+/// lend, so the one wait between the two runs from a face to the session's lock and no cycle can
+/// close; a wait on a face under the lock is the edge that would close one, which
+/// [`FacePlace::lend`] fails a debug build on. Kept in a debug build whose critical sections count
+/// on `std`'s thread-locals (`host-lock` without `host-lock-sys`); every other build keeps
+/// nothing and reads that none is held.
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+#[must_use = "the mark bars a wait on a face only while it is held"]
+pub struct NoFaceWait {
+    #[cfg(all(
+        debug_assertions,
+        feature = "host-lock",
+        not(feature = "host-lock-sys")
+    ))]
+    _marked: (),
+}
+
+/// How many holds that bar a wait on a face the calling thread is inside: one inside another is
+/// two.
+#[cfg(all(
+    debug_assertions,
+    feature = "host-lock",
+    not(feature = "host-lock-sys"),
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+mod no_face_wait {
+    extern crate std;
+
+    std::thread_local! {
+        pub(super) static DEPTH: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+    }
+}
+
+#[cfg(all(
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl NoFaceWait {
+    /// Mark the calling thread as holding a lock under which no face is waited on.
+    #[inline]
+    pub fn enter() -> Self {
+        #[cfg(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        ))]
+        {
+            no_face_wait::DEPTH.with(|depth| depth.set(depth.get().saturating_add(1)));
+            Self { _marked: () }
+        }
+        #[cfg(not(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        )))]
+        {
+            Self {}
+        }
+    }
+
+    /// Whether the calling thread holds such a lock, as far as the marks say.
+    #[inline]
+    fn any_here() -> bool {
+        #[cfg(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        ))]
+        {
+            no_face_wait::DEPTH.with(|depth| depth.get() != 0)
+        }
+        #[cfg(not(all(
+            debug_assertions,
+            feature = "host-lock",
+            not(feature = "host-lock-sys")
+        )))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(all(
+    debug_assertions,
+    feature = "host-lock",
+    not(feature = "host-lock-sys"),
+    feature = "session-unicast",
+    any(feature = "alloc", feature = "session-slot")
+))]
+impl Drop for NoFaceWait {
+    fn drop(&mut self) {
+        no_face_wait::DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
     }
 }
 
@@ -584,7 +944,7 @@ pub(crate) mod tests {
         assert_eq!(
             Held::try_with(&value, |held| *held),
             Some(2),
-            "the nested hold left the value, and a try always runs"
+            "the nested hold left the value, and a try outside every hold of it runs"
         );
     }
 
@@ -735,6 +1095,58 @@ mod face_place_tests {
 
     type Place = FacePlace<Confined<TestOwner>, u32>;
 
+    /// A face whose lend can wait is tried, and not waited on, while the calling thread holds a
+    /// mark that bars a wait on a face, one nested in another as well; a kind whose lend never
+    /// waits is lent under it, and a mark dropped or unwound bars nothing after. Turned red by a
+    /// wait the mark does not fail (`FacePlace::lend`'s check), a try it fails, or a mark left set
+    /// once it is gone, which would fail every later wait on a face on the thread.
+    #[cfg(feature = "host-lock")]
+    #[test]
+    fn a_face_is_tried_and_not_waited_on_under_a_mark_that_bars_it() {
+        extern crate std;
+        use super::NoFaceWait;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let marked = cfg!(all(debug_assertions, not(feature = "host-lock-sys")));
+        let waits = FacePlace::<super::Shared, u32>::empty();
+        let confined = Place::empty();
+        waits.hold(1);
+        confined.hold(2);
+        assert_eq!(waits.lend(|transport| *transport), Some(1));
+        {
+            let _bar = NoFaceWait::enter();
+            assert_eq!(waits.try_lend(|transport| *transport), Lend::Lent(1));
+            assert_eq!(
+                confined.lend(|transport| *transport),
+                Some(2),
+                "a lend that never waits runs under the mark"
+            );
+            let waited = catch_unwind(AssertUnwindSafe(|| waits.lend(|transport| *transport)));
+            assert_eq!(waited.is_err(), marked, "a wait under the mark");
+            drop(NoFaceWait::enter());
+            let again = catch_unwind(AssertUnwindSafe(|| waits.lend(|transport| *transport)));
+            assert_eq!(
+                again.is_err(),
+                marked,
+                "an inner mark's drop leaves the outer one"
+            );
+        }
+        assert_eq!(
+            waits.lend(|transport| *transport),
+            Some(1),
+            "a dropped mark"
+        );
+        let unwound = catch_unwind(|| {
+            let _bar = NoFaceWait::enter();
+            panic!("under the mark");
+        });
+        assert!(unwound.is_err());
+        assert_eq!(
+            waits.lend(|transport| *transport),
+            Some(1),
+            "a mark that unwound bars nothing"
+        );
+    }
+
     /// A place lends nothing before its link is up, lends what it holds after, and keeps what a
     /// lend did; taken out, it lends nothing again. Turned red by a lend that runs on an empty
     /// place, or a place that loses what a lend wrote.
@@ -742,12 +1154,14 @@ mod face_place_tests {
     fn a_face_place_lends_what_it_holds_and_nothing_once_emptied() {
         let place = Place::empty();
         let mut ran = false;
-        assert_eq!((&place).lend(|_| ran = true), None);
+        assert_eq!(place.lend(|_| ran = true), None);
         assert!(!ran, "no transport, no call");
         assert_eq!(place.try_lend(|_| ()), Lend::Empty);
         assert_eq!(place.hold(7), None, "the place held nothing before");
+        // The session's policy lends a face through the place it keeps, the trait's lend.
+        let mut kept = &place;
         assert_eq!(
-            (&place).lend(|transport| {
+            TransportPlace::lend(&mut kept, |transport| {
                 *transport += 1;
                 *transport
             }),
@@ -757,6 +1171,66 @@ mod face_place_tests {
         assert_eq!(place.hold(1), Some(8), "a second link answers the first");
         assert_eq!(place.take(), Some(1));
         assert_eq!(place.try_lend(|_| ()), Lend::Empty);
+    }
+
+    /// A try on a confined face inside the face's own lend finds it held and runs nothing, as a
+    /// handle that reaches the face from inside a read that holds it does; the lend that holds it
+    /// keeps what it wrote. Turned red by a try that lends the face it is inside (the place's
+    /// mark of its lend, `FacePlace::try_lend`), a second `&mut` of the values.
+    #[test]
+    fn a_try_inside_a_confined_faces_own_lend_finds_it_held() {
+        let place = Place::empty();
+        place.hold(4);
+        let inside = place.lend(|transport| {
+            *transport += 1;
+            place.try_lend(|transport| *transport)
+        });
+        assert_eq!(inside, Some(Lend::Held));
+        assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(5));
+    }
+
+    /// A try on a confined face inside a hold of its values (`FacePlace::hold_lent`) finds it
+    /// held and runs nothing, and lends it again once the hold drops, as once a lend that unwound
+    /// is gone; what the hold wrote stays. Turned red by a hold that marks no lend
+    /// (`PlaceHold`), a mark that a dropped hold or an unwound lend leaves set, or a try that
+    /// lends the values a hold of the thread has.
+    #[test]
+    fn a_try_inside_a_confined_faces_hold_finds_it_held_until_it_drops() {
+        extern crate std;
+        let place = Place::empty();
+        place.hold(6);
+        {
+            let mut held = place.hold_lent().expect("the place holds a value");
+            if let Some(value) = held.as_mut() {
+                *value += 1;
+            }
+            assert_eq!(place.try_lend(|transport| *transport), Lend::Held);
+        }
+        assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(7));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            place.lend(|transport| {
+                if *transport == 7 {
+                    panic!("inside the lend");
+                }
+            });
+        }));
+        assert!(unwound.is_err());
+        assert_eq!(
+            place.try_lend(|transport| *transport),
+            Lend::Lent(7),
+            "an unwound lend is not found"
+        );
+    }
+
+    /// A place that holds nothing is held by no hold, and marks no lend: a try after it lends
+    /// the value put in the place then. Turned red by a hold of an empty place that leaves the
+    /// place marked as lent (`FacePlace::hold_lent`).
+    #[test]
+    fn a_hold_of_an_empty_confined_face_marks_nothing() {
+        let place = Place::empty();
+        assert!(place.hold_lent().is_none());
+        place.hold(2);
+        assert_eq!(place.try_lend(|transport| *transport), Lend::Lent(2));
     }
 
     /// A send that does not wait finds a face another thread holds and runs nothing, and finds
@@ -773,8 +1247,7 @@ mod face_place_tests {
         let shared = &place;
         std::thread::scope(|scope| {
             scope.spawn(move || {
-                let mut face = shared;
-                face.lend(|_| {
+                shared.lend(|_| {
                     held_tx.send(()).ok();
                     go_rx.recv().ok();
                 });
