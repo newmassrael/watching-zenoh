@@ -286,6 +286,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-capi-pico/src/clock_source.rs` | S7 | |
 | `crates/wz-capi-pico/src/codec.rs` | S7 | |
 | `crates/wz-capi-pico/src/config.rs` | S7 | |
+| `crates/wz-capi-pico/src/config_limits.rs` | S7 | |
 | `crates/wz-capi-pico/src/config_policy.rs` | S7 | |
 | `crates/wz-capi-pico/src/conformance.rs` | S7 | |
 | `crates/wz-capi-pico/src/connectivity.rs` | S7 | |
