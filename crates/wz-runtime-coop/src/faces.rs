@@ -42,7 +42,7 @@ use crate::session_drive::{
 };
 use crate::sync::{FacePlace, HoldKind, Lend, LockKind, PlaceHold};
 use crate::CoopLocalJoinHandle;
-use core::sync::atomic::{fence, AtomicU32, Ordering};
+use core::sync::atomic::{fence, AtomicBool, AtomicU32, Ordering};
 
 /// The number a session knows one of its faces by.
 pub type FaceId = u64;
@@ -455,6 +455,10 @@ pub struct FaceSite<K: LockKind, P: WireParts> {
     place: FacePlace<K, FaceHeld<P>>,
     /// What is owed to the parts the place holds: [`PARTS_DEBTS`] bits and [`CLOSE_OWED`].
     owed: AtomicU32,
+    /// Whether the place's holder now is a send ([`Self::hold_send`], [`Self::try_lend_send`]),
+    /// which may wait for its link's room while it holds it, and not a lend of a moment (a look
+    /// at the link, a debt paid): what a sender that finds the place held tells apart.
+    sending: AtomicBool,
 }
 
 impl<K: LockKind, P: WireParts> FaceSite<K, P> {
@@ -463,6 +467,7 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         Self {
             place: FacePlace::empty(),
             owed: AtomicU32::new(0),
+            sending: AtomicBool::new(false),
         }
     }
 
@@ -517,6 +522,23 @@ impl<K: LockKind, P: WireParts> FaceSite<K, P> {
         });
         self.pay_after();
         answer
+    }
+
+    /// [`Self::try_lend`] for a send: the place is marked as a send's for as long as `f` holds
+    /// the parts ([`Self::held_by_send`]), as a send held as a value marks it.
+    pub fn try_lend_send<U>(&self, f: impl FnOnce(&mut FaceHeld<P>) -> U) -> Lend<U> {
+        self.try_lend(|held| {
+            let _mark = SendMark::enter(&self.sending);
+            f(held)
+        })
+    }
+
+    /// Whether the place's holder now is a send, which may wait for its link's room while it
+    /// holds the place; `false` for a lend of a moment, and for a free place. A hint, as the
+    /// holder may change as it is read: a sender that reads `false` for a place it found held
+    /// tries the place again.
+    pub fn held_by_send(&self) -> bool {
+        self.sending.load(Ordering::Acquire)
     }
 
     /// [`Self::lend`] that waits for nothing ([`FacePlace::try_lend`]).
@@ -638,10 +660,28 @@ impl<K: HoldKind, P: SendParts> FaceSite<K, P> {
     // publish take the place through this one body.
     #[inline(never)]
     pub unsafe fn hold_send(&self) -> Option<SiteSend<'_, K, P>> {
-        Some(SiteSend {
-            site: self,
-            held: ManuallyDrop::new(self.place.hold_lent()?),
-        })
+        let held = ManuallyDrop::new(self.place.hold_lent()?);
+        // Cleared in the send's drop, before the hold is let go of, so a place no longer held is
+        // never read as a send's.
+        self.sending.store(true, Ordering::Release);
+        Some(SiteSend { site: self, held })
+    }
+}
+
+/// The mark of a place as a send's for a lend of it ([`FaceSite::try_lend_send`]): set as the
+/// lend's closure begins and cleared as it ends, unwinding included, inside the lend.
+struct SendMark<'a>(&'a AtomicBool);
+
+impl<'a> SendMark<'a> {
+    fn enter(sending: &'a AtomicBool) -> Self {
+        sending.store(true, Ordering::Release);
+        Self(sending)
+    }
+}
+
+impl Drop for SendMark<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -673,6 +713,7 @@ impl<K: HoldKind, P: SendParts> Drop for SiteSend<'_, K, P> {
         if let Some(parts) = place.as_mut() {
             self.site.pay(parts);
         }
+        self.site.sending.store(false, Ordering::Release);
         // SAFETY: the hold is let go of here alone, once, and is not reached after: the send is
         // being dropped.
         unsafe { ManuallyDrop::drop(&mut self.held) };
@@ -3330,6 +3371,40 @@ mod tests {
             Lend::Lent(()),
             "the place free again"
         );
+    }
+
+    /// A place reads as a send's while a send holds it, as a value or by a lend for a send, and
+    /// not while it is lent for a moment, nor once the send let go. Turned red by a send's drop
+    /// that leaves the mark set, a mark cleared only after the hold is let go of being read by
+    /// the lend that follows, or a plain lend that marks the place.
+    #[test]
+    fn a_place_reads_as_a_sends_while_a_send_holds_it_alone() {
+        let (aborted, ended, paid) = (Rc::new(Cell::new(0)), Ended::default(), Ended::default());
+        let site = FaceSite::<crate::sync::Confined<TestOwner>, ApartParts>::empty();
+        assert!(site.hold(paying_parts(&aborted, &ended, &paid)).is_none());
+        assert!(!site.held_by_send(), "CONTROL: a free place");
+        assert_eq!(
+            site.try_lend(|_| site.held_by_send()),
+            Lend::Lent(false),
+            "a lend of a moment is no send"
+        );
+        {
+            // SAFETY: the test keeps no handle of the parts past a send.
+            let _send = unsafe { site.hold_send() }.expect("a free place is held");
+            assert!(site.held_by_send(), "a send held as a value");
+        }
+        assert!(!site.held_by_send(), "the send let go");
+        assert_eq!(
+            site.try_lend(|_| site.held_by_send()),
+            Lend::Lent(false),
+            "the lend after the send is no send"
+        );
+        assert_eq!(
+            site.try_lend_send(|_| site.held_by_send()),
+            Lend::Lent(true),
+            "a lend for a send"
+        );
+        assert!(!site.held_by_send(), "the lend for a send let go");
     }
 
     /// A debt of the parts in the bit of the site's close fails a debug build: the close is the
