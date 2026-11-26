@@ -87,6 +87,52 @@ This is not the size gate's case. `text.md` reads the client preset (`pico-clien
 connectivity, liveliness and its get, the multicast transport, peer, query, queryable, scouting,
 the config policy, the conformance digest, the unstable API), 1,140,467 against 297,289: 3.84.
 
+### 2.2 Which build each arm is: pico's switches in wz's features
+
+The crate's default features are the Kconfig defaults, not zenoh-pico's own default build, and the
+reference zenoh-pico of that run was built with each switch the declaration answers set from those
+features (`wz_config.pico_reference`), so arm P carried the advanced publisher and subscriber, the
+unstable API and the connectivity events too, which pico's default build does not, and arm W carried
+three planes of its own no pico switch has. Read from `vendor/zenoh-pico/cmake/feature_config.cmake`
+(pico's defaults), the declaration's `upstream_switch` rows (`deploy/wz-config.toml`) and
+`configs/zenoh-pico_defconfig` (zenoh-pico's preset in wz, generated from the same declaration):
+
+| `Z_FEATURE_` switch | pico default | class | wz feature | preset (W, and P from it) | crate default (the run read above) |
+|---|---:|---|---|---:|---:|
+| `UNSTABLE_API` | 0 | maps | `unstable-api` | 0 | 1 |
+| `CONNECTIVITY` | 0 | maps | `connectivity` | 0 | 1 |
+| `ADVANCED_PUBLICATION`, `ADVANCED_SUBSCRIPTION` | 0 | maps | `advanced` | 0 | 1 |
+| `QUERY`, `QUERYABLE` | 1 | maps | `query`, `queryable` | 1 | 1 |
+| `LIVELINESS` | 1 | maps | `liveliness` (and `liveliness-get`, which pico's switch includes) | 1 | 1 |
+| `MULTI_THREAD` | 1 | maps | `multi-thread` | 1 | 1 |
+| `SCOUTING` | 1 | maps | `scout` | 1 | 1 |
+| `LINK_UDP_UNICAST` | 1 | maps | `link-udp` | 1 | 1 |
+| `MULTICAST_TRANSPORT`, `LINK_UDP_MULTICAST` | 1 | maps | `multicast-transport` | 1 | 1 |
+| `UNICAST_PEER` | 1 | maps | `peer` | 1 | 1 |
+| `LINK_WS`, `LINK_SERIAL`, `LINK_TLS`, `RAWETH_TRANSPORT` | 0 | maps | `transport-link-ws`, `-serial`, `-tls`, `raweth-transport` | 0 | 0 |
+| `LOCAL_SUBSCRIBER`, `LOCAL_QUERYABLE`, `MULTICAST_DECLARATIONS`, `ADMIN_SPACE` | 0 | maps | `local-subscriber`, `local-queryable`, `multicast-declarations`, `admin-space` | 0 | 0 |
+| `PUBLICATION`, `SUBSCRIPTION`, `INTEREST`, `FRAGMENTATION`, `ENCODING_VALUES`, `LINK_TCP`, `UNICAST_TRANSPORT`, `TCP_NODELAY`, `SESSION_CHECK`, `BATCHING`, `MATCHING`, `AUTO_RECONNECT` | 1 | always | in every build | 1 | 1 |
+| `RX_CACHE` | 0 | always | the match memo, in every build | 1 | 1 |
+| `LINK_BLUETOOTH`, `LINK_SERIAL_USB` | 0 | never | none | 0 | 0 |
+| `BATCH_TX_MUTEX`, `BATCH_PEER_MUTEX` | 0 | n/a | none: pico's own locking | 0 | 0 |
+| no switch | | | `config-policy`, `conformance-digest`, `device-requires` (wz's own planes) | off | on |
+
+So the preset is pico's default build on every switch but `RX_CACHE`, which wz holds in every
+build, and the crate default is it plus the six rows that differ. The one declaration of the preset
+is `deploy/wz-config.toml` (`upstream_on`, `upstream_off`), emitted as
+`configs/zenoh-pico_defconfig` and resolved by `wz_config.pico_bench_configuration`; the perf
+matrix (`perf_matrix.py reference` and `wz-arm`, `wz_config.preset_named_features`), the instruction
+counts (`pico-compare.sh subprofile`, `opprofile`) and the parity matrix (`preset-arm`) all read it
+there, and `wz_config.py --selftest` holds the perf matrix's list to the parity's. The size gate's
+`pico-*` cases are a third thing: each names its own narrower list (`pico-client-coop-nostd` is
+`os-host,link-udp`, a client) with a budget of its own, and its reference is derived from that list
+by the same rule, so its ratio compares like with like already.
+
+By name (section 2.1), the preset takes out of arm W `advanced` (100,974 bytes), the connectivity
+listeners (20,699), the digest (13,540) and the config policy's and device requirements' doors, and
+out of arm P pico's advanced publisher and subscriber; liveliness and scouting stay in both, since
+pico's default build has them.
+
 ## 3. Table W: what an arm W process holds resident, by component
 
 | component | count from the code and the build | resident (estimate) | source |
@@ -120,7 +166,7 @@ the config policy, the conformance digest, the unstable API), 1,140,467 against 
 
 | row | W - P (count) | structure that removes it | files | lane | state |
 |---|---:|---|---|---|---|
-| R1 library text pages | +800,696 B mapped | (a) the text lane's areas (`text.md`), read here on the bench's features, where the gap is 3.84 and not 1.38: the engine (`wz_capi_coop::engine` 166 KB) and the session core (352 KB) carry the doors of every default capability; (b) code a run never calls kept off the pages it does: the doors of the capabilities a program may not use (advanced, liveliness, scouting, connectivity, the conformance digest, about 190 KB by name in section 2.1) laid out together, apart from the open, put and read, so their 64 KiB windows are never faulted (GNU ld already puts `.text.unlikely.*` first; a `#[cold]` door is placed there); (c) float formatting and the digest out of the no_std form | `text.md`; the door modules of `wz-capi-pico`; `wz-capi-pico-lib` link script | text, rss | (b) and (c): cell R3 first, since which windows a run faults is read, not counted |
+| R1 library text pages | +800,696 B mapped | (a0) both arms built as zenoh-pico's preset (section 2.2), so neither carries a plane pico's default build has not; (a) the text lane's areas (`text.md`), read here on the bench's features, where the gap is 3.84 and not 1.38: the engine (`wz_capi_coop::engine` 166 KB) and the session core (352 KB) carry the doors of every default capability; (b) code a run never calls kept off the pages it does: the doors of the capabilities a program may not use (advanced, liveliness, scouting, connectivity, the conformance digest, about 190 KB by name in section 2.1) laid out together, apart from the open, put and read, so their 64 KiB windows are never faulted (GNU ld already puts `.text.unlikely.*` first; a `#[cold]` door is placed there); (c) float formatting and the digest out of the no_std form | `text.md`; the door modules of `wz-capi-pico`; `wz-capi-pico-lib` link script; (a0) `wz_config.py`, `perf_matrix.py` | text, rss | (a0) **landed in this lane**, R1 read again on it; (b) and (c): cell R3 first, since which windows a run faults is read, not counted |
 | R2 `.rodata` | +58,692 B | no message text in the no_std form beyond what a door returns; constant tables (`sha2`'s round constants, float formatting's) leave with their code | | text | count, R1 |
 | R3 RW, relocated | +53,176 B | fewer pointers the library holds to itself: each vtable, string slice and panic location in `.data.rel.ro` is a relocation the loader writes, so a page of them is dirty in every process (`c-abi-size-diet.md` T5) | | text | count |
 | R4 `libgcc_s.so.1` | its mapped pages, W only | define `_Unwind_Resume` in the library as a local symbol that aborts, as `rust_eh_personality` is: the library is `panic = "abort"`, its personality aborts and its unwind tables are discarded, so no landing pad is ever entered and the name is never called; with it defined, the C compiler's as-needed link of `libgcc_s` drops the library, and the size gate refuses the name undefined | `wz-capi-pico/src/lib.rs` (`c_library_runtime!`), `scripts/lib/capability_cost_gate.py` | rss | **landed in this lane** |
@@ -147,7 +193,10 @@ a run's resident text is what the layout changes, and only the run's own page ma
   The anonymous mappings are listed one by one with their size, so the arena (its reserved
   size), a thread's stack (8 MiB and a guard page) and a malloc arena (64 MiB) are told apart.
 - **R1, the libraries of the current tree.** Section 2's table again on the run's `lib-W` and
-  `lib-P`, with `nm -S` by crate, after the text lanes land.
+  `lib-P`, with `nm -S` by crate: first on the preset's build (section 2.2; `reference.json` says
+  `wz_preset`), then after the text lanes land. The committed ceiling table
+  (`deploy/pico_perf_ceiling.json`) was filled from the crate default's build, and the gate does not
+  yet tell the two builds apart.
 - **R2, R4 landed.** `readelf -d` of `perf_probe_W` lists no `libgcc_s`, and R0's
   `smaps_libgcc_s_kib` of arm W reads 0.
 - **R3, the run's resident text.** Which pages of the library's text a run holds: with
@@ -163,5 +212,7 @@ a run's resident text is what the layout changes, and only the run's own page ma
 - This design.
 - R0's probe and runner (`PERF_SMAPS`; `perf_probe.c`, `perf_matrix.py` with its selftest), and
   R3's page map of each executable mapping.
+- R1 (a0): the perf matrix builds both arms as zenoh-pico's preset (`wz_config.preset_named_features`,
+  section 2.2), from the declaration the parity matrix and the instruction counts read.
 - R4: `_Unwind_Resume` defined in the library, `libgcc_s` no longer mapped by its programs,
   held by the size gate's `pico-client-coop-nostd` case (`forbid_undefined`).

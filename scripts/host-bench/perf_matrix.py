@@ -14,9 +14,10 @@ committed rows.
         compare the two forms, else the one form the pico C ABI's release ships
         (`pico_windows_package.RELEASE_STDLIBS`), so a run reads what ships unless told another
     perf_matrix.py reference --out DIR --engine ENGINE --stdlib STDLIB
-        zenoh-pico built as the same build as wz-capi-pico's default capabilities on ENGINE (tokio or
-        coop, what `wz_config.py --bench-engine` resolved) with STDLIB (`bench-stdlib`,
-        `wz_config.bench_features`): the build the capability cost gate measures
+        zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset
+        (configs/zenoh-pico_defconfig, `wz_config.preset_features`) on ENGINE (tokio or coop, what
+        `wz_config.py --bench-engine` resolved) with STDLIB (`bench-stdlib`): the build the capability
+        cost gate measures
         (`capability_cost_gate.pico_reference_tree` under the gate's `build_env`, its switches from
         `wz_config.pico_reference`), linked and compiled as the gate builds the reference of arm W's form
         (`capability_cost_gate.reference_build` of the linker arguments of arm W's build, SHAPE_CASES:
@@ -26,8 +27,9 @@ committed rows.
         configuration) to DIR/reference.json, the engine (`wz_engine`) and the standard library
         (`wz_stdlib`) among it, which the run's record and the gate read
     perf_matrix.py wz-arm --out DIR --arm ARM --engine ENGINE --stdlib STDLIB [--features F,...]
-        arm ARM (W, or Wapp with app-transport), wz-capi-pico-lib: the bench's build on ENGINE with STDLIB
-        and the capabilities F over its default ones, built as the size gate builds the case of that form
+        arm ARM (W, or Wapp with app-transport), wz-capi-pico-lib: zenoh-pico's preset on ENGINE with STDLIB
+        and the capabilities F over it (`wz_config.preset_named_features`), built as the size gate builds
+        the case of that form
         (SHAPE_CASES, `capability_cost_gate.case_build` in the gate's `build_env`: its profile, its cargo
         configuration files, its linker), its library copied to DIR/lib-ARM and pico's headers to
         DIR/include-ARM: the reference export's (`reference` first), with the config.h of the build's
@@ -1163,9 +1165,8 @@ def bench_stdlib(stated: str, released: tuple[str, ...]) -> str:
 
 def bench_case(arm: str, engine: str, stdlib: str, named: list[str]):
     """Arm `arm`'s build as a case of the size gate: the case of its form (SHAPE_CASES) with the bench's feature
-    list `named` (`wz_config.bench_named_features`) in the place of the case's, over the crate's default
-    features on the tokio engine, as `wz_config.bench_features` resolves them. A form no case builds is refused
-    (Refused)."""
+    list `named` (`wz_config.preset_named_features`, zenoh-pico's preset on the run's engine) in the place of
+    the case's, or on the tokio engine that list alone. A form no case builds is refused (Refused)."""
     import capability_cost_gate as cost
 
     shape = shape_name(engine, stdlib)
@@ -1186,21 +1187,24 @@ def built_as(case) -> str:
 
 
 def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
-    """zenoh-pico built as the same build as wz-capi-pico's default capabilities on `engine` with `stdlib`, by
-    the size gate's rule for arm W's form, into `out`."""
+    """zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset on `engine` with `stdlib`,
+    by the size gate's rule for arm W's form, into `out`."""
     # The gate's builder and resolver, imported here and not at the top: the selftest needs neither.
     import capability_cost_gate as cost
     import wz_config
 
     table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
+    decl = wz_config.load_decl()
     try:
-        features = wz_config.bench_features(engine, [], table, stdlib)
-        program_features = wz_config.bench_features(engine, ["app-transport"], table, stdlib)
-        shape = bench_case("W", engine, stdlib, wz_config.bench_named_features(engine, [], table, stdlib))
-    except (wz_config.PresetError, KeyError, Refused) as error:
+        kconf = wz_config.pico_bench_configuration()
+        features = wz_config.preset_features(engine, [], table, stdlib, decl, kconf)
+        program_features = wz_config.preset_features(engine, ["app-transport"], table, stdlib, decl, kconf)
+        shape = bench_case("W", engine, stdlib,
+                           wz_config.preset_named_features(engine, [], table, stdlib, decl, kconf))
+    except (wz_config.PresetError, KeyError, ValueError, OSError, Refused) as error:
         print(f"perf-matrix: NOT-MEASURED, {error}", flush=True)
         return 2
-    asked = wz_config.pico_reference(wz_config.load_decl(), features)
+    asked = wz_config.pico_reference(decl, features)
     # The gate's build rule too: the reference's key holds the rule's C flags and epoch, so the
     # library timed here is the one the gate's size and ratio are read from.
     try:
@@ -1237,7 +1241,7 @@ def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
     record = {"reference_pin": pin, "reference_toolchain": toolchain, "reference_switches": asked,
               "reference_refused": refused, "reference_link_args": list(link), "reference_cflags": list(cflags),
               "wz_features": sorted(features), "wz_program_transport_features": sorted(program_features),
-              "wz_engine": engine, "wz_stdlib": stdlib,
+              "wz_engine": engine, "wz_stdlib": stdlib, "wz_preset": wz_config.PICO_BENCH_ORIGINAL,
               "wz_build": {"size_case": shape_name(engine, stdlib), "profile": shape.profile,
                            "cargo_configs": list(shape.cargo_configs), "link_args": list(plan.link_args)}}
     (out / "reference.json").write_text(json.dumps(record, indent=1, sort_keys=True) + "\n", encoding="utf-8")
@@ -1252,7 +1256,7 @@ def cmd_reference(out: pathlib.Path, engine: str, stdlib: str) -> int:
 
 
 def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: list[str]) -> int:
-    """Arm `arm`, wz-capi-pico-lib: the bench's build on `engine` with `stdlib` and the capabilities `asked`,
+    """Arm `arm`, wz-capi-pico-lib: zenoh-pico's preset on `engine` with `stdlib` and the capabilities `asked`,
     built as the size gate builds the case of its form (`bench_case`, `capability_cost_gate.case_build` in the
     gate's `build_env`), its library copied to OUT/lib-ARM and pico's headers to OUT/include-ARM. The headers are
     the reference export's (`reference` writes OUT/include-P first), the pinned pico's own, with the config.h of
@@ -1264,9 +1268,9 @@ def cmd_wz_arm(out: pathlib.Path, arm: str, engine: str, stdlib: str, asked: lis
     table = wz_config.manifest_features(wz_config.MANIFESTS["pico"])
     decl = wz_config.load_decl()
     try:
-        named = wz_config.bench_named_features(engine, asked, table, stdlib)
-        header = wz_config.pico_config_header(decl, wz_config.bench_features(engine, asked, table, stdlib),
-                                              dict(os.environ))
+        kconf = wz_config.pico_bench_configuration()
+        named = wz_config.preset_named_features(engine, asked, table, stdlib, decl, kconf)
+        header = wz_config.pico_config_header(decl, wz_config.enabled_features(table, named), dict(os.environ))
         case = bench_case(arm, engine, stdlib, named)
         env, _ = cost.build_env()
         plan = cost.case_build(case, env)

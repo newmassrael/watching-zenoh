@@ -2697,6 +2697,58 @@ def bench_cargo_args(engine: str, asked: list[str], table: dict) -> str:
     return " ".join(words)
 
 
+# -- the build a bench compares with zenoh-pico ---------------------------------------------------------
+#
+# A bench that reads wz's pico library against zenoh-pico (the perf matrix, its instruction counts, the
+# parity matrix) builds arm W as zenoh-pico's preset in wz: configs/zenoh-pico_defconfig, generated from the
+# declaration's upstream_on and upstream_off, so the two arms carry the same capabilities and a ratio does
+# not charge wz for the planes pico's own build leaves out. The crate's default features are the Kconfig
+# defaults, which turn on planes pico's default build does not have (advanced, connectivity, the config
+# policy, the conformance digest, ...): a ratio read from them is no comparison of like with like.
+
+#: The original whose preset a bench against zenoh-pico builds arm W as.
+PICO_BENCH_ORIGINAL = "zenoh-pico"
+
+
+def pico_bench_configuration():
+    """The preset of `PICO_BENCH_ORIGINAL` resolved: its ABI's configuration with no preset, its
+    defconfig alone (`configuration_of`). Needs kconfiglib; without it PresetError says so."""
+    return configuration_of(BASE_ABI[PICO_BENCH_ORIGINAL], [])
+
+
+def preset_named_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None,
+                          decl: dict | None = None, kconf=None) -> list[str]:
+    """The features a bench's cargo build of wz-capi-pico names, without the default features, for
+    zenoh-pico's preset on `engine` and `asked` over it, `table` the crate's feature table: the
+    capabilities the preset turns on (`kconf`, `pico_bench_configuration` when not given) on the engine
+    the bench measures, not the one the preset chooses (`engine_features`), then `asked`. `stdlib`, when
+    given, is checked against the engine's (`engine_stdlib`). A capability the preset turns on, or one
+    asked, that the cooperative engine does not run is refused by name rather than left out."""
+    asked = [f for f in asked if f]
+    engine_stdlib(engine, stdlib)
+    decl = load_decl() if decl is None else decl
+    kconf = pico_bench_configuration() if kconf is None else kconf
+    abi = BASE_ABI[PICO_BENCH_ORIGINAL]
+    named = engine_features(abi, decl["base"][abi], features_for(decl, abi, resolved_caps(decl, kconf)),
+                            engine == "coop", table, engine_option_features(decl, "tokio"))
+    named += [f for f in asked if f not in named]
+    if engine == "tokio":
+        return named
+    out = coop_features(named, table)
+    lost = [f for f in asked if f not in out]
+    if lost:
+        raise PresetError(f"the cooperative engine does not run {', '.join(lost)}: measure "
+                          f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
+    return out
+
+
+def preset_features(engine: str, asked: list[str], table: dict, stdlib: str | None = None,
+                    decl: dict | None = None, kconf=None) -> set[str]:
+    """The wz-capi-pico features that build turns on, as cargo resolves them: what the reference
+    zenoh-pico (`pico_reference`) and the header a probe compiles against are derived from."""
+    return enabled_features(table, preset_named_features(engine, asked, table, stdlib, decl, kconf))
+
+
 def pico_config_values(decl: dict, enabled: set[str], defaults: dict[str, str],
                        env: dict[str, str]) -> dict[str, str]:
     """The CMake variables zenoh-pico's `config.h.in` is rendered with for a wz-capi-pico build of
@@ -6007,6 +6059,34 @@ def cmd_selftest() -> int:
         chooses_coop = "CONFIG_WZ_ENGINE_COOP=y" in PACKAGE_PICO_PROFILE.read_text(encoding="utf-8")
         expect("an unnamed bench engine is the one the package's profile chooses",
                bench_engine("") == ("coop" if chooses_coop else "tokio"))
+        # A bench against zenoh-pico builds pico's preset: the list parity's arm W is built from, on the
+        # engine the bench names, without the planes pico's own default build does not have.
+        preset = pico_bench_configuration()
+        on_preset = preset_named_features("coop", [], good, "nostd", decl, preset)
+        expect("a bench against zenoh-pico builds the preset parity builds, on the cooperative engine",
+               on_preset == resolved_features(decl, "pico", configuration_of("pico", []))
+               and on_preset[0] == BASE_ENGINE_FEATURE
+               and {"peer", "multicast-transport", "scout", "query", "queryable", "liveliness",
+                    "multi-thread"} <= set(on_preset))
+        expect("zenoh-pico's preset leaves out the planes pico's default build does not have",
+               not {"advanced", "connectivity", "unstable-api", "config-policy", "conformance-digest",
+                    "device-requires"} & preset_features("coop", [], good, None, decl, preset))
+        expect("the preset on the tokio engine names that engine's features in the place of os-host",
+               "engine-tokio" in preset_named_features("tokio", [], good, "std", decl, preset)
+               and BASE_ENGINE_FEATURE not in preset_named_features("tokio", [], good, None, decl, preset))
+        expect("a capability asked over the preset is built, and one the cooperative engine lacks refused",
+               preset_named_features("coop", ["app-transport"], good, None, decl, preset)[-1] == "app-transport"
+               and "unstable-api" in preset_features("coop", ["app-transport"], good, None, decl, preset)
+               and "gossip" in refusal_text(
+                   lambda: preset_named_features("coop", ["gossip"], good, None, decl, preset))
+               and "cooperative" in refusal_text(
+                   lambda: preset_named_features("tokio", [], good, "nostd", decl, preset)))
+        expect("the reference of the preset is pico's default build on the switches wz answers",
+               {k: v for k, v in pico_reference(decl, preset_features("coop", [], good, None, decl, preset)).items()
+                if k in ("Z_FEATURE_ADVANCED_PUBLICATION", "Z_FEATURE_CONNECTIVITY", "Z_FEATURE_UNSTABLE_API",
+                         "Z_FEATURE_UNICAST_PEER", "Z_FEATURE_LIVELINESS")}
+               == {"Z_FEATURE_ADVANCED_PUBLICATION": 0, "Z_FEATURE_CONNECTIVITY": 0,
+                   "Z_FEATURE_UNSTABLE_API": 0, "Z_FEATURE_UNICAST_PEER": 1, "Z_FEATURE_LIVELINESS": 1})
     # The conformance statement (decision C15) states the build the feature list makes, every
     # capability of the ABI on or off, every limit and policy, and a digest of only those values.
     defaults = {lim["id"]: lim["default"] for lim in decl["limits"]}

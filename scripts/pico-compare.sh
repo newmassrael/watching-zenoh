@@ -1594,7 +1594,8 @@ parity() {
 # ── perf: the performance matrix of the pico ABI (docs/pico-perf-matrix.md) ──────────────────────────────
 #
 # One program, scripts/host-bench/perf_probe.c, built three times into $out/perf/bin: perf_probe_P against
-# zenoh-pico built as the same build as wz-capi-pico's default capabilities on the engine and with the standard
+# zenoh-pico built as the same build as wz-capi-pico for zenoh-pico's preset (configs/zenoh-pico_defconfig, the
+# capabilities pico's own default build has; wz_config.preset_features) on the engine and with the standard
 # library resolved above (the capability cost gate's reference, which perf_matrix.py reference builds or finds,
 # by the gate's rule for that form), perf_probe_W against that wz-capi-pico build and perf_probe_Wapp against it
 # with the `app-transport` capability, the one arm that carries the program transport cell; both wz builds are
@@ -1706,7 +1707,7 @@ stamped_stdlib() {
 }
 
 # perf_matrix_wz_arm <dir> <arm> <features>: arm <arm> of the perf matrix, wz-capi-pico on $wz_engine with $wz_stdlib
-# and <features> (a comma list, empty for none) over its default capabilities, built as the size gate builds the case
+# and <features> (a comma list, empty for none) over zenoh-pico's preset, built as the size gate builds the case
 # of that form, its library in <dir>/lib-<arm> and its headers in <dir>/include-<arm> (perf_matrix.py wz-arm, which
 # prints why when it builds nothing).
 perf_matrix_wz_arm() {

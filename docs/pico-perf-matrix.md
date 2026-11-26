@@ -16,12 +16,21 @@ API and is compiled from the same source for each arm:
 | arm | library | headers | carries |
 |---|---|---|---|
 | P | zenoh-pico at the submodule's pin, built as the same build (below) | that build's own (`include` of the export with the `config.h` its CMake generated) | tcp, multicast |
-| W | `wz-capi-pico`, its default capabilities on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, udp, multicast |
+| W | `wz-capi-pico` for zenoh-pico's preset (`configs/zenoh-pico_defconfig`, below) on the engine of the run, in the form the release ships (without `std`), built as the size gate builds that form (below) | arm P's headers, the pinned pico's, with the `config.h` of its own feature list (`wz_config.pico_config_header`) in place of P's | tcp, udp, multicast |
 | W (program transport) | the same build with `app-transport` | the same, for that feature list | the program transport |
 | X | an external library of the pico API, named by the environment (below); measured only when named | its own, with its own `config.h` | tcp, udp, multicast |
 
 The program-transport cell is measured on its own build because a capability that is off adds
-nothing to a build, so the default build is the one the other transports are measured on.
+nothing to a build, so the preset's build is the one the other transports are measured on.
+
+**The preset.** Arm W carries the capabilities zenoh-pico's own default build has, no more:
+`configs/zenoh-pico_defconfig`, generated from the declaration's `upstream_on` and `upstream_off`
+(`deploy/wz-config.toml`), resolved as the parity matrix resolves its arm W
+(`wz_config.preset_named_features` over `wz_config.pico_bench_configuration`), on the engine of the run.
+The crate's default features are the Kconfig defaults, which turn on planes pico's default build has
+not (advanced, connectivity, the config policy, the conformance digest, the device requirements, the
+unstable API); a ratio read from them charges wz for code pico leaves out. `reference.json` records
+the original as `wz_preset`.
 
 **The engine.** Arm W is built on the engine the package for a host ships on, which its profile
 `configs/profiles/host-peer-ext.conf` chooses on the global axis `engine`, unless `PICO_CMP_ENGINE`
@@ -39,7 +48,7 @@ docs/c-abi-engine-and-memory.md phase P4), the one form
 `pico_windows_package.RELEASE_STDLIBS` names, unless `PICO_CMP_STDLIB` (`std` or `nostd`) names the
 other to compare them; `perf_matrix.py bench-stdlib` is where a run learns it, and a release of more than
 one form makes a run name the one it measures. Its feature list is the cooperative engine's on the
-host, `os-host` (`wz_config.bench_named_features`, the rule the Windows package is made by); a capability that turns `std` on is refused by name, and
+host, `os-host` (`wz_config.preset_named_features`; the Windows package is made by the same engine rule); a capability that turns `std` on is refused by name, and
 so is the form without `std` on the tokio engine. `reference --stdlib` records it (`wz_stdlib` in
 `reference.json`), the run carries it into `perf.json` (`record.stdlib`; a reading that names none was
 made before the field, of a library with `std`), and the gate refuses a run against a table filled from
@@ -56,7 +65,7 @@ pinned pico's own, with the `config.h` of its own feature list in place of P's.
 
 **The same build.** Arm P is the build `scripts/lib/capability_cost_gate.py` measures the size of:
 every `Z_FEATURE_*` switch the declaration (`deploy/wz-config.toml`) answers is set from that answer
-for `wz-capi-pico`'s default features (`wz_config.pico_reference`), the rest keep pico's defaults,
+for arm W's features, the preset's (`wz_config.pico_reference`), the rest keep pico's defaults,
 Release, shared. `perf_matrix.py reference` asks the gate's own builder for it, so the library timed
 here and the library whose size the gate prints are one build, built under the gate's build rule
 (`build_env`: no path of the host and the commit's time in its bytes) and found again by the same
