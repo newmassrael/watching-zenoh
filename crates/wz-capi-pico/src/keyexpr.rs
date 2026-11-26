@@ -1906,34 +1906,53 @@ pub unsafe extern "C" fn z_keyexpr_concat(
     right: *const c_char,
     len: usize,
 ) -> ZResult {
-    guarded(|| {
-        if key.is_null() {
-            return Z_ERR_NULL;
+    key_compose(key, left, right.cast(), len, PartsForm::AsGiven)
+}
+
+/// The one body of the doors that make a key of a key and a right part (`z_keyexpr_concat`,
+/// `z_keyexpr_join`), as `form` says: under [`PartsForm::AsGiven`] the right part is `len`
+/// bytes of text appended as given, and a `*` meeting a `*` at the seam is refused with
+/// `Z_EINVAL`; under [`PartsForm::Canonized`] it is a loaned keyexpr joined after a `/` and the
+/// whole canonized. Stored by [`store_canonized`], which keeps `left`'s declaration. `Z_ERR_NULL`
+/// for no object, and for a key on either side that cannot be read; `Z_ERR_INVALID` for appended
+/// bytes that are not UTF-8. `out` is null before anything is read, so a refusal leaves it so.
+///
+/// # Safety
+/// `out` is null or valid and writable; `left` is null or a live loaned keyexpr; `right` is
+/// null or, under [`PartsForm::AsGiven`], points at `len` readable bytes, and under
+/// [`PartsForm::Canonized`] is a live loaned keyexpr.
+#[inline(never)]
+unsafe fn key_compose(
+    out: *mut z_owned_keyexpr_t,
+    left: *const z_loaned_keyexpr_t,
+    right: *const c_void,
+    len: usize,
+    form: PartsForm,
+) -> ZResult {
+    if out.is_null() {
+        return Z_ERR_NULL;
+    }
+    *out = z_owned_keyexpr_t::null_value();
+    let Some(head) = keyexpr_str(left) else {
+        return Z_ERR_NULL;
+    };
+    let (seam, tail): (&[u8], &str) = if form == PartsForm::Canonized {
+        match keyexpr_str(right.cast()) {
+            Some(tail) => (b"/".as_slice(), tail),
+            None => return Z_ERR_NULL,
         }
-        *key = z_owned_keyexpr_t::null_value();
-        let Some(head) = keyexpr_str(left) else {
-            return Z_ERR_NULL;
-        };
-        let tail: &str = if right.is_null() || len == 0 {
-            ""
-        } else {
-            match crate::abi::text_of(core::slice::from_raw_parts(right.cast::<u8>(), len)) {
-                Some(t) => t,
-                None => return Z_ERR_INVALID,
-            }
-        };
-        if head.ends_with('*') && tail.starts_with('*') {
-            return Z_EINVAL;
+    } else if right.is_null() || len == 0 {
+        (b"".as_slice(), "")
+    } else {
+        match crate::abi::text_of(core::slice::from_raw_parts(right.cast::<u8>(), len)) {
+            Some(tail) if head.ends_with('*') && tail.starts_with('*') => return Z_EINVAL,
+            Some(tail) => (b"".as_slice(), tail),
+            None => return Z_ERR_INVALID,
         }
-        store_canonized(
-            key,
-            left,
-            &[head.as_bytes(), tail.as_bytes()],
-            PartsForm::AsGiven,
-        )
+    };
+    store_canonized(out, left, &[head.as_bytes(), seam, tail.as_bytes()], form)
         .err()
         .unwrap_or(Z_OK)
-    })
 }
 
 /// The result of extending `left` to `literal`: `left`'s declaration kept when
@@ -1962,8 +1981,8 @@ unsafe fn extended_from(
     }
 }
 
-/// The body `z_keyexpr_concat`, `z_keyexpr_join` and the owned canonizing constructor share, out
-/// of line so no export holds a copy of it: the key the text `parts` make, taken as `form` says
+/// The store [`key_compose`] and the owned canonizing constructor share, out of line so no
+/// export holds a copy of it: the key the text `parts` make, taken as `form` says
 /// by [`canonize_parts_as`] into a buffer of the bound, stored in `key` keeping `left`'s
 /// declaration ([`extended_from`]), a literal for a null `left`. The bound is held to the form
 /// and not to the text, as pico keeps only the form: a form past the bound is refused as a key past
@@ -2016,23 +2035,7 @@ pub unsafe extern "C" fn z_keyexpr_join(
     left: *const z_loaned_keyexpr_t,
     right: *const z_loaned_keyexpr_t,
 ) -> ZResult {
-    guarded(|| {
-        if key.is_null() {
-            return Z_ERR_NULL;
-        }
-        *key = z_owned_keyexpr_t::null_value();
-        let (Some(l), Some(r)) = (keyexpr_str(left), keyexpr_str(right)) else {
-            return Z_ERR_NULL;
-        };
-        store_canonized(
-            key,
-            left,
-            &[l.as_bytes(), b"/".as_slice(), r.as_bytes()],
-            PartsForm::Canonized,
-        )
-        .err()
-        .unwrap_or(Z_OK)
-    })
+    key_compose(key, left, right.cast(), 0, PartsForm::Canonized)
 }
 
 /// Whether two keyexprs denote the same set (pico `z_keyexpr_equals`).
@@ -3503,6 +3506,74 @@ mod bound_tests {
             );
             assert!(!z_internal_keyexpr_check(&concat), "nothing is left behind");
             z_keyexpr_drop(z_keyexpr_move(&mut full));
+        }
+    }
+
+    /// A concatenation and a join, one body, refuse what they cannot read as each refused it
+    /// alone: no object, and a key on either side that cannot be read, `Z_ERR_NULL`; appended
+    /// bytes that are not UTF-8, `Z_ERR_INVALID`; each leaving the destination null. Turned red by
+    /// a join that reads its right key as appended bytes (a null right key would then be an empty
+    /// tail, and the join made), or by the forms of the two doors swapped.
+    #[test]
+    fn a_concatenation_and_a_join_refuse_what_they_cannot_read() {
+        unsafe {
+            let (rc, mut ab) = owned("a/b");
+            assert_eq!(rc, Z_OK);
+            let c = b"c".as_ptr() as *const c_char;
+            assert_eq!(
+                z_keyexpr_join(
+                    core::ptr::null_mut(),
+                    z_keyexpr_loan(&ab),
+                    z_keyexpr_loan(&ab)
+                ),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                z_keyexpr_concat(core::ptr::null_mut(), z_keyexpr_loan(&ab), c, 1),
+                Z_ERR_NULL
+            );
+            let mut out = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_join(&mut out, z_keyexpr_loan(&ab), core::ptr::null()),
+                Z_ERR_NULL,
+                "a join's right side is a key, and no key cannot be read"
+            );
+            assert!(!z_internal_keyexpr_check(&out), "nothing is left behind");
+            assert_eq!(
+                z_keyexpr_join(&mut out, core::ptr::null(), z_keyexpr_loan(&ab)),
+                Z_ERR_NULL
+            );
+            assert_eq!(
+                z_keyexpr_concat(&mut out, core::ptr::null(), c, 1),
+                Z_ERR_NULL
+            );
+            let not_text = [b'/', 0xff];
+            assert_eq!(
+                z_keyexpr_concat(
+                    &mut out,
+                    z_keyexpr_loan(&ab),
+                    not_text.as_ptr() as *const c_char,
+                    not_text.len()
+                ),
+                Z_ERR_INVALID
+            );
+            assert!(!z_internal_keyexpr_check(&out), "nothing is left behind");
+            assert_eq!(
+                z_keyexpr_concat(&mut out, z_keyexpr_loan(&ab), core::ptr::null(), 0),
+                Z_OK,
+                "CONTROL: a concatenation of nothing is the key"
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&out)), Some("a/b"));
+            let mut joined = z_owned_keyexpr_t::null_value();
+            assert_eq!(
+                z_keyexpr_join(&mut joined, z_keyexpr_loan(&ab), z_keyexpr_loan(&out)),
+                Z_OK,
+                "CONTROL: a join puts a separator between its keys"
+            );
+            assert_eq!(keyexpr_str(z_keyexpr_loan(&joined)), Some("a/b/a/b"));
+            for key in [&mut out, &mut joined, &mut ab] {
+                z_keyexpr_drop(z_keyexpr_move(key));
+            }
         }
     }
 
