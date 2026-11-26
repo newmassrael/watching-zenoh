@@ -1186,6 +1186,7 @@ mod lent_frame_refusal {
                 StillClock,
             )
             .expect("the heap has room");
+            actions.enter_established();
             assert_eq!(put(&actions), Some(Ok(())));
             let mut sent = link.sent.lock().expect("the sends");
             assert_eq!(sent.len(), 1, "one frame");
@@ -1732,41 +1733,6 @@ mod facts_lock {
         assert_eq!(bound, None, "a refused bound is not written");
     }
 
-    /// The RX SN gate reads the ring the peer's capabilities give and moves the conduit's
-    /// baseline in one hold of the facts. Turned red by a gate that reads the capabilities in a
-    /// hold of their own.
-    #[test]
-    fn the_rx_sn_gate_judges_in_one_hold_of_the_facts() {
-        use crate::qos::Priority;
-        use crate::sn::RxAdmit;
-        let (actions, _link) = bundle();
-        let mut first = None;
-        let holds = holds_in(|| {
-            first = Some(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 5));
-        });
-        assert_eq!(
-            first,
-            Some(RxAdmit::Accept),
-            "a channel's first frame is taken"
-        );
-        assert_eq!(holds, 1, "the gate takes the facts once");
-        assert_eq!(
-            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 5),
-            RxAdmit::Stale,
-            "a duplicate is dropped"
-        );
-        assert_eq!(
-            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, 7),
-            RxAdmit::Gap { missing: 1 },
-            "a forward jump is taken and reports the frame it skipped"
-        );
-        assert_eq!(
-            actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 5),
-            RxAdmit::Accept,
-            "the best-effort channel keeps a baseline of its own"
-        );
-    }
-
     /// The chain-boundary markers are read off the negotiated patch level: none before an Init
     /// set one, and the level that has them once it is negotiated.
     #[test]
@@ -2098,9 +2064,13 @@ mod link_stamps {
     }
 
     /// Timers that read the deadlines keep them: a step before the first of them falls due reads
-    /// no stamp and no lease. Turned red by timers that read the deadlines at every step.
+    /// no stamp and no lease. The stamps and the peer's lease are words, read under no lock, so
+    /// what a step reads is told by what it judges: the lease is cut short after the first step
+    /// through its door, which counts no move, and a step that read it again would judge the
+    /// earlier expiry. Turned red by timers that read the deadlines at every step.
     #[test]
     fn a_step_before_the_deadlines_fall_due_reads_none_of_them() {
+        use crate::lease::LeaseCheckOutcome;
         use crate::session_timeouts::SessionTimeouts;
         use crate::transport_timers::TransportTimers;
 
@@ -2112,17 +2082,31 @@ mod link_stamps {
             .store(true, core::sync::atomic::Ordering::SeqCst);
         actions.link.fact_established_at(|slot| *slot = Some(100));
         assert!(
-            101 < 100 + actions.adopted_lease_ms(),
+            101 < 100 + 1 + actions.adopted_lease_ms(),
             "CONTROL: 101 is before the expiry"
         );
         let mut timers = TransportTimers::new(SessionTimeouts::spec_defaults());
-        let mut step = |now_ms| lease_checks(&mut timers, &mut engine, &actions, now_ms);
-        let mut checks = alloc::vec::Vec::new();
-        let first = holds_in(|| checks = step(100));
-        assert_eq!(first, 1, "CONTROL: the first step reads the peer's lease");
-        let later = holds_in(|| checks = step(101));
-        assert_eq!(later, 0, "a step before the expiry reads nothing");
-        assert!(checks.is_empty(), "and judges nothing");
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 100).is_empty(),
+            "CONTROL: nothing is due at the establishment"
+        );
+        let moved = actions.link.deadlines_moved();
+        actions.fact_peer_open_lease_ms(|slot| *slot = Some(0));
+        assert_eq!(
+            actions.link.deadlines_moved(),
+            moved,
+            "CONTROL: the lease's door counts no move"
+        );
+        assert!(
+            lease_checks(&mut timers, &mut engine, &actions, 101).is_empty(),
+            "a step before the expiry it holds reads nothing and judges nothing"
+        );
+        let mut fresh = TransportTimers::new(SessionTimeouts::spec_defaults());
+        assert_eq!(
+            lease_checks(&mut fresh, &mut engine, &actions, 101),
+            [LeaseCheckOutcome::Expired],
+            "CONTROL: a step that reads the lease at 101 judges it expired"
+        );
     }
 
     /// A receipt moves the lease's deadline later with one store and no count: the timers find the
@@ -2582,8 +2566,10 @@ mod rx_sn_gate {
     }
 
     /// Every frame of a walk is judged under no lock: the first taken as the baseline, the next
-    /// one accepted, its duplicate stale, a skip a gap. Turned red by a judgement that takes a
-    /// lock to read the baseline or the ring.
+    /// one accepted, its duplicate stale, a skip a gap; and the best-effort channel, a baseline of
+    /// its own, takes the first frame it sees though the reliable one has passed it. Turned red by
+    /// a judgement that takes a lock to read the baseline or the ring, or by channels that share
+    /// one baseline.
     #[test]
     fn a_frame_is_judged_under_no_lock() {
         let (actions, _link) = bundle();
@@ -2592,6 +2578,7 @@ mod rx_sn_gate {
             for sn in [5, 6, 6, 9] {
                 verdicts.push(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, true, sn));
             }
+            verdicts.push(actions.admit_rx_frame_sn_judged(Priority::DEFAULT, false, 5));
         });
         assert_eq!(
             verdicts,
@@ -2599,7 +2586,8 @@ mod rx_sn_gate {
                 RxAdmit::Accept,
                 RxAdmit::Accept,
                 RxAdmit::Stale,
-                RxAdmit::Gap { missing: 2 }
+                RxAdmit::Gap { missing: 2 },
+                RxAdmit::Accept
             ]
         );
         assert_eq!(
