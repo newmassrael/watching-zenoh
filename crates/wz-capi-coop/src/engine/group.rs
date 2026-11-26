@@ -520,8 +520,13 @@ type SessionLink = GroupSide;
 #[cfg(not(wz_round))]
 pub(super) struct GroupSide {
     link: GroupLink<Watched>,
-    rx: alloc::boxed::Box<dyn GroupReceive>,
+    rx: ReceiveHalf,
 }
+
+/// The receive half of a group's transport, which its session reads and its read slot waits in
+/// (`GroupPump::await_input`): both are stepped by the one thread that holds the slot.
+#[cfg(not(wz_round))]
+type ReceiveHalf = Rc<RefCell<alloc::boxed::Box<dyn GroupReceive>>>;
 
 #[cfg(not(wz_round))]
 impl GroupSide {
@@ -531,9 +536,19 @@ impl GroupSide {
         let rx = rx.unwrap_or_else(|| alloc::boxed::Box::new(ThroughCell(link.clone())));
         Self {
             link: link.clone(),
-            rx,
+            rx: Rc::new(RefCell::new(rx)),
         }
     }
+}
+
+/// Whether a read may wait in the receive of `rx` (`GroupReceive::await_input`) for what it
+/// would wait on as `wait`: the half's own input, on a half whose receive waits.
+#[cfg(not(wz_round))]
+fn awaits_on(rx: &dyn GroupReceive, wait: &LinkWait) -> bool {
+    rx.awaits_input()
+        && rx
+            .input_wait()
+            .is_some_and(|on| LinkWait::input(on) == *wait)
 }
 
 /// The receive of a transport whose halves are one: through the cell the face shares.
@@ -574,7 +589,7 @@ impl GroupTransport for GroupSide {
 
     fn close(&mut self) {
         self.link.close();
-        self.rx.close();
+        self.rx.borrow_mut().close();
     }
 
     fn service(&self) {
@@ -582,7 +597,7 @@ impl GroupTransport for GroupSide {
     }
 
     fn carrier_up(&self) -> bool {
-        self.link.carrier_up() && !self.rx.failed()
+        self.link.carrier_up() && !self.rx.borrow().failed()
     }
 
     fn send_to_group(&mut self, datagram: &[u8]) {
@@ -602,24 +617,24 @@ impl GroupTransport for GroupSide {
     }
 
     fn input_wait(&self) -> Option<WaitOn> {
-        self.rx.input_wait()
+        self.rx.borrow().input_wait()
     }
 
     #[inline]
     fn recv_with(&mut self, f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
-        self.rx.recv_with(f)
+        self.rx.borrow_mut().recv_with(f)
     }
 
     fn keeps_input(&self) -> bool {
-        self.rx.keeps_input()
+        self.rx.borrow().keeps_input()
     }
 
     fn keep(&mut self) {
-        self.rx.keep();
+        self.rx.borrow_mut().keep();
     }
 
     fn lends_until_next_receive(&self) -> bool {
-        self.rx.lends_until_next_receive()
+        self.rx.borrow().lends_until_next_receive()
     }
 
     fn frame_budget(&self) -> Option<u16> {
@@ -723,6 +738,9 @@ pub(super) struct GroupFace<W> {
     /// ([`Self::take_outcome`]), the transport then dropped with what it holds of the session's
     /// (its receive buffer, one of the groups' table), so a join of the group again finds it free.
     link: Option<GroupLink<Watched>>,
+    /// The receive half of this join, until the join's read slot takes it (`GroupSeat`).
+    #[cfg(not(wz_round))]
+    rx: Option<ReceiveHalf>,
     /// What a message of the session waits with on a full lane ([`Self::push_lent`]).
     pace: Rc<dyn Pace>,
     /// The waits of the session's stack, which the group's socket is waited on with.
@@ -864,6 +882,7 @@ impl<W: LinkWaits> GroupFace<W> {
             seed,
             reads,
             records,
+            rx: face.rx.take(),
         };
         (face, seat)
     }
@@ -938,6 +957,8 @@ impl<W: LinkWaits> GroupFace<W> {
         });
         #[cfg(not(wz_round))]
         let session_link = GroupSide::new(&link, rx);
+        #[cfg(not(wz_round))]
+        let half = Rc::clone(&session_link.rx);
         #[cfg(wz_round)]
         let session_link = link.clone();
         let seed = MulticastSessionSeed::<SessionLink, GROUP_MEMBERS>::new(
@@ -977,6 +998,8 @@ impl<W: LinkWaits> GroupFace<W> {
             next_request: Cell::new(0),
             tx,
             link: Some(link),
+            #[cfg(not(wz_round))]
+            rx: Some(half),
             pace,
             waits,
             room,
@@ -1699,6 +1722,7 @@ pub(super) struct GroupSeat {
     seed: MulticastSessionSeed<SessionLink, GROUP_MEMBERS>,
     reads: GroupReads,
     records: FaceRecords<GroupReplies>,
+    rx: Option<ReceiveHalf>,
 }
 
 /// The read slot of a group (`docs/c-abi-architecture.md` 8.8): the group's session, in the
@@ -1717,6 +1741,8 @@ pub(super) struct GroupPump<C: ClockSource + 'static> {
     /// What each record is handed out with: the group's face, the sink of its replies, and the
     /// generation a member's query is answered under.
     records: FaceRecords<GroupReplies>,
+    /// The receive half of the session's transport, which a read waits in before a step.
+    rx: Option<ReceiveHalf>,
 }
 
 #[cfg(not(wz_round))]
@@ -1728,11 +1754,13 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             seed,
             reads,
             records,
+            rx,
         } = seat;
         Self {
             place: MulticastSessionPlace::new(runtime, seed),
             reads,
             records,
+            rx,
         }
     }
 
@@ -1743,10 +1771,42 @@ impl<C: ClockSource + 'static> GroupPump<C> {
             seed,
             reads,
             records,
+            rx,
         } = seat;
         self.place.rejoin(seed);
         self.reads = reads;
         self.records = records;
+        self.rx = rx;
+    }
+
+    /// Whether a read may wait in the group's receive for what it would wait on as `wait`
+    /// (`Self::await_input`): the session runs, and `wait` is its receive half's own input, on a
+    /// half whose receive waits.
+    pub(super) fn awaits(&self, wait: &LinkWait) -> bool {
+        self.holds_session()
+            && self
+                .rx
+                .as_ref()
+                .is_some_and(|rx| awaits_on(&**rx.borrow(), wait))
+    }
+
+    /// Whether the group's receive half waits in its receive (`Self::await_input`).
+    pub(super) fn awaits_input(&self) -> bool {
+        self.rx
+            .as_ref()
+            .is_some_and(|rx| rx.borrow().awaits_input())
+    }
+
+    /// Wait in the group's receive, for at most `timeout_us` of the session's clock, for a
+    /// member's datagram, kept for the step that follows to read first; what the group's own
+    /// sender sent is dropped inside the wait (`GroupReceive::await_input`). Whether one was kept.
+    pub(super) fn await_input(&mut self, timeout_us: u64) -> bool {
+        let Some(rx) = &self.rx else {
+            return false;
+        };
+        let place = &self.place;
+        rx.borrow_mut()
+            .await_input(timeout_us, &mut || place.now_us())
     }
 
     /// Whether the slot holds a session a read steps: from a join to the session's end.
@@ -2270,5 +2330,43 @@ mod side_tests {
         );
         let failed = side(Some(alloc::boxed::Box::new(Half { failed: true })));
         assert!(!failed.carrier_up(), "a failed receive half ends the link");
+    }
+
+    /// A receive half on socket 7, whose receive waits or not.
+    struct Waiting(bool);
+
+    impl GroupReceive for Waiting {
+        fn recv_with(&mut self, _f: &mut dyn FnMut(&[u8], SocketAddr)) -> bool {
+            false
+        }
+
+        fn input_wait(&self) -> Option<WaitOn> {
+            Some(WaitOn::Socket(7))
+        }
+
+        fn awaits_input(&self) -> bool {
+            self.0
+        }
+
+        fn close(&mut self) {}
+    }
+
+    /// A read waits in a group's receive only for the half's own input, on a half whose receive
+    /// waits; it waits on any other input, or on a half whose receive returns at once, as it did.
+    /// Turned red by a read that waits in a receive that returns at once (`awaits_on` without
+    /// `GroupReceive::awaits_input`), which would turn the read with no wait at all, or in the
+    /// receive of a group for another socket's input.
+    #[test]
+    fn a_read_waits_in_a_groups_receive_only_for_its_own_input() {
+        let own = LinkWait::input(WaitOn::Socket(7));
+        assert!(awaits_on(&Waiting(true), &own));
+        assert!(
+            !awaits_on(&Waiting(false), &own),
+            "a receive that returns at once"
+        );
+        assert!(
+            !awaits_on(&Waiting(true), &LinkWait::input(WaitOn::Socket(8))),
+            "another socket's input"
+        );
     }
 }

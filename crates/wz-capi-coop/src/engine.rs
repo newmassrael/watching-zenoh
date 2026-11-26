@@ -9927,7 +9927,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         // the session let go of as a read makes it; one asked from a callback's call leaves the
         // JOIN to the next read.
         #[cfg(not(wz_round))]
-        self.read_groups(None);
+        self.read_groups(None, None);
         // What the step took from a group is handed out outside the lock, as a read's is.
         self.deliver();
         Ok(asked)

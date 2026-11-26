@@ -252,6 +252,24 @@ pub trait GroupReceive {
         false
     }
 
+    /// Whether [`Self::await_input`] waits: a half whose socket's receive itself waits, for at
+    /// most a time it is given. The provided answer is no, and a reader of such a half waits on
+    /// [`Self::input_wait`] instead.
+    fn awaits_input(&self) -> bool {
+        false
+    }
+
+    /// Wait in the receive itself, for at most `timeout_us` microseconds as `now_us` reads them,
+    /// for a member's datagram, and keep it ([`Self::keep`]) for the next [`Self::recv_with`] to
+    /// lend: `true` once one is kept, `false` when the time ran out or the receive failed. What the
+    /// group's own sender sent is dropped inside the wait, which goes on for what is left of the
+    /// time, as zenoh-pico's receive loops past its own datagrams. The provided form waits for
+    /// nothing.
+    fn await_input(&mut self, timeout_us: u64, now_us: &mut dyn FnMut() -> u64) -> bool {
+        let _ = (timeout_us, now_us);
+        false
+    }
+
     /// Receive nothing more: this half's part of [`GroupTransport::close`].
     fn close(&mut self);
 }
@@ -590,6 +608,10 @@ mod tests {
         assert!(half.recv_with(&mut |bytes, _| member = bytes == b"member"));
         assert!(member, "the half reads what the transport would have");
         assert!(!half.failed() && !half.keeps_input() && half.input_wait().is_none());
+        assert!(
+            !half.awaits_input() && !half.await_input(1_000, &mut || 0),
+            "the provided half waits for nothing"
+        );
     }
 
     /// A stack that cannot tell a full socket from a sent datagram sends the datagram and answers

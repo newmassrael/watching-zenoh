@@ -1012,6 +1012,13 @@ impl PosixUdpSocket {
         set_nonblocking(self.fd, true).map_err(PosixNetError::NonBlocking)
     }
 
+    /// Make a receive that passes no flag wait again, up to the socket's receive timeout: `true`
+    /// when the kernel took it.
+    #[cfg(all(feature = "host-multicast", unix))]
+    pub(crate) fn make_receive_wait(&self) -> bool {
+        set_nonblocking(self.fd, false).is_ok()
+    }
+
     /// Whether this host's other members of a group observe what this socket sends:
     /// `IP_MULTICAST_LOOP` or `IPV6_MULTICAST_LOOP`, as the socket's family names it.
     #[cfg(feature = "host-multicast")]

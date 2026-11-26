@@ -65,6 +65,15 @@ pub trait MulticastSocket: DatagramSocket {
     #[cfg(feature = "host-multicast")]
     fn make_nonblocking(&self) -> Result<(), Self::Error>;
 
+    /// Make a receive that passes no flag of its own wait, for at most the socket's receive
+    /// timeout, where [`Self::make_nonblocking`] made it return at once; a receive that asks not
+    /// to wait still does not. `true` when the socket took it. The provided form takes none, and
+    /// a socket that does not is never waited on in its receive.
+    #[cfg(feature = "host-multicast")]
+    fn make_receive_wait(&self) -> bool {
+        false
+    }
+
     /// Whether this host's other members of a group observe what the socket sends, in the option
     /// of its family (`IP_MULTICAST_LOOP`, `IPV6_MULTICAST_LOOP`).
     #[cfg(feature = "host-multicast")]
@@ -275,6 +284,13 @@ impl MulticastSocket for PosixUdpSocket {
     #[cfg(feature = "host-multicast")]
     fn make_nonblocking(&self) -> Result<(), PosixNetError> {
         PosixUdpSocket::make_nonblocking(self)
+    }
+
+    // A receive that asks not to wait passes `MSG_DONTWAIT`, which holds whatever the socket's
+    // mode, so only the receive that passes no flag waits.
+    #[cfg(all(feature = "host-multicast", unix))]
+    fn make_receive_wait(&self) -> bool {
+        PosixUdpSocket::make_receive_wait(self)
     }
 
     #[cfg(feature = "host-multicast")]

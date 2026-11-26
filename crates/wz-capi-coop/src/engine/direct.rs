@@ -1679,10 +1679,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The wait is handed back to the session by the first face's look at its life, or by the
         // read itself when no face was looked at. Each face's records are handed out with its
         // slot still held, so a callback's read finds it held.
-        let mut wait = Some(
-            self.wait_on_faces(self.faces_due_us())
-                .ok_or(SessionClosed)?,
-        );
+        // Where the one input the read would wait on is a group's, the group's step waits in its
+        // receive instead, for as long (`Self::wait_or_await_group`).
+        #[cfg(feature = "group")]
+        let (wait, awaited_us) = self
+            .wait_or_await_group(self.faces_due_us())
+            .ok_or(SessionClosed)?;
+        #[cfg(not(feature = "group"))]
+        let wait = self
+            .wait_on_faces(self.faces_due_us())
+            .ok_or(SessionClosed)?;
+        let mut wait = Some(wait);
         let mut read = Ok(());
         let mut jobs_due_ms = None;
         // The last face's reading of the clock, which the groups are stepped at.
@@ -1740,7 +1747,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // role's held (`Self::read_groups`).
         #[cfg(feature = "group")]
         if read.is_ok() {
-            self.read_groups(read_us);
+            self.read_groups(read_us, awaited_us);
         }
         // What the faces' and the groups' records left to hand out, handed out once for the read
         // rather than once a face and once a run of Pushes: no slot is held, and a callback's read
@@ -1781,13 +1788,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// callback of a group's record finds the faces held and reads nothing. A slot found held is
     /// a read under way on this thread, whose callback this is called from: nothing is stepped.
     /// A session that joined no group steps none and takes nothing for them.
+    /// A read that made no wait of its own for a group whose receive waits hands `awaited_us`,
+    /// the time it would have waited, to that group's step, which waits in its receive for it.
     #[cfg(feature = "group")]
-    pub(super) fn read_groups(&self, now_us: Option<u64>) {
+    pub(super) fn read_groups(&self, now_us: Option<u64>, awaited_us: Option<u64>) {
         if !self.joins_groups {
             return;
         }
         if let Some(_reading) = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot) {
-            self.step_groups(now_us);
+            self.step_groups(now_us, awaited_us);
             self.poll_groups();
         }
     }
@@ -1806,8 +1815,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// end left for the session to read (`Self::poll_groups`); a slot whose session ended is not
     /// stepped. One a read finds the session closed after is stepped once more, which tells the
     /// group it leaves.
+    /// A group whose receive waits is handed `awaited_us`, the time the read made no wait for:
+    /// its step waits in its receive for a member's datagram first, with nothing of the session
+    /// held, and is made at the clock's reading after that wait.
     #[cfg(feature = "group")]
-    fn step_groups(&self, now_us: Option<u64>) {
+    fn step_groups(&self, now_us: Option<u64>, mut awaited_us: Option<u64>) {
         let mut at = 0;
         loop {
             let (pump, most) = {
@@ -1837,7 +1849,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             };
             // A burst read to its bound leaves the group's mark of input for the next read's
             // wait, so that read does not wait for what the socket already holds.
-            let now_us = now_us.unwrap_or_else(|| pump.now_us());
+            let now_us = match awaited_us {
+                Some(timeout_us) if pump.awaits_input() => {
+                    awaited_us = None;
+                    pump.await_input(timeout_us);
+                    pump.now_us()
+                }
+                _ => now_us.unwrap_or_else(|| pump.now_us()),
+            };
             let ended = self.step_group(&mut pump, most, now_us);
             // What the slot shares with the group's face is let go of, stepped or put back under
             // the session's lock, closed or not: a close let go of the face's handles under it.
@@ -1931,7 +1950,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if !self.joins_groups {
             return Ok(());
         }
-        self.step_groups(None);
+        self.step_groups(None, None);
         let held = self.live().ok_or(OpenError::NoEndpoint)?;
         match held
             .0
@@ -1980,11 +1999,30 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// The wait for the input of any face or the earliest deadline `due_us`, made with nothing
     /// of the session held. `None` once the session closed.
     fn wait_on_faces(&self, due_us: u64) -> Option<IdleWait> {
-        let mut wait = self.link_wait(due_us)?;
+        let mut wait = self.link_wait(due_us, None)?;
         #[cfg(test)]
         self.takes.wait(&wait);
         wait.wait(self.rooms.waits(), sleep_ms);
         Some(wait)
+    }
+
+    /// [`Self::wait_on_faces`] for a read that steps the groups after its faces: where the one
+    /// input the read would wait on is a group's, on a receive half whose receive waits, no wait
+    /// is made here, and the time it would have taken is answered beside the wait, for the
+    /// group's step to wait in its receive (`Self::step_groups`). A datagram then costs that
+    /// receive and no wait beside it, as zenoh-pico's read task waits in its receive
+    /// (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_posix.c` @
+    /// `rb = recvfrom(sock._fd, ptr, len, 0, (struct sockaddr *)&raddr, &replen);`).
+    #[cfg(feature = "group")]
+    fn wait_or_await_group(&self, due_us: u64) -> Option<(IdleWait, Option<u64>)> {
+        let mut awaited_us = None;
+        let mut wait = self.link_wait(due_us, Some(&mut awaited_us))?;
+        #[cfg(test)]
+        self.takes.wait(&wait);
+        if awaited_us.is_none() {
+            wait.wait(self.rooms.waits(), sleep_ms);
+        }
+        Some((wait, awaited_us))
     }
 
     /// A turn of `face`, its read slot held as `slot`, after the wait `wait` when this turn
@@ -2048,7 +2086,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// What a read waits for: nothing while a link holds input it already took from its stack,
     /// else, worked out under the session's lock, the links' input, or the earliest of the faces'
     /// deadline `due_us` and the session's. `None` once the session closed.
-    fn link_wait(&self, due_us: u64) -> Option<IdleWait> {
+    ///
+    /// Where `awaits` is given and the wait is on one input, a group's that its step can wait for
+    /// in its receive (`GroupPump::awaits`), the wait's time is answered in it, in microseconds.
+    fn link_wait(&self, due_us: u64, awaits: Option<&mut Option<u64>>) -> Option<IdleWait> {
         // Each face's read tells its facts outside the session (`SiteFacts`), and the faces'
         // records read the same facts under it: a face found holding input here answers the wait
         // with nothing of the session taken, a wait that is none needing no deadline. A group's
@@ -2074,7 +2115,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // Marked as a holder that holds no send, so a droppable publish that finds the session
         // held for the wait tries it again at once (`LinkRooms::for_held`).
         let _waiting = SendingOn::enter(&self.sending_on, WAITING);
-        Some(held.0.idle_wait())
+        let wait = held.0.idle_wait();
+        #[cfg(feature = "group")]
+        if let (Some(awaits), IdleWait::Input { on, ms }) = (awaits, &wait) {
+            if let [only] = on.as_slice() {
+                if held
+                    .0
+                    .group_pumps
+                    .iter()
+                    .flatten()
+                    .any(|pump| pump.awaits(only))
+                {
+                    *awaits = Some(u64::from(*ms) * 1000);
+                }
+            }
+        }
+        #[cfg(not(feature = "group"))]
+        let _ = awaits;
+        Some(wait)
     }
 
     /// Whether a face the read may turn holds input its link already took from its stack, as the
@@ -3014,7 +3072,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     pub(crate) fn faces_due_waited_and_held(&self) -> (u64, u64) {
         let held = <CoopForm as LockForm>::try_lock(&self.direct.dial.slot)
             .expect("no read holds the one face's slot between reads");
-        let wait = self.link_wait(self.wait_due(&held.0));
+        let wait = self.link_wait(self.wait_due(&held.0), None);
         let mut core = self.live().expect("the session is open");
         // The wait is handed back unwaited, as a read hands back the one it made.
         if let Some(wait) = wait {

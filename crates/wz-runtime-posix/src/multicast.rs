@@ -18,6 +18,7 @@
 //! the wait is the engine's, which steps its groups at their tick.
 
 use alloc::vec::Vec;
+use core::ffi::c_int;
 use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
 
@@ -754,6 +755,11 @@ pub struct HostGroupReceive<S: MulticastSocket> {
     /// Whether the joined socket failed a receive: what the host reports of an interface that went
     /// away, and the end of the group's link.
     failed: bool,
+    /// Whether a receive that passes no flag waits on the joined socket, up to its receive timeout:
+    /// made so when the half is taken out of its transport, where a reader waits in it.
+    waits: bool,
+    /// The receive timeout last set on the joined socket, in milliseconds.
+    armed_ms: Option<c_int>,
 }
 
 impl<S: MulticastSocket> HostGroupTransport<S> {
@@ -798,6 +804,58 @@ impl<S: MulticastSocket> HostGroupReceive<S> {
             lent: None,
             kept: None,
             failed: false,
+            waits: false,
+            armed_ms: None,
+        }
+    }
+
+    /// Wait in the joined socket's receive, for at most `timeout_us` as `now_us` reads it, for a
+    /// datagram a member sent, past those the group's own send socket sent, and keep it for the
+    /// next receive to lend: `true` once one is kept. The socket's timeout is set in whole
+    /// milliseconds, again only when what is left of the time needs another, so a stream of
+    /// datagrams sets it once. A half whose socket's receive does not wait waits for nothing.
+    pub fn await_member(&mut self, timeout_us: u64, now_us: &mut dyn FnMut() -> u64) -> bool {
+        if self.kept.is_some() {
+            return true;
+        }
+        if !self.waits {
+            return false;
+        }
+        let Some(socket) = &self.read else {
+            return false;
+        };
+        let deadline_us = now_us().saturating_add(timeout_us);
+        let mut left_us = timeout_us;
+        loop {
+            let ms = c_int::try_from(left_us.div_ceil(1000)).unwrap_or(c_int::MAX);
+            if ms == 0 {
+                return false;
+            }
+            if self.armed_ms != Some(ms) {
+                if !socket.set_receive_timeout(ms) {
+                    return false;
+                }
+                self.armed_ms = Some(ms);
+            }
+            match socket.recv_waiting(self.rx.as_mut_slice()) {
+                Ok(Some((_, from))) if self.own.is_some_and(|own| sent_by_own(own, from)) => {
+                    left_us = deadline_us.saturating_sub(now_us());
+                }
+                Ok(Some((len, from))) => {
+                    self.kept = Some((len, from));
+                    return true;
+                }
+                // The time ran out, or a signal cut the wait short: the read goes on.
+                Ok(None) => return false,
+                Err(e) => {
+                    wz_session_core::diag_warn!(
+                        "group {}: its socket failed a receive: {e:?}",
+                        AddrText(self.group)
+                    );
+                    self.failed = true;
+                    return false;
+                }
+            }
         }
     }
 
@@ -946,10 +1004,17 @@ impl<S: MulticastSocket + 'static> GroupTransport for HostGroupTransport<S> {
             self.receive.as_ref()?.read.as_ref()?.input_wait()
         }
 
+        // The half's reader is its own: the joined socket's receive may wait in it from here on,
+        // where it can be given a time to wait for.
         fn split_receive(
             &mut self,
         ) -> Option<alloc::boxed::Box<dyn wz_runtime_coop::group_transport::GroupReceive>> {
-            let receive = self.receive.take()?;
+            let mut receive = self.receive.take()?;
+            receive.waits = S::CAN_SET_RECEIVE_TIMEOUT
+                && receive
+                    .read
+                    .as_ref()
+                    .is_some_and(S::make_receive_wait);
             Some(alloc::boxed::Box::new(receive))
         }
     }
@@ -986,6 +1051,14 @@ wz_runtime_coop::with_heap_link_seams! {
 
         fn failed(&self) -> bool {
             self.failed
+        }
+
+        fn awaits_input(&self) -> bool {
+            self.waits && self.read.is_some()
+        }
+
+        fn await_input(&mut self, timeout_us: u64, now_us: &mut dyn FnMut() -> u64) -> bool {
+            self.await_member(timeout_us, now_us)
         }
 
         fn close(&mut self) {
@@ -1504,6 +1577,47 @@ mod tests {
             half.close();
             assert!(half.input_wait().is_none(), "a closed half has left the group");
             assert!(!half.recv_with(&mut |_, _| panic!("a closed half received")));
+        }
+
+        /// A receive half taken out of its group waits in its receive for a member's datagram, past
+        /// what the group's own send socket sent, and keeps it for the next receive to lend; with
+        /// nothing sent it waits its time out in the receive and keeps nothing. Turned red by a split
+        /// that leaves the joined socket's receive returning at once (`make_receive_wait` not asked
+        /// in `HostGroupTransport::split_receive`), or a wait that ends on the group's own datagram.
+        #[test]
+        fn a_groups_receive_half_waits_in_its_receive_past_its_own_datagrams() {
+            use std::time::{Duration, Instant};
+            use wz_runtime_coop::group_transport::GroupReceive;
+
+            let loopback = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+            let read = PosixUdpSocket::bind(loopback).expect("a reading socket");
+            let write = PosixUdpSocket::bind(loopback).expect("a sending socket");
+            let member = PosixUdpSocket::bind(loopback).expect("a member's socket");
+            let to = read.local();
+            let mut group = HostGroupTransport::new(read, write, to, None);
+            let mut half = group.split_receive().expect("the receive half");
+            assert!(half.awaits_input(), "a host's joined socket waits in its receive");
+            let started = Instant::now();
+            let mut now_us = || u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let waited = Instant::now();
+            assert!(!half.await_input(30_000, &mut now_us), "nothing was sent");
+            assert!(
+                waited.elapsed() >= Duration::from_millis(25),
+                "the time was waited out in the receive"
+            );
+            group.send_to_group(b"own");
+            member.send_to(to, b"member").expect("sent");
+            assert!(
+                half.await_input(5_000_000, &mut now_us),
+                "the member's datagram"
+            );
+            let mut seen = None;
+            assert!(half.recv_with(&mut |bytes, from| seen = Some((bytes.to_vec(), from))));
+            assert_eq!(
+                seen,
+                Some((b"member".to_vec(), member.local())),
+                "kept past the group's own datagram, and lent by the next receive"
+            );
         }
 
         /// The joined socket's input is waited for from outside the session's loop: the wait is waited
