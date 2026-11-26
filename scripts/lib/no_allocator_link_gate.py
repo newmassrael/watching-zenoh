@@ -113,6 +113,9 @@ build itself compiled confirm it (half 2).
                         row says.
   --census DIR          every image of the table, every target, one report file
                         each plus an index (never fails on a pending image).
+  --zephyr-build-values the stand-ins for what `west build` passes a Zephyr
+                        staticlib, one `NAME=VALUE` line each, for a lane in
+                        another language that builds such a configuration.
 
 Source-line attribution of each allocation call site comes from the ELF's own
 line table (`--lines`, which builds with `debug = line-tables-only`: the code is
@@ -2668,9 +2671,18 @@ def main() -> int:
     parser.add_argument("--lines", action="store_true")
     parser.add_argument("--report")
     parser.add_argument("--census")
+    parser.add_argument(
+        "--zephyr-build-values",
+        action="store_true",
+        help="print the Zephyr build values the census builds with, one NAME=VALUE line each",
+    )
     args = parser.parse_args()
     if args.selftest:
         return _selftest()
+    if args.zephyr_build_values:
+        for name, value in ZEPHYR_BUILD_VALUES:
+            print(f"{name}={value}")
+        return 0
     if args.nm:
         # Exit 3 when the machine has no nm the gate can judge with, so a lane
         # can tell "not provisioned" (skip, or fail when required) from a verdict.

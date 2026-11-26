@@ -1501,7 +1501,7 @@ unsafe fn declare_subscriber_state(
     };
     let session = crate::session::session_count(zs);
     let state = slot
-        .fill(crate::object_slot::Answering::keeping(
+        .fill_answering(
             AdvSubState {
                 engine: crate::session::EngineHold::clone(engine),
                 subscriber: None,
@@ -1510,7 +1510,7 @@ unsafe fn declare_subscriber_state(
                 session: Some(session),
             },
             AdvSubKept::new(SampleKept::new(closure, background.then(|| session.hold()))),
-        ))
+        )
         .cast::<AdvSubState>();
     // SAFETY: `state` was filled for an `AdvSubPlace` just above, and its owner holds it; the
     // closure is counted in the place before anything can call it or let it go, so the place

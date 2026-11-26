@@ -37,22 +37,29 @@ impl<T, S> HeldPlace<T, S> {
     #[cfg(not(feature = "engine-tokio"))]
     pub(crate) const LAYOUT: Layout = Layout::new::<Self>();
 
-    /// Write `value` into the place at `at`, which holds it from then on, with `beside` beside
-    /// it, and answer the place.
+    /// Write `value` into the place at `at`, which holds it from then on, with what
+    /// `write_beside` makes beside it, where it stays, and answer the place. What stays may hold a
+    /// lock, which a kernel makes where it stays and never moves.
     ///
     /// # Safety
-    /// `at` is valid for writes of [`Self::LAYOUT`], aligned to it, and holds no live value.
+    /// `at` is valid for writes of [`Self::LAYOUT`], aligned to it, and holds no live value;
+    /// `write_beside` leaves a valid `S` in the place it is handed.
     #[cfg(not(feature = "engine-tokio"))]
-    pub(crate) unsafe fn fill(at: NonNull<u8>, value: T, beside: S) -> *mut Self {
+    pub(crate) unsafe fn fill(
+        at: NonNull<u8>,
+        value: T,
+        write_beside: impl FnOnce(NonNull<S>),
+    ) -> *mut Self {
         let place = at.cast::<Self>().as_ptr();
-        // SAFETY: the caller's contract.
+        // SAFETY: the caller's contract: each field is written once through a pointer to it, not
+        // null as `at` is valid.
         unsafe {
-            place.write(Self {
-                held: AtomicBool::new(true),
-                value: MaybeUninit::new(value),
-                beside,
-            })
-        };
+            core::ptr::addr_of_mut!((*place).held).write(AtomicBool::new(true));
+            core::ptr::addr_of_mut!((*place).value).write(MaybeUninit::new(value));
+            write_beside(NonNull::new_unchecked(core::ptr::addr_of_mut!(
+                (*place).beside
+            )));
+        }
         place
     }
 
@@ -124,7 +131,11 @@ mod tests {
         let mut memory = MaybeUninit::<HeldPlace<Counted<'_>>>::uninit();
         let at = NonNull::from(&mut memory).cast::<u8>();
         // SAFETY: `memory` is a place of the layout, aligned, holding nothing.
-        let place = unsafe { HeldPlace::fill(at, Counted(&drops), ()) };
+        let place = unsafe {
+            HeldPlace::fill(at, Counted(&drops), |beside: NonNull<()>| {
+                beside.as_ptr().write(())
+            })
+        };
         let copy = place;
         // SAFETY: the place's memory is `memory`, which stands for the whole test.
         unsafe {
@@ -159,7 +170,9 @@ mod tests {
         // SAFETY: `memory` is a place of the layout, aligned, holding nothing, and stands for the
         // whole test.
         unsafe {
-            let place = HeldPlace::fill(at, Counted(&drops), 7);
+            let place = HeldPlace::fill(at, Counted(&drops), |beside: NonNull<u32>| {
+                beside.as_ptr().write(7)
+            });
             assert_eq!(*(*place).beside(), 7);
             drop(HeldPlace::take(place).expect("the value is taken"));
             assert!((*place).held().is_none());

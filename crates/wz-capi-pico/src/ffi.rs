@@ -278,7 +278,11 @@ impl<C> Drop for CClosure<C> {
 /// the owner's place, which stands until the owner has let go of it and no closure is held
 /// (`CountIn`), so a closure let go of after its owner stopped waiting (a close made from
 /// inside a callback) still has its count to tell.
-#[derive(Default)]
+///
+/// Its lock and condition variable are a kernel's in a Zephyr image, which are made where they
+/// stay and never moved (`Self::init_at`); only a build whose lock is the host's makes one by
+/// value.
+#[cfg_attr(any(test, feature = "engine-tokio"), derive(Default))]
 pub(crate) struct OpenClosures {
     state: Mutex<Open>,
     none_open: Condvar,
@@ -301,6 +305,27 @@ impl Open {
 }
 
 impl OpenClosures {
+    /// A count with no closure held, made in `at` with its lock and condition variable made where
+    /// they stay.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The count is not moved from `at` until it is dropped there.
+    pub(crate) unsafe fn init_at(at: core::ptr::NonNull<Self>) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            wz_capi_port::os::mutex_in(
+                core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*at).state)),
+                |open| open.write(Open::default()),
+            );
+            wz_capi_port::os::condvar_in(core::ptr::NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).none_open),
+            ));
+        }
+    }
+
     /// One more held open here: a closure counted in the owner, or a leg of a get, which lets it
     /// go with [`Self::close_one`].
     #[cfg(feature = "query")]
@@ -821,6 +846,34 @@ mod closure_tests {
 
     fn held(owner: &Owner) -> usize {
         owner.open.state.lock().held
+    }
+
+    /// A count made where it stays (`OpenClosures::init_at`), as a kernel's lock must be, starts
+    /// with nothing held, kept or retired, and counts as one made by value does: a closure counted
+    /// holds it, its release lets it go with the owner still holding the place, and the owner's
+    /// retire then gives the place back at once. Turned red by an `init_at` that leaves the count
+    /// anything but empty.
+    #[test]
+    fn a_count_made_in_its_place_starts_empty_and_counts() {
+        let mut place = core::mem::MaybeUninit::<OpenClosures>::uninit();
+        // SAFETY: `place` is valid for one count, aligned and holding none, and it is not moved
+        // until the count is dropped in it below.
+        let open = unsafe {
+            OpenClosures::init_at(NonNull::from(&mut place).cast());
+            place.assume_init_ref()
+        };
+        assert_eq!(open.state.lock().held, 0, "nothing is held at first");
+        assert_eq!(open.state.lock().kept, 0, "nothing is kept at first");
+        open.count_one(false);
+        assert_eq!(open.state.lock().held, 1);
+        assert!(
+            !open.uncount_one(false),
+            "CONTROL: the owner still holds its place"
+        );
+        open.wait_none();
+        assert!(open.retire(), "an empty count's owner gives its place back");
+        // SAFETY: the count was made in `place` and nothing borrows it past here.
+        unsafe { place.assume_init_drop() };
     }
 
     /// An owner's count is open while a closure counted in it is held and none once its drop ran;

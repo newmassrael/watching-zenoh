@@ -47,29 +47,25 @@ pub(crate) fn init_if_asked(config: &zenoh_config::ExpandedConfig) {
 
 /// What carries a buffer of shared memory across the engine, in both directions.
 ///
-/// The process holds two shared-memory systems that share no type: this crate's (`zenoh::shm`,
-/// the family crate `zenoh-shm`), whose buffer an application holds as a `ZShm`, and the engine's
-/// own. They agree on the protocol (POSIX segments, a metadata slot that counts references, the
-/// descriptor on the wire), so the buffer is carried and not converted: the engine is given a
-/// [`ShmSendBuffer`] that wraps the slice of the application's `ZBytes` to send, and a
-/// [`ShmResolver`] that reads a received descriptor with this crate's reader into a slice the
-/// application receives as it is. The reference a sender takes for its receiver is the one the
-/// receiver's slice gives back when it drops, exactly as in upstream's codec.
+/// The engine's provider and this crate's (`zenoh::shm`, the family crate `zenoh-shm`) agree on
+/// the protocol (POSIX segments, a metadata slot that counts references, the descriptor on the
+/// wire), so the buffer is carried and not converted: the engine is given a [`ShmSendBuffer`]
+/// that wraps the slice of the application's `ZBytes` to send. The reader is one in the process,
+/// the engine's (`wz_runtime_tokio::shm_reader`), which is `zenoh-shm`'s `ShmReader`: the
+/// buffer it hands up is the `ShmBufInner` this crate's application receives as it is. The
+/// reference a sender takes for its receiver is the one the receiver's buffer gives back when it
+/// drops, exactly as in upstream's codec.
 #[cfg(all(feature = "shared-memory", feature = "engine-tokio"))]
 pub(crate) mod transport {
-    use std::{any::Any, num::NonZeroUsize, sync::Arc};
+    use std::{any::Any, sync::Arc};
 
+    use wz_runtime_tokio::shm_reader::{global_client_storage, ReceivedBuffer, ShmReaderResolver};
     use wz_session_core::{
         extshm::{ShmDescriptor, ShmReservation, ShmResolver, ShmSendBuffer, ShmSendHandle},
         link::{RxBytes, RxStorage, ShmChunkView},
     };
     use zenoh_buffers::ZSlice;
-    use zenoh_shm::{
-        api::client_storage::{ShmClientStorage, GLOBAL_CLIENT_STORAGE},
-        metadata::descriptor::MetadataDescriptor,
-        reader::ShmReader,
-        ShmBufInfo, ShmBufInner,
-    };
+    use zenoh_shm::{api::client_storage::ShmClientStorage, ShmBufInner};
 
     use crate::api::bytes::ZBytes;
 
@@ -113,12 +109,18 @@ pub(crate) mod transport {
         RxBytes::shared(Arc::new(SliceStorage { slice }), 0..len)
     }
 
-    /// The payload a received view carries, when it is a slice of shared memory this reader
-    /// made; `None` for any other bytes, which the caller copies as it always did.
+    /// The payload a received view carries, when it is a whole buffer of shared memory: one the
+    /// reader of the process read, or the application's own buffer handed to a receiver of the
+    /// session that sent it. `None` for any other bytes, which the caller copies as it always did.
     pub(crate) fn payload_of(view: &RxBytes) -> Option<ZBytes> {
         let (any, range) = view.host_storage()?;
-        let storage = any.downcast_ref::<SliceStorage>()?;
         // A payload that is a part of the buffer is not the buffer.
+        if let Some(received) = any.downcast_ref::<ReceivedBuffer>() {
+            let buffer = received.buffer();
+            return (range == (0..AsRef::<[u8]>::as_ref(&**buffer).len()))
+                .then(|| ZBytes::from_shm_slice(ZSlice::from(Arc::clone(buffer))));
+        }
+        let storage = any.downcast_ref::<SliceStorage>()?;
         (range == (0..storage.slice.as_slice().len()))
             .then(|| ZBytes::from_shm_slice(storage.slice.clone()))
     }
@@ -223,44 +225,6 @@ pub(crate) mod transport {
         }
     }
 
-    /// Reads a received descriptor with this crate's reader.
-    pub(crate) struct ReaderResolver {
-        reader: ShmReader,
-    }
-
-    impl ReaderResolver {
-        pub(crate) fn new(storage: Arc<ShmClientStorage>) -> Self {
-            Self {
-                reader: ShmReader::new(storage),
-            }
-        }
-
-        /// The buffer `descriptor` names. It owns the reference the sender took for this
-        /// receiver, and gives it back when it drops.
-        fn read(&self, descriptor: &ShmDescriptor) -> Option<Arc<ShmBufInner>> {
-            let info = ShmBufInfo::new(
-                NonZeroUsize::new(descriptor.data_len as usize)?,
-                MetadataDescriptor {
-                    id: descriptor.metadata_id,
-                    index: descriptor.metadata_index,
-                },
-                descriptor.generation,
-            );
-            self.reader.read_shmbuf(info).ok()
-        }
-    }
-
-    impl ShmResolver for ReaderResolver {
-        fn resolve(&self, descriptor: &ShmDescriptor) -> Option<Vec<u8>> {
-            let buffer = self.read(descriptor)?;
-            Some(AsRef::<[u8]>::as_ref(&*buffer).to_vec())
-        }
-
-        fn resolve_shared(&self, descriptor: &ShmDescriptor) -> Option<RxBytes> {
-            view_of(ZSlice::from(self.read(descriptor)?))
-        }
-    }
-
     /// The implicit optimisation of large messages: a payload that is a plain buffer as large as
     /// `transport/shared_memory/transport_optimization/message_size_threshold` is copied into the
     /// session's provider, so that it is sent to a peer that negotiated shared memory as a
@@ -343,16 +307,15 @@ pub(crate) mod transport {
         }
     }
 
-    /// The reader every session of an engine is given: over the storage of clients the
-    /// application opened the session with, or over the process's global one.
+    /// The reader every session of an engine is given: the reader of the process, over the
+    /// storage of clients the application opened the session with, or over the process's global
+    /// one.
     pub(crate) fn resolver_factory(
         storage: Option<Arc<ShmClientStorage>>,
     ) -> Arc<dyn Fn() -> Box<dyn ShmResolver + Send + Sync> + Send + Sync> {
         Arc::new(move || {
-            let storage = storage
-                .clone()
-                .unwrap_or_else(|| Arc::clone(&GLOBAL_CLIENT_STORAGE.read()));
-            Box::new(ReaderResolver::new(storage))
+            let storage = storage.clone().unwrap_or_else(global_client_storage);
+            Box::new(ShmReaderResolver::new(storage))
         })
     }
 
@@ -416,6 +379,65 @@ pub(crate) mod transport {
             );
         }
 
+        /// ONE READER IN THE PROCESS: a buffer of this crate's provider is read by the reader the
+        /// engine gives every session it opens, a buffer of the engine's provider by the reader
+        /// this crate gives its sessions, and each is handed up as the buffer itself, which this
+        /// crate reads back as a `ZShm`; the reference each sender took comes back when the
+        /// receiver lets go.
+        ///
+        /// Turned red by a second implementation of the reader: a resolver of this crate's own
+        /// hands up a storage `payload_of` does not read back from the engine's, or the engine's
+        /// hands up one this crate cannot read back as a buffer.
+        #[test]
+        fn one_reader_reads_the_buffers_of_both_providers() {
+            // This crate's provider, as a peer of this crate sends its buffer.
+            let (_provider, payload) = a_shared_payload();
+            let base = references(&payload);
+            let reservation = send_handle_of(&payload)
+                .expect("a handle of the buffer")
+                .reserve_for_receiver();
+            let ours = reservation.descriptor();
+            reservation.commit();
+            // The engine's provider, as the C ABI sends its buffer.
+            let mut engine = wz_runtime_tokio::shm_provider::ShmBackedPayload::alloc(64)
+                .expect("a chunk of the engine's provider");
+            engine.write(&[9u8; 64]);
+            let wire = engine.wire_reference();
+            let theirs = wire.descriptor();
+            wire.commit();
+
+            let engines_reader = ShmReaderResolver::global();
+            let make_ours = resolver_factory(None);
+            let our_reader = make_ours();
+            let read_by_the_engine = engines_reader
+                .resolve_shared(&ours)
+                .expect("the engine's reader reads this crate's buffer");
+            let read_by_us = our_reader
+                .resolve_shared(&theirs)
+                .expect("this crate's reader reads the engine's buffer");
+            for (view, byte) in [(&read_by_the_engine, 7u8), (&read_by_us, 9u8)] {
+                assert!(view.as_slice().iter().all(|&b| b == byte));
+                let read_back = payload_of(view).expect("the view is the buffer itself");
+                assert!(
+                    read_back.single_shm_slice().is_some(),
+                    "the application is handed the buffer, not a copy of it"
+                );
+            }
+            assert_eq!(
+                references(&payload),
+                base + 1,
+                "the receiver holds the reference its sender took"
+            );
+            drop(read_by_the_engine);
+            assert_eq!(
+                references(&payload),
+                base,
+                "the receiver's drop returns the reference"
+            );
+            drop(read_by_us);
+            drop(engine);
+        }
+
         #[test]
         fn a_committed_reservation_leaves_the_receivers_reference_and_the_receiver_returns_it() {
             let (_provider, payload) = a_shared_payload();
@@ -431,7 +453,7 @@ pub(crate) mod transport {
                 "the frame left: exactly one reference stands for the receiver"
             );
 
-            let resolver = ReaderResolver::new(Arc::clone(&GLOBAL_CLIENT_STORAGE.read()));
+            let resolver = ShmReaderResolver::global();
             let received = resolver
                 .read(&descriptor)
                 .expect("the receiver reads the descriptor");

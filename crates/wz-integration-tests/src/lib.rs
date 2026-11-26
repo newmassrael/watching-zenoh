@@ -3750,8 +3750,7 @@ pub mod common {
     /// level every witness this crate asserts on is logged at, so it is the default —
     /// but a hardcoded level is also what blocks a diagnostic run: the topology
     /// witnesses report COUNTS (`peak 3 node(s)`), while the identity of a node and
-    /// the locators it advertised are `debug` (`linkstate_forward`'s "discovered peer
-    /// {zid} reachable at {locators}"). `WZ_TEST_DEMO_LOG` lets an investigation raise
+    /// the locators it advertised are logged at `debug`. `WZ_TEST_DEMO_LOG` lets an investigation raise
     /// it without editing the harness.
     pub fn demo_log_filter() -> String {
         const FLOOR: &str = "wz_ap_demo=info";

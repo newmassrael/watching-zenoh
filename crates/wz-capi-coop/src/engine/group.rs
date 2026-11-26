@@ -1102,7 +1102,7 @@ impl<W: LinkWaits> GroupFace<W> {
 
     /// How many messages of `priority` the session put on the group were dropped for want of room.
     /// Read only by `CoopEngine::group_congestion_drops`, and compiled where it is.
-    #[cfg(all(test, feature = "app-transport", feature = "threads"))]
+    #[cfg(all(test, feature = "std", feature = "app-transport", feature = "threads"))]
     pub(super) fn congestion_drops(&self, priority: Priority) -> u32 {
         self.tx.drops(priority)
     }
@@ -1135,7 +1135,13 @@ impl<W: LinkWaits> GroupFace<W> {
 
     /// The group's stage, as its dispatch stages a reply on it. Read only by
     /// `CoopEngine::stage_group_replies`, and compiled where it is.
-    #[cfg(all(test, feature = "app-transport", feature = "transport-stats"))]
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "app-transport",
+        feature = "threads",
+        feature = "transport-stats"
+    ))]
     pub(super) fn reply_stage(&self) -> &GroupTxStage {
         &self.tx
     }

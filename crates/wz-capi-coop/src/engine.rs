@@ -1511,11 +1511,23 @@ struct HandBack {
 
 #[cfg(all(feature = "threads", wz_round))]
 impl HandBack {
-    fn new() -> Self {
-        Self {
-            behind: core::sync::atomic::AtomicUsize::new(0),
-            handed: Mutex::new(0),
-            back: os::Condvar::new(),
+    /// A hand-back no read waits at, made in `at` with its lock and condition variable made where
+    /// they stay: a kernel's objects are not moved once made, so neither is built by value.
+    ///
+    /// # Safety
+    /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
+    /// without being dropped. The hand-back is not moved from `at` until it is dropped there.
+    unsafe fn init_at(at: NonNull<Self>) {
+        let at = at.as_ptr();
+        // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
+        // so each field is too, and each is written once.
+        unsafe {
+            addr_of_mut!((*at).behind).write(core::sync::atomic::AtomicUsize::new(0));
+            os::mutex_in(
+                NonNull::new_unchecked(addr_of_mut!((*at).handed)),
+                |handed| handed.write(0),
+            );
+            os::condvar_in(NonNull::new_unchecked(addr_of_mut!((*at).back)));
         }
     }
 
@@ -6726,13 +6738,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 addr_of_mut!((*at).held_drop).write(held_drop);
                 addr_of_mut!((*at).sending_on).write(AtomicU64::new(NOT_SENDING));
                 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
-                addr_of_mut!((*at).handed).write(Mutex::new(handed));
+                os::mutex_in(
+                    NonNull::new_unchecked(addr_of_mut!((*at).handed)),
+                    |table| table.write(handed),
+                );
                 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 addr_of_mut!((*at).owed).write(AtomicBool::new(false));
                 #[cfg(wz_round)]
                 addr_of_mut!((*at).input_held).write(AtomicBool::new(false));
                 #[cfg(all(feature = "threads", wz_round))]
-                addr_of_mut!((*at).hand_back).write(HandBack::new());
+                HandBack::init_at(NonNull::new_unchecked(addr_of_mut!((*at).hand_back)));
                 #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
                 addr_of_mut!((*at).handed_limits).write(handed_limits);
                 #[cfg(feature = "transport-stats")]
@@ -6944,14 +6959,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// The plane the session's faces are told through, for a test that tells it rows itself.
-    #[cfg(all(test, feature = "connectivity"))]
+    #[cfg(all(test, feature = "std", feature = "connectivity"))]
     pub(crate) fn face_plane(&self) -> &FacePlane {
         &self.faces
     }
 
     /// The session's say on a second link to a node, the one its links' handshakes ask, for a
     /// test that asks it as they do.
-    #[cfg(all(test, feature = "listen"))]
+    #[cfg(all(test, feature = "std", feature = "listen"))]
     pub(crate) fn link_admission(&self) -> PlacedRef<dyn LinkAdmission> {
         self.core.lock().0.transport.admission
     }
@@ -6960,7 +6975,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// task of the session's: the runtime is confined to that lock (`confine_tasks`), so the set
     /// is used under it and a handle of it taken out is used only once the engine has gone. A
     /// session whose read steps each face where it lies runs no link as a task.
-    #[cfg(all(test, feature = "listen", wz_round))]
+    #[cfg(all(test, feature = "std", feature = "listen", wz_round))]
     pub(crate) fn with_local_set<R>(&self, f: impl FnOnce(&CoopLocalSet<C>) -> R) -> R {
         f(&self.core.lock().0.local)
     }
@@ -7014,6 +7029,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// task (`tests::group`).
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
         feature = "threads"
@@ -7026,6 +7042,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// room on the group's stage. Compiled where its readers are, as [`Self::rooms`] is.
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
         feature = "threads"
@@ -7046,8 +7063,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// where its readers are: the tests of a group's drops (`tests::group`, `transport-stats`).
     #[cfg(all(
         test,
+        feature = "std",
         feature = "group",
         feature = "app-transport",
+        feature = "threads",
         feature = "transport-stats"
     ))]
     pub(crate) fn stage_group_replies(
@@ -9449,7 +9468,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// Spend every interest id of the session of each face whose link is up, as a session that
     /// has asked `u32::MAX` Interests has.
-    #[cfg(all(test, feature = "liveliness-get"))]
+    #[cfg(all(test, feature = "std", feature = "liveliness-get"))]
     pub(crate) fn spend_interest_ids(&self) {
         let Some(guard) = self.live() else {
             return;
@@ -12501,15 +12520,29 @@ mod member_key_tests {
 #[cfg(all(test, feature = "std", feature = "threads", wz_round))]
 mod hand_back_tests {
     use super::{lock, HandBack};
+    use core::ptr::NonNull;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// A hand-back made where it stays, as the engine makes its own.
+    fn made() -> Arc<HandBack> {
+        let mut place = Arc::<HandBack>::new_uninit();
+        let at =
+            NonNull::from(Arc::get_mut(&mut place).expect("the one holder")).cast::<HandBack>();
+        // SAFETY: `at` is the place the Arc holds, aligned for a `HandBack` and holding none,
+        // which the Arc does not move; every field is written before it is read as made.
+        unsafe {
+            HandBack::init_at(at);
+            place.assume_init()
+        }
+    }
 
     /// A read waiting for another read's buffer wakes when the buffer is handed back, well
     /// before its bound, and is counted out after. Turned red by a hand-back that wakes no one,
     /// which leaves a read task asleep for its whole bound behind a program's read.
     #[test]
     fn a_read_waiting_for_the_buffer_wakes_when_it_is_handed_back() {
-        let back = Arc::new(HandBack::new());
+        let back = made();
         let seen = back.enter();
         let handing = {
             let back = back.clone();
@@ -12535,7 +12568,7 @@ mod hand_back_tests {
     /// at once. Turned red by a wait that looks for a notification alone, which this one missed.
     #[test]
     fn a_hand_back_before_the_wait_begins_ends_it_at_once() {
-        let back = HandBack::new();
+        let back = made();
         let seen = back.enter();
         back.handed_back();
         let started = Instant::now();
@@ -12547,7 +12580,7 @@ mod hand_back_tests {
     /// that counts a hand-back no read waits for.
     #[test]
     fn a_hand_back_with_no_read_waiting_counts_nothing() {
-        let back = HandBack::new();
+        let back = made();
         back.handed_back();
         assert_eq!(*lock(&back.handed), 0);
     }

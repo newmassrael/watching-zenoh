@@ -25,7 +25,7 @@
 //! port's shared-memory publication (`publish_shm_on_wire_all`) opens both ends with both, beside
 //! a client that offers none, in a build with `session-extshm`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -33,6 +33,7 @@ use wz_runtime_tokio::session::LocalDeliveryDrain;
 use wz_runtime_tokio::session_glue::{TxQueueConf, WhatAmI};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::face::FaceEventKind;
+use wz_session_core::query_mode::ConsolidationMode;
 use wz_session_core::query_options::QueryOptions;
 use wz_session_core::query_sink::{QueryView, ReplyOut};
 use wz_session_core::reply_sink::{ReplyKind, ReplyView};
@@ -896,54 +897,80 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
     router.close();
 }
 
-/// One ask's legs: the Put replies they are handed, and how many of them have ended.
+/// One ask's legs: the Put replies they are handed, how many callbacks the ask minted, how many
+/// of those were let go of, and how many of the let-go ones had been handed a Put. The engine
+/// mints a callback before it issues the leg, and lets go at once of one it could not issue, so
+/// the count of ends is held to the count minted and not to the legs issued.
 #[derive(Default)]
 struct Legs {
     replies: Mutex<Vec<Vec<u8>>>,
+    minted: AtomicUsize,
     ended: AtomicUsize,
+    answered_ended: AtomicUsize,
 }
 
-/// A leg's end, counted on its ask when the leg's callback is let go of.
-struct LegEnd(Arc<Legs>);
+/// A leg's end, counted on its ask when the leg's callback is let go of. `answered` tells the leg
+/// a queryable answered from one that reached none (the asker's own plane, or a leg never issued),
+/// which ends at once and says nothing of the kept query.
+struct LegEnd {
+    legs: Arc<Legs>,
+    answered: AtomicBool,
+}
 
 impl Drop for LegEnd {
     fn drop(&mut self) {
-        self.0.ended.fetch_add(1, Ordering::SeqCst);
+        if *self.answered.get_mut() {
+            self.legs.answered_ended.fetch_add(1, Ordering::SeqCst);
+        }
+        self.legs.ended.fetch_add(1, Ordering::SeqCst);
     }
 }
 
-/// Ask `key` once through `asker`'s port: how many legs were issued, and what they are handed.
-fn ask_counting_legs(asker: &Arc<dyn SessionEngine>, key: &str) -> (usize, Arc<Legs>) {
+/// Ask `key` once through `asker`'s port, its replies consolidated as `consolidation` says: how
+/// many legs were issued, and what they are handed.
+fn ask_counting_legs(
+    asker: &Arc<dyn SessionEngine>,
+    key: &str,
+    consolidation: ConsolidationMode,
+) -> (usize, Arc<Legs>) {
     let legs = Arc::new(Legs::default());
+    let options = QueryOptions::default().with_consolidation(consolidation);
     let issued = asker
-        .get_on_wire(
-            key,
-            &WireKey::literal(),
-            &QueryOptions::default(),
-            None,
-            &mut || {
-                let end = LegEnd(Arc::clone(&legs));
-                wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
-                    if reply.kind() == ReplyKind::Put {
-                        end.0.replies.lock().unwrap().push(reply.payload().to_vec());
-                    }
-                })
-            },
-        )
+        .get_on_wire(key, &WireKey::literal(), &options, None, &mut || {
+            legs.minted.fetch_add(1, Ordering::SeqCst);
+            let end = LegEnd {
+                legs: Arc::clone(&legs),
+                answered: AtomicBool::new(false),
+            };
+            wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
+                if reply.kind() == ReplyKind::Put {
+                    end.answered.store(true, Ordering::SeqCst);
+                    end.legs
+                        .replies
+                        .lock()
+                        .unwrap()
+                        .push(reply.payload().to_vec());
+                }
+            })
+        })
         .expect("the engine asks queries");
     (issued, legs)
 }
 
 /// Declare on `keeper` a queryable under `key` whose handler keeps each query and answers none,
-/// and ask it through `asker` until a query is kept. The kept query is answered through the
-/// keeper's port (`reply_held`): the reply arrives while the asker's leg stays open, the leg ends
-/// once the keep is released (`release_held`), `holds` (what the keeper keeps) is none after,
-/// and a keep released answers nothing more.
+/// and ask it through `asker` until a query is kept, its replies consolidated as `consolidation`
+/// says. The kept query is answered through the keeper's port (`reply_held`) and the leg it
+/// answers stays open; that leg and every other the ask minted end once the keep is released
+/// (`release_held`), `holds` (what the keeper keeps) is none after, and a keep released answers
+/// nothing more. With no consolidation the reply is handed over while the query is kept; with
+/// `Latest` it is held until the query ends, as zenoh's session holds each key's newest reply
+/// (`zenoh/src/api/session.rs` @ `ConsolidationMode::Auto | ConsolidationMode::Latest => {`).
 fn a_kept_query_answers_and_ends_through_the_port(
     keeper: &Arc<dyn SessionEngine>,
     asker: &Arc<dyn SessionEngine>,
     key: &str,
     holds: impl Fn() -> usize,
+    consolidation: ConsolidationMode,
 ) {
     let kept: Arc<Mutex<Vec<(String, HeldQueryId)>>> = Arc::default();
     let into = Arc::clone(&kept);
@@ -976,7 +1003,7 @@ fn a_kept_query_answers_and_ends_through_the_port(
     let (asked, issued, legs, held) = loop {
         attempt += 1;
         let asked = format!("{key}/{attempt}");
-        let (issued, legs) = ask_counting_legs(asker, &asked);
+        let (issued, legs) = ask_counting_legs(asker, &asked, consolidation);
         let kept_of = || {
             kept.lock()
                 .unwrap()
@@ -997,20 +1024,34 @@ fn a_kept_query_answers_and_ends_through_the_port(
         );
     };
     assert!(holds() >= 1, "the keeper keeps the query");
+    assert!(
+        (1..=legs.minted.load(Ordering::SeqCst)).contains(&issued),
+        "the ask issued a leg, and only legs it minted a callback for"
+    );
 
     keeper.reply_held(held, &asked, &mut |out| {
         out.reply_keyed(&asked, b"kept")
             .expect("a reply on the query's own key");
     });
-    assert!(
-        eventually(|| !legs.replies.lock().unwrap().is_empty()),
-        "the reply made through the port did not arrive"
-    );
-    assert_eq!(legs.replies.lock().unwrap()[0], b"kept".to_vec());
-    std::thread::sleep(Duration::from_millis(300));
-    assert!(
-        legs.ended.load(Ordering::SeqCst) < issued,
-        "a leg ended while its query was kept"
+    let latest = consolidation == ConsolidationMode::Latest;
+    if latest {
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            legs.replies.lock().unwrap().is_empty(),
+            "a Latest query handed a reply over before its end"
+        );
+    } else {
+        assert!(
+            eventually(|| !legs.replies.lock().unwrap().is_empty()),
+            "the reply made through the port did not arrive"
+        );
+        assert_eq!(legs.replies.lock().unwrap()[0], b"kept".to_vec());
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert_eq!(
+        legs.answered_ended.load(Ordering::SeqCst),
+        0,
+        "the leg the kept query answered ended while its query was kept"
     );
 
     let all: Vec<HeldQueryId> = kept
@@ -1023,9 +1064,21 @@ fn a_kept_query_answers_and_ends_through_the_port(
         keeper.release_held(each);
     }
     assert!(
-        eventually(|| legs.ended.load(Ordering::SeqCst) == issued),
-        "the leg did not end once its keep was released"
+        eventually(|| legs.ended.load(Ordering::SeqCst) == legs.minted.load(Ordering::SeqCst)),
+        "a leg the ask minted did not end once its keep was released"
     );
+    assert_eq!(
+        legs.answered_ended.load(Ordering::SeqCst),
+        1,
+        "the leg the kept query answered ended with the release"
+    );
+    if latest {
+        assert_eq!(
+            *legs.replies.lock().unwrap(),
+            [b"kept".to_vec()],
+            "a Latest query hands its key's reply over at its end"
+        );
+    }
     assert_eq!(holds(), 0, "a keep released is kept no more");
 
     let mut answered = false;
@@ -1044,6 +1097,23 @@ fn a_query_the_node_keeps_is_answered_and_ended_through_its_port() {
         &peer.as_engine(),
         "wz/port/kept/node",
         || router.engine.kept.kept(),
+        ConsolidationMode::None,
+    );
+    peer.close();
+    router.close();
+}
+
+/// A query of the registry's client of the default mode (`Latest`) that the node keeps hands the
+/// reply made through the node's port over at its end, not before.
+#[test]
+fn a_latest_query_the_node_keeps_is_answered_at_its_end() {
+    let (router, peer) = pair();
+    a_kept_query_answers_and_ends_through_the_port(
+        &router.as_engine(),
+        &peer.as_engine(),
+        "wz/port/kept/latest-node",
+        || router.engine.kept.kept(),
+        ConsolidationMode::Latest,
     );
     peer.close();
     router.close();
@@ -1060,6 +1130,25 @@ fn a_query_the_registry_keeps_is_answered_and_ended_through_its_port() {
         &router.as_engine(),
         "wz/port/kept/registry",
         || peer.0.shared.kept_queries.kept(),
+        ConsolidationMode::None,
+    );
+    peer.close();
+    router.close();
+}
+
+/// A query of the node's own face of the default mode (`Latest`) that the registry keeps hands the
+/// reply over at its end, as the registry's client does: the node consolidates the replies of its
+/// get as a session does. Turned red by a node whose get hands every reply over as it comes.
+#[cfg(feature = "queryable")]
+#[test]
+fn a_latest_query_of_the_node_the_registry_keeps_is_answered_at_its_end() {
+    let (router, peer) = pair();
+    a_kept_query_answers_and_ends_through_the_port(
+        &peer.as_engine(),
+        &router.as_engine(),
+        "wz/port/kept/latest-registry",
+        || peer.0.shared.kept_queries.kept(),
+        ConsolidationMode::Latest,
     );
     peer.close();
     router.close();

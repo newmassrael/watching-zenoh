@@ -841,12 +841,15 @@ session-extcompression = ["wz-session-core/session-extcompression"]
 # no_std machinery (descriptor + 0x2 marker + is_shm + ShmResolver trait) and
 # pulls memmap2 for the AP POSIX segment (shm_provider). AP-only (no MCU forward
 # -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
-# the Z_EXT_SHM challenge handshake (session-extshm).
+# the Z_EXT_SHM challenge handshake (session-extshm). The reader is `zenoh-shm`'s
+# (`shm_reader`), with `zenoh-result` for the error type its clients return.
 transport-shm = [
     "wz-session-core/transport-shm",
     "wz-ext-pubsub/transport-shm",
     "posix-shm-segment",
     "dep:talc",
+    "dep:zenoh-shm",
+    "dep:zenoh-result",
 ]
 # R2954 — the POSIX shm SEGMENT protocol on its own (`posix_shm`: upstream's
 # `{id}.zenoh` naming, 0600 mode, shared advisory lock, and the orphan cleanup
@@ -1178,12 +1181,12 @@ routing-routes = ["routing-peer"]
 # R311qr — pulls `wz-codecs/codec-linkstate` so the driver's `forward`
 # (c3) can name the decoded `LinkstateListOwned` the graph ingests.
 # R311qu — pulls `wz-session-core/codec-linkstate` for the OAM-LINKSTATE
-# carrier (`try_parse_linkstate_oam`) the `linkstate_forward` driver (c3)
+# carrier (`try_parse_linkstate_oam`) the router forwarder (`RouterForwarder`)
 # decodes inbound topology with.
 routing-peer = [
     "routing-accept",
-    # R2386 — a routing peer ANSWERS interests: `linkstate_forward` and
-    # `router_forward` both close a CURRENT dump with
+    # R2386 — a routing peer ANSWERS interests: `router_forward` closes a
+    # CURRENT dump with
     # `build_declare_final_reply`, and that builder is now gated on the atom
     # named after it rather than on `codec-declare`. The edge was always real;
     # it just used to be satisfied by the `codec-declare` line below happening
@@ -1307,7 +1310,7 @@ router-multicast-faces = [
 # Each independently elides ONE interceptor on the routing-peer admission
 # chain (interceptor/{access_control,downsampling,low_pass}.rs). The chain
 # SEAM (InterceptorChain / InterceptorContext / InterceptorFlow / the
-# per-face admit in linkstate_forward) stays under `routing-peer`, so all
+# per-face admit in router_forward) stays under `routing-peer`, so all
 # three imply it; an empty config — or a routing-peer build that selects
 # none of these — is access control disabled (every message admitted).
 # `access-acl` additionally pulls the pure policy ENGINE crate
@@ -2043,6 +2046,12 @@ webpki-roots = { version = "1", optional = true }
 # against zenoh-c observes both. `default-features = false` is upstream's choice and
 # leaves the crate with no dependencies at all. Behind `transport-shm`.
 talc = { version = "4.4.3", default-features = false, optional = true }
+# The shared-memory reader of the process: upstream's `ShmReader` over a `ShmClientStorage`, from
+# the family crate that carries upstream's name and surface, so the engine, the C ABI and the top
+# crate read a descriptor through one implementation (`docs/shm-transport.md`, section 6). A
+# client of a storage returns `zenoh-result`'s error. Both behind `transport-shm`.
+zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
+zenoh-result = { path = "../wz-zenoh-result", optional = true }
 # The node's time (the wall clock in NTP64, the node HLC, the fallback stamper) is `wz-node-time`'s,
 # which owns the `uhlc` dependency (zenoh's own Hybrid Logical Clock crate, at zenoh's pin); this
 # crate re-exports it at the paths it has always had and forwards the features below.

@@ -44,6 +44,19 @@
 //! [`crate::adminspace::AdminMulticastPeerRef`]) instead of cloning it into owned ones. One writer,
 //! two sinks: the fixed node's reply is the AP's reply byte for byte, because it
 //! is the same code.
+//!
+//! # Three silences one querier cannot tell apart
+//!
+//! A GET this node's read permission denies is answered with nothing before the
+//! query's Final (`ADMIN_READ_DENIED`, the surface document's `read_denied`). A
+//! node that did not enable its admin space declares no admin queryable, and a node
+//! that does not exist answers nothing at all, so a GET addressed to either also
+//! ends in the Final alone. On the wire the three are one observation, and no key of
+//! this space can separate them: a node that sends nothing cannot say why. That is a
+//! property of every in-band surface, the surface document (`wz/surface`)
+//! included, and no key is added to it for this. Whether a node is present is read
+//! from discovery instead: scouting, or the admin root of another node, whose
+//! `sessions` lists the peers it holds a session with.
 
 #[cfg(feature = "alloc")]
 use alloc::string::String;
@@ -1748,11 +1761,21 @@ pub fn admin_nullable_fields() -> &'static [AdminNullable] {
     FIELDS
 }
 
+/// Where the links of one session are presented in the root document, the surface
+/// document's `links_at`, as a path in the notation of `nulls`: one `sessions[]`
+/// row per session, and each link of that session one element of the row's `links`
+/// array, with its own `src` and `dst`. `links` is the only field of the row that
+/// gathers more than one link; every other field is the session's. Whether a row can
+/// hold more than one link is `aggregated_links`, a fact of the build.
+pub const ADMIN_SESSION_LINKS_AT: &str = "sessions[].links";
+
 /// What a GET this node's read permission refuses is answered with, the surface
 /// document's `read_denied`: `final_only`, the terminating Final and nothing before
 /// it, neither a reply nor an error reply. It is the answer a GET that reaches no
-/// admin key gets too, so a consumer that receives only the Final cannot tell the
-/// two apart from the wire.
+/// admin key gets too, and the one a GET to a node without an admin space or to no
+/// node at all ends with, so a consumer that receives only the Final cannot tell
+/// these apart from the wire; the module documentation says where presence is read
+/// from instead.
 ///
 /// Both answerers return before their first leg when `read` is false
 /// ([`AdminAnswerOutcome::DeniedRead`]), and the dispatch still ends the query, as
@@ -1798,6 +1821,53 @@ pub fn admin_config_write_actions() -> &'static [&'static str] {
     ACTIONS
 }
 
+/// What a write to a config path does on this build: the surface document's
+/// `config_write.put`, `config_write.del` and `config_write.applies`.
+///
+/// A PUT is `replace`: the value it carries becomes the whole value of the one key
+/// it names and is never merged into the value before it. The heap decoder hands
+/// the payload over whole (`AdminConfigWrite::SetKey`), and the `admin_connect`
+/// decoder hands over a complete list (`ConnectWriteOutcome::Replace`). A DEL is
+/// `default`: the key returns to its default (`AdminConfigWrite::RemoveKey`, which
+/// the host applies as the schema default; `ConnectWriteOutcome::Remove`, the empty
+/// list). `applies` is `on_arrival`: each write is decided alone when it arrives,
+/// into one complete verdict with nothing staged for a later write to finish, and
+/// the hosts of this workspace (`apply_admin_config_write`, `ConnectControl::apply`)
+/// put it in place within the handling of that write, so the next `config` read
+/// serves it. What the node does next with the changed value (a dial, a re-read) is
+/// the business of that value's consumer.
+///
+/// These words describe a write to a config path (`config_write.keys`). A wz action
+/// sub-key (`config_write.actions`) performs its action instead of holding a value,
+/// and a DEL of one is refused. A build with neither decoder decides no write, and
+/// every word is `none`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdminConfigWriteEffect {
+    /// What a PUT does to the key it names.
+    pub put: &'static str,
+    /// What a DEL does to the key it names.
+    pub del: &'static str,
+    /// When a decided write is in place.
+    pub applies: &'static str,
+}
+
+/// The [`AdminConfigWriteEffect`] of this build.
+pub fn admin_config_write_effect() -> AdminConfigWriteEffect {
+    #[cfg(any(feature = "alloc", feature = "adminspace-write"))]
+    const EFFECT: AdminConfigWriteEffect = AdminConfigWriteEffect {
+        put: "replace",
+        del: "default",
+        applies: "on_arrival",
+    };
+    #[cfg(not(any(feature = "alloc", feature = "adminspace-write")))]
+    const EFFECT: AdminConfigWriteEffect = AdminConfigWriteEffect {
+        put: "none",
+        del: "none",
+        applies: "none",
+    };
+    EFFECT
+}
+
 /// R2413 (open-debt item 676) — the adminspace surface document: the body this
 /// node replies under [`admin_surface_key`].
 ///
@@ -1809,24 +1879,39 @@ pub fn admin_config_write_actions() -> &'static [&'static str] {
 ///           {"path":"plugins","null_is":"silence","reason":"feature_off"}, …],
 ///  "read_denied":"final_only",
 ///  "config_write":{"permit_default":false,"reply":"none","keys":["**"],
-///                  "actions":["acl-deny","connect-add","admin-read"]},
-///  "aggregated_links":false}
+///                  "actions":["acl-deny","connect-add","admin-read"],
+///                  "put":"replace","del":"default","applies":"on_arrival"},
+///  "aggregated_links":false,
+///  "links_at":"sessions[].links"}
 /// ```
 ///
-/// The last three keys declare what the legs cannot show a consumer that was
+/// The keys after `nulls` declare what the legs cannot show a consumer that was
 /// answered: what a GET the node's read permission refuses gets
 /// ([`ADMIN_READ_DENIED`]); what a write to `<root>/config/**` can do on this build,
 /// that is, whether it is refused unless the node's config grants writes
-/// (`permit_default`, upstream's `permissions.write` default), that no reply answers
-/// it, and which config paths ([`admin_config_write_keys`]) and wz action sub-keys
-/// ([`admin_config_write_actions`]) it decodes; and whether a `sessions[]` row's
-/// `links` can hold more than one link of one session
-/// ([`wz_session_core::link::SESSION_LINKS_AGGREGATE`]). The legs list one node's
-/// answers, and these three are the build's answers to questions no leg is asked.
+/// (`permit_default`, upstream's `permissions.write` default), which config paths
+/// ([`admin_config_write_keys`]) and wz action sub-keys
+/// ([`admin_config_write_actions`]) it decodes, what a PUT and a DEL do to the key
+/// they name and when that is in place ([`admin_config_write_effect`]), and that no
+/// reply answers it, applied or refused (`reply`); and how the links of one session
+/// are presented: whether a `sessions[]` row's `links` can hold more than one link
+/// of one session ([`wz_session_core::link::SESSION_LINKS_AGGREGATE`]) and where in
+/// the root document they are ([`ADMIN_SESSION_LINKS_AT`]). The legs list one node's
+/// answers, and these are the build's answers to questions no leg is asked.
 /// Whether the node's host subscribes to its config space or consults its read
 /// permission at all is the host's build, which this document cannot see. They
 /// came without moving `revision`, as `nulls` did: a consumer of the shape before
 /// them reads every key it knew the same way.
+///
+/// A refused write is answered the way an applied one is, with no reply: a PUT and
+/// a DEL have no reply on the wire. The refusal (the permit, a key outside this
+/// node's config space, a value the decoder cannot use, a key the host cannot
+/// change) is logged at the node, and the writer learns what was applied by reading
+/// the `config` leg back.
+///
+/// What the document cannot declare is why a GET got no reply at all: a denied
+/// read, a node without an admin space and an absent node look the same to the
+/// querier, and the module documentation says where presence is read from.
 ///
 /// `nulls` ([`admin_nullable_fields`]) names EVERY path of the root document at
 /// which this build can write `null`, with what that `null` means: `null_is` is
@@ -1931,16 +2016,25 @@ pub fn write_admin_surface_json<W: TextOut + ?Sized, K: AdminBuffer>(
     }
     out.push_str("],\"read_denied\":");
     push_json_str(ADMIN_READ_DENIED, &mut out);
-    // A write is a Put or a Del, and neither has a reply on the wire: the writer
-    // learns what was applied by reading the `config` leg back.
+    // A write is a Put or a Del, and neither has a reply on the wire, applied or
+    // refused: the writer learns what was applied by reading the `config` leg back.
     out.push_str(",\"config_write\":{\"permit_default\":");
     out.push_str(json_bool(AdminSpacePermissions::default().write));
     out.push_str(",\"reply\":\"none\",\"keys\":");
     wz_session_core::json::push_str_array(admin_config_write_keys(), &mut out);
     out.push_str(",\"actions\":");
     wz_session_core::json::push_str_array(admin_config_write_actions(), &mut out);
+    let effect = admin_config_write_effect();
+    out.push_str(",\"put\":");
+    push_json_str(effect.put, &mut out);
+    out.push_str(",\"del\":");
+    push_json_str(effect.del, &mut out);
+    out.push_str(",\"applies\":");
+    push_json_str(effect.applies, &mut out);
     out.push_str("},\"aggregated_links\":");
     out.push_str(json_bool(wz_session_core::link::SESSION_LINKS_AGGREGATE));
+    out.push_str(",\"links_at\":");
+    push_json_str(ADMIN_SESSION_LINKS_AT, &mut out);
     out.push('}');
     Ok(())
 }
@@ -6881,6 +6975,26 @@ mod tests {
         assert_eq!(outcome, AdminAnswerOutcome::Served);
         assert!(calls > 0, "the control: the same GET granted is answered");
 
+        // A granted GET that reaches no admin key of this node is answered the same
+        // way, so the querier's observation of a denied read is also that of a GET
+        // no node answers, which the module documentation states and no key adds to.
+        let elsewhere = admin_view("@/ffff/peer/**");
+        let mut out = EveryCall::default();
+        let outcome = answer_admin_query(
+            &elsewhere,
+            &mut out,
+            &admin_ctx(true),
+            &[],
+            &fixture_declarations(),
+            &fixture_plugins(),
+            "{}",
+        );
+        assert_eq!(
+            (outcome, out.0),
+            (AdminAnswerOutcome::Served, 0),
+            "a GET that reaches no admin key writes nothing before the Final either"
+        );
+
         #[cfg(feature = "adminspace-router-linkstate")]
         {
             let regions = [(String::from("north"), String::from("graph {\n}\n"))];
@@ -6909,6 +7023,12 @@ mod tests {
     /// (a DEL of an action is refused as not deletable, which is the decoder naming it),
     /// a config path decodes when the host's registry holds it, and the permission's
     /// default refuses the write. The action list moves with `adminspace-config-hotreload`.
+    ///
+    /// `put`, `del` and `applies` are what the decoder does with a config path: a PUT
+    /// carries its value whole, so a second PUT holds nothing of the first (`replace`),
+    /// and a DEL decodes to the key's removal (`default`), each from one write alone
+    /// (`on_arrival`). Turned red by a decoder that merges or stages a write, or by a
+    /// document whose words differ from `admin_config_write_effect`.
     #[test]
     fn the_document_declares_the_config_write_this_build_decodes() {
         let doc: serde_json::Value =
@@ -6917,6 +7037,19 @@ mod tests {
         assert_eq!(write["permit_default"], serde_json::Value::Bool(false));
         assert_eq!(write["reply"], "none");
         assert_eq!(write["keys"], serde_json::json!(["**"]));
+        let effect = admin_config_write_effect();
+        assert_eq!(
+            effect,
+            AdminConfigWriteEffect {
+                put: "replace",
+                del: "default",
+                applies: "on_arrival",
+            },
+            "a build with a heap decodes config writes"
+        );
+        assert_eq!(write["put"], effect.put);
+        assert_eq!(write["del"], effect.del);
+        assert_eq!(write["applies"], effect.applies);
         assert_eq!(
             write["actions"],
             serde_json::Value::from(admin_config_write_actions())
@@ -6964,7 +7097,28 @@ mod tests {
             AdminConfigWriteOutcome::Apply(AdminConfigWrite::RemoveKey {
                 key: String::from("a/config/path")
             }),
-            "`**`: a config path the host holds decodes"
+            "`**`: a config path the host holds decodes; `default`: a DEL removes the key"
+        );
+        let put = |value: &str| {
+            parse_admin_config_write(
+                &space,
+                path,
+                AdminConfigWriteBody::Put(value.as_bytes()),
+                true,
+                &|key| key == "a/config/path",
+            )
+        };
+        let set = |value: &str| {
+            AdminConfigWriteOutcome::Apply(AdminConfigWrite::SetKey {
+                key: String::from("a/config/path"),
+                value: String::from(value),
+            })
+        };
+        assert_eq!(put(" {a: 1, b: 2} "), set("{a: 1, b: 2}"));
+        assert_eq!(
+            put("{b: 3}"),
+            set("{b: 3}"),
+            "`replace` and `on_arrival`: each PUT is decided alone and carries its value whole"
         );
         assert_eq!(
             parse_admin_config_write(
@@ -6982,6 +7136,10 @@ mod tests {
     /// The document's `aggregated_links` is the build's, and the row it describes holds
     /// one entry per link of its session: a session over two links is one row whose
     /// `links` has two entries, not two rows.
+    ///
+    /// `links_at` names that array, and resolving it in the root document finds the
+    /// session's two links with their own ends. Turned red by a document whose path
+    /// names no array of the row, or by a writer that moves a session's links out of it.
     #[test]
     fn the_document_declares_whether_a_session_row_aggregates_links() {
         let doc: serde_json::Value =
@@ -6990,6 +7148,7 @@ mod tests {
             doc["aggregated_links"],
             serde_json::Value::Bool(wz_session_core::link::SESSION_LINKS_AGGREGATE)
         );
+        assert_eq!(doc["links_at"], ADMIN_SESSION_LINKS_AT);
 
         let link = |port: u16| AdminLink {
             src: String::from("tcp/127.0.0.1:7447"),
@@ -7019,6 +7178,29 @@ mod tests {
             sessions[0]["links"].as_array().map(Vec::len),
             Some(2),
             "every link of the session is in its row"
+        );
+        let (rows, field) = ADMIN_SESSION_LINKS_AT
+            .split_once("[].")
+            .expect("`links_at` is a field of an array's elements");
+        let links = root[rows][0][field]
+            .as_array()
+            .expect("`links_at` names an array of the row");
+        let ends: Vec<(&str, &str)> = links
+            .iter()
+            .map(|l| {
+                (
+                    l["src"].as_str().expect("a link's `src`"),
+                    l["dst"].as_str().expect("a link's `dst`"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            vec![
+                ("tcp/127.0.0.1:7447", "tcp/127.0.0.1:50000"),
+                ("tcp/127.0.0.1:7447", "tcp/127.0.0.1:50001"),
+            ],
+            "each element of the array at `links_at` is one link of the session"
         );
     }
 

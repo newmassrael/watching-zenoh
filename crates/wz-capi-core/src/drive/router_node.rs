@@ -18,8 +18,8 @@
 //! at the open, by what it asked for, and not opened as a node without it.
 
 use wz_runtime_tokio::accept_loop::{peer_loop_shared, FaceSources, RoutingFaceDrive};
-use wz_runtime_tokio::linkstate_forward::Zid;
 use wz_runtime_tokio::router_forward::RouterForwarder;
+use wz_runtime_tokio::routing_policy::Zid;
 use wz_runtime_tokio::session::QueryOptions;
 use wz_runtime_tokio::session_open::DialConfig;
 
@@ -331,6 +331,7 @@ impl RouterState {
             keyexpr: keyexpr.to_owned(),
             accept: options.effective_accept_replies(),
             timeout_ms: options.effective_timeout_ms(),
+            consolidation: options.resolved_consolidation(),
             ingress,
             on_reply,
             on_final,
@@ -739,7 +740,7 @@ pub(crate) fn open_router_blocking(
             #[cfg(feature = "gossip")]
             if let Some(policy) = gossip {
                 forwarder.enable_autoconnect_into(
-                    wz_runtime_tokio::linkstate_forward::AutoConnect::with_strategies(
+                    wz_runtime_tokio::routing_policy::AutoConnect::with_strategies(
                         own_zid,
                         policy.autoconnect,
                         policy.strategies,

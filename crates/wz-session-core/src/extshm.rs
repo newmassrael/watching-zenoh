@@ -1045,7 +1045,7 @@ pub struct ShmReceiveState {
     negotiated: bool,
     /// The AP-injected resolver that maps a descriptor's segment off `/dev/shm` (the
     /// no_std/std seam; the implementation is
-    /// `wz-runtime-tokio::shm_provider::PosixShmResolver`). `None` until bring-up
+    /// `wz-runtime-tokio::shm_reader::ShmReaderResolver`, zenoh-shm's reader). `None` until bring-up
     /// installs it; a descriptor arriving with none installed drops. Shared, so one
     /// resolver serves every registry of a session.
     resolver: crate::bounded::ZeroOption<alloc::sync::Arc<dyn ShmResolver + Send + Sync>>,

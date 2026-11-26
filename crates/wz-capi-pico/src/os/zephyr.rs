@@ -30,6 +30,18 @@ use super::Unit;
 const NANOS_PER_SECOND: i64 = 1_000_000_000;
 const MICROS_PER_SECOND: i64 = 1_000_000;
 
+/// A `long` field of a `struct timespec` or `struct timeval` as `i64`. A `long` is 32 bits on the
+/// kit's Cortex-M7 and 64 bits where the image's set is linted on a host, so the arithmetic is done
+/// in 64 bits whatever its width, and the widening names no width of its own.
+fn wide<T: Into<i64>>(field: T) -> i64 {
+    field.into()
+}
+
+/// An `unsigned long` count as `u64`, whatever its width: `wide` for a count.
+fn wide_count<T: Into<u64>>(count: T) -> u64 {
+    count.into()
+}
+
 /// pico `z_clock_t`: `struct timespec`, a 64-bit `time_t` and a `long`, 16 B. Returned BY VALUE
 /// from `clock_now`, which the Arm procedure call standard returns through memory the caller
 /// provides, as it does a C function's of the same type.
@@ -124,8 +136,8 @@ pub fn clock_now() -> Clock {
 /// it, where pico's answer is undefined.
 pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ulong {
     let elapsed = arith::elapsed(
-        (instant.tv_sec, i64::from(instant.tv_nsec)),
-        (epoch.tv_sec, i64::from(epoch.tv_nsec)),
+        (instant.tv_sec, wide(instant.tv_nsec)),
+        (epoch.tv_sec, wide(epoch.tv_nsec)),
         NANOS_PER_SECOND,
         unit,
     );
@@ -136,9 +148,9 @@ pub fn clock_elapsed_between(instant: &Clock, epoch: &Clock, unit: Unit) -> c_ul
 /// and gains less than a second, which a 32-bit `long` holds).
 pub fn clock_advance(clock: &mut Clock, unit: Unit, duration: c_ulong) {
     let (secs, nanos) = arith::advance(
-        (clock.tv_sec, i64::from(clock.tv_nsec)),
+        (clock.tv_sec, wide(clock.tv_nsec)),
         unit,
-        u64::from(duration),
+        wide_count(duration),
     );
     clock.tv_sec = secs;
     // Below a second, so a `long` of any width holds it.
@@ -169,8 +181,8 @@ pub fn wall_now() -> WallTime {
 pub fn wall_elapsed(time: &WallTime, unit: Unit) -> c_ulong {
     let now = wall_now();
     let elapsed = arith::elapsed(
-        (now.tv_sec, i64::from(now.tv_usec)),
-        (time.tv_sec, i64::from(time.tv_usec)),
+        (now.tv_sec, wide(now.tv_usec)),
+        (time.tv_sec, wide(time.tv_usec)),
         MICROS_PER_SECOND,
         unit,
     );
