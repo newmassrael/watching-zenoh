@@ -485,7 +485,10 @@ the two readings is the rows' (`nm -S -C` by owner and by symbol). Text, bytes:
 | unclassified | 0 | +5 | +5 |
 | **together** | **-3,586** | **-2,956** | **+630** |
 
-By row, from the symbols each one changes:
+By row, from the symbols each one changes. One commit that is not a row lies between the two readings too, the
+open's `take_on` storing the region's plan whole (section 5.1.1): it reads `wz_capi_coop::arena` +6 and leaves
+`lend_session` where it was (+43 against main in both), so the open of that build is not yet int206's, and
+its bytes are among R2.1's rest below.
 
 | row | text on the ledger's case | what reads it | judged |
 |---|---:|---|---|
