@@ -2700,7 +2700,7 @@ impl<C: ClockSource + 'static, T: GroupTransport + 'static, const MAX_PEERS: usi
         if asked {
             pump.join_now();
         }
-        let outcome = step(pump);
+        let outcome = step(&mut *pump);
         let running_due_us = outcome.is_none().then(|| pump.next_due_us());
         if let (Some(due_us), Some(due)) = (running_due_us, &self.due) {
             due.publish(due_us);
