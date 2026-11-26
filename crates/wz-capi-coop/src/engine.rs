@@ -3343,13 +3343,16 @@ impl SubscriberCall {
     }
 
     /// Hand `sample` to the row's callback, whether or not the subscriber was undeclared since the
-    /// call was begun: a call pinned in the one hold of the session that read the sample, beside
-    /// every row that hold found, each of which is handed it as zenoh-pico calls each subscription
-    /// of the list it took under its lock
+    /// call was begun: a call pinned in the one hold of the session that read or put the sample,
+    /// beside every row that hold found, each of which is handed it as zenoh-pico calls each
+    /// subscription of the list it took under its lock
     /// (`vendor/zenoh-pico/src/session/subscription.c` @ `_z_trigger_subscriptions_impl`). So a
     /// row an earlier callback of the same sample undeclared is still handed it, and the count of
-    /// rows a delivery reached is the count of callbacks it called.
-    #[cfg(not(wz_round))]
+    /// rows a delivery reached is the count of callbacks it called. The read that hands each record
+    /// out pins its rows in the hold that reads the record (`pinned`); a build that keeps the round
+    /// pins a put's own in the hold whose loopback captures their calls
+    /// (`CoopEngine::publish_to_subscribers`).
+    #[cfg(any(not(wz_round), feature = "local-subscriber"))]
     #[inline]
     pub(crate) fn hand_pinned(&self, sample: &SampleRef<'_>) {
         // SAFETY: the row lies where the call began until its last call ended, and this one has
@@ -8737,8 +8740,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// call begun on each one's row under the session's lock ([`SubscriberCall`]). A callback is
     /// called through a shared borrow: one running on another thread is called beside it, and one
     /// the putting thread is inside of is called again from inside itself, as pico's is, so a put a
-    /// callback makes on its own subscriber's key reaches it at once, at any depth.
-    /// The number of subscribers reached.
+    /// callback makes on its own subscriber's key reaches it at once, at any depth. A subscriber an
+    /// earlier callback undeclares is still handed the sample when its turn comes
+    /// (`SubscriberCall::hand_pinned`). The number of subscribers reached.
     #[cfg(all(feature = "local-subscriber", wz_round))]
     fn publish_to_subscribers(
         &self,
@@ -8763,9 +8767,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let sample = SampleRef::of(&sample);
         // A callback that steps the session from inside the put hands out nothing itself, as one
         // inside a delivery does; nor does an undeclare inside it wait for this call.
+        // Every call was begun in the one hold above, so a row an earlier callback undeclared is
+        // still handed the sample, as the read that hands each record out hands it.
         self.deliveries.within(|_| {
             for call in reached.iter() {
-                call.hand(&sample);
+                call.hand_pinned(&sample);
             }
         });
         // Each call is ended; a row whose last call this was, its subscriber undeclared meanwhile,

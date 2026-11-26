@@ -696,7 +696,6 @@ fn a_subscriber_declared_inside_a_callback_is_handed_the_next_sample_and_not_tha
 /// before the put returns. The put after reaches the first and the new subscriber alone. Turned
 /// red by a slot given to a declaration while a call pinned on it is owed, where the new
 /// subscriber's callback is called in the place of the undeclared one's.
-#[cfg(not(wz_round))]
 #[test]
 fn a_subscriber_undeclared_inside_a_callback_is_handed_that_sample_and_keeps_its_slot() {
     let router = Router::start(CatchAll::Held);
