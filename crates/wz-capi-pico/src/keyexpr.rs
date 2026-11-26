@@ -1934,20 +1934,47 @@ pub unsafe extern "C" fn z_keyexpr_equals(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(|| keyexpr_pair(l, r).is_some_and(|(a, b)| a == b))
+    key_pair(l, r, ask::EQUALS) == Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
 }
 
-/// The texts of two loaned keyexprs, or `None` when either is null or not UTF-8: what each door
-/// that compares two keys reads, through one body.
+/// The relations [`key_pair`] is asked of two keys; it answers the strongest asked that holds.
+mod ask {
+    /// The two are the same text.
+    pub(super) const EQUALS: u8 = 1;
+    /// The left key's set contains the right one's.
+    pub(super) const INCLUDES: u8 = 1 << 1;
+    /// The two sets share a member.
+    pub(super) const INTERSECTS: u8 = 1 << 2;
+}
+
+/// The strongest of the relations `asks` ([`ask`]) names that holds between two loaned
+/// keyexprs, asked strongest first, and `Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT` when none holds
+/// or either key is null or not UTF-8. The one body of every door that relates two keys, so the
+/// two texts are read and each matcher is reached from one place, where each door carried the
+/// matchers it asked inlined.
 ///
 /// # Safety
 /// `l` / `r` must be null or live loaned keyexprs.
 #[inline(never)]
-unsafe fn keyexpr_pair<'a>(
+unsafe fn key_pair(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
-) -> Option<(&'a str, &'a str)> {
-    Some((keyexpr_str(l)?, keyexpr_str(r)?))
+    asks: u8,
+) -> z_keyexpr_intersection_level_t {
+    let (Some(a), Some(b)) = (keyexpr_str(l), keyexpr_str(r)) else {
+        return Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT;
+    };
+    if asks & ask::EQUALS != 0 && a == b {
+        Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
+    } else if asks & ask::INCLUDES != 0 && wz_session_core::keyexpr_match::keyexpr_includes(a, b) {
+        Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
+    } else if asks & ask::INTERSECTS != 0
+        && wz_session_core::keyexpr_match::keyexpr_intersects(a, b)
+    {
+        Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
+    } else {
+        Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
+    }
 }
 
 /// Whether `l`'s set CONTAINS `r`'s (pico `z_keyexpr_includes`).
@@ -1959,10 +1986,7 @@ pub unsafe extern "C" fn z_keyexpr_includes(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(|| {
-        keyexpr_pair(l, r)
-            .is_some_and(|(a, b)| wz_session_core::keyexpr_match::keyexpr_includes(a, b))
-    })
+    key_pair(l, r, ask::INCLUDES) == Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
 }
 
 /// Whether the two sets share a member (pico `z_keyexpr_intersects`).
@@ -1974,10 +1998,7 @@ pub unsafe extern "C" fn z_keyexpr_intersects(
     l: *const z_loaned_keyexpr_t,
     r: *const z_loaned_keyexpr_t,
 ) -> bool {
-    guard_val(|| {
-        keyexpr_pair(l, r)
-            .is_some_and(|(a, b)| wz_session_core::keyexpr_match::keyexpr_intersects(a, b))
-    })
+    key_pair(l, r, ask::INTERSECTS) == Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
 }
 
 /// The STRONGEST relation that holds between two keyexprs (pico
@@ -1995,21 +2016,7 @@ pub unsafe extern "C" fn z_keyexpr_relation_to(
     left: *const z_loaned_keyexpr_t,
     right: *const z_loaned_keyexpr_t,
 ) -> z_keyexpr_intersection_level_t {
-    guard_val(|| {
-        // The two texts are read once, and the cascade asks of them.
-        let Some((a, b)) = keyexpr_pair(left, right) else {
-            return Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT;
-        };
-        if a == b {
-            Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
-        } else if wz_session_core::keyexpr_match::keyexpr_includes(a, b) {
-            Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
-        } else if wz_session_core::keyexpr_match::keyexpr_intersects(a, b) {
-            Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
-        } else {
-            Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
-        }
-    })
+    key_pair(left, right, ask::EQUALS | ask::INCLUDES | ask::INTERSECTS)
 }
 
 /// Whether `start[..len]` is already canonical (pico `z_keyexpr_is_canon`).
@@ -2304,6 +2311,55 @@ mod door_reading_tests {
                 z_view_keyexpr_loan(&b_star)
             ));
             assert!(!z_keyexpr_intersects(ab, z_view_keyexpr_loan(&other)));
+        }
+    }
+
+    /// Each relation door answers its own matcher alone, as it did before the doors were calls
+    /// of [`key_pair`]: `z_keyexpr_includes` of two equal keys is the includes matcher's answer,
+    /// and `z_keyexpr_intersects` of a key and one it includes is the intersects matcher's, not
+    /// the level of a stronger relation; the cascade answers the strongest. Turned red by a door
+    /// that asks another relation than its own, or by a cascade that asks out of order.
+    #[test]
+    fn each_relation_door_asks_its_own_relation() {
+        let pairs = [
+            (c"a/b", c"a/b"),
+            (c"a/**", c"a/b"),
+            (c"a/b", c"a/**"),
+            (c"a/*/c", c"a/b/*"),
+            (c"a/b", c"z"),
+        ];
+        for (l, r) in pairs {
+            let (lv, rv) = (unchecked(l), unchecked(r));
+            // SAFETY: views of this frame.
+            unsafe {
+                let (lk, rk) = (z_view_keyexpr_loan(&lv), z_view_keyexpr_loan(&rv));
+                let (a, b) = (
+                    keyexpr_str(lk).expect("a key"),
+                    keyexpr_str(rk).expect("a key"),
+                );
+                let includes = wz_session_core::keyexpr_match::keyexpr_includes(a, b);
+                let intersects = wz_session_core::keyexpr_match::keyexpr_intersects(a, b);
+                assert_eq!(z_keyexpr_equals(lk, rk), a == b, "{l:?} {r:?}");
+                assert_eq!(z_keyexpr_includes(lk, rk), includes, "{l:?} {r:?}");
+                assert_eq!(z_keyexpr_intersects(lk, rk), intersects, "{l:?} {r:?}");
+                let strongest = if a == b {
+                    Z_KEYEXPR_INTERSECTION_LEVEL_EQUALS
+                } else if includes {
+                    Z_KEYEXPR_INTERSECTION_LEVEL_INCLUDES
+                } else if intersects {
+                    Z_KEYEXPR_INTERSECTION_LEVEL_INTERSECTS
+                } else {
+                    Z_KEYEXPR_INTERSECTION_LEVEL_DISJOINT
+                };
+                assert_eq!(z_keyexpr_relation_to(lk, rk), strongest, "{l:?} {r:?}");
+            }
+        }
+        // SAFETY: a view of this frame and a null pointer.
+        unsafe {
+            let ab = unchecked(c"a/b");
+            let ab = z_view_keyexpr_loan(&ab);
+            assert!(!z_keyexpr_includes(ab, core::ptr::null()));
+            assert!(!z_keyexpr_intersects(core::ptr::null(), ab));
         }
     }
 }
