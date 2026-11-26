@@ -47,6 +47,9 @@ verdict is keyed by, which lanes a change needs, and which stage judges what.
   green main runs, the rule `deploy/soft_jobs.json` already holds (section 8).
 - **One round per landing unit** (section 9), and a staged migration with a check and a rollback for
   each stage (section 10). The gate-ledger lane now in progress is stages M1 (in part), M2 and M3.
+- **Lanes run after a landing, not in front of it.** `land.sh` submits to the queue and runs no lane;
+  the lanes a landing moved run once on the new `main`, by digest, into receipts, and a red re-runs
+  that lane alone (section 7).
 
 ## 2. What was measured
 
@@ -483,11 +486,11 @@ pre-push hook, and the reading of the post-merge audit.
 
 | stage | runs where, on what | judges | does not judge | reads | on failure |
 |---|---|---|---|---|---|
-| **author** | the session's worktree, on the lane tip; lanes in the fleet with `bx --checks ci`, or locally | the unit's bounds (3.3); Sel(tip) for D and E lanes; the tests the unit changed, run repeatedly (bx RFC 0037 5.5); the commit hooks (`cargo fmt`, `Cargo.toml` and `Cargo.lock` pairing, schema pin, `validate-workspace`); the round descriptor (`file-round.sh --check`) | other units (the queue's); publication (the push's); S lanes; platform legs | fleet verdicts, author receipts | nothing is submitted; the author fixes or splits |
+| **author** | the session's worktree, on the lane tip; lanes in the fleet with `bx --checks ci`, or locally | the unit's bounds (3.3); Sel(tip) for D and E lanes when the author asks for it (`verify-once.sh`; it admits nothing and `land.sh` does not run it); the tests the unit changed, run repeatedly (bx RFC 0037 5.5); the commit hooks (`cargo fmt`, `Cargo.toml` and `Cargo.lock` pairing, schema pin, `validate-workspace`); the round descriptor (`file-round.sh --check`) | other units (the queue's); publication (the push's); S lanes; platform legs | fleet verdicts, author receipts | nothing is submitted; the author fixes or splits |
 | **submit** | the item push to `refs/bx-land/main/items/<id>` | the public gates over what the item publishes: vocabulary, home paths, identity (gate 0q, `.githooks/pre-push:114-174`) | the repository's gates (the integrator judges the candidate) | none | the item is not published |
 | **queue** | the integrator, on prefix P_i | G(P_i) by digest: hits reused, misses run in the fleet; the derive action (`file-round`) on the candidate | bounds; publication; S lanes; platform legs | fleet verdicts only | that prefix fails; culprit by 6.3 and bx RFC 0024 4.7b (structure 6) |
 | **integrate and push** | the pre-push hook on the integrator's landing push | one writer (gate 0p, `.githooks/pre-push:176`); publication (0, 0b, 0b2, 0c); schema pin (1); the store with the filed round (2, `:382`); claim audit (2b); the previous hosted verdict and its acknowledgement row (2c, `:479`); citation form (2f) | lanes (it reads the queue's verdicts by key) | the verdict file of the judgment run | `hook-refused`, a failure of that prefix (bx RFC 0024 4.7b, structure 8) |
-| **post-merge** | hosted CI on the new `main` (`.github/workflows/ci.yml:49-50`, `platform.yml`), the scheduled clean-room run, S lanes, sampled re-checks | an audit: the platform legs only hosted runners have; S lanes by their sample rule; agreement of hosted and fleet verdicts for one digest | admission; it never moves `main` back | everything | a debt item, paid in a round of its own; never an automatic revert (below) |
+| **post-merge** | hosted CI on the new `main` (`.github/workflows/ci.yml:49-50`, `platform.yml`); the post-merge run, `verify-once.sh --base <main before the landing>` on the new `main`; the scheduled clean-room run, S lanes, sampled re-checks | an audit: Sel(main) of the landing, once, into receipts (a red re-runs that lane alone, `--only-red`); the platform legs only hosted runners have; S lanes by their sample rule; agreement of hosted and fleet verdicts for one digest | admission; it never moves `main` back | everything | a debt item, paid in a round of its own; never an automatic revert (below) |
 
 **Each question is judged once.** Every gate has exactly one owning stage; another stage may read its
 verdict by key and may not re-execute it as admission. The hook's split between what it runs and what it
@@ -501,6 +504,16 @@ stage becomes a column of that table. Two re-executions remain, and neither is a
 - Post-merge re-runs on other machines. Its result does not decide admission; it measures whether the key
   is complete (4.4) and judges what the fleet cannot run. As the fleet takes legs over, the per-push
   hosted jobs give way to the scheduled clean-room run (`docs/verdicts-in-the-fleet.md:129-131`).
+
+**Why lanes do not stand in front of the queue.** Large post-merge systems run the broad test set
+after a change lands and keep the pre-submit set small: Google's TAP runs the affected tests of every
+landed change in batches ("Taming Google-Scale Continuous Testing", 2017), and Chromium separates the
+commit queue's narrow pre-submit from the CI that runs after it. A lane run by `land.sh` before it
+submits judges a tree the queue has not merged yet, waits in front of every item, and runs again on any
+edit of a file many lanes share; at the first cut every lane read `scripts/run-ci.sh`, and an edit of it
+selected all 199. So `land.sh` submits and runs no lane; the admission of a unit is the integrator's
+judgment, and the lanes a landing moved run once after it, keyed by digest, so that a later unit with
+the same inputs inherits the verdict and a red costs the one lane it is (`--only-red`).
 
 **Why no automatic revert.** Under invariant I a post-merge red means one of three things: a platform leg
 or an S lane outside G, an incomplete key, or a flake. Removing the unit fixes none of them: a revert is
@@ -589,9 +602,10 @@ show the unit on the trees that follow.
   at the author stage.
 - **A prefix is a unit**, so each prefix of a split lane (3.4) has its own round, whose prose describes that
   prefix only.
-- **Verification by address.** The lane-gate step of `land.sh` writes the unit's verification from its
-  receipts: lane, digest, verdict, executor class. The round then names content an auditor can recompute,
-  instead of a sentence saying that tests passed.
+- **Verification by address.** A round's verification names receipts, not a sentence saying that tests
+  passed: `verify-once.sh --summary` prints one line per lane the unit moved (lane, digest, verdict,
+  executor class) for an author who ran them, and the post-merge run's receipts are the record of the
+  landed tree. `land.sh` writes no verification of its own.
 - **Quarantine, release and the repayment of a hosted red** are units with rounds like any other, the last
   with its acknowledgement row (section 7).
 
@@ -605,7 +619,7 @@ undoing the stage leaves.
 | **M0** | this document | review | revert the file; nothing reads it |
 | **M1** | `scripts/lib/lanes.toml` (one entry per lane: class, decl, packages, nondet) and its UNDECLARED, ORPHAN, DUPLICATE, FIELD gate in C0; `scripts/lib/lane_digest.py` (4.2, 4.3, 5.2 to 5.4) with `--explain`; `lane_input_closure`, the traced audit (4.4) | selftests both ways, as C0d does: a real edge must widen (`wz-session-core` reaches `wz-runtime-tokio`), a leaf must stay alone (`wz-ap-demo`); dev edges stay one step; a digest is unchanged by an edit outside the lane's inputs and changed by one inside; a replay of the last 80 landings: for every hosted red they caused, the red lane is in the causing unit's selection | remove the files; no stage consumes them yet |
 | **M2** | the author receipt store (4.5) and `scripts/verify-once.sh` revived on it: `--changed` (Sel against the receipts), `--only-red` (the lanes whose latest receipt for this digest failed), `--all --reason <text>` (every lane; the reason goes into each receipt), `--plan` | two writers of one digest at once leave two receipts and lose none; a dirty checkout writes none; a receipt whose recomputed digest differs is ignored and reported; the session guard that refuses a hand-chained whole gate names this script as the way past | delete the script; receipts are advisory and no admission reads them |
-| **M3** | the lane-gate step of `scripts/land.sh`: before submitting, run Sel(tip) through `verify-once.sh --changed`, refuse on a red, write the round's verification from the receipts (9) | land three units through it (a crate change, a script change, a docs change) and compare each selection with `--explain`; a unit with a red lane is refused before submission | revert the step; `land.sh` submits as before and the queue still judges |
+| **M3** | the post-merge run: after a landing, `verify-once.sh --base <main before it>` on the new `main` runs Sel(main) once into receipts, and `--only-red` re-runs a red lane alone; `land.sh` runs no lane before it submits (7) | land three units (a crate change, a script change, a docs change), compare each selection with `--explain`, and see a red re-run alone | stop the run; hosted CI still audits every landing |
 | **M4** | unit bounds in `scripts/lib/land_unit.toml`, refused by `land.sh` with the computed split (3.4); `land.sh --split` producing the prefix chain; one descriptor per unit mandatory; the change of the `CLAUDE.md` rule "merges into ONE integration branch" (the owner's decision) | a week of landings: the share of units within the bounds, the queue's wait (`bx --land-queue --stats`), integration branches made (target: none) | set the bounds to no limit; the descriptor rule stays (it is the ledger's) |
 | **M5** | the image (bx RFC 0034 stage 2, 0033 stage 3); `[checks.ci] cache = true`, each unit carrying its `inputs` from `lane_digest.py`; E lanes move to D | sampled agreement: on 50 digests the fleet verdict equals a fresh execution on another machine (bx RFC 0048's judgment from a sample), and the hosted audit shows no key defect for two weeks | `cache = false`: every unit runs, and verdicts are correct and slow |
 | **M6** | the hook's lane step: a push to `main` asks `bx --checks ci` (the form `docs/verdicts-in-the-fleet.md:117-128` chose); the hook reads `BX_LAND_PRE_PUSH_VERDICT`; `window_max` raised from the measured ρ | ρ < 1 on the busiest day of a week; no `hook-refused` that the judgment passed; the landing push's hook adds no lane run | `window_max = 1` and the hook's lane step off, one line each |
@@ -619,7 +633,7 @@ fall, though its reading of the verdict file does not. M7 needs M2's store for i
 
 **The gate-ledger lane**, in progress beside this document, is the first cut of M1 (its layer lanes: the
 lane set and their inputs), M2 (content-addressed receipts; `verify-once.sh` with `--changed`,
-`--only-red` and `--all --reason`) and M3 (the lane-gate step of `land.sh`). To be those stages it holds
+`--only-red` and `--all --reason`) and M3 (`verify-once.sh` as the post-merge run; `land.sh` runs no lane). To be those stages it holds
 what sections 4 and 5 require: receipts keyed by D(L, t), not by commit or by a HEAD fingerprint (the shape
 of `run-ci.sh --resume`, `scripts/run-ci.sh:369-375`, which invalidates on any edit); inputs derived from
 `cargo metadata` and the lane bodies, not from a trigger list; publication by `link(2)` with no overwrite;

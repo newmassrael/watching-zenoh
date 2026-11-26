@@ -3,8 +3,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
 """R4654 (no register item) -- D(L, t): the digest a lane's verdict is keyed by (RFC 0001, stage M1).
 
-## Interface (fixed: the receipt store and the lane-gate step of `scripts/land.sh`, stages M2 and M3,
-## call these names with these signatures; a change of meaning is a new SCHEMA word)
+## Interface (fixed: the receipt store and `scripts/verify-once.sh`, stages M2 and M3, call these
+## names with these signatures; a change of meaning is a new SCHEMA word)
 
     lanes(root, rev, *, tables=None, decls_from=None) -> list[dict]
         G(t) for the tree of `rev`: one dict per unit `bx --checks ci` runs, in the dispatch table's

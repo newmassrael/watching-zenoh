@@ -22,37 +22,28 @@
 # judged. Gate 0p of that hook refuses a push to `main` from any clone that is not
 # the integrator's, so the queue is the only writer and not a convention.
 #
-# ## The lane-gate (2026-11-26)
-#
-# The author stage of a landing: before anything is submitted, the verification lanes
-# whose digest the item moved from its merge base with `origin/main` run once, in the
-# fleet, through `scripts/verify-once.sh`; a lane with a pass at its digest in the
-# clone's author receipt store is not run again. An item with a failed lane is not
-# submitted. The queue's integrator then judges the candidate as before, and its
-# verdict, not these receipts, is what admits an item. On 2026-11-26 an integration
-# whose layer lanes first ran on the merged branch re-ran a hand-chained whole gate at
-# every repair, for hours; a red found here costs the one lane it is.
-#
 # ## What it does
 #
-#   1. refuses a dirty or untracked tree (the item is a commit, and the lanes run on
-#      committed bytes);
-#   2. runs the lane-gate (`bash scripts/verify-once.sh`) and submits nothing unless
-#      every lane the item moved has a pass at its digest;
-#   3. when append-round arguments follow `--`, writes them as a round descriptor
-#      (`docs/rounds/pending/`, `round_descriptor.py write`), with one verification
-#      bullet per lane the lane-gate judged (lane, digest, verdict, executor class, read
-#      from the receipts), checks it the way the append would (`file-round.sh --check`)
-#      and commits it; an item the queue returns keeps that commit, and
-#      `bash scripts/land.sh` alone lands it again;
-#   4. with `WZ_PREPUSH_EXTENDED=1`, runs the hook's extended local sweep over
+#   1. refuses a dirty tree (the item is a commit, and the change would not be in it);
+#   2. when append-round arguments follow `--`, writes them as a round descriptor
+#      (`docs/rounds/pending/`, `round_descriptor.py write`), checks it the way the
+#      append would (`file-round.sh --check`) and commits it; an item the queue
+#      returns keeps that commit, and `bash scripts/land.sh` alone lands it again;
+#   3. with `WZ_PREPUSH_EXTENDED=1`, runs the hook's extended local sweep over
 #      `origin/main..HEAD` first, as a branch push is judged; it only adds a local
 #      refusal, the item's verdict is the integrator's;
-#   5. submits HEAD with `bx --land` and waits for its end;
-#   6. once it landed, moves the branch onto `origin/main`, which holds the
+#   4. submits HEAD with `bx --land` and waits for its end;
+#   5. once it landed, moves the branch onto `origin/main`, which holds the
 #      landed commits and the round the integrator filed.
 #
 # It never pushes `main`, and it passes nothing that turns a hook off.
+#
+# It runs no verification lane. Admission is the integrator's judgment; the lanes an
+# item moved run once, by digest, through `scripts/verify-once.sh`: by the author
+# when they want a verdict first, and on `main` after the landing as the post-merge
+# run, whose red re-runs that lane alone (`--only-red`). A lane run here would stand
+# between every item and the queue and judge a tree the queue has not merged yet
+# (docs/rfc/0001-a-lane-lands-alone-and-a-verdict-is-keyed-by-what-it-read.md, 7).
 #
 # ## Usage
 #
@@ -72,8 +63,8 @@
 #
 # `bx` is the one on PATH, else `~/.local/bin/bx`.
 #
-# Exit codes: 0 landed (or nothing to land); 1 the queue returned the item, a lane of
-# the lane-gate failed, or a step refused; 2 usage, a dirty tree or no bx; 3 the item was not submitted, was cancelled,
+# Exit codes: 0 landed (or nothing to land); 1 the queue returned the item or a step
+# refused; 2 usage, a dirty tree or no bx; 3 the item was not submitted, was cancelled,
 # or its end is not known; 4 it landed, and moving the branch onto origin/main
 # conflicted (aborted).
 
@@ -119,38 +110,12 @@ if [[ $status -eq 1 ]]; then
     exec "$bx_bin" --land-queue
 fi
 
-if [[ -n "$(git status --porcelain)" ]]; then
-    echo "land: the tree has uncommitted or untracked changes; commit or set them aside first" >&2
+if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+    echo "land: the tree has uncommitted changes; commit or set them aside first" >&2
     exit 2
 fi
 
 git fetch -q origin main
-
-cleanup_files=()
-trap 'rm -f -- "${cleanup_files[@]}"' EXIT
-
-# The lane-gate: every lane whose digest this item moved has a pass at that digest.
-echo "land: [lane-gate] the lanes this item moved, judged once (scripts/verify-once.sh)"
-gate_rc=0
-bash scripts/verify-once.sh || gate_rc=$?
-if [[ $gate_rc -ne 0 ]]; then
-    echo "land: [lane-gate] a lane this item moved has no pass (above); nothing was submitted" >&2
-    if [[ $gate_rc -eq 2 ]]; then
-        exit 2
-    fi
-    exit 1
-fi
-
-# The round's verification names what the lane-gate judged, read from the receipts, so
-# the ledger holds content an auditor can recompute and not only a sentence.
-receipt_bullets() {
-    local lane digest verdict executor
-    bash scripts/verify-once.sh --summary | while read -r lane digest verdict executor; do
-        [[ -n "$lane" ]] || continue
-        printf -- '- Lane-gate: %s at digest %s: %s (%s receipt).\n' \
-            "$lane" "$digest" "$verdict" "$executor"
-    done
-}
 
 if [[ ${#ledger_args[@]} -gt 0 ]]; then
     shopt -s nullglob
@@ -162,38 +127,6 @@ if [[ ${#ledger_args[@]} -gt 0 ]]; then
     fi
     # Named by when and on what it was written, so two sessions' descriptors never share
     # a name and the integrator files them in the order they were made.
-    if ! bullets="$(receipt_bullets)"; then
-        echo "land: [lane-gate] the receipts could not be read for the round's verification" >&2
-        exit 1
-    fi
-    if [[ -n "$bullets" ]]; then
-        verification=""
-        verification_tmp="$(mktemp)"
-        cleanup_files+=("$verification_tmp")
-        for i in "${!ledger_args[@]}"; do
-            case "${ledger_args[$i]}" in
-            --verification-file)
-                verification="${ledger_args[$((i + 1))]:-}"
-                ledger_args[i + 1]="$verification_tmp"
-                ;;
-            --verification-file=*)
-                verification="${ledger_args[$i]#--verification-file=}"
-                ledger_args[i]="--verification-file=$verification_tmp"
-                ;;
-            esac
-        done
-        if [[ -z "$verification" || ! -r "$verification" ]]; then
-            echo "land: the ledger arguments name no readable --verification-file" >&2
-            exit 2
-        fi
-        {
-            cat -- "$verification"
-            if [[ -n "$(tail -c 1 -- "$verification")" ]]; then
-                echo
-            fi
-            printf '%s\n' "$bullets"
-        } >"$verification_tmp"
-    fi
     descriptor="docs/rounds/pending/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short=12 HEAD).toml"
     if ! python3 -I scripts/lib/round_descriptor.py write "$descriptor" "${ledger_args[@]}"; then
         echo "land: the ledger arguments are not a round (the line above says why)" >&2
@@ -210,10 +143,6 @@ if [[ ${#ledger_args[@]} -gt 0 ]]; then
         echo "land: the commit of the round descriptor was refused; $descriptor is staged" >&2
         exit 1
     fi
-    if ! bash scripts/verify-once.sh --check; then
-        echo "land: [lane-gate] the round descriptor's commit moved a lane's inputs; nothing was submitted" >&2
-        exit 1
-    fi
 fi
 
 if [[ "${WZ_PREPUSH_EXTENDED:-0}" == "1" ]]; then
@@ -221,7 +150,7 @@ if [[ "${WZ_PREPUSH_EXTENDED:-0}" == "1" ]]; then
     # grades only a push to main, which is the integrator's; everything else the hook
     # grades is the same.
     precheck="$(git rev-parse --path-format=absolute --git-path "wz-land-precheck-$$")"
-    cleanup_files+=("$precheck")
+    trap 'rm -f -- "$precheck"' EXIT
     printf 'HEAD %s refs/heads/wz-land-precheck %s\n' \
         "$(git rev-parse HEAD)" "$(git rev-parse origin/main)" >"$precheck"
     if ! git hook run --to-stdin="$precheck" pre-push -- origin "$(git remote get-url origin)"; then

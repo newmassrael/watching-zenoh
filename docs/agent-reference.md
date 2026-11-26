@@ -66,33 +66,36 @@ git config core.hooksPath .githooks
   2 usage or a dirty tree, 3 not submitted, cancelled or not known, 4 landed but the move
   onto `origin/main` conflicted.
 
-  **The lane-gate** (2026-11-26) is the author stage of a landing, and the first
-  step of `land.sh`: `bash scripts/verify-once.sh` (planner and store
-  `scripts/lib/gate_ledger.py`) reads the lane set, each lane's class and its
-  digest D(L, t) from `scripts/lib/lane_digest.py`, which hashes the lane's
-  definition, its environment and every tracked file it can read. A lane is run
-  when the branch moved its digest from the merge base with `origin/main` and the
-  clone holds no pass at that digest; the units run in one `bx --checks ci` call,
-  and a lane with a pass is INHERITED, printed with the commit it was judged on.
-  Class S lanes (statistics) are never run or reused here. Each verdict is a
-  receipt in the clone's author receipt store,
+  **Verification lanes run after the landing, not before it** (2026-11-26).
+  `land.sh` runs no lane: admission is the integrator's judgment. The lanes a
+  change moved run once, in the fleet, through `bash scripts/verify-once.sh`
+  (planner and store `scripts/lib/gate_ledger.py`): by the author when they
+  want a verdict before landing, and on `main` after a landing as the
+  post-merge run (`--base <main before it>`). It reads the lane set, each
+  lane's class and its digest D(L, t) from `scripts/lib/lane_digest.py`, which
+  hashes the definitions of `run-ci.sh` the lane runs (its function, what that
+  calls, the code outside functions), its environment and every tracked file it
+  can read; `lane_digest.py --explain <lane> --base <ref>` says why a lane
+  moved. A lane is run when its digest moved from the merge base with the base
+  and the clone holds no pass at that digest; the units run in one
+  `bx --checks ci` call, and a lane with a pass is INHERITED, printed with the
+  commit it was judged on. Class S lanes (statistics) are never run or reused
+  here. Each verdict is a receipt in the clone's receipt store,
   `<git common dir>/wz-receipts/<lane>/<digest[0:2]>/<digest>/<sha256>.json`,
   named by the hash of its bytes and published with link(2), so no receipt is
   ever overwritten (the defect that removed the first receipts on 2026-10-19).
   No receipt is written from a dirty or untracked checkout, a receipt whose bytes
-  or key do not match is ignored and reported, and a failure is never reused. An
-  item with a failed lane is not submitted; the round's verification gets one
-  bullet per judged lane (lane, digest, verdict, executor class). Receipts are
-  the author's: nothing that admits a candidate to `main` reads them, and the
-  integrator's judgment is unchanged.
+  or key do not match is ignored and reported, and a failure is never reused.
+  Nothing that admits a candidate to `main` reads receipts.
 
   `verify-once.sh` modes: the default (the lanes the branch moved, without a
   pass), `--only-red` (the lanes whose latest verdict at their current digest
   failed), `--all --reason '<why>'` (every lane; without a reason it is refused
   when the store already holds a verdict at any of their digests, with a line
   starting `verify-once: REFUSED --all:` and exit 3; the reason is kept in each
-  receipt), `--plan` and `--check` (run nothing), `--summary` (the round's
-  verification lines). Do not chain `run-ci.sh` lanes by hand to get the same
+  receipt), `--plan` and `--check` (run nothing), `--summary` (one line per
+  judged lane: lane, digest, verdict, executor class, for a round's
+  verification). Do not chain `run-ci.sh` lanes by hand to get the same
   answer: a chain re-runs every lane the store already judged.
 
   Gate 0p refuses a push to `main` from any clone that is not the

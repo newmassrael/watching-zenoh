@@ -26,8 +26,9 @@
 # with a pass at its digest is inherited and printed with the commit it was judged on.
 # Run this once, after the work is committed: a second run with nothing changed has
 # nothing to do and says so. A whole gate chained by hand (run-ci.sh lane after lane)
-# is what this replaces. Receipts are the author's: they spare a run, and nothing that
-# admits a candidate to main reads them.
+# is what this replaces. scripts/land.sh runs no lane; on main after a landing,
+# `--base <main before it>` is the post-merge run (RFC 0001, section 7). Receipts
+# spare a run, and nothing that admits a candidate to main reads them.
 #
 # It refuses a dirty or untracked tree: bx ships the working state, and a receipt binds
 # to committed bytes.

@@ -72,15 +72,12 @@ One-time per clone: `git config core.hooksPath .githooks`. Requires
   line, no multi-line bullet wraps, no Co-Authored-By / "Generated with Claude
   Code" / emoji.
 - **Push to `main` only with `bash scripts/land.sh`** (owner, 2026-10-27). It
-  first runs the lane-gate (2026-11-26): `bash scripts/verify-once.sh` runs,
-  once and in the fleet, the lanes whose digest the branch moved from
-  `origin/main`, keeps each verdict in the clone's author receipt store, and
-  submits nothing with a failed lane; a lane with a pass at its digest is not
-  run again (`--only-red` re-runs only the failures, `--all` needs
-  `--reason`). Never chain the whole gate by hand. It then submits HEAD to the
-  landing queue (`bx --land`, `[land]` in `bx.toml`) and waits; the queue's
-  one integrator merges it, files its ledger round with the number the store
-  gives it there, judges it with the pre-push hook and pushes.
+  submits HEAD to the landing queue (`bx --land`, `[land]` in `bx.toml`) and
+  waits; the queue's one integrator merges it, files its ledger round with the
+  number the store gives it there, judges it with the pre-push hook and pushes.
+  It runs no lane first: the lanes a landing moved run once, by digest, with
+  `bash scripts/verify-once.sh` (receipts; `--plan` shows them), and a red
+  re-runs only that lane (`--only-red`). Never chain the whole gate by hand.
   Append-round arguments after `--` (no `--entry-id`) become a round
   descriptor committed under `docs/rounds/pending/` (`scripts/file-round.sh`).
   Pre-push gate 0p refuses a push to main from any clone but the integrator's

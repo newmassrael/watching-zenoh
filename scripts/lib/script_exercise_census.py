@@ -226,7 +226,7 @@ DECLARED: dict[str, tuple[str, str]] = {
     "scripts/verify-once.sh": (
         "runs the lanes a change moved as units of bx --checks ci, which no lane may call; "
         "its planner and receipt store gate_ledger.py is selftested in Layer C0",
-        "run by scripts/land.sh as its lane-gate, and by hand before a landing",
+        "run by hand by an author, and on main after a landing as the post-merge run",
     ),
     "scripts/with-sdk-env.sh": (
         "runs one command inside a Yocto or QNX SDK the caller provides; no lane has one",
