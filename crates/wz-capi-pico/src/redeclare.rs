@@ -3,7 +3,7 @@
 
 //! `zext_redeclare`: tell the peers of a session everything it holds again.
 //!
-//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `unstable-api` carries none of it.
 //!

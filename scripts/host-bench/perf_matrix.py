@@ -699,7 +699,7 @@ PROBE_ROLES = ("ping", "pong", "pub", "sub")
 
 
 def probe_session_limits(source: str) -> dict[str, int]:
-    """The counts the probe's PROBE_LIMITS_MACRO states, by limit id, as wz_ext.h reads the value of
+    """The counts the probe's PROBE_LIMITS_MACRO states, by limit id, as zext.h reads the value of
     ZEXT_CONFIG_LIMITS_KEY (NAME=count items, comma separated). ValueError for a source that defines it
     other than once, or an item that is no NAME=count."""
     found = re.findall(rf'^#define {PROBE_LIMITS_MACRO} "([^"]*)"$', source, re.M)
@@ -2545,7 +2545,7 @@ def cmd_selftest() -> int:
            lost_value(lambda: probe_session_limits(f'#define {PROBE_LIMITS_MACRO} "MAX_PUBLISHERS"\n'))
            and lost_value(lambda: probe_session_limits("")))
     builds = probe_builds((ROOT / "scripts" / "pico-compare.sh").read_text(encoding="utf-8"))
-    expect("both wz probes are built with the switch and wz_ext.h, and the reference's without the switch",
+    expect("both wz probes are built with the switch and zext.h, and the reference's without the switch",
            set(builds) == {"P", "W", "Wapp"}
            and all(f"-D{WZ_PROBE_SWITCH}" in builds[arm] and "crates/wz-capi-core/include" in builds[arm]
                    for arm in ("W", "Wapp"))

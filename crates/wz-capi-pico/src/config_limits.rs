@@ -22,7 +22,7 @@ use wz_session_core::limits::{SessionLimits, SESSION_LIMITS};
 
 use crate::result::{ZResult, Z_ERR_CONFIG_INVALID_VALUE};
 
-/// The config key whose value states the session's limits (`wz_ext.h`). Past zenoh-pico's own
+/// The config key whose value states the session's limits (`zext.h`). Past zenoh-pico's own
 /// keys, which end at `Z_CONFIG_LISTEN_EXIT_ON_FAILURE_KEY` (0x5A), so no upstream key is taken.
 pub const ZEXT_CONFIG_LIMITS_KEY: u8 = 0xC0;
 

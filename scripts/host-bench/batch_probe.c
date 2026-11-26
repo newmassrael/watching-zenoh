@@ -31,7 +31,7 @@
 #include "zenoh-pico.h"
 
 #ifdef BATCH_PROBE_DOCUMENT
-#include "wz_ext.h"
+#include "zext.h"
 #endif
 
 #if Z_FEATURE_BATCHING != 1 || Z_FEATURE_MATCHING != 1

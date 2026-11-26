@@ -37,7 +37,7 @@
 
 #include <zenoh-pico.h>
 
-#include "wz_ext.h"
+#include "zext.h"
 
 /* The key-id doors are in a build with shared-key-ids only. Weak, so the party links against
  * every build and refuses a dictionary by name where the library has none. */

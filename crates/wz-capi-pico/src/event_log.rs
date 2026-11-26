@@ -4,7 +4,7 @@
 //! `zext_event_emit`, `zext_event_read`, `zext_event_release` and `zext_event_dropped`: the
 //! node's event log, written and read from C (the event ring of the observation plane).
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `unstable-api` carries none of it.
 //!

@@ -5,7 +5,7 @@
 //! the program hands over is judged in the state the receiver keeps for each stream, or for each
 //! sender, and the verdict is written beside the payload, which is reported whatever it says.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `e2e-receiver` capability implies `unstable-api`. Its sender slots
 //! are `e2e-sender-demux`; a build without them refuses sender keying by name
 //! (`ZEXT_ERR_UNSUPPORTED`). The judge is [`wz_app_frame::e2e_receiver`]; ownership and threads

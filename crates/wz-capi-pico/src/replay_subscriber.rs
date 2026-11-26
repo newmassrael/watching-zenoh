@@ -7,7 +7,7 @@
 //! hands the program every sample, replies and live samples alike, judged by one receiving judge,
 //! with a flag that says which it is.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `replay-cache` capability implies `unstable-api`. The round, the
 //! table of publishers and the held live samples are [`wz_session_core::replay_subscriber`]'s,
 //! the admission of a reply to the judge is [`wz_app_frame::replay_admission`]'s, and the judge

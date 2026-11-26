@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
  * SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
  *
- * wz_ext.h -- the C doors wz has and the upstream libraries do not.
+ * zext.h -- the C doors wz has and the upstream libraries do not.
  *
  * The drop-in headers declare upstream's functions only, drop-in and extension being
  * separate namespaces: a program that includes a drop-in header and not this one is
@@ -22,8 +22,8 @@
  * Z_EINVAL, writing nothing.
  */
 
-#ifndef WZ_EXT_H
-#define WZ_EXT_H
+#ifndef ZEXT_H
+#define ZEXT_H
 
 /* What an open of this config would ask of the operating system, as ONE
  * JSON object with the keys of the target-build manifest
@@ -2837,4 +2837,4 @@ uint16_t zext_interface_major_1(void);
  * for a struct_size smaller than the struct, nothing written. */
 z_result_t zext_additional_interface(zext_interface_version_t *out);
 
-#endif /* WZ_EXT_H */
+#endif /* ZEXT_H */

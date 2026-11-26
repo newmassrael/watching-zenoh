@@ -6,7 +6,7 @@
 //! it.
 //!
 //! pico's config is a set of numbered keys and has none for wz's policies, so these are doors wz
-//! has and zenoh-pico does not: `zext_*`, declared in `wz_ext.h`. The first two are in a build
+//! has and zenoh-pico does not: `zext_*`, declared in `zext.h`. The first two are in a build
 //! with the `config-policy` capability, which a build that names nothing has and the zenoh-pico
 //! preset leaves out; `zext_config_document` is in a build with the `config-document` capability,
 //! since it links a JSON5 reader. An MCU image whose domain of a policy holds one value refuses

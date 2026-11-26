@@ -15,7 +15,7 @@
 //! [`wz_app_frame::message_payload`]'s; the schema is read by `wz-app-frame`'s descriptor reader,
 //! or its `.proto` text reader, into the same tables.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `message-payload` capability implies `unstable-api` and
 //! `message-catalog`.
 //!

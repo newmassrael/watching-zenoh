@@ -3,7 +3,7 @@
 
 //! `zext_session_step`: one step of a session the program runs on its own cycle.
 //!
-//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `wz_ext.h` with the
+//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `zext.h` with the
 //! periodic run API. zenoh-pico's multi-threaded arm has no call that steps a session on the
 //! program's thread: its read task does that work. A library carries both ways, and the program
 //! picks one when it opens the session: with the read task (`z_open_options_t`'s

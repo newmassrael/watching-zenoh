@@ -3,7 +3,7 @@
 
 //! `zext_get_to_peer`: a get addressed to one node by its zenoh id (policy `targeted-query`).
 //!
-//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so it is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers). It takes what `z_get` takes and the id of
 //! the node the get is for, and asks it on the one link that reaches that node: not on any other
 //! link, not of the session's own queryables, not of a multicast group. A node the session has no

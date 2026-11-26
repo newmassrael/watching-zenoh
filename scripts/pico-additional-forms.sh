@@ -16,7 +16,7 @@
 #   split/libwz_capi_pico.so        the core alone (`--cfg wz_additional_apart`)
 #   split/libwz_capi_pico_ext.so    the doors as a library of their own, which needs the core
 #   include/                        zenoh-pico's headers with the config.h of this feature list's
-#                                   arm, and wz_ext.h: one set for both forms, which share the arm
+#                                   arm, and zext.h: one set for both forms, which share the arm
 #   features                        the feature list, one line
 #
 # The doors' library is built with the features of that list it declares (the doors and the arm of
@@ -117,7 +117,7 @@ cp "$build/debug/libwz_capi_pico_ext.so" "$out/split/" || fail "the doors' libra
 cp -R "$inc"/. "$out/include"/ || fail "the pico headers could not be copied"
 "$py" scripts/lib/wz_config.py --pico-config-h "$features" > "$out/include/zenoh-pico/config.h" \
     || fail "the header of the arm did not render"
-cp crates/wz-capi-core/include/wz_ext.h "$out/include/" || fail "wz_ext.h could not be copied"
+cp crates/wz-capi-core/include/zext.h "$out/include/" || fail "zext.h could not be copied"
 echo "$features" > "$out/features"
 
 # Read each form's exports back: a door is in the one library and in the doors' library, never in

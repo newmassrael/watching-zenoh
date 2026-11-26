@@ -5,7 +5,7 @@
 //! the dictionary, `zext_config_key_wire_form_for` states the key-wire form of one endpoint apart
 //! from the session's, and the open hands both to the engine.
 //!
-//! Doors wz has and zenoh-pico does not, so they are `zext_*`, declared in `wz_ext.h`, and part
+//! Doors wz has and zenoh-pico does not, so they are `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `shared-key-ids` capability implies `unstable-api`. The dictionary
 //! and its rules are `wz_session_core::shared_key_ids`'s; both engines hold it, and each link of a
 //! session names its keys as the form stated for its endpoint, or the session's, says.

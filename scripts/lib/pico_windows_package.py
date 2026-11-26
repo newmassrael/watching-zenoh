@@ -125,7 +125,7 @@ on a finding.
   feature list and limits (the rendering `wz_config.py --pico-config-h` does, called here on the
   exact list the DLL is built with, so no default feature can be assumed on top of it). A program
   compiled against the vendored default `config.h` would allocate the structs of another arm.
-  `wz_ext.h` is beside them: the doors that are wz's own.
+  `zext.h` is beside them: the doors that are wz's own.
 * The build environment is the profile's alone. A `WZ_LIMIT_*` or `WZ_POLICY_*` the caller's
   environment states would change the library and not the statement the package carries, so it is
   refused, by name, before anything is built.
@@ -335,7 +335,7 @@ TRANSPORT_EXAMPLE = CRATES / CRATE / "tests" / "c" / "pico_app_transport.c"
 CHECK_PROGRAM = CRATES / CRATE / "tests" / "c" / "package_check.c"
 # The static assertions that hold the Rust layer's word counts to the program's header.
 LAYOUT_PINS = CRATES / CRATE / "csrc" / "pico_layout_pins.c"
-EXT_HEADER = CRATES / "wz-capi-core" / "include" / "wz_ext.h"
+EXT_HEADER = CRATES / "wz-capi-core" / "include" / "zext.h"
 PICO_TREE = ROOT / "vendor" / "zenoh-pico"
 # Files copied as they are: (path in the package, source).
 FIXED_FILES = (
@@ -345,7 +345,7 @@ FIXED_FILES = (
     ("config/message-catalog.sample.json5", CRATES / "wz-app-frame" / "catalog" / "synthetic.json5"),
     ("config/message-catalog.schema.json", ROOT / "deploy" / "message-catalog.schema.json"),
     ("config/wz-config.schema.json", ROOT / "deploy" / "wz-config.schema.json"),
-    ("include/wz_ext.h", EXT_HEADER),
+    ("include/zext.h", EXT_HEADER),
 )
 CATALOG_SAMPLE = "config/message-catalog.sample.json5"
 
@@ -634,7 +634,7 @@ def render_notices(built_as: str, target: str, linked: list[dict], compile_time:
         "",
         "## The zenoh-pico headers",
         "",
-        "The headers under `include/`, except `include/wz_ext.h`, are zenoh-pico's",
+        "The headers under `include/`, except `include/zext.h`, are zenoh-pico's",
         f"(version {pico['version']}, commit {pico['commit']}), under Apache-2.0 OR EPL-2.0:",
         f"`{pico['dir']}/LICENSE` and `{pico['dir']}/NOTICE.md`. `include/zenoh-pico/config.h` is",
         "rendered from zenoh-pico's `config.h.in` for this library's build.",

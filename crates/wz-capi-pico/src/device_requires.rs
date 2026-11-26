@@ -4,7 +4,7 @@
 //! `zext_config_device_requires`: what pico's open of a config would ask of the operating system
 //! (docs/target-build-contract.md T9), one JSON object with the manifest's keys.
 //!
-//! A door wz has and zenoh-pico does not, so it is `zext_*` and declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so it is `zext_*` and declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers), and part of the unstable surface: a
 //! build without `device-requires` (the zenoh-pico preset, the size-measured client builds)
 //! carries none of it, whether or not it has pico's unstable API.

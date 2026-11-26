@@ -25,7 +25,7 @@ the same commit and profile and carry the same headers.
 | `release/lib/wz_capi_pico.lib` | its import library, which a program links |
 | `debug/bin/`, `debug/lib/` | the same three files of the debug build |
 | `include/zenoh-pico.h`, `include/zenoh-pico/` | zenoh-pico's own headers, with the `config.h` of this library's build |
-| `include/wz_ext.h` | the declarations of wz's own doors |
+| `include/zext.h` | the declarations of wz's own doors |
 | `examples/` | C programs that use the library, each a complete exchange that checks itself |
 | `config/` | a message catalog sample and the schemas of the catalog and of the run-time configuration |
 | `build-statement.json` | what this build is: every capability with whether it is in, every limit and policy value |
@@ -56,7 +56,7 @@ cl /std:c11 /DZENOH_WINDOWS /I include my_program.c release\lib\wz_capi_pico.lib
   its multi-threaded arm, its planes and sizes), which decide the size of every type a program
   allocates. A program compiled against another `config.h` allocates structs of another size, and
   the library writes past them.
-* A program that calls a `zext_*` door includes `wz_ext.h` after `zenoh-pico.h`. A program that
+* A program that calls a `zext_*` door includes `zext.h` after `zenoh-pico.h`. A program that
   does not include it is portable to zenoh-pico.
 
 ## One library or two
@@ -123,7 +123,7 @@ session; what it shares with the program's own thread the program locks, or it r
 through a ring or fifo channel and pulls them with the channel's `try_recv`. A program written for
 the single-threaded arm links a build of that arm, which this package is not: the two arms differ
 in the size of types a program allocates. The order a program with its own scheduler calls the
-run API in is written in `wz_ext.h`, in the section "the periodic run API", and
+run API in is written in `zext.h`, in the section "the periodic run API", and
 `examples\periodic.c` runs it. A program that opens its session without the read task steps it
 itself, once a cycle or more, with `zext_session_step`, whose bound is how long the step may wait
 for input; `examples\periodic_step.c` does, on a time base the program moves (`zext_time_base_*`).
@@ -132,7 +132,7 @@ A build on the cooperative engine (`os-host`) hands a put to the session's own s
 inside the put, as zenoh-pico does. A subscriber's callback is called with no lock of the library
 held, so it may run on two threads at once, and a put made inside a subscriber's callback that
 reaches that same subscriber calls the callback again from inside itself, before the put returns,
-as zenoh-pico's recursion does. The order of the callbacks is `wz_ext.h`'s section "callbacks".
+as zenoh-pico's recursion does. The order of the callbacks is `zext.h`'s section "callbacks".
 
 A liveliness subscriber declared with history is handed the tokens the session already knows
 inside the declaration, before its peers are asked for the rest, as zenoh-pico's is: on the
@@ -141,7 +141,7 @@ number, and from inside a callback as well.
 
 ## wz's own doors in this build
 
-Every door is declared in `wz_ext.h` with its arguments, its results and its refusals; a door of a
+Every door is declared in `zext.h` with its arguments, its results and its refusals; a door of a
 capability this build does not have is declared there too and does not link. The capabilities of
 this build are listed in `RELEASE-NOTES.md` and `build-statement.json`. Its extension doors:
 

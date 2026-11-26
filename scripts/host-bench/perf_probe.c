@@ -4,7 +4,7 @@
 // One program of the host performance matrix (scripts/host-bench/perf_matrix.py, docs/pico-perf-matrix.md),
 // in four roles. It uses only the zenoh-pico C API, so the SAME source is built once against zenoh-pico (the
 // reference, built as the same build) and once against libwz_capi_pico; built with PERF_PROGRAM_TRANSPORT it
-// also carries the session's links over a transport this program supplies (zext_transport_*, wz_ext.h),
+// also carries the session's links over a transport this program supplies (zext_transport_*, zext.h),
 // which exists only in wz, and is built only against it.
 //
 //   perf_probe pong -m peer (-l|-e) ENDPOINT [-b] [-T NAME]
@@ -81,7 +81,7 @@
 //
 // Built against wz's library (PERF_WZ_ARM, which a build with PERF_PROGRAM_TRANSPORT needs too), the program
 // states before its open the counts its roles hold on their session at once, PERF_SESSION_LIMITS, by the
-// config key wz_ext.h names (ZEXT_CONFIG_LIMITS_KEY): a session of that library opens its tables at the few
+// config key zext.h names (ZEXT_CONFIG_LIMITS_KEY): a session of that library opens its tables at the few
 // zenoh-pico's own examples declare and takes no memory after its open, so a role that declares more than the
 // few without saying so has its declaration refused. zenoh-pico grows its lists on the heap and is told
 // nothing.
@@ -176,7 +176,7 @@
 #endif
 
 #ifdef PERF_WZ_ARM
-#include "wz_ext.h"
+#include "zext.h"
 #endif
 
 #if Z_FEATURE_PUBLICATION == 1 && Z_FEATURE_SUBSCRIPTION == 1 && Z_FEATURE_MULTI_THREAD == 1

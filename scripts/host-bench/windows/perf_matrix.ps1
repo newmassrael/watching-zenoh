@@ -1031,7 +1031,7 @@ function Invoke-Build {
     Copy-Item -Recurse -Force -Path (Join-Path $build 'include\*') -Destination $includeP
 
     # The probe against each arm with the same words. /MD: both libraries link the C runtime as a DLL. Arm W's
-    # probe states the counts its roles hold (PERF_WZ_ARM, perf_probe.c), by the wz_ext.h its package ships.
+    # probe states the counts its roles hold (PERF_WZ_ARM, perf_probe.c), by the zext.h its package ships.
     $cl = 'cl /nologo /std:c11 /experimental:c11atomics /O2 /MD /DZENOH_WINDOWS'
     $arms = @(
         @{ Arm = 'P'; Defines = ''; Include = $includeP; Libraries = @($implib[0].FullName) },

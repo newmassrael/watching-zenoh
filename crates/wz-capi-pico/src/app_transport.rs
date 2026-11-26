@@ -5,7 +5,7 @@
 //! own gives the session that stack in place of the system's sockets: a `send` the session calls
 //! with bytes, and calls the program makes when bytes arrive or a link changes state.
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h`, and part
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h`, and part
 //! of the unstable surface: the `app-transport` capability implies `unstable-api`.
 //!
 //! The transport object is engine-neutral (`wz_session_core::app_transport`), its table held

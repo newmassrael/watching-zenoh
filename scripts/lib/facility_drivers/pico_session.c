@@ -19,7 +19,7 @@
 #include <time.h>
 
 #include "wz_capi_pico.h"
-#include "wz_ext.h"
+#include "zext.h"
 
 static int failed(const char *call, int rc) {
     fprintf(stderr, "pico_session: %s returned %d\n", call, rc);

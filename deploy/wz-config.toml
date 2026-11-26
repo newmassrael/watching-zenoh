@@ -1101,7 +1101,7 @@ help = "Report the most memory a session holds, part by part, computed from the 
 # listener is told, once, that the declarations it has been given are everything the peer held
 # when the session was established and the ones after are live. wz's own, with no counterpart in
 # an upstream library, so off in every original. The pico ABI tells it to the declaration watch
-# of `wz_ext.h` (`zext_decl_watch_declare`).
+# of `zext.h` (`zext_decl_watch_declare`).
 [[capability]]
 id = "declarations-synced-event"
 kconfig = "WZ_CAP_DECLARATIONS_SYNCED_EVENT"
@@ -1116,7 +1116,7 @@ help = "Tell a declaration listener when the peer has sent everything it held, s
 # is one link, and a session that reconnects can meet another peer, so a listener that outlives
 # the link needs the identity beside each event rather than a separate read it could not order
 # against them. wz's own, so off in every original. The pico ABI's declaration watch
-# (`zext_decl_watch_declare`, `wz_ext.h`) is in a build that has either of the two
+# (`zext_decl_watch_declare`, `zext.h`) is in a build that has either of the two
 # capabilities, and names the peer of each event only with this one.
 [[capability]]
 id = "remote-declaration-watch"

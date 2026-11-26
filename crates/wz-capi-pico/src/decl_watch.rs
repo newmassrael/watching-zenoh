@@ -4,7 +4,7 @@
 //! `zext_decl_watch_declare` and `zext_decl_watch_drop`: what the peers of a session declare
 //! and retract, told to a C program (the declaration watch).
 //!
-//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `wz_ext.h` (the
+//! A door wz has and zenoh-pico does not, so each is `zext_*`, declared in `zext.h` (the
 //! extension namespace, apart from the drop-in headers). It is in a build with either of the
 //! capabilities `remote-declaration-watch` and `declarations-synced-event`, both off by default:
 //!

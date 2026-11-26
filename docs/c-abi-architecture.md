@@ -139,7 +139,7 @@ and its feature is measured by a sibling program; it is never retried until it p
   closure's function, context and drop held as they are, a Rust closure an `Arc<dyn Fn + Send +
   Sync>` as upstream zenoh's. So it is called with no lock held, from any thread and from inside
   itself, as zenoh-pico calls it (a put a callback makes on its own subscriber's key reaches it
-  again at once; `wz_ext.h`, "callbacks"), and it is let go of once, after its last call.
+  again at once; `zext.h`, "callbacks"), and it is let go of once, after its last call.
 - **L0 driver.** The wait set, the timer wheel and the read task. It owns no protocol state. One
   task table, reserved at open.
 - **L4 façade.** As P7. The port trait (`wz-capi-port`) disappears from the release build: the

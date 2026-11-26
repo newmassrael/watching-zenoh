@@ -1670,7 +1670,7 @@ parity() {
 # with the `app-transport` capability, the one arm that carries the program transport cell; both wz builds are
 # made as the size gate makes the case of their form (perf_matrix.py wz-arm). Each arm's library is copied
 # beside it (lib-<arm>), so a later build of the same crate does not change what a run measured. Both wz probes
-# are built with PERF_WZ_ARM and wz_ext.h, so their sessions state the counts the roles hold (perf_probe.c).
+# are built with PERF_WZ_ARM and zext.h, so their sessions state the counts the roles hold (perf_probe.c).
 # PICO_CMP_NO_BUILD=1 runs the programs already there.
 
 perf_fail() {

@@ -3509,7 +3509,7 @@ layer_c0_test_discipline() {
     _runci_leg capi_c_wz_door_header --after capi_c_wz_door_header.selftest -- python3 scripts/lib/capi_c_wz_door_header.py
     # R3440 (drop-in and extension are separate namespaces) -- the pico drop-in
     # header declares only what zenoh-pico's own header declares at the pin, read
-    # through the preprocessor under three configurations, and wz_ext.h only
+    # through the preprocessor under three configurations, and zext.h only
     # zext_* doors.
     _runci_leg drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py --selftest >/dev/null
     _runci_leg drop_in_header_gate --after drop_in_header_gate.selftest -- python3 scripts/lib/drop_in_header_gate.py
