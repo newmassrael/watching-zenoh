@@ -1121,15 +1121,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         }
     }
 
-    /// Every face, in the order of the face table's rows: the dial role's first, then each past
-    /// it in its row of the arena.
+    /// Every face that may hold a link, in the order of the face table's rows: the dial role's
+    /// first, then, where the session listens, each past it in its row of the arena. Only a
+    /// port's connection or an attach takes a face past the dial role's, so a build that listens
+    /// on none holds a link in no row past it: the rows its groups' places are laid out with are
+    /// walked by no read and no operation, each group's session being read apart
+    /// (`CoopEngine::read_groups`).
     #[inline(always)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(feature = "listen")]
         {
             core::iter::once(&self.dial).chain(self.taken.iter())
         }
-        #[cfg(not(any(feature = "listen", feature = "group")))]
+        #[cfg(not(feature = "listen"))]
         {
             core::iter::once(&self.dial)
         }
@@ -1149,6 +1153,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
                     .filter(|face| face.holds_face.load(Ordering::Acquire)),
             )
         }
+        // Every face that may hold a link is the dial role's alone (`Self::iter`).
         #[cfg(not(feature = "listen"))]
         {
             self.iter()

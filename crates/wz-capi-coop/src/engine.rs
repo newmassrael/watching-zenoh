@@ -2560,7 +2560,13 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     group_pumps: Vec<Option<group::GroupPump<C>>>,
     /// How many places for a group's session the session made (`Self::seat_group`), which a
     /// test of a group joined again counts.
-    #[cfg(all(test, feature = "std", feature = "group", not(wz_round)))]
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        feature = "app-transport",
+        not(wz_round)
+    ))]
     group_places_made: usize,
     /// How often a pass of the session's tasks read the clock to wake its timers
     /// ([`Self::run_tasks`]), which the tests count. Kept where the tests that read it build
@@ -5423,7 +5429,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
             pump.rejoin(seat);
             return;
         }
-        #[cfg(all(test, feature = "std"))]
+        #[cfg(all(test, feature = "std", feature = "app-transport"))]
         {
             self.group_places_made += 1;
         }
@@ -6395,7 +6401,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             group_reads: 0,
             #[cfg(all(feature = "group", not(wz_round)))]
             group_pumps: Vec::new(),
-            #[cfg(all(test, feature = "std", feature = "group", not(wz_round)))]
+            #[cfg(all(
+                test,
+                feature = "std",
+                feature = "group",
+                feature = "app-transport",
+                not(wz_round)
+            ))]
             group_places_made: 0,
             #[cfg(all(test, feature = "std"))]
             task_clock_reads: core::cell::Cell::new(0),
@@ -7043,8 +7055,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// How many places for a group's session the session made since the open, its first join
-    /// of each group and each join again (`Core::seat_group`).
-    #[cfg(all(test, feature = "std", feature = "group", not(wz_round)))]
+    /// of each group and each join again (`Core::seat_group`). Compiled where its reader is: the
+    /// groups of one thread over the program's transport (`tests::one_thread::group`).
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        feature = "app-transport",
+        not(wz_round)
+    ))]
     pub(crate) fn group_places_made(&self) -> usize {
         self.core.lock().0.group_places_made
     }
