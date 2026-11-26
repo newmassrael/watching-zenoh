@@ -390,6 +390,37 @@ transport-link-ws,object-pool|--test-target=it"
     "wz-capi-pico|hook|e2e-supervision,object-pool|--test=stream_supervision_doors"
     "wz-capi-pico|hook|time-base,object-pool|--test=time_base_accept"
     "wz-capi-pico|hook|session-memory,object-pool|--test=session_memory_door"
+    # The tests of the tokio engine alone beside a door the two whole-crate legs above do not
+    # name. The crate's default build is the cooperative engine's (`os-host`), so a leg of the
+    # door over the default features builds none of them: each is named here over the tokio
+    # engine's list of those legs, with the door its file or module requires. Each is a build of
+    # its own, so they are the lane's and not the hook's.
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,clock-source|--test=clock_source_stamps"
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,remote-declaration-watch,object-pool|files::decl_watch_doors::"
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,time-base,object-pool|files::get_roundtrip::c_get_on_a_time_base"
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,shared-key-ids,object-pool|files::key_ids_tokio::"
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,replay-cache,object-pool|files::replay_cache_doors::"
+    "wz-capi-pico|lane|-default,engine-tokio,serial-drive-own-thread,rx-busy-poll,link-udp,peer,\
+multicast-transport,scout,query,queryable,liveliness,liveliness-get,advanced,multi-thread,\
+unstable-api,connectivity,config-document,shared-key-ids|\
+key_ids::tests::one_document_gives_the_key_ids_the_zenoh_reader_gives"
+    # The extension handles shared by threads (`files::ext_handles_across_threads`), which needs
+    # five doors at once, where each leg of one of them names it alone.
+    "wz-capi-pico|lane|e2e-sender,e2e-receiver,instance-key,message-catalog,message-payload,\
+object-pool|files::ext_handles_across_threads::"
+    # Layer C1nh's target (`no_heap_after_open`, needs `app-transport` beside the default build):
+    # its reading of an allocation site. Its measurement is Layer C1nh's (a SKIPS row below).
+    "wz-capi-pico|lane|app-transport|--test=no_heap_after_open"
     # The `serial/` link on the cooperative engine, the default one: the host's ttys beside its
     # sockets, a sample across two pty pairs this process pumps into each other, and a pin pair,
     # which names no tty of a host, refused at the dial. Nothing leaves the host.
@@ -2282,6 +2313,11 @@ a memory leg of Layer S, run by it with --ignored on each engine (8 passed guard
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
     "wz-capi-pico|gets_between_open_sessions_are_counted_for_their_allocations|\
 a memory leg of Layer S, run by it with --ignored on each engine (8 passed guarded); this table never passes --ignored"
+    # The allocations after open counted per operation family (`tests/no_heap_after_open.rs`):
+    # `#[ignore]` because it counts the process's allocations, which Layer C1nh reads with
+    # --ignored; the leg of the target runs the test beside it.
+    "wz-capi-pico|allocations_after_open_are_counted_per_operation_family|\
+Layer C1nh's measurement of a process's allocations, run by it with --ignored; this table never passes --ignored"
 )
 
 if [[ ${#LEGS[@]} -eq 0 ]]; then
