@@ -4890,9 +4890,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> Core<L, C> {
         let links = &self.transport.links;
         let faces = move || {
             links.faces().filter_map(move |face| {
-                let (Link::Up(wire) | Link::Opening { wire, .. }) = &face.link else {
-                    return None;
-                };
+                let wire = face.link.wire()?;
                 let peer = decl_watch::named(|| wire.actions.peer_session_zid());
                 Some((registry.tables_of(face.id)?, peer))
             })

@@ -988,7 +988,10 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// The pending gets of every face and, where the session answers its own gets, its own.
-    #[cfg(all(feature = "query", any(feature = "liveliness-get", test)))]
+    #[cfg(all(
+        feature = "query",
+        any(feature = "liveliness-get", all(test, feature = "runtime-plan"))
+    ))]
     pub(super) fn all_gets(&self) -> impl Iterator<Item = &Gets> {
         let gets = self.faces().map(|face| &face.gets);
         #[cfg(feature = "local-queryable")]
@@ -997,7 +1000,10 @@ impl<H: Holders> RegistryOf<H> {
     }
 
     /// [`Self::all_gets`], to write.
-    #[cfg(all(feature = "query", any(feature = "liveliness-get", test)))]
+    #[cfg(all(
+        feature = "query",
+        any(feature = "liveliness-get", all(test, feature = "runtime-plan"))
+    ))]
     pub(super) fn all_gets_mut(&mut self) -> impl Iterator<Item = &mut Gets> {
         let gets = self
             .sets
