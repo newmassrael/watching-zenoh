@@ -175,8 +175,11 @@ def selftest() -> int:
         got = findings(_RUNCI, _DECL, WorkTree(fx.root), quiet, none)
         # Red if the rows of a leg table are not resolved against the workspaces.
         expect("refused: a leg row naming a package no workspace has", any("ghost" in f for f in got), got)
-        e_asks = findings(_RUNCI, _DECL, tree, quiet, {"B": runci_plan.Asks(["zenohd"])})
-        expect("an E lane may ask the machine", not any("lane B" in f for f in e_asks), e_asks)
+        # The checkout is read from disk, so the clean leg table goes back before the next case.
+        (fx.root / "scripts" / "lib" / "legs.sh").write_text(_LEGS, encoding="utf-8")
+        e_asks = findings(_RUNCI, _DECL, WorkTree(fx.root), quiet, {"B": runci_plan.Asks(["zenohd"])})
+        # Red if the class-D machine rule is applied to an E lane too.
+        expect("an E lane may ask the machine", e_asks == [], e_asks)
     print(f"lanes_gate selftest: {cases} cases pass")
     return 0
 
