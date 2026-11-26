@@ -3521,3 +3521,74 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
     wz_capi_port::SessionDrive::close(&*engine);
     assert!(!handle.is_open(), "a second close changes nothing");
 }
+
+/// An open's plan lays out what a listed plan of the same session lays out, every sum and every
+/// layer's rows, and lists no row, so the open's frame holds no table of them; a listed plan taken
+/// on by an open's plan, as a region's is, is the same plan. Turned red by a walk whose sums depend
+/// on the list it keeps, or a `take_on` that leaves a sum or a layer's rows behind.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
+    let config = client_config();
+    let listed = ArenaPlan::of(&config, &config.limits).expect("lays an arena out");
+    let mut open = crate::arena::OpenPlan::blank();
+    open.count(&config, &config.limits)
+        .expect("lays an arena out");
+    assert!(
+        listed.rows().count() > 0,
+        "CONTROL: the listed plan lists its rows"
+    );
+    assert_eq!(open.rows().count(), 0);
+    assert_eq!(open.reserved_bytes(), listed.reserved_bytes());
+    assert_eq!(open.transport(), listed.transport());
+    assert_eq!(open.session(), listed.session());
+    assert_eq!(open.places(), listed.places());
+    let mut taken = crate::arena::OpenPlan::blank();
+    taken.take_on(&listed);
+    assert_eq!(taken, open);
+}
+
+/// A plan that takes a laid plan on is that plan, whatever it held before: every sum, every layer's
+/// rows and every listed row, so the plan an open made is replaced whole and keeps nothing of its
+/// own. Turned red by a `take_on` that leaves a sum, a layer's rows or a listed row of the plan it
+/// overwrote as it was.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn a_plan_taken_on_is_the_laid_plan_whatever_it_held() {
+    let laid = ArenaPlan::of(
+        &preset_client(caps::MAX_STATIC_CONNECT),
+        &SessionLimits::PICO_PRESET,
+    )
+    .expect("the preset lays a client out");
+    let mut taken = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        taken, laid,
+        "CONTROL: the plan written over differs from the one taken on"
+    );
+    taken.take_on(&laid);
+    assert_eq!(taken, laid);
+}
+
+/// A region lays its plan out over a plan that held another as over a vacant one, in a build that
+/// lays its plans out at the open and in one that does not: the open lays the region's plan over
+/// the plan it made, which keeps nothing of its own. Turned red by a `lay_out_on` that leaves a sum,
+/// a layer's rows or a listed row of the plan it lays out over as it was.
+#[test]
+fn a_region_lays_its_plan_over_one_that_held_another() {
+    let config = preset_client(caps::MAX_STATIC_CONNECT);
+    let mut vacant = ArenaPlan::vacant();
+    PRESET_REGION
+        .lay_out_on(&mut vacant, &config)
+        .expect("the region admits a client of its own shape");
+    let mut held = ArenaPlan::of(&preset_client(1), &other_than_preset())
+        .expect("the other limits lay a client out");
+    assert_ne!(
+        held, vacant,
+        "CONTROL: the plan laid over differs from the region's"
+    );
+    PRESET_REGION
+        .lay_out_on(&mut held, &config)
+        .expect("the region admits a client of its own shape");
+    assert_eq!(held, vacant);
+}

@@ -149,8 +149,8 @@ pub struct GetParts<'a> {
 #[cfg(all(feature = "alloc", feature = "codec-request"))]
 impl GetParts<'_> {
     /// The owned `Request` of this description: what a session sends where it does not write the
-    /// query from its parts (a key it rewrites, counters that read the owned message, a timestamp
-    /// stack). Refused as the owned builder refuses, and parameters past
+    /// query from its parts (a key it rewrites, a timestamp stack). Refused as the owned builder
+    /// refuses, and parameters past
     /// [`crate::request_build::REQUEST_QUERY_PARAMETERS_MAX_LEN`] are `LengthOutOfRange` here
     /// where the builder would stop.
     pub fn owned_request(

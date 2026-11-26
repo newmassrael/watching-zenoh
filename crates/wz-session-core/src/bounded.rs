@@ -2382,6 +2382,23 @@ impl Arena {
         Ok(at)
     }
 
+    /// The next span of the arena, of `bytes` bytes rounded up to [`ARENA_ALIGN`], as an arena of
+    /// its own, none of it lent: what a table set lent after the open is lent from, its bytes
+    /// counted and taken now and written by nothing until then. Over zeroed memory where this
+    /// arena is, since what an arena has not lent is as it was handed. Refused, taking nothing,
+    /// past what is left or when `bytes` is `None` (past the address space).
+    pub fn split_off(&mut self, bytes: Option<usize>) -> Result<Self, LendRefused> {
+        let base = self.lend_span(bytes)?;
+        // `lend_span` lent the span `bytes` rounds up to, so it is within the address space.
+        let span = bytes.and_then(Self::span).unwrap_or_default();
+        Ok(Self {
+            base,
+            bytes: span,
+            lent: 0,
+            zeroed: self.zeroed,
+        })
+    }
+
     /// The bytes a table of `count` buffers of `size` bytes takes in an arena
     /// ([`Self::lend_byte_cells`]): a span of their flags and a span of their bytes. `None` past
     /// the address space.
@@ -2880,6 +2897,54 @@ mod tests {
         // SAFETY: the region is aligned to `ARENA_ALIGN`, as its blocks are, holds at least
         // `bytes` bytes, and is leaked, so nothing else uses it and it outlives every lent table.
         unsafe { Arena::over(NonNull::from(region).cast::<u8>(), bytes) }
+    }
+
+    /// A span split off an arena is taken from it whole, rounded up to the alignment, and lends its
+    /// own spans from its start; it lies over zeroed memory exactly where its arena does; one past
+    /// what is left is refused and takes nothing. Turned red by a split that takes none of its
+    /// arena's bytes, or that forgets the memory it lies over is zero.
+    #[test]
+    fn a_span_split_off_an_arena_lends_from_its_start() {
+        let mut arena = arena_of(4 * ARENA_ALIGN);
+        let mut split = arena
+            .split_off(Some(ARENA_ALIGN + 1))
+            .expect("the arena holds the span");
+        assert_eq!(arena.high_water(), 2 * ARENA_ALIGN, "rounded up");
+        assert_eq!((split.bytes(), split.high_water()), (2 * ARENA_ALIGN, 0));
+        assert!(
+            !split.zeroed,
+            "CONTROL: the arena's memory is not said to be zero"
+        );
+        split
+            .lend::<u64, 4>(4)
+            .expect("the split holds four rows of eight bytes");
+        assert_eq!(split.high_water(), 2 * ARENA_ALIGN);
+        assert_eq!(
+            arena.high_water(),
+            2 * ARENA_ALIGN,
+            "the split lends its own bytes"
+        );
+        assert_eq!(
+            arena.split_off(Some(3 * ARENA_ALIGN)).err(),
+            Some(LendRefused::Exhausted {
+                asked: Some(3 * ARENA_ALIGN),
+                left: 2 * ARENA_ALIGN,
+            })
+        );
+        assert_eq!(
+            arena.high_water(),
+            2 * ARENA_ALIGN,
+            "a refused split takes nothing"
+        );
+        let region: &'static mut [Block] = std::vec![Block { _bytes: [0; ARENA_ALIGN] }; 2].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds `2 * ARENA_ALIGN` bytes, every one
+        // zero, and is leaked, so nothing else uses it and it outlives every lent table.
+        let mut zeroed =
+            unsafe { Arena::over_zeroed(NonNull::from(region).cast::<u8>(), 2 * ARENA_ALIGN) };
+        let split = zeroed
+            .split_off(Some(ARENA_ALIGN))
+            .expect("the arena holds the span");
+        assert!(split.zeroed, "a split of zeroed memory lies over zero");
     }
 
     /// A lender keeps its first refusal for every kind of table it lends: after it a table of

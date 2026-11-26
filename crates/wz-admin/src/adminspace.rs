@@ -7406,6 +7406,13 @@ mod tests {
         let metrics = registry
             .transport_mut(transport)
             .expect("the transport was just registered");
+        // The key a payload counts under is a configured one, as upstream's is.
+        metrics.set_key_filters(
+            wz_session_core::stats_registry::StatsKeyFilters::new(alloc::vec![String::from(
+                "demo/**",
+            )])
+            .expect("one key is within the list's capacity"),
+        );
         metrics.inc_bytes(StatsDirection::Tx, slot, 140);
         metrics.observe_network_message_payload(
             StatsDirection::Tx,

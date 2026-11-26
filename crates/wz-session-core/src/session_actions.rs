@@ -4775,9 +4775,9 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
     // key), and the heap drain skips one whose bounded field overflows. A reply to a query
     // that named its key by an id of the link's dictionary (`shared-key-ids`) names it as
     // the query did. The OWNED record is built only where something reads it: the session's
-    // egress policy asks a verdict of it, a routing namespace decorates its key, or the
-    // transport's statistics classify its content. Those go the way every owned reply goes,
-    // through [`Self::send_response`].
+    // egress policy asks a verdict of it, or a routing namespace decorates its key. Those go the
+    // way every owned reply goes, through [`Self::send_response`]. The transport's statistics
+    // classify the reply off its parts, as they classify the owned record of the same parts.
     #[cfg(all(feature = "codec-response", feature = "storage-profile"))]
     fn send_reply_parts(&self, parts: crate::reply_stage::ReplyParts<'_>) {
         #[cfg(feature = "alloc")]
@@ -4796,6 +4796,13 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
             keys.reply_key(parts.rid, parts.keyexpr)
         }));
         let qos = parts.qos;
+        #[cfg(feature = "transport-stats")]
+        let class = self.stats_keys_of(
+            crate::network_message::reply_parts_stats_class(&parts),
+            || Some(parts.keyexpr),
+        );
+        #[cfg(not(feature = "transport-stats"))]
+        let class = crate::stats::NetworkStatsClass::unread();
         // The reply's own size: a Response has no size constant (its payload's bound is a u32
         // length), and the link lends a slot of this size. A reply the writer refuses is refused
         // by the encode below too.
@@ -4806,7 +4813,7 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
                 self.reply_conduit(qos.priority(), true),
                 qos,
                 size,
-                crate::stats::NetworkStatsClass::unread(),
+                class,
                 as_encoder(&|sink| writer.encode_tx(sink)),
             )
             .map(|_| ());
@@ -14481,6 +14488,30 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
     }
 
+    /// [`Self::outbound_request_class`] for a get written from its parts: the class of the owned
+    /// `Request` of the same parts, a key named by a declaration read in the space of the
+    /// declaration where it lies ([`Self::with_outbound_mapping`]), so counting a get makes no
+    /// string. Only a session that holds `stats/filters` composes the key's text, to match it.
+    #[cfg(all(
+        feature = "transport-stats",
+        feature = "codec-request",
+        feature = "storage-profile"
+    ))]
+    fn outbound_get_class(
+        &self,
+        writer: &crate::lent_request::RequestWriter<'_>,
+    ) -> crate::stats::NetworkStatsClass {
+        let class = crate::network_message::get_stats_class(writer, |id| {
+            self.with_outbound_mapping(id, crate::stats::StatSpace::of_keyexpr)
+        });
+        let key = writer.parts().key;
+        self.stats_keys_of(class, || {
+            crate::network_message::stats_keyexpr_of_key(key.id(), key.suffix(), &|id| {
+                self.resolve_outbound_mapping(id)
+            })
+        })
+    }
+
     /// R311ms (Level B, B5b-2) — the UNICAST arm of the transport send seam:
     /// route a built [`NetworkMessage`](crate::network_message::NetworkMessage)
     /// to the matching `dispatch_*` family plus the express batch flush. The
@@ -14805,9 +14836,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             return Err(UnsentShared::Unshareable);
         }
         #[cfg(feature = "transport-stats")]
-        let class = self.stats_keys_of(encoded.stats_class(), || {
-            encoded.keyexpr().map(alloc::string::String::from)
-        });
+        let class = self.stats_keys_of(encoded.stats_class(), || encoded.keyexpr());
         #[cfg(not(feature = "transport-stats"))]
         let class = crate::stats::NetworkStatsClass::unread();
         let ended = self.dispatch_network_message_at(
@@ -17293,11 +17322,29 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// `_z_get_resource_by_id` on the publish path.
     #[cfg(feature = "alloc")]
     pub fn resolve_outbound_mapping(&self, mapping_id: crate::wire_id::ExprId) -> Option<String> {
+        self.with_outbound_mapping(mapping_id, <str as alloc::string::ToString>::to_string)
+    }
+
+    /// `read` of the literal [`Self::resolve_outbound_mapping`] answers for `mapping_id`, read
+    /// where it lies under the link's lock: the session's own declaration, else the key the
+    /// installed dictionary of shared key ids names (`shared-key-ids`). `None`, `read` not run,
+    /// for an id neither holds. For a reader that needs a fact of the literal and not a copy of it.
+    #[cfg(feature = "alloc")]
+    fn with_outbound_mapping<X>(
+        &self,
+        mapping_id: crate::wire_id::ExprId,
+        read: impl FnOnce(&str) -> X,
+    ) -> Option<X> {
         self.with_facts(|facts| {
-            let keys = &mut facts.own_keyexprs;
-            keys.space()?.resolve_own_mapping(mapping_id)
+            let literal = facts
+                .own_keyexprs
+                .held()
+                .and_then(|keys| keys.literal(mapping_id));
+            #[cfg(feature = "shared-key-ids")]
+            let literal =
+                literal.or_else(|| facts.link_keys.ids().and_then(|ids| ids.key_of(mapping_id)));
+            literal.map(read)
         })
-        .or_else(|| self.shared_key_literal(mapping_id))
     }
 
     /// `key`, which the caller names by the declaration this link's session calls `mapping_id`
@@ -17531,22 +17578,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             );
         }
         response
-    }
-
-    /// The key the installed dictionary names `id`, when one is installed and holds it.
-    #[cfg(feature = "shared-key-ids")]
-    fn shared_key_literal(&self, id: crate::wire_id::ExprId) -> Option<String> {
-        self.with_facts(|facts| {
-            let keys = &mut facts.link_keys;
-            keys.ids().and_then(|ids| ids.key_of(id)).map(String::from)
-        })
-    }
-
-    /// A build without the shared key ids has no dictionary to answer from.
-    #[cfg(all(feature = "alloc", not(feature = "shared-key-ids")))]
-    #[inline(always)]
-    fn shared_key_literal(&self, _id: crate::wire_id::ExprId) -> Option<String> {
-        None
     }
 
     /// R283 — `true` once the session-FSM has entered the `Established`
@@ -18542,9 +18573,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// bytes the owned builder writes for the same description.
     ///
     /// The owned `Request` goes out instead where the session needs that message itself: a
-    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]), and a
-    /// build whose network counters classify a message by its owned form (`transport-stats`). A
-    /// build with no allocator has no owned message, and refuses such a query as `FeatureDisabled`.
+    /// session that rewrites the keys it originates ([`Self::rewrites_originated_keys`]). A build
+    /// with no allocator has no owned message, and refuses such a query as `FeatureDisabled`. The
+    /// network counters (`transport-stats`) count the get as they count the owned `Request` of
+    /// the same parts, read off the parts.
     ///
     /// Reliable, as every query is: a Query lost on the way would leave the asker waiting for
     /// answers and a final that never come. Routed at the band its QoS names, and an express one
@@ -18554,11 +18586,15 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         &self,
         parts: crate::query_parts::GetParts<'_>,
     ) -> Result<(), SendWireError> {
-        if crate::lent_request::COUNTED_FROM_OWNED || self.rewrites_originated_keys() {
+        if self.rewrites_originated_keys() {
             return self.send_owned_get(parts);
         }
         let writer = crate::lent_request::RequestWriter::new(parts);
         let qos = parts.query.qos;
+        #[cfg(feature = "transport-stats")]
+        let class = self.outbound_get_class(&writer);
+        #[cfg(not(feature = "transport-stats"))]
+        let class = crate::stats::NetworkStatsClass::unread();
         // The query's own size, counted by running its writer into a sink that keeps nothing: a
         // Request has no size constant, and the link lends a slot of this size. A query the
         // writer refuses counts as zero and is refused by the encode below with its own error.
@@ -18571,7 +18607,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             Conduit::new(qos.priority(), true),
             qos,
             size,
-            crate::stats::NetworkStatsClass::unread(),
+            class,
             as_encoder(&|sink| writer.encode(sink)),
         )?;
         #[cfg(feature = "transport-batching")]
@@ -18786,15 +18822,13 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
 
     /// Whether a staged reply may leave as it is written from its parts, with no owned
     /// record built: nothing between the handler and the wire needs one. The egress policy
-    /// asks its verdict of the owned reply, a routing namespace decorates the owned reply's
-    /// key, and the statistics classify the owned reply's content, so a session that holds
-    /// either, or is built to count, sends the owned reply. A build with none of the three
-    /// answers `true` with no read, and links no owned reply for its staged ones.
+    /// asks its verdict of the owned reply and a routing namespace decorates the owned reply's
+    /// key, so a session that holds either sends the owned reply. The statistics read a reply
+    /// off its parts (`crate::network_message::reply_parts_stats_class`) and need no owned one.
+    /// A build with neither answers `true` with no read, and links no owned reply for its staged
+    /// ones.
     #[cfg(all(feature = "codec-response", feature = "alloc"))]
     fn reply_can_be_written_from_parts(&self) -> bool {
-        if cfg!(feature = "transport-stats") {
-            return false;
-        }
         #[cfg(feature = "reply-egress-gate")]
         if self
             .egress_reply_gate_set
