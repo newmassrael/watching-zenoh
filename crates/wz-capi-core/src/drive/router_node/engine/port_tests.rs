@@ -25,7 +25,7 @@
 //! port's shared-memory publication (`publish_shm_on_wire_all`) opens both ends with both, beside
 //! a client that offers none, in a build with `session-extshm`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -896,36 +896,63 @@ fn a_node_refuses_each_statement_by_name_and_takes_a_call_that_states_none() {
     router.close();
 }
 
-/// One ask's legs: the Put replies they are handed, and how many of them have ended.
+/// One ask's legs: the Put replies they are handed, how many callbacks the ask minted, how many
+/// of those were let go of, and how many of the let-go ones had been handed a Put. The engine
+/// mints a callback before it issues the leg, and lets go at once of one it could not issue, so
+/// the count of ends is held to the count minted and not to the legs issued.
 #[derive(Default)]
 struct Legs {
     replies: Mutex<Vec<Vec<u8>>>,
+    minted: AtomicUsize,
     ended: AtomicUsize,
+    answered_ended: AtomicUsize,
 }
 
-/// A leg's end, counted on its ask when the leg's callback is let go of.
-struct LegEnd(Arc<Legs>);
+/// A leg's end, counted on its ask when the leg's callback is let go of. `answered` tells the leg
+/// a queryable answered from one that reached none (the asker's own plane, or a leg never issued),
+/// which ends at once and says nothing of the kept query.
+struct LegEnd {
+    legs: Arc<Legs>,
+    answered: AtomicBool,
+}
 
 impl Drop for LegEnd {
     fn drop(&mut self) {
-        self.0.ended.fetch_add(1, Ordering::SeqCst);
+        if *self.answered.get_mut() {
+            self.legs.answered_ended.fetch_add(1, Ordering::SeqCst);
+        }
+        self.legs.ended.fetch_add(1, Ordering::SeqCst);
     }
 }
 
 /// Ask `key` once through `asker`'s port: how many legs were issued, and what they are handed.
+///
+/// The ask consolidates nothing, so each reply is handed as it arrives: a get that names no mode
+/// resolves to `Latest`, which holds every reply until its leg's final (`ConsolidatingSink`), and
+/// the final of a kept query comes only with its release.
 fn ask_counting_legs(asker: &Arc<dyn SessionEngine>, key: &str) -> (usize, Arc<Legs>) {
     let legs = Arc::new(Legs::default());
     let issued = asker
         .get_on_wire(
             key,
             &WireKey::literal(),
-            &QueryOptions::default(),
+            &QueryOptions::default()
+                .with_consolidation(wz_session_core::query_mode::ConsolidationMode::None),
             None,
             &mut || {
-                let end = LegEnd(Arc::clone(&legs));
+                legs.minted.fetch_add(1, Ordering::SeqCst);
+                let end = LegEnd {
+                    legs: Arc::clone(&legs),
+                    answered: AtomicBool::new(false),
+                };
                 wz_capi_port::ReplyCallback::shared(move |reply: &dyn ReplyView| {
                     if reply.kind() == ReplyKind::Put {
-                        end.0.replies.lock().unwrap().push(reply.payload().to_vec());
+                        end.answered.store(true, Ordering::SeqCst);
+                        end.legs
+                            .replies
+                            .lock()
+                            .unwrap()
+                            .push(reply.payload().to_vec());
                     }
                 })
             },
@@ -936,9 +963,9 @@ fn ask_counting_legs(asker: &Arc<dyn SessionEngine>, key: &str) -> (usize, Arc<L
 
 /// Declare on `keeper` a queryable under `key` whose handler keeps each query and answers none,
 /// and ask it through `asker` until a query is kept. The kept query is answered through the
-/// keeper's port (`reply_held`): the reply arrives while the asker's leg stays open, the leg ends
-/// once the keep is released (`release_held`), `holds` (what the keeper keeps) is none after,
-/// and a keep released answers nothing more.
+/// keeper's port (`reply_held`): the reply arrives while the leg it answers stays open, that leg
+/// and every other the ask minted end once the keep is released (`release_held`), `holds` (what
+/// the keeper keeps) is none after, and a keep released answers nothing more.
 fn a_kept_query_answers_and_ends_through_the_port(
     keeper: &Arc<dyn SessionEngine>,
     asker: &Arc<dyn SessionEngine>,
@@ -997,6 +1024,10 @@ fn a_kept_query_answers_and_ends_through_the_port(
         );
     };
     assert!(holds() >= 1, "the keeper keeps the query");
+    assert!(
+        (1..=legs.minted.load(Ordering::SeqCst)).contains(&issued),
+        "the ask issued a leg, and only legs it minted a callback for"
+    );
 
     keeper.reply_held(held, &asked, &mut |out| {
         out.reply_keyed(&asked, b"kept")
@@ -1008,9 +1039,10 @@ fn a_kept_query_answers_and_ends_through_the_port(
     );
     assert_eq!(legs.replies.lock().unwrap()[0], b"kept".to_vec());
     std::thread::sleep(Duration::from_millis(300));
-    assert!(
-        legs.ended.load(Ordering::SeqCst) < issued,
-        "a leg ended while its query was kept"
+    assert_eq!(
+        legs.answered_ended.load(Ordering::SeqCst),
+        0,
+        "the leg the kept query answered ended while its query was kept"
     );
 
     let all: Vec<HeldQueryId> = kept
@@ -1023,8 +1055,13 @@ fn a_kept_query_answers_and_ends_through_the_port(
         keeper.release_held(each);
     }
     assert!(
-        eventually(|| legs.ended.load(Ordering::SeqCst) == issued),
-        "the leg did not end once its keep was released"
+        eventually(|| legs.ended.load(Ordering::SeqCst) == legs.minted.load(Ordering::SeqCst)),
+        "a leg the ask minted did not end once its keep was released"
+    );
+    assert_eq!(
+        legs.answered_ended.load(Ordering::SeqCst),
+        1,
+        "the leg the kept query answered ended with the release"
     );
     assert_eq!(holds(), 0, "a keep released is kept no more");
 
