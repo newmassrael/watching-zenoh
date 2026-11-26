@@ -113,30 +113,6 @@ impl<'f, S: MsgDelFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOw
     }
 }
 
-/// How the chain `extensions` is read by the form held in place of this
-/// codec's body (docs/adr/0140): as [`MsgDelExtensionsChain`] reads it, each entry read
-/// by its form held in place.
-#[allow(dead_code)]
-struct MsgDelExtensionsHeldChain;
-
-impl ::sce_forge_runtime::codec::ChainEnds for MsgDelExtensionsHeldChain {
-    const END: ::sce_forge_runtime::codec::ChainEnd = <MsgDelExtensionsChain as ::sce_forge_runtime::codec::ChainEnds>::END;
-    const DEPTH: Option<u32> = <MsgDelExtensionsChain as ::sce_forge_runtime::codec::ChainEnds>::DEPTH;
-}
-
-impl<'f, S: MsgDelFrom<'f>> ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0> for MsgDelExtensionsHeldChain {
-    type Kinds = ::sce_forge_runtime::codec::NoKinds;
-
-    #[inline]
-    fn read(_r: &mut SceReader<'f>, _a: &[u8; 0]) -> ExtEntryOwned<S> {
-        ExtEntryOwned::<S>::read_inline(_r)
-    }
-
-    fn follows(_e: &ExtEntryOwned<S>) -> bool {
-        <MsgDelExtensionsChain as ::sce_forge_runtime::codec::ChainRule<'f, ExtEntryOwned<S>, 0>>::follows(_e)
-    }
-}
-
 #[allow(dead_code)]
 impl<S: MsgDelStorage> MsgDelIn<S> {
     /// Construct an instance with every field at its own type's
@@ -187,8 +163,6 @@ impl<S: MsgDelStorage> MsgDelIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// A body on the build's hot path reads the same body by
-    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: MsgDelFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
@@ -223,57 +197,11 @@ impl<S: MsgDelStorage> MsgDelIn<S> {
 
     }
 
-    /// [`Self::read_into`] held in place where it is called: the same body,
-    /// which each site on the build's hot path holds, reading each body it
-    /// holds by its form held in place (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: MsgDelFrom<'f> {
-        // Streaming decode (SSOT selection: `needs_streaming`).
-        // The positional `raw[byte_off]` path is valid only when every
-        // field's absolute offset is fixed at codegen time; this branch
-        // handles every codec where it is not — present-if-gated fields
-        // (runtime presence), VLE / repeat / TLV-chain / embed fields
-        // (runtime width), string fields (UTF-8 decode), and a fixed field
-        // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
-        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
-        // every other field flows through `present_if_decode_stmt`, whose
-        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let header = {
-            let raw = cursor.take_array::<1>();
-            raw[0]
-        };
-        if (header & 0x20u8) != 0 {
-            TimestampOwned::<S>::read_into_inline(cursor, _out.timestamp.get_or_insert_with(TimestampOwned::<S>::default));
-        } else {
-            _out.timestamp = None;
-        }
-        if (header & 0x80u8) != 0 {
-            cursor.hold_with(|cursor| _out.extensions.get_or_insert_with(Default::default).refill(|_vec| {
-                ::sce_forge_runtime::codec::read_chain_into::<MsgDelExtensionsHeldChain, _, 0>(cursor, _vec, [], &mut [])
-            }));
-        } else {
-            _out.extensions = None;
-        }
-        _out.header = header;
-
-    }
-
     /// [`Self::read_into`] of a value of its own: a list's entry, which the
     /// list then holds.
     pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: MsgDelFrom<'f> {
         let mut _out = Self::default();
         Self::read_into(cursor, &mut _out);
-        _out
-    }
-
-    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
-    /// list then holds.
-    #[inline(always)]
-    pub fn read_inline<'f>(cursor: &mut SceReader<'f>) -> Self where S: MsgDelFrom<'f> {
-        let mut _out = Self::default();
-        Self::read_into_inline(cursor, &mut _out);
         _out
     }
 
@@ -555,26 +483,6 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for MsgDelWalk {
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
 }
 
-/// How the scan of a chain of `MsgDel` in a body on the build's hot path reads
-/// its entries: each by its form held in place, where the walk of its lists reads each
-/// by its entry point (docs/adr/0140). No list names it as its type.
-#[allow(dead_code)]
-pub(super) struct MsgDelHeldWalk;
-
-impl ::sce_forge_runtime::codec::ListWalk<0> for MsgDelHeldWalk {
-    type Entry<'b> = MsgDelView<'b>;
-
-    #[inline(always)]
-    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        MsgDelView::read_with_inline(_r, _h)
-    }
-
-    #[inline(always)]
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
-        <MsgDelWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
-    }
-}
-
 // `MsgDelView` is what a decode of `MsgDel` learned, not a
 // copy of what the wire repeated: a scalar, a string or a bytes field is held
 // as `MsgDel` holds it, an embedded body or a variant arm as its
@@ -653,8 +561,6 @@ impl<'a> MsgDelView<'a> {
     /// view that embeds, dispatches to or lists this one reads it through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// A body on the build's hot path reads the same body by
-    /// [`Self::read_with_inline`], held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read_with<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
         // Streaming decode (SSOT selection: `needs_streaming`).
@@ -685,54 +591,6 @@ impl<'a> MsgDelView<'a> {
         if (header & 0x80u8) != 0 {
             let _rest = cursor.rest();
             let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryWalk, MsgDelExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
-                site: ::sce_forge_runtime::codec::ChainSite { codec: "msg_del", field: "extensions" },
-                args: [],
-            });
-            extensions = cursor.settle(Bounded::new(ListView::new(_rest, _count, [])).ok_or(CodecError::TooManyElements).map(Some));
-        } else {
-            extensions = None;
-        }
-        Self {
-            header,
-            timestamp,
-            extensions,
-        }
-
-    }
-
-    /// [`Self::read_with`] held in place where it is called: the same body,
-    /// which each site on the build's hot path holds, reading each body it
-    /// holds by its form held in place (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_with_inline<H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'a>, _hook: &mut H) -> Self {
-        // Streaming decode (SSOT selection: `needs_streaming`).
-        // The positional `raw[byte_off]` path is valid only when every
-        // field's absolute offset is fixed at codegen time; this branch
-        // handles every codec where it is not — present-if-gated fields
-        // (runtime presence), VLE / repeat / TLV-chain / embed fields
-        // (runtime width), string fields (UTF-8 decode), and a fixed field
-        // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
-        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
-        // every other field flows through `present_if_decode_stmt`, whose
-        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let header = {
-            let raw = cursor.take_array::<1>();
-            raw[0]
-        };
-        #[allow(clippy::needless_late_init)]
-        let timestamp: Option<TimestampView<'a>>;
-        if (header & 0x20u8) != 0 {
-            timestamp = Some(TimestampView::read_with_inline(cursor, _hook));
-        } else {
-            timestamp = None;
-        }
-        #[allow(clippy::needless_late_init)]
-        let extensions: Option<Bounded<ListView<'a, super::ext_entry::ExtEntryWalk, 0>, { usize::MAX }, 1>>;
-        if (header & 0x80u8) != 0 {
-            let _rest = cursor.rest();
-            let _count = ::sce_forge_runtime::codec::walk_chain::<super::ext_entry::ExtEntryHeldWalk, MsgDelExtensionsChain, _, 0>(cursor, _hook, ::sce_forge_runtime::codec::ChainScan {
                 site: ::sce_forge_runtime::codec::ChainSite { codec: "msg_del", field: "extensions" },
                 args: [],
             });

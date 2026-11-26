@@ -131,8 +131,6 @@ impl<S: ZbufSliceStorage> ZbufSliceIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// A body on the build's hot path reads the same body by
-    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     #[inline(never)]
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: ZbufSliceFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
@@ -165,55 +163,11 @@ impl<S: ZbufSliceStorage> ZbufSliceIn<S> {
 
     }
 
-    /// [`Self::read_into`] held in place where it is called: the same body,
-    /// which each site on the build's hot path holds, reading each body it
-    /// holds by its form held in place (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: ZbufSliceFrom<'f> {
-        // Streaming decode (SSOT selection: `needs_streaming`).
-        // The positional `raw[byte_off]` path is valid only when every
-        // field's absolute offset is fixed at codegen time; this branch
-        // handles every codec where it is not — present-if-gated fields
-        // (runtime presence), VLE / repeat / TLV-chain / embed fields
-        // (runtime width), string fields (UTF-8 decode), and a fixed field
-        // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
-        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
-        // every other field flows through `present_if_decode_stmt`, whose
-        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let kind = cursor.read_vle_u32_inline();
-        let len = cursor.read_vle_u64_inline();
-        let bytes = {
-            let _len = len;
-            if _len > 4294967295 {
-                cursor.fail(CodecError::LengthOutOfRange);
-            }
-            let _n = cursor.settle(usize::try_from(_len).map_err(|_| CodecError::NeedMoreBytes));
-            cursor.take_slice(_n)
-        };
-        let bytes = cursor.settle(::sce_forge_runtime::codec::Bounded::new(bytes).ok_or(CodecError::LengthOutOfRange));
-        let bytes = cursor.hold(bytes.store::<S, ZbufSliceBytesField>());
-        _out.kind = kind;
-        _out.len = len;
-        _out.bytes = bytes;
-
-    }
-
     /// [`Self::read_into`] of a value of its own: a list's entry, which the
     /// list then holds.
     pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: ZbufSliceFrom<'f> {
         let mut _out = Self::default();
         Self::read_into(cursor, &mut _out);
-        _out
-    }
-
-    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
-    /// list then holds.
-    #[inline(always)]
-    pub fn read_inline<'f>(cursor: &mut SceReader<'f>) -> Self where S: ZbufSliceFrom<'f> {
-        let mut _out = Self::default();
-        Self::read_into_inline(cursor, &mut _out);
         _out
     }
 
@@ -223,14 +177,6 @@ impl<S: ZbufSliceStorage> ZbufSliceIn<S> {
     #[inline(always)]
     pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: ZbufSliceFrom<'f> {
         Self::read(cursor)
-    }
-
-    /// [`Self::read_inline`], under the name every view reads with a chain hook
-    /// (docs/adr/0130): `ZbufSlice` is its own view and holds no chain,
-    /// so `_hook` is shown nothing.
-    #[inline(always)]
-    pub fn read_with_inline<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: ZbufSliceFrom<'f> {
-        Self::read_inline(cursor)
     }
 
 
@@ -411,26 +357,6 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for ZbufSliceWalk {
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
-
-/// How the scan of a chain of `ZbufSlice` in a body on the build's hot path reads
-/// its entries: each by its form held in place, where the walk of its lists reads each
-/// by its entry point (docs/adr/0140). No list names it as its type.
-#[allow(dead_code)]
-pub(super) struct ZbufSliceHeldWalk;
-
-impl ::sce_forge_runtime::codec::ListWalk<0> for ZbufSliceHeldWalk {
-    type Entry<'b> = ZbufSliceView<'b>;
-
-    #[inline(always)]
-    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        ZbufSliceView::read_with_inline(_r, _h)
-    }
-
-    #[inline(always)]
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
-        <ZbufSliceWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
-    }
 }
 
 // `ZbufSlice` holds no bounded list, embedded body or variant, so a

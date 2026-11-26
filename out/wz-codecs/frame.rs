@@ -129,8 +129,6 @@ impl<S: FrameStorage> FrameIn<S> {
     /// through its own reader, so one frame has one verdict, and through this
     /// one function, out of line where the set reads it from two sites or more
     /// so that no site holds a copy (docs/adr/0136, docs/adr/0137).
-    /// A body on the build's hot path reads the same body by
-    /// [`Self::read_into_inline`], held in place (docs/adr/0140).
     pub fn read_into<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: FrameFrom<'f> {
         // Streaming decode (SSOT selection: `needs_streaming`).
         // The positional `raw[byte_off]` path is valid only when every
@@ -159,52 +157,11 @@ impl<S: FrameStorage> FrameIn<S> {
 
     }
 
-    /// [`Self::read_into`] held in place where it is called: the same body,
-    /// which each site on the build's hot path holds, reading each body it
-    /// holds by its form held in place (docs/adr/0140).
-    #[inline(always)]
-    pub fn read_into_inline<'f>(cursor: &mut SceReader<'f>, _out: &mut Self) where S: FrameFrom<'f> {
-        // Streaming decode (SSOT selection: `needs_streaming`).
-        // The positional `raw[byte_off]` path is valid only when every
-        // field's absolute offset is fixed at codegen time; this branch
-        // handles every codec where it is not — present-if-gated fields
-        // (runtime presence), VLE / repeat / TLV-chain / embed fields
-        // (runtime width), string fields (UTF-8 decode), and a fixed field
-        // after a variable-length payload (offset depends on the payload
-        // length). Each field reads its own bytes from the reader and
-        // consumes exactly what it read. Per-field `is_repeat` /
-        // `is_tlv_chain` / `is_embed` route to their dedicated helpers;
-        // every other field flows through `present_if_decode_stmt`, whose
-        // non-gated arm covers plain fixed / tail / length-ref / VLE reads.
-        let sn = cursor.read_vle_u64_inline();
-        let payload = {
-            let _n = cursor.remaining();
-            if _n > 65536 {
-                cursor.fail(CodecError::LengthOutOfRange);
-            }
-            cursor.take_slice(_n)
-        };
-        let payload = cursor.settle(::sce_forge_runtime::codec::Bounded::new(payload).ok_or(CodecError::LengthOutOfRange));
-        let payload = cursor.hold(payload.store::<S, FramePayloadField>());
-        _out.sn = sn;
-        _out.payload = payload;
-
-    }
-
     /// [`Self::read_into`] of a value of its own: a list's entry, which the
     /// list then holds.
     pub fn read<'f>(cursor: &mut SceReader<'f>) -> Self where S: FrameFrom<'f> {
         let mut _out = Self::default();
         Self::read_into(cursor, &mut _out);
-        _out
-    }
-
-    /// [`Self::read_into_inline`] of a value of its own: a list's entry, which the
-    /// list then holds.
-    #[inline(always)]
-    pub fn read_inline<'f>(cursor: &mut SceReader<'f>) -> Self where S: FrameFrom<'f> {
-        let mut _out = Self::default();
-        Self::read_into_inline(cursor, &mut _out);
         _out
     }
 
@@ -214,14 +171,6 @@ impl<S: FrameStorage> FrameIn<S> {
     #[inline(always)]
     pub fn read_with<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: FrameFrom<'f> {
         Self::read(cursor)
-    }
-
-    /// [`Self::read_inline`], under the name every view reads with a chain hook
-    /// (docs/adr/0130): `Frame` is its own view and holds no chain,
-    /// so `_hook` is shown nothing.
-    #[inline(always)]
-    pub fn read_with_inline<'f, H: ::sce_forge_runtime::codec::ChainHook>(cursor: &mut SceReader<'f>, _hook: &mut H) -> Self where S: FrameFrom<'f> {
-        Self::read_inline(cursor)
     }
 
     /// Worst-case encoded byte count for this codec — the upper bound
@@ -404,26 +353,6 @@ impl ::sce_forge_runtime::codec::ListWalk<0> for FrameWalk {
     }
 
     fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {  }
-}
-
-/// How the scan of a chain of `Frame` in a body on the build's hot path reads
-/// its entries: each by its form held in place, where the walk of its lists reads each
-/// by its entry point (docs/adr/0140). No list names it as its type.
-#[allow(dead_code)]
-pub(super) struct FrameHeldWalk;
-
-impl ::sce_forge_runtime::codec::ListWalk<0> for FrameHeldWalk {
-    type Entry<'b> = FrameView<'b>;
-
-    #[inline(always)]
-    fn read_with<'b, H: ::sce_forge_runtime::codec::ChainHook>(_r: &mut SceReader<'b>, _a: &[u8; 0], _h: &mut H) -> Self::Entry<'b> {
-        FrameView::read_with_inline(_r, _h)
-    }
-
-    #[inline(always)]
-    fn advance(_e: &Self::Entry<'_>, _s: &mut [u8; 0]) {
-        <FrameWalk as ::sce_forge_runtime::codec::ListWalk<0>>::advance(_e, _s)
-    }
 }
 
 // `Frame` holds no bounded list, embedded body or variant, so a
