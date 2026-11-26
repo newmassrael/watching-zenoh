@@ -395,6 +395,9 @@ pub struct RemoteQueryablePeer<P: Storage = Profile> {
     /// text. Counted with the table's own refusals.
     #[cfg(feature = "storage-profile")]
     oversize: u32,
+    /// `UndeclQueryable`s that named an id the table does not hold ([`Self::unknown_undeclares`]).
+    #[cfg(feature = "storage-profile")]
+    unknown_undeclares: u32,
     /// Where the rows keep their keys ([`Storage::Keys`]): the session's key arena on the lent
     /// policy, handed over with the session's other tables ([`Self::keep_keys_in`]). A
     /// `DeclQueryable` whose key finds no room there is dropped and counted with the table's
@@ -429,6 +432,8 @@ impl<P: Storage> Default for RemoteQueryablePeer<P> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            unknown_undeclares: 0,
             #[cfg(feature = "storage-profile")]
             keys: Default::default(),
             #[cfg(feature = "storage-profile")]
@@ -467,6 +472,8 @@ impl RemoteQueryablePeer<Static> {
             key_quota: crate::limits::MaxKeyexprBytesHeld::build_default(),
             #[cfg(feature = "storage-profile")]
             oversize: 0,
+            #[cfg(feature = "storage-profile")]
+            unknown_undeclares: 0,
             #[cfg(feature = "storage-profile")]
             keys: crate::bounded::InlineKeys,
             #[cfg(feature = "storage-profile")]
@@ -642,6 +649,15 @@ impl<P: Storage> RemoteQueryablePeer<P> {
         Self::declared_ref(&self.declared, &self.keys)
             .refusals()
             .saturating_add(self.oversize)
+    }
+
+    /// How many `UndeclQueryable` named an id this peer's table does not hold: one the peer never
+    /// declared, one it already withdrew, or one the table refused when it was declared. Each
+    /// changed nothing and was told to no observer, as upstream drops it
+    /// (`zenoh/src/api/session.rs` @ `Undeclare Queryable for unknown id`; `vendor/zenoh-pico/src/session/interest.c` @ `z_result_t _z_interest_process_undeclares(`). Kept when the table is forgotten.
+    #[cfg(feature = "storage-profile")]
+    pub fn unknown_undeclares(&self) -> u32 {
+        self.unknown_undeclares
     }
 
     /// Backbone for `Querier::get_matching_status` (R288 surfaced
@@ -1551,7 +1567,7 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
     /// What an undeclared peer queryable does, whichever form carried the
     /// undeclaration: drop the membership entry first (so a `get_matching_status`
     /// fired from inside the `on_undecl` chain observes the post-undeclare state;
-    /// a missing id is silent), fan it to the observers, and flip-fire the
+    /// a missing id is counted and silent), fan it to the observers, and flip-fire the
     /// matching watches.
     #[cfg(all(feature = "codec-declare", feature = "storage-profile"))]
     fn apply_undeclared<Q: Storage>(
@@ -1574,7 +1590,15 @@ impl<D: DeclSink, U: UndeclSink, P: Storage, M: MatchingReport> RemoteQueryableT
                 })
             })
         };
-        RemoteQueryablePeer::<Q>::declared_mut(&mut peer.declared, &peer.keys).unbind(id);
+        // An id the table does not hold changes nothing, so neither the observers nor the
+        // matching watches hear of it and the counter stands.
+        if RemoteQueryablePeer::<Q>::declared_mut(&mut peer.declared, &peer.keys)
+            .unbind(id)
+            .is_none()
+        {
+            peer.unknown_undeclares = peer.unknown_undeclares.saturating_add(1);
+            return;
+        }
         peer.changed();
         // Told gone when the last declaration of the queryable goes, under the id it was told
         // by (`RemoteSubscriberPeer::aliases` for the reading).
@@ -1872,8 +1896,11 @@ mod tests {
         assert_eq!(fired.load(Ordering::SeqCst), 0);
     }
 
+    /// The queryable twin of the subscriber's: an undeclaration of an id the table does not
+    /// hold is counted and told to no one; once the id is held it is told (the CONTROL). Turned
+    /// red by an `apply_undeclared` that dispatches whatever `unbind` returned.
     #[test]
-    fn queryable_undeclare_callback_fires() {
+    fn a_queryable_undeclaration_of_an_id_not_held_is_counted_and_told_to_no_one() {
         let mut reg = RemoteQueryableRegistry::new();
         let captured: Arc<Mutex<Vec<u64>>> = Arc::new(Mutex::new(Vec::new()));
         let captured_for_cb = captured.clone();
@@ -1881,9 +1908,25 @@ mod tests {
             captured_for_cb.lock().unwrap().push(id);
         })
         .expect("no quota is stated on this table");
-        let body = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
-        reg.dispatch_declare(&body, &HashMap::new());
-        assert_eq!(*captured.lock().unwrap(), vec![99]);
+        let undeclare = DeclareOwnedVariant::CodecZenohUndeclQueryable(undecl_queryable(99));
+        reg.dispatch_declare(&undeclare, &HashMap::new());
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "an id never declared is told to no one"
+        );
+        assert_eq!(reg.peer().unknown_undeclares(), 1);
+        assert_eq!(
+            reg.peer().refusals(),
+            0,
+            "a miss is not a refused declaration"
+        );
+
+        let declare =
+            DeclareOwnedVariant::CodecZenohDeclQueryable(decl_queryable(99, 0, Some("home/temp")));
+        reg.dispatch_declare(&declare, &HashMap::new());
+        reg.dispatch_declare(&undeclare, &HashMap::new());
+        assert_eq!(*captured.lock().unwrap(), vec![99], "a held id is told");
+        assert_eq!(reg.peer().unknown_undeclares(), 1, "and not counted");
     }
 
     #[test]
