@@ -771,7 +771,7 @@ fn a_key_past_the_memorys_entries_still_reaches_its_subscriber() {
     use crate::pubsub::{LocalSubscribers, PeerDelivery};
     let mut tables = Tables::new();
     subscribe(&mut tables, "a/b", Locality::Any, 1);
-    let others = tables.memo_slot_count().max(caps::MATCH_MEMO_FIXED_SLOTS) + 2;
+    let others = tables.memo_slot_count() + 2;
     for how in [
         PeerDelivery::default(),
         PeerDelivery {
