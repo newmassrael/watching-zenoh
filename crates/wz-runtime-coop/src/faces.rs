@@ -2636,6 +2636,48 @@ impl<
         waits
     }
 
+    /// What a read of the face at place `at` alone waits on, written to the front of `into`: its
+    /// link's input first, then a connection on each port, then `beside` (a wake of the
+    /// stack's); how many entries. Made once for a run of such reads and kept for its whole length,
+    /// none of it written anew a wait. `None` where a wait on these alone would miss what a wait
+    /// over the whole session finds ([`Self::idle_wait`]): the face's link is not
+    /// [`WireLook::Quiet`] or waits in its own loop, a port gives no wait or the link's own (a
+    /// datagram port its faces share), or `into` has no room for every entry.
+    pub fn lone_waits(
+        &self,
+        at: usize,
+        beside: Option<LinkWait>,
+        into: &mut [LinkWait],
+    ) -> Option<usize> {
+        let wire = self.faces.get(at)?.link().wire()?;
+        if wire.look() != WireLook::Quiet {
+            return None;
+        }
+        let own = wire.input_wait()?;
+        let mut count = 0;
+        let mut put = |wait: LinkWait| -> Option<()> {
+            *into.get_mut(count)? = wait;
+            count += 1;
+            Some(())
+        };
+        put(LinkWait::input(own))?;
+        #[cfg(feature = "listen")]
+        for listening in &self.listeners {
+            let on = listening
+                .listener
+                .input_wait()
+                .filter(|_| listening.listener.asked_when_ready())?;
+            if on == own {
+                return None;
+            }
+            put(LinkWait::input(on))?;
+        }
+        if let Some(wake) = beside {
+            put(wake)?;
+        }
+        Some(count)
+    }
+
     /// What a read waits for, for at most `most` milliseconds: the input of every link that
     /// holds none already and gives a wait, a connection on every port that gives one, and
     /// `others` after them; no wait at all when a link holds input. A link that owes its stack the

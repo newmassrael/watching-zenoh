@@ -47,13 +47,15 @@ use core::sync::atomic::AtomicBool;
 use wz_runtime_coop::faces::MessageCount;
 #[cfg(not(any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::SiteSend;
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
 use wz_runtime_coop::faces::WireLook;
 use wz_runtime_coop::faces::{
     Dial, FaceAt, FaceSite, LinkEnd, ReadFacts, SendParts, WireParts, WriteMark,
 };
 use wz_runtime_coop::link_cells::{FaceHeld, FaceParts};
 use wz_runtime_coop::session_drive::LinkOpenError;
+#[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
+use wz_runtime_coop::session_drive::LinkWait;
 #[cfg(not(feature = "threads"))]
 use wz_runtime_coop::sync::ConfinedOwner;
 use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
@@ -64,6 +66,11 @@ use super::registry::Planes;
 #[cfg(feature = "listen")]
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
+
+/// The entries a quiet read keeps to wait on (`CoopEngine::read_quiet`): the face's link, each
+/// port and the clock's wake. A session with more ports than this has its faces read whole.
+#[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
+const QUIET_WAITS: usize = 8;
 
 /// The pump of the session's one link, which the read steps itself.
 type DirectPump<L, C> = LinkPump<Face<C, L>, CellRc<dyn SessionDatagramLink, LinkCount>>;
@@ -1210,11 +1217,11 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// nothing owed, every other face at rest, and nothing of the session due before
     /// `quiet_until_us`, so its read may read it alone until then. Written by the look alone,
     /// with the face's read slot held.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     quiet: AtomicBool,
     /// When the quiet read the face's last look allowed ends, on the session's clock in
     /// microseconds; read only while `quiet` is set.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     quiet_until_us: AtomicU64,
 }
 
@@ -1262,6 +1269,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             {
                 addr_of_mut!((*at).due_us).write(AtomicU64::new(u64::MAX));
                 addr_of_mut!((*at).rests).write(AtomicBool::new(false));
+            }
+            #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
+            {
                 addr_of_mut!((*at).quiet).write(AtomicBool::new(false));
                 addr_of_mut!((*at).quiet_until_us).write(AtomicU64::new(0));
             }
@@ -1282,7 +1292,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
     }
 
     /// Show what the face's look found of its quiet read: until `until_us`, or none.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     #[inline(always)]
     fn mark_quiet(&self, until_us: Option<u64>) {
         if let Some(until_us) = until_us {
@@ -1719,6 +1729,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // with no face turned the first at rest is turned all the same, for that bookkeeping.
         let mut rested = None;
         let mut turned = false;
+        // The last face turned: read alone after the read when its look found it quiet.
+        #[cfg(feature = "threads")]
+        let mut quiet = None;
         for face in faces() {
             if face.rests.load(Ordering::Acquire) {
                 if rested.is_none() {
@@ -1732,6 +1745,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             turned = true;
             if !turn_face(face, &mut held.0) {
                 break;
+            }
+            #[cfg(feature = "threads")]
+            {
+                quiet = Some(face);
             }
         }
         if let (false, Some(face)) = (turned, rested) {
@@ -1765,6 +1782,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 self.run_due_tickers(started_ms);
             }
         }
+        // Only the read task's read goes on alone: a program's read returns once its turn is done,
+        // as zenoh-pico's `zp_read` does.
+        #[cfg(feature = "threads")]
+        if let (true, Ok(()), Some(face)) = (TASK, &read, quiet) {
+            self.read_quiet(face);
+        }
         // A close made while a read stepped a pump (a callback's) ended the link's life but left
         // the pump, which the read held: each goes now, once no step of it is under way.
         if self.closed.load(Ordering::Acquire) {
@@ -1776,6 +1799,135 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return Err(SessionClosed);
         }
         read
+    }
+
+    /// Read `face`, which its look in the read that calls this found quiet (`Self::quiet_until`),
+    /// alone until the look's deadline, as the read task's one read: each pass waits on what the
+    /// run keeps for its whole length (the face's link, each port, the clock's wake;
+    /// `LinkSupervisor::lone_waits`) with nothing held, reads the clock and asks whether the
+    /// session owes anything under one take of its lock, then steps the face's pump with its slot
+    /// held and no look at its life, and hands out what the step left. The run ends at the
+    /// deadline, at a wait that found a port or the wake ready, where the face owes a write, holds
+    /// input it cannot read, ended or is due by its pump, where a chain is staged in its Router,
+    /// where the session owes its bookkeeping, a job or a retraction, where another read holds
+    /// the face's slot, and where the session closed or the read task's run moved on: the next
+    /// read is a whole one, which serves each of these.
+    #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
+    fn read_quiet(&self, face: &DirectFace<L, C>) {
+        // A test that has every read find input held reads each through a whole turn.
+        #[cfg(test)]
+        if self.takes.input_held.load(Ordering::Relaxed) {
+            return;
+        }
+        if !face.quiet.load(Ordering::Acquire) {
+            return;
+        }
+        let until_us = face.quiet_until_us.load(Ordering::Relaxed);
+        let run = self.reader_run.load(Ordering::Acquire);
+        let mut kept = [LinkWait::input(WaitOn::Socket(0)); QUIET_WAITS];
+        // The face's row is read off its slot, taken before the session's lock as a read takes
+        // them, and what the run waits on is gathered once under that lock.
+        let (count, mut now_us) = {
+            let Some(held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+                return;
+            };
+            let Some(core) = self.live() else {
+                return;
+            };
+            let core = &core.0;
+            #[cfg(feature = "time-base")]
+            let beside = match (core.config.clock_moves.as_ref(), core.clock_wake.as_ref()) {
+                (None, _) => None,
+                (Some(_), Some(wake)) => Some(LinkWait::input(wake.on)),
+                // A clock the program moves with no wake to end a wait on is looked at after
+                // each wait of a millisecond, which only a whole read makes.
+                (Some(_), None) => return,
+            };
+            #[cfg(not(feature = "time-base"))]
+            let beside = None;
+            let Some(count) = core
+                .transport
+                .links
+                .lone_waits(held.0.at(), beside, &mut kept)
+            else {
+                return;
+            };
+            (count, core.now_us())
+        };
+        let waits = &mut kept[..count];
+        let Some(own) = waits.first().map(|wait| wait.on) else {
+            return;
+        };
+        loop {
+            let facts = face.site.facts();
+            if facts.owes_write()
+                || face.end.over()
+                || self.reader_run.load(Ordering::Acquire) != run
+            {
+                return;
+            }
+            let read = facts.read();
+            if read.waits_for_buffer || !read.established {
+                return;
+            }
+            if !read.holds_input {
+                let left_ms = u32::try_from(until_us.saturating_sub(now_us).div_ceil(1000))
+                    .unwrap_or(u32::MAX);
+                #[cfg(test)]
+                self.takes.polls.fetch_add(1, Ordering::Relaxed);
+                let ready = self.rooms.waits().wait_ready(waits, left_ms);
+                if waits.iter().take(ready).any(|wait| wait.on != own) {
+                    return;
+                }
+            }
+            let now_ms = {
+                let Some(held) = self.live() else {
+                    return;
+                };
+                // Marked as a read working out its wait, which holds no send: a droppable publish
+                // that finds the session held tries it again at once (`LinkRooms::for_held`).
+                let _waiting = SendingOn::enter(&self.sending_on, WAITING);
+                let core = &held.0;
+                now_us = core.now_us();
+                if now_us >= until_us
+                    || core.ledger.owes(now_us, core.seen())
+                    || core.jobs_due_at(now_us).is_some()
+                    || core.transport.links.ports_to_ask()
+                {
+                    return;
+                }
+                #[cfg(feature = "liveliness")]
+                if core.session.registry.retracting() {
+                    return;
+                }
+                core.session_time.ms_at(now_us)
+            };
+            let Some(mut held) = <CoopForm as LockForm>::try_lock(&face.slot) else {
+                return;
+            };
+            let slot = &mut held.0;
+            // The pump's own time is served by a whole turn, with its look.
+            if now_us >= slot.pump_due_us {
+                return;
+            }
+            let mark = face.site.facts().write_mark();
+            let Some((ended, due_us)) = self.step_pump(slot, now_us, now_ms) else {
+                return;
+            };
+            slot.tell_facts(&face.site, mark);
+            slot.pump_due_us = due_us;
+            if ended {
+                face.end.ended.store(true, Ordering::Release);
+                slot.life_due_us = now_us;
+            }
+            face.note_due(slot);
+            let chains = slot.router.due_ms() != u64::MAX;
+            drop(held);
+            self.deliver();
+            if ended || chains || self.closed.load(Ordering::Acquire) {
+                return;
+            }
+        }
     }
 
     /// Step each group's session once (`Self::step_groups`) and read what the steps left
@@ -2205,7 +2357,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             core.settle_ledger();
         }
         let jobs_due_ms = core.jobs_due_at(now_us);
-        #[cfg(any(feature = "listen", feature = "group"))]
+        #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
         face.mark_quiet(self.quiet_until(
             face,
             core,
@@ -2237,7 +2389,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// to be asked, no chain is staged in its Router, and the bookkeeping owes nothing. The read
     /// then ends by the earliest of the face's own due, the bookkeeping's, the next job and the
     /// session's wait bound, which keeps every latency a read has.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(all(feature = "threads", any(feature = "listen", feature = "group")))]
     fn quiet_until(
         &self,
         face: &DirectFace<L, C>,
@@ -2250,7 +2402,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         if self.joins_groups {
             return None;
         }
-        #[cfg(feature = "threads")]
         if slot.site_owed.is_some() {
             return None;
         }
@@ -2302,7 +2453,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     fn pump_turn(&self, face: &DirectFace<L, C>, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) {
         // Read before the step, which writes what the link owes its stack beside the sends.
         let mark = face.site.facts().write_mark();
-        let Some((ended, due_us)) = self.step_pump(slot, turn) else {
+        let Some((ended, due_us)) = self.step_pump(slot, turn.now_us, turn.now_ms) else {
             return;
         };
         slot.tell_facts(&face.site, mark);
@@ -2313,12 +2464,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         slot.pump_due_us = due_us;
     }
 
-    /// One step of the pump `slot` holds at `turn`: its own bookkeeping when it is due or owes
-    /// what was asked of it from outside, then the units of its input the link holds
-    /// (`Self::take_held_input`), the slot's Router lent for them. Whether the pump ended, and
-    /// when it is due next; `None` while no pump is written.
-    fn step_pump(&self, slot: &mut DirectSlot<L, C>, turn: &LinkTurn) -> Option<(bool, u64)> {
-        let (now_us, now_ms) = (turn.now_us, turn.now_ms);
+    /// One step of the pump `slot` holds at `now_us` (`now_ms` on its session's epoch): its own
+    /// bookkeeping when it is due or owes what was asked of it from outside, then the units of its
+    /// input the link holds (`Self::take_held_input`), the slot's Router lent for them. Whether
+    /// the pump ended, and when it is due next; `None` while no pump is written.
+    fn step_pump(
+        &self,
+        slot: &mut DirectSlot<L, C>,
+        now_us: u64,
+        now_ms: u64,
+    ) -> Option<(bool, u64)> {
         let DirectSlot {
             pump,
             records,
