@@ -6,13 +6,16 @@
 //! One test, in a process of its own, because the pools are the process's: the arms run in order
 //! against them, and an object another test made while they are reserved would be taken from them.
 //! The first object of the process reserves the build's pools, so the arms give those up before a
-//! program's own are reserved. A program that reserves its own states the configs it opens from.
+//! program's own are reserved. A program that reserves its own states the configs it opens from,
+//! and each open's config states the values it holds apart from any session as the reservation
+//! holds them: an open that states more of one than the pools hold is refused as out of memory.
 //! The counts state every entity, so the arms hold in a build whose limits bound none of them.
 
 #![cfg(all(feature = "object-pool", feature = "peer"))]
 
 use std::ffi::{CStr, CString};
 
+use wz_capi_pico::config_limits::WZ_EXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::object_pool::{
     wz_ext_object_pool_bytes, wz_ext_object_pool_class, wz_ext_object_pool_class_t,
     wz_ext_object_pool_counts_t, wz_ext_object_pool_release, wz_ext_object_pool_reserve,
@@ -61,13 +64,35 @@ unsafe fn payload(text: &CStr) -> (z_owned_bytes_t, i8) {
     (bytes, code)
 }
 
-/// A config that listens on a port of the loopback, or dials one, as `key` says.
-unsafe fn config(key: u8) -> z_owned_config_t {
+/// A config that listens on a port of the loopback, or dials one, as `key` says, stating the
+/// values the program holds apart from any session as `held` reserved them.
+unsafe fn config(key: u8, held: &wz_ext_object_pool_counts_t) -> z_owned_config_t {
     let endpoint = CString::new(format!("tcp/127.0.0.1:{}", free_port())).expect("a locator");
     let mut cfg: z_owned_config_t = std::mem::zeroed();
     assert_eq!(z_config_default(&mut cfg), Z_OK);
     assert_eq!(
         zp_config_insert(z_config_loan_mut(&mut cfg), key, endpoint.as_ptr()),
+        Z_OK
+    );
+    let stated = CString::new(format!(
+        "HELD_SAMPLES={},HELD_REPLIES={},HELD_QUERIES={},HELD_ENCODINGS={},HELD_HELLOS={},\
+         HELD_SMALL_PAYLOAD_BLOCKS={},HELD_MEDIUM_PAYLOAD_BLOCKS={},HELD_LARGE_PAYLOAD_BLOCKS={}",
+        held.samples,
+        held.replies,
+        held.queries,
+        held.encodings,
+        held.hellos,
+        held.small_payload_blocks,
+        held.medium_payload_blocks,
+        held.large_payload_blocks
+    ))
+    .expect("a statement");
+    assert_eq!(
+        zp_config_insert(
+            z_config_loan_mut(&mut cfg),
+            WZ_EXT_CONFIG_LIMITS_KEY,
+            stated.as_ptr()
+        ),
         Z_OK
     );
     cfg
@@ -309,15 +334,16 @@ fn reserved_pools_give_each_object_a_slot_refuse_the_one_more_and_are_given_up_w
         assert_eq!(in_use(), 4);
 
         // ARM 7: the one session's place is taken; a second open is refused before it dials, and
-        // consumes its config.
-        let mut cfg = config(Z_CONFIG_LISTEN_KEY);
+        // consumes its config. Each config states the held values the reservation holds, so the
+        // second is refused for the session's place and not for a held value.
+        let mut cfg = config(Z_CONFIG_LISTEN_KEY, &counts);
         let mut session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(
             z_open(&mut session, z_config_move(&mut cfg), std::ptr::null()),
             Z_OK
         );
         assert_eq!(in_use(), 5);
-        let mut refused_cfg = config(Z_CONFIG_CONNECT_KEY);
+        let mut refused_cfg = config(Z_CONFIG_CONNECT_KEY, &counts);
         let mut second_session: z_owned_session_t = std::mem::zeroed();
         assert_eq!(
             z_open(
