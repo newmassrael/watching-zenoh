@@ -3480,8 +3480,9 @@ fn an_endpoint_refusal_reads_as_its_endpoint_and_its_reason() {
 }
 
 /// A dial refused before any link is made names its endpoint and its cause: a text that names no
-/// address the build reads is refused by the locator, a protocol the links do not carry by the
-/// links. Turned red by a refusal that names the other cause or loses the endpoint.
+/// address the build reads, and no host either, is refused by the locator, a protocol the links do
+/// not carry by the links. Turned red by a refusal that names the other cause or loses the
+/// endpoint.
 #[test]
 fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
     use crate::{EndpointRefusal, OpenError, Refusal};
@@ -3490,7 +3491,7 @@ fn a_dial_refused_at_once_names_its_endpoint_and_its_cause() {
 
     for (endpoint, why) in [
         (
-            "tcp/localhost:7447",
+            "tcp/127.0.0.256:7447",
             Refusal::Locator(DialRefused::BadAddress),
         ),
         (
@@ -3670,6 +3671,31 @@ fn a_config_made_inside_the_open_opens_the_session_the_config_opens() {
     assert_eq!(made.listening().len(), 1, "one port is bound");
 }
 
+/// A dial of a host name reaches an address the host's resolver answers for it: a client that
+/// dials `localhost` at the port a TCP listener holds on the loopback address connects to that
+/// listener, where a dial that read the name as no address would be refused before any
+/// connection. No zenoh node answers on the port, so the open itself ends without a session.
+/// Turned red by a name refused at once or dialled at an address its resolver did not answer.
+#[test]
+fn a_dial_of_a_host_name_connects_to_the_address_it_resolves_to() {
+    let listener = std::net::TcpListener::bind(std::net::SocketAddr::from((LOOPBACK, 0)))
+        .expect("a free loopback port");
+    let port = listener.local_addr().expect("the port it holds").port();
+    listener
+        .set_nonblocking(true)
+        .expect("a listener asked without waiting");
+    let refused = open_with_result(CoopConfig {
+        endpoints: vec![format!("tcp/localhost:{port}")],
+        open_timeout_ms: 500,
+        ..client_config()
+    });
+    assert!(refused.is_some(), "no node answers the handshake");
+    assert!(
+        listener.accept().is_ok(),
+        "the dial of the name connected to the listener: {refused:?}"
+    );
+}
+
 /// An open that fails once its engine is built ends what it began: the port it bound before its
 /// dial was refused is let go of, so a listener can bind it again at once.
 #[cfg(feature = "listen")]
@@ -3713,6 +3739,9 @@ mod congestion;
 mod decl_watch;
 mod dial_in_flight;
 mod direct_receive;
+// The runtime of a build whose read steps its one link itself, which runs no task.
+#[cfg(not(any(feature = "threads", feature = "listen", feature = "group")))]
+mod direct_runtime;
 mod entity_tables;
 #[cfg(all(
     feature = "listen",

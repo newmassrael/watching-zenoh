@@ -44,6 +44,7 @@ wz_runtime_coop::with_heap_link_seams! {
     #[cfg(feature = "alloc")]
     use wz_runtime_coop::session_drive::StackWake;
 }
+use wz_runtime_coop::locator_text::NamedHost;
 use wz_runtime_coop::udp_link::{DatagramSocket, Received, SERVICE_WAIT_MS};
 
 /// Why a socket call failed: the call, and the `errno` it left.
@@ -629,7 +630,7 @@ pub(crate) struct RawAddr {
 impl RawAddr {
     /// `at` in the kernel's form, for a call that reads an address (`bind`, `connect`, `sendto`).
     ///
-    /// Out of line, as [`Self::to_socket_addr`] and [`name_of`] are: each opener and each send
+    /// Out of line, as [`socket_addr_at`] and [`name_of`] are: each opener and each send
     /// would otherwise carry its own copy of both families' conversion, where the one system call
     /// beside it costs far more than the call.
     #[inline(never)]
@@ -713,34 +714,118 @@ impl RawAddr {
     }
 
     /// The address the kernel wrote, or `None` for a family other than the two (no socket here
-    /// has one). The flow label is left out: it is a field of a packet and not of an end, and a
-    /// link compares its peer by address, port and scope.
-    #[inline(never)]
+    /// has one) ([`socket_addr_at`]).
     pub(crate) fn to_socket_addr(&self) -> Option<SocketAddr> {
-        match c_int::from(self.storage.ss_family) {
-            libc::AF_INET if self.len as usize >= size_of::<libc::sockaddr_in>() => {
-                // SAFETY: the kernel wrote an `AF_INET` address, which is a `sockaddr_in`, and the
-                // storage is aligned for it.
-                let sin = unsafe { &*(self.as_ptr() as *const libc::sockaddr_in) };
-                Some(SocketAddr::V4(SocketAddrV4::new(
-                    Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()),
-                    u16::from_be(sin.sin_port),
-                )))
-            }
-            libc::AF_INET6 if self.len as usize >= size_of::<libc::sockaddr_in6>() => {
-                // SAFETY: the kernel wrote an `AF_INET6` address, which is a `sockaddr_in6`, and
-                // the storage is aligned for it.
-                let sin6 = unsafe { &*(self.as_ptr() as *const libc::sockaddr_in6) };
-                Some(SocketAddr::V6(SocketAddrV6::new(
-                    Ipv6Addr::from(sin6.sin6_addr.s6_addr),
-                    u16::from_be(sin6.sin6_port),
-                    0,
-                    sin6.sin6_scope_id,
-                )))
-            }
-            _ => None,
+        // SAFETY: the storage holds `len` bytes the kernel wrote, is larger than a `sockaddr`
+        // and is aligned for every family's form.
+        unsafe { socket_addr_at(self.as_ptr(), self.len) }
+    }
+}
+
+/// The address `len` bytes at `addr` hold in the kernel's form, or `None` for a family other
+/// than the two (no socket here has one) or a length short of its family's form. The flow label
+/// is left out: it is a field of a packet and not of an end, and a link compares its peer by
+/// address, port and scope. The one conversion from the kernel's form, for an address the kernel
+/// wrote into a [`RawAddr`] and for one the resolver answered in its own list alike. Out of line,
+/// as [`RawAddr::of`] is.
+///
+/// # Safety
+///
+/// `addr` points to at least a `sockaddr`'s bytes and to `len` readable bytes, aligned as the
+/// form of the family it names, as the kernel and `getaddrinfo` write an address.
+#[inline(never)]
+pub(crate) unsafe fn socket_addr_at(
+    addr: *const libc::sockaddr,
+    len: libc::socklen_t,
+) -> Option<SocketAddr> {
+    // SAFETY: `addr` points to a `sockaddr`'s bytes, as the caller states.
+    match c_int::from(unsafe { (*addr).sa_family }) {
+        libc::AF_INET if len as usize >= size_of::<libc::sockaddr_in>() => {
+            // SAFETY: an `AF_INET` address is a `sockaddr_in`, whose bytes the length holds and
+            // for which the caller states the address is aligned.
+            let sin = unsafe { &*addr.cast::<libc::sockaddr_in>() };
+            Some(SocketAddr::V4(SocketAddrV4::new(
+                Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()),
+                u16::from_be(sin.sin_port),
+            )))
+        }
+        libc::AF_INET6 if len as usize >= size_of::<libc::sockaddr_in6>() => {
+            // SAFETY: as for the IPv4 form, an `AF_INET6` address being a `sockaddr_in6`.
+            let sin6 = unsafe { &*addr.cast::<libc::sockaddr_in6>() };
+            Some(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::from(sin6.sin6_addr.s6_addr),
+                u16::from_be(sin6.sin6_port),
+                0,
+                sin6.sin6_scope_id,
+            )))
+        }
+        _ => None,
+    }
+}
+
+/// The addresses the host's resolver (`getaddrinfo`) answers for the host `name`, each at its
+/// port, written to the front of `found` in its order: how many, `0` when it answers none or
+/// fails. Asked as zenoh-pico asks it for a locator's host, of every family the host has and of
+/// the stream kind alone (`vendor/zenoh-pico/src/link/transport/tcp/tcp_posix.c` @
+/// `hints.ai_family = PF_UNSPEC`), so that each address of a record is answered once and not
+/// once for each kind; the answer is walked as that open walks it, in its order, each address
+/// read in place.
+pub(crate) fn resolve(name: &NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+    let text = crate::resolve::terminated(name);
+    // SAFETY: an all-zero `addrinfo` is a valid value of it: no flags, no family, null pointers.
+    let mut hints: libc::addrinfo = unsafe { core::mem::zeroed() };
+    hints.ai_family = libc::AF_UNSPEC;
+    hints.ai_socktype = libc::SOCK_STREAM;
+    let mut answers: *mut libc::addrinfo = core::ptr::null_mut();
+    // SAFETY: `text` ends in a 0 byte, `hints` is live for the call, and the call writes
+    // `answers`, which is freed below once read.
+    let failed = unsafe {
+        libc::getaddrinfo(
+            text.as_ptr().cast(),
+            core::ptr::null(),
+            &hints,
+            &mut answers,
+        )
+    } != 0;
+    if failed {
+        return 0;
+    }
+    // SAFETY: the list the call made, live until it is freed below.
+    let count = unsafe { read_answers(answers, name.port(), found) };
+    // SAFETY: `answers` is the list the call made, freed once, and nothing read of it is held.
+    unsafe { libc::freeaddrinfo(answers) };
+    count
+}
+
+/// The addresses of the resolver's answers from `first` on, each at `port`, written to the front
+/// of `found` in their order, past each answer with no address or of a family other than the two:
+/// how many. The resolver was asked for no service, so an answer names no port, and the one the
+/// name is dialled at is written in.
+///
+/// # Safety
+///
+/// `first` is null or the first of a list of answers linked by `ai_next`, each with a null
+/// `ai_addr` or one of `ai_addrlen` bytes in its family's form and aligned for it, all live for
+/// the call, as `getaddrinfo` makes them.
+unsafe fn read_answers(first: *const libc::addrinfo, port: u16, found: &mut [SocketAddr]) -> usize {
+    let mut count: usize = 0;
+    let mut next = first;
+    // SAFETY: `next` is null or an answer of the list, live for the call.
+    while let (Some(answer), Some(place)) = (unsafe { next.as_ref() }, found.get_mut(count)) {
+        next = answer.ai_next.cast_const();
+        if answer.ai_addr.is_null() {
+            continue;
+        }
+        // SAFETY: a non-null `ai_addr` is the resolver's address of `ai_addrlen` bytes, in the
+        // form of its family and aligned for it.
+        if let Some(mut at) = unsafe { socket_addr_at(answer.ai_addr, answer.ai_addrlen) } {
+            at.set_port(port);
+            *place = at;
+            // `count` names a place of `found`, so the sum does not wrap.
+            count = count.wrapping_add(1);
         }
     }
+    count
 }
 
 /// Bind or connect `fd` to `at`: `call` is `libc::bind` or `libc::connect`, handed `at` in the
@@ -1026,6 +1111,12 @@ impl PosixUdpSocket {
 impl DatagramSocket for PosixUdpSocket {
     type Error = PosixNetError;
 
+    const RESOLVES: bool = true;
+
+    fn resolve(name: &NamedHost<'_>, found: &mut [SocketAddr]) -> usize {
+        resolve(name, found)
+    }
+
     fn bind(at: SocketAddr) -> Result<Self, PosixNetError> {
         Self::open(at, false)
     }
@@ -1123,6 +1214,59 @@ impl Drop for PosixUdpSocket {
 mod tests {
     use super::*;
 
+    /// The host's resolver answers `localhost` with its loopback addresses, each at the port the
+    /// name is dialled at, and the answer is cut at the room it is given; an answer given no room
+    /// is none. Turned red by an address answered at the wrong port or past the room, or by a
+    /// resolver not asked.
+    #[test]
+    fn the_host_resolver_answers_a_name_with_its_addresses() {
+        let name = crate::resolve::named("tcp/localhost:7447");
+        let unset = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut found = [unset; 4];
+        let count = resolve(&name, &mut found);
+        assert!(count >= 1, "localhost resolves");
+        let answered = found.get(..count).expect("the count is within the room");
+        for at in answered {
+            assert!(at.ip().is_loopback(), "{at}");
+            assert_eq!(at.port(), 7447, "{at}");
+        }
+        let mut one = [unset; 1];
+        assert_eq!(resolve(&name, &mut one), 1);
+        assert_eq!(one.first().map(SocketAddr::port), Some(7447));
+        assert_eq!(resolve(&name, &mut []), 0);
+    }
+
+    /// A walk of the resolver's answers passes over an answer without an address and one of a
+    /// family other than the two, and writes the address after them at the port it is asked for;
+    /// it stops at the room it is given. Turned red by a walk that stops at the first answer it
+    /// cannot read, keeps the answer's own port, or writes past its room.
+    #[test]
+    fn a_walk_passes_over_an_answer_it_cannot_read() {
+        let v4 = RawAddr::of(SocketAddr::from(([192, 168, 1, 50], 9)));
+        // SAFETY: an all-zero `sockaddr_storage` is a valid value of it, an unspecified family.
+        let unspecified: libc::sockaddr_storage = unsafe { core::mem::zeroed() };
+        // SAFETY: an all-zero `addrinfo` is a valid value of it: null pointers.
+        let mut answers: [libc::addrinfo; 3] = unsafe { core::mem::zeroed() };
+        let [no_address, other_family, address] = &mut answers;
+        other_family.ai_addr = (&unspecified as *const libc::sockaddr_storage)
+            .cast::<libc::sockaddr>()
+            .cast_mut();
+        other_family.ai_addrlen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+        address.ai_addr = v4.as_ptr().cast_mut();
+        address.ai_addrlen = v4.size();
+        other_family.ai_next = address;
+        no_address.ai_next = other_family;
+        let first: *const libc::addrinfo = &*no_address;
+        let unset = SocketAddr::from(([0, 0, 0, 0], 0));
+        let mut found = [unset; 2];
+        // SAFETY: the answers and the addresses they name outlive the walk.
+        let count = unsafe { read_answers(first, 7447, &mut found) };
+        assert_eq!(count, 1);
+        assert_eq!(found, [SocketAddr::from(([192, 168, 1, 50], 7447)), unset]);
+        // SAFETY: as above.
+        assert_eq!(unsafe { read_answers(first, 7447, &mut []) }, 0, "no room");
+    }
+
     /// Only `fe80::/10` is a unicast link-local address, the one a source needs its zone for;
     /// a site-local multicast group, the loopback and a global address are not. Turned red by a
     /// test of the first byte alone, which takes `fec0::` too.
@@ -1193,6 +1337,13 @@ mod tests {
             RawAddr::empty().to_socket_addr(),
             None,
             "an unspecified family names no end"
+        );
+        let raw = RawAddr::of(SocketAddr::from(([192, 168, 1, 50], 7447)));
+        // SAFETY: the storage holds an address and is larger than any length asked of it here.
+        let short = unsafe { socket_addr_at(raw.as_ptr(), raw.size() - 1) };
+        assert_eq!(
+            short, None,
+            "a length short of its family's form names no end"
         );
     }
 

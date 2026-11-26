@@ -301,9 +301,9 @@ impl<C: ClockSource> CoopRuntime<C> {
 }
 
 /// Which table a runtime placed in a span holds ([`CoopRuntime::placed`]): the one
-/// [`CoopRuntime::try_reserved`] holds, the one cell [`CoopRuntime::try_reserved_for_one`] holds, or the
-/// cells [`CoopRuntime::try_opening`] holds with its count of cells added while the open lasts, which
-/// take their bytes of the heap.
+/// [`CoopRuntime::try_reserved`] holds, the one cell [`CoopRuntime::try_reserved_for_one`] holds, no
+/// cell ([`RuntimeForm::Taskless`]), or the cells [`CoopRuntime::try_opening`] holds with its count
+/// of cells added while the open lasts, which take their bytes of the heap.
 #[cfg(not(feature = "session-slot"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeForm {
@@ -311,6 +311,11 @@ pub enum RuntimeForm {
     Reserved,
     /// One cell at most.
     ForOne,
+    /// No cell, whatever the rows' count of tasks: the runtime of an engine whose owner steps its
+    /// links itself and spawns nothing on it. A spawn is refused, counted, as a table of one cell
+    /// that holds none refuses it, and a pass walks nothing, so a build whose runtimes are all of
+    /// this form links nothing that polls, settles or drops a task.
+    Taskless,
     /// The cells reserved and `added` bare cells beside them while the open lasts.
     Opening {
         /// The bare cells.
@@ -364,6 +369,9 @@ impl PlacedParts {
     fn of<C: ClockSource>(rows: RuntimeRows, form: RuntimeForm) -> Option<Self> {
         let laid = match form {
             RuntimeForm::ForOne => StoreLayout::of::<true>(rows.tasks, Some(rows.task_bytes)),
+            // Laid as a table of one cell that holds none, so a runtime of no task spans what one
+            // made for one task of none did.
+            RuntimeForm::Taskless => StoreLayout::of::<true>(0, Some(rows.task_bytes)),
             RuntimeForm::Reserved | RuntimeForm::Opening { .. } => {
                 StoreLayout::of::<false>(rows.tasks, Some(rows.task_bytes))
             }
@@ -442,6 +450,7 @@ impl<C: ClockSource> CoopRuntime<C> {
         let executor = match form {
             RuntimeForm::Reserved => ExecutorState::reserved_in(store),
             RuntimeForm::ForOne => ExecutorState::reserved_one_in(store),
+            RuntimeForm::Taskless => ExecutorState::taskless_in(store),
             RuntimeForm::Opening { added } => ExecutorState::opening_in(store, added)?,
         };
         let timers = if rows.timers == 0 {

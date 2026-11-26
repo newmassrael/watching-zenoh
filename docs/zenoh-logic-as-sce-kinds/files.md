@@ -485,6 +485,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-coop/src/app_link.rs` | S12 | |
 | `crates/wz-runtime-coop/src/atomic.rs` | S5 | |
 | `crates/wz-runtime-coop/src/cs.rs` | S5 | |
+| `crates/wz-runtime-coop/src/dial.rs` | S5 | |
 | `crates/wz-runtime-coop/src/either_links.rs` | S5 | |
 | `crates/wz-runtime-coop/src/executor.rs` | S5 | |
 | `crates/wz-runtime-coop/src/face_send.rs` | S5 | |
@@ -543,6 +544,7 @@ directory) is excluded as `test` with that reason.
 | `crates/wz-runtime-posix/src/multicast.rs` | S9 | |
 | `crates/wz-runtime-posix/src/net.rs` | S9 | |
 | `crates/wz-runtime-posix/src/raweth.rs` | S9 | |
+| `crates/wz-runtime-posix/src/resolve.rs` | S9 | |
 | `crates/wz-runtime-posix/src/scouting.rs` | S9 | |
 | `crates/wz-runtime-posix/src/serial.rs` | S9 | |
 | `crates/wz-runtime-posix/src/slot.rs` | S9 | |
