@@ -21,8 +21,22 @@
 # configuration named after this one, `.cargo/capi-discard-unwind-tables.toml`, discards them at
 # the link (docs/c-abi-size-diet.md T7).
 #
-# The flag is given to POSIX hosts only: a Windows build keeps its tables, which the system's own
-# exception handling reads, and needs no other flag: `panic = "abort"` is the profile's, and the
+# A `match` of fewer than eight arms is lowered to compares and not to a jump table
+# (`-min-jump-table-entries=8`; LLVM's own floor is four). A table of four entries is 16 bytes of
+# `.rodata` and its dispatch about as much text as the compares that take its place, and this
+# library's `.rodata` is resident whole in every process that maps it, so its 140 tables of fewer
+# than eight entries (2,608 bytes of 4,840) are a page a process holds (docs/win-budget/rss.md,
+# section 5.3, R2.1). The library is linked with fat LTO, which compiles the prebuilt `core` and
+# `alloc` again in its own session, so the flag reaches their matches too. What it moves is read
+# where every build of this form reads this file: the size ledger's text and `.rodata` and the
+# capability cost gate's ceiling (`scripts/lib/capability_cost_gate.py`, `case_config_flags`),
+# the perf matrix's arm W (`scripts/host-bench/perf_matrix.py`, `bench_case`), whose instruction
+# counts and per-mapping figures (`PERF_SMAPS=1`, docs/win-budget/rss.md section 6, R0) are the
+# cells that judge it, and the packages, which name this file with `--config`.
+#
+# The flags are given to POSIX hosts only: a Windows build keeps its unwind tables, which the
+# system's own exception handling reads, and its jump tables until a Windows cell reads them; it
+# needs no other flag: `panic = "abort"` is the profile's, and the
 # library names the C runtime it links itself (`src/os/no_std_host.rs` of `wz-capi-pico`).
 [target.'cfg(unix)']
-rustflags = ["-C", "force-unwind-tables=no"]
+rustflags = ["-C", "force-unwind-tables=no", "-C", "llvm-args=-min-jump-table-entries=8"]
