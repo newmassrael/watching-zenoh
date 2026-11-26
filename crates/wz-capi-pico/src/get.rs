@@ -1590,14 +1590,21 @@ pub(crate) fn fan_get(
     // The fan is the registration: it lies in the place, and is linked into the token's list
     // where it lies, so registering takes no memory.
     let cancellable = token.is_some();
-    let place = slot.fill(GetPlace {
-        get: PendingGet {
-            closure,
-            gate,
-            fan: CancellableFan::new(),
-        },
-        legs: crate::ffi::OpenClosures::default(),
-    });
+    // The count of the legs is made where it stays, as a kernel's lock is.
+    // SAFETY: the place is sized and aligned for a `GetPlace` and holds none, and each field is
+    // written once through a pointer to it, so a whole one stands there after.
+    let place = unsafe {
+        slot.fill_in_place(|at| {
+            core::ptr::addr_of_mut!((*at).get).write(PendingGet {
+                closure,
+                gate,
+                fan: CancellableFan::new(),
+            });
+            crate::ffi::OpenClosures::init_at(core::ptr::NonNull::new_unchecked(
+                core::ptr::addr_of_mut!((*at).legs),
+            ));
+        })
+    };
     if let Some(token) = token {
         // SAFETY: the place was filled just above and does not move until it is given back,
         // which drops the fan; no engine has the fan yet.

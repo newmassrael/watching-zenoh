@@ -138,7 +138,7 @@ pub(crate) struct MatchingKept {
 /// A matching listener's place: its handle's state, which the handle lets go of (none for a
 /// background listener, which has no handle), and what is kept past it; the last of the handle,
 /// the closure and the filter's hold gives the place back (`crate::object_slot::Answering`).
-pub(crate) type MatchingPlace = crate::object_slot::Answering<MatchingListenerState, MatchingKept>;
+pub(crate) type MatchingPlace = Answering<MatchingListenerState, MatchingKept>;
 
 /// A listener's link in its entity's write filter's list ([`FilterListeners`]), reached only
 /// under [`LISTS`]: the listener's id, which outlives its handle's state, the list it is on (null
@@ -668,7 +668,7 @@ pub(crate) unsafe fn declare_on_filter(
         return Z_ERR_SYSTEM_OUT_OF_MEMORY;
     };
     let object = place
-        .fill(Answering::keeping(
+        .fill_answering(
             MatchingListenerState {
                 shared: crate::session::EngineHold::clone(filter.engine()),
                 id: 0,
@@ -677,7 +677,7 @@ pub(crate) unsafe fn declare_on_filter(
                 closure,
                 link: FilterLink::unlinked(),
             },
-        ))
+        )
         .cast::<MatchingListenerState>();
     // The closure lies in the place now, counted there before the engine can call it or let it go.
     let kept = kept_at::<MatchingListenerState, MatchingKept>(object);
