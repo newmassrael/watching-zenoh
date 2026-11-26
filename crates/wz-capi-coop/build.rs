@@ -10,9 +10,9 @@
 //! takes and the groups it joins among them, hands out every sample, token, query, reply and
 //! declaration watch's event itself, and puts nothing in the round: its text keeps none of what
 //! hands a round out. A read task beside the program's calls (`threads`) reads that way too where
-//! each value has a lock of its own: it reaches a face's values with no session's lock held. A
-//! `threads` build keeps the round where its form has no such lock, or where it joins a group
-//! (`group`), whose read is one thread's.
+//! each value has a lock of its own: it reaches a face's values with no session's lock held, and a
+//! group's, of one thread's types, under that lock. A `threads` build keeps the round where its
+//! form has no such lock.
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_round)");
@@ -21,7 +21,7 @@ fn main() {
     if value_locks {
         println!("cargo:rustc-cfg=wz_value_locks");
     }
-    if set("CARGO_FEATURE_THREADS") && (set("CARGO_FEATURE_GROUP") || !value_locks) {
+    if set("CARGO_FEATURE_THREADS") && !value_locks {
         println!("cargo:rustc-cfg=wz_round");
     }
 }

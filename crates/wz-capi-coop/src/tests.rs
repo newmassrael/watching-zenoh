@@ -3884,13 +3884,14 @@ mod timestamps;
 mod tx_pool;
 
 /// The round is kept by exactly the builds that queue a record into it (`wz_round`, the crate's
-/// build script): a build whose read task runs beside the program's calls and either joins a
-/// group, whose read is one thread's, or has no lock of each value's own (`wz_value_locks`: a
-/// host lock on a target with 8- and 64-bit atomics). The read that hands each record out as it
+/// build script): a build whose read task runs beside the program's calls with no lock of each
+/// value's own (`wz_value_locks`: a host lock on a target with 8- and 64-bit atomics). A group's
+/// read is no reason to keep it: the read task steps a group's session under the session's lock
+/// and hands its records out with that lock let go of. The read that hands each record out as it
 /// is read queues none, a get's reply included. A build that keeps none compiles no
-/// `crate::round`, so this is read here, where every build reads it. Turned red by `group`
-/// dropped from the script's predicate: the shipped host preset (`threads` and `group`) would
-/// leave the round with a group read only one thread may make.
+/// `crate::round`, so this is read here, where every build reads it. Turned red by `group` put
+/// back in the script's predicate: the shipped host preset (`threads` and `group`) would read
+/// through the round again.
 #[test]
 fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
     let value_locks = cfg!(all(
@@ -3899,6 +3900,5 @@ fn the_round_is_kept_by_exactly_the_builds_that_queue_into_it() {
         target_has_atomic = "64"
     ));
     assert_eq!(cfg!(wz_value_locks), value_locks);
-    let queues = cfg!(feature = "threads") && (cfg!(feature = "group") || !value_locks);
-    assert_eq!(cfg!(wz_round), queues);
+    assert_eq!(cfg!(wz_round), cfg!(feature = "threads") && !value_locks);
 }

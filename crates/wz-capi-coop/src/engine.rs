@@ -246,8 +246,8 @@ pub use reach::RowClaim;
 mod ledger;
 use ledger::{Due, Ledger, Seen};
 
-// A build without a read task, or whose read task joins no group and reaches each value under a
-// lock of its own (`build.rs`): the read steps each face's link session itself (`direct`).
+// A build without a read task, or whose read task reaches each value under a lock of its own
+// (`build.rs`): the read steps each face's link session itself (`direct`).
 #[cfg(not(wz_round))]
 mod direct;
 // The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).

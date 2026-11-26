@@ -277,16 +277,19 @@ fn a_group_past_the_task_cells_is_refused_for_want_of_a_task() {
 }
 
 /// The endpoint a [`LateDialStack`] answers late; any other unicast endpoint it refuses.
+#[cfg(wz_round)]
 const LATE: &str = "tcp/192.0.2.50:7447";
 
 /// A member's stack that also dials: it joins [`GROUP`] as [`MemberStack`] does, answers a dial
 /// of [`LATE`] up only once the session has asked it and gone on, and refuses any other; each
 /// unicast endpoint it is asked to open is recorded.
+#[cfg(wz_round)]
 struct LateDialStack {
     member: MemberStack,
     dialled: Arc<Mutex<Vec<String>>>,
 }
 
+#[cfg(wz_round)]
 impl AppPort for LateDialStack {
     fn open(&self, link: LinkHandle, kind: AppLinkKind, locator: &str) -> ProgramOpen {
         if kind == AppLinkKind::Group {
@@ -320,7 +323,9 @@ impl AppPort for LateDialStack {
 /// the endpoint's, so the second endpoint would be refused the same, and the dial role dials it
 /// not; the open, which redials none, ends for want of a task. Turned red by a walk that goes on
 /// to the next endpoint after a late answer whose task was refused, which dials the second
-/// endpoint and ends with that endpoint's refusal.
+/// endpoint and ends with that endpoint's refusal. Only where a group's session is a task (the
+/// round's form) do the groups hold the cells.
+#[cfg(wz_round)]
 #[test]
 fn a_late_answer_refused_a_task_dials_no_further_endpoint() {
     use wz_runtime_coop::executor::SpawnRefusal;
