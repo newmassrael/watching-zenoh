@@ -221,7 +221,7 @@ fn a_session_held_by_a_read_working_out_its_wait_is_tried_again_without_asking()
 /// A leg that holds the send place of its one face answers behind a held session for that face
 /// alone: under zenoh's profile it asks that face, and no other, for room, and is dropped on it
 /// when it took none; under pico's it is dropped at once only behind a send on that face, and
-/// waits for the session behind a send on another. CONTROL: a publish that holds no face asks
+/// tries the session again behind a send on another. CONTROL: a publish that holds no face asks
 /// every face. Turned red by a leg that asks every face's room, where a full face it is not sent
 /// on drops it, or by one dropped behind another face's send.
 #[test]
@@ -253,8 +253,8 @@ fn a_leg_held_alone_answers_for_its_own_face_behind_a_held_session() {
     );
     assert_eq!(
         rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(0), 1_000, Some(1)),
-        Room::Stepping,
-        "behind a send on another face the leg waits for the session"
+        Room::Free,
+        "behind a send on another face the leg tries the session again"
     );
     assert_eq!(
         rooms.for_held(HeldDrop::DropAtOnce, Holder::Sending(1), 1_000, Some(1)),
