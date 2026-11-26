@@ -3521,3 +3521,29 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
     wz_capi_port::SessionDrive::close(&*engine);
     assert!(!handle.is_open(), "a second close changes nothing");
 }
+
+/// An open's plan lays out what a listed plan of the same session lays out, every sum and every
+/// layer's rows, and lists no row, so the open's frame holds no table of them; a listed plan taken
+/// on by an open's plan, as a region's is, is the same plan. Turned red by a walk whose sums depend
+/// on the list it keeps, or a `take_on` that leaves a sum or a layer's rows behind.
+#[cfg(feature = "runtime-plan")]
+#[test]
+fn an_open_s_plan_lays_out_a_listed_plan_s_sums_and_lists_no_row() {
+    let config = client_config();
+    let listed = ArenaPlan::of(&config, &config.limits).expect("lays an arena out");
+    let mut open = crate::arena::OpenPlan::blank();
+    open.count(&config, &config.limits)
+        .expect("lays an arena out");
+    assert!(
+        listed.rows().count() > 0,
+        "CONTROL: the listed plan lists its rows"
+    );
+    assert_eq!(open.rows().count(), 0);
+    assert_eq!(open.reserved_bytes(), listed.reserved_bytes());
+    assert_eq!(open.transport(), listed.transport());
+    assert_eq!(open.session(), listed.session());
+    assert_eq!(open.places(), listed.places());
+    let mut taken = crate::arena::OpenPlan::blank();
+    taken.take_on(&listed);
+    assert_eq!(taken, open);
+}

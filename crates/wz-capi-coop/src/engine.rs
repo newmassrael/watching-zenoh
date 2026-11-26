@@ -50,8 +50,8 @@ use crate::arena::CacheSpan;
 use crate::arena::HandedTable;
 use crate::arena::{
     ArenaMemory, ArenaPlan, ArenaRefused, ClaimedPlaces, DroppedOn, EnginePlace, EntityKind,
-    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenStorage, PlaceTables,
-    PlanFrom, SessionArena, SessionRows, TransportTables,
+    EntityPlace, EntityPlaces, HandlePlace, HeldPlaces, LinkCells, OpenPlan, OpenStorage,
+    PlaceTables, PlanFrom, SessionArena, SessionRows, TransportTables,
 };
 use crate::form::{CoopForm, Latch};
 use crate::form::{
@@ -878,7 +878,7 @@ fn lend_session(
     config: &CoopConfig<Counted>,
     policy: &SessionPolicy,
 ) -> Result<SessionLent, ArenaRefused> {
-    let mut plan = ArenaPlan::vacant();
+    let mut plan = OpenPlan::blank();
     match from {
         PlanFrom::Region(region) => region.lay_out_on(&mut plan, config)?,
         #[cfg(any(feature = "runtime-plan", test))]
@@ -3596,8 +3596,8 @@ impl SessionPlanes {
 /// after every other row: the one plan an open reserves by. Laid
 /// out where the plan lies, which `lend_session` reads in its own frame: a plan handed back by
 /// value would be moved again, twice, by the open that reads it.
-pub(crate) fn lay_out_open(
-    plan: &mut ArenaPlan,
+pub(crate) fn lay_out_open<const ROWS: usize>(
+    plan: &mut ArenaPlan<ROWS>,
     holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
     plan.lay_cells(holds.cells);
