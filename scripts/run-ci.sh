@@ -28165,7 +28165,14 @@ layer_c1cc_api_compat_c() {
     # They need the pico CLIs as well as the zenoh-c oracle; ci.yml builds them
     # ahead of this lane (moved there in this same commit for exactly that
     # reason). The oracle guard above covers the zenoh-c half and returns before
-    # reaching here when it is absent.
+    # reaching here when it is absent. The CLIs are this lane's own precondition
+    # too: a run of the lane alone (a fleet run, a red re-run) has no earlier job
+    # to build them, and judged a missing program as a failed leg. Build them
+    # when absent, as the other pico-CLI layers do, so the lane judges the same
+    # tree wherever it runs.
+    if [[ ! -x "$WZ_ARTIFACTS"/target/zenoh-pico-cli/z_put ]]; then
+        bash scripts/build-zenoh-pico-cli.sh || return 1
+    fi
     for leg in \
         upstream_z_sub_on_wz_capi_c_receives_from_a_real_pico_zput \
         upstream_z_put_on_wz_capi_c_reaches_a_real_pico_zsub \
