@@ -77,7 +77,7 @@ impl Expected {
         self.check(&RUNTIME_LIMITS, &RuntimeLimits::defaults(), runtime)
     }
 
-    fn check<S: 'static>(
+    fn check<S: 'static + crate::limit_binding::LimitNames>(
         &self,
         table: &[LimitEntry<S>],
         defaults: &S,

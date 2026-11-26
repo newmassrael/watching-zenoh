@@ -1383,7 +1383,7 @@ fn select_found<'a>(
 /// out and leaves `snapshot` as it was. A bound stated as `0` is refused first: a quota of `0` is
 /// what a build that sizes a table of no rows runs with, and a layer that states it would admit
 /// nothing.
-fn select_limit<'a, S: 'static>(
+fn select_limit<'a, S: 'static + crate::limit_binding::LimitNames>(
     entry: &LimitEntry<S>,
     snapshot: &mut S,
     value: LimitValue,
@@ -2575,7 +2575,9 @@ mod tests {
     }
 
     /// The first limit of `table` whose machines still read the build's value.
-    fn unread<S: 'static>(table: &'static [LimitEntry<S>]) -> &'static LimitEntry<S> {
+    fn unread<S: 'static + crate::limit_binding::LimitNames>(
+        table: &'static [LimitEntry<S>],
+    ) -> &'static LimitEntry<S> {
         table
             .iter()
             .find(|entry| !entry.read_from_snapshot())

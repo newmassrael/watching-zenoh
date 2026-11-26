@@ -3168,7 +3168,8 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
     is more than one value, so two snapshots compare as one slice; its build defaults, an accessor
     and a `select_*` per limit, the `LimitField` impl that states which word keeps each limit,
     and the table a reader that names a limit by its id dispatches on, which its `Debug` reads
-    the limits' names from. With `presets` (`pico_opening_values`), the snapshot of the pico
+    the limits' names from, and the ids as one string beside it (`LimitNames`), where each entry
+    reads its id from its `NAME_AT`. With `presets` (`pico_opening_values`), the snapshot of the pico
     preset too, `PICO_PRESET`: what an ABI that follows zenoh-pico opens under, whatever the
     build's environment states; with `bounds` (`limit_presets`), its bound, `PICO_PRESET_BOUND`:
     the preset without the open values, what a config raises an open value to."""
@@ -3292,8 +3293,21 @@ def limit_snapshot_rust(snapshot: str, lims: list[dict], what: str,
                 f"unsafe impl LimitField<{snapshot}> for {name} {{"]
         word = "0" if previous is None else f"word_after::<{previous}, {snapshot}>()"
         out += rust_assoc_const("WORD", "usize", word)
+        name_at = "0" if previous is None else f"name_after::<{previous}, {snapshot}>()"
+        out += rust_assoc_const("NAME_AT", "usize", name_at)
         out.append("}")
         previous = name
+    # The ids one after another, each where its `NAME_AT` says, so an entry of the table keeps
+    # offsets and no pointer (docs/win-budget/rss.md, section 5.3, R3.2). One id a line, the
+    # newline and the indent after each escaped out of the string, so rustfmt leaves it as written.
+    out += ["", f"impl LimitNames for {snapshot} {{"]
+    if lims:
+        out.append("    const NAMES: &'static str = \"\\")
+        out += [f"        {lim['id']}\\" for lim in lims[:-1]]
+        out.append(f"        {lims[-1]['id']}\";")
+    else:
+        out.append("    const NAMES: &'static str = \"\";")
+    out.append("}")
     out += ["", f"/// How many limits [`{snapshot}`] holds: the length of [`{table}`].",
             f"pub const {count}: usize = {len(lims)};", "",
             f"/// Every limit of [`{snapshot}`] as a reader that names it by its id sees it, in the order of",
@@ -3328,8 +3342,8 @@ def emit_rust_limit_snapshots(decl: dict) -> str:
         "",
         "use crate::caps;",
         "use crate::limit_binding::{",
-        "    limit_defaults_only, word_after, LimitDomain, LimitEntry, LimitField, LimitSpec, LimitValue,",
-        "    Limited, OutsideLimitDomain, Quota,",
+        "    limit_defaults_only, name_after, word_after, LimitDomain, LimitEntry, LimitField, LimitNames,",
+        "    LimitSpec, LimitValue, Limited, OutsideLimitDomain, Quota,",
         "};",
         "use crate::policy_binding::Driven;",
         "",
@@ -7179,9 +7193,10 @@ def cmd_selftest() -> int:
     expect("a runtime-scope limit is a field of RuntimeLimits",
            "pub const RUNTIME_LIMIT_COUNT: usize = 1;" in rsnap)
     expect("a limit's entry reaches its word by the index its LimitField states, not by a function",
-           "unsafe impl LimitField<SessionLimits> for MaxA {\n    const WORD: usize = 0;\n}\n" in bsnap
-           and "unsafe impl LimitField<RuntimeLimits> for MaxA {\n    const WORD: usize = 0;\n}\n"
-           in rsnap
+           "unsafe impl LimitField<SessionLimits> for MaxA {\n    const WORD: usize = 0;\n"
+           "    const NAME_AT: usize = 0;\n}\n" in bsnap
+           and "unsafe impl LimitField<RuntimeLimits> for MaxA {\n    const WORD: usize = 0;\n"
+           "    const NAME_AT: usize = 0;\n}\n" in rsnap
            and "fn select_in(" not in bsnap and "fn held_in(" not in bsnap)
     # A snapshot is one array of words, so its derived comparison is one comparison of the array
     # (a slice compare), not one per limit; its Debug names the limits from its table instead.
@@ -7230,6 +7245,17 @@ def cmd_selftest() -> int:
            len(shipped_words) > 1 and shipped_words[0][1] == "0"
            and all(word == f"word_after::<{before}, SessionLimits>()"
                    for (before, _), (_, word) in zip(shipped_words, shipped_words[1:])))
+    shipped_names = re.findall(r"unsafe impl LimitField<SessionLimits> for (\w+) \{\n    const WORD: usize =\s*"
+                               r"[^;]+;\n    const NAME_AT: usize =\s*([^;]+);",
+                               emit_rust_limit_snapshots(shipped))
+    expect("each limit's id follows the id of the limit before it, the first at the start",
+           len(shipped_names) == len(shipped_words) and shipped_names[0][1] == "0"
+           and all(name == f"name_after::<{before}, SessionLimits>()"
+                   for (before, _), (_, name) in zip(shipped_names, shipped_names[1:])))
+    expect("a snapshot's ids are one string beside its table, a line each, none for no limit",
+           'impl LimitNames for SessionLimits {\n    const NAMES: &\'static str = "\\\n        MAX_A";\n}\n'
+           in bsnap
+           and 'impl LimitNames for RuntimeLimits {\n    const NAMES: &\'static str = "";\n}\n' in bsnap)
     expect("every limit's domain is evaluated in every build, read or not",
            "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in psnap
            and "}\n\nconst _: LimitDomain = MaxA::DOMAIN;\n" in bsnap)

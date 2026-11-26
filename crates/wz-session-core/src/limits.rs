@@ -2714,7 +2714,9 @@ mod tests {
             .expect("a limit this test names")
     }
 
-    fn ids<S>(table: &[LimitEntry<S>]) -> std::vec::Vec<&'static str> {
+    fn ids<S: crate::limit_binding::LimitNames>(
+        table: &[LimitEntry<S>],
+    ) -> std::vec::Vec<&'static str> {
         table.iter().map(LimitEntry::id).collect()
     }
 
@@ -2856,7 +2858,7 @@ mod tests {
     /// id. Turned red by a word kept for a limit of one value, or a `Debug` that shows the words.
     #[test]
     fn a_snapshot_is_a_word_for_each_limit_left_open_and_shows_each_by_its_id() {
-        fn words<S>(table: &[LimitEntry<S>]) -> usize {
+        fn words<S: crate::limit_binding::LimitNames>(table: &[LimitEntry<S>]) -> usize {
             let open = table.iter().filter(|entry| !entry.domain().is_singleton());
             open.count() * core::mem::size_of::<usize>()
         }
@@ -2883,7 +2885,9 @@ mod tests {
         }
     }
 
-    fn each_entry_moves_only_itself<S: Copy + PartialEq + core::fmt::Debug>(
+    fn each_entry_moves_only_itself<
+        S: Copy + PartialEq + core::fmt::Debug + crate::limit_binding::LimitNames,
+    >(
         table: &[LimitEntry<S>],
         defaults: S,
     ) {
