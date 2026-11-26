@@ -105,18 +105,21 @@ mod tests {
         let many = caps::MAX_PENDING_REPLIES + 8;
 
         let mut handed = 0usize;
-        let mut pass = ReplyPass::new(bounds, |parts: ReplyParts<'_>| {
-            assert_eq!(
-                parts.rid as usize, handed,
-                "handed on in the order they were made"
-            );
-            handed += 1;
-        });
-        for rid in 0..many as RequestId {
-            assert_eq!(pass.stage_reply(put(rid, b"x")), Ok(()));
-        }
-        assert_eq!(pass.refusals(), ReplyRefusals::default());
-        drop(pass);
+        // The pass borrows the count for as long as it stands, so it stands in this block alone.
+        let refusals = {
+            let mut pass = ReplyPass::new(bounds, |parts: ReplyParts<'_>| {
+                assert_eq!(
+                    parts.rid as usize, handed,
+                    "handed on in the order they were made"
+                );
+                handed += 1;
+            });
+            for rid in 0..many as RequestId {
+                assert_eq!(pass.stage_reply(put(rid, b"x")), Ok(()));
+            }
+            pass.refusals()
+        };
+        assert_eq!(refusals, ReplyRefusals::default());
         assert_eq!(handed, many, "every reply was handed on");
 
         let mut stage = ReplyStage::held_to(bounds);
@@ -145,22 +148,25 @@ mod tests {
         stated.expect("two is inside the domain");
 
         let mut handed = 0usize;
-        let mut pass = ReplyPass::new(ReplyBounds::of(&limits), |_parts: ReplyParts<'_>| {
-            handed += 1;
-        });
+        // The pass borrows the count for as long as it stands, so it stands in this block alone.
+        let refusals = {
+            let mut pass = ReplyPass::new(ReplyBounds::of(&limits), |_parts: ReplyParts<'_>| {
+                handed += 1;
+            });
+            assert_eq!(
+                pass.stage_reply(put(1, b"abc")),
+                Err(ReplyError::PayloadTooLarge)
+            );
+            assert_eq!(pass.stage_reply(put(2, b"ab")), Ok(()));
+            pass.refusals()
+        };
         assert_eq!(
-            pass.stage_reply(put(1, b"abc")),
-            Err(ReplyError::PayloadTooLarge)
-        );
-        assert_eq!(pass.stage_reply(put(2, b"ab")), Ok(()));
-        assert_eq!(
-            pass.refusals(),
+            refusals,
             ReplyRefusals {
                 staging_full: 0,
                 payload_too_large: 1,
             }
         );
-        drop(pass);
         assert_eq!(handed, 1, "only the reply within the bound was handed on");
     }
 }
