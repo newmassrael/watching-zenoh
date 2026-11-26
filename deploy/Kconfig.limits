@@ -860,6 +860,19 @@ config WZ_LIMIT_TX_POOL_SLOTS
 	  session may hold keeps every link's slot its own, and is held to them. At least
 	  1; a session may lower it and never raise it.
 
+config WZ_LIMIT_REASSEMBLY_CHAINS
+	int "REASSEMBLY_CHAINS"
+	default 3
+	help
+	  How many buffers, each as long as PICO_FRAG_MAX_BYTES, the links of a session
+	  share to rejoin fragmented messages in when its engine lends them from the
+	  session's memory at open. A chain holds one from its first fragment until it
+	  ends, and the message it rejoined keeps it until its records are handed out.
+	  A first fragment that finds none free is refused and counted, and its message
+	  is dropped, as zenoh-pico drops one whose buffer it cannot allocate. The
+	  default holds a chain of each reliability and the message the last of them
+	  rejoined; 0 rejoins no fragmented message.
+
 config WZ_LIMIT_SESSION_MAX_PEER_KEYEXPR_ALIASES
 	int "SESSION_MAX_PEER_KEYEXPR_ALIASES"
 	default 32 if WZ_LIMITS_ZENOH_PICO

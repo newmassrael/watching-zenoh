@@ -756,6 +756,14 @@ const _: () = assert!(
     "a pool of no outbound slot sends nothing"
 );
 
+/// How many buffers, each of [`PICO_FRAG_MAX_BYTES`], the links of a session whose engine lends
+/// them from its arena share at most to rejoin fragmented messages in: a chain holds one from its
+/// first fragment to its end, and the message it rejoined until that message's records are handed
+/// out. A session's config states how many its open reserves, up to this; a first fragment that
+/// finds none free is refused and counted, as zenoh-pico drops a chain whose defragmentation
+/// buffer it cannot allocate. `0` rejoins no fragmented message.
+pub const REASSEMBLY_CHAINS: usize = generated::REASSEMBLY_CHAINS;
+
 /// Maximum number of key expressions all the peers of a session hold declared to it at once,
 /// each peer also held to [`MAX_PEER_KEYEXPR_ALIASES`]. An engine that keeps what its faces'
 /// peers declare in one pool the faces share lends the fewer of this and what its faces could

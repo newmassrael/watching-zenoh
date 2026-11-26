@@ -885,6 +885,28 @@ const _: LimitDomain = TxPoolSlots::DOMAIN;
 /// How `TX_POOL_SLOTS` is held: in no byte when its domain is one value.
 pub type TxPoolSlotsHeld = Limited<TxPoolSlots, { TxPoolSlots::HELD }>;
 
+/// `REASSEMBLY_CHAINS`: How many buffers, each as long as PICO_FRAG_MAX_BYTES, the links of
+/// a session share to rejoin fragmented messages in when its engine lends them from the
+/// session's memory at open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReassemblyChains;
+
+impl LimitSpec for ReassemblyChains {
+    type Value = Quota;
+    const LIMIT: &'static str = "REASSEMBLY_CHAINS";
+    const DRIVEN: Option<Driven> = Some(Driven::Remote);
+    const READ_FROM_SNAPSHOT: bool = true;
+    const CAPACITY: Option<usize> = fixed_capacity(caps::REASSEMBLY_CHAINS);
+    const DOMAIN: LimitDomain = LimitDomain::of_count(Self::CAPACITY, Self::DEFAULT);
+    const DEFAULT: Quota = Quota::of_build(Self::CAPACITY, Quota::UNBOUNDED);
+}
+
+const _: LimitDomain = ReassemblyChains::DOMAIN;
+
+/// How `REASSEMBLY_CHAINS` is held: in no byte when its domain is one value.
+/// A table the bound limits keeps it so, and asks it [`Limited::admits`].
+pub type ReassemblyChainsHeld = Limited<ReassemblyChains, { ReassemblyChains::HELD }>;
+
 /// `SESSION_MAX_PEER_KEYEXPR_ALIASES`: The key expressions all the peers of a session may
 /// have declared to it at a time, each peer also held to MAX_PEER_KEYEXPR_ALIASES.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1832,6 +1854,7 @@ impl SessionLimits {
         limits.keep(&MaxAcceptPendingHeld::build_default());
         limits.keep(&RxPoolBuffersHeld::build_default());
         limits.keep(&TxPoolSlotsHeld::build_default());
+        limits.keep(&ReassemblyChainsHeld::build_default());
         limits.keep(&SessionMaxPeerKeyexprAliasesHeld::build_default());
         limits.keep(&SessionMaxRemoteDeclsHeld::build_default());
         limits.keep(&SessionMaxInboundSubInterestsHeld::build_default());
@@ -1973,6 +1996,10 @@ impl SessionLimits {
             LimitValue::Integer(2),
         ));
         limits.keep(&TxPoolSlotsHeld::preset_or_build(2, LimitValue::Integer(2)));
+        limits.keep(&ReassemblyChainsHeld::preset_or_build(
+            Quota::at_most(2),
+            LimitValue::Integer(2),
+        ));
         limits.keep(&SessionMaxPeerKeyexprAliasesHeld::preset_or_build(
             Quota::at_most(32),
             LimitValue::Integer(32),
@@ -2665,6 +2692,23 @@ impl SessionLimits {
     /// Selects `TX_POOL_SLOTS`, when the build's domain holds `value`.
     pub fn select_tx_pool_slots(&mut self, value: usize) -> Result<(), OutsideLimitDomain> {
         self.keep(&TxPoolSlotsHeld::select(value)?);
+        Ok(())
+    }
+
+    /// `REASSEMBLY_CHAINS` as this snapshot holds it.
+    pub const fn reassembly_chains(&self) -> Quota {
+        self.reassembly_chains_held().get()
+    }
+
+    /// `REASSEMBLY_CHAINS` as the snapshot keeps it, for the table the bound limits to keep
+    /// and ask ([`Limited::admits`]): in no byte where the build allows one value.
+    pub const fn reassembly_chains_held(&self) -> ReassemblyChainsHeld {
+        self.limit()
+    }
+
+    /// Selects `REASSEMBLY_CHAINS`, when the build's domain holds `value`.
+    pub fn select_reassembly_chains(&mut self, value: Quota) -> Result<(), OutsideLimitDomain> {
+        self.keep(&ReassemblyChainsHeld::select(value)?);
         Ok(())
     }
 
@@ -3523,8 +3567,14 @@ unsafe impl LimitField<SessionLimits> for TxPoolSlots {
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
 // those of the limit before it, inside `SESSION_LIMIT_WORDS`.
-unsafe impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
+unsafe impl LimitField<SessionLimits> for ReassemblyChains {
     const WORD: usize = word_after::<TxPoolSlots, SessionLimits>();
+}
+
+// SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
+// those of the limit before it, inside `SESSION_LIMIT_WORDS`.
+unsafe impl LimitField<SessionLimits> for SessionMaxPeerKeyexprAliases {
+    const WORD: usize = word_after::<ReassemblyChains, SessionLimits>();
 }
 
 // SAFETY: `SessionLimits` is transparent over its words, and this limit's word follows
@@ -3714,7 +3764,7 @@ unsafe impl LimitField<SessionLimits> for PicoKeepalivesPerLease {
 }
 
 /// How many limits [`SessionLimits`] holds: the length of [`SESSION_LIMITS`].
-pub const SESSION_LIMIT_COUNT: usize = 69;
+pub const SESSION_LIMIT_COUNT: usize = 70;
 
 /// Every limit of [`SessionLimits`] as a reader that names it by its id sees it, in the order of
 /// its words.
@@ -3756,6 +3806,7 @@ pub static SESSION_LIMITS: [LimitEntry<SessionLimits>; SESSION_LIMIT_COUNT] = [
     LimitEntry::of::<MaxAcceptPending>(),
     LimitEntry::of::<RxPoolBuffers>(),
     LimitEntry::of::<TxPoolSlots>(),
+    LimitEntry::of::<ReassemblyChains>(),
     LimitEntry::of::<SessionMaxPeerKeyexprAliases>(),
     LimitEntry::of::<SessionMaxRemoteDecls>(),
     LimitEntry::of::<SessionMaxInboundSubInterests>(),

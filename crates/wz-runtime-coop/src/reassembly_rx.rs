@@ -110,12 +110,15 @@ pub fn mcu_reassembly(policy: &SessionPolicy) -> CoopReassembly {
 /// `_z_wbuf_t _dbuf_best_effort;`).
 pub const LENT_CHAINS: usize = crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize;
 
-/// How many buffers a session's chain table holds: one for each chain its links stage at once
-/// ([`LENT_CHAINS`]) and one for the rejoined message the session reads where it lies until its
-/// records are handed out, the buffer kept out of the table meanwhile
+/// How many buffers a session's chain table needs for no chain its Router admits to be refused for
+/// want of one: one for each chain its links stage at once ([`LENT_CHAINS`]) and one for the
+/// rejoined message the session reads where it lies until its records are handed out, the buffer
+/// kept out of the table meanwhile
 /// ([`ChainStaging::keep`](wz_session_core::chain_staging::ChainStaging::keep)). Without the one
 /// more, a chain that starts while that buffer is kept would find none free and be refused, which
-/// a chain whose message was read before its buffer went back is not.
+/// a chain whose message was read before its buffer went back is not. The table holds what the
+/// session's `REASSEMBLY_CHAINS` states, whose default is this count; a session that states fewer
+/// has a chain refused and counted where this many would have rejoined it.
 pub const SESSION_CHAIN_BUFFERS: usize = LENT_CHAINS + 1;
 
 /// The staging of a Router whose chains lie in buffers a session's arena lent
@@ -1135,6 +1138,17 @@ mod tests {
             IngestOutcome::Refused(RefuseReason::PoolExhausted),
             "CONTROL: with no buffer for the kept message, the next chain finds none"
         );
+    }
+
+    /// The build's default of a session's `REASSEMBLY_CHAINS` is the count of buffers at which no
+    /// chain the Router admits is refused for want of one, so a session whose config states
+    /// nothing rejoins every chain it did before the count was the config's. Read only where the
+    /// build states no value of its own. Turned red by a declared default off this count.
+    #[test]
+    fn the_builds_reassembly_chains_are_the_buffers_no_chain_is_refused_for() {
+        if option_env!("WZ_LIMIT_REASSEMBLY_CHAINS").is_none() {
+            assert_eq!(caps::REASSEMBLY_CHAINS, SESSION_CHAIN_BUFFERS);
+        }
     }
 
     /// A lent Router's ceiling is the build's `PICO_FRAG_MAX_BYTES`, and its chains are bounded by

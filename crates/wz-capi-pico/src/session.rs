@@ -454,6 +454,18 @@ mod opening_limits_tests {
             assert_eq!(opening.max_pending_queries(), Quota::at_most(1));
         }
     }
+
+    /// A session opens two reassembly buffers (`[limit.pico_open]`), where the build's domain
+    /// holds two: one for the reliable chain zenoh-pico's parity programs send and one for the
+    /// message it rejoined while its records are handed out; a config raises it to the bound.
+    /// Turned red by a preset that opens them at the bound the Kconfig keeps.
+    #[test]
+    fn a_session_opens_two_reassembly_buffers() {
+        let mut probe = SessionLimits::defaults();
+        if probe.select_reassembly_chains(Quota::at_most(2)).is_ok() {
+            assert_eq!(opening_limits().reassembly_chains(), Quota::at_most(2));
+        }
+    }
 }
 
 /// [`resolve_snapshots`] with where each value came from, which no door of this ABI reports: what
