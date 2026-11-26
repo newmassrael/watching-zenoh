@@ -399,6 +399,7 @@ features), not the release form.
 | E21 | a time base the program moves (`time-base`) | `wz_ext_time_base_*` `wz_ext_internal_time_base_*` `wz_ext_config_time_base` | no | — | — | — | — | — | not in `host-peer-ext` |
 | E22 | process pools a program reserves or places itself (`object-pool`) | `wz_ext_object_pool_*` | no | — | — | — | — | — | not in `host-peer-ext`; the reservation at the first call it serves is the subject of W06 |
 | E23 | a watch on the peers' declarations (`remote-declaration-watch`, `declarations-synced-event`) | `wz_ext_decl_watch_*` | no | — | — | — | — | — | not in `host-peer-ext` |
+| E24 | the count of the program's callbacks a build left unrun, its table of the threads inside callbacks full | `wz_ext_callbacks_refused` | yes | `crates/wz-capi-pico/src/ffi.rs` | no input to fuzz: the door takes no argument | L19, L20: the crate's tests in the package profile under AddressSanitizer and ThreadSanitizer (L20 observed), Linux with std | `deploy/coverage_floor.json` module rows `crates/wz-capi-pico/src/ffi.rs` (L21), not filled yet | `crates/wz-capi-core/include/wz_ext.h` | the release DLL, built without std, answers the count its table of `CALLBACK_THREADS` entries keeps, which the host's tests run apart from the door and no lane reads through the DLL (W13); the sanitizers run the library with std on Linux, not the release DLL (W11); the coverage rows are empty until the first Vcov export fills them (W12) |
 
 ## 9. Work to close the gaps
 

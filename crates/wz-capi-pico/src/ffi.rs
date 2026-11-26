@@ -683,6 +683,21 @@ mod tests {
         assert_eq!(callback_table::refused(), 0, "no callback was refused");
     }
 
+    /// The door answers the count of the build's own marking of threads in callbacks: a build
+    /// with std marks every thread, so it refuses none, however many callbacks run at once.
+    #[cfg(feature = "std")]
+    #[test]
+    fn the_refused_callbacks_door_answers_none_in_a_build_with_std() {
+        let entered: std::vec::Vec<_> = (0..4).map(|_| super::callback_depth::enter()).collect();
+        assert!(
+            entered.iter().all(Option::is_some),
+            "every callback entered"
+        );
+        assert_eq!(super::wz_ext_callbacks_refused(), 0);
+        drop(entered);
+        assert_eq!(super::wz_ext_callbacks_refused(), 0);
+    }
+
     #[test]
     fn a_full_callback_table_refuses_a_new_thread_and_takes_a_nested_callback() {
         let threads = callback_table::Threads::<2>::new();
