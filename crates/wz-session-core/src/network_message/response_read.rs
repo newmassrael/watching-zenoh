@@ -66,7 +66,7 @@ pub(super) fn read_response_view<'f>(
         | ResponseViewVariant::Default { body: reply, .. } => read_reply(cursor, reply)?,
         ResponseViewVariant::CodecZenohErr(err) => {
             ErrView::decode_into(cursor, err)?;
-            super::judge_entries(
+            crate::ext_admit::judge_entries(
                 ExtCarrier::Zenoh(ZenohBody::Err),
                 err.extensions
                     .as_ref()
@@ -74,7 +74,7 @@ pub(super) fn read_response_view<'f>(
             )
         }
     };
-    Ok(super::then_judge(own.verdict, || body))
+    Ok(crate::ext_admit::then_judge(own.verdict, || body))
 }
 
 /// The Reply at the cursor, read into `reply`, and the verdict on its chains: its own, then its
@@ -116,7 +116,7 @@ fn read_reply<'f>(
         }
         ReplyViewVariant::CodecZenohMsgDel(del) => body_read::read_del(cursor, del, &mut InPlace)?,
     };
-    Ok(super::then_judge(own.verdict, || body))
+    Ok(crate::ext_admit::then_judge(own.verdict, || body))
 }
 
 #[cfg(test)]

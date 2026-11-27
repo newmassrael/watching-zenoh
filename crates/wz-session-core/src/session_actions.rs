@@ -4012,6 +4012,15 @@ enum LentDeclaration<'a> {
         mapping_id: crate::wire_id::ExprId,
         suffix: Option<&'a str>,
     },
+    /// A held liveliness token declared in answer to an interest. Its envelope carries no
+    /// extension, unlike every other kind here, so it leaves at the QoS a message without
+    /// `ext_qos` reads as ([`Self::qos`]).
+    #[cfg(feature = "liveliness-token")]
+    TokenReply {
+        interest_id: u64,
+        token_id: u64,
+        keyexpr: &'a str,
+    },
     /// A queryable declared in answer to an interest.
     #[cfg(all(
         feature = "alloc",
@@ -4121,6 +4130,16 @@ impl<'a> LentDeclaration<'a> {
             } => with.declaration(crate::lent_control::token_declaration(
                 id, mapping_id, suffix,
             )),
+            #[cfg(feature = "liveliness-token")]
+            Self::TokenReply {
+                interest_id,
+                token_id,
+                keyexpr,
+            } => with.declaration(crate::lent_control::token_reply_declaration(
+                token_id,
+                keyexpr,
+                interest_id,
+            )),
             #[cfg(all(
                 feature = "alloc",
                 feature = "declare-queryable",
@@ -4173,6 +4192,18 @@ impl<'a> LentDeclaration<'a> {
                 crate::lent_control::undeclare_token_declaration(id, key),
             )),
         }
+    }
+
+    /// The QoS the declaration leaves at: the declare QoS the `ext_qos` of its envelope states, or,
+    /// for a token reply, whose envelope carries none, the QoS a message without one reads as. The
+    /// QoS the heap form's dispatch reads off the owned message of the same bytes
+    /// (`declare_ext_qos::read_declare_qos`).
+    fn qos(&self) -> crate::sample::QosLevel {
+        #[cfg(feature = "liveliness-token")]
+        if let Self::TokenReply { .. } = self {
+            return crate::sample::QosLevel::DEFAULT;
+        }
+        crate::declare_ext_qos::QOS_DECLARE
     }
 
     /// The bytes the declaration encodes to: what the dispatch asks the link to lend for it, since
@@ -5034,10 +5065,10 @@ impl<R: SessionRuntime, T: TimeSource> ResponseSink for SessionLinkActions<R, T>
 // encodes the same borrowed value through `SliceSink`. No reply-shape
 // duplication across profiles.
 impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R, T> {
-    // With no allocator the reply is written into the lent slot as a declaration of its one
-    // kind (`lent_control::token_reply_declaration`, the group's writer of it too): the bytes of
-    // the borrowed reply the heap form converts to its owned mirror (`build_token_reply`), the
-    // same routing (control band, the default QoS a reply with no `ext_qos` reads as).
+    // With no allocator the reply is written into the lent slot from its parts, as a declaration
+    // of its one kind (`LentDeclaration::TokenReply`, the group's writer of it too): the bytes of
+    // the borrowed reply the heap form converts to its owned mirror (`build_token_reply`), on the
+    // control band at the QoS its envelope states.
     #[cfg(all(feature = "liveliness-token", not(feature = "alloc")))]
     fn send_declare_token_reply(&self, token_id: u64, keyexpr: &str, interest_id: u64) {
         // A keyexpr past the session's `MAX_KEYEXPR_BYTES` is not answered, as the subscriber
@@ -5051,27 +5082,11 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
         {
             return;
         }
-        let _ = self
-            .dispatch_network_message_at(
-                DispatchStage::Fresh,
-                Conduit::new(Priority::Control, true),
-                crate::sample::QosLevel::DEFAULT,
-                size_hint(|| {
-                    crate::declare::local_token::token_reply_len(token_id, keyexpr, interest_id)
-                }),
-                crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-                as_encoder(&|sink| {
-                    wz_codecs::declare::DeclareWire::encode_source(
-                        &crate::lent_control::token_reply_declaration(
-                            token_id,
-                            keyexpr,
-                            interest_id,
-                        )?,
-                        sink,
-                    )
-                }),
-            )
-            .map(|_| ());
+        let _ = self.dispatch_declare_lent(&LentDeclaration::TokenReply {
+            interest_id,
+            token_id,
+            keyexpr,
+        });
     }
     // A lend-only session writes the reply from its parts, as the session with no allocator
     // does, and builds the owned one only for what reads it (`send_declare_from_parts`).
@@ -5098,24 +5113,11 @@ impl<R: SessionRuntime, T: TimeSource> DeclareReplySink for SessionLinkActions<R
                     .ok()
             },
             || {
-                let reply = |sink: &mut crate::tx_buf::TxSink<'_>| {
-                    wz_codecs::declare::DeclareWire::encode_source(
-                        &crate::lent_control::token_reply_declaration(
-                            token_id,
-                            keyexpr,
-                            interest_id,
-                        )?,
-                        sink,
-                    )
-                };
-                let _ = self.dispatch_network_message_at(
-                    DispatchStage::Fresh,
-                    Conduit::new(Priority::Control, true),
-                    crate::sample::QosLevel::DEFAULT,
-                    size_hint(|| crate::tx_buf::encoded_len(as_encoder(&reply))),
-                    crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
-                    as_encoder(&reply),
-                );
+                let _ = self.dispatch_declare_lent(&LentDeclaration::TokenReply {
+                    interest_id,
+                    token_id,
+                    keyexpr,
+                });
             },
         );
     }
@@ -15750,9 +15752,9 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// session with no allocator sends a `Declare` by, since the owned
     /// `DeclareOwned` that `dispatch_declare` takes is a heap object, and the route a
     /// lend-only session sends one by, whose slot would take the owned one's bytes. The routing is
-    /// the same (`Priority::Control`, the declare QoS, the `Declare` stats label);
-    /// only the body's source differs. Always reliable, as `dispatch_declare`'s
-    /// callers pass it.
+    /// the same (`Priority::Control`, the QoS the declaration's envelope states,
+    /// [`LentDeclaration::qos`], the `Declare` stats label); only the body's source differs.
+    /// Always reliable, as `dispatch_declare`'s callers pass it.
     ///
     /// The declaration arrives as the arguments of its writer ([`LentDeclaration`]), so
     /// the encoder handed to the dispatch is one closure type for every caller: a closure
@@ -15773,7 +15775,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.dispatch_network_message_at(
             DispatchStage::Fresh,
             Conduit::new(Priority::Control, true),
-            crate::declare_ext_qos::QOS_DECLARE,
+            what.qos(),
             size_hint(|| what.encoded_len()),
             crate::stats::NetworkStatsClass::control(crate::stats::MessageLabel::Declare),
             as_encoder(&|sink| what.encode(sink)),
@@ -21179,6 +21181,49 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     #[cfg(not(feature = "accept-cookie"))]
     fn minted_cookie_echoed(&self) -> bool {
         false
+    }
+}
+
+// The declarations a session writes from their parts, held to the writer of the kind each names.
+#[cfg(all(
+    test,
+    feature = "liveliness-token",
+    any(not(feature = "alloc"), feature = "tx-lend-only")
+))]
+mod lent_declaration_tests {
+    use super::LentDeclaration;
+    use crate::tx_buf::{SliceTxBuf, TxBuf, TxSink};
+
+    /// A token reply is written as the declaration of its own kind, whose envelope carries no
+    /// `ext_qos`, and leaves at the QoS a message without one reads as; a final reply leaves at
+    /// the declare QoS its envelope states. Turned red by a `TokenReply` arm that writes another
+    /// declaration or swaps its two ids, a count that is not the written length, or a `qos` that
+    /// answers the declare QoS for every kind.
+    #[test]
+    fn a_token_reply_is_written_as_the_declaration_of_its_kind() {
+        let reply = LentDeclaration::TokenReply {
+            interest_id: 7,
+            token_id: 3,
+            keyexpr: "lv/a",
+        };
+        let declaration = crate::lent_control::token_reply_declaration(3, "lv/a", 7)
+            .expect("a short key is a declaration");
+        let mut want_bytes = [0u8; 64];
+        let mut want = SliceTxBuf::new(&mut want_bytes);
+        wz_codecs::declare::DeclareWire::encode_source(&declaration, &mut TxSink::new(&mut want))
+            .expect("the declaration is written");
+        let mut got_bytes = [0u8; 64];
+        let mut got = SliceTxBuf::new(&mut got_bytes);
+        reply
+            .encode(&mut TxSink::new(&mut got))
+            .expect("the reply is written");
+        assert_eq!(got.as_slice(), want.as_slice());
+        assert_eq!(reply.encoded_len(), want.as_slice().len());
+        assert_eq!(reply.qos(), crate::sample::QosLevel::DEFAULT);
+        assert_eq!(
+            LentDeclaration::FinalReply { interest_id: 7 }.qos(),
+            crate::declare_ext_qos::QOS_DECLARE
+        );
     }
 }
 

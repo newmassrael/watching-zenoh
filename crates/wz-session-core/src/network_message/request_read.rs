@@ -69,7 +69,7 @@ pub(super) fn read_request_view<'f>(
         RequestViewVariant::CodecZenohQuery(query)
         | RequestViewVariant::Default { body: query, .. } => {
             QueryView::decode_into(cursor, query)?;
-            super::judge_entries(
+            crate::ext_admit::judge_entries(
                 ExtCarrier::Zenoh(ZenohBody::Query),
                 query
                     .extensions
@@ -78,7 +78,7 @@ pub(super) fn read_request_view<'f>(
             )
         }
     };
-    Ok(super::then_judge(own.verdict, || body))
+    Ok(crate::ext_admit::then_judge(own.verdict, || body))
 }
 
 #[cfg(test)]

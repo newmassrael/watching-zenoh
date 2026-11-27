@@ -283,10 +283,10 @@ mod tests {
         assert!(walks() > before, "a reply keyed otherwise is walked");
     }
 
-    /// A get admits a reply keyed with its own text before any walk, and judges every other key
-    /// as the walk does: a wildcard covers a key it matches, and a key one chunk shorter or longer
-    /// than the get's, or with another last chunk, is refused. Turned red by the shortcut left
-    /// out (the wildcard key is walked), or by one that compares the shorter length only.
+    /// A get admits a reply keyed with its own text before any walk, and refuses a key one chunk
+    /// shorter or longer than the get's, or with another last chunk, in every dialect. Turned red
+    /// by the shortcut left out (the get's own `**` text is walked), or by one that compares the
+    /// shorter length only.
     #[test]
     fn a_get_admits_a_reply_keyed_with_its_own_text_before_the_walk() {
         use crate::keyexpr_match::INTERSECT_WALKS;
@@ -295,10 +295,21 @@ mod tests {
         assert!(reply_key_admitted("a/b", "a/b"));
         assert!(reply_key_admitted("demo/**", "demo/**"));
         assert_eq!(walks(), before, "the get's own text is not walked");
-        assert!(reply_key_admitted("a/*", "a/b"));
         assert!(!reply_key_admitted("a/b", "a/c"));
         assert!(!reply_key_admitted("a/b", "a"));
         assert!(!reply_key_admitted("a/b", "a/b/c"));
+    }
+
+    /// A key the get's text does not equal goes on to the walk, so a wildcard get admits a key
+    /// it covers and refuses one it does not. Gated on the single wildcard: without it `*` is a
+    /// literal chunk, a literal get intersects no key but its own text, and no build without a
+    /// wildcard can tell the walk from the text comparison alone. Turned red by a gate that
+    /// stops at the text comparison.
+    #[cfg(feature = "keyexpr-wildcard-single")]
+    #[test]
+    fn a_reply_keyed_otherwise_goes_on_to_the_walk() {
+        assert!(reply_key_admitted("a/*", "a/b"));
+        assert!(!reply_key_admitted("a/*", "b/b"));
     }
 
     #[test]

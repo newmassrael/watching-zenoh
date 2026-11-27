@@ -216,7 +216,7 @@ fn read_body<'f, S: EntrySink<'f>>(
         }
         PushViewVariant::CodecZenohMsgDel(del) => body_read::read_del(cursor, del, sink)?,
     };
-    Ok(super::then_judge(own, || body))
+    Ok(crate::ext_admit::then_judge(own, || body))
 }
 
 /// The lent record at the heap's capacity, which the owned parse projects its owned message from.
@@ -380,7 +380,7 @@ impl<'f> PutKept<'f> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{judge_entries, judge_put_view, then_judge};
+    use super::super::judge_put_view;
     use super::*;
     use crate::ext_admit::ZenohBody;
     use sce_forge_runtime::codec::{ListView, Without};
@@ -423,8 +423,8 @@ mod tests {
         let mut cursor = SceCursor::new(bytes);
         let view = PushView::decode(&mut cursor)?;
         let consumed = bytes.len() - cursor.remaining();
-        let admission = then_judge(
-            judge_entries(
+        let admission = crate::ext_admit::then_judge(
+            crate::ext_admit::judge_entries(
                 ExtCarrier::Network(NetworkEnvelope::Push),
                 view.extensions
                     .as_ref()
@@ -433,7 +433,7 @@ mod tests {
             || match &view.body {
                 PushViewVariant::CodecZenohMsgPut(put)
                 | PushViewVariant::Default { body: put, .. } => judge_put_view(put),
-                PushViewVariant::CodecZenohMsgDel(del) => judge_entries(
+                PushViewVariant::CodecZenohMsgDel(del) => crate::ext_admit::judge_entries(
                     ExtCarrier::Zenoh(ZenohBody::Del),
                     del.extensions
                         .as_ref()

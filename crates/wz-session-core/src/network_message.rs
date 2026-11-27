@@ -45,7 +45,6 @@ use sce_forge_runtime::codec::CodecError;
     feature = "codec-frame",
     any(
         feature = "alloc",
-        test,
         feature = "session-unicast",
         feature = "session-multicast"
     )
@@ -197,7 +196,7 @@ macro_rules! own_wire {
                 feature = "rx-control"
             ),
             any(
-                test,
+                all(test, feature = "alloc"),
                 feature = "session-unicast",
                 all(feature = "session-multicast", not(feature = "alloc"))
             )
@@ -378,138 +377,6 @@ impl NetworkMessage {
     }
 }
 
-/// The verdict on one chain, or
-/// [`ExtAdmission::Admissible`](crate::ext_admit::ExtAdmission::Admissible) for a
-/// message that has none.
-// The union of its callers: the owned message (`alloc`), the Declare verdict,
-// the Response read where its frame lies (`response_read`,
-// whose verdict the owned message shares), and the views read where a slot
-// profile's frame lies. The Request verdict is `alloc`'s alone, so it adds
-// nothing. Each item below is gated on the union of ITS callers, because the
-// workspace builds with warnings denied: an item wider than its callers is dead
-// code in a build that has none, and a caller wider than the item has no callee.
-//
-// A node reads only the kinds it asked for (`rx-push`, `rx-response`, `rx-control`), so on a build
-// with no allocator each verdict is a caller when its selector is on.
-#[cfg(any(
-    feature = "alloc",
-    all(feature = "codec-declare", feature = "rx-control"),
-    all(
-        feature = "codec-frame",
-        feature = "codec-response",
-        feature = "rx-response",
-        any(
-            test,
-            feature = "session-unicast",
-            all(feature = "session-multicast", not(feature = "alloc"))
-        )
-    ),
-    all(
-        feature = "codec-frame",
-        feature = "rx-lent-control",
-        any(feature = "rx-control", feature = "rx-response"),
-        any(
-            test,
-            feature = "session-unicast",
-            all(feature = "session-multicast", not(feature = "alloc"))
-        )
-    )
-))]
-fn judge_chain<E: crate::ext_view::ExtEntryView>(
-    carrier: crate::ext_admit::ExtCarrier,
-    extensions: Option<&[E]>,
-) -> crate::ext_admit::ExtAdmission {
-    judge_entries(carrier, extensions.map(|chain| chain.iter()))
-}
-
-/// [`judge_chain`] over the entries a chain yields, held or walked where its frame lies: each
-/// entry's header and the body of each extension the message declares
-/// ([`crate::ext_admit::judge_ext_entries`]), so the held, the lent and the walked forms of a
-/// message refuse the same chains.
-// [`judge_chain`]'s union, which it serves and which holds the Put verdict's
-// (`judge_put_chain`) and the Response read where its frame lies
-// (`response_read`), and the Request read where its frame lies
-// (`request_read`, and `request_view_admission` in a build without `request-put-del`), which
-// call this alone.
-#[cfg(any(
-    feature = "alloc",
-    all(feature = "codec-declare", feature = "rx-control"),
-    all(feature = "codec-push", feature = "rx-push"),
-    all(
-        feature = "codec-frame",
-        any(
-            feature = "codec-request",
-            all(feature = "codec-response", feature = "rx-response")
-        ),
-        any(
-            test,
-            feature = "session-unicast",
-            all(feature = "session-multicast", not(feature = "alloc"))
-        )
-    ),
-    all(
-        feature = "codec-frame",
-        feature = "rx-lent-control",
-        any(feature = "rx-control", feature = "rx-response"),
-        any(
-            test,
-            feature = "session-unicast",
-            all(feature = "session-multicast", not(feature = "alloc"))
-        )
-    )
-))]
-fn judge_entries<I>(
-    carrier: crate::ext_admit::ExtCarrier,
-    entries: Option<I>,
-) -> crate::ext_admit::ExtAdmission
-where
-    I: IntoIterator,
-    I::Item: crate::ext_view::ExtEntryView,
-{
-    entries.map_or(crate::ext_admit::ExtAdmission::Admissible, |entries| {
-        crate::ext_admit::judge_ext_entries(carrier, entries)
-    })
-}
-
-/// `first` unless it is admissible, and then `next()`: the
-/// chains of a message are read in the order upstream reads them, the envelope's
-/// before the body's, and the first offender is the one reported.
-// The union of its callers: the messages that carry a body, which have a second chain to read
-// (the Declare, Push, Request and Response verdicts, and the Request and Response read where
-// their frame lies).
-#[cfg(any(
-    all(
-        feature = "codec-declare",
-        any(feature = "alloc", feature = "rx-control")
-    ),
-    all(feature = "codec-push", any(feature = "alloc", feature = "rx-push")),
-    all(
-        feature = "alloc",
-        any(feature = "codec-request", feature = "codec-response")
-    ),
-    all(
-        feature = "codec-frame",
-        any(
-            feature = "codec-request",
-            all(feature = "codec-response", feature = "rx-response")
-        ),
-        any(
-            test,
-            feature = "session-unicast",
-            all(feature = "session-multicast", not(feature = "alloc"))
-        )
-    )
-))]
-fn then_judge(
-    first: crate::ext_admit::ExtAdmission,
-    next: impl FnOnce() -> crate::ext_admit::ExtAdmission,
-) -> crate::ext_admit::ExtAdmission {
-    match first {
-        crate::ext_admit::ExtAdmission::Admissible => next(),
-        other => other,
-    }
-}
-
 #[cfg(feature = "alloc")]
 impl NetworkMessage {
     /// What a conforming PARTICIPANT must do with this message's extension
@@ -567,7 +434,7 @@ impl NetworkMessage {
                 judge_push_chains(push.extensions.entries(), || match &push.body {
                     B::CodecZenohMsgPut(put) | B::Default { body: put, .. } => judge_put_chain(put),
                     B::CodecZenohMsgDel(del) => {
-                        judge_chain(C::Zenoh(Z::Del), del.extensions.entries())
+                        crate::ext_admit::judge_chain(C::Zenoh(Z::Del), del.extensions.entries())
                     }
                 })
             }
@@ -581,9 +448,10 @@ impl NetworkMessage {
                             R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
                                 judge_put_chain(put)
                             }
-                            R::CodecZenohMsgDel(del) => {
-                                judge_chain(C::Zenoh(Z::Del), del.extensions.entries())
-                            }
+                            R::CodecZenohMsgDel(del) => crate::ext_admit::judge_chain(
+                                C::Zenoh(Z::Del),
+                                del.extensions.entries(),
+                            ),
                         };
                         ResponseBodyChain::Reply {
                             reply: reply.extensions.entries(),
@@ -595,13 +463,17 @@ impl NetworkMessage {
                 judge_response_chains(response.extensions.entries(), body)
             }
             #[cfg(feature = "codec-response-final")]
-            Self::ResponseFinal(done) => {
-                judge_chain(C::Network(N::ResponseFinal), done.extensions.entries())
+            Self::ResponseFinal(done) => crate::ext_admit::judge_chain(
+                C::Network(N::ResponseFinal),
+                done.extensions.entries(),
+            ),
+            Self::Oam(oam) => {
+                crate::ext_admit::judge_chain(C::Network(N::Oam), oam.extensions.entries())
             }
-            Self::Oam(oam) => judge_chain(C::Network(N::Oam), oam.extensions.entries()),
-            Self::Interest(interest) => {
-                judge_chain(C::Network(N::Interest), interest.extensions.entries())
-            }
+            Self::Interest(interest) => crate::ext_admit::judge_chain(
+                C::Network(N::Interest),
+                interest.extensions.entries(),
+            ),
             #[cfg(feature = "codec-declare")]
             Self::Declare(declare) => {
                 use crate::ext_admit::DeclarationKind as K;
@@ -621,31 +493,11 @@ impl NetworkMessage {
                         (K::Final, d.extensions.entries())
                     }
                 };
-                judge_declare_chains(declare.extensions.entries(), kind, chain)
+                crate::ext_admit::judge_declare_chains(declare.extensions.entries(), kind, chain)
             }
             Self::Unknown { .. } => ExtAdmission::Unjudged,
         }
     }
-}
-
-/// The verdict on a Declare: its own chain, then the chain of the declaration it
-/// carries (`kind`). One rule for the owned message
-/// ([`NetworkMessage::ext_admission`]) and the Declare read where its frame lies
-/// (`declare_view_admission`), so the receive path that delivers a Declare
-/// without copying it refuses exactly what the one that copies it does.
-#[cfg(all(
-    feature = "codec-declare",
-    any(feature = "alloc", feature = "rx-control")
-))]
-fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
-    outer: Option<&[E]>,
-    kind: crate::ext_admit::DeclarationKind,
-    chain: Option<&[E]>,
-) -> crate::ext_admit::ExtAdmission {
-    use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    then_judge(judge_chain(C::Network(N::Declare), outer), || {
-        judge_chain(C::Declaration(kind), chain)
-    })
 }
 
 /// [`NetworkMessage::ext_admission`] for a Declare read where its frame lies.
@@ -655,7 +507,7 @@ fn judge_declare_chains<E: crate::ext_view::ExtEntryView>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -678,7 +530,7 @@ fn declare_view_admission(
             (K::Final, d.extensions.entries())
         }
     };
-    judge_declare_chains(declare.extensions.entries(), kind, chain)
+    crate::ext_admit::judge_declare_chains(declare.extensions.entries(), kind, chain)
 }
 
 /// [`NetworkMessage::ext_admission`] for an Interest read where its frame lies.
@@ -687,7 +539,7 @@ fn declare_view_admission(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -696,7 +548,7 @@ fn interest_view_admission(
     interest: &wz_codecs::lent::Interest<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    judge_chain(C::Network(N::Interest), interest.extensions.entries())
+    crate::ext_admit::judge_chain(C::Network(N::Interest), interest.extensions.entries())
 }
 
 /// [`NetworkMessage::ext_admission`] for a ResponseFinal read where its frame
@@ -707,7 +559,7 @@ fn interest_view_admission(
     feature = "rx-response",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -716,7 +568,7 @@ fn response_final_view_admission(
     response_final: &wz_codecs::lent::ResponseFinal<'_>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    judge_chain(
+    crate::ext_admit::judge_chain(
         C::Network(N::ResponseFinal),
         response_final.extensions.entries(),
     )
@@ -728,14 +580,14 @@ fn response_final_view_admission(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
 ))]
 fn oam_view_admission(oam: &wz_codecs::lent::Oam<'_>) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    judge_chain(C::Network(N::Oam), oam.extensions.entries())
+    crate::ext_admit::judge_chain(C::Network(N::Oam), oam.extensions.entries())
 }
 
 /// The verdict on a Push: its own chain, then the chain of the body it carries
@@ -749,7 +601,10 @@ fn judge_push_chains<E: crate::ext_view::ExtEntryView>(
     body: impl FnOnce() -> crate::ext_admit::ExtAdmission,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N};
-    then_judge(judge_chain(C::Network(N::Push), outer), body)
+    crate::ext_admit::then_judge(
+        crate::ext_admit::judge_chain(C::Network(N::Push), outer),
+        body,
+    )
 }
 
 /// The verdict on the chain of a Put body, its shared-memory marker included at the
@@ -771,7 +626,7 @@ fn judge_put_chain<S: wz_codecs::msg_put::MsgPutStorage>(
     put: &wz_codecs::msg_put::MsgPutOwned<S>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
-    judge_entries(C::Zenoh(Z::Put), crate::put_payload::chain_entries(put))
+    crate::ext_admit::judge_entries(C::Zenoh(Z::Put), crate::put_payload::chain_entries(put))
 }
 
 /// The verdict on the chain of a Put read as its view, its shared-memory marker included at the
@@ -790,7 +645,7 @@ fn judge_put_view(put: &wz_codecs::msg_put::MsgPutView<'_>) -> crate::ext_admit:
     use crate::ext_admit::{ExtCarrier as C, ZenohBody as Z};
     // A Put holds its shared-memory marker as a place among its entries, so the walk yields the
     // marker at that place, as `judge_put_chain` reads a held Put.
-    judge_entries(
+    crate::ext_admit::judge_entries(
         C::Zenoh(Z::Put),
         crate::put_payload::view_chain(put).map(|(rest, place)| {
             use crate::put_payload::ChainEntry;
@@ -838,15 +693,20 @@ fn judge_request_chains<E: crate::ext_view::ExtEntryView, Q: crate::ext_view::Ex
     body: RequestBodyChain<'_, E, Q>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
-    then_judge(judge_chain(C::Network(N::Request), outer), || match body {
-        #[cfg(feature = "request-put-del")]
-        RequestBodyChain::Put(verdict) => verdict,
-        #[cfg(feature = "request-put-del")]
-        RequestBodyChain::Del(chain) => judge_chain(C::Zenoh(Z::Del), chain),
-        RequestBodyChain::Query(chain) => judge_chain(C::Zenoh(Z::Query), chain),
-        #[cfg(not(feature = "request-put-del"))]
-        RequestBodyChain::Never(_, never) => match never {},
-    })
+    crate::ext_admit::then_judge(
+        crate::ext_admit::judge_chain(C::Network(N::Request), outer),
+        || match body {
+            #[cfg(feature = "request-put-del")]
+            RequestBodyChain::Put(verdict) => verdict,
+            #[cfg(feature = "request-put-del")]
+            RequestBodyChain::Del(chain) => crate::ext_admit::judge_chain(C::Zenoh(Z::Del), chain),
+            RequestBodyChain::Query(chain) => {
+                crate::ext_admit::judge_chain(C::Zenoh(Z::Query), chain)
+            }
+            #[cfg(not(feature = "request-put-del"))]
+            RequestBodyChain::Never(_, never) => match never {},
+        },
+    )
 }
 
 /// The chains a Response's body carries, for [`judge_response_chains`]: a
@@ -874,12 +734,16 @@ fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
     body: ResponseBodyChain<'_, E>,
 ) -> crate::ext_admit::ExtAdmission {
     use crate::ext_admit::{ExtCarrier as C, NetworkEnvelope as N, ZenohBody as Z};
-    then_judge(judge_chain(C::Network(N::Response), outer), || match body {
-        ResponseBodyChain::Reply { reply, data } => {
-            then_judge(judge_chain(C::Zenoh(Z::Reply), reply), || data)
-        }
-        ResponseBodyChain::Err(chain) => judge_chain(C::Zenoh(Z::Err), chain),
-    })
+    crate::ext_admit::then_judge(
+        crate::ext_admit::judge_chain(C::Network(N::Response), outer),
+        || match body {
+            ResponseBodyChain::Reply { reply, data } => crate::ext_admit::then_judge(
+                crate::ext_admit::judge_chain(C::Zenoh(Z::Reply), reply),
+                || data,
+            ),
+            ResponseBodyChain::Err(chain) => crate::ext_admit::judge_chain(C::Zenoh(Z::Err), chain),
+        },
+    )
 }
 
 /// [`NetworkMessage::ext_admission`] for a Request read where its frame lies: the verdict of a
@@ -888,11 +752,18 @@ fn judge_response_chains<E: crate::ext_view::ExtEntryView>(
 #[cfg(all(
     feature = "codec-frame",
     feature = "codec-request",
-    any(test, not(feature = "request-put-del")),
+    // Read by the walk of a build that reads no Put or Del a Request carries, and by the tests of
+    // the reader of one that does.
     any(
-        test,
-        feature = "session-unicast",
-        all(feature = "session-multicast", not(feature = "alloc"))
+        all(test, feature = "request-put-del"),
+        all(
+            not(feature = "request-put-del"),
+            any(
+                all(test, feature = "alloc"),
+                feature = "session-unicast",
+                all(feature = "session-multicast", not(feature = "alloc"))
+            )
+        )
     )
 ))]
 fn request_view_admission(
@@ -903,8 +774,8 @@ fn request_view_admission(
     use wz_codecs::request::RequestViewVariant as B;
     // The rule of [`judge_request_chains`] -- the envelope's chain, then the body's -- over chains
     // that are walked where the frame lies and not held, so no entry is decoded into a slot.
-    then_judge(
-        judge_entries(
+    crate::ext_admit::then_judge(
+        crate::ext_admit::judge_entries(
             C::Network(N::Request),
             request.extensions.as_ref().map(|chain| walked(Some(chain))),
         ),
@@ -912,14 +783,16 @@ fn request_view_admission(
             #[cfg(feature = "request-put-del")]
             B::CodecZenohMsgPut(put) => judge_put_view(put),
             #[cfg(feature = "request-put-del")]
-            B::CodecZenohMsgDel(del) => judge_entries(
+            B::CodecZenohMsgDel(del) => crate::ext_admit::judge_entries(
                 C::Zenoh(Z::Del),
                 del.extensions.as_ref().map(|chain| walked(Some(chain))),
             ),
-            B::CodecZenohQuery(query) | B::Default { body: query, .. } => judge_entries(
-                C::Zenoh(Z::Query),
-                query.extensions.as_ref().map(|chain| walked(Some(chain))),
-            ),
+            B::CodecZenohQuery(query) | B::Default { body: query, .. } => {
+                crate::ext_admit::judge_entries(
+                    C::Zenoh(Z::Query),
+                    query.extensions.as_ref().map(|chain| walked(Some(chain))),
+                )
+            }
             // As in `ext_admission`: a Put or Del body this build does not name is not judged.
             #[cfg(not(feature = "request-put-del"))]
             #[allow(unreachable_patterns)]
@@ -958,8 +831,8 @@ fn response_view_admission(
     // The rule of [`judge_response_chains`] -- the envelope's chain, then a Reply's own before
     // its data's, or an Err's -- over chains that are walked where the frame lies and not held,
     // so no entry is decoded into a slot.
-    then_judge(
-        judge_entries(
+    crate::ext_admit::then_judge(
+        crate::ext_admit::judge_entries(
             C::Network(N::Response),
             response
                 .extensions
@@ -967,36 +840,40 @@ fn response_view_admission(
                 .map(|chain| walked(Some(chain))),
         ),
         || match &response.body {
-            B::CodecZenohReply(reply) | B::Default { body: reply, .. } => then_judge(
-                judge_entries(
-                    C::Zenoh(Z::Reply),
-                    reply.extensions.as_ref().map(|chain| walked(Some(chain))),
-                ),
-                || match &reply.body {
-                    // A Put holds its shared-memory marker as a place among its entries, so the
-                    // walk yields the marker at that place, as `judge_put_chain` reads a held
-                    // Put.
-                    R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => judge_entries(
-                        C::Zenoh(Z::Put),
-                        crate::put_payload::view_chain(put).map(|(rest, place)| {
-                            use crate::put_payload::ChainEntry;
-                            let entries = sce_forge_runtime::codec::Entries::entries(rest);
-                            let at = place.unwrap_or(usize::MAX);
-                            entries
-                                .clone()
-                                .take(at)
-                                .map(ChainEntry::Entry)
-                                .chain(place.map(|_| ChainEntry::Marker))
-                                .chain(entries.skip(at).map(ChainEntry::Entry))
-                        }),
+            B::CodecZenohReply(reply) | B::Default { body: reply, .. } => {
+                crate::ext_admit::then_judge(
+                    crate::ext_admit::judge_entries(
+                        C::Zenoh(Z::Reply),
+                        reply.extensions.as_ref().map(|chain| walked(Some(chain))),
                     ),
-                    R::CodecZenohMsgDel(del) => judge_entries(
-                        C::Zenoh(Z::Del),
-                        del.extensions.as_ref().map(|chain| walked(Some(chain))),
-                    ),
-                },
-            ),
-            B::CodecZenohErr(err) => judge_entries(
+                    || match &reply.body {
+                        // A Put holds its shared-memory marker as a place among its entries, so the
+                        // walk yields the marker at that place, as `judge_put_chain` reads a held
+                        // Put.
+                        R::CodecZenohMsgPut(put) | R::Default { body: put, .. } => {
+                            crate::ext_admit::judge_entries(
+                                C::Zenoh(Z::Put),
+                                crate::put_payload::view_chain(put).map(|(rest, place)| {
+                                    use crate::put_payload::ChainEntry;
+                                    let entries = sce_forge_runtime::codec::Entries::entries(rest);
+                                    let at = place.unwrap_or(usize::MAX);
+                                    entries
+                                        .clone()
+                                        .take(at)
+                                        .map(ChainEntry::Entry)
+                                        .chain(place.map(|_| ChainEntry::Marker))
+                                        .chain(entries.skip(at).map(ChainEntry::Entry))
+                                }),
+                            )
+                        }
+                        R::CodecZenohMsgDel(del) => crate::ext_admit::judge_entries(
+                            C::Zenoh(Z::Del),
+                            del.extensions.as_ref().map(|chain| walked(Some(chain))),
+                        ),
+                    },
+                )
+            }
+            B::CodecZenohErr(err) => crate::ext_admit::judge_entries(
                 C::Zenoh(Z::Err),
                 err.extensions.as_ref().map(|chain| walked(Some(chain))),
             ),
@@ -1892,7 +1769,7 @@ impl<const N: usize> RecordOut for heapless::Vec<NetworkMessage, N> {
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -1962,7 +1839,7 @@ pub(crate) enum RecordForm {
             feature = "rx-push"
         ),
         any(
-            test,
+            all(test, feature = "alloc"),
             feature = "session-unicast",
             all(feature = "session-multicast", not(feature = "alloc"))
         ),
@@ -1995,7 +1872,7 @@ pub(crate) struct PushRead<'f> {
             feature = "rx-push"
         ),
         any(
-            test,
+            all(test, feature = "alloc"),
             feature = "session-unicast",
             all(feature = "session-multicast", not(feature = "alloc"))
         ),
@@ -2037,7 +1914,7 @@ pub(crate) struct PushExts<'f> {
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2186,7 +2063,6 @@ pub(crate) fn for_each_record<'f>(
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
         feature = "alloc",
         feature = "session-unicast",
         feature = "session-multicast"
@@ -2232,10 +2108,13 @@ pub(crate) fn try_for_each_record<'f>(
 /// owned form, and so a lent record is counted as the same record walked owned is, and how a
 /// record is received does not depend on whether the build counts it. An owned record is not
 /// handed to `counted`: its consumer counts it from the owned message it is handed.
+// Its test readers are the heap profile's (`record_walk_tests` and the chain tests), as
+// `try_for_each_record`'s are, so a test build with neither an allocator nor a session has no
+// reader of the walk, and every item the walk alone reads carries the same term.
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2269,7 +2148,7 @@ pub(crate) fn try_for_each_record_while<'f>(
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2286,7 +2165,7 @@ trait EachRecord<'f> {
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2313,7 +2192,7 @@ where
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2486,7 +2365,7 @@ fn walk_kept_records<'f>(
     feature = "codec-frame",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2557,7 +2436,7 @@ fn lend_record<'f>(
 #[cfg(all(
     feature = "codec-frame",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     ),
@@ -2709,7 +2588,7 @@ mod response_read;
         feature = "rx-push"
     ),
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2734,7 +2613,7 @@ fn read_push<'f>(
     feature = "codec-frame",
     feature = "codec-request",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2771,7 +2650,7 @@ fn read_request<'f>(
         feature = "rx-response"
     ),
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2794,7 +2673,7 @@ fn read_response<'f>(
     feature = "rx-response",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2815,7 +2694,7 @@ fn read_response_final<'f>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2837,7 +2716,7 @@ fn read_declare<'f>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -2857,7 +2736,7 @@ fn read_interest<'f>(
     feature = "rx-control",
     feature = "rx-lent-control",
     any(
-        test,
+        all(test, feature = "alloc"),
         feature = "session-unicast",
         all(feature = "session-multicast", not(feature = "alloc"))
     )
@@ -6890,6 +6769,7 @@ mod attachment_identity_tests {
 // extension.
 #[cfg(all(
     test,
+    feature = "alloc",
     feature = "codec-push",
     feature = "codec-request",
     feature = "codec-response",

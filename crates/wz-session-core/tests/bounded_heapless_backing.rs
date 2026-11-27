@@ -267,13 +267,20 @@ fn local_token_table_refuses_the_token_past_max_local_tokens_without_allocating(
 // session's table next to it is untouched by the first one filling its own.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "codec-declare")]
+// Compiled where one of the tables below is: each table's module brings the imports it alone reads,
+// so a build with the declare codec and none of those tables holds no fixture that nothing calls.
+#[cfg(all(
+    feature = "codec-declare",
+    any(
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "liveliness-subscriber",
+        feature = "pubsub-put"
+    )
+))]
 mod peer_tables {
     use super::*;
-    use wz_session_core::bounded::Profile;
-    use wz_session_core::id_map::PeerAliases;
     use wz_session_core::transport_profile::owned::DeclareOwned;
-    use wz_session_core::wireexpr_resolve::MappingSpaces;
     use wz_session_core_test_support as fx;
 
     /// The owned `Declare` messages a peer would send, built before any window:
@@ -287,7 +294,10 @@ mod peer_tables {
     #[cfg(feature = "declare-subscriber")]
     mod subscribers {
         use super::*;
+        use wz_session_core::bounded::Profile;
         use wz_session_core::declare::subscriber::{RemoteSubscriberPeer, RemoteSubscriberTable};
+        use wz_session_core::id_map::PeerAliases;
+        use wz_session_core::wireexpr_resolve::MappingSpaces;
 
         fn sub(id: u64, ke: &str) -> DeclareOwned {
             fx::declare_envelope_decl_subscriber(fx::decl_subscriber(id, 0, Some(ke)))
@@ -357,7 +367,10 @@ mod peer_tables {
     #[cfg(feature = "declare-queryable")]
     mod queryables {
         use super::*;
+        use wz_session_core::bounded::Profile;
         use wz_session_core::declare::queryable::{RemoteQueryablePeer, RemoteQueryableTable};
+        use wz_session_core::id_map::PeerAliases;
+        use wz_session_core::wireexpr_resolve::MappingSpaces;
 
         fn qbl(id: u64, ke: &str) -> DeclareOwned {
             fx::declare_envelope_decl_queryable(fx::decl_queryable(id, 0, Some(ke)))
@@ -420,8 +433,11 @@ mod peer_tables {
     #[cfg(feature = "liveliness-subscriber")]
     mod tokens {
         use super::*;
+        use wz_session_core::bounded::Profile;
         use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleSink};
         use wz_session_core::declare::liveliness_subscriber::LivelinessSubscriberRegistry;
+        use wz_session_core::id_map::PeerAliases;
+        use wz_session_core::wireexpr_resolve::MappingSpaces;
 
         struct NoopTokenSink;
         impl LivelinessSampleSink for NoopTokenSink {

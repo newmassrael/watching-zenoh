@@ -405,7 +405,7 @@ pub(super) fn read_del<'f, S: EntrySink<'f>>(
     sink: &mut S,
 ) -> Result<ExtAdmission, CodecError> {
     MsgDelView::decode_into(cursor, del)?;
-    Ok(super::judge_entries(
+    Ok(crate::ext_admit::judge_entries(
         ExtCarrier::Zenoh(ZenohBody::Del),
         del.extensions.as_ref().map(|chain| {
             crate::ext_view::walked(Some(chain)).inspect(|entry| sink.del_entry(entry))

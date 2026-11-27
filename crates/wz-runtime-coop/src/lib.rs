@@ -19,134 +19,43 @@
     )
 )]
 
-//! wz-runtime-coop — Phase W MCU profile.
+//! wz-runtime-coop: the cooperative runtime of the MCU profile and of the C ABI's cooperative
+//! engine, the sibling of `wz-runtime-tokio` for the runtime-services contract. Generic code over
+//! `R: wz_runtime_core::Runtime, T: wz_runtime_core::TimeSource` composes against it as it does
+//! against the AP runtime. The crate is `#![no_std]` in every form.
 //!
-//! This crate is the MCU sibling of [`wz-runtime-tokio`] for the §5.P
-//! runtime-services-tier contract. The R311au scope (C) entry landed
-//! the [`sync`] module (`critical_section::Mutex<RefCell<T>>` aliases)
-//! under `#![no_std]` without `alloc`. R311av lands the `Runtime`
-//! trait impl behind the `alloc` feature: a self-rolled cooperative
-//! task pool ([`executor`]) + [`join_handle`] handle type + own
-//! [`ClockSource`] / [`CoopTime`] in [`time`], satisfying the
-//! `wz_runtime_core::Runtime` and `wz_runtime_core::TimeSource`
-//! contracts so generic code over `R: Runtime, T: TimeSource`
-//! composes against this profile identically to the AP one.
+//! ## What each feature compiles
 //!
-//! ## Feature gate split
+//! The parts a feature compiles are named here as code and not linked, since a link to an item
+//! the documented build leaves out does not resolve; each module's own documentation says what it
+//! does.
 //!
-//! - **Default (no features)**: `sync` only. The R311au cross-compile
-//!   surface — every Phase W MCU target (`thumbv6m`, `thumbv7m`,
-//!   `thumbv7em-hf`, `thumbv8m.{base,main}{,-hf}`, `riscv32imac`)
-//!   builds the sync alias under `#![no_std]` with no allocator
-//!   requirement. This is the Layer G.4 lane.
-//! - **`alloc`**: adds the [`executor`] + [`join_handle`] +
-//!   [`runtime_impl`] + [`time`] modules. The `wz-runtime-core` dep
-//!   activates (with its own `alloc` feature) and the
-//!   [`CoopRuntime`] + [`CoopJoinHandle`] + [`CoopTime`] surface
-//!   becomes available. Layer G.4-alloc covers the cross-compile.
-//!
-//! ## Why this scope shape (R63 anti-stub honesty)
-//!
-//! Every item exported under the `alloc` feature is a real
-//! implementation:
-//!
-//! - `CoopRuntime::spawn` writes the user future into a cell of the
-//!   runtime's task table and returns a real `CoopJoinHandle<T>`
-//!   whose `poll` reads the output the task left in that cell, or
-//!   registers a waker if the task has not yet completed.
-//! - [`CoopRuntime::run_until_idle`] is a real polling loop: it
-//!   atomic-swaps each task's `wake_flag` to false, polls every
-//!   task that was ready, and re-stores Pending futures. Tasks that
-//!   self-wake (e.g. `SleepFuture::poll` returning Pending +
-//!   `cx.waker().wake_by_ref()`) become ready for the *next*
-//!   `run_until_idle` call; this round does not busy-spin inside
-//!   one call.
-//! - `CoopTime::now_monotonic_ms` reads the user-supplied
-//!   `ClockSource::now_us(&self)` and divides by 1000 against the
-//!   per-instance epoch — no fake constant, no `unimplemented!()`.
-//!
-//! The R53/R58/R63 retrospect (NOP `CoopRuntime::spawn` doc-around-
-//! the-hack pattern) is honoured by *only* shipping real code: a
-//! reader who builds with `--features alloc` and calls
-//! `runtime.spawn(future).await` receives that future's output,
-//! not silently-discarded work.
-//!
-//! ## What R311av deliberately defers
-//!
-//! - **`embedded-time` ecosystem adapter**: own [`ClockSource`]
-//!   trait only. `embedded-time` v0.13 has been stalled since 2024;
-//!   the composable-framework north star prefers a self-contained
-//!   trait + optional adapter feature in a future round over a
-//!   maintenance-mode external dep.
-//!
-//! ## What R311bc closes
-//!
-//! - **Real timer queue**: [`timer::TimerQueue`] lands as a
-//!   deadline-keyed `BinaryHeap<Reverse<TimerEntry>>`; sleep /
-//!   timeout futures register `(deadline_us, Waker)` on first
-//!   Pending poll instead of self-waking. `CoopRuntime::try_new`
-//!   takes a [`ClockSource`] (breaking sig from R311av's
-//!   `CoopRuntime::try_new()`); [`CoopRuntime::run_until_idle`] calls
-//!   `timers.pop_expired(clock.now_us())` before polling the task
-//!   pool so wake-on-deadline becomes the natural shape. The
-//!   deploy main loop can now `wfi()`-sleep between IRQs because
-//!   the executor pass is genuinely idle when no task is ready and
-//!   no timer has elapsed; previously the self-wake busy-poll kept
-//!   the executor active every cycle.
-//!
-//! ## What R311bd closes
-//!
-//! - **`CoopJoinHandle::abort()`**: AP/MCU parity with
-//!   `wz_runtime_tokio::TokioJoinHandle::abort`. `abort()` raises
-//!   the task cell's cancel flag (the next `run_until_idle` sweeps
-//!   the cancelled cells and drops their futures) AND marks the
-//!   cell aborted, so an awaiting handle resolves to
-//!   `Err(RuntimeError::JoinCancelled)` at once without needing the
-//!   executor pass to land. A task that already ended keeps its
-//!   result; idempotent under repeated abort calls.
-//!
-//! ## Layer G.4 / G.4-alloc cross-compile gate
-//!
-//! `scripts/run-ci.sh` Layer G exercises both lanes:
-//!
-//! - **G.4** (R311au): `cargo build -p wz-runtime-coop` (no
-//!   features) on every Phase W target. Sync-only path; no
-//!   wz-runtime-core dep pulled in. Covers all 7 targets including
-//!   `thumbv6m-none-eabi` (Cortex-M0+ / ARMv6-M).
-//! - **G.4-alloc** (R311av): `cargo build -p wz-runtime-coop
-//!   --features alloc` on the 6-target subset that supports atomic
-//!   pointer CAS. Pulls in wz-runtime-core (its own `alloc` feature
-//!   on) and exercises the executor + Runtime impl modules.
-//!
-//! ## Why thumbv6m-none-eabi is excluded from G.4-alloc
-//!
-//! Cortex-M0+ (ARMv6-M) lacks LDREX/STREX instructions, so
-//! `target_has_atomic = "ptr"` is false and `alloc::sync::Arc` is
-//! gated out by the standard library. The executor's `Arc<
-//! ExecutorState>` + `Arc<AtomicBool>` waker storage cannot be
-//! satisfied by `core::alloc::sync` alone on this target.
-//!
-//! Adding a polyfill (`portable-atomic` / `atomic-polyfill` with
-//! the `critical-section` feature) would close the gap by emulating
-//! CAS via critical sections, but pulling such a dep into the MCU
-//! profile's runtime crate is an architectural decision that
-//! deserves its own round — the polyfill changes the cost model of
-//! every atomic operation in the executor (every wake_flag access
-//! becomes a `critical_section::with` IRQ-disable on M0+), and the
-//! tradeoff against just compiling without alloc on M0+ deploys is
-//! a deploy-time choice. R311az+ carries the polyfill decision; for
-//! R311av the M0+ deploys stay on the no-alloc sync-only build.
-//!
-//! Both lanes SKIP if the matching rustup target is not installed
-//! (the developer machine does not need cross-compile interest to
-//! build the workspace).
-//!
-//! [`wz-runtime-tokio`]: ../wz_runtime_tokio/index.html
-//! [`Runtime`]: wz_runtime_core::Runtime
-//! [`ClockSource`]: time::ClockSource
-//! [`CoopRuntime`]: runtime_impl::CoopRuntime
-//! [`CoopJoinHandle`]: join_handle::CoopJoinHandle
-//! [`CoopTime`]: time::CoopTime
+//! - Always: the critical sections ([`cs`]), the lock aliases over them ([`sync`]) and the seam a
+//!   multicast group session asks of its network stack ([`group_transport`]). This is the whole
+//!   crate a build that names none of the features below has.
+//! - `runtime`: the runtime itself, present over one of two forms of its tables. `alloc` is the
+//!   heap form, `session-slot` the static one an image declares; `runtime` with neither is
+//!   refused by a `compile_error!`. It compiles the task pool (`executor`), the handle of a
+//!   spawned task (`join_handle`), the `!Send` view of the pool (`local`), the clock seam and
+//!   the time source over it (`time`), the deadline-keyed timer queue (`timer`) and the
+//!   `Runtime` implementation (`runtime_impl`), re-exported here as `CoopRuntime`,
+//!   `CoopJoinHandle`, `CoopLocalSet`, `CoopTime` and `ClockSource`. A pass of the runtime
+//!   (`CoopRuntime::run_until_idle`) wakes the timers whose deadline passed before it polls the
+//!   ready tasks, so it is idle when no task is ready and no deadline passed, and a deploy loop
+//!   may sleep until the next interrupt between passes. On a target without the atomic operations
+//!   a shared count needs (Cortex-M0+), the runtime's atomics are emulated over the critical
+//!   sections (`atomic`, `portable-atomic`).
+//! - `session-unicast` (with `runtime`): the session tier over this runtime: the
+//!   `SessionRuntime` binding (`session_runtime`), the unicast drive loop (`session_drive`), the
+//!   datagram and stream links written once for every stack with BSD-style sockets (`udp_link`,
+//!   `stream_link`, `ip_stack`, `link_storage`) and the reader of an endpoint's text
+//!   (`locator_text`). The faces, the transport and the dial of the heap profile's engine
+//!   (`faces`, `transport`, `dial`) need `alloc` and leave `session-slot` out.
+//! - `reassembly`: the reassembly of fragmented messages (`reassembly_rx`, over the pool the SCE
+//!   document states, `reassembly_pool_mcu`), which takes its clock from the caller and so needs
+//!   no runtime.
+//! - `scouting-static` and `switchboard`: the session core's static scouting and switchboard
+//!   ingress, re-exported so an image reaches them through its runtime crate.
 
 // Fixed-memory step S9c -- under `session-slot` the crate does not link `alloc` at
 // all, so a use that creeps back into the slot profile is a compile error and not a
