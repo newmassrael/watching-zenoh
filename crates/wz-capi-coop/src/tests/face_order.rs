@@ -6,7 +6,7 @@
 //! (`wz_runtime_coop::sync::NoFaceWait`), which a debug build on a host fails at once. The one
 //! wait between the two runs from a face to the session's lock, so no cycle closes.
 
-use wz_runtime_coop::sync::{FacePlace, Lend, LockKind};
+use wz_runtime_coop::sync::{FacePlace, Lend};
 
 use super::{open, CatchAll, Router};
 use crate::form::SessionLock;
@@ -43,6 +43,7 @@ fn the_sessions_lock_is_taken_inside_a_faces_lend() {
 #[cfg(feature = "threads")]
 #[test]
 fn a_face_is_tried_and_not_waited_on_under_the_sessions_lock() {
+    use wz_runtime_coop::sync::LockKind;
     let router = Router::start(CatchAll::None);
     let engine = open(&router);
     let place = face_holding(5);
