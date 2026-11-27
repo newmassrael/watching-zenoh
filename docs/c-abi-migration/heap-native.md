@@ -4,10 +4,13 @@ Status: design of the lane and its first steps. Landed on the lane's branch: N0 
 contract held on every policy), N1 (where a policy's rows lie and when its tables take their
 memory are facts of `Storage`), N2 (the policy `OnUse`, its column `FirstUse` and its keys
 `HeapKey` over a `KeyBudget`, held to the same contract) and N3a (the session's tables made
-counted on `OnUse`). The owner's ruling of 2026-11-27 chose the form of section 6 (c), per
-preset: the cooperative engine's on-use form (N3b to N3e), the doors' (N4) and the switch with its
+counted on `OnUse`), then N3b (every other table a face and the application hold, counted on
+`OnUse`, and the two places where a table of that policy is asked for room before the push that
+takes its memory). The owner's ruling of 2026-11-27 chose the form of section 6 (c), per
+preset: the cooperative engine's on-use form (N3c to N3e), the doors' (N4) and the switch with its
 guards (section 9) are designed here and not written yet, because the engine has no form on
-`OnUse` to select and a switch that cannot be built is not declared. Nothing here was built or
+`OnUse` to select and a switch that cannot be built is not declared; section 11 reads what N3c has
+to give a home to, and why it is the next step and not a part of N3b. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
 instructions is a reading of the code, not a run. Line references are to the tree this lane
@@ -259,7 +262,7 @@ session takes its row at its open, as every policy's does.
 | **N1 (landed, `5acca4fdfd`)** | `Storage::ROWS_STAY_APART` ("a row lies apart and never moves") read by `row_may_lie_in` and by the engine's assertion of where its rows lie; `Storage::TAKEN` (`Taken`) states when each policy's tables take their memory, and the engine asserts its `RowPolicy` takes it at open | `bounded.rs`, `session_tables.rs`, `crates/wz-capi-coop/src/lib.rs`, `engine.rs` | 0 (constants and a compile-time assertion) | 0 | 0 |
 | **N2 (landed, `64609f48a3`)** | `OnUse`, `FirstUse`, `HeapKey`, `KeyBudget` and its handle `BudgetKeys`; `SeqBacking::make_room`, so a table that grows two columns as one makes both their rooms before it pushes to either; the N0 bodies, the sequence bodies of `bounded.rs` and the key contract run on it | `bounded.rs`, `slot_map.rs`, `on_use.rs` (new) | 0 (nothing in a case names it) | 0 | 0 |
 | **N3a (landed, `1243d2623f`)** | the session's tables made counted on `OnUse` (`SessionTables::counted`, `Presence::counted`, `CountedTable`, `HeldReplies::counted`) | `session_tables.rs`, `reply_hold.rs` | 0 (no engine makes them yet) | 0 | 0 |
-| N3b | the session core's other tables a face holds, counted on `OnUse`: `PeerTables::<OnUse>`, the observer (`SlotObserverOf`), the gets (`Requesters`), `LentRoom`, `ReplyStage`, `PeerTokens`, each a constructor as N3a's from the limits the open resolved | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `declare/liveliness_subscriber.rs` | 0 | 0 | 0 |
+| **N3b (landed, `ffde81a72e`, `b83c368fbd`, `3da7536dde`)** | the session core's other tables a face and the application hold, counted on `OnUse`, each a constructor as N3a's from the limits the open resolved: `PeerTables::counted` and `count_rows` (the in-place form, as `lend_rows`), `SubscriberPeer::counted`, `ReplyStage::counted`, `FinalStage::counted`, `Requesters::counted` (`ReplyRegistry`, `LivelinessGetRegistry`), `SlotObserverOf::counted` over `CountedTables` (the watcher lists, `LocalTokenRegistry`); `LentRoom` and `PeerTokens` need none (on `OnUse` the composing room is inline, `ComposeInline`, and a peer's tokens a `FixedIdMap` whose keys `keep_keys_in` hands). `ReplyStage::stage_parts` makes both its columns' rooms before it writes either, and the query dispatch asks `FinalStaging::make_room` before a query runs, on a first-use policy (each arm folds away on every other) | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `reply.rs`, `decl_sink.rs`, `declare/{subscriber,queryable,liveliness,liveliness_get,local_token}.rs`, `query.rs`, `query/{in_place,pinned}.rs` | 0 (no case names them; the two room arms fold away on the D12 policies) | 0 | 0 |
 | N3c | the cooperative engine on `OnUse` under `tables-on-use`: `RowPolicy = OnUse`, the registry made by value (a third form beside `RegistryRegion` and the arena's), the open with no plan, no region and no lender (3.1), the session's `KeyBudget` in the boxed engine state (3.2); the moment assertion of N1 reads `AtFirstUse` in that form | `crates/wz-capi-coop` (`lib.rs`, `engine.rs` `lend_session` and `assemble`, `engine/registry.rs`, `registry/placed.rs`; `arena.rs` and `region.rs` not compiled in the form) | -4,500 to -8,200 (3.1, 3.2, 3.3, 3.5) | 0 to -6 (3.2); +3 at worst (3.5) | section 5 |
 | N3d | link memory on the heap arm alone (3.6) | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
 | N3e | a key held apart from every row (an object outside the lock: `KeyRef::hold_apart`, `KeysLocked::adopt`, `SampleView::keyexpr_held`) as a `HeapKey` clone taken and let go of under the lock, read by its text outside it | `key_arena.rs` beside `on_use.rs`, `sink.rs`, the engine's object paths | -200 to +200 | 0 | 0 |
@@ -401,9 +404,51 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   end. Red at the build if `OnUse::ROWS_STAY_APART` is `false` (the `const` assertion of
   `begin_subscriber`), and at the run if a retired row leaves its slot before its last call ends.
 
+### 7.4 N3b
+
+- `reply_stage::tests::on_first_use::*`: the fifteen stage bodies every policy runs (the `Final`s'
+  fill, drain, backing and clear; the replies' fill, payload bound, exchange, arena, drain and the
+  fields each build keeps) on `OnUse`. Red if `FirstUse` moves the rows a drain kept, or a bulk
+  write of the stage's bytes lands before its room is made.
+- `reply_stage::tests::an_on_use_stage_takes_its_memory_at_its_first_reply_and_holds_its_counts`.
+  Red if `ReplyStage::counted` makes its rows of the build's bound (`BoundedVec::default()` in
+  place of `BoundedVec::counted(replies)`), or a column takes its memory when the stage is made.
+- `reply_stage::tests::an_on_use_stage_refuses_a_reply_past_its_count_of_bytes`. Red if the bytes
+  are counted by the build's bound (`arena: BoundedVec::counted(bytes)` dropped).
+- `reply_stage::tests::an_on_use_final_stage_takes_its_rows_at_its_first_final_and_holds_its_count`.
+  Red if `FinalStage::counted` ignores `rows`.
+- `peer_tables::on_use_tests::on_use_peer_tables_refuse_past_their_counts_and_keep_their_rows_across_a_drain`.
+  Red if `count_rows` makes the reply stage, the `Final`s or the liveliness staging of the
+  build's bound.
+- `peer_tables::on_use_tests::an_on_use_peers_keys_are_counted_against_the_budget_and_given_back`
+  (`codec-declare`, `declare-subscriber`). Red if `count_rows` does not hand the tables the
+  budget (`keep_keys_in`), or a key's bytes are not given back with the forgotten peer.
+- `slot_observer::on_use_tests::an_on_use_observer_holds_the_subscriptions_its_count_gives_it`.
+  Red if `SlotObserverOf::counted` makes the table set by `Default` rather than
+  `CountedTables::counted`, or does not hand it the budget.
+- `slot_observer::on_use_tests::on_use_watcher_lists_hold_the_sessions_count_and_refuse_one_more`
+  (`declare-subscriber`). Red if `DeclObserverPair::counted` ignores `rows`.
+- `slot_observer::on_use_tests::on_use_requesters_refuse_a_get_past_their_count_and_count_its_key`.
+  Red if `ReplyRegistry::counted` ignores `rows` or `keys`.
+- `slot_observer::on_use_tests::on_use_liveliness_gets_hold_their_count` (`liveliness-get`). Red
+  if `LivelinessGetRegistry::counted` ignores `rows`.
+- `reply_stage::tests::making_room_for_a_final_takes_the_on_use_rows_before_anything_is_owed`.
+  Red if `FinalStage::make_room` answers `has_room` without taking the rows on `OnUse`; the four
+  dispatch sites (`query.rs`, `query/in_place.rs` twice, `query/pinned.rs`) ask it in place of
+  `has_room`.
+- Not tested: the arms that refuse a reply or a query whose row the allocator would not give
+  (`stage_parts`, `make_room`); only a refusing allocator reaches them, and the crate's tests run
+  on the process's.
+
 ## 8. What the main session runs
 
-Nothing of N1, N2 or N3a was built or run by this lane.
+Nothing of N1, N2, N3a or N3b was built or run by this lane.
+
+- N3b, with the crate's default features: `cargo test -p wz-session-core --lib reply_stage::tests`
+  51 (32 before: fifteen `on_first_use` bodies and four tests of the counted stages added);
+  `cargo test -p wz-session-core --lib on_use_tests`: 3 (one in `peer_tables`, two in
+  `slot_observer`). With `--features declare-subscriber,liveliness-get` the same filter runs 6
+  (the key budget of a peer's tables, the watcher lists, the liveliness gets).
 
 - `cargo test -p wz-session-core --lib slot_map::tests`: 49 tests with the crate's default
   features (46 after N0, three added by N2).
@@ -560,3 +605,42 @@ Every pico case is the D12 form, and so is every case of the size ledger (C1cs:
 - A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan`, where a listening
   session's faces come and go: on `OnUse` each face's tables are counted at its attach (N3b's
   constructors), with no pool lent at open.
+
+## 11. What N3c has to give a home to
+
+N3b ends where the session core's tables end. N3c is the open of the cooperative engine on
+`OnUse`, and the open places far more in the one block it reserves than those tables: "no plan, no
+region, no lender, no arena" (3.1) means each tenant below gets a home of its own before `arena.rs`
+and `region.rs` leave the form. Read off `lend_session` and `assemble` at `6cded4d63b`
+(`crates/wz-capi-coop/src/engine.rs:898`, `:6672`); line references in this section are to that
+tree.
+
+| tenant | today | the on-use form |
+|--------|-------|-----------------|
+| the registry and its rows | `RegistryRegion`, a field of `StateRegion` placed by the region's walk (`engine/registry/placed.rs`, bound at `engine.rs:1126`), or `Registry::new` over the arena (`runtime-plan`) | a third form made by value: `App` by `SlotObserverOf::counted`, each `FaceTables` by `PeerTables::count_rows` and `Requesters::counted` (N3b), the sets a `BoundedVec::<FaceTables, MAX_FACE_SETS, OnUse>::counted` |
+| the key arena | a `KeySpace` of the region (`StateRegion::place`, `engine.rs:974`) or of the arena (`lend.keys`), then `SessionState::keys` | a `KeyBudget` in the boxed state; every reader of `session.keys` changes with it: `keys_locked` (`engine.rs:1683`, `:2662`, `KeysLocked::vouched` over a `KeySpace`), `key_counts` (`:7353`), `key_arena`, which answers the port's `SessionKeys` (`:11052`), `Round::reads_keys_in(KeySpace)` (`crates/wz-session-core/src/round.rs:1564`), and the registry's `keys: KeySpace` parameters (`engine/registry.rs:263`, `:811`, `:2253`, `:2269`, `:2293`) |
+| the region's other places (`StatePlaces`, `engine/state_places.rs:82`) | the registry's and the Router's lend cells, the round and its rows, the gets' and the queries' planes, the face plane, the rooms' places, the plain tables' rows (`StatePlaces::tables`, `rooms`, `gets`, `round`, `steps`, `queries`, `faces`, `engine.rs:1002` to `:1085`, `:6801`) | a value each in the boxed state, the round's rows and the plain tables counted |
+| the transport's tables | the links' buffers and cells, the reassembly chains and the endpoints' texts, lent by the plan (`plan.transport().lent_from`) and handed to the stack (`lend_buffers`, `lend_cells`, `write_into`) | N3d: a link's buffers taken at its dial (`heap_head`), a chain's buffer at its first fragment, the endpoints' texts by value |
+| the runtime, the engine and the rooms | `runtime_place`, `engine_place` and `LinkRooms::init_at` in the arena (`engine.rs:6733`) | boxed: the engine (`Shared::<CoopEngine>`), the runtime's task and timer tables, the rooms |
+| the ABI's places | the handle place, the entity places and the lodgings, held after every table (`ArenaPlan::holding`) | N4: each object from the allocator, counted against its kind |
+
+The order that builds at each step:
+
+1. The registry and the key arena out of the region: an on-use twin of `StateRegion` whose
+   registry is made by value and whose keys are a `KeyBudget`, every other tenant still the
+   arena's; `RowPolicy` is `OnUse` under `tables-on-use` and its moment assertion `AtFirstUse`
+   (9.2, 1). The size case of section 10 is not read yet: the region's other places and the arena
+   are still linked.
+2. The region's other places into the boxed state; `region.rs` leaves the form.
+3. N3d, then the runtime, the engine and the rooms boxed; `arena.rs` leaves the form and the
+   size case reads group A's figure.
+4. N4, then N5: the switch is declared once the form it selects builds.
+
+A table that answers whether it has room before the push that would take its memory cannot take
+the memory when it answers (`FinalStaging::has_room`, `&self`): the query dispatch asks before the
+queryables run and owes the `Final` after (`crates/wz-session-core/src/query/in_place.rs:216`,
+`:234`), so on `OnUse` a `Final` the allocator refused at the table's first row would have been
+counted as a refused request after the callbacks ran, with no `Final` sent. N3b's last commit makes
+the dispatch ask `FinalStaging::make_room`, which takes the row on a first-use policy and answers
+as `has_room` on every other. The engine's own checks of room before a push are read the same way
+when N3c names `OnUse`.
