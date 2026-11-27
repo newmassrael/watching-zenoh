@@ -509,11 +509,11 @@ const STEP_LEND_ROWS: usize =
     cfg!(feature = "runtime-plan") as usize * (1 + cfg!(wz_round) as usize);
 /// The reassembly buffers' flags and the buffers.
 const REASSEMBLY_ROWS: usize = 2;
-/// The read slots and send places of the faces past the dial role's, where each face is read where
-/// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
-/// does one that listens on no port (`listen`), the one role that reads a face past the dial
-/// role's where it lies (`read_faces`).
-const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && cfg!(feature = "listen")) as usize;
+/// The read slots and send places of the faces, where each face is read where it lies
+/// (`crate::engine::direct`) and the session has places past the dial role's (`TAKES_FACES`): a
+/// build whose links run as tasks (`wz_round`) has none, nor does one of the dial role's face
+/// alone, whose one row lies inline in the engine's place.
+const DIRECT_FACE_ROWS: usize = (!cfg!(wz_round) && TAKES_FACES) as usize;
 /// The receive buffers of the groups the session may join and their flags (`group`).
 const GROUP_RX_ROWS: usize = 2 * cfg!(feature = "group") as usize;
 /// The slots of the datagrams the udp ports of a session that listens hold and their flags, and the
@@ -2771,17 +2771,15 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     }
 
     /// Lay out the table of the faces' read slots and send places where it is lent, a row of
-    /// `bytes` for each face read where it lies (`read_faces`), the dial role's among them: a
-    /// session that listens. Elsewhere the table is the dial role's one row, inline in the engine's
-    /// place, and nothing is laid out. Laid out once, at the open, the plan not settled.
+    /// `bytes` for each place of the face table, the dial role's first: a session with places past
+    /// the dial role's (`TAKES_FACES`), each a link's a port gave or an attach dialled, or a
+    /// group's, whose row holds the group's session. Elsewhere the table is the dial role's one row,
+    /// inline in the engine's place, and nothing is laid out. Laid out once, at the open, the plan
+    /// not settled.
     #[cfg(not(wz_round))]
     pub(crate) const fn lay_direct_faces(&mut self, bytes: usize) {
-        if cfg!(feature = "listen") {
-            self.put(
-                ArenaPart::DirectFaces,
-                read_faces(self.session.peers.sets()),
-                bytes,
-            );
+        if TAKES_FACES {
+            self.put(ArenaPart::DirectFaces, self.session.peers.sets(), bytes);
         }
     }
 
@@ -3304,9 +3302,10 @@ pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "gro
 /// The faces of the face table's `sets` places that are read where they lie, each with a read
 /// slot, a send place and a share of the chain buffers of its own (`crate::engine::direct`):
 /// every place where the session listens, whose ports' connections and attaches take the places
-/// past the dial role's, and the dial role's alone otherwise. A group's place is read through the
-/// group's own session, which stages its chains itself, so it is lent neither. Where the links
-/// are tasks (`wz_round`) they stage into the session's one Router, which reads them all.
+/// past the dial role's, and the dial role's alone otherwise. A group's session stages its chains
+/// itself, so its place is lent no share, its row of the read slots' table
+/// (`ArenaPlan::lay_direct_faces`) holding that session. Where the links are tasks (`wz_round`)
+/// they stage into the session's one Router, which reads them all.
 const fn read_faces(sets: usize) -> usize {
     if cfg!(feature = "listen") && !cfg!(wz_round) {
         sets

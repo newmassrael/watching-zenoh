@@ -1184,10 +1184,11 @@ fn a_client_reads_its_one_face_through_a_table_of_one_row() {
 }
 
 /// The faces' table lies where the build's bound puts it: inline in the engine's place where the
-/// session listens on no port, its one row the dial role's, so a reach of that row is a constant
-/// offset of the engine; lent from the session's arena where it listens, the dial role's row the
-/// first of the table, so the engine holds no face of its own. Turned red by a table of one row
-/// lent from the arena (`FaceSlots`), or by a listening build that keeps the dial role's row in
+/// session has no place past the dial role's (neither `listen` nor `group`), its one row the
+/// dial role's, so a reach of that row is a constant offset of the engine; lent from the session's
+/// arena elsewhere, the dial role's row the first of the table, so the engine holds no face of its
+/// own. Turned red by a table of one row lent from the arena (`FaceSlots`), by a build of groups
+/// without `listen` that keeps its one row inline, or by a build that keeps the dial role's row in
 /// the engine beside the rows past it (`DirectFaces::lent_in` laying the rows past it alone).
 #[cfg(not(wz_round))]
 #[test]
@@ -1201,8 +1202,8 @@ fn the_dial_roles_row_lies_where_the_faces_table_does() {
     );
     assert_eq!(
         engine.dial_row_lies_in_the_engine(),
-        !cfg!(feature = "listen"),
-        "the dial role's row lies inline exactly where the session listens on no port"
+        !crate::arena::TAKES_FACES,
+        "the dial role's row lies inline exactly where the session has no place past it"
     );
 }
 

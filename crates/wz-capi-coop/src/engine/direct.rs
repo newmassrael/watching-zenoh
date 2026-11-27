@@ -72,7 +72,7 @@ use wz_session_core::driver_loop::DriverLoopOutcome;
 use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
 
 use super::registry::Planes;
-#[cfg(feature = "listen")]
+#[cfg(any(feature = "listen", feature = "group"))]
 use wz_session_core::bounded::{BoundedVec, Lent};
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
@@ -1380,8 +1380,9 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// is given to a link taken off a port or a dial attached beside the dial role's, and cleared
     /// as that face goes with its link. A read of many rows turns those alone, so a row no face
     /// holds costs it neither a take of the session nor a reading of the clock. The dial role's
-    /// row holds its face for the table's life, so every walk reads every row alike.
-    #[cfg(feature = "listen")]
+    /// row holds its face for the table's life, so every walk reads every row alike. A group's row
+    /// is never marked: its session is stepped by the group's read (`CoopEngine::step_groups`).
+    #[cfg(any(feature = "listen", feature = "group"))]
     holds_face: AtomicBool,
     /// Whether the face has nothing a look would move: no pump, no dial and no opened link, a
     /// life idle or closed with no wake, and no chain in its Router, so a read passes it over
@@ -1456,7 +1457,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
                 addr_of_mut!((*at).quiet).write(AtomicBool::new(false));
                 addr_of_mut!((*at).quiet_until_us).write(AtomicU64::new(0));
             }
-            #[cfg(feature = "listen")]
+            #[cfg(any(feature = "listen", feature = "group"))]
             addr_of_mut!((*at).holds_face).write(AtomicBool::new(row == 0));
         }
     }
@@ -1497,26 +1498,26 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
 
 /// The rows of the read slots' table, where they lie. Where the build takes no face beside the dial
 /// role's, its one row lies inline in the engine's place, so a reach of it is a constant offset of
-/// that place and every bound and index of the table a constant. Where the session listens, the
-/// rows are lent from the session's arena at the open, the dial role's the first of them
+/// that place and every bound and index of the table a constant. Where the session has a place past
+/// the dial role's (`crate::arena::TAKES_FACES`), the rows are lent from the session's arena at the
+/// open, one for each place of the face table, the dial role's the first of them
 /// (`crate::arena::ArenaPlan::lay_direct_faces`): a port's connection or an attach takes a row past
-/// it, and a group's place is read through the group's own session (`CoopEngine::read_groups`), so
-/// a build that listens on none keeps its one row inline.
-#[cfg(not(feature = "listen"))]
+/// it, and a group's row holds the group's session (`CoopEngine::step_groups`).
+#[cfg(not(any(feature = "listen", feature = "group")))]
 type FaceSlots<L, C> = [DirectFace<L, C>; 1];
-#[cfg(feature = "listen")]
+#[cfg(any(feature = "listen", feature = "group"))]
 pub(super) type FaceSlots<L, C> = BoundedVec<DirectFace<L, C>, { usize::MAX }, Lent>;
 
 /// Every face the read steps itself, one table of rows in the order of the face table's places:
-/// the dial role's first, held for the table's life, and, where the session listens, one for each
-/// place past it (`FaceSlots`). Each face has its own read slot, Router and send place, so a
+/// the dial role's first, held for the table's life, and, where the session has places past it,
+/// one for each of them (`FaceSlots`). Each face has its own read slot, Router and send place, so a
 /// face's read and its sends never wait on another face's; and none moves, so the session's
 /// record of a face reaches its place by a handle.
 pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> {
     rows: FaceSlots<L, C>,
     /// The rows up to the last that holds a face (`Self::hold_face`), the dial role's first: the
     /// rows past it hold none, and a read walks the faces several times, so its walks end there.
-    #[cfg(feature = "listen")]
+    #[cfg(any(feature = "listen", feature = "group"))]
     held_rows: core::sync::atomic::AtomicUsize,
 }
 
@@ -1525,7 +1526,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// face table's place `n` in the row `n`, the dial role's first, each with a Router of its
     /// own under `policy`, staging at most `open` chains at once in `chains`, lent through a
     /// cell of its own. Refused past what the arena has left.
-    #[cfg(feature = "listen")]
+    #[cfg(any(feature = "listen", feature = "group"))]
     pub(super) fn lent_in(
         arena: &mut Arena,
         rows: usize,
@@ -1560,21 +1561,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// without being dropped. The faces are not moved from `at` until they are dropped there.
     pub(super) unsafe fn init_at(
         at: NonNull<Self>,
-        #[cfg(not(feature = "listen"))] router: SessionReassembly,
-        #[cfg(feature = "listen")] rows: FaceSlots<L, C>,
+        #[cfg(not(any(feature = "listen", feature = "group")))] router: SessionReassembly,
+        #[cfg(any(feature = "listen", feature = "group"))] rows: FaceSlots<L, C>,
     ) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once; an array of one face is laid out as the
         // face.
         unsafe {
-            #[cfg(not(feature = "listen"))]
+            #[cfg(not(any(feature = "listen", feature = "group")))]
             DirectFace::init_at(
                 NonNull::new_unchecked(addr_of_mut!((*at).rows).cast::<DirectFace<L, C>>()),
                 0,
                 router,
             );
-            #[cfg(feature = "listen")]
+            #[cfg(any(feature = "listen", feature = "group"))]
             {
                 addr_of_mut!((*at).rows).write(rows);
                 addr_of_mut!((*at).held_rows).write(core::sync::atomic::AtomicUsize::new(1));
@@ -1586,12 +1587,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// table's for its life.
     #[inline(always)]
     pub(super) fn dial(&self) -> &DirectFace<L, C> {
-        #[cfg(not(feature = "listen"))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         {
             let [dial] = &self.rows;
             dial
         }
-        #[cfg(feature = "listen")]
+        #[cfg(any(feature = "listen", feature = "group"))]
         {
             // SAFETY: the table is lent with one row at least, each made before it is handed
             // out (`Self::lent_in`), and no row is taken out of it before its drop.
@@ -1599,8 +1600,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
         }
     }
 
-    /// Every face that may hold a link, in the order of the face table's rows: the dial role's
-    /// first, then, where the session listens, each past it.
+    /// Every row of the table, in the order of the face table's places: the dial role's first,
+    /// then, where the session has places past it, each of them, a group's among them.
     #[inline(always)]
     pub(super) fn iter(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         self.rows.iter()
@@ -1608,16 +1609,17 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
 
     /// The faces a read turns, in the order of the face table's rows: the dial role's, whose life
     /// dials the session's endpoints whether or not it holds a link and whose row holds its face
-    /// for the table's life, then each past it whose row holds a face (`Self::hold_face`).
+    /// for the table's life, then each past it whose row holds a face (`Self::hold_face`). A
+    /// group's row is never marked so: the group's read steps it (`CoopEngine::step_groups`).
     #[inline(always)]
     pub(super) fn turned(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
-        #[cfg(feature = "listen")]
+        #[cfg(any(feature = "listen", feature = "group"))]
         {
             self.walked()
                 .filter(|face| face.holds_face.load(Ordering::Acquire))
         }
         // Every face that may hold a link is the dial role's alone (`Self::iter`).
-        #[cfg(not(feature = "listen"))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         {
             self.walked()
         }
@@ -1627,13 +1629,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     /// row past it up to the last that holds a face (`Self::hold_face`), held or not.
     #[inline(always)]
     pub(super) fn walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
-        #[cfg(feature = "listen")]
+        #[cfg(any(feature = "listen", feature = "group"))]
         {
             self.rows
                 .iter()
                 .take(self.held_rows.load(Ordering::Acquire))
         }
-        #[cfg(not(feature = "listen"))]
+        #[cfg(not(any(feature = "listen", feature = "group")))]
         {
             self.iter()
         }

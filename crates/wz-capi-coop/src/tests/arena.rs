@@ -3879,12 +3879,13 @@ fn a_session_a_lost_link_ended_reads_closed_through_its_handle() {
 /// apart: the reassembly table holds one face's share for each face read where it lies, and the
 /// faces are laid out a row each, of one face's read slot and send place, the dial role's among
 /// them. Only a session that listens reads a face past the dial role's where it lies: a build
-/// without `listen`, groups and all, has one share and no such row whatever its face table's
-/// places, its table being the dial role's one row inline in the engine's place, a group's place
-/// being read through the group's own session. Turned red by a table of one share whatever the
-/// faces of a build that listens (`ArenaPlan::lay_out`), by a row or a share for each place of a
-/// build that does not (`read_faces`), or, where the table is lent, by a table without the dial
-/// role's row (`ArenaPlan::lay_direct_faces`).
+/// without `listen` has one share whatever its face table's places. The table of read slots is
+/// lent wherever the face table has places past the dial role's (`TAKES_FACES`), a group's
+/// among them, whose row holds the group's session; a build of the dial role's face alone keeps
+/// its one row inline in the engine's place. Turned red by a table of one share whatever the faces
+/// of a build that listens (`ArenaPlan::lay_out`), by a share for each place of a build that does
+/// not (`read_faces`), by a build with groups and no `listen` that lends no table, or, where the
+/// table is lent, by a table without a row for each place (`ArenaPlan::lay_direct_faces`).
 #[cfg(not(wz_round))]
 #[test]
 fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
@@ -3906,9 +3907,12 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
         caps::REASSEMBLY_CHAINS * read
     );
     let direct = plan.rows().find(|row| row.part() == "direct faces");
-    if cfg!(feature = "listen") {
+    if crate::arena::TAKES_FACES {
         let direct = direct.expect("a row of the faces' table, the dial role's among them");
-        assert_eq!(direct.count, read);
+        assert_eq!(
+            direct.count, sets,
+            "a row for each place, a group's among them"
+        );
         assert_eq!(direct.entry_bytes, Engine::DIRECT_FACE_BYTES);
     } else {
         assert!(
