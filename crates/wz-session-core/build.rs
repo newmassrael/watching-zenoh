@@ -8,7 +8,9 @@
 //! keys of `links = "wz_session_core"`: a crate that implements the trait reads them as
 //! `DEP_WZ_SESSION_CORE_<KEY>` (`1` declared, `0` not) and binds the items on what they say.
 //! A feature of the implementing crate cannot say it: Cargo unifies this crate's features across
-//! the graph, so any crate in it can turn on what declares the items.
+//! the graph, so any crate in it can turn on what declares the items. Whether this build answers a
+//! peer's Interest (`interest-answer`) is stated the same way, as `interest_answer`, for an engine
+//! that compiles its own half of the answer beside this crate's.
 
 #[path = "src/ext_chains_cfg.rs"]
 mod ext_chains_cfg;
@@ -61,4 +63,8 @@ fn main() {
         u8::from(unicast_runtime_items)
     );
     println!("cargo:wrap_actions={}", u8::from(wrap_actions));
+    println!(
+        "cargo:interest_answer={}",
+        u8::from(on("CARGO_FEATURE_INTEREST_ANSWER"))
+    );
 }
