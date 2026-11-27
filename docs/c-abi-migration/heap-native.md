@@ -590,7 +590,10 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
 - With `tables-on-use`, `tests::on_use::an_on_use_engine_and_its_rooms_lie_apart_from_its_arena`
   (red if the open writes the engine at a place the arena lends, `SessionArena::engine_place` and
   `Shared::placed_with` in `CoopEngine::engine_of`, or the rooms, `Arena::place_with` in
-  `CoopEngine::assemble`). `tests::arena::a_sessions_engine_lies_in_its_own_arena_and_is_reached_until_it_closes`
+  `CoopEngine::assemble`), and `tests::on_use::an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms`
+  (red if `lay_out_open` lays the engine's place, `ArenaPlan::lay_engine`, or the rooms',
+  `ArenaPlan::lay_rooms`, in the on-use form; its CONTROL rows, the runtime's span and the count
+  the arena is kept by, are laid out). `tests::arena::a_sessions_engine_lies_in_its_own_arena_and_is_reached_until_it_closes`
   reads where the engine lies in the D12 forms alone and its row in every form: in those forms it
   is the live control of the accessor the on-use test reads.
 - At the build: `EnginePlace` and `SessionArena::engine_place` compile outside the on-use form
@@ -611,11 +614,12 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
 
 Nothing of N1, N2, N3a, N3b or N3c's first two steps was built or run by this lane.
 
-- N3c, step 3a (7.8), not built or run by this lane either. `cargo test -p wz-runtime-coop --lib
+- N3c, step 3a (7.8; `f104d31bc8`, `81cebf0f4c`, `b0afa53110`, `44d25ac4b9` on the lane), not
+  built or run by this lane either. `cargo test -p wz-runtime-coop --lib
   kept::tests` two more than before, and `cargo clippy -p wz-runtime-coop --all-targets -- -D
   warnings`. The engine's on-use legs: `cargo test -p wz-capi-coop --features tables-on-use --lib
-  on_use` 7 (6 before), the same with `--features
-  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 8 (7 before), and
+  on_use` 8 (6 before), the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 9 (7 before), and
   `cargo clippy` of both legs with `--all-targets -- -D warnings`; the round's form,
   `WZ_COOP_VALUE_LOCKS=off cargo clippy -p wz-capi-coop --features query,queryable,tables-on-use
   --all-targets -- -D warnings`; the client library in the on-use form, `cargo build -p
