@@ -87,6 +87,8 @@ default = [
     # The send's behaviours zenoh-pico's transport does not have (deploy/wz-config.toml,
     # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`, `tx-stream-owed`), and the
     # group endpoint's keys its multicast link does not read (`multicast-locator-keys`).
+    # `tx-probe`, `tx-expiry-run`, `tx-fragment-credit`, `tx-held-wait`), and the query
+    # plane's (`query-replies-with-final`).
     "tx-probe",
     "tx-expiry-run",
     "tx-fragment-credit",
@@ -95,6 +97,7 @@ default = [
     # The numbered key that states a session's limits (`config-limits`), read by the pico ABI.
     "config-limits",
     "multicast-locator-keys",
+    "query-replies-with-final",
     "config-verdict",
     "transport_compression",
     "auth_usrpwd",
@@ -337,6 +340,10 @@ config-limits = []
 # engine's runtime takes the session core with its defaults, which read them, so the feature only
 # carries the capability's name.
 multicast-locator-keys = []
+# The query plane's behaviour zenoh-pico does not have (`wz-capi-pico/query-replies-with-final`):
+# the tokio engine's runtime takes the session core with its defaults, which hold a query's
+# replies for its Final, so the feature only carries the capability's name.
+query-replies-with-final = []
 # The batch compression a session offers and accepts, and the capability that names it in the
 # declaration (zenoh-c's own feature name). The runtime's feature is the mechanism.
 transport_compression = ["wz-runtime-tokio/session-extcompression"]

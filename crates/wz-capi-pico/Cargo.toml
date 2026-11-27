@@ -117,6 +117,7 @@ default = [
     "tx-stream-owed",
     "config-limits",
     "multicast-locator-keys",
+    "query-replies-with-final",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -688,6 +689,16 @@ config-limits = ["wz-capi-core?/config-limits"]
 multicast-locator-keys = [
     "wz-capi-core?/multicast-locator-keys",
     "wz-capi-coop?/multicast-locator-keys",
+]
+# `query-replies-with-final`: the replies a queryable's callbacks make wait in the face's open frame
+# and leave with the query's Final in one send, a behaviour of the query plane that zenoh-pico does
+# not have: on in a build that names nothing and off in the zenoh-pico preset, as the send's four
+# are. Off, each reply leaves as its callback makes it and the Final after them, possibly in a
+# later frame, as zenoh-pico's `_z_send_reply` sends each. The tokio engine holds them whatever is
+# named.
+query-replies-with-final = [
+    "wz-capi-core?/query-replies-with-final",
+    "wz-capi-coop?/query-replies-with-final",
 ]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's

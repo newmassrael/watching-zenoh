@@ -1819,6 +1819,19 @@ abis = ["core", "pico"]
 implies = []
 help = "A group endpoint's #ttl=, #bind= and #dscp=: the hop limit, the local address of the send socket and the traffic class of what a member sends (wz-own). Off, each is refused by name when the group's endpoint is read, as zenoh-pico's multicast link reads iface and join alone."
 
+[[capability]]
+id = "query-replies-with-final"
+kconfig = "WZ_CAP_QUERY_REPLIES_WITH_FINAL"
+# On in a build that names nothing and off in the zenoh-pico preset: zenoh-pico sends each reply as
+# its queryable's callback makes it (`_z_send_reply`) and the Final after the callbacks, each a
+# send of its own. A behaviour of the query plane, not a door, so the host profiles keep it as they
+# keep the send's four; the tokio engine holds the replies whatever is named.
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The replies a queryable's callbacks make wait in the face's open frame and leave with the query's Final in one send (wz-own). Off, each reply leaves as its callback makes it and the Final after the callbacks, possibly in a later frame, as zenoh-pico's are sent."
+
 # ## The upstream switches (a complete map: every upstream switch is classified)
 #
 # Every build switch of zenoh-pico (each `Z_FEATURE_*` its CMakeLists defines) and of zenoh-c

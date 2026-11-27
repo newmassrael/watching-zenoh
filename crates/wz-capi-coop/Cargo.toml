@@ -139,6 +139,7 @@ default = [
     "tx-held-wait",
     "tx-stream-owed",
     "multicast-locator-keys",
+    "query-replies-with-final",
 ]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
@@ -274,6 +275,11 @@ tx-stream-owed = ["wz-runtime-coop/tx-stream-owed"]
 # core's feature of the same name and given to the group's sockets (`host_group`). Without it the
 # three are refused when the group's endpoint is read, and no send socket is marked.
 multicast-locator-keys = ["wz-session-core/multicast-locator-keys"]
+# `query-replies-with-final`: the replies a queryable's callbacks make wait in the face's open frame
+# and leave with the query's Final in one send, a behaviour of the query plane that zenoh-pico does
+# not have, named as the send's are. Without it each reply leaves as it is made, and the Final
+# after them, as zenoh-pico's `_z_send_reply` sends each.
+query-replies-with-final = ["wz-session-core/query-replies-with-final"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]
