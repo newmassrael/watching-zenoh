@@ -565,11 +565,37 @@ trait UnderHeldFaces<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
     fn run(&mut self, core: &mut Core<L, C>, tx: LinkTx<'_, C>);
 }
 
-/// The operation `f`, run at most once, and what it answered.
+/// The operation `f` until it runs, then what it answered: one state, so the answer is written
+/// over a state that holds nothing. Two slots, an operation's and its answer's, would have each
+/// operation's body drop the answer slot it writes over, a drop of a value it never held.
 #[cfg(any(feature = "listen", feature = "group"))]
-struct HeldOperation<F, U> {
-    f: Option<F>,
-    answer: Option<U>,
+enum HeldOperation<F, U> {
+    /// Not run yet.
+    Waiting(F),
+    /// Taken to run; what the operation is while it runs, and stays if it never answers.
+    Running,
+    /// Run, and what it answered.
+    Answered(U),
+}
+
+#[cfg(any(feature = "listen", feature = "group"))]
+impl<F, U> HeldOperation<F, U> {
+    /// `run` handed the operation, once: a state that is not waiting runs nothing. The answer
+    /// is written over the running state this body wrote, which holds nothing to drop.
+    #[inline(always)]
+    fn run_once(&mut self, run: impl FnOnce(F) -> U) {
+        if let Self::Waiting(f) = core::mem::replace(self, Self::Running) {
+            *self = Self::Answered(run(f));
+        }
+    }
+
+    /// What the operation answered; `None` where it did not run, its closure dropped unrun.
+    fn into_answer(self) -> Option<U> {
+        match self {
+            Self::Answered(answer) => Some(answer),
+            Self::Waiting(_) | Self::Running => None,
+        }
+    }
 }
 
 #[cfg(any(feature = "listen", feature = "group"))]
@@ -580,9 +606,7 @@ where
     F: FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
 {
     fn run(&mut self, core: &mut Core<L, C>, tx: LinkTx<'_, C>) {
-        if let Some(f) = self.f.take() {
-            self.answer = Some(f(core, tx));
-        }
+        self.run_once(|f| f(core, tx));
     }
 }
 
@@ -3119,12 +3143,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         &self,
         f: impl FnOnce(&mut Core<L, C>, LinkTx<'_, C>) -> U,
     ) -> Option<U> {
-        let mut operation = HeldOperation {
-            f: Some(f),
-            answer: None,
-        };
+        let mut operation = HeldOperation::Waiting(f);
         self.hold_faces_from(self.direct.iter(), None, &mut operation);
-        operation.answer
+        operation.into_answer()
     }
 
     /// Hold the send place of each face `faces` has left, after those `before` holds, then the
@@ -3645,5 +3666,56 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         };
         let mut held = <CoopForm as LockForm>::lock(&self.direct.dial.slot);
         f(&mut held.0.router, now_ms)
+    }
+}
+
+#[cfg(all(test, feature = "std", any(feature = "listen", feature = "group")))]
+mod held_operation_tests {
+    use super::HeldOperation;
+    use core::cell::Cell;
+
+    /// Counts its own drop in the cell it names.
+    struct Dropped<'a>(&'a Cell<usize>);
+
+    impl Drop for Dropped<'_> {
+        fn drop(&mut self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// An operation held for the faces runs once and hands back what it answered; a second run of
+    /// the same hold runs nothing. Turned red by a run that runs the operation again (the count
+    /// reads two) or by one whose answer is not kept (`None`).
+    #[test]
+    fn a_held_operation_runs_once_and_hands_back_its_answer() {
+        let runs = Cell::new(0);
+        let mut operation = HeldOperation::Waiting(|seed: u32| {
+            runs.set(runs.get() + 1);
+            seed + 1
+        });
+        operation.run_once(|f| f(41));
+        operation.run_once(|f| f(0));
+        assert_eq!(runs.get(), 1, "run once");
+        assert_eq!(operation.into_answer(), Some(42));
+    }
+
+    /// An operation that never ran, as on a session closed before its faces were held, answers
+    /// nothing and lets go of what it took, once; nor does a run that never answered. Turned red by
+    /// an answer read from a state that did not run, or by a closure left undropped (the count
+    /// reads zero).
+    #[test]
+    fn an_operation_that_never_ran_answers_nothing_and_lets_go_of_what_it_took() {
+        let drops = Cell::new(0);
+        let held = Dropped(&drops);
+        let operation: HeldOperation<_, ()> = HeldOperation::Waiting(move || {
+            let _held = &held;
+        });
+        assert_eq!(operation.into_answer(), None);
+        assert_eq!(drops.get(), 1, "the unrun operation is dropped once");
+        assert_eq!(
+            HeldOperation::<fn(), ()>::Running.into_answer(),
+            None,
+            "a run that never answered"
+        );
     }
 }
