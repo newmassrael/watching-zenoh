@@ -8467,6 +8467,25 @@
       "carry_forward_bullets": [
         "debt-shm-reader-keeps-segments-of-gone-providers: a weak reference to the mapped segment plus a bounded set of recent strong ones in ShmReader would unmap a segment once no buffer of it is held; it closes the debt by another criterion than the register states, so it waits for the owner. C1d own-space alias test: read the next hosted run that reaches it. The shared-memory arm's +34,704 bytes: the C ABI instantiates five policy compositions over two backends; a provider that erases the backend behind one type would take most of it back. Then the register's CRITICAL item 15."
       ]
+    },
+    "Round 4688": {
+      "decision_summary": "Keep the typed lock's and the kept count's uncontended steps in line and\ntheir slow steps cold, then count a kept value and drop a face's link\nthrough one body each, so the receive gets cheaper and the driver smaller.",
+      "changes_bullets": [
+        "host-sync: lock fast paths inline, contended paths cold.",
+        "runtime-coop and capi-coop: kept count and drop_link each one body.",
+        "docs/win-budget/size.md 3.4 reads the steps."
+      ],
+      "verification_bullets": [
+        "size ledger: total 218,139 B vs main 218,756 (-617); driver 29,395 B.",
+        "receive Ir W 2,987.2 vs main 3,078.1 (subprofile, callgrind).",
+        "runtime-coop kept, host-sync lib pass; capi-coop clippy clean after rebase."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
