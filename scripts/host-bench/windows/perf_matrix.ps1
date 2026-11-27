@@ -250,8 +250,10 @@ public static class WzPerfNative {
         }
     }
 
-    // Each CPU's busy seconds and its whole seconds so far: busy is kernel less idle, less the time of
-    // interrupts and deferred procedure calls, plus user; whole is kernel (which holds idle) plus user.
+    // Each CPU's busy seconds, its whole seconds and its seconds of interrupts and deferred procedure calls
+    // so far: busy is kernel less idle, less the time of interrupts and DPCs, plus user; whole is kernel
+    // (which holds idle) plus user; the third is the interrupts' and DPCs' alone, which no process is
+    // charged with and which the CPU spends all the same.
     public static double[][] Sample() {
         IntPtr buffer = Marshal.AllocHGlobal(PerformanceRecord * MaxCpus);
         try {
@@ -261,6 +263,7 @@ public static class WzPerfNative {
             int count = returned / PerformanceRecord;
             double[] busy = new double[count];
             double[] whole = new double[count];
+            double[] irq = new double[count];
             for (int cpu = 0; cpu < count; cpu++) {
                 int at = cpu * PerformanceRecord;
                 long idle = Marshal.ReadInt64(buffer, at);
@@ -270,8 +273,9 @@ public static class WzPerfNative {
                 long interrupt = Marshal.ReadInt64(buffer, at + 32);
                 busy[cpu] = (kernel - idle - dpc - interrupt + user) / 1e7;
                 whole[cpu] = (kernel + user) / 1e7;
+                irq[cpu] = (dpc + interrupt) / 1e7;
             }
-            return new double[][] { busy, whole };
+            return new double[][] { busy, whole, irq };
         } finally {
             Marshal.FreeHGlobal(buffer);
         }
@@ -597,11 +601,16 @@ function Get-Endpoints([string]$transport) {
     Fail "no transport $transport on Windows"
 }
 
+# The pinned CPUs' busy seconds so far and their seconds of interrupts and DPCs, from one sample.
 function Get-CpuBusy {
     $sample = [WzPerfNative]::Sample()
-    $total = 0.0
-    foreach ($cpu in $script:PinnedCpus) { $total += $sample[0][$cpu] }
-    return $total
+    $busy = 0.0
+    $irq = 0.0
+    foreach ($cpu in $script:PinnedCpus) {
+        $busy += $sample[0][$cpu]
+        $irq += $sample[2][$cpu]
+    }
+    return @{ Busy = $busy; Irq = $irq }
 }
 
 $LF = [string][char]10
@@ -713,14 +722,19 @@ function Invoke-Timed([string]$binary, [string]$transport, [bool]$batching, [str
     $shares = New-Object System.Collections.Generic.List[string]
     $runs = [int]$script:PlanDoc.max_runs
     for ($run = 0; $run -lt $runs; $run++) {
-        $busy0 = Get-CpuBusy
+        $before = Get-CpuBusy
         $clock = [System.Diagnostics.Stopwatch]::StartNew()
         $result = Invoke-CellOnce $binary $transport $batching $workload $size $tag
         $wall = $clock.Elapsed.TotalSeconds
         if ($result.ContainsKey('Lost')) { return @{ Status = 'lost'; Why = $result.Lost } }
-        $foreign = [math]::Max(0.0, (Get-CpuBusy) - $busy0 - $result.Own) / ($wall * $script:PinnedCpus.Count)
+        $after = Get-CpuBusy
+        $span = $wall * $script:PinnedCpus.Count
+        $foreign = [math]::Max(0.0, $after.Busy - $before.Busy - $result.Own) / $span
+        # Recorded beside the share, not judged: no process is charged with it, and a driver's DPCs on a
+        # pinned CPU delay a side as another process's time does.
+        $irq = [math]::Max(0.0, $after.Irq - $before.Irq) / $span
         if ($foreign -le [double]$script:PlanDoc.foreign_limit) {
-            return @{ Status = 'measured'; Figures = $result.Figures; Foreign = $foreign }
+            return @{ Status = 'measured'; Figures = $result.Figures; Foreign = $foreign; Irq = $irq }
         }
         $shares.Add(("{0:F0}%" -f ($foreign * 100)))
         Start-Sleep -Seconds 5
@@ -746,6 +760,7 @@ function Invoke-MatrixCell([string]$arm, [string]$transport, [bool]$batching, [s
     $result = Invoke-Timed "perf_probe_$arm.exe" $transport $batching $workload $size $tag
     if ($result.Status -eq 'measured') {
         $cell['status'] = 'measured'; $cell['figures'] = $result.Figures; $cell['foreign_share'] = $result.Foreign
+        $cell['irq_share'] = $result.Irq
     } else {
         $cell['status'] = 'lost'; $cell['why'] = $result.Why; $cell['figures'] = [ordered]@{}
         if ($result.Status -eq 'disturbed') { $cell['disturbed'] = $true }
@@ -776,11 +791,18 @@ function Get-Summary($cells) {
         }
         $arms = $groups[$key].Arms
         if (-not $arms.ContainsKey($cell.arm)) {
-            $arms[$cell.arm] = @{ Figures = New-Object System.Collections.ArrayList; Lost = 0; Status = @{} }
+            $arms[$cell.arm] = @{ Figures = New-Object System.Collections.ArrayList; Lost = 0; Status = @{};
+                                  Foreign = $null; Irq = $null }
         }
         $arm = $arms[$cell.arm]
         $arm.Status[$cell.status] = $true
-        if ($cell.status -eq 'measured') { [void]$arm.Figures.Add($cell.figures) }
+        if ($cell.status -eq 'measured') {
+            [void]$arm.Figures.Add($cell.figures)
+            # The most any measured repetition of the row's arm shared its CPUs, so a row says how quiet
+            # the host was when it was read.
+            if ($cell.Contains('foreign_share')) { $arm.Foreign = [math]::Max([double]$arm.Foreign, [double]$cell.foreign_share) }
+            if ($cell.Contains('irq_share')) { $arm.Irq = [math]::Max([double]$arm.Irq, [double]$cell.irq_share) }
+        }
         elseif ($cell.status -eq 'lost') { $arm.Lost++ }
     }
     $sorted = @($groups.Values | Sort-Object @{ Expression = { [array]::IndexOf($order, $_.Transport) } },
@@ -800,7 +822,8 @@ function Get-Summary($cells) {
                 $median[$figure] = Get-Median $values
             }
             $arms[$name] = [ordered]@{ measured = $arm.Figures.Count; lost = $arm.Lost;
-                                       not_applicable = $arm.Status.ContainsKey('not-applicable'); median = $median }
+                                       not_applicable = $arm.Status.ContainsKey('not-applicable'); median = $median;
+                                       foreign_max = $arm.Foreign; irq_max = $arm.Irq }
         }
         $ratio = [ordered]@{}
         if ($arms.Contains('P') -and $arms.Contains('W')) {
@@ -829,6 +852,8 @@ function Get-ReportLines($rows) {
             if ($row.arms.Contains($name)) {
                 $arm = $row.arms[$name]
                 $said = if ($arm.not_applicable) { 'not applicable' } else { "$($arm.measured) measured, $($arm.lost) lost" }
+                if ($null -ne $arm.foreign_max) { $said += ", foreign share at most $(Format-Figure ($arm.foreign_max * 100) 'F2')%" }
+                if ($null -ne $arm.irq_max) { $said += ", interrupts and DPCs at most $(Format-Figure ($arm.irq_max * 100) 'F2')%" }
                 $out.Add("  $($name): $said")
             }
         }
