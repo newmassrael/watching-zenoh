@@ -1577,8 +1577,8 @@ mod woken {
     /// datagram is written before the put returns, with one take of the session and no key named
     /// in the session's tables. CONTROL: a filter whose row keeps no plain way is still answered
     /// `NotPlain`, nothing sent, for the general publish to send. Turned red by a groups' leg that
-    /// answers `NotPlain` for the general publish to send the put again
-    /// (`CoopEngine::put_through_filter_in` without its `is_groups_leg` arm), which takes the
+    /// answers `NotPlain` for the general publish to send the put again (`CoopEngine::put_on_links`
+    /// without its plain put's groups' leg, `CoopEngine::put_plain_groups_leg`), which takes the
     /// session twice, or by one that names the key in the session's tables.
     #[cfg(not(wz_round))]
     #[test]
