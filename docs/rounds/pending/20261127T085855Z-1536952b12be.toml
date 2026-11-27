@@ -1,0 +1,16 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Fill the Windows preset perf rows from their first readings, and make the
+probe tell a pong's first CPU reading of 0 from no reading at all.
+'''
+changes = '''
+- pico_perf_ceiling_windows.json: 84 rows from perf_matrix --gate.
+- perf_probe: a flag marks the first ping's CPU read (Windows ticks at 15.6 ms).
+'''
+verification = '''
+- pc3-win preset package 41988298bc: 26 win, 19 tie, 39 loss; gate passes.
+- two pong rows re-read with the fixed probe, 3 of 3 repetitions each.
+'''
+carry = '''
+- none for this lane.
+'''
