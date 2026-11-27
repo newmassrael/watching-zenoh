@@ -45,7 +45,10 @@
 //!   [`LINK_TX_SLOTS`] at a time from its grant to its send; and a place for each link; each table
 //!   with the flags that say which buffers are lent (`TransportRows::links_from`). The batch is
 //!   the config's, held to the session's `PICO_UNICAST_BATCH_BYTES` under the build's; these are
-//!   the rows lent when the session opens, first;
+//!   the rows lent when the session opens, first. Where the tables take their memory on use none
+//!   of them is laid out: each link holds a receive buffer and [`LINK_TX_SLOTS`] slots of the
+//!   batch of its own, made of the allocator as it opens and given back with it, as zenoh-pico's
+//!   transport takes its buffers (`TransportRows::lent_from`);
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
 //!   when it is joined, lent after the links' tables (`TransportRows::group_rx_from`);
@@ -124,6 +127,10 @@ use core::ptr::NonNull;
 
 use wz_runtime_coop::faces::EndpointTexts;
 use wz_runtime_coop::kept::Kept;
+use wz_runtime_coop::link_cells::CountKind;
+#[cfg(wz_on_use)]
+use wz_runtime_coop::link_storage::HeapBuffers;
+#[cfg(not(wz_on_use))]
 use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(feature = "udp-listen")]
@@ -1333,10 +1340,12 @@ pub struct TransportRows {
     /// The links whose buffers the arena holds.
     links: usize,
     /// The receive buffers of the pool those links share (`RX_POOL_BUFFERS`, at most one for each
-    /// link).
+    /// link). None where the tables take their memory on use, whose links hold their own.
+    #[cfg(not(wz_on_use))]
     rx_buffers: usize,
     /// The outbound slots of the pool those links share (`TX_POOL_SLOTS`, at most one for each
-    /// link).
+    /// link). None where the tables take their memory on use, whose links hold their own.
+    #[cfg(not(wz_on_use))]
     tx_slots: usize,
     /// The length of a link's receive buffer and of each of its slots.
     link_bytes: usize,
@@ -1373,10 +1382,17 @@ pub struct TransportRows {
 /// (`wz_runtime_coop::sync::LockKind::Flag`), which the handles placed in it are counted by.
 type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
 
+/// What the session's links take their buffers through: the source their kind names
+/// (`wz_runtime_coop::link_cells::CountKind::Buffers`), the tables the arena lends, or the heap
+/// where the tables take their memory on use.
+type LinkSource = <crate::LinkCount as CountKind>::Buffers;
+
 /// The tables a session's transport is lent ([`TransportRows::lent_from`]).
 pub(crate) struct TransportTables {
-    /// The links' buffers and, where the links share pools, their places.
-    pub(crate) links: LinkTables<LinkCellFlag>,
+    /// Where the links take their buffers (`SessionLinks::lend_buffers`): the tables of their
+    /// buffers and, where the links share pools, their places; where the tables take their memory
+    /// on use, the heap, each link a buffer and slots of the session's batch of its own.
+    pub(crate) links: LinkSource,
     /// The receive buffers of the groups the session may join, one for each; none for a plan
     /// that counts no group.
     #[cfg(feature = "group")]
@@ -1411,7 +1427,9 @@ impl TransportRows {
     /// The rows of no transport: a vacant plan's.
     const NONE: Self = Self {
         links: 0,
+        #[cfg(not(wz_on_use))]
         rx_buffers: 0,
+        #[cfg(not(wz_on_use))]
         tx_slots: 0,
         link_bytes: 0,
         reassembly_bytes: 0,
@@ -1435,7 +1453,11 @@ impl TransportRows {
     pub(crate) fn lent_from(&self, lend: &mut TableLender<'_>) -> TransportTables {
         let (dials, listens) = self.endpoint_rows;
         TransportTables {
-            links: self.links_from(lend),
+            #[cfg(not(wz_on_use))]
+            links: Some(self.links_from(lend)),
+            // Laid out in no row: each link takes its own as it opens.
+            #[cfg(wz_on_use)]
+            links: HeapBuffers::sized(self.link_bytes, LINK_TX_SLOTS),
             #[cfg(feature = "group")]
             group_rx: self.group_rx_from(lend),
             #[cfg(feature = "udp-listen")]
@@ -1480,6 +1502,7 @@ impl TransportRows {
     /// outbound slots they share, each held by a link from its grant to its send
     /// ([`LINK_TX_SLOTS`] at a time), and a place for each link the session may hold, which the
     /// session's links claim as they open and give back as they go.
+    #[cfg(not(wz_on_use))]
     pub(crate) fn links_from(&self, lend: &mut TableLender<'_>) -> LinkTables<LinkCellFlag> {
         let rx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.rx_buffers);
         let tx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.tx_slots);
@@ -1919,7 +1942,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         let link_bytes = tried!(link_batch(shape.batch, limits));
         self.transport = TransportRows {
             links,
+            #[cfg(not(wz_on_use))]
             rx_buffers: links,
+            #[cfg(not(wz_on_use))]
             tx_slots: links,
             link_bytes,
             reassembly_bytes: 0,
@@ -1954,6 +1979,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         };
         self.transport.face_chains = face_chains(share);
         // The links' receive buffers and outbound slots, as a report reads them (`link_buffers`).
+        #[cfg(not(wz_on_use))]
         match pooled_buffers(links, limits) {
             Ok((rx_buffers, tx_slots)) => {
                 self.transport.rx_buffers = rx_buffers;
@@ -2003,21 +2029,25 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         );
         self.put(ArenaPart::EndpointTexts, 1, texts);
         // The links' rows are lent when the session opens, in this order
-        // (`TransportRows::links_from`).
-        self.put_table(
-            [ArenaPart::LinkReceiveFlags, ArenaPart::LinkReceiveBuffers],
-            self.transport.rx_buffers,
-            link_bytes,
-        );
-        self.put_table(
-            [ArenaPart::LinkTransmitFlags, ArenaPart::LinkTransmitSlots],
-            self.transport.tx_slots,
-            link_bytes,
-        );
-        // A place for each link, which bounds the links that open where the slots are a pool:
-        // the flags of a table of buffers of no bytes.
-        #[cfg(feature = "listen")]
-        self.put(ArenaPart::LinkPlaces, links, LentByteCells::FLAG_BYTES);
+        // (`TransportRows::links_from`). Where the tables take their memory on use each link
+        // takes its own as it opens, and none is laid out.
+        #[cfg(not(wz_on_use))]
+        {
+            self.put_table(
+                [ArenaPart::LinkReceiveFlags, ArenaPart::LinkReceiveBuffers],
+                self.transport.rx_buffers,
+                link_bytes,
+            );
+            self.put_table(
+                [ArenaPart::LinkTransmitFlags, ArenaPart::LinkTransmitSlots],
+                self.transport.tx_slots,
+                link_bytes,
+            );
+            // A place for each link, which bounds the links that open where the slots are a
+            // pool: the flags of a table of buffers of no bytes.
+            #[cfg(feature = "listen")]
+            self.put(ArenaPart::LinkPlaces, links, LentByteCells::FLAG_BYTES);
+        }
         // A receive buffer for each group the session may join, lent after the links' tables
         // (`TransportRows::group_rx_from`): as many as the plan counts groups, each of the largest
         // batch a group the config names sends, held to the build's multicast batch. A group's
@@ -2440,11 +2470,24 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         self.transport.links
     }
 
+    /// The bytes of each link's receive buffer and of each of its slots: the batch the session
+    /// advertises, whether the arena lends the links their buffers or each link takes its own of
+    /// the heap as it opens.
+    pub const fn link_bytes(&self) -> usize {
+        self.transport.link_bytes
+    }
+
     /// Whether the outbound slots the links share are fewer than the links (`TX_POOL_SLOTS`), so
     /// that a link may find every slot held.
-    #[cfg(feature = "listen")]
+    #[cfg(all(feature = "listen", not(wz_on_use)))]
     pub fn tx_pool_short(&self) -> bool {
         self.transport.tx_slots < self.transport.links
+    }
+
+    /// Never, where the tables take their memory on use: each link holds slots of its own.
+    #[cfg(all(feature = "listen", wz_on_use))]
+    pub fn tx_pool_short(&self) -> bool {
+        false
     }
 
     /// How many rows each table of the engine's record of the session's declarations is lent.
@@ -2862,8 +2905,8 @@ const fn lent_under(
 
 /// Whether a session's links share a pool of receive buffers and one of outbound slots, as a build
 /// that listens lends them (`RX_POOL_BUFFERS`, `TX_POOL_SLOTS`), rather than each link holding a
-/// buffer and a slot of its own.
-pub const LINKS_SHARE_POOLS: bool = cfg!(feature = "listen");
+/// buffer and a slot of its own, as a link does where the tables take their memory on use.
+pub const LINKS_SHARE_POOLS: bool = cfg!(all(feature = "listen", not(wz_on_use)));
 
 /// The buffers a session's links read their batches into and encode their frames into, and the
 /// buffers they stage the chains of fragmented messages in, as the session's plan lays them out

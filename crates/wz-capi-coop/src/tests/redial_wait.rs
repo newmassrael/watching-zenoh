@@ -19,7 +19,6 @@ use crate::tests::{host_links, PosixLinks};
 use crate::LinkCount;
 use wz_capi_port::{PeerLists, SessionDrive};
 use wz_runtime_coop::link_cells::CountKind;
-use wz_runtime_coop::link_storage::LinkTables;
 use wz_runtime_coop::session_drive::{LinkOpenError, Locator, OpenedLink, SessionLinks};
 use wz_runtime_coop::ClockSource;
 use wz_runtime_posix::stream::PosixTcpDial;
@@ -69,7 +68,7 @@ impl SessionLinks<LinkCount> for SlowRefusals {
     }
 
     // The session's tables reach the links it dials through, as they reach the host's links.
-    fn lend_buffers(&mut self, tables: LinkTables<<LinkCount as CountKind>::Flag>) {
+    fn lend_buffers(&mut self, tables: <LinkCount as CountKind>::Buffers) {
         self.inner.lend_buffers(tables);
     }
 

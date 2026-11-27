@@ -8,13 +8,10 @@
 use crate::EngineHold;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::tests::host_links;
 use wz_capi_port::{SessionEngine, WireKey};
-use wz_runtime_coop::session_drive::SessionDatagramLink;
-use wz_runtime_coop::udp_link::{DatagramSocket, UdpDriver};
-use wz_runtime_posix::net::PosixUdpSocket;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 use wz_session_core::bounded::{BoundedVec, Lent};
@@ -31,7 +28,7 @@ use super::{
     client_config, config, open, open_with, until, CatchAll, Command, Engine, Router, LOOPBACK,
 };
 use crate::arena::{
-    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena, LINK_TX_SLOTS,
+    AllocatorMemory, ArenaLimit, ArenaMemory, ArenaPlan, ArenaRefused, SessionArena,
 };
 #[cfg(wz_round)]
 use crate::round::RoundRowCounts;
@@ -106,7 +103,8 @@ fn open_dialling(
 
 /// The count of a link row of a pool of `pool` for `links` links: the pool's, at most the links,
 /// in a build that listens; one for each link in a build that only dials, whose links keep buffers
-/// of their own.
+/// of their own. Read where the plan lays the links' rows out.
+#[cfg(any(feature = "listen", not(wz_on_use)))]
 fn pooled(pool: usize, links: usize) -> usize {
     if cfg!(feature = "listen") {
         pool.min(links)
@@ -117,6 +115,7 @@ fn pooled(pool: usize, links: usize) -> usize {
 
 /// How many links `plan` holds places for: its row of places in a build that listens, its
 /// transmit rows, one for each link, in a build that only dials.
+#[cfg(any(feature = "listen", not(wz_on_use)))]
 fn link_places(plan: &ArenaPlan) -> usize {
     plan.rows()
         .find(|row| row.part() == "link places")
@@ -447,8 +446,9 @@ fn each_declaration_limit_is_the_snapshots_under_the_builds_value() {
 }
 
 /// The links' buffers are the batch the config advertises, held to the batch the session's limits
-/// state: a lowered batch the config fits lays the buffers out at the config's, and a config
-/// batch over the stated one refuses the plan, naming the limit and both values.
+/// state: a lowered batch the config fits sizes the buffers at the config's, laid out so where the
+/// arena lends them, and a config batch over the stated one refuses the plan, naming the limit and
+/// both values.
 #[test]
 fn the_links_batch_is_held_to_the_snapshots() {
     let lowered = lowered(|l| l.select_pico_unicast_batch_bytes(512));
@@ -460,6 +460,8 @@ fn the_links_batch_is_held_to_the_snapshots() {
         &lowered,
     )
     .expect("a batch the snapshot holds lays an arena out");
+    assert_eq!(fits.link_bytes(), 512);
+    #[cfg(not(wz_on_use))]
     assert_eq!(row(&fits, "link receive buffers").entry_bytes, 512);
     assert_eq!(
         ArenaPlan::of(
@@ -586,7 +588,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
         &SessionLimits::defaults(),
     )
     .expect("lays an arena out");
-    let batch = row(&listening, "link receive buffers").entry_bytes;
+    let batch = usize::from(client_config().batch_size);
     let slots = row(&listening, "link port datagram slots");
     assert_eq!(slots.count, caps::UDP_PORT_SLOTS);
     assert_eq!(slots.entry_bytes, batch, "a slot is a batch long");
@@ -597,6 +599,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&listening, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
+    #[cfg(not(wz_on_use))]
     let _links = listening.transport().links_from(&mut lend);
     let slots = listening.transport().port_slots_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
@@ -607,7 +610,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     );
     // The ports' book: a peer row for each link the session may hold, and a queue row for each
     // slot a waiting datagram holds.
-    let links = row(&listening, "link places").count;
+    let links = listening.links();
     assert_eq!(
         Some(row(&listening, "udp port peers").entry_bytes),
         wz_session_core::bounded::Arena::table_bytes::<wz_runtime_coop::udp_link::PortPeerRow>(
@@ -629,6 +632,7 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&dialling, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
+    #[cfg(not(wz_on_use))]
     let _links = dialling.transport().links_from(&mut lend);
     let slots = dialling.transport().port_slots_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
@@ -714,6 +718,7 @@ fn a_listening_session_lays_out_its_link_admission_only_where_the_build_has_one(
 /// `RX_POOL_BUFFERS`; otherwise one for each link. Turned red by a plan that lays its link rows
 /// out by another reckoning than the one a report reads, or a report that counts a buffer for
 /// each link of a pooled build.
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_link_buffers_a_report_reads_are_the_plans_rows() {
     use crate::arena::{link_buffers, links_of, LINKS_SHARE_POOLS};
@@ -845,6 +850,7 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
+    #[cfg(not(wz_on_use))]
     let _links = plan.transport().links_from(&mut lend);
     let groups = plan.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
@@ -860,6 +866,7 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&none, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
+    #[cfg(not(wz_on_use))]
     let _links = none.transport().links_from(&mut lend);
     let groups = none.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
@@ -2072,8 +2079,11 @@ fn a_session_that_only_dials_is_refused_a_face_beside_its_dial() {
 /// The links' rows are what the open lends first: their tables take exactly the rows' spans, a
 /// receive buffer of the batch and [`LINK_TX_SLOTS`] slots of it for each link the config admits,
 /// and the rest of the plan fills the arena to its size, so the reservation is still the plan.
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
+    use crate::arena::LINK_TX_SLOTS;
+
     let config = CoopConfig {
         max_faces: BESIDE_DIAL,
         ..client_config()
@@ -2133,9 +2143,15 @@ fn the_links_rows_are_lent_first_and_the_reservation_is_still_the_plan() {
 
 /// A link over the buffers its session's arena lent reads a datagram where the arena holds its
 /// receive buffer, and nowhere else.
+#[cfg(not(wz_on_use))]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_link_reads_into_the_buffer_its_sessions_arena_lent() {
+    use std::time::Instant;
+    use wz_runtime_coop::session_drive::SessionDatagramLink;
+    use wz_runtime_coop::udp_link::{DatagramSocket, UdpDriver};
+    use wz_runtime_posix::net::PosixUdpSocket;
+
     let config = CoopConfig {
         max_faces: 0,
         ..client_config()

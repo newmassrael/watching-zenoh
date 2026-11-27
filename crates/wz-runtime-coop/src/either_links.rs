@@ -18,7 +18,6 @@ use wz_session_core::link::{LostCause, RxFrame};
 
 use crate::group_transport::GroupTransport;
 use crate::link_cells::{CellRc, CountKind};
-use crate::link_storage::LinkTables;
 use crate::session_drive::{
     LinkListener, LinkOpenError, LinkWait, LinkWaits, Locator, OpenedLink, PendingDial,
     SessionDatagramLink, SessionLinks, StackWake, WaitOn,
@@ -274,7 +273,7 @@ impl<N: CountKind, A: SessionLinks<N>, B: SessionLinks<N>> SessionLinks<N> for E
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
+    fn lend_buffers(&mut self, tables: N::Buffers) {
         on_side!(EitherLinks, self, links => links.lend_buffers(tables))
     }
 

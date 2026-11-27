@@ -73,8 +73,6 @@ use crate::reassembly_rx::{in_place_reassembly, InPlaceReassembly, PoolStorage, 
 #[cfg(all(feature = "reassembly", not(feature = "rx-in-place")))]
 use crate::reassembly_rx::{mcu_reassembly, CoopReassembly};
 
-#[cfg(not(feature = "session-slot"))]
-use crate::link_storage::LinkTables;
 use crate::session_runtime::{EntropyOf, SessionEntropy, SessionHandle};
 use crate::sync::LockKind;
 use crate::{yield_now, ClockSource, CoopLocalJoinHandle, CoopLocalSet, CoopRuntime, CoopTime};
@@ -1133,14 +1131,16 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     /// [`LinkOpenError::Unsupported`].
     fn open_initiator(&self, to: Locator) -> Result<OpenedLink<Self::Pump, N>, LinkOpenError>;
 
-    /// The buffers of every link the stack opens from now on, for the session the links serve:
-    /// tables the session laid out in the memory it reserved when it opened, a receive buffer and
-    /// outbound storage for each link it may hold. A stack that takes them opens each link over a
-    /// buffer of each, and a link the tables have no buffer left for is
-    /// [`LinkOpenError::Exhausted`], never one that allocates; told before the session listens, so
-    /// a listener it opens after takes them too. The default ignores them: a stack whose links
-    /// bring buffers of their own (an lwIP pool, a test network) keeps them.
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
+    /// Where the buffers of every link the stack opens from now on are taken, for the session the
+    /// links serve ([`CountKind::Buffers`](crate::link_cells::CountKind::Buffers)): tables the
+    /// session laid out in the memory it reserved when it opened, a receive buffer and outbound
+    /// storage for each link it may hold, or the heap, where it lent none or where the kind's
+    /// buffers are the heap's alone. A stack lent tables opens each link over a buffer of each,
+    /// and a link the tables have no buffer left for is [`LinkOpenError::Exhausted`], never one
+    /// that allocates; told before the session listens, so a listener it opens after takes them
+    /// too. The default ignores them: a stack whose links bring buffers of their own (an lwIP
+    /// pool, a test network) keeps them.
+    fn lend_buffers(&mut self, tables: N::Buffers) {
         let _ = tables;
     }
 

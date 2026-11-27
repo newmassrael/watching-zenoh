@@ -279,8 +279,8 @@ fn an_on_use_sessions_link_parts_lie_on_the_heap() {
 /// session's one table set, the key arena, the faces' sets and the index of the held ones, a peer's
 /// tables, the tokens the faces that went owe, the places of the rooms or of a step, the
 /// declaration watchers, the gets' tables, the held Finals or the round's tables, each counted from
-/// the plan and taking its memory at its first row; the CONTROL rows, the endpoints' texts and the
-/// links' receive buffers, are laid out.
+/// the plan and taking its memory at its first row, nor the links' buffers and places, which each
+/// link takes of the heap as it opens; the CONTROL row, the endpoints' texts, is laid out.
 /// Turned red by a row of those tables put where the build lays its plans out at the open
 /// (`feature = "runtime-plan"`) rather than where the policy lends them (`wz_lent`), as
 /// `ArenaPlan::put_entities` was put, in a build of both features.
@@ -294,9 +294,18 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
     let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
     let laid = |part: &str| plan.rows().any(|row| row.part() == part);
     assert!(
-        laid("endpoint texts") && laid("link receive buffers"),
-        "CONTROL: the transport's rows are laid out"
+        laid("endpoint texts"),
+        "CONTROL: the transport's texts are laid out"
     );
+    for part in [
+        "link receive flags",
+        "link receive buffers",
+        "link transmit flags",
+        "link transmit slots",
+        "link places",
+    ] {
+        assert!(!laid(part), "{part} lies on the heap, each link's own");
+    }
     for part in [
         "session tables",
         "key arena",
@@ -322,6 +331,46 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
     ] {
         assert!(!laid(part), "{part} is counted, not laid out");
     }
+}
+
+/// A session whose tables take their memory on use lends its links the heap as where their
+/// buffers are taken, each link a receive buffer of the batch the session advertises and
+/// `LINK_TX_SLOTS` slots of it, as its tables would lend each link and as zenoh-pico's transport
+/// takes one buffer of each; a report of its memory reads that for each link it may hold, as no
+/// link shares a pool. Turned red by a transport lent tables on use (`TransportRows::lent_from`),
+/// by a source of another size than the plan's batch, or by a report that reads pools a session on
+/// use holds none of (`LINKS_SHARE_POOLS`).
+#[test]
+fn an_on_use_sessions_links_take_their_batch_of_the_heap() {
+    use crate::arena::{
+        link_buffers, links_of, AllocatorMemory, ArenaPlan, SessionArena, LINK_TX_SLOTS,
+    };
+    use wz_runtime_coop::link_storage::HeapBuffers;
+
+    let config = crate::CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        ..super::client_config()
+    };
+    let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
+    let batch = usize::from(config.batch_size);
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let transport = plan.transport().lent_from(&mut lend);
+    lend.finish().expect("the plan lays the transport out");
+    assert_eq!(
+        transport.links,
+        HeapBuffers::sized(batch, LINK_TX_SLOTS),
+        "each link takes a buffer and its slots of the session's batch"
+    );
+    let links = links_of(&config).expect("within the address space");
+    let report = link_buffers(links, config.max_faces, config.batch_size, &config.limits)
+        .expect("the plan's batch");
+    assert_eq!(
+        (report.receive, report.transmit, report.bytes),
+        (links, links, batch),
+        "a buffer and a slot of the batch for each link"
+    );
 }
 
 /// A session whose tables take their memory on use takes the state its own values and its key

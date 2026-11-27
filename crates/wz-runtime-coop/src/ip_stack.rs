@@ -44,7 +44,7 @@ use crate::group_transport::{GroupJoiner, GroupTransport, NoGroups};
 use crate::link_cells::{CellClaim, CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::TxStore;
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
-use crate::link_storage::{heap_link_buffers, LinkBuffers, LinkTables, RxBuffer, TxBuffer};
+use crate::link_storage::{BufferSource, LinkBuffers, RxOf, TxOf};
 #[cfg(all(
     feature = "alloc",
     not(feature = "session-slot"),
@@ -405,9 +405,11 @@ struct LinkShape<N: CountKind> {
     /// The receive buffer of a datagram link: the largest datagram until the stack is told the
     /// largest batch its sessions receive ([`IpLinks::with_rx_capacity`]).
     datagram_rx: usize,
-    /// The tables of the session the links serve, when it lent the stack some
-    /// ([`SessionLinks::lend_buffers`]): every link claims its buffers there, and none allocates.
-    lent: Option<LinkTables<N::Flag>>,
+    /// Where every link's buffers are taken ([`SessionLinks::lend_buffers`]): the tables of the
+    /// session the links serve when it lent the stack some, where every link claims its buffers
+    /// and none allocates; the link's own otherwise, or always where the kind's buffers are the
+    /// heap's.
+    lent: N::Buffers,
     place: LinkPlace<N>,
 }
 
@@ -429,7 +431,7 @@ impl<N: CountKind> Default for LinkShape<N> {
             tx_slots: 0,
             tx_capacity: 0,
             datagram_rx: UDP_RX_CAPACITY,
-            lent: None,
+            lent: Default::default(),
             place: LinkPlace::default(),
         }
     }
@@ -442,14 +444,14 @@ impl<N: CountKind> LinkShape<N> {
     /// ([`SessionLinks::lend_cells`]), so the shape is changed before that and has none.
     fn counted_by<M: CountKind>(self) -> LinkShape<M> {
         debug_assert!(
-            self.place.cells.table().is_none() && self.lent.is_none(),
+            self.place.cells.table().is_none() && self.lent.tables().is_none(),
             "cells and buffers are lent after the links are made"
         );
         LinkShape {
             tx_slots: self.tx_slots,
             tx_capacity: self.tx_capacity,
             datagram_rx: self.datagram_rx,
-            lent: None,
+            lent: Default::default(),
             place: LinkPlace {
                 owner_waits: self.place.owner_waits,
                 cells: Default::default(),
@@ -501,8 +503,8 @@ impl<N: CountKind> LinkPlace<N> {
     fn stream<S: StreamSocket + 'static>(
         &self,
         socket: S,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(&self.cells, stream_ends_fit(&socket))?.open(|place| {
             let link = place.write(link_over(socket, rx, tx));
@@ -524,8 +526,8 @@ impl<N: CountKind> LinkPlace<N> {
         &self,
         socket: U,
         peer: Option<SocketAddr>,
-        rx: RxBuffer<N::Flag>,
-        tx: TxBuffer<N::Flag>,
+        rx: RxOf<N>,
+        tx: TxOf<N>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(&self.cells, datagram_ends_fit(&socket, peer))?.open(|place| {
             let link = UdpDriver::<U, _, _, W>::with_peer_in(place, socket, peer, rx, tx);
@@ -542,8 +544,8 @@ impl<N: CountKind> LinkShape<N> {
     /// The buffers of a link that opens now, its own receive buffer `rx` bytes long: claimed from
     /// the session's tables when it lent some, and [`LinkOpenError::Exhausted`] when they have none
     /// left, so a session whose tables are full opens no link; allocated otherwise.
-    fn buffers(&self, rx: usize) -> Result<LinkBuffers<N::Flag>, LinkOpenError> {
-        heap_link_buffers(self.lent.as_ref(), rx, self.tx_slots, self.tx_capacity)
+    fn buffers(&self, rx: usize) -> Result<LinkBuffers<N>, LinkOpenError> {
+        self.lent.buffers(rx, self.tx_slots, self.tx_capacity)
     }
 }
 
@@ -797,24 +799,23 @@ where
     }
 
     /// Every link these links open from now on, dialled or taken off a port that is listened on
-    /// after this, claims its buffers from `tables`.
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
-        self.shape.lent = Some(tables);
+    /// after this, takes its buffers through `tables`.
+    fn lend_buffers(&mut self, tables: N::Buffers) {
+        self.shape.lent = tables;
     }
 
     /// The largest cell any link of these takes: a datagram link, a link of a `udp/` port's
     /// peer, a plain stream's and a secure channel's.
     const LINK_CELL_BYTES: usize = {
-        let datagram =
-            CellRc::<UdpDriver<U, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes();
+        let datagram = CellRc::<UdpDriver<U, RxOf<N>, TxOf<N>, W>>::cell_bytes();
         #[cfg(feature = "udp-listen")]
         let datagram = crate::link_cells::larger_cell(
             datagram,
-            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxBuffer<N::Flag>, TxBuffer<N::Flag>, W>>::cell_bytes(),
+            CellRc::<UdpDriver<PortPeer<U, N::Shared>, RxOf<N>, TxOf<N>, W>>::cell_bytes(),
         );
         let stream = crate::link_cells::larger_cell(
-            CellRc::<<D::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
-            CellRc::<<L::Stream as StreamSocket>::Link<RxBuffer<N::Flag>, TxBuffer<N::Flag>>>::cell_bytes(),
+            CellRc::<<D::Stream as StreamSocket>::Link<RxOf<N>, TxOf<N>>>::cell_bytes(),
+            CellRc::<<L::Stream as StreamSocket>::Link<RxOf<N>, TxOf<N>>>::cell_bytes(),
         );
         crate::link_cells::larger_cell(datagram, stream)
     };
@@ -1060,7 +1061,7 @@ where
 ))]
 struct PendingStream<P: StreamSocket + 'static, N: CountKind> {
     socket: Option<P>,
-    buffers: Option<LinkBuffers<N::Flag>>,
+    buffers: Option<LinkBuffers<N>>,
     place: LinkPlace<N>,
 }
 
@@ -1546,6 +1547,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+    use crate::link_storage::LinkTables;
     use crate::stream_link::StreamEnds;
     use core::ffi::c_int;
     #[cfg(feature = "session-slot")]
@@ -2550,7 +2553,7 @@ mod tests {
             answer: answer.clone(),
             waited: waited.clone(),
         });
-        links.lend_buffers(tables);
+        links.lend_buffers(Some(tables));
 
         let mut pending = links
             .begin_initiator(Locator::tls(ROUTER))
@@ -2687,7 +2690,7 @@ mod tests {
         );
 
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial);
-        links.lend_buffers(tables);
+        links.lend_buffers(Some(tables));
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link over the tables' buffers")
@@ -2831,17 +2834,21 @@ mod tests {
         );
     }
 
-    /// Links counted by a kind whose cells are the heap's hold a source that names no table and
-    /// open each link in a block of the heap of its own, none refused for want of a cell. Turned
-    /// red by a stack whose links' cells are made otherwise than its kind's source says.
+    /// Links counted by a kind whose cells and buffers are the heap's hold sources that name no
+    /// table and open each link in a block of the heap of its own over buffers of its own, none
+    /// refused for want of a cell or a buffer, of the stack's shape until a session sizes the
+    /// source and of the session's batch after. Turned red by a stack whose links' cells or buffers
+    /// are made otherwise than its kind's sources say.
     #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
     #[test]
     fn links_whose_cells_are_the_heaps_open_each_link_on_the_heap() {
         use crate::link_cells::{HeapCells, OnHeap};
+        use crate::link_storage::HeapBuffers;
 
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).counted_by::<OnHeap<OneTask>>();
-        // The kind's source is the heap's: a table could not be lent to these links.
+        // The kind's sources are the heap's: no table could be lent to these links.
         links.lend_cells(HeapCells);
+        links.lend_buffers(HeapBuffers::default());
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link on the heap");
@@ -2853,7 +2860,19 @@ mod tests {
             2,
             "a link's sink and pump are two handles on its one cell"
         );
+        assert_eq!(
+            datagram.sink.link_rx_capacity(),
+            UDP_RX_CAPACITY,
+            "a datagram link receives into a buffer of its own of the largest datagram"
+        );
         drop((stream, datagram));
+
+        // Sized by its session, a link receives into a buffer of the session's batch.
+        links.lend_buffers(HeapBuffers::sized(512, 1));
+        let sized = links
+            .open_initiator(Locator::udp(ROUTER))
+            .expect("a datagram link of the session's batch");
+        assert_eq!(sized.sink.link_rx_capacity(), 512);
     }
 
     /// Links counted as several threads count a link's handles place each link in a cell of a

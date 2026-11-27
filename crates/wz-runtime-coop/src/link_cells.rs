@@ -38,6 +38,7 @@ use wz_session_core::bounded::ARENA_ALIGN;
 use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
 use wz_session_core::link::BoxedLinkDriver;
 
+use crate::link_storage::{BufferSource, HeapBuffers, LinkTables};
 use crate::session_drive::SessionDatagramLink;
 
 /// What a cell keeps before its value: how many handles name it and where the value lies, where its
@@ -79,6 +80,12 @@ pub trait CountKind: Sized + 'static {
     /// for a kind whose sessions may lend their links tables; the heap alone for [`OnHeap`]'s.
     type Cells: CellSource<Self::Flag>;
 
+    /// Where a link's buffers are taken from, which what opens a link holds as it holds
+    /// [`Self::Cells`]: the tables a session lent, or the heap while it lent none, for a kind
+    /// whose sessions may lend their links tables; the heap alone for [`OnHeap`]'s, whose links
+    /// then hold buffers of their own and name no store of a table.
+    type Buffers: BufferSource<Self::Flag>;
+
     /// The word as it stands.
     fn read(word: &CountWord) -> usize;
 
@@ -111,6 +118,7 @@ impl CountKind for OneTask {
     type Flag = Cell<bool>;
     type Shared = OneTask;
     type Cells = Option<LentByteCells<Cell<bool>>>;
+    type Buffers = Option<LinkTables<Cell<bool>>>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -157,6 +165,7 @@ impl CountKind for Atomic {
     type Flag = AtomicBool;
     type Shared = Atomic;
     type Cells = Option<LentByteCells<AtomicBool>>;
+    type Buffers = Option<LinkTables<AtomicBool>>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -230,6 +239,7 @@ impl CountKind for OneFace {
     type Flag = AtomicBool;
     type Shared = Atomic;
     type Cells = Option<LentByteCells<AtomicBool>>;
+    type Buffers = Option<LinkTables<AtomicBool>>;
 
     #[inline]
     fn read(word: &CountWord) -> usize {
@@ -259,15 +269,17 @@ impl CountKind for OneFace {
     }
 }
 
-/// Counted as `N` counts, every cell made on the heap ([`HeapCells`]): the kind of a session that
-/// takes its links' memory as each link opens and lends its links no table of cells, so no maker of
-/// a link's part names a table or a claim of one. What its links share is counted as `N`'s is.
+/// Counted as `N` counts, every cell made on the heap ([`HeapCells`]) and every link's buffers its
+/// own ([`HeapBuffers`]): the kind of a session that takes its links' memory as each link opens
+/// and lends its links no table of cells or of buffers, so no maker of a link's part names a table
+/// or a claim of one. What its links share is counted as `N`'s is.
 pub struct OnHeap<N: CountKind>(PhantomData<fn() -> N>);
 
 impl<N: CountKind> CountKind for OnHeap<N> {
     type Flag = N::Flag;
     type Shared = N::Shared;
     type Cells = HeapCells;
+    type Buffers = HeapBuffers;
 
     #[inline]
     fn read(word: &CountWord) -> usize {

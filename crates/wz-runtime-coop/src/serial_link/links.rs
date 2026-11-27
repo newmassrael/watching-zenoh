@@ -48,7 +48,7 @@ use crate::group_transport::GroupTransport;
 use crate::ip_stack::HeapLink;
 use crate::link_cells::{CellRc, CellSource, CountKind, OneTask};
 use crate::link_storage::{
-    heap_link_buffers, LinkTables, RxBuffer, RxStore, TxBuffer, TxLender, TxStore,
+    BufferSource, RxBuffer, RxOf, RxStore, TxBuffer, TxLender, TxOf, TxStore,
 };
 use crate::session_drive::{
     LinkListener, LinkOpenError, Locator, OpenedLink, PendingDial, SerialLine, SerialLocator,
@@ -582,12 +582,7 @@ impl<D: SerialDevice + 'static, B: RxStore + 'static, T: TxStore + 'static, M: C
 
 /// A serial link of a stack whose sessions count its handles as `N` does: its buffers are of
 /// tables flagged as `N` flags the cells it is placed in.
-type SerialDriverOf<D, N> = SerialDriver<
-    D,
-    RxBuffer<<N as CountKind>::Flag>,
-    TxBuffer<<N as CountKind>::Flag>,
-    <N as CountKind>::Shared,
->;
+type SerialDriverOf<D, N> = SerialDriver<D, RxOf<N>, TxOf<N>, <N as CountKind>::Shared>;
 
 /// The handle a stack's sessions hold a serial link by: on the cell it is made in, counted as they
 /// count their handles.
@@ -704,7 +699,7 @@ fn opened<D: SerialDevice + 'static, N: CountKind>(
 /// and cells when it lent them, the slots its frames are encoded into, and whether its owner
 /// waits.
 struct SerialShape<N: CountKind> {
-    lent: Option<LinkTables<N::Flag>>,
+    lent: N::Buffers,
     cells: N::Cells,
     owner_waits: bool,
     tx_slots: usize,
@@ -723,7 +718,7 @@ impl<N: CountKind> Copy for SerialShape<N> {}
 impl<N: CountKind> Default for SerialShape<N> {
     fn default() -> Self {
         Self {
-            lent: None,
+            lent: Default::default(),
             cells: Default::default(),
             owner_waits: false,
             tx_slots: 0,
@@ -741,12 +736,9 @@ impl<N: CountKind> SerialShape<N> {
         line: LineLease<D, N::Shared>,
         at: SerialLocator,
     ) -> Result<SerialCellOf<D, N>, LinkOpenError> {
-        let (rx, tx) = heap_link_buffers(
-            self.lent.as_ref(),
-            SERIAL_MAX_COBS_BUF,
-            self.tx_slots,
-            self.tx_capacity,
-        )?;
+        let (rx, tx) = self
+            .lent
+            .buffers(SERIAL_MAX_COBS_BUF, self.tx_slots, self.tx_capacity)?;
         let owner_waits = self.owner_waits;
         CellRc::<_, N>::claim_of(&self.cells)
             .ok_or(LinkOpenError::Exhausted)?
@@ -947,14 +939,14 @@ impl<S, O: SerialOpen, N: CountKind> SerialLinks<S, O, N> {
     /// lends them its cells.
     pub fn counted_by<M: CountKind, T>(self, links: T) -> SerialLinks<T, O, M> {
         debug_assert!(
-            self.shape.cells.table().is_none() && self.shape.lent.is_none(),
+            self.shape.cells.table().is_none() && self.shape.lent.tables().is_none(),
             "cells and buffers are lent after the links are made"
         );
         SerialLinks {
             links,
             opener: self.opener,
             shape: SerialShape {
-                lent: None,
+                lent: Default::default(),
                 cells: Default::default(),
                 owner_waits: self.shape.owner_waits,
                 tx_slots: self.shape.tx_slots,
@@ -1043,8 +1035,8 @@ where
         }
     }
 
-    fn lend_buffers(&mut self, tables: LinkTables<N::Flag>) {
-        self.shape.lent = Some(tables);
+    fn lend_buffers(&mut self, tables: N::Buffers) {
+        self.shape.lent = tables;
         self.links.lend_buffers(tables);
     }
 

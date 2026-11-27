@@ -6949,7 +6949,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// resolved lay it out ([`ArenaPlan`]): a session whose memory cannot be given binds no port,
     /// joins no group and dials no endpoint, and is [`OpenError::Arena`]. The links' buffers are
     /// lent from it to `links` before anything is bound or dialled
-    /// (`SessionLinks::lend_buffers`), so a link the session opens reads and encodes in the arena.
+    /// (`SessionLinks::lend_buffers`), so a link the session opens reads and encodes in the arena;
+    /// where the tables take their memory on use, `links` is told instead the batch and slots each
+    /// link takes of the heap as it opens.
     #[cfg(any(feature = "runtime-plan", test))]
     pub fn open_in(
         links: L,
