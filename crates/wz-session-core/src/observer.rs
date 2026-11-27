@@ -513,7 +513,7 @@ impl ApplicationLayerObserver {
                 #[cfg(feature = "liveliness-token")]
                 liveliness: &mut app.liveliness,
                 #[cfg(feature = "liveliness-token")]
-                local_tokens: &mut app.local_tokens,
+                local_tokens: &mut app.tables.local_tokens,
                 #[cfg(feature = "liveliness-subscriber")]
                 liveliness_subscribers: &mut app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
@@ -561,7 +561,7 @@ impl ApplicationLayerObserver {
                 #[cfg(feature = "liveliness-token")]
                 liveliness: &app.liveliness,
                 #[cfg(feature = "liveliness-token")]
-                local_tokens: &app.local_tokens,
+                local_tokens: &app.tables.local_tokens,
                 #[cfg(feature = "liveliness-subscriber")]
                 liveliness_subscribers: &app.tables.liveliness_subscribers,
                 #[cfg(feature = "declarations-synced-event")]
@@ -2773,6 +2773,7 @@ mod history_replay_is_peer_scoped {
         // will declare. Upstream would not replay it; neither may wz.
         observer
             .app
+            .tables
             .local_tokens
             .register(41, "live/mine")
             .expect("register a locally held token");

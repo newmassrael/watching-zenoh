@@ -73,8 +73,6 @@ use wz_session_core::slot_observer::NoRequesters;
     feature = "declarations-synced-event"
 )))]
 use wz_session_core::slot_observer::NoSink;
-#[cfg(feature = "runtime-plan")]
-use wz_session_core::slot_observer::ObserverRows;
 #[cfg(any(
     feature = "listen",
     feature = "group",
@@ -818,7 +816,7 @@ impl<H: Holders> RegistryOf<H> {
         limits: &SessionLimits,
         arena: &mut Arena,
         keys: KeySpace,
-        rows: ObserverRows<wz_session_core::session_tables::TableRows>,
+        rows: wz_session_core::session_tables::TableRows,
         gets: GetTables,
         peers: FacePeers,
         delivery: RoundDelivery,
@@ -2470,12 +2468,9 @@ mod tests {
             arena.arena_mut(),
             keys,
             // A row for a liveliness subscriber, which the tests of retractions declare.
-            ObserverRows {
-                tables: wz_session_core::session_tables::TableRows {
-                    liveliness_subscribers: 1,
-                    ..Default::default()
-                },
-                ..ObserverRows::default()
+            wz_session_core::session_tables::TableRows {
+                liveliness_subscribers: 1,
+                ..Default::default()
             },
             gets,
             peers,

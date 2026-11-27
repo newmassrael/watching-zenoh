@@ -96,7 +96,7 @@ impl FaceTables {
 /// The rows of the registry: the application's watchers' and tables', the one set's and its
 /// tables', and the session's own gets'.
 struct RegistryRows {
-    app: ObserverRegionRows<CoopSinks, 0>,
+    app: ObserverRegionRows<CoopSinks>,
     tables: SessionRows<CoopRows>,
     /// The sets, written field by field where they lie before the region is placed, then counted
     /// by the registry's table of them.
@@ -134,7 +134,7 @@ impl RegistryRegion {
         let set_rows = rows.wrapping_add(offset_of!(RegistryRows, set_rows));
         let mut lines = RegionLines::EMPTY
             .with(
-                &App::places::<0>(app, rows.wrapping_add(offset_of!(RegistryRows, app))),
+                &App::places(app, rows.wrapping_add(offset_of!(RegistryRows, app))),
                 0,
             )
             .with(

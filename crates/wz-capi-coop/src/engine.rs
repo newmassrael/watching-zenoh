@@ -106,8 +106,6 @@ use wz_session_core::session_tables::{
     SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
-#[cfg(feature = "runtime-plan")]
-use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
 // host and the kernel's on an MCU (`docs/upstream-parity.md` section 5a, E1).
@@ -1244,19 +1242,13 @@ fn lend_session(
         resolve_limits(config),
         arena.arena_mut(),
         keys,
-        // The session's tokens are rows of its one table set, which answers a peer's Interest
-        // too, so the observer's own registry of them is lent none.
-        ObserverRows {
-            tables: plan.tables(),
-            local_tokens: 0,
-        },
+        plan.tables(),
         plan.gets(),
         plan.peers(),
         delivery,
     )
     .map_err(ArenaRefused::Lend)?;
-    // The application's tables are the region's, placed above; the session's one table set holds
-    // its tokens as rows, so the observer's own registry of them has none (`RegistryRegion`).
+    // The application's tables are the region's, placed above (`RegistryRegion`).
     // SAFETY: the region was written and placed by `StateRegion::place` above and nothing reaches
     // its registry yet; the block is held after the handle (`SessionLent`, then `Core`).
     #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]

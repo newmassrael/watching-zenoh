@@ -47,8 +47,8 @@
 //!    via [`HeldTokens::keyexpr_for`] — then one `Final`) into the peer's
 //!    bounded staging. No codec, no heap; the caller supplies the
 //!    already-resolved Interest pattern.
-//! 3. **Owned inbound parse (alloc)** — [`TokenAnswers::answer`] /
-//!    [`TokenAnswers::answer_messages`] consume an owned `InterestOwned` +
+//! 3. **Owned inbound parse (alloc)** — `TokenAnswers::answer` /
+//!    `TokenAnswers::answer_messages` consume an owned `InterestOwned` +
 //!    resolve its keyexpr through the peer table (`alloc`), then funnel
 //!    through the no-heap borrowed SSOT.
 //!
@@ -159,10 +159,12 @@ struct LocalToken<P: Storage = Profile> {
     keyexpr: P::Key,
 }
 
-/// The tokens a session holds, which a peer's liveliness Interest is answered from: the
-/// registry of them ([`LocalTokenRegistry`]), or the session's one table set where its tokens are
-/// rows of it (`crate::session_tables::SessionTables`). The peer's staging stages the answer from
-/// either ([`TokenAnswers::answer_iteration_event`]), holding no token itself.
+/// The tokens a session holds, which a peer's liveliness Interest is answered from: the registry
+/// of them ([`LocalTokenRegistry`]) the tables of the storage policies keep, or the session's one
+/// table set, whose tokens are rows of it (`crate::session_tables::SessionTables`). The
+/// application's tables answer which (`crate::slot_observer::ObserverTables::held_tokens`); the
+/// peer's staging stages the answer from it (`TokenAnswers::answer_iteration_event`), holding
+/// no token itself.
 pub trait HeldTokens {
     /// Call `each` with the id and the key of every token held.
     fn each_token(&self, each: &mut dyn FnMut(u64, &str));
@@ -235,62 +237,6 @@ impl LocalTokenRegistry<Profile> {
     /// when wz holds no matching token.
     pub fn new() -> Self {
         Self::default()
-    }
-}
-
-/// The rows of a [`LocalTokenRegistry`] of the region policy, `N` tokens, which a region lays out
-/// beside it: none where the session's tables keep its tokens as rows, and the registry holds none.
-pub struct LocalTokenRows<const N: usize> {
-    tokens: [core::mem::MaybeUninit<LocalToken<crate::bounded::Region>>; N],
-}
-
-// SAFETY: the rows are `MaybeUninit`, valid as any bytes, holding no value until placed.
-unsafe impl<const N: usize> crate::bounded::ZeroEmpty for LocalTokenRows<N> {}
-
-/// The lines a region's description holds for one [`LocalTokenRegistry`] of the region policy: its
-/// tokens' rows, and its handle to the key arena.
-pub const LOCAL_TOKEN_LINES: usize = 1;
-
-// SAFETY: of the region policy, at all zero bytes: the tokens are a `LentSeq` of no rows, each bound
-// a `Limited` (`ZeroEmpty`) admitting nothing until the session states it, and the handle to the
-// key arena a `LentKeys` of none. Nothing drops a value, the table holding none.
-unsafe impl crate::bounded::ZeroEmpty for LocalTokenRegistry<crate::bounded::Region> {}
-
-impl LocalTokenRegistry<crate::bounded::Region> {
-    /// The description of a registry of the region policy at `at` in a region and its
-    /// [`LocalTokenRows`] of `N` tokens at `rows`: the line of its tokens' rows and its handle to
-    /// the region's key arena. `N` past the build's `MAX_LOCAL_TOKENS` stops the build.
-    pub const fn places<const N: usize>(
-        at: usize,
-        rows: usize,
-    ) -> crate::bounded::RegionLines<LOCAL_TOKEN_LINES> {
-        assert!(
-            N <= caps::MAX_LOCAL_TOKENS,
-            "a region lays out no token past the build's bound"
-        );
-        crate::bounded::RegionLines::EMPTY
-            .keys_at(at.wrapping_add(core::mem::offset_of!(Self, keys)))
-            .seq(crate::bounded::SeqPlace::of::<
-                LocalToken<crate::bounded::Region>,
-            >(
-                at.wrapping_add(core::mem::offset_of!(Self, tokens)),
-                rows.wrapping_add(core::mem::offset_of!(LocalTokenRows<N>, tokens)),
-                N,
-            ))
-    }
-}
-
-#[cfg(feature = "alloc")]
-impl LocalTokenRegistry<crate::bounded::OnUse> {
-    /// An empty registry of at most `rows` tokens, under `MAX_LOCAL_TOKENS`, taken at its first
-    /// token, their keys counted against `keys`, the session's key budget: a session's, at its
-    /// open.
-    pub fn counted(keys: crate::on_use::BudgetKeys, rows: usize) -> Self {
-        Self {
-            tokens: BoundedVec::counted(rows),
-            keys,
-            ..Self::default()
-        }
     }
 }
 
