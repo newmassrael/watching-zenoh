@@ -1,0 +1,18 @@
+impact = ["feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"]
+decision = '''
+Shrink the sessions area of the no_std pico preset by the S-ROW step of
+size.md, measured against main on the same build with the receive cost
+inside the spread of fixed code.
+'''
+changes = '''
+- session-core: the arch-sessions step of size.md (S-ROW).
+- docs/win-budget/size.md records the step and its reading.
+'''
+verification = '''
+- size ledger pico-client-coop-nostd: total 218,218 B vs main 218,756 (-538).
+- receive Ir W 3,078.4 vs main 3,078.1, inside P's spread of 1.2 on fixed code.
+- session-core 1785 lib tests pass; clippy and nondefault-features clean.
+'''
+carry = '''
+- none for this lane.
+'''
