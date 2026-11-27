@@ -1080,8 +1080,8 @@ function Invoke-Build {
     }
     Say "arm W: $($script:PlanDoc.package.name) on the $($script:PlanDoc.wz_engine) engine, $($script:PlanDoc.wz_stdlib)"
     if ($null -eq $script:PlanDoc.wz_preset) {
-        Say ('arm W is not built as zenoh-pico''s preset (beyond it: {0}; short of it: {1}): the gate judges no row of this run against the table of the preset' -f
-             (@($script:PlanDoc.wz_beyond_preset) -join ', '), (@($script:PlanDoc.wz_short_of_preset) -join ', '))
+        Say ('arm W is not built as zenoh-pico''s preset (the package is of profile {0}; beyond it: {1}; short of it: {2}): the gate judges no row of this run against the table of the preset; its package is pico_windows_package.py --build OUT --preset zenoh-pico' -f
+             $script:PlanDoc.package.profile, (@($script:PlanDoc.wz_beyond_preset) -join ', '), (@($script:PlanDoc.wz_short_of_preset) -join ', '))
     }
 }
 

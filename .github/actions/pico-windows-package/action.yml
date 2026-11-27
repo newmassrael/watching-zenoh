@@ -9,7 +9,10 @@
 # checkout), and uploads `outputs.directory`, which holds the zip and its `.zip.sha256`.
 #
 # The profile is fixed here, not an input: the package a release ships is the one the Platform lane
-# tests. Composite steps take no `timeout-minutes`, so the caller's job timeout bounds the build.
+# tests. `preset` builds an original's own default build in wz in its place (`--preset`), the
+# package the performance matrix on Windows measures (docs/pico-perf-matrix.md section 6), which no
+# release carries; the release workflow never names it. Composite steps take no `timeout-minutes`,
+# so the caller's job timeout bounds the build.
 #
 # The DLL is the C library without `std` (docs/win-budget/std-heap.md, S1), over the system's own
 # calls (`os-host`), the only form it has and the one a release ships (owner, 2026-11-23,
@@ -26,6 +29,10 @@ inputs:
   form:
     description: The form of the library (`single` or `split`), as `pico_windows_package.py --form` takes it
     required: true
+  preset:
+    description: Empty for the release profile; an original's name (`zenoh-pico`) for its own default build in wz, as `pico_windows_package.py --preset` takes it
+    required: false
+    default: ""
 outputs:
   directory:
     description: The directory holding the package's zip and its `.zip.sha256`
@@ -39,7 +46,8 @@ runs:
       env:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
-      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}" >> "$GITHUB_OUTPUT"
+        WZ_PACKAGE_PRESET: ${{ inputs.preset }}
+      run: echo "directory=${RUNNER_TEMP}/pico-package-${WZ_PACKAGE_ARCH}-${WZ_PACKAGE_FORM}${WZ_PACKAGE_PRESET:+-${WZ_PACKAGE_PRESET}}" >> "$GITHUB_OUTPUT"
 
     - name: Install Rust toolchain (pinned by rust-toolchain.toml)
       shell: bash
@@ -71,7 +79,14 @@ runs:
         WZ_PACKAGE_ARCH: ${{ inputs.arch }}
         WZ_PACKAGE_FORM: ${{ inputs.form }}
         WZ_PACKAGE_OUT: ${{ steps.where.outputs.directory }}
-      run: python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" --profile host-peer-ext --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM"
+        WZ_PACKAGE_PRESET: ${{ inputs.preset }}
+      run: |
+        if [ -n "$WZ_PACKAGE_PRESET" ]; then
+          built_as=(--preset "$WZ_PACKAGE_PRESET")
+        else
+          built_as=(--profile host-peer-ext)
+        fi
+        python scripts/lib/pico_windows_package.py --build "$WZ_PACKAGE_OUT" "${built_as[@]}" --arch "$WZ_PACKAGE_ARCH" --form "$WZ_PACKAGE_FORM"
 
     - name: the package's regression test (its zip, extracted, verified, compiled against and run)
       shell: bash

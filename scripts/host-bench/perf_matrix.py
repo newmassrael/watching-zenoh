@@ -74,7 +74,9 @@ committed rows.
         as a release ships it unless built otherwise; its manifest's `stdlib` is recorded as the Linux
         reference records its own), verified against its manifest, and arm P zenoh-pico built as the
         same build, its switches derived from the package's features as `reference` derives them from the
-        bench's build; with the figures, the
+        bench's build; arm W is planned as zenoh-pico's preset when the package's manifest says it is
+        (`pico_windows_package.py --build OUT --preset zenoh-pico`), and a package that says so and is not
+        the preset's build (its features, its conformance digest) is refused; with the figures, the
         reasons a cell is not applicable and the rules of a cell the runner applies, so the runner states
         none of its own. A package built from a commit whose inputs of that derivation differ from this
         tree's is refused
@@ -2125,19 +2127,23 @@ WINDOWS_NOT_RUN = {
 
 
 def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, target: str,
-                 preset_of: Callable[[str, str], set[str]]) -> dict:
+                 preset_of: Callable[[str, str], set[str]], preset_digest: str) -> dict:
     """What a run on Windows measures, from a package's manifest and build statement: arm W is the package's
     library, built for `target` with the features its manifest lists on the engine its statement states and with
     the standard library its manifest states (`pico_windows_package.stdlib_of`: every package is the library
     without `std`, so none is on the tokio engine), and arm P zenoh-pico built as the same build, every switch
     the declaration answers set from those features (`wz_config.pico_reference`), as `reference` derives the
-    Linux arm from the bench's build. The plan states the build the package is (`wz_preset`): zenoh-pico's
-    preset when its features are exactly the ones `preset_of(engine, stdlib)` names (`wz_config.preset_features`,
-    the one declaration the Linux arms are built from), and none otherwise, with what it has beyond the preset and
-    what it lacks of it, so the gate refuses to judge a package of another build against the preset's table.
+    Linux arm from the bench's build. The plan states the build the package is (`wz_preset`) as its manifest
+    states it (`pico_windows_package.manifest_preset`, the package `--build OUT --preset zenoh-pico` makes): a
+    package of zenoh-pico's preset is planned as that preset, and one of a registered profile as none, with what it
+    has beyond the preset and what it lacks of it, so the gate refuses to judge it against the preset's table. A
+    package whose manifest names the preset is held to it: its features are exactly the ones `preset_of(engine,
+    stdlib)` names (`wz_config.preset_features`, the one declaration the Linux arms are built from) and its
+    statement's digest is `preset_digest`, the preset's own, so its limits and policies are the preset's too.
     `table` is the feature table of wz-capi-pico, `decl` the declaration. A package of another width, one that
-    names a feature the crate lacks, one whose statement's engine is not the one its features run, and one whose
-    manifest states no standard library, or one its features do not build, are refused."""
+    names a feature the crate lacks, one whose statement's engine is not the one its features run, one whose
+    manifest states no standard library, or one its features do not build, one whose manifest states neither a
+    profile nor a preset, and one that names a preset it is not the build of, are refused."""
     import pico_windows_package as pwp
     import wz_config
 
@@ -2165,10 +2171,25 @@ def windows_plan(manifest: dict, statement: dict, table: dict, decl: dict, targe
         wz_config.engine_stdlib(engine, stdlib)
     except wz_config.PresetError as why:
         raise Refused(f"the package's manifest says it is built {stdlib}: {why}") from None
+    try:
+        named = pwp.manifest_preset(manifest)
+    except pwp.Refusal as why:
+        raise Refused(f"the package's manifest: {why}") from None
     preset = preset_of(engine, stdlib)
     beyond, short = sorted(enabled - preset), sorted(preset - enabled)
+    if named is not None:
+        if named not in PRESETS:
+            raise Refused(f"the package is {named}'s preset, and arm W is compared as {', '.join(PRESETS)}'s")
+        if beyond or short:
+            raise Refused(f"the package's manifest says it is {named}'s preset, and its features are not the "
+                          f"preset's (beyond it: {', '.join(beyond) or 'none'}; short of it: "
+                          f"{', '.join(short) or 'none'})")
+        if statement.get("digest") != preset_digest:
+            raise Refused(f"the package's manifest says it is {named}'s preset, and its build statement "
+                          f"({statement.get('digest')}) is not the preset's ({preset_digest}): a limit or a "
+                          f"policy differs")
     return {"wz_features": sorted(features), "wz_engine": engine, "wz_stdlib": stdlib,
-            "wz_preset": None if beyond or short else PRESETS[0],
+            "wz_preset": named,
             "wz_beyond_preset": beyond, "wz_short_of_preset": short,
             "reference_switches": wz_config.pico_reference(decl, enabled)}
 
@@ -2216,7 +2237,9 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
         def preset_of(engine: str, stdlib: str) -> set[str]:
             return wz_config.preset_features(engine, [], table, stdlib, decl, kconf)
 
-        plan = windows_plan(manifest, statement, table, decl, pwp.ARCHES[WINDOWS_ARCH][0], preset_of)
+        # The digest names the build alone, not where it was read from, so the derivation's words are none.
+        preset_digest = wz_config.resolved_statement(decl, "pico", kconf, {"kind": "presets", "inputs": []})["digest"]
+        plan = windows_plan(manifest, statement, table, decl, pwp.ARCHES[WINDOWS_ARCH][0], preset_of, preset_digest)
     except (OSError, ValueError, KeyError, zipfile.BadZipFile, pwp.Refusal, Refused, wz_config.PresetError) as why:
         print(f"perf-matrix: windows-plan refused: {why}", file=sys.stderr, flush=True)
         return 2
@@ -2227,6 +2250,7 @@ def cmd_windows_plan(package: pathlib.Path, out: pathlib.Path) -> int:
         "tree": first_line(["git", "-C", str(ROOT), "rev-parse", "HEAD"]),
         "tree_dirty": bool(status.stdout.strip()) if status.returncode == 0 else None,
         "package": {"name": name, "zip": package.name, "sha256": sha256_of(package), "commit": commit,
+                    "profile": manifest.get("profile"), "preset": manifest.get("preset"),
                     "form": manifest.get("form"), "libraries": manifest.get("libraries"),
                     "target": manifest.get("target"), "rustc": (manifest.get("toolchain") or {}).get("rustc"),
                     "statement_digest": manifest.get("statement_digest")},
@@ -3003,8 +3027,12 @@ def cmd_selftest() -> int:
         {"original": "zenoh-pico", "switch": "BATCH_UNICAST_SIZE", "class": "maps", "anchor": "wz-capi-pico/x"},
         {"original": "zenoh-c", "switch": "Z_FEATURE_SHARED_MEMORY", "class": "always"}]}
     x64 = "x86_64-pc-windows-msvc"
-    package_manifest = {"target": x64, "features": ["os-host", "app-transport"], "stdlib": "nostd"}
+    package_manifest = {"target": x64, "features": ["os-host", "app-transport"], "stdlib": "nostd",
+                        "profile": None, "preset": PRESETS[0]}
+    profile_manifest = dict(package_manifest, profile="p", preset=None)
     package_build = {"os-host", "app-transport", "advanced"}
+    digest = "sha256:" + "1" * 64
+    package_statement = {"engine": "coop", "digest": digest}
 
     def package_preset(engine, stdlib):
         return package_build if (engine, stdlib) == ("coop", "nostd") else set()
@@ -3012,27 +3040,42 @@ def cmd_selftest() -> int:
     def narrower_preset(engine, stdlib):
         return {"os-host", "zenoh-pico-only"}
 
-    planned = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64, package_preset)
+    planned = windows_plan(package_manifest, package_statement, feature_table, switch_rows, x64, package_preset,
+                           digest)
     expect("a plan pairs the package's library with pico built with the switches its features answer",
            planned["reference_switches"] == {"Z_FEATURE_ADVANCED_PUBLICATION": 1, "Z_FEATURE_MATCHING": 1,
                                              "Z_FEATURE_RAWETH_TRANSPORT": 0}
            and planned["wz_engine"] == "coop" and planned["wz_features"] == ["app-transport", "os-host"]
            and planned["wz_stdlib"] == "nostd")
-    expect("a package built as zenoh-pico's preset is planned as that build",
+    expect("a package whose manifest names zenoh-pico's preset, and that is its build, is planned as that build",
            planned["wz_preset"] == PRESETS[0] and planned["wz_beyond_preset"] == []
            and planned["wz_short_of_preset"] == [])
-    other = windows_plan(package_manifest, {"engine": "coop"}, feature_table, switch_rows, x64, narrower_preset)
-    expect("a package of another build is planned as no preset, with what it has beyond the preset and lacks",
+    other = windows_plan(profile_manifest, package_statement, feature_table, switch_rows, x64, narrower_preset,
+                         digest)
+    expect("a package of a profile is planned as no preset, with what it has beyond the preset and lacks",
            other["wz_preset"] is None and other["wz_beyond_preset"] == ["advanced", "app-transport"]
            and other["wz_short_of_preset"] == ["zenoh-pico-only"])
+    same = windows_plan(profile_manifest, package_statement, feature_table, switch_rows, x64, package_preset, digest)
+    expect("a package of a profile is planned as no preset even when its features are the preset's",
+           same["wz_preset"] is None and same["wz_beyond_preset"] == [] and same["wz_short_of_preset"] == [])
     tokio_manifest = {"target": x64, "features": ["engine-tokio", "app-transport"], "stdlib": "std"}
 
-    def plan_refused(manifest, statement):
+    def plan_refused(manifest, statement, preset_of=package_preset):
         try:
-            windows_plan(manifest, statement, feature_table, switch_rows, x64, package_preset)
+            windows_plan(manifest, statement, feature_table, switch_rows, x64, preset_of, digest)
         except Refused:
             return True
         return False
+
+    expect("a package whose manifest names the preset is refused when its features or its statement are not the "
+           "preset's",
+           plan_refused(package_manifest, package_statement, narrower_preset)
+           and plan_refused(package_manifest, dict(package_statement, digest="sha256:" + "2" * 64))
+           and plan_refused(package_manifest, {"engine": "coop"}))
+    expect("a package whose manifest names no build, both builds, or a preset of no pico original is refused",
+           plan_refused(dict(package_manifest, preset=None), package_statement)
+           and plan_refused(dict(package_manifest, profile="p"), package_statement)
+           and plan_refused(dict(package_manifest, preset="zenoh-c"), package_statement))
 
     expect("a package of another width, or one that lists no features, is refused",
            plan_refused(dict(package_manifest, target="i686-pc-windows-msvc"), {"engine": "coop"})
