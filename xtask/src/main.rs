@@ -501,6 +501,7 @@ fn regen_codec_deployment(
 ///   wz-plugin-abi    : abi_gate_verdict (algorithm)
 ///   wz-volume-abi    : abi_gate_verdict, volume_abi_verdict (algorithms)
 ///   wz-node-time     : timestamping_enabled_for (algorithm)
+///   wz-capi-pico     : pico_link_properties (algorithm); pico_link_reported (event-schema)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -651,8 +652,9 @@ fn regen_statecharts_and_pools(root: &Path) {
     }
 
     // Algorithms a crate other than the two above holds a rule of, each emitted into that crate's
-    // own directory: (stem, consuming crate). Each is a pure function of scalars, so it names no
-    // runtime and adds no dependency to the crate that includes it.
+    // own directory: (stem, consuming crate). Each is a pure function that names no runtime; one
+    // of scalars adds no dependency to the crate that includes it, and a record one returns is
+    // emitted beside it (`crate_schemas` below).
     let crate_algorithms: &[(&str, &str)] = &[
         // The window an accepted link's session handshake is given: what the link's own
         // handshake left of the accept's one bound, never nothing (wz-runtime-tokio
@@ -670,11 +672,20 @@ fn regen_statecharts_and_pools(root: &Path) {
         // The entry of the per-role timestamping map a node's role reads (wz-node-time
         // `node_clock`), over the role's API byte.
         ("timestamping_enabled_for", "wz-node-time"),
+        // What pico's link of a kind reports about itself: its MTU, stream and reliability
+        // (wz-capi-pico `link_properties`).
+        ("pico_link_properties", "wz-capi-pico"),
     ];
     for (stem, krate) in crate_algorithms {
         let out = root.join("out").join(krate);
         mkdir(&out);
         codegen.emit_algorithm(stem, &algorithms, &out);
+    }
+    // The records those algorithms return, each named by its algorithm as the sibling module
+    // `super::<stem>`: (stem, consuming crate).
+    let crate_schemas: &[(&str, &str)] = &[("pico_link_reported", "wz-capi-pico")];
+    for (stem, krate) in crate_schemas {
+        codegen.emit_event_schema(stem, &algorithms, &root.join("out").join(krate));
     }
 
     // sce-codegen drops a `sce_sourcemap.json` side-artifact into the
@@ -691,6 +702,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "wz-plugin-abi",
         "wz-volume-abi",
         "wz-node-time",
+        "wz-capi-pico",
     ] {
         let _ = std::fs::remove_file(root.join("out").join(krate).join("sce_sourcemap.json"));
     }

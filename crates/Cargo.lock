@@ -3987,6 +3987,7 @@ dependencies = [
  "base64",
  "getrandom 0.2.17",
  "libc",
+ "sce-portable-bytes",
  "tokio",
  "windows-sys 0.61.2",
  "wz-abi-stamp",
