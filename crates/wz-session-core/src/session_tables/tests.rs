@@ -3825,14 +3825,14 @@ fn a_plain_way_is_planned_at_one_epoch_for_its_heads_key_alone() {
     );
 }
 
-/// A plain way kept on a write filter keeps the row of the declaration that names its key, found
-/// by its id when the holder gave none, and none for a key that names no declaration; a key named
-/// at that row is named as by the declaration's id; a row that no longer holds the id is passed
-/// over for the search by id, and a retracted declaration names nothing. Turned red by a kept way
-/// that keeps no row, and by a read at a row that holds another declaration.
+/// A key is named at the row of the declaration its holder names as by the declaration's id; a row
+/// that no longer holds the id is passed over for the search by id, and a retracted declaration
+/// names nothing. A plain way is kept whatever declaration its holder gives, which the way keeps
+/// nothing of but the head it writes, and the general way keeps none. Turned red by a read at a row
+/// that holds another declaration, or by a way refused for the row its holder gave.
 #[cfg(feature = "alloc")]
 #[test]
-fn a_plain_way_keeps_its_declarations_row_and_a_key_is_named_there() {
+fn a_key_is_named_at_its_declarations_row() {
     use crate::named_key::NamedKey;
     use crate::publish_options::PlainPutParams;
     use crate::wire_key::{KeyText, MappedId, WireKey};
@@ -3861,28 +3861,20 @@ fn a_plain_way_keeps_its_declarations_row_and_a_key_is_named_there() {
         id: declared.id,
         row: Some(declared.handle),
     };
-    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(declared.id))));
-    assert_eq!(way(&tables).expect("a way kept").key, at, "found by its id");
-    tables.keep_write_filter_plain(filter, Some((params, at)));
-    assert_eq!(way(&tables).unwrap().key, at, "the row the holder gave");
     let stale = KeyexprRef {
         id: declared.id,
         row: Some(other.handle),
     };
-    tables.keep_write_filter_plain(filter, Some((params, stale)));
-    assert_eq!(
-        way(&tables).unwrap().key,
+    for key in [
+        KeyexprRef::by_id(declared.id),
         at,
-        "a row of another declaration"
-    );
-    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(0))));
-    assert_eq!(way(&tables).unwrap().key.row, None, "a whole key");
-    tables.keep_write_filter_plain(filter, Some((params, KeyexprRef::by_id(99))));
-    assert_eq!(
-        way(&tables).unwrap().key.row,
-        None,
-        "an id nothing declares"
-    );
+        stale,
+        KeyexprRef::by_id(0),
+        KeyexprRef::by_id(99),
+    ] {
+        tables.keep_write_filter_plain(filter, Some((params, key)));
+        assert!(way(&tables).is_some(), "a way kept for {key:?}");
+    }
     tables.keep_write_filter_plain(filter, None);
     assert!(way(&tables).is_none(), "the general way");
 

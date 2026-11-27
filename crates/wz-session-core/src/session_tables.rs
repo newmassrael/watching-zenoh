@@ -1133,16 +1133,17 @@ pub struct WriteFilterRow<Key> {
     planned: Cell<Option<u64>>,
 }
 
-/// How a write of a write filter's entity that brings nothing of its own is sent the plain way.
+/// How a write of a write filter's entity that brings nothing of its own is sent the plain way:
+/// the facts it is sent from and the head they write. The declaration that names the entity's key
+/// is not kept here: the entity names it on every write (its wire key), and the row holds it
+/// (`WriteFilterRow::own`).
 #[cfg(feature = "alloc")]
 #[derive(Clone, Copy, Debug)]
 pub struct PlainWay {
     /// The facts the Put is sent from.
     pub params: crate::publish_options::PlainPutParams,
-    /// The declaration that names the entity's key.
-    pub key: KeyexprRef,
-    /// The Put's bytes up to its payload's length, written once here for the declaration and the
-    /// QoS: `None` for a key the declaration does not name by an id.
+    /// The Put's bytes up to its payload's length, written once here for the declaration that
+    /// names the entity's key and the QoS: `None` for a key no declaration names by an id.
     #[cfg(feature = "codec-push")]
     pub head: Option<crate::lent_push::PutHead>,
 }
@@ -3086,9 +3087,9 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
     }
 
     /// Keep how a write of write filter `filter`'s entity that brings nothing of its own is sent
-    /// the plain way, `None` for the general way: the facts it is sent from and the declaration
-    /// naming its key, at the row it stands at now, found here once for a holder that knows only
-    /// its id. A filter the tables do not hold keeps nothing.
+    /// the plain way, `None` for the general way: the facts it is sent from, and the head they
+    /// write for the declaration naming its key, which only its id is read of. A filter the tables
+    /// do not hold keeps nothing.
     #[cfg(feature = "alloc")]
     pub fn keep_write_filter_plain(
         &self,
@@ -3104,17 +3105,18 @@ impl<F: RowCallbacks, P: Storage> SessionTables<F, P> {
         // A way stated again is planned again.
         #[cfg(feature = "codec-push")]
         row.planned.set(None);
-        row.plain.set(plain.map(|(params, key)| PlainWay {
-            params,
-            key: KeyexprRef {
-                id: key.id,
-                row: self.keyexpr_at(key),
-            },
-            #[cfg(feature = "codec-push")]
-            head: crate::lent_push::PutHead::new(
-                key.id,
-                params.qos.unwrap_or(crate::sample::QosLevel::DEFAULT),
-            ),
+        row.plain.set(plain.map(|(params, key)| {
+            // A build with no Push codec writes no head, and reads nothing of the declaration.
+            #[cfg(not(feature = "codec-push"))]
+            let _ = key;
+            PlainWay {
+                params,
+                #[cfg(feature = "codec-push")]
+                head: crate::lent_push::PutHead::new(
+                    key.id,
+                    params.qos.unwrap_or(crate::sample::QosLevel::DEFAULT),
+                ),
+            }
         }));
     }
 
