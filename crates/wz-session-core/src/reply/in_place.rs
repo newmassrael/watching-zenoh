@@ -444,11 +444,13 @@ impl<C: ReplySink, P: Storage> ReplyRegistry<C, P> {
         spaces: MappingSpaces<'_, PS, OS>,
         reach: Reach,
     ) {
-        if let Some(inbound) = self.project_response(response, spaces) {
+        if let Some(inbound) = self.receive.project_response(response, spaces) {
             self.fire_to(&inbound, reach);
         }
     }
+}
 
+impl super::ReplyReceive {
     /// The owned projection of `response`, which the lent form does not represent
     /// ([`OwedToProjection`]): the reply the copying receive delivers for it, owned, for a
     /// caller that hands it to the pending gets itself. `None` for one the projection drops, and
@@ -500,7 +502,7 @@ impl Default for ReplyRoom {
 /// caller's room; `None` for a Response the owned path drops too (an unknown body, a kind this
 /// build does not deliver, a key no space holds) and, in a build with no owned projection to fall
 /// back on, for one the lent form does not represent; [`OwedToProjection`] for one the lent form
-/// does not represent, which its owned projection delivers (`ReplyRegistry::project_response`).
+/// does not represent, which its owned projection delivers (`ReplyReceive::project_response`).
 pub type LentResponse<'r, 'f> = Result<Option<LentReply<'r, 'f>>, OwedToProjection>;
 
 /// Read `response` into the reply its pending gets are handed, over its frame, the peer's tables

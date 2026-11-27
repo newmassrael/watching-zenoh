@@ -339,7 +339,7 @@ pub trait RequesterTables {
 
     /// [`Self::dispatch_iteration_event`] to the Finals alone, for a caller that handed each answer
     /// of a frame the copying receive decoded to the pending gets and snapshots itself, in their
-    /// order, before this (`ReplyRegistry::take_response`, `LivelinessGetRegistry::claim_token`):
+    /// order, before this (`ReplyReceive::take_response`, `LivelinessGetRegistry::claim_token`):
     /// each Final then ends its get after every answer the frame carried.
     #[cfg(any(
         feature = "codec-response",

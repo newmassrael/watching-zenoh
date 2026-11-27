@@ -1836,11 +1836,14 @@ impl<H: Holders> RegistryOf<H> {
             .subscribers
             .mapping_spaces_over(own)
             .from_sender(record.sender());
-        face.gets.replies.project_response(response, spaces)
+        face.gets
+            .replies
+            .receive_mut()
+            .project_response(response, spaces)
     }
 
     /// The reply `response`, a record of a frame of face `face` the copying receive decoded, is
-    /// delivered as (`ReplyRegistry::take_response`), for a read that hands it to the get it
+    /// delivered as (`ReplyReceive::take_response`), for a read that hands it to the get it
     /// answers with the session let go of (`replies`), the frame's other planes told the rest of
     /// it after (`Planes::BesideSubscribers`). A face the session no longer holds takes nothing.
     #[cfg(all(feature = "query", not(wz_round)))]
@@ -1852,7 +1855,10 @@ impl<H: Holders> RegistryOf<H> {
         let Split { app, face, .. } = self.split_unwritten(self.place(face))?;
         let own = wz_session_core::pubsub::LocalSubscribers::own_space(&app.tables);
         let spaces = face.peer.subscribers.mapping_spaces_over(own);
-        face.gets.replies.take_response(response, spaces)
+        face.gets
+            .replies
+            .receive_mut()
+            .take_response(response, spaces)
     }
 
     /// Hand `reply`, read by [`Self::lend_reply`] or projected by [`Self::project_reply`], to
