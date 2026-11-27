@@ -22,6 +22,8 @@ struct RecordingPlane {
     node: NodeHlc,
     /// The bytes of the ring the session keeps its caches in; `None` keeps them on the heap.
     ring: Option<usize>,
+    /// The entity whose declaration the plane refuses: `"cache"`, `"token"` or `"beacon"`.
+    refuses: Option<&'static str>,
 }
 
 /// A handle that writes its own name when it is dropped.
@@ -50,7 +52,34 @@ impl RecordingPlane {
             sent: std::sync::Mutex::new(Vec::new()),
             node: NodeHlc::disabled(),
             ring: None,
+            refuses: None,
         }
+    }
+
+    /// A plane that refuses to declare `entity`.
+    fn refusing(entity: &'static str) -> Self {
+        Self {
+            refuses: Some(entity),
+            ..Self::new(true)
+        }
+    }
+
+    /// `entity` declared, or refused when the plane refuses it.
+    fn declared(&self, entity: &'static str) -> Result<Named, AdvancedPublisherError> {
+        if self.refuses == Some(entity) {
+            self.events.lock().unwrap().push(format!("refuse {entity}"));
+            return Err(AdvancedPublisherError::Plane { entity, code: -1 });
+        }
+        Ok(self.handle(entity))
+    }
+
+    /// `handle` handed back to be retracted: written, then let go of.
+    fn retracted(&self, handle: Named) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(format!("retract {}", handle.name));
+        drop(handle);
     }
 
     /// A plane whose session keeps its caches in a ring of `span` bytes.
@@ -152,12 +181,12 @@ impl AdvancedPublisherPlane for RecordingPlane {
         _store: &CacheStore,
     ) -> Result<Named, AdvancedPublisherError> {
         self.events.lock().unwrap().push(format!("on {keyexpr}"));
-        Ok(self.handle("cache"))
+        self.declared("cache")
     }
 
     fn declare_token(&self, keyexpr: &str) -> Result<Named, AdvancedPublisherError> {
         self.events.lock().unwrap().push(format!("on {keyexpr}"));
-        Ok(self.handle("token"))
+        self.declared("token")
     }
 
     fn declare_beacon(
@@ -165,7 +194,19 @@ impl AdvancedPublisherPlane for RecordingPlane {
         _keyexpr: &str,
         _sporadic: bool,
     ) -> Result<Named, AdvancedPublisherError> {
-        Ok(self.handle("beacon"))
+        self.declared("beacon")
+    }
+
+    fn retract_publisher(&self, publisher: Named) {
+        self.retracted(publisher);
+    }
+
+    fn retract_queryable(&self, queryable: Named) {
+        self.retracted(queryable);
+    }
+
+    fn retract_token(&self, token: Named) {
+        self.retracted(token);
     }
 
     fn start_beacon_timer(
@@ -287,6 +328,18 @@ impl AdvancedPublisherPlane for Arc<RecordingPlane> {
         RecordingPlane::declare_beacon(self, keyexpr, sporadic)
     }
 
+    fn retract_publisher(&self, publisher: Named) {
+        RecordingPlane::retract_publisher(self, publisher);
+    }
+
+    fn retract_queryable(&self, queryable: Named) {
+        RecordingPlane::retract_queryable(self, queryable);
+    }
+
+    fn retract_token(&self, token: Named) {
+        RecordingPlane::retract_token(self, token);
+    }
+
     fn start_beacon_timer(
         &self,
         period: Duration,
@@ -353,8 +406,11 @@ fn a_plane_sees_the_entities_declared_and_retracted_in_the_reference_order() {
             adv,
             "declare token".to_string(),
             "publish".to_string(),
+            "retract publisher".to_string(),
             "drop publisher".to_string(),
+            "retract token".to_string(),
             "drop token".to_string(),
+            "retract cache".to_string(),
             "drop cache".to_string(),
             // The ring goes with the cache, and the sample in it keeps the
             // publisher's key until it does.
@@ -399,12 +455,15 @@ fn a_plane_sees_the_beacon_publisher_declared_after_the_token_and_retracted_befo
             "declare token",
             "declare beacon",
             "declare timer",
+            "retract publisher",
             "drop publisher",
             // No sample was cached, so the cache never took the key: it goes with the publisher.
             "drop retained key",
+            "retract token",
             "drop token",
             "drop timer",
             "drop beacon",
+            "retract cache",
             "drop cache",
         ],
         "the beacon's publisher was not declared and retracted where the reference does, \
@@ -510,6 +569,107 @@ fn a_publisher_is_declared_in_the_place_its_host_gives() {
         "the publisher in the place retracted what it declared, in the reference order: {events:?}"
     );
     assert_eq!(Arc::strong_count(&plane), 1, "and let its plane go");
+}
+
+/// A declaration refused after the publisher stood hands what stands back to the plane to
+/// retract, in the order the drop retracts it, and lets the plane go: a refused cache queryable
+/// hands back the publisher, a refused token the publisher and then the cache. Turned red by a
+/// refusal that lets go of an entity without handing it to the plane, or in another order.
+#[test]
+fn a_refused_declaration_hands_what_stands_back_to_the_plane_in_order() {
+    let declare = |entity: &'static str| {
+        let plane = Arc::new(RecordingPlane::refusing(entity));
+        let refused = AdvancedPublisherOn::declare_on(
+            Arc::clone(&plane),
+            "demo/refused",
+            AdvancedPublisherOptions {
+                cache: Some(CacheConfig::default()),
+                publisher_detection: true,
+                ..AdvancedPublisherOptions::default()
+            },
+            SessionZid::from([0x01]),
+        );
+        assert!(
+            matches!(&refused, Err(AdvancedPublisherError::Plane { entity: e, .. }) if *e == entity),
+            "the plane's refusal of the {entity} is the declaration's"
+        );
+        drop(refused);
+        assert_eq!(Arc::strong_count(&plane), 1, "the refused plane was let go");
+        plane
+            .events()
+            .into_iter()
+            .filter(|e| !e.starts_with("on "))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        declare("cache"),
+        [
+            "declare publisher",
+            "refuse cache",
+            "retract publisher",
+            "drop publisher",
+        ]
+    );
+    assert_eq!(
+        declare("token"),
+        [
+            "declare publisher",
+            "declare cache",
+            "refuse token",
+            "retract publisher",
+            "drop publisher",
+            "retract cache",
+            "drop cache",
+        ]
+    );
+}
+
+/// A refused beacon publisher hands back the publisher, the token and the cache in the drop's
+/// order, and starts no timer. Turned red by a refusal of the beacon that lets go of the token or
+/// the cache without handing it to the plane.
+#[cfg(feature = "ext-pubsub-sample-miss-detection")]
+#[test]
+fn a_refused_beacon_hands_back_what_stands_before_it() {
+    let plane = Arc::new(RecordingPlane::refusing("beacon"));
+    let refused = AdvancedPublisherOn::declare_on(
+        Arc::clone(&plane),
+        "demo/refused",
+        AdvancedPublisherOptions {
+            cache: Some(CacheConfig::default()),
+            publisher_detection: true,
+            sample_miss_detection: MissDetectionConfig::default()
+                .heartbeat(Duration::from_secs(3600)),
+            ..AdvancedPublisherOptions::default()
+        },
+        SessionZid::from([0x01]),
+    );
+    assert!(matches!(
+        refused,
+        Err(AdvancedPublisherError::Plane {
+            entity: "beacon",
+            ..
+        })
+    ));
+    let events: Vec<String> = plane
+        .events()
+        .into_iter()
+        .filter(|e| !e.starts_with("on "))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            "declare publisher",
+            "declare cache",
+            "declare token",
+            "refuse beacon",
+            "retract publisher",
+            "drop publisher",
+            "retract token",
+            "drop token",
+            "retract cache",
+            "drop cache",
+        ]
+    );
 }
 
 /// The plane's timer calls the composite's tick, and the tick is the beacon's whole decision: a

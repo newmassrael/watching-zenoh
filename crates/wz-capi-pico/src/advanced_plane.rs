@@ -35,13 +35,12 @@ use wz_session_core::reliability::Reliability;
 use wz_session_core::sample::SampleKind;
 use wz_session_core::WhatAmI;
 
-use crate::keyexpr::DeclaredKeyexpr;
 use crate::prelude::*;
 use crate::pubsub::{PlainPublisher, PublisherQos};
 use crate::query::PlainQueryable;
 use crate::result::{ZResult, Z_ERR_TRANSPORT_TX_FAILED, Z_OK};
 use crate::session::EngineHold;
-use crate::write_filter::{FilterOn, PicoSession};
+use crate::write_filter::PicoSession;
 
 /// The plane of one pico session.
 pub(crate) struct PicoPlane {
@@ -84,6 +83,13 @@ impl PicoPlane {
         }
     }
 
+    /// The engine of the plane's session: the one count the advanced publisher keeps of it, which
+    /// its publisher, its cache's queryable and its token are used and retracted on, and which the
+    /// door reaches the publisher's key and write filter through.
+    pub(crate) fn engine(&self) -> &EngineHold {
+        &self.engine
+    }
+
     /// The session the plane declares on, lent from what it keeps.
     fn session(&self) -> PicoSession<'_> {
         PicoSession {
@@ -99,68 +105,25 @@ impl PicoPlane {
     }
 }
 
-/// A plain publisher the plane keeps by value, and the count of its session's engine it is used
-/// and retracted on. The composite holds it on no place of the session's, so it has no lender to
-/// reach the engine through, and lets go of it by dropping it, which retracts it.
-pub(crate) struct KeptPublisher {
+/// The publisher a heartbeat beacon is sent on, and the count of its session's engine it is sent
+/// and retracted on: the timer's tick sends it with no plane, and its last holder (the composite,
+/// or a tick that was running when the timer stopped) lets it go, which retracts it, as
+/// zenoh-pico's heartbeat state undeclares its publisher when its last holder lets it go.
+pub(crate) struct BeaconPublisher {
     engine: EngineHold,
     publisher: PlainPublisher,
 }
 
-impl KeptPublisher {
-    /// Declare a publisher on `keyexpr` of `session` that sends with `declared`.
-    fn declare(
-        session: PicoSession<'_>,
-        keyexpr: &str,
-        declared: PublisherQos,
-    ) -> Result<Self, ZResult> {
-        Ok(Self {
-            publisher: PlainPublisher::declare(session, keyexpr, declared)?,
-            engine: session.engine.clone(),
-        })
-    }
-
-    /// The loan of the publisher's key ([`PlainPublisher::lend`]), naming the engine this keeps:
-    /// valid while this and `record` stay at their address.
-    pub(crate) fn lend(
-        &self,
-        record: &mut crate::keyexpr::RecordKey,
-    ) -> crate::abi::z_loaned_keyexpr_t {
-        self.publisher.lend(&self.engine, record)
-    }
-
-    /// The publisher's write filter on its session ([`PlainPublisher::filter_on`]).
-    pub(crate) fn filter_on(&self) -> FilterOn<'_> {
-        self.publisher.filter_on(&self.engine)
-    }
-
-    /// A key of its own made of the publisher's ([`PlainPublisher::key_copy`]).
-    fn key_copy(&self) -> Result<DeclaredKeyexpr, ZResult> {
-        self.publisher.key_copy(&self.engine)
-    }
-
-    /// Publish on the publisher's key ([`PlainPublisher::publish`]).
+impl BeaconPublisher {
+    /// Publish a beacon on the publisher's key ([`PlainPublisher::publish`]).
     fn publish<'a>(&'a self, payload: &[u8], opts: Option<&mut PublishOptions<'a>>) -> ZResult {
         self.publisher.publish(&self.engine, payload, opts)
     }
 }
 
-impl Drop for KeptPublisher {
+impl Drop for BeaconPublisher {
     fn drop(&mut self) {
         self.publisher.retract(&self.engine);
-    }
-}
-
-/// The `@adv` liveliness token the plane keeps by value, and the count of its session's engine it
-/// is retracted on when the composite drops it.
-pub(crate) struct KeptToken {
-    engine: EngineHold,
-    id: wz_capi_port::TokenId,
-}
-
-impl Drop for KeptToken {
-    fn drop(&mut self) {
-        self.engine.undeclare_liveliness_token(self.id);
     }
 }
 
@@ -203,10 +166,13 @@ fn beacon_options() -> PublishOptions<'static> {
 }
 
 impl AdvancedPublisherPlane for PicoPlane {
-    type Publisher = KeptPublisher;
+    /// Used and retracted on the plane's engine: it keeps no count of its own.
+    type Publisher = PlainPublisher;
+    /// Retracted on the plane's engine.
     type Queryable = PlainQueryable;
-    type Token = KeptToken;
-    type Beacon = KeptPublisher;
+    /// The token's id, retracted on the plane's engine.
+    type Token = wz_capi_port::TokenId;
+    type Beacon = BeaconPublisher;
     /// The engine's periodic job, which is its own to run: a task of the runtime on the tokio
     /// engine, a step of the session on the cooperative one. `None` from an engine with no
     /// periodic jobs, whose publisher then declares and sends no heartbeat. The job names the
@@ -251,7 +217,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         &self,
         keyexpr: &str,
         _options: PublishOptions,
-    ) -> Result<DeclaredPublisher<KeptPublisher>, AdvancedPublisherError> {
+    ) -> Result<DeclaredPublisher<PlainPublisher>, AdvancedPublisherError> {
         // The QoS the program declared the composite with, and not the
         // `PublishOptions` the composite folds its own knobs into: those reach the
         // publisher as the options of each put, and the publisher's declared QoS
@@ -262,10 +228,10 @@ impl AdvancedPublisherPlane for PicoPlane {
             .declared
             .try_clone()
             .ok_or_else(|| Self::refusal("publisher", crate::result::Z_ERR_SYSTEM_OUT_OF_MEMORY))?;
-        let publisher = KeptPublisher::declare(self.session(), keyexpr, declared)
+        let publisher = PlainPublisher::declare(self.session(), keyexpr, declared)
             .map_err(|code| Self::refusal("publisher", code))?;
         Ok(DeclaredPublisher {
-            eid: publisher.publisher.entity_id(),
+            eid: publisher.entity_id(),
             handle: publisher,
         })
     }
@@ -314,27 +280,43 @@ impl AdvancedPublisherPlane for PicoPlane {
         .ok_or(AdvancedPublisherError::CacheRingUnavailable)
     }
 
-    fn declare_token(&self, keyexpr: &str) -> Result<KeptToken, AdvancedPublisherError> {
-        let id = crate::liveliness::declare_token(self.session(), keyexpr, None)
-            .map_err(|code| Self::refusal("liveliness token", code))?;
-        Ok(KeptToken {
-            engine: self.engine.clone(),
-            id,
-        })
+    fn declare_token(
+        &self,
+        keyexpr: &str,
+    ) -> Result<wz_capi_port::TokenId, AdvancedPublisherError> {
+        crate::liveliness::declare_token(self.session(), keyexpr, None)
+            .map_err(|code| Self::refusal("liveliness token", code))
     }
 
     fn declare_beacon(
         &self,
         keyexpr: &str,
         _sporadic: bool,
-    ) -> Result<KeptPublisher, AdvancedPublisherError> {
-        KeptPublisher::declare(self.session(), keyexpr, PublisherQos::pico_default())
-            .map_err(|code| Self::refusal("beacon publisher", code))
+    ) -> Result<BeaconPublisher, AdvancedPublisherError> {
+        let publisher =
+            PlainPublisher::declare(self.session(), keyexpr, PublisherQos::pico_default())
+                .map_err(|code| Self::refusal("beacon publisher", code))?;
+        Ok(BeaconPublisher {
+            engine: self.engine.clone(),
+            publisher,
+        })
+    }
+
+    fn retract_publisher(&self, publisher: PlainPublisher) {
+        publisher.retract(&self.engine);
+    }
+
+    fn retract_queryable(&self, queryable: PlainQueryable) {
+        queryable.retract(&self.engine);
+    }
+
+    fn retract_token(&self, token: wz_capi_port::TokenId) {
+        self.engine.undeclare_liveliness_token(token);
     }
 
     fn publish(
         &self,
-        publisher: &KeptPublisher,
+        publisher: &PlainPublisher,
         _keyexpr: &str,
         payload: &[u8],
         options: PublishOptions,
@@ -347,7 +329,7 @@ impl AdvancedPublisherPlane for PicoPlane {
         // Bound again so the options' borrow may be as short as the publisher's.
         let mut options = options;
         pico_publish(&mut options);
-        match publisher.publish(payload, Some(&mut options)) {
+        match publisher.publish(&self.engine, payload, Some(&mut options)) {
             code if code == Z_OK => Ok(payload.len()),
             // Dropped behind a held conduit: the same drop, so the advanced put answers it as
             // the plain one does.
@@ -358,7 +340,7 @@ impl AdvancedPublisherPlane for PicoPlane {
 
     /// Through the beacon publisher, as pico's heartbeat task does, so the beacon is held back
     /// while nothing subscribes to it.
-    fn send_beacon(beacon: &KeptPublisher, _keyexpr: &str, payload: &[u8], _sporadic: bool) {
+    fn send_beacon(beacon: &BeaconPublisher, _keyexpr: &str, payload: &[u8], _sporadic: bool) {
         let mut options = beacon_options();
         let _ = beacon.publish(payload, Some(&mut options));
     }
@@ -373,12 +355,14 @@ impl AdvancedPublisherPlane for PicoPlane {
         );
     }
 
-    fn retained_key(&self, publisher: &KeptPublisher) -> Option<Retained> {
+    fn retained_key(&self, publisher: &PlainPublisher) -> Option<Retained> {
         // The cached sample holds a reference to the key it was published on, as
         // pico's does (`_z_declared_keyexpr_copy` in `_z_sample_copy_data`), so
         // the key stays declared until the ring lets the sample go. A key whose declaration's
         // count has no room keeps nothing, as a plane whose key is not a declaration does.
-        Some(Retained::new(Arc::new(publisher.key_copy().ok()?)))
+        Some(Retained::new(Arc::new(
+            publisher.key_copy(&self.engine).ok()?,
+        )))
     }
 }
 
@@ -621,6 +605,64 @@ mod tests {
         let publisher = AdvancedPublisherOn::declare_on(plane, "demo/pico/ts", options, ZID.into())
             .expect("the declaration is accepted");
         (shared, publisher)
+    }
+
+    /// The publisher's entities keep no count of the engine: the plane's is the one the advanced
+    /// publisher adds, and its drop hands each entity to the plane, which retracts it on that
+    /// count, so no key its publisher, its cache's queryable or its token declared stands after it
+    /// and the count goes with the plane. Turned red by an entity that keeps a count again (more
+    /// than one added), or by a plane that lets go of an entity without retracting it (a key left
+    /// declared).
+    #[test]
+    fn the_publishers_entities_are_retracted_on_the_planes_one_count() {
+        for cached in [false, true] {
+            let shared = Arc::new(
+                SharedSession::new(
+                    TokioTime::new(),
+                    ZID.into(),
+                    wz_session_core::policy::SessionPolicy::defaults(),
+                )
+                .expect("test host entropy"),
+            );
+            let before = Arc::strong_count(&shared);
+            let plane = PicoPlane::new(
+                PicoSession {
+                    engine: &shared.as_engine(),
+                    mode: WhatAmI::Peer,
+                },
+                NodeHlc::default(),
+                SessionTime::new(),
+                PublisherQos::pico_default(),
+            );
+            let mut options = AdvancedPublisherOptions::default();
+            options.cache = cached.then(CacheConfig::default);
+            options.publisher_detection = true;
+            let publisher =
+                AdvancedPublisherOn::declare_on(plane, "demo/pico/retract", options, ZID.into())
+                    .expect("the declaration is accepted");
+            if !cached {
+                assert_eq!(
+                    Arc::strong_count(&shared) - before,
+                    1,
+                    "the plane's count alone: the publisher and the token keep none"
+                );
+            }
+            assert!(
+                !shared.keyexpr_declarations().is_empty(),
+                "the publisher's key and its `@adv` key are declared"
+            );
+            drop(publisher);
+            let left = shared.keyexpr_declarations();
+            assert!(
+                left.is_empty(),
+                "every entity was retracted (cached: {cached}): {left:?}"
+            );
+            assert_eq!(
+                Arc::strong_count(&shared),
+                before,
+                "the plane's count went with it (cached: {cached})"
+            );
+        }
     }
 
     /// With the policy off, the default and upstream's, a sample is stamped through the session's

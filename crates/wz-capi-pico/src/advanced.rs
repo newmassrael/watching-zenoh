@@ -442,9 +442,8 @@ impl ze_owned_advanced_publisher_t {
 /// Behind a `ze_owned_advanced_publisher_t` handle: the composite, on this
 /// session's plane. Dropping it retracts its entities in pico's order, so an
 /// implicit `z_drop` and an explicit `ze_undeclare_advanced_publisher` take the
-/// identical path.
+/// identical path. Its session's engine is the plane's one count ([`Self::engine`]).
 pub(crate) struct AdvPubState {
-    engine: crate::session::EngineHold,
     publisher: AdvancedPublisherOn<PicoPlane>,
     /// R311y559 — the cached `{ start, len }` view of the publisher's key, so
     /// `ze_advanced_publisher_keyexpr` has stable storage to borrow. Bound
@@ -459,9 +458,18 @@ pub(crate) struct AdvPubState {
 }
 
 impl AdvPubState {
-    /// Point the cached view at the wrapped publisher's own key, after boxing.
+    /// The engine of the publisher's session, as its plane keeps it.
+    fn engine(&self) -> &EngineHold {
+        self.publisher.plane().engine()
+    }
+
+    /// Point the cached view at the wrapped publisher's own key, after boxing. The loan names the
+    /// plane's engine, which lies in this state and stays at its address with it.
     fn bind(&mut self) {
-        self.loaned_keyexpr = self.publisher.publisher().lend(&mut self.record);
+        let publisher = &self.publisher;
+        self.loaned_keyexpr = publisher
+            .publisher()
+            .lend(publisher.plane().engine(), &mut self.record);
     }
 }
 
@@ -588,14 +596,11 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             return code;
         }
         let session = PicoSession::of(handle);
-        // The publisher's source identity is the session's own zid, the one its
-        // peers see in the handshake.
-        let engine = session.engine.clone();
         // The publisher lies in a place of its session's, taken before anything is declared, so a
         // session with every place held refuses it and declares nothing, as pico answers a
         // publisher its heap cannot hold.
         let Some(slot) = crate::object_slot::Slot::<AdvPubState>::take_entity(
-            &engine,
+            session.engine,
             crate::object_slot::Kind::AdvancedPublisher,
         ) else {
             return Z_ERR_SYSTEM_OUT_OF_MEMORY;
@@ -607,14 +612,15 @@ pub unsafe extern "C" fn ze_declare_advanced_publisher(
             declared,
         );
         let wz_options = advanced_publisher_options(options);
-        let zid = engine.session_zid();
+        // The publisher's source identity is the session's own zid, the one its
+        // peers see in the handshake.
+        let zid = session.engine.session_zid();
         // The publisher is declared in the state's place and the rest of the state written after
         // it, so a refused declaration leaves the place unwritten and the slot gives it back.
         let filled = slot.try_fill_in_place(|at| -> Result<(), AdvancedPublisherError> {
             let place = core::ptr::addr_of_mut!((*at).publisher)
                 .cast::<core::mem::MaybeUninit<AdvancedPublisherOn<PicoPlane>>>();
             AdvancedPublisherOn::declare_in(&mut *place, plane, ke, wz_options, zid)?;
-            core::ptr::addr_of_mut!((*at).engine).write(engine);
             core::ptr::addr_of_mut!((*at).loaned_keyexpr).write(
                 crate::abi::z_loaned_keyexpr_t::borrowed(core::ptr::null(), 0),
             );
@@ -2198,7 +2204,7 @@ unsafe fn advanced_publisher_filter<'a>(
     pub_: *const ze_loaned_advanced_publisher_t,
 ) -> Option<crate::write_filter::FilterOn<'a>> {
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| state.publisher.publisher().filter_on())
+        .map(|state| state.publisher.publisher().filter_on(state.engine()))
 }
 
 /// Declare a miss listener that lives as long as its subscriber (pico
@@ -2261,7 +2267,7 @@ pub(crate) unsafe fn advanced_publisher_identity(
     // The wrapped publisher's entity id, as pico's `ze_advanced_publisher_id` is
     // `z_publisher_id` of the publisher it wraps.
     crate::abi::handle_ref::<ze_loaned_advanced_publisher_t, AdvPubState>(pub_)
-        .map(|state| (state.engine.zid(), state.publisher.eid()))
+        .map(|state| (state.engine().zid(), state.publisher.eid()))
 }
 
 /// The cached keyexpr borrow behind a loaned advanced publisher.
@@ -3129,6 +3135,63 @@ mod tests {
         );
         drop(held);
 
+        drop(engine);
+        // SAFETY: the session is live and owned here, and given up by this call.
+        unsafe { z_session_drop(z_session_move(&mut session)) };
+    }
+
+    /// An advanced publisher holds its session's engine through its place and its plane alone:
+    /// its publisher and its liveliness token are used and retracted on the plane's count and keep
+    /// none of their own, and its undeclare gives both counts back. Turned red by a state, a
+    /// publisher or a token that keeps a count of the engine again, or an undeclare that leaves
+    /// one held.
+    #[cfg(all(not(feature = "engine-tokio"), feature = "peer"))]
+    #[test]
+    fn an_advanced_publisher_holds_its_engine_through_its_place_and_its_plane() {
+        use crate::session::{
+            engine_held, listening_on_loopback, session_handle, z_session_drop, z_session_loan,
+            z_session_move, EngineHold,
+        };
+
+        let mut session = listening_on_loopback();
+        // SAFETY: the session is live and owned by this frame.
+        let loaned = unsafe { z_session_loan(&session) };
+        // SAFETY: as above.
+        let handle = unsafe { session_handle(loaned) }.expect("an open session has its handle");
+        let engine = engine_held(handle).clone();
+        let before = EngineHold::holders(&engine);
+        // SAFETY: a view is plain data, and the text is a live C string.
+        let mut view: crate::abi::z_view_keyexpr_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        let viewed = unsafe {
+            crate::keyexpr::z_view_keyexpr_from_str(&mut view, c"demo/adv/held".as_ptr())
+        };
+        assert_eq!(viewed, Z_OK);
+        // SAFETY: the view is live for the rest of the frame.
+        let ke = unsafe { crate::keyexpr::z_view_keyexpr_loan(&view) };
+        // SAFETY: the options are plain data, filled by their default before they are read.
+        let mut options: ze_advanced_publisher_options_t = unsafe { core::mem::zeroed() };
+        // SAFETY: as above.
+        unsafe { ze_advanced_publisher_options_default(&mut options) };
+        options.publisher_detection = true;
+        let mut publisher = ze_owned_advanced_publisher_t::null_value();
+        // SAFETY: every pointer is live.
+        let code = unsafe { ze_declare_advanced_publisher(loaned, &mut publisher, ke, &options) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(
+            EngineHold::holders(&engine) - before,
+            2,
+            "the place's lender and the plane hold the engine, the publisher and the token do not"
+        );
+        // SAFETY: the publisher is live and owned here, and given up by this call.
+        let code =
+            unsafe { ze_undeclare_advanced_publisher(ze_advanced_publisher_move(&mut publisher)) };
+        assert_eq!(code, Z_OK);
+        assert_eq!(
+            EngineHold::holders(&engine),
+            before,
+            "the undeclare gave both counts back"
+        );
         drop(engine);
         // SAFETY: the session is live and owned here, and given up by this call.
         unsafe { z_session_drop(z_session_move(&mut session)) };

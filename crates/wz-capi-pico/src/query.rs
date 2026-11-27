@@ -1655,12 +1655,12 @@ pub(crate) fn declare_queryable_on(
     Ok(declared)
 }
 
-/// A pico queryable with no C handle around it, retracted when dropped, for a composite that
-/// answers with something other than a C closure (an advanced publisher's cache, the admin
-/// space). The session's record of the queryable keeps its key.
+/// A pico queryable with no C handle around it, for a composite that answers with something other
+/// than a C closure (an advanced publisher's cache, the admin space). The session's record of the
+/// queryable keeps its key. It names no engine: its owner keeps the session it was declared on and
+/// retracts it there ([`Self::retract`]).
 #[cfg(any(feature = "advanced", feature = "admin-space"))]
 pub(crate) struct PlainQueryable {
-    engine: crate::session::EngineHold,
     id: QblId,
 }
 
@@ -1685,17 +1685,16 @@ impl PlainQueryable {
             sink,
         )?
         .id;
-        Ok(Self {
-            engine: session.engine.clone(),
-            id,
-        })
+        Ok(Self { id })
     }
-}
 
-#[cfg(any(feature = "advanced", feature = "admin-space"))]
-impl Drop for PlainQueryable {
-    fn drop(&mut self) {
-        wz_capi_port::SessionEngine::undeclare_queryable(&*self.engine, self.id);
+    /// Retract the queryable from `engine`, the session it was declared on: once, by its owner,
+    /// which lets go of it with this.
+    pub(crate) fn retract(self, engine: &crate::session::EngineHold) {
+        wz_capi_port::SessionEngine::undeclare_queryable(
+            crate::session::EngineHold::as_ref(engine),
+            self.id,
+        );
     }
 }
 
