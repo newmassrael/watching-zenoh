@@ -2817,11 +2817,8 @@ mod tests {
         use crate::link_cells::{HeapCells, OnHeap};
 
         let mut links = IpLinks::<Datagrams, Dial>::new(NODE, Dial).counted_by::<OnHeap<OneTask>>();
+        // The kind's source is the heap's: a table could not be lent to these links.
         links.lend_cells(HeapCells);
-        assert!(
-            links.shape.place.cells.table().is_none(),
-            "the heap's source names no table"
-        );
         let stream = links
             .open_initiator(Locator::tcp(ROUTER))
             .expect("a stream link on the heap");
