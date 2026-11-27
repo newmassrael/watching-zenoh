@@ -19,6 +19,7 @@ here (five lanes work beside each other). The size case is `pico-client-coop-nos
 | 6b-5 | built (commit "Hand a face life's wake back with its answer") | section 6.2; its two readings and the tests in 6.5 |
 | 6b-3 | built (commit "Name a dial's endpoint by its face life's row") | section 6.3 |
 | 6b-4 | built in the direct read and the round (commits "Keep the walk's refusal with no text until it ends", "Carry the round's walk refusal with no text"), the refusal kept by L0, not the life | section 6.4 |
+| 6b-6 | designed (section 6.6): the life stays in the face's record; its reading of the link moves to L2 | section 6.6 |
 | 6c sending, 6d session state | not this lane's first steps | 6d goes with phase 4 (lane arch-l3-rows) |
 
 ## 2. The layers that overlap in a face's lifecycle now
@@ -69,13 +70,13 @@ sample's path. A step whose rows do not move by its estimate is reverted.
 | **6b-3** the dial's endpoint is the life's row | without `listen`, `Dial` and `DirectSlot::opened` carry no `DialEndpoint`; the refusal's text is read by the life's row | -50 to -150; one word less a face slot | 0 | `faces` tests of `answer_face_dial` on both forms; a build without `listen` |
 | **6b-4** the walk's refusal is L2's | the life keeps `WalkRefusal { row, cause }` (`Copy`); `DirectSlot::last` and the round's `last` go; `OpenError` is built once, when the life ends the session | -200 to -500 (the `OpenError` writes and moves at each refusal); `MAX_LOCATOR_LEN` plus about 16 bytes less a face slot | 0 | the session-end refusals of `tests.rs` (`NoAnswerInTime`, a refused dial, a lost link, no task, no entropy), each read off the refusal the open or the read returns |
 | **6b-5** the wake with the answer | `Effects` carries `wake_at`'s answer; `life_turn` writes `life_due_us` from it instead of a second call | -50 to -100 | 0 (written after `drive_link`, which an up link that brings nothing does not reach) | `link_life` tests comparing the answer with `wake_at` for every state |
-| **6b-6** the life in the transport value | the face's link sessions run over `UnicastTransport<_, UnicastLink>`, persistent a face, so the transport tells its life `Established` and `Ended` itself; `DirectSlot::next_input`'s translation and `FaceFacts::ended` go | -1K to -2K | must not rise: `next_input` runs at every look; the design keeps the look of an up link that brings nothing at what it is (the face's row, a state compare, one atomic load) | `unicast_transport` tests; the direct engine's receive tests; the receive count read before landing |
+| **6b-6** the life reads its link | the life in one transport value a face is withdrawn (6.6: the life and the receive lie under two locks); the translation of the link's I/O into the life's input, copied in `DirectSlot::next_input` and `LinkSupervisor::read_face`, is `UnicastLink::read_link`, once in L2 | 0 to -30 | 0 or a few fewer: the same reads, no phase value built | `link_life` tests of `read_link`; `faces`' `read_face` tests; the direct engine's tests |
 
 6b-1 to 6b-5 touch `link_life.rs`, `engine/direct.rs` (`drive_link`, `DirectSlot`), `engine.rs`
 (`poll_face`, `give_face`, `carry_out`) and `faces.rs` (`Dial`, its tests); 6b-6 touches
-`session_drive.rs` and `unicast_transport.rs`. `engine/direct.rs` is shared with the lanes of
-`docs/win-budget` section 9.3 (S-PLAN, H3, T-READ): each step here changes `drive_link`,
-`DirectSlot` and its `next_input` alone.
+`link_life.rs`, `faces.rs` (`read_face`) and `engine/direct.rs` (`next_input`).
+`engine/direct.rs` is shared with the lanes of `docs/win-budget` section 9.3 (S-PLAN, H3,
+T-READ): each step here changes `drive_link`, `DirectSlot` and its `next_input` alone.
 
 ## 5. What 6b-1 changes in behaviour
 
@@ -257,23 +258,65 @@ readings move is when a dial under way is next asked, which only a timing shows;
 `tests::dial_in_flight` and `tests::direct_receive` is the check, and a test whose count moved
 is named here once the run is read.
 
-### 6.6 Not built in this pass: what 6b-6 needs, read in the code
+### 6.6 6b-6, designed: the life reads its link, and stays out of the transport value
 
-6b-6 (the life in the transport value) is left. Its premise holds, but it is a re-layout, not a
-change of `DirectSlot::next_input` alone:
+Section 4's premise for 6b-6 (the face's link sessions over one `UnicastTransport<_, UnicastLink>`
+kept a face, which tells its life `Established` and `Ended` itself) is withdrawn, read in the
+code. What the step is for, the translation of section 2's row, is built another way.
 
-- The transport value is per link: the pump builds a `UnicastTransport<R, MadeLink>` with each
-  link's session (`wz-runtime-coop/src/session_drive.rs`, `init_made_in` in the pump's making)
-  and drops it with the pump. The life is per face, kept across dials and links in the face's
-  record (`FaceRecord::life`) and read there by L0 at about 34 sites (`faces.rs` 15, `direct.rs` 8,
-  `engine.rs` 5, `faces_added.rs` 4, `transport/state.rs` 2).
-- So the transport that holds the life must outlive its links: built with the face, its receive
-  over the face's Router (already the face's, `DirectSlot::router`, lent at each step), its
-  timers armed for each link's session machine (`TransportTimers`). The value splits into a
-  part a face holds (the life, the receive) and a part a link holds (the timers), and the pump
-  borrows the face's part for each step as it borrows the Router now (`RouterLend`).
-- The 34 reads of the life then go through the face's transport; the round, which keeps no
-  pump place of its own, holds the same face part in its record.
+Where each part of a face's transport lies in the direct read, and under which lock:
 
-The step is its own design pass with a receive count read before it lands (`next_input` runs at
-every look), and is not started on this branch.
+| part | one per | lies in | held under | read by |
+|---|---|---|---|---|
+| the life (`UnicastLink`) | face | the face's record (`Face::life`, `FaceRecord::life`) | the session's lock | every send's gate (`FaceRecord::up`: `TransportState`'s sends, the engine's sends to a face, `replay`), each look (`next_input`, `read_node`, `rests`, `quiet_until`), `link_is_up`, the round's `read_face` and `links_settle` |
+| the receive (`UnicastRx`: the Router lent, the record buffer) | link (its Router: face) | the pump's transport in `DirectSlot::pump`; the Router in `DirectSlot::router` | the face's read slot | the read's step, with the session's lock let go of |
+| the timers (`TransportTimers`) | link (they arm each link session's machine) | the pump's transport | the face's read slot | the read's step, the pump's `due_ms` |
+
+One value is lent under one lock. The life in the slot would have every send's gate wait for the
+read's step (the slot is held across it), or read a copy of the phase published beside the record,
+a second holder of L2's fact. The receive and the timers in the record would have the step run
+under the session's lock, and the direct read's defining property (a record's callback finds the
+session free, and a send never waits for a read's step) would go. The round holds each link's
+transport in the link's task and the life in the same record, so it meets the same split. The
+transport value so stays one a link, over `MadeLink`, and the life one a face, in its record; the
+pump's end crosses from the step to the look by `EndFlags`, a fact of the link's I/O and not of
+the life. About 34 reads of the life in L0 stay where they are: each is a question to the life
+under the session's lock (is the link up, held, at rest; the endpoint row; the next wake), or an
+input told to it (`drive_link`, `LinkIo::life`, the taken and attached faces of
+`faces_added`).
+
+What overlapped is the translation: L0 made the life's input out of the link's I/O by reading the
+life's own phase, in two copies, `DirectSlot::next_input` (the direct read) and
+`LinkSupervisor::read_face` (the round). Each read: the establishment only of a link in its
+handshake, before its end, so a handshake that completed is established even when its link ended
+after; the end at every phase; and, for the node a dial role's face reached (`listen`), a
+handshake over at its end or at its deadline, which the life already judges in `input`. 6b-6
+moves that reading into L2 once:
+
+- `UnicastLink::read_link(now_us, established, ended) -> LinkRead { input, over }`, the two I/O
+  facts handed as closures, so the establishment is asked only of a handshake, as both copies do
+  now; `LinkRead::NOTHING` for a face whose record holds no link.
+- `next_input` hands it the wire's `established` and `EndFlags::over`; `read_face` the
+  wire's `established` and `finished`. Neither reads a phase to make an input. The direct read's
+  established input now goes through `read_node` as the round's does, which hands it back as it
+  came (a handshake is not `Held`, and `over` is false).
+- `read_node` keeps its `Held` look: which face holds which node is L0's table, and what a free
+  node comes to is the life's (`NodeFree`).
+- `UpFacts::ended` stays: it is L3's reading of whether the face stands for a reader between the
+  step and the loss, and the life's `Up` lasts through a close's drain until the loss is told.
+
+Receive: the look of an up link that brings nothing reads the face's row, its wire, the machine's
+state compared to `Handshaking` and the end's two loads, as before, less the `LinkPhase`
+`phase()` built: 0 or a few instructions fewer. Bytes: the case's `next_input` about 0 to -30
+(the same reading inlined once, no phase value built); the round's `read_face` about 0. The gain is
+the layer: the life's reading of its link is written once, in L2.
+
+Tests: `link_life::tests::a_look_at_a_handshake_reads_it_established_before_its_end_and_over_at_its_deadline`
+(red if the end is read before the establishment, or a handshake is over that neither ended nor
+passed its deadline), `a_look_asks_a_links_establishment_only_in_its_handshake` (red if a look
+outside a handshake asks it, which would cost each look of an up link a read of its session);
+`faces`' `read_face` tests hold the round's reading, the direct engine's tests the direct read's.
+
+Left open for the owner: `UnicastTransport<_, UnicastLink>` (`init_in`, `input`, `pumped`,
+`life`) has no driver in the tree, only tests; it is the form of a driver of one face with no
+face table, kept or removed by that decision, not by this step.
