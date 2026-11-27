@@ -734,6 +734,21 @@ impl MulticastTxMeta {
     pub fn conduit(self) -> Priority {
         self.0.priority
     }
+
+    /// The message a group's transmit state sends for one framed so, whose body encodes to at
+    /// most `size` bytes ([`GroupTx::send`](crate::transport_tx::GroupTx::send)): its conduit,
+    /// channel, congestion control and express flag as this framing reads them, so a group that
+    /// sends through the walk frames a message as its stage did.
+    #[cfg(feature = "session-unicast")]
+    pub fn group_message(self, size: usize) -> crate::transport_tx::GroupTxMessage {
+        crate::transport_tx::GroupTxMessage {
+            priority: self.0.priority,
+            reliable: self.0.reliable,
+            droppable: self.0.droppable,
+            express: self.0.express,
+            worst_case_payload: size,
+        }
+    }
 }
 
 /// A reply a group's dispatch hands its backing for the call
@@ -3408,6 +3423,43 @@ mod push_tests {
             policy: crate::policy::SessionPolicy::defaults(),
             limits: crate::limits::SessionLimits::BUILD,
         }
+    }
+
+    /// A framing's message for a group's transmit state carries the framing's conduit, channel,
+    /// congestion control and express flag, and the size it is given. Turned red by a field taken
+    /// from another, or a size that is not the one given.
+    #[cfg(all(feature = "codec-response-final", feature = "session-unicast"))]
+    #[test]
+    fn a_framing_is_the_group_message_it_reads_as() {
+        use crate::qos::CongestionControl;
+        use crate::sample::QosLevel;
+        let mut params = params(512);
+        params.is_qos = true;
+        for qos in [
+            QosLevel::DEFAULT,
+            QosLevel::from_parts(Priority::DataHigh, CongestionControl::Drop, true),
+        ] {
+            let meta = MulticastTxMeta::of_item(
+                &MulticastTxItem::ResponseFinal { request_id: 7, qos },
+                &params,
+            );
+            let message = meta.group_message(9);
+            assert_eq!(message.priority, meta.0.priority);
+            assert_eq!(message.reliable, meta.0.reliable);
+            assert_eq!(message.droppable, meta.0.droppable);
+            assert_eq!(message.express, meta.0.express);
+            assert_eq!(message.worst_case_payload, 9);
+        }
+        let express = MulticastTxMeta::of_item(
+            &MulticastTxItem::ResponseFinal {
+                request_id: 7,
+                qos: QosLevel::from_parts(Priority::DataHigh, CongestionControl::Drop, true),
+            },
+            &params,
+        )
+        .group_message(9);
+        assert!(express.express, "an express reply leaves at once");
+        assert!(express.reliable, "a reply rides the reliable channel");
     }
 
     /// Answers each ask from a script (room once the script is spent) and

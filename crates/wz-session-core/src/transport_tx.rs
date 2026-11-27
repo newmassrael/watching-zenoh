@@ -2732,6 +2732,29 @@ impl<R: SessionRuntime> GroupTx<R> {
         }
     }
 
+    /// Whether a sender holds one of the group's conduits now: staging its message, writing its
+    /// frame or waiting for room for it. A message the group's own dispatch answered meanwhile on
+    /// the same task would take a conduit a second time, which no lock of a cooperative runtime
+    /// allows, so a task that steps the group beside its senders reads no input while this answers
+    /// `true` and leaves the input in the socket for its next step.
+    #[cfg(any(
+        feature = "codec-push",
+        feature = "codec-request",
+        feature = "codec-response",
+        feature = "codec-response-final",
+        feature = "declare-keyexpr",
+        feature = "declare-subscriber",
+        feature = "declare-queryable",
+        feature = "declare-token",
+        feature = "declare-interest",
+        feature = "liveliness-token",
+    ))]
+    pub fn sending(&self) -> bool {
+        self.tx.conduits.sending.iter().any(|flag| {
+            crate::runtime_cell::FlagCell::load(flag, core::sync::atomic::Ordering::Relaxed)
+        })
+    }
+
     /// Open the batch window (zenoh-pico `zp_batch_start` on a multicast transport): a message
     /// joins its conduit's open frame until the frame fills, an express message takes it, or the
     /// window is flushed or stopped.

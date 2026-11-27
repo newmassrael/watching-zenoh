@@ -4694,6 +4694,22 @@ mod group_tx_tests {
         assert!(socket.sent().is_empty());
     }
 
+    /// A sender is read as holding its conduit while its body is written, and as gone once its
+    /// send returned. Turned red by a reading of no flag, or of a flag the walk does not raise.
+    #[test]
+    fn a_group_reads_a_sender_inside_its_conduit() {
+        let (group, _socket) = group();
+        assert!(!group.sending(), "no sender at rest");
+        let inside = core::cell::Cell::new(false);
+        let probe = |sink: &mut TxSink<'_>| {
+            inside.set(group.sending());
+            body(sink)
+        };
+        assert!(matches!(group.send(PUT, &probe), Ok(PushOutcome::Pushed)));
+        assert!(inside.get(), "the sender held its conduit while it wrote");
+        assert!(!group.sending(), "and let go of it once it returned");
+    }
+
     /// Inside the batch window two messages join one frame, which leaves only at the stop, under
     /// one number. Turned red by a `batch_start` that opens no window, or a `batch_stop` that
     /// closes it without handing the open frame over.
