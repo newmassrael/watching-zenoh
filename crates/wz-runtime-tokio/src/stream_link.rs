@@ -1519,10 +1519,10 @@ mod tests {
     /// Encode `payload` into a slot the driver lends, the way the session does,
     /// and send it. `None` when the driver lent nothing.
     fn send_lent(driver: &StreamWriteDriver, payload: &[u8]) -> Option<LinkSendOutcome> {
-        use wz_session_core::tx_buf::TxBuf;
         use wz_session_core::tx_lease::TxLease;
         let mut lease = TxLease::acquire(driver, payload.len(), Priority::DEFAULT)?;
         lease
+            .frame_mut()
             .append(payload)
             .expect("the lent buffer holds the frame");
         Some(lease.send(Reliability::Reliable, Priority::DEFAULT))
@@ -1570,12 +1570,11 @@ mod tests {
     /// is what the byte door cannot avoid.
     #[tokio::test]
     async fn a_lent_frame_reaches_the_writer_in_the_buffer_it_was_encoded_into() {
-        use wz_session_core::tx_buf::TxBuf;
         use wz_session_core::tx_lease::TxLease;
         let (driver, mut rx, _flag) = write_driver(false);
         let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("a lent buffer");
         let encoded_into = driver.tx_slot_storage(TxSlot(0)).0 as usize;
-        lease.append(b"hello").expect("fits");
+        lease.frame_mut().append(b"hello").expect("fits");
         assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
             LinkSendOutcome::Sent
@@ -1614,11 +1613,10 @@ mod tests {
     /// NOW, which is the byte door's answer for the same payload.
     #[tokio::test]
     async fn a_framing_flip_between_grant_and_send_is_framed_by_the_flag_as_it_stands() {
-        use wz_session_core::tx_buf::TxBuf;
         use wz_session_core::tx_lease::TxLease;
         let (driver, mut rx, flag) = write_driver(false);
         let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
-        lease.append(b"flip").expect("fits");
+        lease.frame_mut().append(b"flip").expect("fits");
         flag.store(true, Ordering::Release);
         assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
@@ -1669,7 +1667,6 @@ mod tests {
     #[tokio::test]
     async fn the_writer_task_gives_a_written_buffer_back_to_be_lent_again() {
         use tokio::io::AsyncReadExt;
-        use wz_session_core::tx_buf::TxBuf;
         use wz_session_core::tx_lease::TxLease;
 
         let (tx, rx) = crate::writer_queue::outbound_channel();
@@ -1687,7 +1684,7 @@ mod tests {
         for round in 0..6u8 {
             let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
             seen.insert(driver.tx_slot_storage(TxSlot(0)).0 as usize);
-            lease.append(&[round; 20]).expect("fits");
+            lease.frame_mut().append(&[round; 20]).expect("fits");
             assert_eq!(
                 lease.send(Reliability::Reliable, Priority::DEFAULT),
                 LinkSendOutcome::Sent
@@ -2045,12 +2042,11 @@ mod tests {
     #[cfg(feature = "runtime-zero-copy")]
     #[tokio::test]
     async fn a_lent_frame_is_written_from_the_slot_it_was_encoded_into() {
-        use wz_session_core::tx_buf::TxBuf;
         use wz_session_core::tx_lease::TxLease;
         let (driver, mut rx, _flag) = pooled_driver(false);
         let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
         let encoded_into = driver.tx_slot_storage(TxSlot(0)).0 as usize;
-        lease.append(b"hello").expect("fits");
+        lease.frame_mut().append(b"hello").expect("fits");
         assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),
             LinkSendOutcome::Sent
@@ -2072,11 +2068,10 @@ mod tests {
     #[cfg(feature = "runtime-zero-copy")]
     #[tokio::test]
     async fn a_pooled_framing_flip_is_framed_in_place_by_the_flag_as_it_stands() {
-        use wz_session_core::tx_buf::TxBuf;
         use wz_session_core::tx_lease::TxLease;
         let (driver, mut rx, flag) = pooled_driver(false);
         let mut lease = TxLease::acquire(&driver, 64, Priority::DEFAULT).expect("lent");
-        lease.append(b"flip").expect("fits");
+        lease.frame_mut().append(b"flip").expect("fits");
         flag.store(true, Ordering::Release);
         assert_eq!(
             lease.send(Reliability::Reliable, Priority::DEFAULT),

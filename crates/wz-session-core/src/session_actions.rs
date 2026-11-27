@@ -6548,7 +6548,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         let Some(slot) = lent.as_mut() else {
             return Lend::NoSlot;
         };
-        if let Err(why) = write.write_lent(&mut *slot) {
+        if let Err(why) = write.write_lent(slot.frame_mut()) {
             return Lend::Refused(why);
         }
         self.emit_on_link(link, &[], Some(slot), reliability, priority, false);
@@ -6660,7 +6660,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     /// conduit's band). The flush paths' half of the append that keeps it open.
     #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
     fn close_lent_batch(&self, batch: &mut BatchTx, idx: usize, priority: Priority) {
-        use crate::tx_buf::TxBuf;
         batch.stage.count = 0;
         let Some(open) = batch.stage.lent.take() else {
             return;
@@ -6746,8 +6745,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         priority: Priority,
         lend: &mut BatchLendCounts,
     ) {
-        #[cfg(not(feature = "tx-lend-only"))]
-        use crate::tx_buf::TxBuf;
         if self.conduit_routes_to(link, channel, priority) {
             self.emit_on_link(link, &[], Some(slot), channel, priority, false);
             return;
@@ -6829,8 +6826,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         feature = "transport-tx-lend"
     ))]
     fn move_lent_batches_off(&self, link: &LinkState<R>) {
-        #[cfg(not(feature = "tx-lend-only"))]
-        use crate::tx_buf::TxBuf;
         for idx in 0..TX_CONDUITS {
             let priority = TxConduits::<R>::conduit_priority(idx);
             R::with_mutex_mut(self.tx_conduits.conduit(priority), |batch| {
@@ -7461,7 +7456,6 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // needs the bytes, the stats and the link-liveness disposition below,
         // which is why the lent send is a parameter of this seam and not a
         // second one that would have to repeat them.
-        use crate::tx_buf::TxBuf;
         let frame: &[u8] = match &lent {
             Some(slot) => slot.as_slice(),
             None => bytes,
@@ -13476,42 +13470,57 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // messages it held, and opens the next frame below.
         #[cfg(all(feature = "transport-batching", feature = "transport-tx-lend"))]
         if in_window {
-            if let Some(open) = batch.stage.lent.take() {
-                use crate::tx_buf::TxBuf;
+            if let Some(open_slot) = batch
+                .stage
+                .lent
+                .as_ref()
+                .map(crate::tx_lease::OpenSlot::slot)
+            {
                 let idx = TxConduits::<R>::conduit_index(priority);
                 // Found where it was put down, under the conduit's lock the caller holds: no other
                 // lock is taken and the driver is asked nothing. Its lender is this binding's own
                 // link for every session but an aggregated one whose conduit moved.
-                let joined = self.with_batch_holder(idx, open.slot(), |found| {
+                let joined = self.with_batch_holder(idx, open_slot, |found| {
                     let Some(link) = found else {
                         // No link records the slot: the link that lent it has gone and gave it
                         // back as it went, and the open frame with it.
+                        batch.stage.lent = None;
                         batch.stage.count = 0;
                         batch.lend.lost = batch.lend.lost.wrapping_add(1);
                         return false;
                     };
-                    // SAFETY: `link` records the slot for this conduit, so it lent it, and every
-                    // send or abort of a conduit's lent slot clears the record first, under the
-                    // conduit's lock, which the caller holds (`batch`): the slot is still lent and
-                    // unsettled.
-                    let mut slot =
-                        unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
-                    let open_channel = crate::frame_encode::frame_wire_reliability(slot.as_slice());
+                    let Some(open) = batch.stage.lent.as_mut() else {
+                        return false;
+                    };
+                    // SAFETY (the three reads and writes of the open frame below): `link` records
+                    // the slot for this conduit, so it lent it, and every send or abort of a
+                    // conduit's lent slot clears the record first, under the conduit's lock, which
+                    // the caller holds (`batch`): the slot is still lent and unsettled.
+                    let open_channel =
+                        crate::frame_encode::frame_wire_reliability(unsafe { open.written() });
                     if open_channel == reliability {
-                        let wpos = slot.len();
+                        // The message is written where the frame lies, and kept there.
+                        let wpos = open.len();
                         let appended = {
-                            let mut sink = crate::tx_buf::TxSink::new(&mut slot);
+                            let mut sink = crate::tx_buf::TxSink::new(unsafe { open.frame_mut() });
                             encode_body.write_body(&mut sink).is_ok()
                         };
                         if appended {
                             batch.stage.count = batch.stage.count.saturating_add(1);
-                            batch.stage.lent = Some(slot.keep_open());
                             return true;
                         }
-                        slot.truncate(wpos);
+                        open.truncate(wpos);
                     }
+                    // The frame leaves before the next opens: only now is it taken out of the
+                    // stage and picked up to be sent.
+                    let Some(open) = batch.stage.lent.take() else {
+                        return false;
+                    };
                     let _ = link.batch_slots.get(idx).and_then(LentRecord::take);
                     batch.stage.count = 0;
+                    // SAFETY: as above; the record is cleared just now, under the same lock.
+                    let mut slot =
+                        unsafe { crate::tx_lease::TxLease::pick_up(link.link_driver(), open) };
                     self.send_lent_batch(link, &mut slot, open_channel, priority, &mut batch.lend);
                     false
                 });
@@ -13625,7 +13634,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // payload is not copied in; a window kept open keeps the hold for what is appended.
             slot.hold_to(emit.mtu);
             let written = crate::frame_encode::encode_frame_envelope_into(
-                slot,
+                slot.frame_mut(),
                 crate::sn::to_wire(sn),
                 crate::frame_encode::frame_flags(emit.reliable),
                 emit.ext_qos,
