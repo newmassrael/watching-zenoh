@@ -16,7 +16,9 @@ here (five lanes work beside each other). The size case is `pico-client-coop-nos
 | 6b face lifecycle | partly in the tree before this lane | the life of a link is a sans-I/O value already: `UnicastLink` (`wz-session-core/src/link_life.rs`, machine `unicast_link.scxml`, `6b0a9f6d7e`) answers each input with `Effects`; `UnicastTransport` (`unicast_transport.rs`, `bd54e874cb`) holds a life, a receive and the timers as one value, but the cooperative engine builds it over `MadeLink` (no life) and keeps each face's life in the face record |
 | 6b-1 | this lane's first step, committed with this file | section 4 |
 | 6b-2 | built (commit "Carry a face life's effects in one carrier") | section 6.1 |
-| 6b-5 | built (commit "Hand a face life's wake back with its answer") | section 6.2 |
+| 6b-5 | built (commit "Hand a face life's wake back with its answer") | section 6.2; its two readings and the tests in 6.5 |
+| 6b-3 | built (commit "Name a dial's endpoint by its face life's row") | section 6.3 |
+| 6b-4 | built in the direct read and the round (commits "Keep the walk's refusal with no text until it ends", "Carry the round's walk refusal with no text"), the refusal kept by L0, not the life | section 6.4 |
 | 6c sending, 6d session state | not this lane's first steps | 6d goes with phase 4 (lane arch-l3-rows) |
 
 ## 2. The layers that overlap in a face's lifecycle now
@@ -171,9 +173,90 @@ carrier's tests of 6.1 assert the wake each carrying returns.
 Expected: the case -50 to -100 (`life_turn`'s second `wake_at`, its record look and its match);
 `Effects` grows by an `Option<u64>`, free where `input` is inlined into its caller. Receive: 0.
 
-### 6.3 Not built in this pass
+### 6.3 6b-3, the dial's endpoint is the life's row
 
-6b-3 (the dial's endpoint as the life's row), 6b-4 (the walk's refusal in L2) and 6b-6 (the life in
-the transport value) are left in the order of section 4. 6b-3 touches `DialEndpoint`'s 82 uses
-(54 in `wz-runtime-coop/src/faces.rs`, 13 in `transport/state.rs`), so it is a build loop of its
-own; 6b-4 builds on it (the refusal names the life's row).
+Of `DialEndpoint`'s 82 uses, those that wrote the endpoint into a value that outlives a call go:
+a dial (`faces::Dial`) and the direct read's made link (`DirectSlot::opened`) hold a
+`DialNamed` instead, what the life does not name. Without `listen` it is a struct with no field
+(size 0); with it, the text of an endpoint named apart (an attach), `None` for the session's own.
+The endpoint a refusal or a link's making reads is built where it is read, by
+`DialEndpoint::of(row, named)`, the row being the life's:
+
+- a dial answered at a look (`LinkSupervisor::answer_face_dial`, the round's `read_face`) reads
+  `UnicastLink::endpoint_row` of its face's life, which stands at the dial until it is told the
+  answer;
+- a dial given up (`LinkSupervisor::end_dial(at, row)`) is named by `Effects::gives_up_dial`,
+  now `Option<usize>`: the row the input found the link at, as `end_handshake` names it, since
+  the life has walked past it by then;
+- the direct read's handshake begun reads `endpoint_row` of the record's life, which stands at the
+  made dial until `HandshakeBegun` is told.
+
+The uses that only read an endpoint for a call (`OpenedAs`, the refusal and key-form arguments of
+`TransportState`, `FaceDialAnswer`, the round's `ReadDial::dialled`, a port's `Accepted`)
+keep `DialEndpoint`: a value of one word without `listen`, built by the reader.
+
+Tests: `link_life::tests::the_endpoint_row_names_the_dial_under_way_and_its_handshake` (red if the
+row is read off anything but the walk's), `only_an_unanswered_dial_at_its_deadline_is_given_up`
+and the carrier's `GiveUpDial(row)` (red if the give-up names the row walked to);
+`faces::tests::a_dials_endpoint_is_its_lifes_row_unless_it_names_one_apart`,
+`an_ended_dial_hands_over_its_endpoint_and_its_face_waits` (the row asked for, and with `listen`
+the name apart over it), `a_dial_is_answered_where_it_lies_in_its_face` (the life moved to row 1
+before the answer: red if the dial kept its own row), and, without `listen`,
+`an_endpoint_of_a_build_that_only_dials_is_a_row` now also holds `DialNamed` at size 0. The
+tests that told dials apart by their endpoint (`a_places_row_of_the_dials_goes_with_its_face`,
+the `ask_dial` test) tell them apart by what each holds.
+
+Expected: the case -50 to -150 (no endpoint written into a dial or moved through
+`answer_face_dial` and `opened`); `DirectSlot` one word less. Receive: 0, no look of an up
+link reaches a dial.
+
+### 6.4 6b-4, the walk's refusal kept with no text
+
+Premise read in the code: the life cannot keep the refusal. Its cause is L0's vocabulary
+(`LinkOpenError`, `SpawnRefusal`, the `Refusal` of `wz-runtime-coop::transport`), which
+`wz-session-core` does not name, and `LinkInput` would have to carry it. What 6b-4 is for (no
+`MAX_LOCATOR_LEN` text written at each refusal, one `OpenError` built at the session's end) needs
+no L2 change, so the refusal is kept by its owner in a value with no text:
+
+- `wz_runtime_coop::transport::WalkRefusal { endpoint: Option<DialEndpoint>, why }`, `why` the
+  shape of a `TransportRefusal` with the text left out (an endpoint's `Refusal`, no face, no
+  entropy, no task, no heap). `WalkRefusal::of` keeps a `TransportRefusal`'s reason,
+  `WalkRefusal::endpoint` an endpoint's; `TransportState::walk_refused` reads the endpoint's
+  text once and builds the `TransportRefusal` the session ends with.
+- The direct read: `DirectSlot::last: Option<OpenError>` is `refusal: Option<WalkRefusal>`;
+  `keep_refusal` takes the endpoint, not its text; `answered` no longer goes through
+  `TransportState::dialled`; `place_link_session` refuses as a `TransportRefusal` (its
+  refusals all were one, and `Core::link_params` now refuses as one too).
+- The round: `last: &mut OpenError` is `&mut Option<WalkRefusal>` through `poll_links`,
+  `poll_face`, `give_face`, `carry_out` and `RoundLinkIo`; `Core::refuse` goes;
+  `open_wire` and `start_wire` refuse as a `TransportRefusal`.
+- `Core::walk_ended` (cold, out of line) builds the `OpenError` once for both reads: the walk's
+  last refusal with its text, or `NoEndpoint` when the walk passed none.
+
+Every refusal a caller reads is the same: a text read from `Listed(row)` is the one
+`dial_text(row)` gave, a lost link's endpoint is `None` (text ""), and a refusal no endpoint
+caused (no entropy, no task, no heap, no face) is rebuilt as itself.
+
+Test: `transport::tests::a_walks_refusal_keeps_the_reason_and_reads_the_text_once` (red if a
+reason is lost or a kept text is used rather than the one read at the end); the session-end
+refusals of `tests.rs` (`NoAnswerInTime`, a refused dial, a lost link, no task, no entropy) hold
+both reads.
+
+Expected: the case -200 to -500 (the `EndpointRefusal` writes at `keep_refusal`, `answered` and
+`dial_row` go; one build at the end); `DirectSlot` `MAX_LOCATOR_LEN` plus about 16 bytes
+less. Receive: 0.
+
+### 6.5 What 6b-5's two readings move
+
+6b-5 changed two readings (6.2), kept as corrections: a look that did not move the life keeps the
+look its last answer named, and the open's first input notes the life's look. By reading the
+tests, no existing test counts looks at a life: `tests::dial_in_flight` counts dials begun and
+reads phases, which neither change moves (a look that keeps its due asks no stack anything); the
+round's `link_polls` (`tests::group`) is the round's, which 6b-5 did not change. What the
+readings move is when a dial under way is next asked, which only a timing shows; the run of
+`tests::dial_in_flight` and `tests::direct_receive` is the check, and a test whose count moved
+is named here once the run is read.
+
+### 6.6 Not built in this pass
+
+6b-6 (the life in the transport value) is left as section 4 states it.
