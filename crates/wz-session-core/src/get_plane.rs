@@ -280,7 +280,8 @@ impl<P: Storage> EndedLegs<P> {
         if self.legs.free_slots() <= self.owed {
             return false;
         }
-        self.owed += 1;
+        // Below the table's free rows, which a `usize` counts, so the count never saturates.
+        self.owed = self.owed.saturating_add(1);
         true
     }
 

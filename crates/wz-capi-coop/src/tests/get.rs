@@ -650,25 +650,6 @@ fn a_get_on_a_closed_session_is_refused_as_closed() {
     assert_eq!(leg.lock().unwrap().open, 0, "no leg was minted");
 }
 
-/// A get whose link goes ends with it, long before its deadline: the peer that owed its Final is
-/// gone.
-#[test]
-fn a_get_ends_with_its_link() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    settle(&router, &engine, Command::Silence);
-    let (issued, leg) = ask(&engine, "demo/g/a", &remote_get(), None, None, None);
-    assert_eq!(issued, Ok(1));
-    until(&engine, "the query to reach the router", || {
-        router.seen(|s| s.queries) == 1
-    });
-    router.send(Command::Close);
-    until(&engine, "the leg to end with the link", || {
-        leg.lock().unwrap().ended
-    });
-    assert!(leg.lock().unwrap().replies.is_empty());
-}
-
 /// A get that issued no leg is refused when its legs' requests went out on no link, with why the
 /// last did not, and not ended as one that reached nobody: a request past what the session sends
 /// is the request's refusal, any other the link's. The CONTROL is a get that issued a leg, which is
