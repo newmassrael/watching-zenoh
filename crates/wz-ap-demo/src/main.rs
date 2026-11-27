@@ -1015,7 +1015,7 @@ fn demo_main() -> ExitCode {
                     config_write_permit,
                     no_admin_read,
                     session_lifecycle: rest.iter().any(|a| a == "--session-lifecycle"),
-                    session_commanders: crate::args::parse_pairs(rest, "--session-commander"),
+                    node_declaration: parse_pair(rest, "--node-declaration"),
                     metadata: metadata.clone(),
                     put_key,
                     put_payload,
@@ -1035,6 +1035,7 @@ fn demo_main() -> ExitCode {
                     // use; cert-free schemes leave them None.
                     tls_cert: parse_pair(rest, "--tls-cert"),
                     tls_key: parse_pair(rest, "--tls-key"),
+                    tls_client_ca: crate::args::parse_tls_client_ca(rest),
                     quic_cert: parse_pair(rest, "--quic-cert"),
                     quic_key: parse_pair(rest, "--quic-key"),
                     // R2233 (open-debt item 585) — the DIAL twin: a `--connect
@@ -1044,6 +1045,7 @@ fn demo_main() -> ExitCode {
                     // them until the loop had somewhere to put the material.
                     dial_certs: crate::runner::DialCertPaths {
                         tls_ca: parse_pair(rest, "--tls-ca"),
+                        tls_connect: crate::args::TlsConnectIdentity::from_args(rest),
                         quic_ca: parse_pair(rest, "--quic-ca"),
                     },
                     #[cfg(feature = "routing-interest-pending-gc")]
@@ -1303,6 +1305,7 @@ fn demo_main() -> ExitCode {
                 crate::runner::AcceptCertPaths {
                     tls_cert: parse_pair(rest, "--tls-cert"),
                     tls_key: parse_pair(rest, "--tls-key"),
+                    tls_client_ca: crate::args::parse_tls_client_ca(rest),
                     quic_cert: parse_pair(rest, "--quic-cert"),
                     quic_key: parse_pair(rest, "--quic-key"),
                 },
@@ -1318,6 +1321,7 @@ fn demo_main() -> ExitCode {
                     // cert against these.
                     dial_certs: crate::runner::DialCertPaths {
                         tls_ca: parse_pair(rest, "--tls-ca"),
+                        tls_connect: crate::args::TlsConnectIdentity::from_args(rest),
                         quic_ca: parse_pair(rest, "--quic-ca"),
                     },
                     multicast_qos,
@@ -1347,7 +1351,7 @@ fn demo_main() -> ExitCode {
                     no_admin_read: rest.iter().any(|a| a == "--no-admin-read"),
                     // The lifecycle queries: the same two bare flags `--peer` parses.
                     session_lifecycle: rest.iter().any(|a| a == "--session-lifecycle"),
-                    session_commanders: crate::args::parse_pairs(rest, "--session-commander"),
+                    node_declaration: parse_pair(rest, "--node-declaration"),
                     // R2393 (§5.23 adminspace-write) — the write-side twin, the SAME
                     // bare presence flag `--peer` and `--storage-host` parse, so one
                     // spelling means one thing across every run-mode that hosts an
@@ -1794,6 +1798,8 @@ fn demo_main() -> ExitCode {
             // against server name `localhost`). Read here, applied only on the
             // one-shot dial path (establish_link); `None` for a non-tls connect.
             tls_ca: parse_pair(rest, "--tls-ca"),
+            // The certificate a `tls/...` --connect presents when the listener asks for one.
+            tls_connect: crate::args::TlsConnectIdentity::from_args(rest),
             // R311y366 — root-CA PEM path for a `quic/...` --connect (QUIC sibling
             // of --tls-ca; verified against server name `localhost`).
             quic_ca: parse_pair(rest, "--quic-ca"),
@@ -2380,19 +2386,35 @@ fn demo_main() -> ExitCode {
         print_usage();
         return ExitCode::from(2);
     }
-    if has_flag("--session-commander") && !has_flag("--session-lifecycle") {
-        eprintln!("wz-ap-demo: --session-commander requires --session-lifecycle");
+    // Mutual TLS is asked by a listener of the mesh run-modes, which verify their clients
+    // against --tls-ca; the one-shot --listen has no client to grant anything to.
+    if has_flag("--tls-mtls") && !(has_flag("--peer") || has_flag("--router-hat")) {
+        eprintln!("wz-ap-demo: --tls-mtls requires --peer or --router-hat");
         eprintln!();
         print_usage();
         return ExitCode::from(2);
     }
-    // A grant that does not read is refused here, before any node is up, rather than leaving a
-    // node that refuses every commander for a reason its operator never sees.
+    if has_flag("--tls-mtls") && !has_flag("--tls-ca") {
+        eprintln!(
+            "wz-ap-demo: --tls-mtls requires --tls-ca, the root a client's certificate is \
+             verified against"
+        );
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    if has_flag("--node-declaration") && !has_flag("--session-lifecycle") {
+        eprintln!("wz-ap-demo: --node-declaration requires --session-lifecycle");
+        eprintln!();
+        print_usage();
+        return ExitCode::from(2);
+    }
+    // A declaration that does not read is refused here, before any node is up, rather than
+    // leaving a node that refuses every commander for a reason its operator never sees.
     #[cfg(feature = "session-close-ingress")]
-    if let Err(e) = crate::runner::session_commander_grants(&crate::args::parse_pairs(
-        rest,
-        "--session-commander",
-    )) {
+    if let Err(e) =
+        crate::runner::declared_session_grants(parse_pair(rest, "--node-declaration").as_deref())
+    {
         eprintln!("wz-ap-demo: {e}");
         eprintln!();
         print_usage();
@@ -2643,6 +2665,7 @@ fn demo_main() -> ExitCode {
             connect,
             reconnect,
             tls_ca,
+            tls_connect,
             quic_ca,
             namespace,
             qos,
@@ -2671,6 +2694,9 @@ fn demo_main() -> ExitCode {
             }
             if let Some(ca) = tls_ca {
                 log::info!("tls-ca  = {ca} (tls/ dial verifies server name localhost)");
+            }
+            if let Some(cert) = &tls_connect.cert {
+                log::info!("tls-connect-cert = {cert} (presented when a tls/ listener asks)");
             }
             if let Some(ca) = quic_ca {
                 log::info!("quic-ca = {ca} (quic/ dial verifies server name localhost)");

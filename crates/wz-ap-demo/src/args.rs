@@ -105,6 +105,10 @@ pub(crate) enum Role {
         connect: Vec<String>,
         reconnect: bool,
         tls_ca: Option<String>,
+        /// The certificate a `tls/...` --connect presents when the listener asks for one
+        /// (`--tls-connect-cert`, `--tls-connect-key`). Feature-uniform; inert in a build without
+        /// the `tls` feature.
+        tls_connect: TlsConnectIdentity,
         /// R311y366 — the `--quic-ca <path>` root-CA PEM a `quic/...` --connect
         /// verifies the peer's server cert against (server name `localhost`), the
         /// QUIC sibling of `tls_ca`. Feature-uniform (always present on the match
@@ -601,6 +605,40 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The certificate a `tls/...` dial presents when the listener asks for one (mutual TLS): the
+/// `--tls-connect-cert` and `--tls-connect-key` PEM paths, both or neither. zenoh
+/// `transport/link/tls/connect_certificate` and `connect_private_key`. The zid its key names is
+/// the zid the dialling node proves to the listener (decision D1 of
+/// `docs/session-lifecycle-intent.md`), so a node that claims it with `--zid` is a commander a
+/// listener can grant verbs to.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TlsConnectIdentity {
+    pub cert: Option<String>,
+    pub key: Option<String>,
+}
+
+impl TlsConnectIdentity {
+    /// The two flags as the arguments give them.
+    pub(crate) fn from_args(args: &[String]) -> Self {
+        Self {
+            cert: parse_pair(args, "--tls-connect-cert"),
+            key: parse_pair(args, "--tls-connect-key"),
+        }
+    }
+}
+
+/// The root a `tls/...` listen verifies its clients' certificates against when `--tls-mtls` asks
+/// for mutual TLS: `--tls-ca`, which upstream reads for both directions
+/// (`transport/link/tls/enable_mtls` with `root_ca_certificate`). `None` without `--tls-mtls`,
+/// and then the listener asks no client for a certificate.
+pub(crate) fn parse_tls_client_ca(args: &[String]) -> Option<String> {
+    if args.iter().any(|a| a == "--tls-mtls") {
+        parse_pair(args, "--tls-ca")
+    } else {
+        None
+    }
 }
 
 /// `--cpu-share <percent>` and `--max-data-wait <ms>`: what the operator declares about the CPU this

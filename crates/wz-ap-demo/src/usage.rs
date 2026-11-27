@@ -201,6 +201,16 @@ pub(crate) fn print_usage() {
     eprintln!("                             presents (--listen, --peer, --router-hat). zenoh");
     eprintln!("                             transport/link/tls/listen_certificate and");
     eprintln!("                             listen_private_key");
+    eprintln!("    --tls-connect-cert <pem>, --tls-connect-key <pem>");
+    eprintln!("                             certificate chain and private key a tls/ dial");
+    eprintln!("                             presents when the listener asks for one; its key");
+    eprintln!("                             names the zid the dial proves (claim it with");
+    eprintln!("                             --zid). Needs --tls-ca. zenoh transport/link/tls/");
+    eprintln!("                             connect_certificate and connect_private_key");
+    eprintln!("    --tls-mtls               a tls/ listen of --peer or --router-hat asks every");
+    eprintln!("                             client for a certificate that chains to --tls-ca,");
+    eprintln!("                             and the key of the one it presents proves its zid.");
+    eprintln!("                             zenoh transport/link/tls/enable_mtls");
     eprintln!("    --quic-ca <pem>, --quic-cert <pem>, --quic-key <pem>");
     eprintln!("                             the same three for quic/ links, which build their own");
     eprintln!("                             TLS 1.3 configuration from them");
@@ -474,18 +484,15 @@ pub(crate) fn print_usage() {
     eprintln!("                             (a second open changes nothing). A GET on");
     eprintln!("                             @/<zid>/<role>/session/verbs lists the verbs bound.");
     eprintln!("                             Requires --peer or --router-hat.");
-    eprintln!("    --session-commander <zid>=<verb>[,<verb>...][=<key expression>]");
-    eprintln!("                             grant the verbs (open, close, reset, status) to the");
-    eprintln!(
-        "                             commander whose zid the key of the asking link proves,"
-    );
-    eprintln!("                             narrowed to the keys the key expression matches when");
-    eprintln!(
-        "                             one is given. Repeatable. Without a grant each verb is"
-    );
-    eprintln!("                             answered `refused`; the verbs query still lists them,");
-    eprintln!("                             because the node knows them. Requires");
-    eprintln!("                             --session-lifecycle.");
+    eprintln!("    --node-declaration <file>");
+    eprintln!("                             the node's declaration (TOML, the file a fixed node");
+    eprintln!("                             is built from): each [[endpoint]] row whose role is");
+    eprintln!("                             commander grants its verbs (open, close, reset,");
+    eprintln!("                             status) to the commander whose zid the key of the");
+    eprintln!("                             asking link proves. Without one, or with no commander");
+    eprintln!("                             row, each verb is answered `refused`; the verbs query");
+    eprintln!("                             still lists them, because the node knows them.");
+    eprintln!("                             Requires --session-lifecycle.");
     eprintln!("    --router-link-weight <zid>=<weight>");
     eprintln!(
         "                             zenoh routing.router.linkstate.transport_weights — the"
