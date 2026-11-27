@@ -6,11 +6,14 @@ memory are facts of `Storage`), N2 (the policy `OnUse`, its column `FirstUse` an
 `HeapKey` over a `KeyBudget`, held to the same contract) and N3a (the session's tables made
 counted on `OnUse`), then N3b (every other table a face and the application hold, counted on
 `OnUse`, and the two places where a table of that policy is asked for room before the push that
-takes its memory). The owner's ruling of 2026-11-27 chose the form of section 6 (c), per
-preset: the cooperative engine's on-use form (N3c to N3e), the doors' (N4) and the switch with its
-guards (section 9) are designed here and not written yet, because the engine has no form on
-`OnUse` to select and a switch that cannot be built is not declared; section 11 reads what N3c has
-to give a home to, and why it is the next step and not a part of N3b. Nothing here was built or
+takes its memory), then the first step of N3c (section 11, 1): the cooperative engine on `OnUse`
+under its feature `tables-on-use`, its registry made by value and its keys counted against a
+`KeyBudget` its region holds, guarded by the session's lock as the key arena is. The owner's
+ruling of 2026-11-27 chose the form of section 6 (c), per preset: the rest of the cooperative
+engine's on-use form (N3c's steps 2 and 3, N3d, N3e), the doors' (N4) and the switch with its
+guards (section 9) are designed here and not written yet, because a switch that cannot be built is
+not declared; section 11 reads what N3c has to give a home to, and why it is the next step and not
+a part of N3b. Nothing here was built or
 measured by this lane: a byte figure is either **read** from the size ledger's explain document or
 from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
 instructions is a reading of the code, not a run. Line references are to the tree this lane
@@ -440,9 +443,50 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   (`stage_parts`, `make_room`); only a refusing allocator reaches them, and the crate's tests run
   on the process's.
 
+### 7.5 N3c, step 1
+
+- `on_use::tests` in the session core, four more, two of them in a build with debug assertions
+  alone: `a_value_written_in_place_takes_the_rows_and_holds_the_count` (red if
+  `FirstUse::push_in_place` writes before it makes its room, `room_for`);
+  `a_key_let_go_of_outside_its_budgets_lock_fails` and
+  `a_key_let_go_of_beside_the_thread_that_holds_its_budgets_lock_fails` (red if `HeapKey`'s drop
+  does not ask its budget's guard, or the guard reads the owner's mark and not its answer for the
+  calling thread); `keys_under_their_budgets_lock_or_with_the_owner_alone_pass`, their control (red
+  if the guard fails a key touched under the lock, or a budget its owner holds alone is checked).
+- With `tables-on-use`, every test whose path names `on_use`:
+  `region::tests::an_on_use_region_holds_the_sessions_key_budget` (red if `StateRegion::place`
+  writes a budget of other bytes than the limits' `KEY_ARENA_BYTES`, or hands back a handle of no
+  budget); `engine::registry::counted::tests::an_on_use_registry_holds_the_plans_rows_and_has_taken_none`
+  (red if an application's table is made of the build's bound, `SlotMap::new` for `counted`, or
+  takes its rows when made, if the registry holds no set, or, without `queryable`, if the set's
+  peer tables are not counted); `tests::on_use::`, three: a declaration's key counted against the
+  budget as its arena block and given back with its last hold (red if the budget's bytes are not
+  the limits', or a key is not counted or not given back); an object's key a copy of its own, held,
+  shared and let go of through the engine's `SessionKeys` and refused past the session's
+  `MAX_KEYEXPR_BYTES` (red if a hold is counted against the budget, is not a copy, or is kept past
+  the bound); and a subscriber declared after the open told to the router and handed what it pushes
+  (red if the subscribers' table refuses its first row).
+- At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` without
+  `tables-on-use` and `AtFirstUse` with it (9.2, 1), and refuses `tables-on-use` beside
+  `runtime-plan` by name until N3c covers that form; `region.rs` asserts the key budget has no drop,
+  which the region's drop would leave undone.
+- Not tested: the open refused when the allocator has no room for the dial face's set
+  (`ArenaRefused::NoMemory`); only a refusing allocator reaches it.
+
 ## 8. What the main session runs
 
-Nothing of N1, N2, N3a or N3b was built or run by this lane.
+Nothing of N1, N2, N3a, N3b or N3c's first step was built or run by this lane.
+
+- N3c, step 1, the D12 form, whose behaviour and bytes it does not change:
+  `cargo test -p wz-session-core --lib on_use::tests` 14 in a debug build (10 before, four added;
+  12 in a build without debug assertions), and the crate's suites of `wz-capi-coop` and
+  `wz-capi-pico` as before. The on-use form: `cargo test -p wz-capi-coop --features tables-on-use
+  --lib on_use` 5, the same with `--features
+  liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use` 5 (the two legs of
+  `scripts/lib/nondefault-tests-gate.sh`); `cargo clippy -p wz-capi-coop --features tables-on-use
+  --all-targets -- -D warnings`; the client library in that form, `cargo build -p wz-capi-pico
+  --no-default-features --features os-host,link-udp,wz-capi-coop/tables-on-use`; and a build of it
+  beside `peer` refused by name.
 
 - N3b, with the crate's default features: `cargo test -p wz-session-core --lib reply_stage::tests`
   51 (32 before: fifteen `on_first_use` bodies and four tests of the counted stages added);
@@ -630,7 +674,13 @@ The order that builds at each step:
    registry is made by value and whose keys are a `KeyBudget`, every other tenant still the
    arena's; `RowPolicy` is `OnUse` under `tables-on-use` and its moment assertion `AtFirstUse`
    (9.2, 1). The size case of section 10 is not read yet: the region's other places and the arena
-   are still linked.
+   are still linked. Written (7.5): the twin is `StateRegion` under the feature, its key budget a
+   field where the key arena lay; the registry is `engine/registry/counted.rs`; the session's
+   state names its key store with its policy (`SessionParts::Keys`), and the budget takes the key
+   arena's marks of the session's lock, so every reader of `session.keys` reads it unchanged but
+   the C ABI's held keys (`SessionKeys`, `KeysLocked`): on the on-use form each is a copy of its
+   own the engine makes, refused past the session's `MAX_KEYEXPR_BYTES` as the arena refuses it,
+   and not counted against the budget until N3e makes it a holder of the row's `HeapKey`.
 2. The region's other places into the boxed state; `region.rs` leaves the form.
 3. N3d, then the runtime, the engine and the rooms boxed; `arena.rs` leaves the form and the
    size case reads group A's figure.
