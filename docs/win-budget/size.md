@@ -726,8 +726,8 @@ report, so a body inlined across two owners is counted where its owner is.
 
 | job | wz | zenoh-pico | gap | lever, and whose |
 |-----|---:|-----------:|----:|------------------|
-| the three machines' runtime (`sce_rust_runtime`: engine 4,574, microstep 1,316, event queue 1,071, tables 557, state set 548, run store 154, the rest about 100) | about 8,300 | the hand-written handshake, `vendor/zenoh-pico/src/transport/unicast/transport.c` 2,324 | about +6,000 | 10.3, SCE |
-| the send: dispatch, writer, fragment chain, control writes, lease of the slot (`session_actions` 10,647, `tx_buf` 1,167, `tx_lease` 743, `tx_deadline` 378) | about 12,900 | `vendor/zenoh-pico/src/transport/common/tx.c` 3,483 | about +9,400 | 10.2 (landed), 10.5 (preset decisions) |
+| the three machines' runtime (`sce_rust_runtime`: engine 4,574, microstep 1,316, event queue 1,071, tables 557, state set 548, run store 154, the rest about 100) | about 8,300 | the hand-written handshake, `vendor/zenoh-pico/src/transport/unicast/transport.c` @ `static z_result_t _z_unicast_handshake_open(`, the file 2,324 | about +6,000 | 10.3, SCE |
+| the send: dispatch, writer, fragment chain, control writes, lease of the slot (`session_actions` 10,647, `tx_buf` 1,167, `tx_lease` 743, `tx_deadline` 378) | about 12,900 | `vendor/zenoh-pico/src/transport/common/tx.c` @ `z_result_t _z_send_n_msg(_z_session_t *zn,`, the file 3,483 | about +9,400 | 10.2 (landed), 10.5 (preset decisions) |
 | the receive: units, control read, fragment rejoin (`drive` 4,657 with its sub-owners, `reassembly_dispatch` 2,111, `unicast_rx` 330, `sn`, `link_admission`, the handshake extensions) | about 7,900 | `unicast/rx.c` 1,820, `unicast/read.c` 1,010, `common/rx.c` 502 | about +4,600 | 10.4, T-RX |
 | timers (`transport_timers` 786; `keepalive_deadlines`, `due_ms`, `service_due` are counted in the receive row by their owners) | 786 | `unicast/lease.c` 626 | +160 | 10.4 |
 | pico's manager, peer and transport files, which wz holds in sessions and driver | 0 | about 3,700 | -3,700 | none |
