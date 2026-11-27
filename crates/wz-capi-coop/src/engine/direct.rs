@@ -1711,8 +1711,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
         slot.pay_site(&self.direct.dial.site);
         while !self.link_is_up(slot.at()) {
+            let wait = self
+                .wait_on_faces(self.wait_due(slot), NO_STEP_BOUND_MS)
+                .ok_or(OpenError::NoEndpoint)?;
             let turn = self
-                .link_turn(&self.direct.dial, slot, NO_STEP_BOUND_MS)
+                .face_turn(&self.direct.dial, slot, Some(wait))
                 .ok_or(OpenError::NoEndpoint)?;
             if let Some(last) = turn.ended {
                 return Err(last);
@@ -1793,7 +1796,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             return self.held_elsewhere::<TASK>(u64::MAX);
         };
         let slot = &mut held.0;
-        let read = match self.link_turn(face, slot, most_ms) {
+        let turn = self
+            .wait_on_faces(self.wait_due(slot), most_ms)
+            .and_then(|wait| self.face_turn(face, slot, Some(wait)));
+        let read = match turn {
             Some(turn) => {
                 self.deliver();
                 if turn.ended.is_some() {
@@ -2300,22 +2306,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         }
     }
 
-    /// One turn of the face `face`, its read slot held as `slot`, the open's and, where the dial
-    /// role's face is the only face, the read's: the wait for the
-    /// link's input or the next deadline, then the face's turn (`Self::face_turn`). `None`
-    /// once the session closed. Where the dial role's face is the only face this is the one body
-    /// the open and each read turn it through, the face's turn inlined into it.
-    #[cfg_attr(not(any(feature = "listen", feature = "group")), inline(never))]
-    fn link_turn(
-        &self,
-        face: &DirectFace<L, C>,
-        slot: &mut DirectSlot<L, C>,
-        most_ms: u32,
-    ) -> Option<LinkTurn> {
-        let wait = self.wait_on_faces(self.wait_due(slot), most_ms)?;
-        self.face_turn(face, slot, Some(wait))
-    }
-
     /// When the faces are next due, for a wait made with `slot`, the read slot of the face the
     /// read turns, held: as each face's read last noted it where a read may turn several faces,
     /// and as `slot` holds it where the dial role's face is the only face, whose read holds that
@@ -2366,11 +2356,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
 
     /// A turn of `face`, its read slot held as `slot`, after the wait `wait` when this turn
     /// hands it back: a look at the link's life, and a step of the pump unless the look ended the
-    /// session. `None` once the session closed. Out of line where a read turns several faces:
-    /// the open and each read turn a face through one body. Where the dial role's face is the only
-    /// face its one caller is that body (`Self::link_turn`), which holds it inline.
-    #[cfg_attr(any(feature = "listen", feature = "group"), inline(never))]
-    #[cfg_attr(not(any(feature = "listen", feature = "group")), inline(always))]
+    /// session. `None` once the session closed. The one turn of every face in every build, out of
+    /// line: the open and each read turn a face through this body, whether the table holds one
+    /// face or many, each caller having made the wait it hands.
+    #[inline(never)]
     fn face_turn(
         &self,
         face: &DirectFace<L, C>,

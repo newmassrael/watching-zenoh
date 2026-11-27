@@ -580,7 +580,7 @@ fn a_stream_of_batches_still_sends_the_keep_alive_on_time() {
 /// or not the read waited. Each such read reads the clock once, for that look, and none for a
 /// wait. The CONTROL is the leg halfway to its deadline: still open. Turned red by a read on held
 /// input that leaves the look at the life or the pump's due work to the next read that waits
-/// (`CoopEngine::link_turn`), or that still reads the clock for its wait (`link_wait`).
+/// (`CoopEngine::face_turn`), or that still reads the clock for its wait (`link_wait`).
 #[cfg(all(feature = "query", not(wz_round)))]
 #[test]
 fn reads_on_held_input_still_serve_what_falls_due() {
@@ -1150,6 +1150,36 @@ fn a_read_turns_every_face_once() {
         faces,
         "one turn of each face"
     );
+}
+
+/// A client reads its one face through a table of one row: the read slots' table holds the dial
+/// role's row alone, and each read turns that row once, through the one turn body every build
+/// turns a face through. Turned red by a client read that turns its face in a body of its own
+/// (a turn the body's count does not see), by a read that turns the row twice, or by a client
+/// table of more than one row.
+#[cfg(all(not(wz_round), not(any(feature = "listen", feature = "group"))))]
+#[test]
+fn a_client_reads_its_one_face_through_a_table_of_one_row() {
+    assert!(
+        !crate::arena::TAKES_FACES,
+        "CONTROL: the build takes no face beside its dial role's"
+    );
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    assert_eq!(
+        engine.direct_faces(),
+        (1, 1),
+        "one row, the dial role's, turned by every read"
+    );
+    for read in 1..=3 {
+        let before = engine.takes.face_turns.load(Ordering::SeqCst);
+        let _ = SessionDrive::read(&*engine, false);
+        assert_eq!(
+            engine.takes.face_turns.load(Ordering::SeqCst) - before,
+            1,
+            "read {read} turns row 0 once"
+        );
+    }
 }
 
 /// What a read waits for is the earliest due of the faces as their slots hold it: each turn of a
