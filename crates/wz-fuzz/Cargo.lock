@@ -1147,7 +1147,6 @@ dependencies = [
 name = "wz-app-frame"
 version = "0.1.0"
 dependencies = [
- "sce-portable-bytes",
  "wz-app-schema",
  "wz-session-core",
 ]

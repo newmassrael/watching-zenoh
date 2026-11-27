@@ -33,13 +33,8 @@ declaration_stall_deadline	7258	102	0	0
 declare	15664	402	0	0
 declare_sub_mid_v1_valid	24	0	0	0
 drop_report_due	6092	102	0	0
-e2e_bind_sender	9186	137	0	0
 e2e_counter_step	6050	102	0	0
 e2e_counter_verdict	26	0	0	0
-e2e_sender_slot	9504	181	0	0
-e2e_sender_slot_held	0	0	0	0
-e2e_sender_slot_kind	58	49	0	0
-e2e_sender_slot_result	992	66	0	0
 encoding	3704	157	0	0
 err	6052	198	0	0
 eth_rx_pool_mcu	820	410	0	16
