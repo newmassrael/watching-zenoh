@@ -91,44 +91,45 @@ use matrix::{read_status, Status, HELD};
 // barrier-producer: deploy/host-slot-node/src/bin/declared_node.rs @ "HOST-WZ-CLIENT READY " for "HOST-WZ-CLIENT READY "
 
 /// The declaration the node is built from, with the zids the test replaces.
-const DECLARATION: &str = "deploy/nodes/slot-commander.toml";
+pub(super) const DECLARATION: &str = "deploy/nodes/slot-commander.toml";
 /// The configuration a client that commands such a node opens its session from, with the words a
 /// client fills in angle brackets.
 const CANONICAL_CONFIG: &str = "deploy/clients/commander.json5";
 /// The zid the declaration grants `status`, which the test replaces with the zid of the key of a
 /// node that opens a session to the listener.
-const STATUS_ZID: &str = "zid = \"a1\"";
+pub(super) const STATUS_ZID: &str = "zid = \"a1\"";
 /// The zid the declaration grants `close`, which the test replaces with the zid of the router's key.
-const CLOSE_ZID: &str = "zid = \"b2\"";
+pub(super) const CLOSE_ZID: &str = "zid = \"b2\"";
 /// The router the node dials, and the port it listens on, as its declaration states them.
 const ROUTER_LOCATOR: &str = "tls/127.0.0.1:17476";
-const LISTENER: &str = "tls/127.0.0.1:17477";
+pub(super) const LISTENER: &str = "tls/127.0.0.1:17477";
 /// What the node prints once its port is bound.
-const LISTENING: &str = "HOST-WZ-LISTEN tls/127.0.0.1:17477";
+pub(super) const LISTENING: &str = "HOST-WZ-LISTEN tls/127.0.0.1:17477";
 /// The line the node says who it is on.
 const READY: &str = "HOST-WZ-CLIENT READY ";
 /// What the node prints when a session is up and the key of its link named the zid it claimed.
-const VERIFIED: &str = "slot-commander: session established, peer verified";
+pub(super) const VERIFIED: &str = "slot-commander: session established, peer verified";
 /// How long the node may take to start, and to establish with a router that comes up late.
-const BUDGET: Duration = Duration::from_secs(30);
+pub(super) const BUDGET: Duration = Duration::from_secs(30);
 /// How long a query may wait for its replies.
 const QUERY_TIMEOUT_MS: &str = "5000";
 
 /// What a lifecycle verb is refused with when the commander is not on the verb's list
 /// (`wz_session_core::lifecycle_wire::RefusedReason`).
-const STATUS_REFUSED: &str =
+pub(super) const STATUS_REFUSED: &str =
     "this node does not permit reading the status of the session with that peer";
-const CLOSE_REFUSED: &str = "this node does not permit closing the session with that peer";
+pub(super) const CLOSE_REFUSED: &str =
+    "this node does not permit closing the session with that peer";
 
 /// A zenoh id as zenoh's configuration spells one: lowercase hex of the id's bytes read as a
 /// little-endian integer (`uhlc` 0.8.2 `src/id.rs` @ `write!(f, "{:x}", u128::from_le_bytes(self.0))`).
-fn config_id(zid: &[u8; 16]) -> String {
+pub(super) fn config_id(zid: &[u8; 16]) -> String {
     format!("{:x}", u128::from_le_bytes(*zid))
 }
 
 /// The key of one party and the zid it names.
 pub(super) struct Party {
-    cert_pem: String,
+    pub(super) cert_pem: String,
     key_pem: String,
     pub(super) zid: String,
     /// The files a client made its identity into with the library's door, which it presents as
@@ -299,7 +300,7 @@ struct Built {
     _dir: tempfile::TempDir,
 }
 
-fn repo_root() -> PathBuf {
+pub(super) fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -343,7 +344,7 @@ fn built() -> &'static Built {
 
 /// Write the declaration `text` of the node `id` into `dir` and build the node from it as a
 /// consumer does (`wz_package.py --node-file`): the packaged executable.
-fn package(dir: &Path, id: &str, text: &str) -> PathBuf {
+pub(super) fn package(dir: &Path, id: &str, text: &str) -> PathBuf {
     let root = repo_root();
     let file = dir.join(format!("{id}.toml"));
     std::fs::write(&file, text).expect("write the declaration");
@@ -384,11 +385,11 @@ pub(super) fn printed_certificate(captured: &str) -> Option<String> {
 
 /// The running node: its output, its zid and the certificate it presents, written where a peer's
 /// configuration names it.
-struct Node {
+pub(super) struct Node {
     child: ChildGuard,
     out: File,
-    zid: String,
-    certificate: PathBuf,
+    pub(super) zid: String,
+    pub(super) certificate: PathBuf,
     _files: tempfile::TempDir,
 }
 
@@ -399,7 +400,7 @@ impl Node {
     }
 
     /// Start the node `binary` and wait until it says `ready`.
-    fn run(binary: &Path, what: &str, ready: &str) -> Self {
+    pub(super) fn run(binary: &Path, what: &str, ready: &str) -> Self {
         let out = tempfile::tempfile().expect("a capture for the node");
         let child = ChildGuard::wrap(
             what,
@@ -443,7 +444,7 @@ impl Node {
 
     /// What the node has printed so far. Not named `output`: `bounded::census` reads the text of
     /// every test file for a bare `.output()` of a child and cannot tell this method from it.
-    fn console(&mut self) -> String {
+    pub(super) fn console(&mut self) -> String {
         read_captured(&mut self.out)
     }
 }

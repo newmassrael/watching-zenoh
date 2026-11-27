@@ -220,6 +220,7 @@ mod wz_router_unixpipe_forward;
 mod wz_router_ws_acceptor_zenohd_interop;
 mod wz_scout_fanout_netns;
 mod wz_scout_zenohd_interop;
+mod wz_sealed_commander_zenohd_interop;
 mod wz_shm_establishment_zenohd_interop;
 mod wz_shm_payload_zenohd_interop;
 mod wz_shm_query_reply_zenohd_interop;

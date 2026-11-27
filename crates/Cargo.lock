@@ -4280,6 +4280,7 @@ dependencies = [
  "wz-capture",
  "wz-codecs",
  "wz-codegen-build",
+ "wz-command-seal",
  "wz-mesh-client",
  "wz-packet-fixtures",
  "wz-runtime-tokio",
