@@ -1363,7 +1363,7 @@ impl OwnerWaits {
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(cells, stream_ends_fit(&stream))?
-            .open(|place| self.stream(place.write(StreamDriver::over(stream, rx, tx))))
+            .open(|place| self.stream(StreamDriver::over_in(place, stream, rx, tx)))
     }
 }
 

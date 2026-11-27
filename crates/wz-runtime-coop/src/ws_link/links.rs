@@ -143,7 +143,7 @@ impl<N: CountKind> WsPlace<N> {
         let link = CellRc::<_, N>::claim_of(self.cells.as_ref())
             .ok_or(LinkOpenError::Exhausted)?
             .made(|place| {
-                let link = place.write(StreamDriver::framed(stream, rx, held, tx, framing));
+                let link = StreamDriver::framed_in(place, stream, rx, held, tx, framing);
                 if owner_waits {
                     link.wait_by_owner();
                 }

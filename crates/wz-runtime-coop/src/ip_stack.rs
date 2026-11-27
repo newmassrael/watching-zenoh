@@ -64,8 +64,10 @@ use crate::session_drive::{
 };
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::session_drive::{LinkOpenError, LinkProto, Locator};
-#[cfg(any(feature = "session-slot", feature = "alloc"))]
+#[cfg(feature = "session-slot")]
 use crate::stream_link::link_over;
+#[cfg(all(feature = "alloc", not(feature = "session-slot")))]
+use crate::stream_link::link_over_in;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
 use crate::stream_link::NoDial;
 #[cfg(any(feature = "session-slot", feature = "alloc"))]
@@ -487,8 +489,8 @@ impl<N: CountKind> Default for LinkPlace<N> {
 #[cfg(all(feature = "alloc", not(feature = "session-slot")))]
 impl<N: CountKind> LinkPlace<N> {
     /// The stream link over the connected `socket`, over the buffers `rx` and `tx`, as the stack
-    /// opens it: refused when the build's rows do not name both its ends, made in a cell when the
-    /// stack was lent some, and waited on by its owner when the stack says so.
+    /// opens it: refused when the build's rows do not name both its ends, written where it lies, in
+    /// a cell when the stack was lent some, and waited on by its owner when the stack says so.
     /// Out of line: a dial, a dial made later and a port's accept each open one, and one body for
     /// each stream serves them.
     #[inline(never)]
@@ -499,7 +501,7 @@ impl<N: CountKind> LinkPlace<N> {
         tx: TxBuffer<N::Flag>,
     ) -> Result<OpenedLink<HeapLink<N>, N>, LinkOpenError> {
         heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&socket))?.open(|place| {
-            let link = place.write(link_over(socket, rx, tx));
+            let link = link_over_in(place, socket, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
             }

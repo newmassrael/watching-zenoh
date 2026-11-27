@@ -43,7 +43,7 @@ use crate::session_drive::{
     SessionLinks, UnixpipeLocator, WaitOn,
 };
 use crate::stream_link::{
-    link_over, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
+    link_over_in, stream_ends_fit, StreamDriver, StreamEnds, StreamSocket, STREAM_RX_CAPACITY,
 };
 
 /// The mode a link's FIFOs are created with when its locator names none: owner only.
@@ -331,7 +331,7 @@ impl<N: CountKind> PipeShape<N> {
             self.tx_capacity,
         )?;
         heap_link::<_, N>(self.cells.as_ref(), stream_ends_fit(&pipe))?.open(|place| {
-            let link = place.write(link_over(pipe, rx, tx));
+            let link = link_over_in(place, pipe, rx, tx);
             if self.owner_waits {
                 link.wait_by_owner();
             }
