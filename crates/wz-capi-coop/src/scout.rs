@@ -29,6 +29,9 @@ use wz_session_core::scouting_host::{
 #[cfg(all(test, feature = "std", unix))]
 use wz_session_core::scouting_host::{ScoutingActions, SharedWindowState};
 
+// Only the tests hold what the heap gives (the buffer `run_window` reads into, and theirs through
+// `super::*`): a window run for a host reads into the caller's buffer and records in its table.
+#[cfg(all(test, feature = "std", unix))]
 use crate::prelude::*;
 
 pub use wz_session_core::scouting_host::{
