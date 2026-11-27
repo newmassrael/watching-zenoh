@@ -69,7 +69,7 @@ use wz_runtime_coop::session_drive::LinkWait;
 use wz_runtime_coop::sync::ConfinedOwner;
 use wz_runtime_coop::transport::{LinkPump, OpenedAs, PlacedWire, PumpPlace};
 use wz_session_core::driver_loop::DriverLoopOutcome;
-use wz_session_core::link_life::{LinkInput, LinkPhase, Refused};
+use wz_session_core::link_life::{carry, LinkInput, LinkIo, LinkPhase, Refused, SessionEnded};
 
 use super::registry::Planes;
 #[cfg(feature = "listen")]
@@ -1669,6 +1669,105 @@ struct LinkTurn {
     accepts: bool,
 }
 
+/// What the read holds of a face's link while it carries out its life's effects
+/// (`link_life::carry`): the engine, the face and its slot, and the session under its lock.
+struct DirectLinkIo<'a, L: CoopLinks + 'static, C: ClockSource + Clone + 'static> {
+    engine: &'a CoopEngine<L, C>,
+    face: &'a DirectFace<L, C>,
+    core: &'a mut Core<L, C>,
+    slot: &'a mut DirectSlot<L, C>,
+}
+
+impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> LinkIo for DirectLinkIo<'_, L, C> {
+    const TAKES_FACES: bool = cfg!(feature = "listen");
+
+    fn life(&mut self) -> Option<&mut UnicastLink> {
+        self.core
+            .transport
+            .links
+            .face_mut(self.slot.at())
+            .map(|record| &mut record.life)
+    }
+
+    fn now_us(&mut self) -> u64 {
+        self.core.now_us()
+    }
+
+    /// A dial the life gave up on before the network answered it is its endpoint's refusal for
+    /// want of an answer in time, as a build whose links are tasks names it.
+    fn give_up_dial(&mut self) {
+        if let Some(endpoint) = self.core.transport.links.end_dial(self.slot.at()) {
+            self.slot.keep_refusal(
+                self.core.transport.endpoint_text(Some(&endpoint)),
+                Refusal::NoAnswerInTime,
+            );
+        }
+    }
+
+    fn end_handshake(&mut self, row: usize) {
+        let at = self.slot.at();
+        let why = self.core.transport.end_handshake(at);
+        self.slot
+            .keep_refusal(self.core.transport.endpoints.dial_text(row), why);
+        // The record lets go of the link while the place still holds its parts, so what the
+        // link's session counted is read through the place as it goes.
+        self.core.transport.links.put_link(at, Link::Idle);
+        self.slot.drop_link(&self.face.site);
+    }
+
+    fn lose(&mut self, ends_session: bool) {
+        let at = self.slot.at();
+        // The lost peer's chains end with its link: the next link's fragments would be spliced
+        // onto them.
+        let peer = self
+            .core
+            .transport
+            .links
+            .face(at)
+            .and_then(|face| face.facts.as_ref())
+            .and_then(|facts| facts.peer);
+        if let Some(zid) = peer {
+            let _ended = self.slot.router.abort_peer(zid.as_slice());
+        }
+        if let Some(id) = self.slot.face_id(self.core) {
+            self.core.lose_face_link(at, id);
+        }
+        self.slot.drop_link(&self.face.site);
+        if ends_session {
+            self.slot.keep_refusal("", Refusal::LinkLost);
+        }
+    }
+
+    /// What the link says of its peer is read off the read's own handle on its actions, with
+    /// nothing of the face's send place lent.
+    fn bring_up(&mut self, now_us: u64) {
+        if let Some(facts) = self.slot.records.as_ref().map(FaceRecords::up_facts) {
+            self.core.bring_up_with(self.slot.at(), now_us, facts);
+        }
+        self.slot.brought_up = true;
+    }
+
+    /// A face taken beside the dial role's goes with its link: what its place held first, then
+    /// its record and its tables.
+    fn take_out(&mut self) {
+        #[cfg(feature = "listen")]
+        {
+            let at = self.slot.at();
+            self.engine.direct.hold_face(at, false);
+            self.slot.clear(&self.face.site);
+            self.core.remove_face(at);
+        }
+    }
+
+    fn begin_handshake(&mut self) -> LinkInput {
+        self.engine.begin_handshake(self.face, self.core, self.slot)
+    }
+
+    fn dial(&mut self, row: usize) -> LinkInput {
+        self.slot.dial_row(self.core, row)
+    }
+}
+
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// The bytes of the read slot and send place of one face past the dial role's, a row of which
     /// the open lays out for each (`crate::arena::ArenaPlan::lay_direct_faces`).
@@ -2804,10 +2903,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         took
     }
 
-    /// Tell the link's life `input` at `now_us` and carry out its effects, in the order the life
-    /// names them, until it asks for nothing more. `Err` with why the last endpoint came to no
-    /// link when the life ends the session. Out of line: the open's first input and each look at
-    /// the life carry the effects out through one body.
+    /// Tell the link's life `input` at `now_us` and carry out its effects (`link_life::carry`)
+    /// with what the read holds of the face's link (`DirectLinkIo`). `Err` with why the last
+    /// endpoint came to no link when the life ends the session. Out of line: the open's first
+    /// input and each look at the life carry the effects out through one body.
     #[inline(never)]
     fn drive_link(
         &self,
@@ -2817,88 +2916,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         input: LinkInput,
         now_us: u64,
     ) -> Result<(), OpenError> {
-        let (mut input, mut now_us) = (input, now_us);
-        loop {
-            let Some(record) = core.transport.links.face_mut(slot.at()) else {
-                return Ok(());
-            };
-            let effects = record.life.input(input, now_us);
-            // A close is told to the life by the slot alone, which lets go of what it holds
-            // itself (`DirectSlot::let_go`): no input told here asks for that.
-            debug_assert!(!effects.let_go(), "a close told to the life past the slot");
-            // A dial the life gave up on before the network answered it is its endpoint's refusal
-            // for want of an answer in time, as a build whose links are tasks names it.
-            if effects.gives_up_dial() {
-                if let Some(endpoint) = core.transport.links.end_dial(slot.at()) {
-                    slot.keep_refusal(
-                        core.transport.endpoint_text(Some(&endpoint)),
-                        Refusal::NoAnswerInTime,
-                    );
-                }
-            }
-            // Why the handshake ended is read off its link before the link goes, and names the
-            // endpoint the link was dialled to, which the life names with the end.
-            if let Some(row) = effects.end_handshake() {
-                let why = core.transport.end_handshake(slot.at());
-                slot.keep_refusal(core.transport.endpoints.dial_text(row), why);
-                // The record lets go of the link while the place still holds its parts, so what
-                // the link's session counted is read through the place as it goes.
-                core.transport.links.put_link(slot.at(), Link::Idle);
-                slot.drop_link(&face.site);
-            }
-            if effects.lose() {
-                // The lost peer's chains end with its link: the next link's fragments would be
-                // spliced onto them.
-                let peer = core
-                    .transport
-                    .links
-                    .face(slot.at())
-                    .and_then(|face| face.facts.as_ref())
-                    .and_then(|facts| facts.peer);
-                if let Some(zid) = peer {
-                    let _ended = slot.router.abort_peer(zid.as_slice());
-                }
-                if let Some(id) = slot.face_id(core) {
-                    core.lose_face_link(slot.at(), id);
-                }
-                slot.drop_link(&face.site);
-                if effects.ends_session() {
-                    slot.keep_refusal("", Refusal::LinkLost);
-                }
-            }
-            if effects.bring_up() {
-                // What the link says of its peer is read off the read's own handle on its actions,
-                // with nothing of the face's send place lent.
-                if let Some(facts) = slot.records.as_ref().map(FaceRecords::up_facts) {
-                    core.bring_up_with(slot.at(), now_us, facts);
-                }
-                slot.brought_up = true;
-            }
-            // The dial under way, if any, was taken above.
-            if effects.ends_session() {
-                return Err(slot.last.take().unwrap_or(OpenError::NoEndpoint));
-            }
-            // A face taken beside the dial role's goes with its link: what its place held first,
-            // then its record and its tables.
-            #[cfg(feature = "listen")]
-            if effects.removes() {
-                self.direct.hold_face(slot.at(), false);
-                slot.clear(&face.site);
-                core.remove_face(slot.at());
-                return Ok(());
-            }
-            input = if effects.begin_handshake() {
-                self.begin_handshake(face, core, slot)
-            } else if let Some(row) = effects.dial() {
-                slot.dial_row(core, row)
-            } else {
-                return Ok(());
-            };
-            // What the dial or the handshake came to is told at the time read after it: a host
-            // may take a while to refuse a dial, and a wait to dial again counted from before the
-            // dial would be over by then, so that each read would dial again at once.
-            now_us = core.now_us();
-        }
+        let Some(record) = core.transport.links.face_mut(slot.at()) else {
+            return Ok(());
+        };
+        // A close is told to the life by the slot alone, which lets go of what it holds itself
+        // (`DirectSlot::let_go`): no input told here asks for that.
+        let effects = record.life.input(input, now_us);
+        let mut io = DirectLinkIo {
+            engine: self,
+            face,
+            core,
+            slot,
+        };
+        carry(&mut io, effects, now_us)
+            .map_err(|SessionEnded| io.slot.last.take().unwrap_or(OpenError::NoEndpoint))
     }
 
     /// Hand the liveliness subscribers the declaration `record` of the face `records` reads, lent

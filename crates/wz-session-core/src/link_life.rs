@@ -33,7 +33,8 @@
 //! counted from the time of the input that ended them, once its link has been up and when it has
 //! a `redial_ms`; before that, or without one, it ends. An established link that ends is dialled
 //! again at once, from the first endpoint. The cooperative engine keeps one such link for each
-//! face it holds, and carries out its effects with the face's I/O.
+//! face it holds, and carries out its effects with the face's I/O through the one carrier
+//! [`carry`], over what the owner holds of the link ([`LinkIo`]).
 //!
 //! A face taken beside the dial role's ([`LinkRole::Taken`]) is dialled once at most and goes
 //! with its link: where the dial role's face would dial on, back off, stand by or end the
@@ -667,9 +668,108 @@ impl UnicastLink {
     }
 }
 
+/// The life asked for no link further: the session ends ([`Effects::ends_session`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionEnded;
+
+/// What the owner of a face's link holds of it: the I/O each of [`Effects`] is carried out
+/// with by [`carry`]. The owner implements it over its own rows (the face's record, its dial,
+/// its pump and its refusal); the order the effects are carried out in and the input each I/O
+/// comes to are [`carry`]'s, so an owner keeps no copy of either.
+pub trait LinkIo {
+    /// Whether the owner holds faces taken beside the dial role's, which go with their link
+    /// ([`Effects::removes`]): a constant, so an owner that holds none compiles no removal.
+    const TAKES_FACES: bool;
+
+    /// The life the effects are of, read again before each input as the owner's row of the face
+    /// is: `None` once the face is gone, which ends the carrying.
+    fn life(&mut self) -> Option<&mut UnicastLink>;
+
+    /// The time now, in microseconds: read after the I/O of each effect.
+    fn now_us(&mut self) -> u64;
+
+    /// Let go of the dial under way the life gave up at its deadline
+    /// ([`Effects::gives_up_dial`]).
+    fn give_up_dial(&mut self);
+
+    /// End the handshake of the link dialled to endpoint `row` ([`Effects::end_handshake`]).
+    fn end_handshake(&mut self, row: usize);
+
+    /// Lose the established link ([`Effects::lose`]); `ends_session` when no link follows it.
+    fn lose(&mut self, ends_session: bool);
+
+    /// Bring the link up, its handshake told completed at `now_us` ([`Effects::bring_up`]).
+    fn bring_up(&mut self, now_us: u64);
+
+    /// Take the face out, its link gone ([`Effects::removes`]). Asked only where
+    /// [`Self::TAKES_FACES`] holds.
+    fn take_out(&mut self);
+
+    /// Begin the handshake of the link the last dial made ([`Effects::begin_handshake`]):
+    /// [`LinkInput::HandshakeBegun`] or [`LinkInput::HandshakeRefused`].
+    fn begin_handshake(&mut self) -> LinkInput;
+
+    /// Dial the endpoint of `row` ([`Effects::dial`]): what the dial came to at once.
+    fn dial(&mut self, row: usize) -> LinkInput;
+}
+
+/// Carry out `effects`, what the life answered an input reported at `now_us`, with the owner's
+/// I/O, in the order [`Effects`] names, and tell the life what the dial or the handshake it asked
+/// for came to as its next input, at the time read after that I/O, until it asks for no more.
+/// [`SessionEnded`] once the life ends the session; carrying stops too where a taken face goes
+/// or the face is gone.
+///
+/// A close is not carried: whoever tells the life it closes lets go of what it holds itself.
+// Always inlined: each owner has one carrier of its own, out of line, which this is the body of.
+#[inline(always)]
+pub fn carry<I: LinkIo>(io: &mut I, effects: Effects, now_us: u64) -> Result<(), SessionEnded> {
+    let (mut effects, mut now_us) = (effects, now_us);
+    loop {
+        debug_assert!(!effects.let_go(), "a close told to the life is not carried");
+        if effects.gives_up_dial() {
+            io.give_up_dial();
+        }
+        // Why the handshake ended is read off its link before the link goes, and names the
+        // endpoint the life names with the end.
+        if let Some(row) = effects.end_handshake() {
+            io.end_handshake(row);
+        }
+        if effects.lose() {
+            io.lose(effects.ends_session());
+        }
+        if effects.bring_up() {
+            io.bring_up(now_us);
+        }
+        if effects.ends_session() {
+            return Err(SessionEnded);
+        }
+        if I::TAKES_FACES && effects.removes() {
+            io.take_out();
+            return Ok(());
+        }
+        let input = if effects.begin_handshake() {
+            io.begin_handshake()
+        } else if let Some(row) = effects.dial() {
+            io.dial(row)
+        } else {
+            // A wait to dial again is the life's: its wake (`UnicastLink::wake_at`) brings the
+            // owner's next look.
+            return Ok(());
+        };
+        // A host may take a while to refuse a dial, and a wait to dial again counted from before
+        // the dial would be over by then, so that each look would dial again at once.
+        now_us = io.now_us();
+        let Some(life) = io.life() else {
+            return Ok(());
+        };
+        effects = life.input(input, now_us);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec::Vec;
 
     /// The clock is the test's: every input carries the time it is reported at, in microseconds.
     const MS: u64 = 1000;
@@ -1210,5 +1310,227 @@ mod tests {
         let close = closing.input(LinkInput::Close, deadline);
         assert!(close.let_go());
         assert!(!close.gives_up_dial(), "a close lets go of the dial itself");
+    }
+
+    /// What a recording owner was asked, in the order it was asked.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Asked {
+        GiveUpDial,
+        EndHandshake(usize),
+        Lose(bool),
+        BringUp(u64),
+        TakeOut,
+        Begin,
+        Dial(usize),
+        Now(u64),
+    }
+
+    /// How far the recording owner's clock moves at each read, in microseconds.
+    const STEP_US: u64 = 10;
+
+    /// An owner whose I/O answers as the test says and records each ask: a dial of a row in
+    /// `refuses` is refused, of a row in `pends` under way, of any other made; a handshake
+    /// begins; the clock moves on `STEP_US` at each read; once `gone`, the face is gone.
+    /// `TAKES` is whether the owner holds taken faces.
+    struct Recording<'a, const TAKES: bool> {
+        life: &'a mut UnicastLink,
+        asked: Vec<Asked>,
+        refuses: &'a [usize],
+        pends: &'a [usize],
+        clock_us: u64,
+        gone: bool,
+    }
+
+    impl<'a, const TAKES: bool> Recording<'a, TAKES> {
+        fn over(life: &'a mut UnicastLink, clock_us: u64) -> Self {
+            Self {
+                life,
+                asked: Vec::new(),
+                refuses: &[],
+                pends: &[],
+                clock_us,
+                gone: false,
+            }
+        }
+
+        /// Tell the life `input` at the owner's clock and carry out what it answers.
+        fn give(&mut self, input: LinkInput) -> Result<(), SessionEnded> {
+            let now_us = self.clock_us;
+            let effects = self.life.input(input, now_us);
+            carry(self, effects, now_us)
+        }
+    }
+
+    impl<const TAKES: bool> LinkIo for Recording<'_, TAKES> {
+        const TAKES_FACES: bool = TAKES;
+
+        fn life(&mut self) -> Option<&mut UnicastLink> {
+            (!self.gone).then_some(&mut *self.life)
+        }
+
+        fn now_us(&mut self) -> u64 {
+            self.clock_us += STEP_US;
+            self.asked.push(Asked::Now(self.clock_us));
+            self.clock_us
+        }
+
+        fn give_up_dial(&mut self) {
+            self.asked.push(Asked::GiveUpDial);
+        }
+
+        fn end_handshake(&mut self, row: usize) {
+            self.asked.push(Asked::EndHandshake(row));
+        }
+
+        fn lose(&mut self, ends_session: bool) {
+            self.asked.push(Asked::Lose(ends_session));
+        }
+
+        fn bring_up(&mut self, now_us: u64) {
+            self.asked.push(Asked::BringUp(now_us));
+        }
+
+        fn take_out(&mut self) {
+            self.asked.push(Asked::TakeOut);
+        }
+
+        fn begin_handshake(&mut self) -> LinkInput {
+            self.asked.push(Asked::Begin);
+            LinkInput::HandshakeBegun
+        }
+
+        fn dial(&mut self, row: usize) -> LinkInput {
+            self.asked.push(Asked::Dial(row));
+            if self.refuses.contains(&row) {
+                LinkInput::DialRefused
+            } else if self.pends.contains(&row) {
+                LinkInput::DialPending
+            } else {
+                LinkInput::DialMade
+            }
+        }
+    }
+
+    /// The carrier feeds what each I/O came to back to the life as its next input, at the time
+    /// read after that I/O: a refused dial walks on to the next endpoint, a made one begins its
+    /// handshake, and the handshake's deadline is counted from the clock read after the dial
+    /// that made its link. Turned red by an input told at the time of the first input (`carry`'s
+    /// `now_us` not read again), or an answer not fed back.
+    #[test]
+    fn the_carrier_feeds_each_answer_back_at_the_time_read_after_its_io() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 2);
+        let mut io = Recording::<false>::over(link, 0);
+        io.refuses = &[0];
+        assert_eq!(io.give(LinkInput::Open), Ok(()));
+        assert_eq!(
+            io.asked,
+            [
+                Asked::Dial(0),
+                Asked::Now(10),
+                Asked::Dial(1),
+                Asked::Now(20),
+                Asked::Begin,
+                Asked::Now(30),
+            ]
+        );
+        assert_eq!(
+            io.life.phase(),
+            LinkPhase::Handshaking {
+                row: 1,
+                deadline_us: 20 + 1000 * MS,
+            }
+        );
+    }
+
+    /// A handshake over ends its task, named by the endpoint it ran over, before the next
+    /// endpoint is dialled; a dial under way is given up at its deadline before the next one;
+    /// the session's end stops the carrying with `SessionEnded`. Turned red by an end carried
+    /// after the dial, or an `Err` lost.
+    #[test]
+    fn the_carrier_ends_what_is_over_before_it_dials_and_stops_at_the_sessions_end() {
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 3);
+        let mut io = Recording::<false>::over(link, 0);
+        io.pends = &[1];
+        io.refuses = &[2];
+        assert_eq!(io.give(LinkInput::Open), Ok(()));
+        io.asked.clear();
+        io.clock_us = 40;
+        assert_eq!(io.give(LinkInput::Ended), Ok(()));
+        assert_eq!(
+            io.asked,
+            [Asked::EndHandshake(0), Asked::Dial(1), Asked::Now(50)]
+        );
+        io.asked.clear();
+        let deadline = 50 + 1000 * MS;
+        io.clock_us = deadline;
+        assert_eq!(io.give(LinkInput::Tick), Err(SessionEnded));
+        assert_eq!(
+            io.asked,
+            [Asked::GiveUpDial, Asked::Dial(2), Asked::Now(deadline + 10)]
+        );
+        assert_eq!(io.life.phase(), LinkPhase::Closed);
+    }
+
+    /// A completed handshake brings the link up at the time its input was told, and an
+    /// established link lost is lost before the first endpoint is dialled again, or is lost as
+    /// the session's end where the session dials none again. Turned red by a loss that does not
+    /// say whether the session ends, or a bring-up told the clock read after an I/O.
+    #[test]
+    fn the_carrier_brings_up_at_the_inputs_time_and_loses_before_it_dials_again() {
+        for redial_ms in [Some(5000), None] {
+            let mut slot = MaybeUninit::uninit();
+            let link = made(&mut slot, LinkTimes { redial_ms, ..TIMES }, 1);
+            let mut io = Recording::<false>::over(link, 0);
+            assert_eq!(io.give(LinkInput::Open), Ok(()));
+            io.asked.clear();
+            io.clock_us = 77;
+            assert_eq!(io.give(LinkInput::Established), Ok(()));
+            assert_eq!(io.asked, [Asked::BringUp(77)]);
+            io.asked.clear();
+            let lost = io.give(LinkInput::Ended);
+            if redial_ms.is_some() {
+                assert_eq!(lost, Ok(()));
+                assert_eq!(io.asked[0], Asked::Lose(false));
+                assert_eq!(io.asked[1], Asked::Dial(0));
+            } else {
+                assert_eq!(lost, Err(SessionEnded));
+                assert_eq!(io.asked, [Asked::Lose(true)]);
+            }
+        }
+    }
+
+    /// A taken face whose link goes is taken out by an owner that holds taken faces, and nothing
+    /// is dialled for it; the carrying stops once the face is gone from the owner's rows. Turned
+    /// red by a removal asked of an owner whose `TAKES_FACES` is false, or an input told to a
+    /// life the owner no longer holds.
+    #[test]
+    fn the_carrier_takes_a_gone_face_out_only_where_faces_are_taken_and_stops_at_a_gone_face() {
+        let mut slot = MaybeUninit::uninit();
+        let link = UnicastLink::init_in(&mut slot, TIMES, LinkRole::Taken, 1);
+        let mut io = Recording::<true>::over(link, 0);
+        assert_eq!(io.give(LinkInput::Taken), Ok(()));
+        assert_eq!(io.give(LinkInput::Ended), Ok(()));
+        assert_eq!(io.asked, [Asked::EndHandshake(0), Asked::TakeOut]);
+
+        let mut slot = MaybeUninit::uninit();
+        let link = UnicastLink::init_in(&mut slot, TIMES, LinkRole::Taken, 1);
+        let mut io = Recording::<false>::over(link, 0);
+        assert_eq!(io.give(LinkInput::Taken), Ok(()));
+        assert_eq!(io.give(LinkInput::Ended), Ok(()));
+        assert_eq!(io.asked, [Asked::EndHandshake(0)]);
+
+        let mut slot = MaybeUninit::uninit();
+        let link = made(&mut slot, TIMES, 1);
+        let mut io = Recording::<false>::over(link, 0);
+        io.gone = true;
+        assert_eq!(io.give(LinkInput::Open), Ok(()));
+        assert_eq!(io.asked, [Asked::Dial(0), Asked::Now(10)]);
+        assert_eq!(
+            io.life.phase(),
+            LinkPhase::Dialing { row: 0 },
+            "the made dial was told to no life"
+        );
     }
 }
