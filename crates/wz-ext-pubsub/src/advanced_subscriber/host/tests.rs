@@ -1115,12 +1115,9 @@ fn shared_on_key(
     base: &str,
 ) -> Strong<super::Shared<Arc<dyn SessionEngine>>> {
     let d = Arc::clone(delivered);
-    let state = State::new(
-        Box::new(move |s: Delivery<'_>| d.lock().unwrap().push(s.view().payload()[0])),
-        MissHandlers::default(),
-    )
-    .with_retransmission(true)
-    .with_history(1, usize::MAX);
+    let on_sample = OnSample::boxed(Box::new(move |s: Delivery<'_>| {
+        d.lock().unwrap().push(s.view().payload()[0])
+    }));
     let handle = Arc::downgrade(&engine(script));
     let base_keyexpr = super::fixed_key(base).expect("a key a session stores");
     let make = |place: core::ptr::NonNull<super::Shared<Arc<dyn SessionEngine>>>| {
@@ -1129,7 +1126,18 @@ fn shared_on_key(
             super::Shared::write_in(
                 place,
                 handle,
-                state,
+                // Written in its lock as the host writes it: retransmitting, the startup get in
+                // flight, no bound on the samples held back for it.
+                |cell| {
+                    State::write_in(
+                        cell,
+                        on_sample,
+                        MissHandlers::default(),
+                        true,
+                        1,
+                        usize::MAX,
+                    )
+                },
                 base_keyexpr,
                 Locality::SessionLocal,
                 1_000,
