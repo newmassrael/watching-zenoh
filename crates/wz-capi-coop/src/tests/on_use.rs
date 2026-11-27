@@ -369,7 +369,8 @@ fn an_on_use_sessions_link_parts_lie_on_the_heap() {
 /// declaration watchers, the gets' tables, the held Finals or the round's tables, each counted from
 /// the plan and taking its memory at its first row, nor the links' buffers and places, which each
 /// link takes of the heap as it opens, nor the endpoints' texts, which each role's table takes as
-/// its first is written; the CONTROL row, the reassembly buffers, is laid out.
+/// its first is written, nor the reassembly buffers, which each chain takes as it starts; the
+/// CONTROL is the plan's count of the chains, which their Routers are sized by.
 /// Turned red by a row of those tables put where the build lays its plans out at the open
 /// (`feature = "runtime-plan"`) rather than where the policy lends them (`wz_lent`), as
 /// `ArenaPlan::put_entities` was put, in a build of both features.
@@ -383,8 +384,8 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
     let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
     let laid = |part: &str| plan.rows().any(|row| row.part() == part);
     assert!(
-        laid("reassembly buffers"),
-        "CONTROL: the transport's chains are laid out"
+        plan.reassembly().1 > 0,
+        "CONTROL: the plan counts the transport's chains"
     );
     assert!(
         !laid("endpoint texts"),
@@ -396,6 +397,8 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
         "link transmit flags",
         "link transmit slots",
         "link places",
+        "reassembly flags",
+        "reassembly buffers",
     ] {
         assert!(!laid(part), "{part} lies on the heap, each link's own");
     }
@@ -424,6 +427,42 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
     ] {
         assert!(!laid(part), "{part} is counted, not laid out");
     }
+}
+
+/// A session whose tables take their memory on use hands each of its reassembly Routers the length
+/// of a chain's own buffer, the session's bound on a rejoined message, and the most chains one
+/// holds open at once, its share of the chains up to those a Router stages at once
+/// (`LENT_CHAINS`), and is lent no table for them: the transport's tables are lent with every row
+/// the plan laid out and no other. Turned red by a transport lent a table of chains on use
+/// (`TransportRows::lent_from`), or sized to another length or count than the plan's.
+#[test]
+fn an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table() {
+    use crate::arena::{AllocatorMemory, ArenaPlan, SessionArena};
+    use wz_runtime_coop::reassembly_rx::{HeapChains, LENT_CHAINS};
+
+    let config = crate::CoopConfig {
+        endpoints: vec!["tcp/127.0.0.1:7447".to_owned()],
+        ..super::client_config()
+    };
+    let plan = ArenaPlan::of(&config, &config.limits).expect("the client's limits lay a plan out");
+    let (bytes, chains) = plan.reassembly();
+    assert!(chains > 0, "CONTROL: the plan counts the chains");
+    // The plan's count is a share for each face read where it lies, each with a Router of its own.
+    let faces = if cfg!(wz_round) || !cfg!(feature = "listen") {
+        1
+    } else {
+        plan.peers().sets()
+    };
+    let share = chains / faces;
+    let mut session =
+        SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
+    let mut lend = session.lender();
+    let transport = plan.transport().lent_from(&mut lend);
+    lend.finish().expect("the plan lays the transport out");
+    assert_eq!(
+        transport.reassembly,
+        HeapChains::sized(bytes, share.min(LENT_CHAINS))
+    );
 }
 
 /// A session whose tables take their memory on use lends its links the heap as where their

@@ -1802,6 +1802,7 @@ fn a_session_that_sends_each_face_its_own_leg_reserves_no_handed_places() {
 /// The faces whose reads stage their chains apart, a share of the reassembly table each: each set
 /// of face tables of a session that listens and reads each face where it lies, and one otherwise
 /// (`crate::arena::ArenaPlan::lay_out`).
+#[cfg(not(wz_on_use))]
 fn chain_shares(plan: &ArenaPlan) -> usize {
     if cfg!(wz_round) || !cfg!(feature = "listen") {
         1
@@ -1816,7 +1817,9 @@ fn chain_shares(plan: &ArenaPlan) -> usize {
 /// count and the length a session lowers them to, no buffer for a session that states none, and a
 /// value over the build's refuses the plan under its own name. A report reads the same count
 /// (`link_buffers`). Turned red by a table laid out at the build's count whatever the session
-/// states, or one that grows with the links.
+/// states, or one that grows with the links. A session whose tables take their memory on use is
+/// lent no table, each chain taking a buffer of its own (`tests::on_use`).
+#[cfg(not(wz_on_use))]
 #[test]
 fn the_session_is_lent_one_table_of_reassembly_buffers_of_the_snapshots_count_and_length() {
     let config = CoopConfig {
@@ -4119,10 +4122,15 @@ fn each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own() {
         );
     }
     let read = if cfg!(feature = "listen") { sets } else { 1 };
+    assert_eq!(plan.reassembly().1, caps::REASSEMBLY_CHAINS * read);
+    // On use each chain takes a buffer of its own, so no table of them is laid out.
+    #[cfg(not(wz_on_use))]
     assert_eq!(
         row(&plan, "reassembly buffers").count,
         caps::REASSEMBLY_CHAINS * read
     );
+    #[cfg(wz_on_use)]
+    assert!(plan.rows().all(|laid| laid.part() != "reassembly buffers"));
     let direct = plan.rows().find(|row| row.part() == "direct faces");
     #[cfg(not(wz_on_use))]
     if read > 1 {

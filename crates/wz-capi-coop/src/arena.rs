@@ -70,7 +70,10 @@
 //!   given back when the chain ends or the round lets its message go, each as long as the largest message the session
 //!   rejoins (`PICO_FRAG_MAX_BYTES`, under the build's, which a chain past it is ended at, as pico
 //!   ends one), with the flags that say which are lent (`TransportRows::lent_from`), lent
-//!   with the links' tables;
+//!   with the links' tables. Where the tables take their memory on use none is laid out: each
+//!   chain takes a buffer of its own of that length at its first fragment, a face's chains open
+//!   at once held to the same share, and a buffer the allocator refuses is refused and counted as
+//!   one the table had none free for (`OwnStaging` of `wz_session_core::chain_staging`);
 //! - with `listen` or `group`, the places of the droppable publishes the session keeps for the
 //!   faces they were not dropped on while a send holds it (`HANDED_LEG_BYTES`, under the build's),
 //!   each a link's batch long, with their flags and a row beside each for the rest of the
@@ -140,6 +143,10 @@ use wz_runtime_coop::link_cells::CountKind;
 use wz_runtime_coop::link_storage::HeapBuffers;
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::link_storage::LinkTables;
+#[cfg(wz_on_use)]
+use wz_runtime_coop::reassembly_rx::HeapChains;
+#[cfg(not(wz_on_use))]
+use wz_runtime_coop::reassembly_rx::LentChainTable;
 use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(all(feature = "udp-listen", wz_on_use))]
 use wz_runtime_coop::udp_link::HeapPorts;
@@ -177,6 +184,7 @@ use wz_session_core::slot_observer::Requesters;
 #[cfg(wz_lent)]
 use wz_session_core::slot_observer::SlotObserverOf;
 
+use crate::engine::ChainSource;
 #[cfg(all(feature = "query", wz_lent))]
 use crate::engine::LegHold;
 #[cfg(all(feature = "query", wz_lent))]
@@ -529,8 +537,9 @@ const LANE_ROWS: usize = 0;
 /// The places the session lends its Router and, where its links run as tasks, its registry in for
 /// a step, where the open places them in the arena (`runtime-plan`); a region holds them otherwise.
 const STEP_LEND_ROWS: usize = cfg!(wz_lent) as usize * (1 + cfg!(wz_round) as usize);
-/// The reassembly buffers' flags and the buffers.
-const REASSEMBLY_ROWS: usize = 2;
+/// The reassembly buffers' flags and the buffers: none where the tables take their memory on use,
+/// whose chains each take a buffer of their own at their first fragment.
+const REASSEMBLY_ROWS: usize = 2 * !cfg!(wz_on_use) as usize;
 /// The read slots and send places of the faces past the dial role's, where each face is read where
 /// it lies (`crate::engine::direct`): a build whose links run as tasks (`wz_round`) has none, nor
 /// does one that listens on no port (`listen`), the one role that reads a face past the dial
@@ -1434,10 +1443,10 @@ pub(crate) struct TransportTables {
     /// where the tables take their memory on use, whose links' parts are made on the heap.
     #[cfg(not(wz_on_use))]
     pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
-    /// The reassembly buffers the links share.
-    pub(crate) reassembly: LentByteCells,
-    /// The most chains one face's Router holds open at once in `reassembly`.
-    pub(crate) face_chains: usize,
+    /// What each of the session's reassembly Routers stages its chains as, with the most chains
+    /// one holds open at once: the table of buffers the links share, lent; where the tables take
+    /// their memory on use, the length of a chain's own buffer, taken at its first fragment.
+    pub(crate) reassembly: ChainSource,
     /// The rows of the endpoints' texts, none written: lent, or, where the tables take their
     /// memory on use, counted to the endpoints the config names and taken at the first written.
     pub(crate) endpoints: EndpointTexts<crate::StatePolicy>,
@@ -1496,8 +1505,14 @@ impl TransportRows {
             cells: self.cells_from(lend),
             // A chain's buffer is claimed when its first fragment arrives and given back when it
             // ends; the session holds the table for its life.
-            reassembly: lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
-            face_chains: self.face_chains,
+            #[cfg(not(wz_on_use))]
+            reassembly: LentChainTable::over(
+                lend.byte_cells(self.reassembly_bytes, self.reassembly_chains),
+                self.face_chains,
+            ),
+            // Laid out in no row: each chain takes a buffer of its own at its first fragment.
+            #[cfg(wz_on_use)]
+            reassembly: HeapChains::sized(self.reassembly_bytes, self.face_chains),
             #[cfg(not(wz_on_use))]
             endpoints: EndpointTexts::over(lend.table(dials), lend.table(listens)),
             // Laid out in no row: each role's texts take their rows as the first is written.
@@ -2217,6 +2232,9 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         #[cfg(wz_lent)]
         self.put(ArenaPart::RouterLend, 1, ROUTER_LEND_BYTES);
         // The session's reassembly buffers, which its links share (`TransportRows::lent_from`).
+        // Where the tables take their memory on use each chain takes its own, and none is laid
+        // out.
+        #[cfg(not(wz_on_use))]
         self.put_table(
             [ArenaPart::ReassemblyFlags, ArenaPart::ReassemblyBuffers],
             self.transport.reassembly_chains,

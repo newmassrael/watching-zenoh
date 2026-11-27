@@ -143,7 +143,7 @@ use wz_runtime_coop::faces::{
     LinkSupervisor, WaitRoom, DIAL_LOOK_MS,
 };
 use wz_runtime_coop::link_cells::CellRc;
-use wz_runtime_coop::reassembly_rx::{session_reassembly, SessionChains};
+use wz_runtime_coop::reassembly_rx::{session_reassembly, ChainStore};
 #[cfg(wz_round)]
 use wz_runtime_coop::session_drive::router_session_task_bytes;
 #[cfg(feature = "time-base")]
@@ -161,11 +161,7 @@ use wz_runtime_coop::transport::{
 #[cfg(not(wz_on_use))]
 use wz_runtime_coop::RuntimePlace;
 use wz_runtime_coop::{ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimeRows};
-#[cfg(any(
-    all(test, feature = "std"),
-    feature = "advanced-cache",
-    all(not(wz_round), feature = "listen")
-))]
+#[cfg(any(all(test, feature = "std"), feature = "advanced-cache"))]
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::close_reason::CloseReason;
 use wz_session_core::declare_form::{InterestAsk, InterestForm, RetractionKey};
@@ -1136,10 +1132,7 @@ fn lend_session(
     let ClaimedPlaces {
         handle: handle_place,
     } = claimed;
-    let router: SessionReassembly = session_reassembly(
-        policy,
-        SessionChains::over(&transport.reassembly, transport.face_chains),
-    );
+    let router = chain_router(policy, &transport.reassembly);
     #[cfg(all(wz_round, wz_lent))]
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
@@ -2900,8 +2893,23 @@ type RouterPeers = OnePeer;
 #[cfg(not(wz_round))]
 const _: () = assert!(!<RouterPeers as ChainPeers>::KEYED);
 
-/// A reassembly Router of the session, holding the chains of the peers `RouterPeers` says.
-pub(crate) type SessionReassembly = wz_runtime_coop::reassembly_rx::SessionReassembly<RouterPeers>;
+/// A reassembly Router of the session, holding the chains of the peers `RouterPeers` says, staged
+/// as the storage of the session's tables stages them (`ChainStore`).
+pub(crate) type SessionReassembly = wz_runtime_coop::reassembly_rx::SessionReassembly<
+    RouterPeers,
+    <crate::StatePolicy as ChainStore>::Chains,
+>;
+
+/// What the session holds for its life to make each of its reassembly Routers' staging of: the
+/// table of chain buffers its open lent, or, where its tables take their memory on use, the
+/// length of the buffer each chain takes of the allocator at its first fragment. Either names the
+/// most chains one Router holds open at once.
+pub(crate) type ChainSource = <crate::StatePolicy as ChainStore>::Source;
+
+/// A reassembly Router of the session under `policy`, its chains staged as `chains` says.
+fn chain_router(policy: &SessionPolicy, chains: &ChainSource) -> SessionReassembly {
+    session_reassembly(policy, <crate::StatePolicy as ChainStore>::chains(chains))
+}
 
 /// The handle on the place the session lends its reassembly Router in to its links' receives for
 /// the length of each pass of its tasks: a cell in the session's arena (`StepPlaces`).
@@ -3176,12 +3184,12 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// the admission where it lies.
     #[cfg(all(feature = "link-admission", wz_on_use))]
     _admission: OwnPlaced<Admission<C>>,
-    /// The chain buffers the faces past the dial role's stage into, and the most chains each
-    /// face's Router holds open at once: where the tables take their memory on use, a face's read
-    /// slot is made at its place's first face (`direct::DirectFaces::made_at`), its Router over
-    /// these, as the open made every face's Router over them in a build that lends the slots.
+    /// What the Routers of the faces past the dial role's stage their chains as: where the tables
+    /// take their memory on use, a face's read slot is made at its place's first face
+    /// (`direct::DirectFaces::made_at`), its Router over this, as the open made every face's
+    /// Router over the chains in a build that lends the slots.
     #[cfg(all(wz_on_use, feature = "listen", not(wz_round)))]
-    face_chains: (LentByteCells, usize),
+    face_chains: ChainSource,
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds its registry too (`crate::region`), or the session's own state where
     /// its tables take their memory on use. After the session's state, whose handle of the registry
@@ -7204,7 +7212,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             lent.taken_faces,
             &policy,
             &lent.transport.reassembly,
-            lent.transport.face_chains,
         )
         .map_err(lend_refused)?;
         // Where the tables take their memory on use, a row for each of those faces and none made:
@@ -7460,7 +7467,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             #[cfg(feature = "link-admission")]
             _admission: admission,
             #[cfg(all(wz_on_use, feature = "listen", not(wz_round)))]
-            face_chains: (lent.transport.reassembly, lent.transport.face_chains),
+            face_chains: lent.transport.reassembly,
             #[cfg(not(wz_lent))]
             _state: lent.state,
             arena: lent.arena,
