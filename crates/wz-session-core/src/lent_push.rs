@@ -603,8 +603,14 @@ std::thread_local! {
 }
 
 /// How many times [`write_plain_put`] ran on this thread, for a test of a send outside this
-/// module.
-#[cfg(all(test, feature = "storage-profile", feature = "alloc"))]
+/// module: `session_actions`'s lent frame refusal tests, so it is compiled where they are.
+#[cfg(all(
+    test,
+    feature = "storage-profile",
+    feature = "alloc",
+    feature = "tx-lend-only",
+    feature = "codec-push"
+))]
 pub(crate) fn plain_writer_runs() -> usize {
     WRITER_RUNS.with(core::cell::Cell::get)
 }

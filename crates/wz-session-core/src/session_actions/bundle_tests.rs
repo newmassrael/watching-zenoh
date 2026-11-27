@@ -1238,6 +1238,7 @@ mod lent_frame_refusal {
     /// is still the key's own, written from its parts. Turned red by a head written for a key it
     /// does not name, by a head whose bytes differ from the writer's, or by a head the send is
     /// handed and does not write.
+    #[cfg(feature = "storage-profile")]
     #[test]
     fn a_put_written_from_its_head_is_the_frame_its_parts_make() {
         let send = super::super::SendAs {
