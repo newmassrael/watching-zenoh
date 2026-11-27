@@ -1366,7 +1366,28 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   runs `tests::arena::` there (`listen,tables-on-use`). The rest of that form (`StatePolicy` of
   `OnUse` under `wz_round`) is compiled there for the first time too.
 
+### 7.26 The reds of hn15
+
+- The pico peer's arena test on use
+  (`tests::arena::the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum`,
+  `udp-listen,tables-on-use` and `listen,tables-on-use`): fixed by `749284f74f` (7.25).
+- `e480c04fd2`: `arena::tests::each_kinds_places_take_its_own_rows_and_part` (`tables-on-use`)
+  gave rows to every kind of entity, though a plan holds places for the build's kinds alone
+  (`ENTITY_PLACE_ROWS`): it fit on the slack of rows the on-use plan no longer counts
+  (`6015e9551a`), and `put` refused the rest (`TooLarge`). It gives rows to the kinds the
+  build's limits count (`entity_rows`), and asserts a kind of no row is laid out nothing.
+- `52368494dd`: `ArenaPlan::links` is a listening build's (`feature = "listen"`), and
+  `1d7bac1532`'s `link_places` called it in a build that only dials (the crate's defaults and
+  `group-host`, E0599). A build that only dials counts its links by its transmit rows
+  (`laid_link_places`), as before; a listening build reads the count, and in D12 asserts the row.
+
 ## 8. What the main session runs
+
+- The reds of hn15 (`e480c04fd2`, `52368494dd`; `749284f74f` for the pico peer's test), not built
+  or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
+  tables-on-use --lib` (the one failure green, count unchanged), `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop` (compiles), and `cargo clippy --manifest-path crates/Cargo.toml
+  -p wz-capi-coop --features group-host --all-targets -- -D warnings`. Size: none (tests).
 
 - R3, 3c (c), the kept publishes and the on-use arena tests (`1d5b2e25d0`, `a405ec1189`,
   `749284f74f`, `4ea1507eb9`), not built or run by this lane. `cargo test --manifest-path
