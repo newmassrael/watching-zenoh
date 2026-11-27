@@ -78,9 +78,7 @@ use wz_session_core::bounded::{BoundedVec, Lent};
 // The faces past the dial role's of a session whose tables take their memory on use, each made at
 // its place's first face.
 #[cfg(all(feature = "listen", wz_on_use))]
-mod once_rows;
-#[cfg(all(feature = "listen", wz_on_use))]
-use once_rows::OnceRows;
+use super::once_rows::OnceRows;
 use wz_session_core::response_sink::{DeclareReplySink, LivelinessGetPrune, ResponseSink};
 
 /// The pump of the session's one link, which the read steps itself.

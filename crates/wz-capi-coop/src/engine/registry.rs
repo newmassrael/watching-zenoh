@@ -317,17 +317,12 @@ mod counted;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) mod placed;
 
-/// The most sets of face tables a session holds where the open lends none of them from its arena:
-/// the dial role's face's alone where the build takes no face beside it, as every build of the
-/// region's form does, and one for each face it may hold at once where the tables take their
-/// memory on use and the build takes faces (`listen`, `group`). What the state keeps a place of
-/// each face's room for (`StatePlaces`).
-#[cfg(not(wz_lent))]
-pub(in crate::engine) const FACE_SETS: usize = if cfg!(any(feature = "listen", feature = "group")) {
-    MAX_FACE_SETS
-} else {
-    1
-};
+/// The sets of face tables a session whose shape the build fixes holds: the dial role's face's
+/// alone, a build of that form taking no face beside it (`listen` and `group` each name
+/// `runtime-plan`). What its region keeps the sets and a place of each face's room for
+/// (`RegistryRegion`, `StatePlaces`).
+#[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
+pub(in crate::engine) const FACE_SETS: usize = 1;
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
 /// place: never a free set, whose row names no face.

@@ -276,6 +276,11 @@ use ledger::{Due, Ledger, Seen};
 // (`build.rs`): the read steps each face's link session itself (`direct`).
 #[cfg(not(wz_round))]
 mod direct;
+// Rows counted at the open whose values are each made at the row's first use and kept for the
+// session, where the tables take their memory on use: the places of the faces' rooms and, where
+// the session listens, the read slots of the faces past the dial role's.
+#[cfg(wz_on_use)]
+mod once_rows;
 // The delivery of a lent Push such a read makes, one subscriber at a time (`pinned`).
 #[cfg(not(wz_round))]
 mod pinned;
@@ -1114,8 +1119,12 @@ fn lend_session(
     } = tables;
     // SAFETY: as above, for the rooms' places: the table is held by the rooms, which the session's
     // state drops before the block.
-    #[cfg(not(wz_lent))]
+    #[cfg(not(any(wz_lent, wz_on_use)))]
     let room_places = unsafe { StatePlaces::rooms(region_places, plan.peers().sets()) };
+    // Where the tables take their memory on use, a row for each set the plan counts, each face's
+    // place made at its first hold of a wait (`LinkRooms::hold`).
+    #[cfg(wz_on_use)]
+    let room_places = RoomPlaces::counted(plan.peers().sets())?;
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
     let cache = cache
@@ -1894,14 +1903,96 @@ struct RoomTable {
     mark: u64,
 }
 
+impl RoomTable {
+    /// The table over `places`, every place free: each one written now where the open laid the
+    /// places out, none until its face's first hold where each is made on use.
+    #[cfg(not(wz_on_use))]
+    fn over(mut places: RoomPlaces) -> Self {
+        while places.push(None).is_ok() {}
+        Self { places, mark: 0 }
+    }
+
+    /// See the form whose places the open laid out.
+    #[cfg(wz_on_use)]
+    fn over(places: RoomPlaces) -> Self {
+        Self { places, mark: 0 }
+    }
+
+    /// The place `at`, for a face that holds a wait there: made at the place's first such face
+    /// where the places are made on use, and kept for every face of the place after. `None` past
+    /// the table, or where the allocator has no room for the place: the face then names no wait,
+    /// as a face whose link gives none, and the table answers for it as for one.
+    fn taken(&mut self, at: usize) -> Option<&mut Option<RoomPlace>> {
+        #[cfg(not(wz_on_use))]
+        {
+            self.places.get_mut(at)
+        }
+        #[cfg(wz_on_use)]
+        {
+            self.places.made_mut(at, || None)
+        }
+    }
+
+    /// The place `at` as its face's going frees it: `None` past the table and, where the places
+    /// are made on use, at a place no face made, which holds nothing to free.
+    fn held(&mut self, at: usize) -> Option<&mut Option<RoomPlace>> {
+        #[cfg(not(wz_on_use))]
+        {
+            self.places.get_mut(at)
+        }
+        #[cfg(wz_on_use)]
+        {
+            self.places.row_mut(at).flatten()
+        }
+    }
+
+    /// The place `at` as it stands: `None` past the table, and a free place, or one no face made
+    /// yet, as `Some(None)`.
+    #[cfg(any(
+        feature = "tx-held-wait",
+        all(wz_round, any(feature = "listen", feature = "group"))
+    ))]
+    fn place(&mut self, at: usize) -> Option<Option<RoomPlace>> {
+        #[cfg(not(wz_on_use))]
+        {
+            self.places.get(at).copied()
+        }
+        #[cfg(wz_on_use)]
+        {
+            self.places
+                .row_mut(at)
+                .map(|place| place.copied().flatten())
+        }
+    }
+
+    /// Free every place, a place made on use kept for its next face.
+    fn free_all(&mut self) {
+        #[cfg(not(wz_on_use))]
+        self.places.fill(None);
+        #[cfg(wz_on_use)]
+        for place in self.places.iter_mut() {
+            *place = None;
+        }
+    }
+}
+
 /// The places of the table of rooms, one for each set of face tables the open lent
 /// (`crate::arena::ArenaPart::RoomPlaces`), lent from the session's arena or laid in its region
 /// (`StatePlaces::rooms`), so of the lent policy whichever policy the registry's rows are of.
+#[cfg(not(wz_on_use))]
 pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
     Option<RoomPlace>,
     { crate::arena::MAX_FACE_SETS },
     wz_session_core::bounded::Lent,
 >;
+
+/// The places of the table of rooms where the tables take their memory on use: a row for each set
+/// of face tables the plan counts, taken at the open, and each face's place made at its first
+/// hold of a wait (`LinkRooms::hold`) in an allocation of its own, kept for the session's life
+/// and the next face of its place, as the place's set of tables is. A session holds as many
+/// places as faces it ever held at once, not the build's bound of them.
+#[cfg(wz_on_use)]
+pub(crate) type RoomPlaces = once_rows::OnceRows<Option<RoomPlace>>;
 
 /// The bytes of one place of the table of rooms, as the plan lays the places out where the arena
 /// lends them.
@@ -2016,8 +2107,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// # Safety
     /// `at` is valid for writes of a `Self` and aligned for it, and what it held is overwritten
     /// without being dropped. The rooms are not moved from `at` until they are dropped there.
-    pub(crate) unsafe fn init_at(at: NonNull<Self>, waits: W, mut places: RoomPlaces) {
-        while places.push(None).is_ok() {}
+    pub(crate) unsafe fn init_at(at: NonNull<Self>, waits: W, places: RoomPlaces) {
         let at = at.as_ptr();
         // SAFETY: `at` is valid for writes of a `Self` that stays there (the caller's contract),
         // so each field is too, and each is written once.
@@ -2025,7 +2115,7 @@ impl<W: LinkWaits> LinkRooms<W> {
             core::ptr::addr_of_mut!((*at).waits).write(waits);
             os::mutex_in(
                 NonNull::new_unchecked(core::ptr::addr_of_mut!((*at).rooms)),
-                |rooms| rooms.write(RoomTable { places, mark: 0 }),
+                |rooms| rooms.write(RoomTable::over(places)),
             );
         }
     }
@@ -2035,6 +2125,14 @@ impl<W: LinkWaits> LinkRooms<W> {
         &self.waits
     }
 
+    /// How many places of the table are made, each at its face's first hold of a wait where the
+    /// tables take their memory on use, and how many rows the table counts.
+    #[cfg(all(test, feature = "std", wz_on_use))]
+    pub(crate) fn places_made(&self) -> (usize, usize) {
+        let rooms = lock(&self.rooms);
+        (rooms.places.iter().count(), rooms.places.rows().len())
+    }
+
     /// Hold `on`, what a wait for room on the face at place `at` waits on, in place of what the
     /// face named before (a group joined again keeps the mark it took the place at), or as the
     /// face that takes the place now.
@@ -2042,7 +2140,7 @@ impl<W: LinkWaits> LinkRooms<W> {
         let mut guard = lock(&self.rooms);
         let rooms = &mut *guard;
         let mark = rooms.mark.wrapping_add(1);
-        let Some(place) = rooms.places.get_mut(at) else {
+        let Some(place) = rooms.taken(at) else {
             return;
         };
         #[cfg(not(feature = "tx-held-wait"))]
@@ -2054,35 +2152,35 @@ impl<W: LinkWaits> LinkRooms<W> {
             }
             return;
         }
-        rooms.mark = mark;
         *place = Some(RoomPlace {
             #[cfg(feature = "tx-held-wait")]
             on,
             #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
             since: mark,
         });
+        rooms.mark = mark;
     }
 
     /// Let go of what the face at place `at` named: its link is lost, or the face has gone. Its
     /// place is free.
     pub(crate) fn forget(&self, at: usize) {
-        if let Some(place) = lock(&self.rooms).places.get_mut(at) {
+        if let Some(place) = lock(&self.rooms).held(at) {
             *place = None;
         }
     }
 
     /// Let go of what every face named: the faces' links are ended.
     pub(crate) fn forget_all(&self) {
-        lock(&self.rooms).places.fill(None);
+        lock(&self.rooms).free_all();
     }
 
     /// The set of place `at` alone, as the table stands now: every face when no face holds the
     /// place, since a publish dropped on a face no place names is dropped on all.
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) fn dropped_on(&self, at: usize) -> DroppedOn {
-        let rooms = lock(&self.rooms);
+        let mut rooms = lock(&self.rooms);
         let mut set = DroppedOn::none(rooms.mark);
-        if rooms.places.get(at).is_some_and(Option::is_some) {
+        if matches!(rooms.place(at), Some(Some(_))) {
             set.insert(at);
         } else {
             set.insert(usize::MAX);
@@ -2099,9 +2197,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     #[cfg(all(wz_round, any(feature = "listen", feature = "group")))]
     pub(crate) fn skips(&self, set: &DroppedOn, at: usize) -> bool {
         lock(&self.rooms)
-            .places
-            .get(at)
-            .copied()
+            .place(at)
             .flatten()
             .is_some_and(|place| !set.owes(at, place.since))
     }
@@ -2175,7 +2271,7 @@ impl<W: LinkWaits> LinkRooms<W> {
     /// what it names: `None` past the table, and a free place as `Some(None)`.
     #[cfg(feature = "tx-held-wait")]
     fn room_at(&self, at: usize) -> Option<Option<RoomPlace>> {
-        lock(&self.rooms).places.get(at).copied()
+        lock(&self.rooms).place(at)
     }
 
     /// The table's mark now.
@@ -7599,6 +7695,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(test, feature = "std", wz_on_use))]
     pub(crate) fn rooms_place(&self) -> *const u8 {
         core::ptr::from_ref::<LinkRooms<L::Waits>>(&self.rooms).cast::<u8>()
+    }
+
+    /// How many places of the faces' rooms are made, and how many rows their table counts
+    /// ([`LinkRooms::places_made`]).
+    #[cfg(all(test, feature = "std", wz_on_use))]
+    pub(crate) fn room_places_made(&self) -> (usize, usize) {
+        self.rooms.places_made()
     }
 
     /// Whether `at` is a byte of the session's arena.

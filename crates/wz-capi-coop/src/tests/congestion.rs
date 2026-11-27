@@ -15,8 +15,12 @@ use std::sync::{Arc, Mutex};
 
 use wz_runtime_coop::session_drive::{LinkWait, LinkWaits, WaitOn};
 
+#[cfg(not(wz_on_use))]
 use crate::arena::{AllocatorMemory, SessionArena};
-use crate::engine::{Holder, LinkRooms, Room, RoomPlace, RoomPlaces};
+#[cfg(not(wz_on_use))]
+use crate::engine::RoomPlace;
+use crate::engine::{Holder, LinkRooms, Room, RoomPlaces};
+#[cfg(not(wz_on_use))]
 use wz_session_core::bounded::Arena;
 
 /// One face's handle in a test stack: the room it answers, as the test set it, and how long each
@@ -72,19 +76,31 @@ impl LinkWaits for Answers {
     }
 }
 
-/// The rooms of a session over a stack whose waits are `answers`, four places lent from an arena
-/// the test leaks.
-fn rooms(answers: &Answers) -> Box<LinkRooms<Answers>> {
-    const PLACES: usize = 4;
+/// `count` places of the table of rooms lent from an arena the test leaks, as the open lends them
+/// where it lays them out.
+#[cfg(not(wz_on_use))]
+fn places(count: usize) -> RoomPlaces {
     let bytes =
-        Arena::table_bytes::<Option<RoomPlace>>(PLACES).expect("places the address space holds");
+        Arena::table_bytes::<Option<RoomPlace>>(count).expect("places the address space holds");
     let arena: &'static mut SessionArena = Box::leak(Box::new(
         SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
     ));
-    let places: RoomPlaces = arena
+    arena
         .arena_mut()
-        .lend(PLACES)
-        .expect("the arena has the places");
+        .lend(count)
+        .expect("the arena has the places")
+}
+
+/// `count` rows of the table of rooms, each place made at its face's first hold, as the open
+/// counts them where the tables take their memory on use.
+#[cfg(wz_on_use)]
+fn places(count: usize) -> RoomPlaces {
+    RoomPlaces::counted(count).expect("the test allocator answers")
+}
+
+/// The rooms of a session over a stack whose waits are `answers`, four places.
+fn rooms(answers: &Answers) -> Box<LinkRooms<Answers>> {
+    let places = places(4);
     let mut place = Box::<LinkRooms<Answers>>::new_uninit();
     // SAFETY: the box's place is valid for writes of the rooms, which stay there.
     unsafe {
@@ -449,6 +465,50 @@ fn a_faces_room_lies_at_its_own_place() {
         "a place past the table holds no room"
     );
     assert!(answers.asked(90).is_empty());
+}
+
+/// Where the tables take their memory on use, a face's place in the table of rooms is made at its
+/// first hold of a wait and kept for the place's next face: none when the rooms are made, one for
+/// the one face held, still one once it is let go of and its place held again, none past the
+/// table, and the place made is the one a publish asks. Turned red by rooms that make every row's
+/// place when made (`RoomTable::over` making a place for each row, as the forms that lay the
+/// places out write one), by a `forget` or `forget_all` that makes a place (`RoomTable::held`
+/// reading through `made_mut`), or by a hold that makes no place (`RoomTable::taken` reading
+/// through `row_mut`).
+#[cfg(wz_on_use)]
+#[test]
+fn an_on_use_rooms_place_is_made_at_its_faces_first_hold() {
+    let answers = Answers::default();
+    let rooms = rooms(&answers);
+    assert_eq!(
+        rooms.places_made(),
+        (0, 4),
+        "CONTROL: four rows, no place made"
+    );
+    rooms.forget(2);
+    rooms.forget_all();
+    assert_eq!(rooms.places_made(), (0, 4), "letting go makes no place");
+    rooms.hold(2, answers.face(20, true));
+    assert_eq!(rooms.places_made(), (1, 4), "the face's place alone");
+    rooms.forget(2);
+    rooms.hold(2, answers.face(21, true));
+    assert_eq!(
+        rooms.places_made(),
+        (1, 4),
+        "the place is kept for its next face"
+    );
+    rooms.hold(9, answers.face(90, true));
+    assert_eq!(
+        rooms.places_made(),
+        (1, 4),
+        "past the table nothing is made"
+    );
+    #[cfg(feature = "tx-held-wait")]
+    {
+        assert_eq!(rooms.within(1_000), Room::Free);
+        assert_eq!(answers.asked(21).len(), 1, "the place made is asked");
+        assert!(answers.asked(20).is_empty(), "the face before it is not");
+    }
 }
 
 /// A face keeps its place while it is up, and a publish dropped on a set read at one mark is sent

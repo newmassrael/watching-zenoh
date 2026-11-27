@@ -23,7 +23,9 @@ use core::mem::ManuallyDrop;
 use core::mem::MaybeUninit;
 use core::ptr::{addr_of_mut, NonNull};
 
-use wz_session_core::bounded::{BoundedVec, ZeroEmpty};
+#[cfg(any(not(wz_on_use), feature = "query", feature = "queryable"))]
+use wz_session_core::bounded::BoundedVec;
+use wz_session_core::bounded::ZeroEmpty;
 #[cfg(all(any(feature = "query", feature = "queryable"), not(wz_on_use)))]
 use wz_session_core::caps;
 use wz_session_core::placed::Placed;
@@ -39,6 +41,7 @@ use wz_session_core::step_lend::LendCell;
 
 #[cfg(feature = "queryable")]
 use super::query;
+#[cfg(not(wz_on_use))]
 use super::registry::FACE_SETS;
 #[cfg(feature = "connectivity")]
 use super::FacePlane;
@@ -54,7 +57,9 @@ use super::{Ended, LegRow, PendingGet, Rows};
 use super::{EndedLegs, LegRows};
 #[cfg(all(feature = "queryable", not(wz_on_use)))]
 use super::{FinalHold, RefusedFinal};
-use super::{RoomPlace, RoomPlaces, SessionReassembly, StepPlaces};
+#[cfg(not(wz_on_use))]
+use super::{RoomPlace, RoomPlaces};
+use super::{SessionReassembly, StepPlaces};
 #[cfg(any(feature = "query", feature = "queryable"))]
 use crate::arena::SessionRows;
 #[cfg(all(wz_round, not(wz_on_use)))]
@@ -149,7 +154,9 @@ pub(crate) struct StatePlaces {
     #[cfg(feature = "connectivity")]
     faces: MaybeUninit<FacePlane>,
     /// What the face holding each set names for a wait for its room, a place for each set the
-    /// region holds.
+    /// region holds; where the tables take their memory on use, each face's place is made at its
+    /// first hold of a wait instead, none in the state (`crate::engine::RoomPlaces`).
+    #[cfg(not(wz_on_use))]
     room_places: [MaybeUninit<Option<RoomPlace>>; FACE_SETS],
     /// The rows of the session's plain tables, each table's at the build's bound: the ends of the
     /// legs, their callbacks, the session's note of each leg pending and the replies the gets that
@@ -288,6 +295,7 @@ impl StatePlaces {
     /// # Safety
     /// As [`Self::steps`], for the rooms' field: it is reached by the one table placed over it
     /// here.
+    #[cfg(not(wz_on_use))]
     pub(super) unsafe fn rooms(at: NonNull<Self>, sets: usize) -> RoomPlaces {
         // SAFETY: the caller's contract; the field holds no value, and a field of a value at a
         // pointer that is not null is not null either.
@@ -586,12 +594,14 @@ impl<T: ZeroEmpty> Drop for OwnBlock<T> {
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use super::*;
+    #[cfg(any(not(wz_on_use), feature = "query", feature = "queryable"))]
     use crate::arena::{ArenaPlan, PlanShape};
     use wz_session_core::limits::SessionLimits;
 
     /// The table of the rooms' places placed over a region's places takes the sets asked, at most
     /// the sets the region holds, and lies in the places. Turned red by a field of fewer places
     /// than the sets the build's plan counts, or by a table placed anywhere but the places.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn the_rooms_places_take_the_regions_sets_at_most() {
         let plan = ArenaPlan::planned(
