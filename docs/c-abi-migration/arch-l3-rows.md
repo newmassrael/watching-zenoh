@@ -978,6 +978,58 @@ is bound by `MAX_PENDING_QUERIES` whatever `N`, which lends the row past `N` and
 `MAX_PENDING_QUERIES - MAX_PENDING_LIVELINESS_GETS` fewer leg rows per face (8 by default); no
 code path changes, so no Ir moves.
 
+**The switch's reds after its bound** (four commits). Read against the reds of the build that
+landed the bound above:
+
+- `fix(capi-coop): Name the state's holds only where a plane lies in it`. No get plane is laid
+  out, so a build of `query` alone has no plane in its state, and `state_holds` was dead code
+  there (`plane_places` already named `queryable` and `connectivity` alone). It is built where
+  `plane_places` is. Held by the clippy legs of `query` and `query,tables-on-use`.
+- `fix(session-core): Hold each kind of get to its own bound in one table`. The gets' table held
+  `MAX_PENDING_QUERIES + MAX_PENDING_LIVELINESS_GETS` rows as one count, so a `liveliness-get`
+  build whose session stated `MAX_PENDING_QUERIES` 1 held a second query in a snapshot's row:
+  the region form lays a face's legs out at the build's bound and states no quota of its own
+  (`get_legs`), so nothing refused it. `TableRows` states `pending_queries` and
+  `pending_snapshots` apart (`pending_gets()` their sum, the table's rows), a get's row names its
+  `GetKind`, and the tables hold each kind to its own bound (`GetBounds`, kept inverted as the
+  planes' filter bounds are, so zero bytes bind nothing until the open's `limit_to`); a build
+  without `liveliness-get` keeps no kind in the row and holds queries alone.
+  `has_room_for_get` is the one read of that fact, which `begin_get` and a caller about to make
+  a callback both ask. Tests: `session_tables::tests::each_kind_of_get_is_held_to_its_own_bound_in_the_one_table`
+  (red if the table is bound by its rows alone), `a_build_without_snapshots_holds_no_snapshot`,
+  `the_gets_table_holds_a_row_for_each_query_and_snapshot_pending` (now stated by kind) and
+  `tests::arena::the_tables_hold_a_row_for_each_get_and_each_held_reply` (the plan's rows by kind).
+- `fix(capi-coop): Refuse a get past its table whole under its first hold`. A query past its bound
+  was refused by `begin_get` after its callback was made, so the get was refused but a leg was
+  minted. The issue now asks `has_room_for_get` in its first hold, before the own queryables'
+  Final row and before any callback, and refuses the get whole (`Refusal::TableFull`), as
+  zenoh-pico refuses a query it cannot register before it sends anything. Held by
+  `tests::get::a_get_past_its_table_is_refused_and_sends_nothing` in the region form (red if the
+  check is left to `begin_get`: one leg minted).
+- `fix(capi-coop): End a get's asker leg in the hold of its last leg`. The asker's own leg on the
+  row (which keeps the get standing while its legs are issued) was ended after the issue in a hold
+  of its own, one more take of the session than the walk. It now ends in the hold of the get's last
+  leg: the links' walk where it issues the last leg or finds no face left, when no group and no own
+  queryable is asked after; the groups' walk where it finds no group left, when the own queryables
+  are not asked; the own queryables' leg in its hold; a snapshot's walk where it finds no face
+  left. `end_asker` ends only an asker an issue cut short left standing (a fan cancelled between
+  two legs). Tests: `tests::get::a_get_of_one_peer_holds_the_session_once_for_its_links` (one
+  hold, one more with `group`; red if the asker ends in a hold of its own) and
+  `tests::snapshot::a_snapshot_of_one_peer_ends_its_askers_leg_in_the_walks_last_hold` (three
+  holds: the open check, the face's leg, the walk's end).
+
+Expected size and Ir: the pico-compare preset asks no snapshot, so its row keeps no kind and its
+check of a query's room is the table's `is_full`, read once more in the issue's first hold; the
+issue loses the hold `end_asker` took after it (a lock pair and a call), so the api case of a get
+is about level in text and lower in Ir. The
+receive is unchanged (no change is on a Push's path). A `liveliness-get` build counts the rows of
+a kind on each get's begin (at most `PENDING_GET_ROWS`).
+
+Read and not yet attributed: `tests::get::a_get_ends_with_its_link` (region and runtime-plan
+forms) and `tests::listen::a_listener_hears_and_asks_every_client_it_has_taken` were red with no
+panic line kept; the loss path ends each leg on its row (`end_legs_of`) and notes the end for the
+read's delivery, and none of the four commits moves it. Their panic lines decide the next step.
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
