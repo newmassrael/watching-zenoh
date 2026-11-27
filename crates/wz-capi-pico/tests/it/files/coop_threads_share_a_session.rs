@@ -40,6 +40,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use wz_capi_pico::abi::z_owned_keyexpr_t;
 use wz_capi_pico::config_limits::ZEXT_CONFIG_LIMITS_KEY;
 use wz_capi_pico::{
     z_bytes_copy_from_buf, z_bytes_move, z_bytes_to_slice, z_close, z_closure_query,
@@ -48,16 +49,15 @@ use wz_capi_pico::{
     z_congestion_control_t, z_declare_keyexpr, z_declare_queryable, z_declare_subscriber, z_get,
     z_get_options_default, z_get_options_t, z_keyexpr_as_view_string, z_keyexpr_loan,
     z_keyexpr_move, z_loaned_bytes_t, z_loaned_keyexpr_t, z_loaned_query_t, z_loaned_reply_t,
-    z_loaned_sample_t, z_open, z_owned_bytes_t, z_owned_config_t, z_owned_keyexpr_t,
-    z_owned_queryable_t, z_owned_session_t, z_owned_slice_t, z_owned_subscriber_t, z_put,
-    z_put_options_default, z_put_options_t, z_query_keyexpr, z_query_reply, z_queryable_move,
-    z_queryable_options_default, z_queryable_options_t, z_reply_is_ok, z_reply_ok,
-    z_sample_payload, z_session_drop, z_session_loan, z_session_loan_mut, z_session_move,
-    z_slice_data, z_slice_drop, z_slice_len, z_slice_loan, z_slice_move, z_string_data,
-    z_string_len, z_subscriber_move, z_undeclare_keyexpr, z_undeclare_queryable,
-    z_undeclare_subscriber, z_view_keyexpr_from_str, z_view_keyexpr_loan, z_view_keyexpr_t,
-    z_view_string_loan, z_view_string_t, zp_config_insert, ZResult, Z_CONFIG_CONNECT_KEY,
-    Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY, Z_OK,
+    z_loaned_sample_t, z_open, z_owned_bytes_t, z_owned_config_t, z_owned_queryable_t,
+    z_owned_session_t, z_owned_slice_t, z_owned_subscriber_t, z_put, z_put_options_default,
+    z_put_options_t, z_query_keyexpr, z_query_reply, z_queryable_move, z_queryable_options_default,
+    z_queryable_options_t, z_reply_is_ok, z_reply_ok, z_sample_payload, z_session_drop,
+    z_session_loan, z_session_loan_mut, z_session_move, z_slice_data, z_slice_drop, z_slice_len,
+    z_slice_loan, z_slice_move, z_string_data, z_string_len, z_subscriber_move,
+    z_undeclare_keyexpr, z_undeclare_queryable, z_undeclare_subscriber, z_view_keyexpr_from_str,
+    z_view_keyexpr_loan, z_view_keyexpr_t, z_view_string_loan, z_view_string_t, zp_config_insert,
+    ZResult, Z_CONFIG_CONNECT_KEY, Z_CONFIG_LISTEN_KEY, Z_CONFIG_MODE_KEY, Z_OK,
 };
 use wz_runtime_tokio_test_support::free_port;
 
