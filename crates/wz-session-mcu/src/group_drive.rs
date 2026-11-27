@@ -305,6 +305,20 @@ mod stage;
     feature = "codec-push"
 ))]
 pub use stage::{GroupLink, GroupTxPace, GroupTxStage};
+// A group's send socket as the driver of the link its transmit state sends on, beside the link it
+// shares with the group's session task.
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "codec-push"
+))]
+mod driver;
+#[cfg(all(
+    feature = "alloc",
+    not(feature = "session-slot"),
+    feature = "codec-push"
+))]
+pub use driver::GroupDriver;
 
 /// R311ma/R311mb/R311md — the no_std multicast reply backing: the MCU
 /// [`MulticastReplyEnqueue`] provider for the shared generic
