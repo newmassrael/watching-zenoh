@@ -185,9 +185,9 @@ pub(crate) fn leaked_placed(events: usize) -> &'static mut Placed<Round> {
     let arena: &'static mut SessionArena = alloc::boxed::Box::leak(alloc::boxed::Box::new(
         SessionArena::of_bytes(bytes, &AllocatorMemory).expect("the host has the memory"),
     ));
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     let rows = RoundRows::lent(arena.arena_mut(), counts).expect("the arena has the rows");
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     let rows = RoundRows::counted(counts);
     let placed = Round::placed_over(arena.arena_mut(), rows).expect("the arena has the round");
     alloc::boxed::Box::leak(alloc::boxed::Box::new(placed))

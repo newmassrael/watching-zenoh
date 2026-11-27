@@ -51,7 +51,7 @@ use crate::arena::HandedTable;
 #[cfg(feature = "runtime-plan")]
 use crate::arena::OpenPlan;
 // The place the arena lends the engine: none where the engine lies in an allocation of its own.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 use crate::arena::EnginePlace;
 use crate::arena::{
     ArenaMemory, ArenaPlan, ArenaRefused, ArenaRegion, ClaimedPlaces, DroppedOn, EntityKind,
@@ -65,26 +65,26 @@ use crate::form::{
 use crate::lodging::LodgingPlaces;
 #[cfg(wz_round)]
 use crate::round::RoundGate;
-#[cfg(all(wz_round, feature = "runtime-plan"))]
+#[cfg(all(wz_round, wz_lent))]
 use crate::round::RoundRows;
 #[cfg(wz_round)]
 use crate::round::{Round, RoundCounts};
 use crate::RowPolicy;
 use wz_runtime_coop::kept::Shared;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use wz_runtime_coop::kept::{Kept, SharedClaim};
 #[cfg(any(
-    feature = "runtime-plan",
+    wz_lent,
     all(not(wz_round), any(feature = "listen", feature = "group"))
 ))]
 use wz_session_core::bounded::Arena;
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 use wz_session_core::bounded::KeyUnkept;
 use wz_session_core::bounded::{LendRefused, TableLender};
 use wz_session_core::caps;
 #[cfg(all(feature = "liveliness", wz_round))]
 use wz_session_core::key_arena::KeyRef;
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 use wz_session_core::key_arena::{KeySpace, KeysLocked};
 use wz_session_core::placed::{Placed, PlacedRef};
 #[cfg(not(wz_round))]
@@ -93,7 +93,7 @@ use wz_session_core::reassembly_dispatch::ChainPeers;
 use wz_session_core::reassembly_dispatch::ManyPeers;
 #[cfg(not(all(wz_round, feature = "listen")))]
 use wz_session_core::reassembly_dispatch::OnePeer;
-#[cfg(all(feature = "query", feature = "runtime-plan"))]
+#[cfg(all(feature = "query", wz_lent))]
 use wz_session_core::reply_hold::HeldReplies;
 use wz_session_core::round::RowReleases;
 use wz_session_core::row_callback::{RowCallback, ThreadForm};
@@ -106,7 +106,7 @@ use wz_session_core::session_tables::{
     SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 use wz_session_core::slot_observer::ObserverRows;
 
 // The operating system the engine runs on: its mutex, its threads and its sleep are `std`'s on a
@@ -241,10 +241,7 @@ mod query;
 pub(crate) use query::QueryableCall;
 // Read where a state lends the Finals and refusals their rows (`state_places`, `arena`): the
 // forms a build lays out at the open. The on-use form counts them in its own tables.
-#[cfg(all(
-    feature = "queryable",
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-))]
+#[cfg(all(feature = "queryable", not(wz_on_use)))]
 pub(crate) use query::{FinalHold, RefusedFinal};
 
 #[cfg(feature = "group")]
@@ -296,23 +293,20 @@ use crate::region::{RegionBlock, StateRegion};
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 // The values the state owns and its tasks reach by handles, as fields of the region.
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(wz_lent))]
 mod state_places;
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) use registry::FACE_SET_BYTES;
 #[cfg(any(feature = "listen", feature = "group"))]
 pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
 use registry::{FaceId, HeldFace, Registry, DIAL_FACE};
-#[cfg(all(
-    any(feature = "query", feature = "queryable"),
-    not(feature = "runtime-plan")
-))]
+#[cfg(all(any(feature = "query", feature = "queryable"), not(wz_lent)))]
 use state_places::PlacedTables;
-#[cfg(not(feature = "runtime-plan"))]
+#[cfg(not(wz_lent))]
 pub(crate) use state_places::StatePlaces;
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 use state_places::{OwnBlock, OwnPlaced, OwnState};
 
 /// The state the places of the session's own values and the store of its keys lie in where the
@@ -322,14 +316,14 @@ use state_places::{OwnBlock, OwnPlaced, OwnState};
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 type StateLayout = StateRegion;
 /// See the form of a build without `tables-on-use`.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 type StateLayout = OwnState;
 /// What holds that state and drops it in place after every owner written in it: the region's
 /// block, whose memory its arena gives back, or the state's own allocation, which it gives back.
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 type StateHold = RegionBlock<StateRegion>;
 /// See the form of a build without `tables-on-use`.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 type StateHold = OwnBlock<OwnState>;
 
 /// How the session's state holds its registry: by value where the open lent its tables from the
@@ -342,11 +336,11 @@ type RegistryHold = RegionField<Registry>;
 
 /// The store the rows of the session's tables keep their keys in, as the session's state holds it
 /// (`SessionParts::Keys`): the session's key arena, where the tables take their memory at the open.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 type KeyStore = KeySpace;
 /// See the form of a build without `tables-on-use`: the handle of the session's key budget, which
 /// its own state holds, where the tables take their memory at their first row.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 type KeyStore = wz_session_core::on_use::BudgetKeys;
 
 mod replay;
@@ -858,11 +852,11 @@ struct LentApart {
     #[cfg(not(wz_round))]
     router: SessionReassembly,
     /// The place the engine is written at.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     engine: EnginePlace,
     /// The count of the arena's memory the engine keeps, where it lies in an allocation of its own
     /// (`SharedClaim`).
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     engine: NonNull<Kept>,
     handle_place: Option<HandlePlace>,
     lodgings: LodgingPlaces,
@@ -920,17 +914,17 @@ struct SessionLent {
     /// The span the session's runtime is placed in, and the count of the arena it is kept by.
     runtime: RuntimePlace,
     /// The place the session's engine is written at, and the count of the arena it is kept by.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     engine: EnginePlace,
     /// The count of the arena the session's engine keeps, where the engine lies in an allocation of
     /// its own (`SharedClaim`) and the arena lends it no place.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     engine: NonNull<Kept>,
     /// The state the places of the session's own values and its keys lie in (`StateHold`): the
     /// region, which holds the registry too, or the session's own state where the tables take
     /// their memory on use. After the registry, which its handle drops in place where it lies in the
     /// region, and every table that keeps a key there.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     state: StateHold,
     arena: SessionArena,
 }
@@ -941,17 +935,17 @@ struct SessionLent {
 /// (`runtime-plan`; a region holds them otherwise, `StatePlaces::tables`), and the ring of the
 /// advanced publishers' caches.
 struct StateTables {
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    #[cfg(all(feature = "query", wz_lent))]
     legs: Rows<Ended, { usize::MAX }>,
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    #[cfg(all(feature = "query", wz_lent))]
     leg_rows: Rows<Option<LegRow>, { usize::MAX }>,
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    #[cfg(all(feature = "query", wz_lent))]
     pending_gets: Rows<PendingGet, { usize::MAX }>,
     /// The Finals the queryables' plane holds and the requests a dispatch refused, a row of each
     /// for each query held at once (`query::FinalHolds`).
-    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+    #[cfg(all(feature = "queryable", wz_lent))]
     held_finals: query::HeldFinals<wz_session_core::bounded::Lent>,
-    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+    #[cfg(all(feature = "queryable", wz_lent))]
     refused_finals: query::RefusedFinals<wz_session_core::bounded::Lent>,
     #[cfg(feature = "advanced-cache")]
     cache: Option<LentByteCells>,
@@ -964,25 +958,22 @@ impl SessionRows {
         // A build that asks and answers no query from the arena and caches no sample lends the
         // state no plain table: its lender is asked nothing.
         #[cfg(not(any(
-            all(
-                any(feature = "query", feature = "queryable"),
-                feature = "runtime-plan"
-            ),
+            all(any(feature = "query", feature = "queryable"), wz_lent),
             feature = "advanced-cache"
         )))]
         let _ = lend;
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         let legs = self.gets().legs().unwrap_or(usize::MAX);
         StateTables {
-            #[cfg(all(feature = "query", feature = "runtime-plan"))]
+            #[cfg(all(feature = "query", wz_lent))]
             legs: lend.table(legs),
-            #[cfg(all(feature = "query", feature = "runtime-plan"))]
+            #[cfg(all(feature = "query", wz_lent))]
             leg_rows: lend.table(legs),
-            #[cfg(all(feature = "query", feature = "runtime-plan"))]
+            #[cfg(all(feature = "query", wz_lent))]
             pending_gets: lend.table(legs),
-            #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+            #[cfg(all(feature = "queryable", wz_lent))]
             held_finals: lend.table(self.held_queries()),
-            #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+            #[cfg(all(feature = "queryable", wz_lent))]
             refused_finals: lend.table(self.held_queries()),
             #[cfg(feature = "advanced-cache")]
             cache: (self.cache_bytes() != 0).then(|| lend.byte_cells(self.cache_bytes(), 1)),
@@ -1020,10 +1011,10 @@ fn lend_session(
     }
     let OpenPlaces {
         runtime: runtime_bytes,
-        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+        #[cfg(not(wz_on_use))]
             engine: engine_bytes,
         // The engine lies in an allocation of its own the open claimed (`SharedClaim`).
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        #[cfg(wz_on_use)]
             engine: _,
     } = from.places();
     #[cfg(any(feature = "runtime-plan", feature = "tables-on-use"))]
@@ -1042,7 +1033,7 @@ fn lend_session(
     // Where the tables take their memory on use, the places of the state's own values and the key
     // budget lie in a state of the session's own, zeroed by the allocator apart from the arena;
     // a refusal here gives the arena back.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     let state = OwnBlock::<OwnState>::take()?;
     let mut lend = arena.lender();
     // Held whole to the end, as the value handed back holds it; the state's tables, which the
@@ -1051,21 +1042,21 @@ fn lend_session(
     let transport = plan.transport().lent_from(&mut lend);
     // The key arena is the arena's where the open lends the registry from it, and the region's
     // otherwise, beside the registry whose tables keep their keys there.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     let keys = lend.keys(
         plan.session().key_bytes(),
         config.limits.max_keyexpr_bytes_held(),
     );
     let StateTables {
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         legs,
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         leg_rows,
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         pending_gets,
-        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        #[cfg(all(feature = "queryable", wz_lent))]
         held_finals,
-        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        #[cfg(all(feature = "queryable", wz_lent))]
         refused_finals,
         #[cfg(feature = "advanced-cache")]
         cache,
@@ -1075,16 +1066,16 @@ fn lend_session(
         entities: places,
         lodgings,
     } = plan.places().lent_from(&mut lend, plan.entities());
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     let room_places: RoomPlaces = lend.table(plan.peers().sets());
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     let keys = lend.finish_keys(keys).map_err(ArenaRefused::Lend)?;
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     lend.finish().map_err(ArenaRefused::Lend)?;
     // SAFETY: the block is a zeroed state (`StateLayout`) this open alone reaches; it neither moves
     // nor goes back before the registry and every key of it are let go of, being held after them
     // by what this hands back and then by the session's state.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     let keys = unsafe { StateLayout::place(state.as_ptr(), resolve_limits(config)) };
     // The plane, the round, the step places, the queryables' plane and the plain tables' rows lie
     // in the region where the build fixes the session's shape, each in a field of it no other owner
@@ -1093,7 +1084,7 @@ fn lend_session(
     // SAFETY: the state was placed above, and nothing reaches its places' fields but this open,
     // which writes each once; the block is held after every owner written in it (`SessionLent`,
     // then `Core`), and neither moves nor goes back before them.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     let region_places = unsafe { StateLayout::places_at(state.as_ptr()) };
     // SAFETY: as above, for the plain tables' fields: each table is held by the plane or the
     // state it is moved into, both dropped before the block.
@@ -1104,16 +1095,9 @@ fn lend_session(
     let tables = unsafe { StatePlaces::tables(region_places, plan.session()) };
     // Where the tables take their memory on use, each plain table is counted as the plan counts
     // its rows and takes them at its first row, none of them in the state.
-    #[cfg(all(
-        any(feature = "query", feature = "queryable"),
-        feature = "tables-on-use",
-        not(feature = "runtime-plan")
-    ))]
+    #[cfg(all(any(feature = "query", feature = "queryable"), wz_on_use))]
     let tables = PlacedTables::counted(plan.session());
-    #[cfg(all(
-        any(feature = "query", feature = "queryable"),
-        not(feature = "runtime-plan")
-    ))]
+    #[cfg(all(any(feature = "query", feature = "queryable"), not(wz_lent)))]
     let PlacedTables {
         #[cfg(feature = "query")]
         legs,
@@ -1130,7 +1114,7 @@ fn lend_session(
     } = tables;
     // SAFETY: as above, for the rooms' places: the table is held by the rooms, which the session's
     // state drops before the block.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     let room_places = unsafe { StatePlaces::rooms(region_places, plan.peers().sets()) };
     let claimed = plan.claim_handle(handle)?;
     #[cfg(feature = "advanced-cache")]
@@ -1144,11 +1128,11 @@ fn lend_session(
         policy,
         SessionChains::over(&transport.reassembly, transport.face_chains),
     );
-    #[cfg(all(wz_round, feature = "runtime-plan"))]
+    #[cfg(all(wz_round, wz_lent))]
     let round_rows =
         RoundRows::lent(arena.arena_mut(), plan.round()).map_err(ArenaRefused::Lend)?;
     // The rows the gets that consolidate hold their replies in, lent beside the round's.
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    #[cfg(all(feature = "query", wz_lent))]
     let held_replies = HeldReplies::lent(arena.arena_mut(), plan.session().held_replies())
         .map_err(ArenaRefused::Lend)?;
     // What the gets share: placed here, so the round is told whose legs' callbacks its replies'
@@ -1157,7 +1141,7 @@ fn lend_session(
     let (ended, legs) = (EndedLegs::over(legs), LegRows::over(leg_rows));
     // SAFETY: the arena hands a place aligned for the plane and valid for writes of one, where it
     // stays.
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    #[cfg(all(feature = "query", wz_lent))]
     let gets = unsafe {
         arena.arena_mut().place_with(|at| {
             GetPlane::init_at(NonNull::new_unchecked(at), ended, held_replies, legs)
@@ -1165,15 +1149,15 @@ fn lend_session(
     }
     .map_err(ArenaRefused::Lend)?;
     // SAFETY: as for the region's places above, for the gets' field.
-    #[cfg(all(feature = "query", not(feature = "runtime-plan")))]
+    #[cfg(all(feature = "query", not(wz_lent)))]
     let gets = unsafe { StatePlaces::gets(region_places, ended, held_replies, legs) };
     // The round lies beside its tables, owned by the session's state and reached by handles that
     // count nothing.
-    #[cfg(all(wz_round, feature = "runtime-plan"))]
+    #[cfg(all(wz_round, wz_lent))]
     let mut samples =
         Round::placed_over(arena.arena_mut(), round_rows).map_err(ArenaRefused::Lend)?;
     // SAFETY: as above, for the round's field and the field of its tables' rows.
-    #[cfg(all(wz_round, not(feature = "runtime-plan")))]
+    #[cfg(all(wz_round, not(wz_lent)))]
     let mut samples = unsafe { StatePlaces::round(region_places, plan.round()) };
     // No handle of the round is taken yet: it reads the keys a peer's aliases keep in the
     // session's key arena where they lie.
@@ -1183,13 +1167,9 @@ fn lend_session(
         // A key a peer's alias keeps in the key arena is read where it lies; a key of the on-use
         // policy is its row's own allocation, which the round copies, as it copies every key it is
         // not told the place of.
-        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+        #[cfg(not(wz_on_use))]
         round.reads_keys_in(keys);
-        #[cfg(all(
-            feature = "tables-on-use",
-            not(feature = "runtime-plan"),
-            not(feature = "query")
-        ))]
+        #[cfg(all(wz_on_use, not(feature = "query")))]
         let _ = round;
         #[cfg(feature = "query")]
         {
@@ -1201,17 +1181,17 @@ fn lend_session(
             unsafe { round.calls_legs_of(legs) };
         }
     }
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     let steps = StepPlaces::placed_in(arena.arena_mut()).map_err(ArenaRefused::Lend)?;
     // SAFETY: as above, for the step places' fields.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     let steps = unsafe { StatePlaces::steps(region_places) };
     // The queries the session's queryables are asked wait for their callbacks here, and the
     // Finals of them are held here, in rows the plan counts.
     #[cfg(feature = "queryable")]
     let final_holds = query::FinalHolds::over(held_finals, refused_finals);
     // SAFETY: as for the gets' plane above.
-    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+    #[cfg(all(feature = "queryable", wz_lent))]
     let plane = unsafe {
         arena
             .arena_mut()
@@ -1219,7 +1199,7 @@ fn lend_session(
     }
     .map_err(ArenaRefused::Lend)?;
     // SAFETY: as above, for the queryables' field.
-    #[cfg(all(feature = "queryable", not(feature = "runtime-plan")))]
+    #[cfg(all(feature = "queryable", not(wz_lent)))]
     let plane = unsafe { StatePlaces::queries(region_places, final_holds) };
     // SAFETY: the registry holds the handle, and is dropped before the round's owner wherever
     // both are held (`SessionLent`, and the session's state, whose round is its last field); the
@@ -1239,7 +1219,7 @@ fn lend_session(
     };
     // The application's tables, lent from the rows the plan counts for them: the session's
     // one table set among them, which holds its subscribers and its queryables.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     let registry = Registry::new(
         resolve_limits(config),
         arena.arena_mut(),
@@ -1272,7 +1252,7 @@ fn lend_session(
     // The application's tables and the dial face's, made by value and counted from the rows the
     // plan counts for them, none taking a row before its first, their keys counted against the
     // region's budget; the session's one table set holds its tokens as rows, as above.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     let registry = Registry::counted(
         resolve_limits(config),
         keys,
@@ -1284,18 +1264,18 @@ fn lend_session(
     let runtime = arena
         .runtime_place(runtime_bytes)
         .map_err(ArenaRefused::Lend)?;
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     let engine = arena
         .engine_place(engine_bytes)
         .map_err(ArenaRefused::Lend)?;
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     let memory = engine.memory;
     // An engine in an allocation of its own keeps the arena's memory by a count it takes of it, as
     // the place the arena would lend it does: what the engine holds that lies in the arena (the
     // lodgings, the handle's place) stands for as long as the engine does.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     let engine = arena.keep().map_err(ArenaRefused::Lend)?;
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     let memory = engine;
     // SAFETY: the span was lent above to the lodging places alone, and `memory` is the count of the
     // memory it lies in, held by the session's engine for as long as the engine lends from the
@@ -1327,7 +1307,7 @@ fn lend_session(
         tx_pool_short: plan.tx_pool_short(),
         #[cfg(feature = "advanced-cache")]
         cache,
-        #[cfg(not(feature = "runtime-plan"))]
+        #[cfg(not(wz_lent))]
         state,
         #[cfg(all(not(wz_round), feature = "listen"))]
         taken_faces: plan.peers().sets().saturating_sub(1),
@@ -1850,7 +1830,7 @@ impl<'a, L: CoopLinks + 'static, C: ClockSource + 'static> CoreGuard<'a, L, C> {
     /// The proof that this hold holds the lock that guards the session's key arena, for as long as
     /// the hold is borrowed: what a key an object of the C ABI holds apart is shared and let go of
     /// through, and nothing else makes one.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     fn keys_locked(&self) -> KeysLocked<'_> {
         // SAFETY: this guard holds the session's lock from its taking to its drop, the lock that
         // guards the arena (`CoreLock::init_at`), and the proof borrows the guard.
@@ -1925,13 +1905,13 @@ pub(crate) type RoomPlaces = wz_session_core::bounded::BoundedVec<
 
 /// The bytes of one place of the table of rooms, as the plan lays the places out where the arena
 /// lends them.
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) const ROOM_PLACE_BYTES: usize = core::mem::size_of::<Option<RoomPlace>>();
 
 /// The bytes of the rooms of a session over links of `L`, which the open places in the session's
 /// arena (`ArenaPlan::holding_rooms`): how large they are is the stack's waits'. A session whose
 /// tables take their memory on use places them in an allocation of their own, and lays out none.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 pub(crate) const fn link_rooms_bytes<L: CoopLinks>() -> usize {
     core::mem::size_of::<LinkRooms<L::Waits>>()
 }
@@ -2824,11 +2804,11 @@ pub(crate) type SessionReassembly = wz_runtime_coop::reassembly_rx::SessionReass
 type RouterPlace = PlacedRef<LendCell<SessionReassembly>>;
 
 /// The bytes of the place the session lends its registry in ([`RegistryLend`]).
-#[cfg(all(feature = "runtime-plan", wz_round))]
+#[cfg(all(wz_lent, wz_round))]
 pub(crate) const REGISTRY_LEND_BYTES: usize = core::mem::size_of::<LendCell<Registry>>();
 
 /// The bytes of the place the session lends its reassembly Router in ([`RouterPlace`]).
-#[cfg(feature = "runtime-plan")]
+#[cfg(wz_lent)]
 pub(crate) const ROUTER_LEND_BYTES: usize = core::mem::size_of::<LendCell<SessionReassembly>>();
 
 /// The places the session lends its registry and its reassembly Router in for a pass of its
@@ -2843,7 +2823,7 @@ struct StepPlaces {
 
 impl StepPlaces {
     /// Both places, nothing lent in either, placed in `arena`. Refused past what it has left.
-    #[cfg(feature = "runtime-plan")]
+    #[cfg(wz_lent)]
     fn placed_in(arena: &mut Arena) -> Result<Self, LendRefused> {
         Ok(Self {
             #[cfg(wz_round)]
@@ -2867,7 +2847,7 @@ struct LiveCore<'a, L: CoopLinks + 'static, C: ClockSource + 'static> {
 
 impl<L: CoopLinks + 'static, C: ClockSource + 'static> LiveCore<'_, L, C> {
     /// The proof of the hold this is ([`CoreGuard::keys_locked`]).
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     fn keys_locked(&self) -> KeysLocked<'_> {
         self.core.keys_locked()
     }
@@ -2977,12 +2957,12 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// Where each link that comes up leaves its wait for room, for the publishes that find the
     /// session held ([`CoopEngine::live_to_publish`]). They lie in the arena, owned here, before
     /// the arena, and are reached by the engine through a handle that counts nothing.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     rooms: Placed<LinkRooms<L::Waits>>,
     /// See the form of a build without `tables-on-use`: where the tables take their memory on use,
     /// the rooms lie in an allocation of their own, which their owner gives back after it drops
     /// them where they lie.
-    #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+    #[cfg(wz_on_use)]
     rooms: OwnPlaced<LinkRooms<L::Waits>>,
     /// The wake of the links' stack that the program's word that the clock moved on wakes, which
     /// a read waits on beside its links (`CoopConfig::clock_moves`); none for a clock that moves
@@ -3092,7 +3072,7 @@ struct Core<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// its tables take their memory on use. After the session's state, whose handle of the registry
     /// drops it in place, and every table that keeps a key in it. Held for its owner's drop alone:
     /// the session reaches the state through those handles.
-    #[cfg(not(feature = "runtime-plan"))]
+    #[cfg(not(wz_lent))]
     _state: StateHold,
     /// The memory the open reserved for what the session's limits size (`crate::arena`). Last,
     /// so every table lent from it is dropped before it gives its memory back.
@@ -4722,7 +4702,7 @@ pub(crate) struct OpenHolds<'h> {
     pub(crate) cells: LinkCells<usize>,
     /// The bytes of the faces' rooms, where the arena holds them: a session whose tables take their
     /// memory on use holds them in an allocation of their own, and its plan lays out no place.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     pub(crate) rooms: usize,
     /// The ABI's places.
     pub(crate) held: &'h HeldPlaces,
@@ -4784,24 +4764,24 @@ fn as_link_admission<C: ClockSource + 'static>(
 #[derive(Clone, Copy)]
 pub(crate) struct SessionPlanes {
     /// The queryables' plane (`QueryPlane`), in the arena where the open lays it out.
-    #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+    #[cfg(all(feature = "queryable", wz_lent))]
     pub(crate) queries: usize,
     /// The gets' plane (`GetPlane`), in the arena where the open lays it out.
-    #[cfg(all(feature = "query", feature = "runtime-plan"))]
+    #[cfg(all(feature = "query", wz_lent))]
     pub(crate) gets: usize,
     /// The plane of the watchers of the faces (`FacePlane`), in the arena where the open lays it out.
-    #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
+    #[cfg(all(feature = "connectivity", wz_lent))]
     pub(crate) faces: usize,
 }
 
 impl SessionPlanes {
     /// This build's planes.
     pub(crate) const OF_BUILD: Self = Self {
-        #[cfg(all(feature = "queryable", feature = "runtime-plan"))]
+        #[cfg(all(feature = "queryable", wz_lent))]
         queries: core::mem::size_of::<QueryPlane>(),
-        #[cfg(all(feature = "query", feature = "runtime-plan"))]
+        #[cfg(all(feature = "query", wz_lent))]
         gets: core::mem::size_of::<GetPlane>(),
-        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
+        #[cfg(all(feature = "connectivity", wz_lent))]
         faces: core::mem::size_of::<FacePlane>(),
     };
 }
@@ -4821,14 +4801,14 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     plan.lay_cells(holds.cells);
     // The rooms of a session whose tables take their memory on use lie in an allocation of their
     // own (`state_places::RoomsPlace`) and take no place of the arena.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     plan.lay_rooms(holds.rooms);
     if let Err(refused) = plan.lay_held(holds.held) {
         return Err(refused);
     }
     plan.lay_runtime(holds.runtime);
     // An engine in an allocation of its own (`SharedClaim`) takes no place of the arena.
-    #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+    #[cfg(not(wz_on_use))]
     plan.lay_engine(holds.engine);
     plan.lay_planes(holds.planes);
     #[cfg(feature = "link-admission")]
@@ -6883,7 +6863,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     const fn open_holds(driver: usize, held: &HeldPlaces, runtime: usize) -> OpenHolds<'_> {
         OpenHolds {
             cells: cells_of::<C>(driver),
-            #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+            #[cfg(not(wz_on_use))]
             rooms: link_rooms_bytes::<L>(),
             held,
             runtime,
@@ -6990,7 +6970,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // Where the tables take their memory on use, the engine lies in an allocation of its own,
         // claimed here, after its row where the build keeps the table of engines: an open the
         // allocator has no room for reserves nothing.
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        #[cfg(wz_on_use)]
         let claim = SharedClaim::<Self>::try_new()
             .ok_or_else(|| heap_refused(Shared::<Self>::layout().size()))?;
         // The runtime's tables are placed in the arena, so its plan holds their span.
@@ -7034,7 +7014,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let mut entropy =
                 SessionEntropy::<SharedCount>::try_held(entropy).map_err(heap_refused)?;
             let wire = session_zid(&config, &policy, &lent.transport.endpoints, &mut entropy)?;
-            #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+            #[cfg(not(wz_on_use))]
             let rooms_at = lent
                 .arena
                 .arena_mut()
@@ -7044,7 +7024,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // own, reserved here alike and filled at the same step: a refusal before the fill
             // gives the allocation back unwritten, and once filled their owner (`Core::rooms`)
             // gives it back after it drops them.
-            #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+            #[cfg(wz_on_use)]
             let rooms_at = OwnPlaced::<LinkRooms<L::Waits>>::vacant().map_err(OpenError::Arena)?;
             Ok((wire, entropy, rooms_at))
         })?;
@@ -7073,13 +7053,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // where its tables take their memory on use.
         #[cfg(feature = "connectivity")]
         let face_rows = face_event_rows(config.max_faces, config.groups.len());
-        #[cfg(all(feature = "connectivity", feature = "runtime-plan"))]
+        #[cfg(all(feature = "connectivity", wz_lent))]
         let watchers =
             FacePlane::place_in(lent.arena.arena_mut(), face_rows).map_err(lend_refused)?;
         // SAFETY: the state's places were placed by the open's lend and its faces' field is
         // reached by this write alone; the block is held by `Core` after the session's state,
         // which holds the plane's owner, and neither moves nor goes back before it.
-        #[cfg(all(feature = "connectivity", not(feature = "runtime-plan")))]
+        #[cfg(all(feature = "connectivity", not(wz_lent)))]
         let watchers =
             unsafe { StatePlaces::faces(StateLayout::places_at(lent.state.as_ptr()), face_rows) };
         // A row for each link the plan holds buffers for, reserved here: a link the session takes
@@ -7281,7 +7261,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             _steps: lent.steps,
             #[cfg(feature = "link-admission")]
             _admission: admission,
-            #[cfg(not(feature = "runtime-plan"))]
+            #[cfg(not(wz_lent))]
             _state: lent.state,
             arena: lent.arena,
         };
@@ -7303,7 +7283,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             taken,
             #[cfg(any(feature = "engine-rows", test))]
             row,
-            #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+            #[cfg(wz_on_use)]
             claim,
         ))
     }
@@ -7320,9 +7300,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         apart: LentApart,
         #[cfg(all(not(wz_round), feature = "listen"))] taken: direct::TakenFaces<L, C>,
         #[cfg(any(feature = "engine-rows", test))] row: RowClaim,
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))] claim: SharedClaim<
-            Self,
-        >,
+        #[cfg(wz_on_use)] claim: SharedClaim<Self>,
     ) -> EngineHold<Self> {
         // The place is a span of the arena, aligned as a span starts.
         const { assert!(Shared::<Self>::layout().align() <= wz_session_core::bounded::ARENA_ALIGN) };
@@ -7525,12 +7503,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // SAFETY: the place was lent to the engine alone, aligned as asserted above and as large as
         // `Shared::<Self>::layout`, in the arena `place.memory` keeps; the engine is read through
         // its place only once it is written.
-        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+        #[cfg(not(wz_on_use))]
         let engine = unsafe { Shared::placed_with(place.at, place.memory, make) };
         // SAFETY: the claim is this open's alone; `place` is the count of the session's arena, live
         // while the arena is held, which the engine's state holds; the engine is read through its
         // place only once `make` has written it whole.
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        #[cfg(wz_on_use)]
         let engine = unsafe { claim.made_with(place, make) };
         EngineHold::of(engine)
     }
@@ -7586,11 +7564,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Where the faces' rooms lie, which the test of the form that holds them apart reads.
-    #[cfg(all(
-        test,
-        feature = "std",
-        all(feature = "tables-on-use", not(feature = "runtime-plan"))
-    ))]
+    #[cfg(all(test, feature = "std", wz_on_use))]
     pub(crate) fn rooms_place(&self) -> *const u8 {
         core::ptr::from_ref::<LinkRooms<L::Waits>>(&self.rooms).cast::<u8>()
     }
@@ -7607,7 +7581,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     #[cfg(all(
         test,
         feature = "std",
-        not(feature = "runtime-plan"),
+        not(wz_lent),
         any(feature = "queryable", feature = "query", feature = "connectivity")
     ))]
     pub(crate) fn state_holds(&self, at: *const u8) -> bool {
@@ -10673,9 +10647,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The session's queryables only begin a call and hold the query's Final
         // (`QueryPlane::arrive`, `QueryPlane::arrive_own`), so none stages a reply here: the
         // stage they are handed has no room.
-        #[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+        #[cfg(not(wz_on_use))]
         let mut staged = ReplyStage::<RowPolicy>::default();
-        #[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+        #[cfg(wz_on_use)]
         let mut staged = ReplyStage::<RowPolicy>::counted(0, 0);
         let registry = &mut core.session.registry;
         if let Some(query) = &query {
@@ -10793,11 +10767,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// Mint key expression ids from `next` on: how a test reaches the wrap of the id space
     /// without spending it. Compiled with the key arena's tests that ask it (`tests::held_keys`),
     /// which a build of the on-use form leaves out.
-    #[cfg(all(
-        test,
-        feature = "std",
-        not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
-    ))]
+    #[cfg(all(test, feature = "std", not(wz_on_use)))]
     pub(crate) fn expr_ids_from(&self, next: ExprId) {
         tables_mut(&mut self.core.lock().0.session.registry).expr_ids_from(next);
     }
@@ -12671,7 +12641,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> wz_capi_port::Cac
 /// given back whole when the engine goes, which a holder's hold on the engine keeps from happening
 /// first. So a key shared or let go of after the close takes no lock, and a holder the close itself
 /// lets go of, under the lock, does not wait on it.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
     #[inline(never)]
     fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {
@@ -12710,7 +12680,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for C
 /// room when the heap has none. Their bytes are not counted against the session's key budget until
 /// a held key is a holder of the key its row keeps (section 4 of
 /// `docs/c-abi-migration/heap-native.md`, N3e).
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionKeys for CoopEngine<L, C> {
     #[inline(never)]
     fn key(&self, ask: KeyAsk<'_>) -> Result<Option<HeldKey>, KeyNotHeld> {

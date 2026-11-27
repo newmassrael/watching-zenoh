@@ -3,8 +3,9 @@
 
 //! The one statement of which builds keep the session's round of deliveries (`src/round.rs`) and
 //! the work form that steps the faces as tasks of one set, as the cfg `wz_round` every use reads,
-//! and of which give each value a session lends its links a lock of its own, as the cfg
-//! `wz_value_locks` the engine's form reads (`src/form.rs`, `LockForm::SessionLock`).
+//! of which give each value a session lends its links a lock of its own, as the cfg
+//! `wz_value_locks` the engine's form reads (`src/form.rs`, `LockForm::SessionLock`), and of
+//! which storage policy the session's tables take ([`TablePolicy`]), as the cfg of its name.
 //!
 //! The read that hands each record out as it is read (`direct`), the faces a session listening
 //! takes and the groups it joins among them, hands out every sample, token, query, reply and
@@ -35,6 +36,13 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(wz_value_locks)");
     println!("cargo:rustc-check-cfg=cfg(wz_face_places)");
     println!("cargo:rustc-check-cfg=cfg(wz_one_send_place)");
+    println!("cargo:rustc-check-cfg=cfg(wz_lent)");
+    println!("cargo:rustc-check-cfg=cfg(wz_on_use)");
+    match table_policy() {
+        TablePolicy::Region => {}
+        TablePolicy::Lent => println!("cargo:rustc-cfg=wz_lent"),
+        TablePolicy::OnUse => println!("cargo:rustc-cfg=wz_on_use"),
+    }
     println!("cargo:rerun-if-env-changed={VALUE_LOCKS}");
     // Read whatever the target, so a word the script refuses is refused on every build.
     let withheld = withheld();
@@ -56,6 +64,33 @@ fn main() {
         } else {
             println!("cargo:rustc-cfg=wz_one_send_place");
         }
+    }
+}
+
+/// The storage policy of the session's tables (`wz_session_core::bounded::Storage`), chosen by two
+/// facts the features state apart: where the tables' counts come from, the region the build lays
+/// out or the config the open lays its plan out from (`runtime-plan`), and when the tables take
+/// their memory, at the open or at each table's first row (`tables-on-use`). `src/lib.rs` names
+/// the policy's type by the cfg of its name, and every item that differs by the policy reads that
+/// cfg, so where the counts come from and when the memory is taken are read apart.
+enum TablePolicy {
+    /// Placed in the region the build lays out, at the open (`Region`): neither feature.
+    Region,
+    /// Lent from the arena the open lays out from its config, at the open (`Lent`, `wz_lent`).
+    Lent,
+    /// Taken from the allocator at each table's first row (`OnUse`, `wz_on_use`).
+    OnUse,
+}
+
+/// The policy this build's features choose. A session laid out from its config takes its tables
+/// at the open, `tables-on-use` or not: its open has no form that takes them on use yet.
+fn table_policy() -> TablePolicy {
+    let planned = set("CARGO_FEATURE_RUNTIME_PLAN");
+    let on_use = set("CARGO_FEATURE_TABLES_ON_USE");
+    match (planned, on_use) {
+        (true, _) => TablePolicy::Lent,
+        (false, true) => TablePolicy::OnUse,
+        (false, false) => TablePolicy::Region,
     }
 }
 

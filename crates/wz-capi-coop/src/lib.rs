@@ -128,31 +128,32 @@ mod lodging;
 // session whose tables take their memory on use holds a state of its own instead.
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub mod region;
-// The tables take their memory on use in a session whose shape the build fixes. Features add, so a
-// build may name `tables-on-use` beside `runtime-plan` (`listen` and `group` turn it on, and
-// `--all-features` names both): the session laid out at the open from its config wins, its faces'
-// tables kept in the pools that arena lends, and the build is the `runtime-plan` form whole. Each
-// item of the on-use form reads the feature beside `not(feature = "runtime-plan")`, and its twin
-// the negation of both, so no item of the on-use form is compiled into that build
-// (`form_precedence_tests`).
+// Two facts of a build choose the session's tables: where their counts come from (the build's
+// region, or the config the open lays its plan out from, `runtime-plan`) and when they take their
+// memory (at the open, or at each table's first row, `tables-on-use`). The policy that answers both
+// is stated once, by the build script (`build.rs`, `TablePolicy`), as the cfg of its name: `wz_lent`
+// where the open lends the tables from the arena it lays out from its config, `wz_on_use` where they
+// take their memory on use, and neither where the region the build lays out places them. Every item
+// that differs by the policy reads its name, and every item that differs by where the counts come
+// from reads `runtime-plan`, so the two are read apart.
 /// The storage policy of the session's registry, named once so every table of it and the rows each
-/// is given agree on it: lent from the arena where the open lays the arena out from its config
-/// (`runtime-plan`), placed in the region the build lays out otherwise (`region`), and taken from
-/// the allocator at each table's first row where the tables take their memory on use
-/// (`tables-on-use` without `runtime-plan`).
-#[cfg(feature = "runtime-plan")]
+/// is given agree on it: lent from the arena where the open lays the arena out from its config and
+/// lends its tables from it (`wz_lent`), placed in the region the build lays out where the build
+/// fixes the session's shape (`region`), and taken from the allocator at each table's first row
+/// where the tables take their memory on use (`wz_on_use`).
+#[cfg(wz_lent)]
 pub(crate) type RowPolicy = wz_session_core::bounded::Lent;
-/// See the form of a build with `runtime-plan`.
+/// See the form of a build whose open lends its tables.
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) type RowPolicy = wz_session_core::bounded::Region;
-/// See the form of a build with `runtime-plan`.
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+/// See the form of a build whose open lends its tables.
+#[cfg(wz_on_use)]
 pub(crate) type RowPolicy = wz_session_core::bounded::OnUse;
 // The session takes the memory of its tables when it opens and none after (docs/upstream-parity.md,
 // D12): the moment this engine lays its tables out at, which every form above but the on-use one
 // answers. A policy that takes its memory at another moment is a form of its own, chosen with the
 // moment, so no form builds whose policy disagrees with its moment.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
@@ -160,7 +161,7 @@ const _: () = assert!(
     ),
     "the session's tables take their memory at its open"
 );
-#[cfg(all(feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(wz_on_use)]
 const _: () = assert!(
     matches!(
         <RowPolicy as wz_session_core::bounded::Storage>::TAKEN,
@@ -195,15 +196,11 @@ mod form_precedence_tests {
 /// tables take their memory on use.
 #[cfg(all(
     any(wz_round, feature = "query", feature = "queryable"),
-    not(all(feature = "tables-on-use", not(feature = "runtime-plan")))
+    not(wz_on_use)
 ))]
 pub(crate) type StatePolicy = wz_session_core::bounded::Lent;
-/// See the form of a build without `tables-on-use`.
-#[cfg(all(
-    any(wz_round, feature = "query", feature = "queryable"),
-    feature = "tables-on-use",
-    not(feature = "runtime-plan")
-))]
+/// See the form of a build whose tables take their memory at the open.
+#[cfg(all(any(wz_round, feature = "query", feature = "queryable"), wz_on_use))]
 pub(crate) type StatePolicy = wz_session_core::bounded::OnUse;
 // How the engine's calls stand to its threads, and the locks that choice decides.
 mod form;

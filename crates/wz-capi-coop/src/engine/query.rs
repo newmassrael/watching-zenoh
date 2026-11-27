@@ -312,7 +312,7 @@ pub(super) type QueryPlane = wz_session_core::query_plane::QueryPlane<CoopCalls>
 
 // The rows a form that lays its state out at the open lends the Finals and refusals; the on-use
 // form counts them in its own tables and names neither.
-#[cfg(not(all(feature = "tables-on-use", not(feature = "runtime-plan"))))]
+#[cfg(not(wz_on_use))]
 pub(crate) use wz_session_core::query_plane::{FinalHold, RefusedFinal};
 pub(super) use wz_session_core::query_plane::{FinalHolds, HeldFinals, RefusedFinals};
 
@@ -437,7 +437,7 @@ pub(super) fn leaked_plane(rows: usize) -> Box<QueryPlane> {
 }
 
 /// The Finals of at most `rows` queries, in rows lent from an arena the test leaks.
-#[cfg(all(test, feature = "runtime-plan"))]
+#[cfg(all(test, wz_lent))]
 fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::Arena;
     let held = Arena::table_bytes::<FinalHold>(rows).expect("rows the address space holds");
@@ -456,7 +456,7 @@ fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
 }
 
 /// The Finals of at most `rows` queries, counted, taking their rows at the first query held.
-#[cfg(all(test, feature = "tables-on-use", not(feature = "runtime-plan")))]
+#[cfg(all(test, wz_on_use))]
 fn leaked_holds(rows: usize) -> FinalHolds<crate::StatePolicy> {
     use wz_session_core::bounded::BoundedVec;
     FinalHolds::over(BoundedVec::counted(rows), BoundedVec::counted(rows))
