@@ -8557,6 +8557,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4693": {
+      "decision_summary": "Let a node that only dials derive its zid under address-ports: a config\nstates the node's own address (wz/owned-address), which heads the zid in\nplace of the first listener's; a node with neither is refused by name.",
+      "changes_bullets": [
+        "policy_document and the pico tree-less reader read wz/owned-address.",
+        "zid_derivation: the stated address, else the first own listener address.",
+        "capi-core, capi-coop, runtime-tokio and the router node open by it."
+      ],
+      "verification_bullets": [
+        "session-core zid_derivation 8 and owned_address, capi-core 264, coop pass.",
+        "runtime-tokio zenoh_config 106 pass; wz_config --check/--selftest pass.",
+        "app-plane oracle 14/14 with the address stated; 9/14 without it."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
