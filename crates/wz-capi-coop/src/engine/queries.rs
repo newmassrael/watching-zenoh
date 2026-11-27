@@ -34,15 +34,67 @@ use wz_session_core::wireexpr_resolve::KeyexprBuf;
 use super::direct::{FaceRecords, RecordActions};
 use super::query::QueryableCall;
 
+/// What the walk of a peer's query reads of the face it came from, beside the session's tables:
+/// the face and its generation, and the calls that answer through the face's kind (a link's
+/// actions, a group's replies). The walk is the engine's, compiled once for every kind of face;
+/// only these calls are compiled for each.
+pub(super) trait QueryFace {
+    /// The face the query came from.
+    fn face(&self) -> HeldFace;
+    /// The face's generation, which the query is answered under.
+    fn generation(&self) -> u64;
+    /// Keep the key form of each query `event` carries, so a reply on its key mirrors it.
+    fn keep_query_keys(&self, event: &IterationEvent<'_, '_>);
+    /// Owe the Finals the dispatch of the face's records staged in `registry`.
+    fn owe_staged_finals(&self, registry: &mut Registry);
+    /// The query `rid` owes its Final, of `qos`.
+    fn owe_query_final(&self, rid: wz_session_core::wire_id::RequestId, qos: QosLevel);
+    /// Hold the replies the face sends until [`Self::release_answers`], and say whether this call
+    /// raised the hold.
+    fn hold_answers(&self) -> bool;
+    /// Let go of the hold [`Self::hold_answers`] raised, when `raised`, and send what it held.
+    fn release_answers(&self, raised: bool);
+}
+
+impl<A: RecordActions> QueryFace for FaceRecords<A> {
+    fn face(&self) -> HeldFace {
+        self.face
+    }
+
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn keep_query_keys(&self, event: &IterationEvent<'_, '_>) {
+        self.note_requests(event);
+    }
+
+    fn owe_staged_finals(&self, registry: &mut Registry) {
+        self.owe_finals(registry);
+    }
+
+    fn owe_query_final(&self, rid: wz_session_core::wire_id::RequestId, qos: QosLevel) {
+        self.owe_final(rid, qos);
+    }
+
+    fn hold_answers(&self) -> bool {
+        wz_session_core::response_sink::ResponseSink::hold_replies(self.actions.sink())
+    }
+
+    fn release_answers(&self, raised: bool) {
+        wz_session_core::response_sink::ResponseSink::release_replies(self.actions.sink(), raised);
+    }
+}
+
 impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> {
     /// Hand the query of the Request `record`, the record `event` of the face `records` reads,
     /// to each queryable it reaches, one call at a time with the session let go of, then owe its
     /// Final; a Request the lent form does not represent by its owned projection. A Request no
     /// queryable is handed (no Query, its key unresolved, past the bounds or the Finals the face
     /// holds) sends what its dispatch owes. A closed session hands nothing.
-    pub(super) fn hand_lent_query<A: RecordActions>(
+    pub(super) fn hand_lent_query(
         &self,
-        records: &FaceRecords<A>,
+        records: &dyn QueryFace,
         record: &InPlaceRecord<'_, '_>,
         event: &IterationEvent<'_, '_>,
     ) {
@@ -50,12 +102,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         let Some(mut held) = self.live() else {
             return;
         };
-        records.note_requests(event);
+        records.keep_query_keys(event);
         let pinned = held
             .0
             .session
             .registry
-            .pin_lent_query(records.face, record, &mut room);
+            .pin_lent_query(records.face(), record, &mut room);
         let mut query = match pinned {
             // SAFETY: what the query borrows outlives the walk, which holds it no longer than this
             // call: the frame is lent by the pump the read holds through it, `room` stays in this
@@ -63,7 +115,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             // runs (see the module's docs).
             Ok(Some(query)) => unsafe { past_the_lock(query, record) },
             Ok(None) => {
-                records.owe_finals(&mut held.0.session.registry);
+                records.owe_staged_finals(&mut held.0.session.registry);
                 return;
             }
             Err(OwedToProjection) => {
@@ -78,10 +130,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// projection, read under `held`, handed as one the copying receive decoded. Out of line, so
     /// the lent walk's frame does not hold the projection's.
     #[inline(never)]
-    fn hand_projected_query<A: RecordActions>(
+    fn hand_projected_query(
         &self,
         held: LiveCore<'_, L, C>,
-        records: &FaceRecords<A>,
+        records: &dyn QueryFace,
         record: &InPlaceRecord<'_, '_>,
     ) {
         if let Some(request) = wz_session_core::query::pinned::project_request(record) {
@@ -95,10 +147,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// no queryable is handed sends what its dispatch owes. Out of line, so the room the query's
     /// parts lie in is in a frame of its own.
     #[inline(never)]
-    pub(super) fn hand_owned_query<A: RecordActions>(
+    pub(super) fn hand_owned_query(
         &self,
         mut held: LiveCore<'_, L, C>,
-        records: &FaceRecords<A>,
+        records: &dyn QueryFace,
         request: &wz_session_core::wire::RequestOwned,
     ) {
         let mut room = QueryRoom::default();
@@ -106,9 +158,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .0
             .session
             .registry
-            .pin_owned_query(records.face, request, &mut room);
+            .pin_owned_query(records.face(), request, &mut room);
         let Some(query) = pinned else {
-            records.owe_finals(&mut held.0.session.registry);
+            records.owe_staged_finals(&mut held.0.session.registry);
             return;
         };
         // SAFETY: what the query borrows outlives the walk, which holds it no longer than this
@@ -123,29 +175,25 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// in the face's open frame and its hold on the Final is let go of after it (`run_queryable`).
     /// Then the query owes its Final, sent at once unless a callback keeps the query, and what
     /// was held leaves with it.
-    fn hand_query<A: RecordActions>(
+    fn hand_query(
         &self,
         held: LiveCore<'_, L, C>,
-        records: &FaceRecords<A>,
+        records: &dyn QueryFace,
         query: &mut PinnedQuery<'_>,
     ) {
-        let generation = records.generation;
+        let generation = records.generation();
         let first = self.pin_queryable(&held, query, generation);
         drop(held);
         // The callbacks' replies wait in the face's open frame for the Final, and the two leave
-        // in one send once it is owed. No window is open meanwhile: what else is sent, on this
-        // thread or another, goes at once.
-        let replies =
-            wz_session_core::response_sink::ResponseSink::hold_replies(records.actions.sink());
+        // in one send once it is owed (`query-replies-with-final`). No window is open meanwhile:
+        // what else is sent, on this thread or another, goes at once.
+        let replies = records.hold_answers();
         self.call_queryables(first, query, generation);
         // A session closed by a callback sends nothing more.
         if let Some(_held) = self.live() {
-            records.owe_final(query.rid(), query.qos());
+            records.owe_query_final(query.rid(), query.qos());
         }
-        wz_session_core::response_sink::ResponseSink::release_replies(
-            records.actions.sink(),
-            replies,
-        );
+        records.release_answers(replies);
         #[cfg(test)]
         if replies {
             self.takes.held_answers.fetch_add(1, Ordering::Relaxed);
