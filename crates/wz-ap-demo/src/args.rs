@@ -613,9 +613,13 @@ pub(crate) fn parse_pair(args: &[String], flag: &str) -> Option<String> {
 /// the zid the dialling node proves to the listener (decision D1 of
 /// `docs/session-lifecycle-intent.md`), so a node that claims it with `--zid` is a commander a
 /// listener can grant verbs to.
+///
+/// The key is read only by the dial that presents it, which a build without `tls` does not have;
+/// the certificate is also named in the client's banner, so it is read in every build.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TlsConnectIdentity {
     pub cert: Option<String>,
+    #[cfg(feature = "tls")]
     pub key: Option<String>,
 }
 
@@ -624,6 +628,7 @@ impl TlsConnectIdentity {
     pub(crate) fn from_args(args: &[String]) -> Self {
         Self {
             cert: parse_pair(args, "--tls-connect-cert"),
+            #[cfg(feature = "tls")]
             key: parse_pair(args, "--tls-connect-key"),
         }
     }
@@ -632,7 +637,9 @@ impl TlsConnectIdentity {
 /// The root a `tls/...` listen verifies its clients' certificates against when `--tls-mtls` asks
 /// for mutual TLS: `--tls-ca`, which upstream reads for both directions
 /// (`transport/link/tls/enable_mtls` with `root_ca_certificate`). `None` without `--tls-mtls`,
-/// and then the listener asks no client for a certificate.
+/// and then the listener asks no client for a certificate. Read by the two run-modes that listen
+/// with a client's certificate in view, the peer mesh and the router-hat.
+#[cfg(any(feature = "routing-peer", feature = "router-hat-router"))]
 pub(crate) fn parse_tls_client_ca(args: &[String]) -> Option<String> {
     if args.iter().any(|a| a == "--tls-mtls") {
         parse_pair(args, "--tls-ca")
