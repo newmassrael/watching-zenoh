@@ -1510,7 +1510,59 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   them (none on use) and the count the engine keeps the arena by (`ArenaKeep`); the arena and its
   count are the next and last step of 3d.
 
+### 7.30 The reds of hn19 and the kept message's bound on use
+
+- `5db4e1ab42` (the red of hn19): `TransportRows::lent_from` took the open's lender in every form,
+  and on use read none of it once every transport table was counted (the endpoints' texts, the
+  chains, the kept publishes): every on-use build failed on the unused parameter. The lend is now
+  the lent forms' alone (`not(wz_on_use)`), and on use `TransportRows::counted` makes the same
+  tables from the plan's counts with no lender; the open and the on-use tests (`tests::on_use`
+  two, `tests::arena` the kept publishes') take the transport without reserving an arena for it.
+- `425e22cf54`: the window 7.28 left open is closed. The form chooses where a chain's buffer
+  comes from, never how many are admitted: on use the chains are counted against a table of the
+  lent table's count (`HeapByteCells`, `wz-session-core` `byte_cells.rs`, `alloc`), the plan's
+  `REASSEMBLY_CHAINS` for each face read where it lies, which the session's Routers share as they
+  share a lent table. A buffer is taken of the allocator at its claim (`OwnBuf`) and holds a count
+  of the table until it drops, so a rejoined message kept by its reader (`KeptBytes::own`) holds
+  its buffer out of the table as a lent cell is held, and a chain that starts meanwhile is refused
+  where the lent table refuses it. `OwnStaging::over(&HeapByteCells, chains)` mirrors
+  `LentStaging::over` (its `available` the smaller of its chains left and the table's buffers
+  free); `HeapChains::try_sized(bytes, buffers, chains)` takes the table's count at the open, the
+  one allocation the on-use transport makes there, refused as `ArenaRefused::NoMemory`
+  (`HeapByteCells::COUNT_BYTES`). The count and each handle are cells, as the lent table's flags
+  are (one task claims and releases); the count lies in an allocation of its own, held by every
+  handle and every buffer lent, so no holder points at memory another owner may let go first.
+- Tests. wz-runtime-coop `reassembly_rx::tests::both_forms_count_a_kept_message_against_the_sessions_chains`
+  (new; the same scenario over the lent table and the on-use one, `LENT_CHAINS` and
+  `SESSION_CHAIN_BUFFERS` buffers: B refused over the first in both and begun over the second in
+  both, CONTROL the lent outcome; red if `OwnStaging::keep` gives the buffer back or its `take`
+  reads its own count alone); `an_on_use_router_stages_each_chain_in_a_buffer_of_its_own` over a
+  table of `SESSION_CHAIN_BUFFERS`. wz-session-core `byte_cells::tests::a_heap_table_lends_as_many_buffers_as_a_lent_table_of_its_count`
+  (new; red if `claim` passes the count or `OwnBuf`'s drop gives nothing back);
+  `kept_bytes_of_an_own_buffer_are_read_where_it_lies` now also reads the buffer out of its
+  table while kept; `reassembly_dispatch::tests::a_kept_own_chain_is_handed_up_where_it_was_staged`
+  adds the table of one buffer, where the next chain is refused while the message is kept, and the
+  three other own-staging tests stage over a table. wz-capi-coop
+  `tests::on_use::an_on_use_sessions_chains_are_sized_by_the_plan_and_lent_no_table` reads the
+  table's count (the plan's chains) beside the length and each Router's share.
+
 ## 8. What the main session runs
+
+- The reds of hn19 and the kept message's bound on use (`5db4e1ab42`, `425e22cf54`), not built or
+  run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --features
+  alloc,reassembly --lib byte_cells` (one more) and `--lib reassembly_dispatch` (count unchanged);
+  `cargo test --manifest-path crates/Cargo.toml -p wz-runtime-coop --features
+  alloc,session-unicast,reassembly --lib reassembly_rx` (one more); `cargo test --manifest-path
+  crates/Cargo.toml -p wz-capi-coop --features tables-on-use --lib tests::on_use` and `--features
+  listen,tables-on-use --lib tests::arena` (counts unchanged, now compiling), the default set's
+  `--lib` (unchanged). Clippy of wz-session-core (`--features alloc,reassembly` and
+  `--no-default-features --features reassembly`), wz-runtime-coop (`--features
+  alloc,session-unicast,reassembly`) and wz-capi-coop in its default set, `--features
+  tables-on-use`, `--features listen,tables-on-use`, `--features udp-listen,tables-on-use` and
+  `--features group-host`. Size: D12 none (the lent arm's code unchanged, `KeptBytes`'s own arm
+  holds a handle beside its buffer); on use one small allocation at the open (the chains' count),
+  a count's read and write at each chain's start and end and at a kept message's drop. Receive Ir:
+  an unfragmented receive unchanged; on use a rejoined message two cell updates more.
 
 - 3d, steps 3 and 4, the caches' ring and the ABI's places on use (`59685c9a0d`, `898e504334`),
   not built or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop
