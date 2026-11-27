@@ -163,6 +163,7 @@ its plane.
 | CN1 (the row) | `refactor(session-core): Hold a face row's link ends as facts, not text` | `FaceLinkRow`'s `src` and `dst` texts became `ends: RowEnds`: the ends a driver lent (`Lent`: the kind, and each end an IP address or a name, `LentEnd`), a group member's (`Member`: the group's locator and the address the member's datagrams come from), or two locators a snapshot holds written (`Written`, the tokio engine's rows, read off `FaceSnapshot`). `FaceLinkRow::write_src` and `write_dst` write a locator with `link::write_locator` (now public, still the one writer) where the row is read; `member_end` is the one writer of a member's end, for its row and its snapshot (`GroupMemberLink`). The engine writes no locator into a row: `end_row`, `ends_row`, `udp_row`, `member_row` and `udp_text` are gone. The pico door writes each end once into the string it hands out (`ConnText::written`: on the stack, one allocation of the text's length) | `a_row_holds_the_ends_its_driver_lent_and_reads_as_their_locators` (red if a row writes another scheme, suffix or address than the driver's ends, or keeps an end's text rather than its address), `a_group_members_row_is_the_row_of_its_snapshot_held_in_place` now reads the member's address in the row, `a_member_end_is_written_whole` (the widest IPv6 end, and a UDP group's member written as no group's), `a_links_ends_are_written_where_they_are_handed_out` in the pico door (red if the door writes another scheme, none, or cuts a name past the row's bound); the snapshot, told-row and queue tests unchanged in what they assert |
 | CN2 | `refactor(capi-pico): Write a session's group text once, at its open` | as planned: `GroupText`, pico's text of the endpoint the session joins its group by (`pico_group_endpoint_text`), is written by each open where it plans the join (the tokio engine's and the cooperative engine's, before the config it is read from goes), handed to `PicoSessionExt::new` and kept by the hub (`Connectivity::group`), which every door that hands out a member's link reads (`z_info_links`, a listener's events, its replay and its convergence). No row is read as pico's endpoint text again. The engine's row still carries the endpoint the group was joined by, which other ABIs' snapshots read (`GroupLink`) | `a_members_link_starts_at_the_text_the_open_wrote` (red if the door reads the group's text for a unicast link, or ignores it for a member, which then starts at the group's locator); `a_group_members_link_starts_at_the_joined_endpoint` and its raweth twin unchanged in what they assert, reading through `GroupText` as the open writes it |
 | CN1 (the queue) | `refactor(capi-pico): Hold a replay's arrivals as keys, told from rows` | takes back CN3's queue growth by holding no event at all: a queue row is a change (`Held`: the row's key and whether it came), the same for either plane, and its event is written when it is told, from the row the engine keeps as it notes the listener told. `SessionEngine::tell_came` and `tell_went` answer that row (`Option<FaceLinkRow>`) where they answered whether to tell: the row as it stands, or as it was told it came, read from its tomb (the cooperative engine's face tomb, a group's member tomb, the port's `ToldLedger`). A held change owns nothing, so `Pending::release` and the events' release on a fold are gone | the replay tests of the delivery over held changes, unchanged in what they assert (a PUT and DEL that cancel, a reconnect told in order, a queue past its rows that converges once, holding allocates nothing); the engine's told tests now read the row a departure is told by (`a_told_face_that_goes_keeps_its_tomb_until_its_departure_is_told`, the second departure kept apart, `a_member_told_stays_as_its_tomb_until_its_departure_is_told`, `a_tombstone_stays_until_every_listener_told_it_came_was_told_it_left`: red if a departure is told of another row than the one it was told came as); a compile-time bound holds a queue row below two transport events |
+| CN1 (the admission) | `refactor(runtime-coop): Bound a link's IP ends by its pair's bound alone` | what CN1 left owed (section 8). `ends_fit` refused an IP link whose locator would not fit `MAX_LOCATOR_LEN`, so that no face row spilled; a row now holds an IP end as its address, and the one reader left that holds an IP end's text in a bound is the pair of locators a link reports (`LinkEndpoints`), held in the link under `session-slot` (the slot profile's admin rows and stats labels read it) and a pair of `String`s otherwise. The pair states that bound (`LinkEndpoints::BOUND`: `Some(MAX_LOCATOR_LEN)` under `session-slot`, `None` otherwise) and `ends_fit` asks it (`ends_fit_within`), so a build without `session-slot` admits every IP link and a slot build refuses what its pair would. A FIFO's end, which a face's row holds as text (`LentEnd::Named`), keeps its rule (`StreamEnds::fit`). The pico door's `ConnText::written` reaches the heap past the bound for an IPv6 end with its scope under a bound below 62 bytes, as it does for a unix socket path; a handed-out link is an allocation of its own either way. No preset sets the bound below 62 (the default is 64), so no preset case's bytes move | `link::tests::a_pair_states_its_bound_exactly_when_it_holds_one` (red if a bound is stated for a pair of `String`s, which would have a link refused that no reader refuses, or none for a pair held in the link); `udp_link::tests::a_link_is_admitted_exactly_when_its_pairs_bound_holds_both_ends` over `ends_fit_within` with no bound, a bound one byte short of the widest IPv6 end and one that holds it, and `ends_fit` against the build's own `BOUND` (red where a short `MAX_LOCATOR_LEN` without `session-slot` refuses the widest IPv6 link, or a length is answered otherwise) |
 
 ## 8. What waits, and why
 
@@ -202,14 +203,42 @@ its plane.
   (`RowEnds`'s `Lent` holds a kind beside two ends of a name's size, about 8 bytes a row on a
   64-bit target, an estimate), which the face watch's queue, each face's kept row and the hub's
   told rows each hold; and the hub keeps the group's text (one `GroupRowText` a session with
-  `connectivity`). Not done here, and owed: `wz_runtime_coop::udp_link::ends_fit` refuses an IP
-  link whose locator would not fit `MAX_LOCATOR_LEN`, a rule written so that no face row spills
-  to the heap; a row now holds an IP end as its address, so whether the rule still has a reader
-  that needs it (the bounded `LinkEndpoints` of `session-slot`) is to be read before it is
-  kept or narrowed.
-- **CN4** is not begun. It keeps its plan and its order: the hub told as the face changes, from
-  the engine's face watch, with no queue between, which removes `Told`, `catch_up` and
-  `MAX_CONNECTIVITY_TOLD_ROWS`'s rows.
+  `connectivity`). The admission rule CN1 left owed, `ends_fit`'s bound, is narrowed to the one
+  reader that holds an IP end's text in a bound (section 7, CN1 (the admission)).
+- **CN4 is stopped: its premise is false in the code.** The plan has the hub told as the face
+  changes, outside the engine's lock, with no queue between. The cooperative engine sees a face
+  change under its lock: `Core::bring_up_with` and `Core::lose_face_link`
+  (`crates/wz-capi-coop/src/engine.rs`) run on the core the session's lock holds, and report the
+  row there (`SessionState::report_face_row`). The hub's callbacks run outside that lock, as
+  zenoh-pico's do, because a callback may list the transports, which takes it. A change seen under
+  the lock is therefore carried across its release to the hand-out (`CoopEngine::hand_out`,
+  `FacePlane::hand_out_next`), and something holds it meanwhile: no form of this engine has
+  nothing between. (The tokio engine tells its watchers outside its registry's lock from the thread
+  that changed the face, so its rows never count a loss; the hub's reconciliation is the
+  cooperative engine's alone.) What can be chosen is the carrier, and each choice that removes the
+  hub's reconciliation (`Told`, `catch_up`, `stands_as_told`, `FaceLinkRow::lost_after`,
+  `MAX_CONNECTIVITY_TOLD_ROWS`) changes what a listener is told, so it is the owner's:
+  - **The queue as it stands**: a ring of `face_event_rows` rows (two a place, at most
+    `MAX_FACE_WATCH_ROWS`), a loss counted on the last row kept, and the hub told what the loss
+    changed against the rows that stand. It is the bounded queue with an overflow mark and a
+    rescan (the form of inotify's `IN_Q_OVERFLOW`): every transient told while the room holds,
+    the state after a loss.
+  - **The state of record** (level-triggered): each face place and each group member row keeps
+    the row its watchers were last told, kept across the place's reuse, and the hand-out tells,
+    a change at a time read under the lock and told outside it, what differs between that row and
+    the row that stands (a departure, then an arrival). Nothing is lost and nothing reconciled,
+    at one row a place where the ring holds two; but a face that came and went between two
+    hand-outs is told neither, where zenoh-pico, dispatching from the task that saw the peer,
+    tells both.
+  - **Two slots a place, ordered by a sequence**: a place holds at most its arrival and its
+    departure untold, and a third change coalesces the pair still untold. The state is never
+    lost and the hub reconciles nothing; a transient is lost only when one place turns over twice
+    in one pass, which the ring tells while its room holds.
+  To read before the ruling: the twin's (`pico-api-coop-nostd`) bytes of `Connectivity::catch_up`,
+  `Told`, `stands_as_told` and the ring against one told row a place; and whether a hand-out
+  follows every step that changes a face on both engine forms (`wz_round` and not), which bounds
+  how often a place can turn over between two hand-outs and so how often the second and third
+  forms coalesce.
 - **K1 and K2** landed (section 7). **K3 waits on CN4: its off form's premise is false while the
   hub is handed queued rows.** Section 5 says the off form holds the face table's read across the
   replay, so that an arrival waits for it rather than queueing. It does not wait: the rows reach the
@@ -223,3 +252,18 @@ its plane.
   face table changes, so that one lock orders the change, its telling and a replay's walk. K3's
   capability, its features and its off form land with or after CN4; no capability is declared
   before the code it switches.
+- **K3's off form, recorded for the owner's ruling, by CN4's carrier.** With the queue as it
+  stands there is no off form that matches zenoh-pico: a replay under the face table's read stops
+  no row already queued (above), and a replay run in the hand-out pass, where the rows are
+  ordered, runs after `z_declare_*_listener` returns, where zenoh-pico's runs before. With the
+  state of record the off form is exact and smaller than the on form: the declare walks the rows
+  the watchers were last told (what the hub has been told, not the rows that stand, which may
+  hold a change not handed out yet), under the engine's lock, calls the closure there and puts the
+  listener in the table before it lets go, as zenoh-pico replays under its peer lock and inserts
+  the listener after (`_z_connectivity_replay_transport_history`). No arrival interleaves, since
+  every later change reaches the listener through the hand-out as a difference from those rows,
+  so the off form needs neither `Pending` nor the engine's told notes (`SessionEngine::tell_came`,
+  `tell_went`, `first_told_gone`, `forget_told`, the face and member tombs, the port's
+  `ToldLedger`); a replay's callback that reads the faces waits on itself, as zenoh-pico's does.
+  The on form keeps what it has. So the ruling on CN4's carrier decides K3's off form, and K3
+  is not implemented before it.
