@@ -1,6 +1,6 @@
 # Formal models of wz: the promises are written here, and SCE's judge checks them once wz pins it
 
-Status: plan and first model, 2026-11-27. No configuration here has been run by TLC yet (section 4).
+Status, 2026-11-28: each configuration here has been run by hand with the TLC release SCE pins (1.7.4), and each run's outcome is the one models.json declares; the judge itself, which also checks state counts, promises and what stays possible, waits for SCE (section 4).
 
 wz is to be generated from SCE documents for Rust and C, and checked with TLA+ as SCE ADR 0115 lays
 out (`vendor/sce/docs/adr/0115-*.md`): a promise module (level 1) says what a user may rely on, a
