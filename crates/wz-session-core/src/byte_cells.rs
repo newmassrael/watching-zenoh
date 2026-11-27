@@ -436,7 +436,9 @@ impl OwnBuf {
         &self.bytes
     }
 
-    /// What was written in the buffer, to write more in the room it was claimed with.
+    /// What was written in the buffer, to write more in the room it was claimed with: a chain's
+    /// staging writes its fragments through it.
+    #[cfg(any(test, feature = "reassembly"))]
     pub(crate) fn written(&mut self) -> &mut alloc::vec::Vec<u8> {
         &mut self.bytes
     }
