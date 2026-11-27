@@ -834,6 +834,8 @@ def python_refs(text: str, given: frozenset[str] | None = None,
             argv = _cargo_argv(node.elts, consts)
             if argv is not None:
                 cargo.append(argv)
+            # Recognises a lane call in a module's source and never makes one, so the decline
+            # assertion (`WZ_DECLINED_EXPECT`) is not this reader's to arm or to drop.
             runs_lane = runs_lane or (any(w.endswith("run-ci.sh") for w in words) and "--layer" in words)
         if isinstance(node, ast.Import):
             for alias in node.names:
