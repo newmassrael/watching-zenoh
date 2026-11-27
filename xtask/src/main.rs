@@ -502,6 +502,8 @@ fn regen_codec_deployment(
 ///   wz-volume-abi    : abi_gate_verdict, volume_abi_verdict (algorithms)
 ///   wz-node-time     : timestamping_enabled_for (algorithm)
 ///   wz-capi-pico     : pico_link_properties (algorithm); pico_link_reported (event-schema)
+///   wz-session-core  : also fragment_pacing_wait (algorithm), fragment_pacing_step
+///                      (event-schema)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -587,6 +589,9 @@ fn regen_statecharts_and_pools(root: &Path) {
         "capacity_lateness_limit",
         "capacity_cost_with_margin",
         "capacity_calibrated_emission",
+        // A datagram writer's fragment pacing (wz-session-core `fragment_pacing`): how long the
+        // writer waits before a datagram, the pacer's run taken and given back.
+        "fragment_pacing_wait",
     ] {
         codegen.emit_algorithm(stem, &algorithms, &sc_out);
     }
@@ -597,6 +602,7 @@ fn regen_statecharts_and_pools(root: &Path) {
         "keyexpr_shape_schema",
         "reset_peer_schema",
         "take_generation_duplicate",
+        "fragment_pacing_step",
     ] {
         codegen.emit_event_schema(stem, &algorithms, &sc_out);
     }

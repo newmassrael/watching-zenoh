@@ -27,6 +27,9 @@ promises those levels will be held to.
 | `E2eCounterService.tla` | 1, promise | A receiver of one stream of end-to-end protected frames judges each frame by what it is: the baseline's message again a repetition, 1 to `max_gap` messages on in range with the exact count of messages lost, further on out of range; a message the sender refused is never counted as lost |
 | `E2eCounters.tla` | 2, protocol | How the two ends keep it: the sender's counter and its rollover (`sources/algorithms/counter_after.scxml`), and the receiver's step and verdict (`e2e_counter_step`, `e2e_counter_verdict`). `Refines` checks it against the promise |
 | `E2eCounters*.cfg` | bounded exploration | A two-bit counter made with 1, nine messages (twice round the ring), a gap of two, under `Wrap` and under `Refuse`; one configuration per part taken out |
+| `FragmentPacingService.tla` | 1, promise | A paced writer's fragments: at most `Burst` in a row each less than `Gap` after the one before, none delayed past the gap after the last write, a datagram that is not a fragment never delayed, and `Burst` fragments let through between two waits |
+| `FragmentPacing.tla` | 2, protocol | The pacer (S1 29): the rule `sources/algorithms/fragment_pacing_wait.scxml`, its run taken and given back. `Refines` checks it against the promise |
+| `FragmentPacing*.cfg` | bounded exploration | A burst of two, a gap of three, six datagrams of either kind over five ticks; one configuration per part taken out |
 | `models.json` | manifest | Every module and configuration, in the format of SCE's `schemas/sce-formal-models.v1.schema.json` (`"v": 1`, no tool pin) |
 
 ## 2. Each part of the query's Final has a configuration that fails without it
@@ -109,6 +112,24 @@ the value a caller names on the next frame; the profile's rule that keeps the ba
 out of range, the joined report of a repetition and a step out of range, the CRC and the timeout.
 The test `across_the_wrap_the_receiver_reads_every_loss_and_repetition_the_sender_made` of
 `crates/wz-app-frame/src/e2e_rules_tests.rs` runs the same sequence on the code.
+
+### A writer's fragment pacing (2026-11-28)
+
+The mechanism is S1 29 of `docs/zenoh-logic-as-sce-kinds.md`: the `datagram-fragment-pacing`
+policy's pacer, whose rule moved into the SCE algorithm `fragment_pacing_wait` the same day.
+Neither upstream preset paces fragments; the promise is what a sender over a paced link relies on.
+
+| Part (constant) | What it keeps | Without it TLC is to find | Promise |
+|---|---|---|---|
+| `Hold` | a fragment past the burst waits for the gap | three fragments written at one time (`Spaced`) | broken |
+| `EndRun` | a datagram that is not a fragment ends the run | a fragment held just after one that is not a fragment (`LetsBurst`) | broken |
+| `Restart` | the run starts again at one after a held fragment | two held fragments in a row (`LetsBurst`) | broken |
+| `Subtract` | a held fragment waits the gap less the time already passed | a fragment written later than the gap after the last write (`BoundedDelay`) | broken |
+
+Run by hand with TLC 1.7.4 on 2026-11-28, outside the judge: the holding configuration found no
+violation in 57162 distinct states and refines the promise, and each configuration with a part
+taken out found the violation the table names. Not modelled: a timer that wakes late, a clock
+that goes back, and the time a write takes (the module's "Taken as given").
 
 ## 3. The judge is SCE's, and the SCE revision wz pins cannot run it on this manifest
 

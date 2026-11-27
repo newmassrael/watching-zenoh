@@ -272,6 +272,58 @@
       "decision": "docs/zenoh-logic-as-sce-kinds.md, W12 (S11 3, S10 8)",
       "runs": [],
       "abstract": true
+    },
+    {
+      "module": "FragmentPacing",
+      "decision": "docs/zenoh-logic-as-sce-kinds/S1.md, row 29",
+      "parts": {
+        "Hold": "TRUE",
+        "EndRun": "TRUE",
+        "Restart": "TRUE",
+        "Subtract": "TRUE"
+      },
+      "runs": [
+        {
+          "config": "FragmentPacing.cfg",
+          "expect": "holds"
+        },
+        {
+          "config": "FragmentPacing_without_hold.cfg",
+          "expect": "violates",
+          "invariant": "Spaced",
+          "without": "Hold",
+          "promise": "broken"
+        },
+        {
+          "config": "FragmentPacing_without_end_run.cfg",
+          "expect": "violates",
+          "invariant": "LetsBurst",
+          "without": "EndRun",
+          "promise": "broken"
+        },
+        {
+          "config": "FragmentPacing_without_restart.cfg",
+          "expect": "violates",
+          "invariant": "LetsBurst",
+          "without": "Restart",
+          "promise": "broken"
+        },
+        {
+          "config": "FragmentPacing_without_subtract.cfg",
+          "expect": "violates",
+          "invariant": "BoundedDelay",
+          "without": "Subtract",
+          "promise": "broken"
+        }
+      ],
+      "promise": "Refines",
+      "refines": "FragmentPacingService"
+    },
+    {
+      "module": "FragmentPacingService",
+      "decision": "docs/zenoh-logic-as-sce-kinds/S1.md, row 29",
+      "runs": [],
+      "abstract": true
     }
   ]
 }

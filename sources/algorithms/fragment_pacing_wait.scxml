@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The rule of the `datagram-fragment-pacing` policy (wz-session-core `fragment_pacing`): how long
+  a datagram link's writer waits before it writes the datagram it is about to write at `now_us`,
+  and the run of fragments after it. The pacer's state is taken and given back: `run`, the
+  fragments written since the last wait or the last datagram that was not a fragment, comes in
+  and goes out in the step; `written_at_us`, when the last datagram was written, is the host's
+  to note once the write has returned.
+
+    - A datagram that is not a fragment is never delayed and ends the run before it.
+    - Of a run of fragments, at most `burst` are written back to back; the next waits until
+      `gap_us` has passed since the last datagram was written, and starts a new run of one.
+    - A wait that has already passed, the writer having been idle, is not waited again: the
+      wait is the gap less the time since the last write, held at 0.
+
+  The time is an argument and the rule owns no clock, so it is tested at every value of its two
+  numbers and driven by any engine's clock. `burst` is at least 1 (the pacer reads 0 as 1 when
+  it is made). The subtractions saturate and the run's increment saturates at the largest
+  `uint32`, which a burst of that size never reaches; the rule cannot fail.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="fragment_pacing_wait"
+       version="1.0">
+  <sce:import kind="event-schema" src="fragment_pacing_step.scxml" as="Step"/>
+  <sce:signature>
+    <sce:param name="fragment" type="bool"/>
+    <sce:param name="run" type="uint32"/>
+    <sce:param name="burst" type="uint32"/>
+    <sce:param name="gap_us" type="uint64"/>
+    <sce:param name="written_at_us" type="uint64"/>
+    <sce:param name="now_us" type="uint64"/>
+    <sce:return type="record:Step"/>
+  </sce:signature>
+  <sce:body>
+    <sce:if cond="!fragment">
+      <sce:var name="other" type="record:Step">
+        <sce:set name="wait_us" expr="0"/>
+        <sce:set name="run" expr="0"/>
+      </sce:var>
+      <sce:return expr="other"/>
+    </sce:if>
+    <sce:if cond="run &gt;= burst">
+      <sce:var name="held" type="record:Step">
+        <sce:set name="wait_us" expr="saturatingSub(gap_us, saturatingSub(now_us, written_at_us))"/>
+        <sce:set name="run" expr="1"/>
+      </sce:var>
+      <sce:return expr="held"/>
+    </sce:if>
+    <sce:var name="through" type="record:Step">
+      <sce:set name="wait_us" expr="0"/>
+      <sce:set name="run" expr="saturatingAdd(run, 1)"/>
+    </sce:var>
+    <sce:return expr="through"/>
+  </sce:body>
+</scxml>

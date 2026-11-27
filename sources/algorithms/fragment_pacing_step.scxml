@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  One step of a writer's fragment pacing (fragment_pacing_wait.scxml): how long the writer waits
+  before it writes the datagram asked about, in microseconds (0 to write at once), and the run of
+  fragments the pacer holds after it, which the pacer gives back on the next step. No machine
+  sends it as an event; the event-schema kind is how SCE declares a record (SCE_FORGE.md,
+  "Records").
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       version="1.0"
+       sce:kind="event-schema"
+       name="fragment_pacing_step"
+       sce:event-name="fragment.pacing_step">
+  <datamodel>
+    <data id="wait_us" sce:type="uint64" sce:direction="in"/>
+    <data id="run" sce:type="uint32" sce:direction="in"/>
+  </datamodel>
+</scxml>
