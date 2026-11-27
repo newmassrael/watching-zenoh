@@ -480,3 +480,40 @@ Held by every test that reads the conduits or the numbers, unchanged: `session_a
 `outbound_frame_sn_splits_reliable_and_best_effort_channels` and, with `transport-multilink` and
 `session-reconnect`, `reset_for_reopen_preserves_shared_sn_while_a_link_is_live` (red if the
 reset reaches the numbers while a link is live, or misses them once none is).
+
+## 12. T4's first half: no push kept while the conduits are held, as landed
+
+Section 9.4 settled that the group's session reads no input while a push holds the group's
+conduits. Two commits make it the code, before T3a-2 and independent of it:
+
+- The round form's input gate also asks the stage (`GroupTxStage::sending`, whether a push or a
+  flush of the batch window holds the conduits): `GroupFace::made` builds the session's gate as
+  `!stage.sending() && round_gate.takes()`. Inside a put's wait for room the group's own task
+  then leaves what the members sent in the socket, as it does when the round has no room.
+- The stage keeps nothing a push makes while the conduits are held: a message of the session is
+  a congestion drop of its lane, a reply is dropped as one past the reply limit
+  (`GroupTxStage::dropped`), and neither takes a sequence number. `Staged`, its
+  `VecDeque<StagedMessage>`, the kept count, `GroupTxStage::stage` and `push_deferred` are gone,
+  and with them `multicast_tx_push_staged` and `multicast_tx_encode_into`, which nothing else
+  called. In the pico builds no push ever found the conduits held (section 9.4), so they send
+  what they sent; the round form sends a reply after the put it was asked under, from the
+  socket instead of from the staged storage.
+
+Expected (`pico-api-coop-nostd`): -7,000 to -9,000, read from section 2's table
+(`push_deferred` 6,326, `stage` 738) and estimated for `Staged::keep`, the staged push's
+framing instance and the encode into the staged storage; `pico-client-coop-nostd` 0 (no group);
+receive Ir none (a send path, and one flag read a step in the round form only).
+
+Held by: `group_drive::stage::tests::the_stage_is_sending_while_a_push_holds_its_conduits` (red
+if `sending` reads anything but the conduits' borrow);
+`a_push_made_while_the_conduits_are_held_is_a_counted_congestion_drop` (red if a push waits, keeps
+or frames anything while they are held, or takes a number);
+`a_lent_message_is_queued_and_one_pushed_inside_another_push_is_dropped`,
+`a_reply_offered_while_a_push_waits_is_dropped` (red if a reply offered inside a put's wait is
+framed); the counting tests (`a_reply_that_enters_the_stage_is_counted_and_one_past_the_limit_is_not`,
+`a_message_of_the_session_is_counted_by_its_class_as_it_enters_the_stage`: red if a refused push
+is counted); and the five tests that hold each lent reply to its owned form, which now hold a
+reply refused while the conduits are held to no datagram, no slot and one drop. The round form's
+gate is held by `wz-capi-coop`'s group tests in the form the non-default tests gate builds with
+`WZ_COOP_VALUE_LOCKS=off` and `threads`; no test of that form was added (a put that waits for
+room while a member asks needs a socket that refuses on demand there).
