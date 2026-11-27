@@ -557,8 +557,9 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
         assert_eq!(row(&plan, "room places").count, plan.peers().sets());
         #[cfg(not(wz_lent))]
         assert!(plan.rows().all(|laid| laid.part() != "room places"));
-        // The index of held sets is a row of a build that takes faces beside the dial role's.
-        if crate::arena::TAKES_FACES {
+        // The index of held sets is a row of a build that takes faces beside the dial role's and
+        // lends its tables; one whose tables take their memory on use counts it.
+        if crate::arena::TAKES_FACES && cfg!(wz_lent) {
             assert_eq!(row(&plan, "held faces").count, plan.peers().sets());
         } else {
             assert!(plan.rows().all(|laid| laid.part() != "held faces"));
@@ -861,7 +862,11 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
 /// faces gave back, a table of them lent at the open with a row for each row of the session's token
 /// pool: a face owes apart only while its tokens hold a row of the pool, so the faces owing at
 /// once are never more. A session of one face, whose one face never goes, is lent none.
-#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+#[cfg(all(
+    wz_lent,
+    feature = "liveliness",
+    any(feature = "listen", feature = "group")
+))]
 #[test]
 fn the_tokens_owed_apart_are_bounded_by_the_sessions_token_pool() {
     let many = ArenaPlan::of(
@@ -2838,6 +2843,7 @@ fn the_pico_presets_arena_for_a_client_and_a_peer_is_the_notes_sum() {
         .filter(|row| row.part() == "owed tokens")
         .collect();
     let owes = cfg!(all(
+        wz_lent,
         feature = "liveliness",
         any(feature = "listen", feature = "group")
     ));

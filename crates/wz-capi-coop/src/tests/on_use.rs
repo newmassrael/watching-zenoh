@@ -170,6 +170,8 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
             runtime: 64,
             engine: 64,
             planes: crate::engine::SessionPlanes::OF_BUILD,
+            #[cfg(feature = "link-admission")]
+            admission: 64,
             #[cfg(not(wz_round))]
             direct_face: Engine::DIRECT_FACE_BYTES,
         },
@@ -190,10 +192,12 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_or_the_rooms() {
 
 /// A session whose tables take their memory on use lays out no row of the tables it counts in the
 /// plan an open lays out from its config, whether the build's plans are laid out at the open
-/// (`runtime-plan`) or not: none of the session's one table set, the key arena, the faces' sets, a
-/// peer's tables, the places of the rooms or of a step, the declaration watchers, the gets' tables,
-/// the held Finals or the round's tables, each counted from the plan and taking its memory at its
-/// first row; the CONTROL rows, the endpoints' texts and the links' receive buffers, are laid out.
+/// (`runtime-plan`) or not, and whether it takes faces beside its dial role's or not: none of the
+/// session's one table set, the key arena, the faces' sets and the index of the held ones, a peer's
+/// tables, the tokens the faces that went owe, the places of the rooms or of a step, the
+/// declaration watchers, the gets' tables, the held Finals or the round's tables, each counted from
+/// the plan and taking its memory at its first row; the CONTROL rows, the endpoints' texts and the
+/// links' receive buffers, are laid out.
 /// Turned red by a row of those tables put where the build lays its plans out at the open
 /// (`feature = "runtime-plan"`) rather than where the policy lends them (`wz_lent`), as
 /// `ArenaPlan::put_entities` was put, in a build of both features.
@@ -214,7 +218,9 @@ fn an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts() {
         "session tables",
         "key arena",
         "face tables",
+        "held faces",
         "peer tables",
+        "owed tokens",
         "room places",
         "router lend",
         "registry lend",

@@ -297,7 +297,7 @@ pub(crate) use registry::placed::{RegistryRegion, REGISTRY_REGION_LINES};
 mod state_places;
 #[cfg(wz_lent)]
 pub(crate) use registry::FACE_SET_BYTES;
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_lent, any(feature = "listen", feature = "group")))]
 pub(crate) use registry::HELD_SET_BYTES;
 #[cfg(feature = "local-queryable")]
 use registry::LOCAL_FACE;
@@ -1249,16 +1249,16 @@ fn lend_session(
         )
     }
     .map_err(ArenaRefused::Lend)?;
-    // The application's tables and the dial face's, made by value and counted from the rows the
-    // plan counts for them, none taking a row before its first, their keys counted against the
-    // region's budget; the session's one table set holds its tokens as rows, as above.
+    // The application's tables and the faces', made by value and counted from the rows the plan
+    // counts for them, none taking a row before its first, their keys counted against the state's
+    // budget; the session's one table set holds its tokens as rows, as above.
     #[cfg(wz_on_use)]
     let registry = Registry::counted(
         resolve_limits(config),
         keys,
         plan.tables(),
-        plan.gets().rows,
-        plan.peers().rows,
+        plan.gets(),
+        plan.peers(),
         delivery,
     )?;
     let runtime = arena

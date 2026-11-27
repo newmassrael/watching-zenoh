@@ -179,12 +179,12 @@ mod form_precedence_tests {
 
     use crate::RowPolicy;
 
-    /// A build with `tables-on-use` and `runtime-plan` whose session takes no face beside its dial
-    /// role's takes its tables' memory on use, their counts laid out from its config: its policy
-    /// is `OnUse`, whose memory is taken at each table's first row. Turned red by a build script
-    /// that lets `runtime-plan` choose the policy (`TablePolicy::Lent` for a build of both in
-    /// `build.rs`), which names `Lent`, taken at the open.
-    #[cfg(not(any(feature = "listen", feature = "group")))]
+    /// A build with `tables-on-use` and `runtime-plan` takes its tables' memory on use, their
+    /// counts laid out from its config, whatever faces its session takes beside its dial role's
+    /// (`listen`, `group`, which `--all-features` names): its policy is `OnUse`, whose memory is
+    /// taken at each table's first row. Turned red by a build script that lets `runtime-plan`
+    /// choose the policy (`TablePolicy::Lent` for a build of both in `build.rs`), or that keeps a
+    /// session which takes faces lent, either of which names `Lent`, taken at the open.
     #[test]
     fn a_build_of_both_forms_takes_its_tables_memory_on_use() {
         assert_eq!(
@@ -192,20 +192,6 @@ mod form_precedence_tests {
             TypeId::of::<wz_session_core::bounded::OnUse>()
         );
         assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtFirstUse);
-    }
-
-    /// A build of both whose session takes faces beside its dial role's (`listen`, `group`) lends
-    /// its tables from the arena its open lays out, at the open (`Lent`), until its faces' sets
-    /// are made on use: what `--all-features` builds. Turned red by a build script that names
-    /// `OnUse` for it while its faces' sets are still lent from the arena's pools.
-    #[cfg(any(feature = "listen", feature = "group"))]
-    #[test]
-    fn a_build_of_both_that_takes_faces_lends_its_tables_at_the_open() {
-        assert_eq!(
-            TypeId::of::<RowPolicy>(),
-            TypeId::of::<wz_session_core::bounded::Lent>()
-        );
-        assert_eq!(<RowPolicy as Storage>::TAKEN, Taken::AtOpen);
     }
 }
 /// The storage policy of the tables the session core's planes and round keep for the engine (the

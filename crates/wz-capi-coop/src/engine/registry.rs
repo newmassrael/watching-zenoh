@@ -280,8 +280,9 @@ impl FaceTables {
 pub(crate) const FACE_SET_BYTES: usize = core::mem::size_of::<FaceTables>();
 
 /// The bytes of one entry of the index of held sets, a row of the arena's table of them: kept by a
-/// build that adds faces beside its dial role's alone (`held::ManyHolders`).
-#[cfg(any(feature = "listen", feature = "group"))]
+/// build that adds faces beside its dial role's alone (`held::ManyHolders`), where the arena lends
+/// it.
+#[cfg(all(wz_lent, any(feature = "listen", feature = "group")))]
 pub(crate) const HELD_SET_BYTES: usize = core::mem::size_of::<FaceId>();
 
 /// What the index of held sets reads for a free set: the session numbers its faces up from 1
@@ -310,16 +311,23 @@ use held::Holders;
 #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
 mod owed;
 // The registry made by value, its tables counted at the open, where they take their memory at
-// their first row.
+// their first row, and the sets of the faces that come counted as each comes.
 #[cfg(wz_on_use)]
 mod counted;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 pub(crate) mod placed;
 
-/// The sets of face tables a session whose shape the build fixes holds: the dial role's face's
-/// alone, a build of that form taking no face beside it.
+/// The most sets of face tables a session holds where the open lends none of them from its arena:
+/// the dial role's face's alone where the build takes no face beside it, as every build of the
+/// region's form does, and one for each face it may hold at once where the tables take their
+/// memory on use and the build takes faces (`listen`, `group`). What the state keeps a place of
+/// each face's room for (`StatePlaces`).
 #[cfg(not(wz_lent))]
-pub(in crate::engine) const FACE_SETS: usize = 1;
+pub(in crate::engine) const FACE_SETS: usize = if cfg!(any(feature = "listen", feature = "group")) {
+    MAX_FACE_SETS
+} else {
+    1
+};
 
 /// Where the set face `id` holds lies, `holders` naming the face of each set by the set's
 /// place: never a free set, whose row names no face.
@@ -570,16 +578,18 @@ pub(super) struct RegistryOf<H: Holders> {
     /// Where a sample the application's subscribers match goes: the session's round of
     /// deliveries, handed to each dispatch of the application's tables.
     delivery: RoundDelivery,
-    /// What builds the set of each place no face has taken yet, from the span the open reserved for
-    /// it, the session's pools of what its peers write by their own choice among it: a session of
-    /// its dial role's face alone builds its one set at the open and keeps none.
+    /// What builds the set of each place no face has taken yet: from the span the open reserved for
+    /// it, the session's pools of what its peers write by their own choice among it, where the open
+    /// lends the tables, or counted as the dial face's set is where they take their memory on use.
+    /// A session of its dial role's face alone builds its one set at the open and keeps none.
     #[cfg(any(feature = "listen", feature = "group", all(test, wz_lent)))]
     spares: adding::SpareSets,
     /// Every set of face tables built so far, each where it was built and never moved from, in a
-    /// table the arena lent at the open with a row for each face the config admits: the dial role's
-    /// face's first and always held by it, then a set for each place a face has taken, built as the
-    /// first face takes it. A face past them is refused (`FacesFull`), so the session's memory is
-    /// the arena alone. A set no face holds is kept, emptied, for the next face.
+    /// table with a row for each face the config admits, lent by the arena at the open or, where the
+    /// tables take their memory on use, taking every row at the open with its first set: the dial
+    /// role's face's first and always held by it, then a set for each place a face has taken, built
+    /// as the first face takes it. A face past them is refused (`FacesFull`), so no face takes
+    /// memory for its set as it comes. A set no face holds is kept, emptied, for the next face.
     sets: ManuallyDrop<BoundedVec<FaceTables, MAX_FACE_SETS, RowPolicy>>,
     /// The face that holds each set, by the set's place among `sets`, [`NO_FACE`] for a set no
     /// face holds, and `KEPT` for one a departed face's tomb keeps: the dial role's face holds

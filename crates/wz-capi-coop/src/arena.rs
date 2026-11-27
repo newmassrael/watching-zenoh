@@ -128,10 +128,7 @@ use wz_runtime_coop::reassembly_rx::LENT_CHAINS;
 #[cfg(feature = "udp-listen")]
 use wz_runtime_coop::udp_link::{PortPeerRow, PortRows, QueuedDatagram};
 use wz_runtime_coop::RuntimePlace;
-#[cfg(any(
-    wz_lent,
-    all(feature = "liveliness", any(feature = "listen", feature = "group"))
-))]
+#[cfg(any(wz_lent, feature = "udp-listen"))]
 use wz_session_core::bounded::Lent;
 #[cfg(not(any(feature = "runtime-plan", feature = "tables-on-use")))]
 use wz_session_core::bounded::ZeroEmpty;
@@ -164,7 +161,7 @@ use wz_session_core::slot_observer::SlotObserverOf;
 use crate::engine::LegHold;
 #[cfg(all(feature = "query", wz_lent))]
 use crate::engine::LegSink;
-#[cfg(any(feature = "listen", feature = "group"))]
+#[cfg(all(wz_lent, any(feature = "listen", feature = "group")))]
 use crate::engine::HELD_SET_BYTES;
 #[cfg(all(wz_lent, wz_round))]
 use crate::engine::REGISTRY_LEND_BYTES;
@@ -534,10 +531,10 @@ const OBSERVER_ROWS: usize = cfg!(wz_lent) as usize;
 /// the arena lends them (`runtime-plan`): one that asks nothing holds no table of gets, and a
 /// region holds them otherwise (`crate::engine::StatePlaces`).
 const GET_ROWS: usize = 5 * cfg!(all(feature = "query", wz_lent)) as usize;
-/// The faces' sets where the arena lends them (`runtime-plan`), and the index of the held ones
-/// where the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face
-/// alone knows it holds the first set.
-const FACE_ROWS: usize = cfg!(wz_lent) as usize + TAKES_FACES as usize;
+/// The faces' sets where the arena lends them (`wz_lent`), and the index of the held ones where
+/// the build takes faces beside its dial role's (`TAKES_FACES`): a session of that face alone knows
+/// it holds the first set, and one whose tables take their memory on use counts both.
+const FACE_ROWS: usize = cfg!(wz_lent) as usize * (1 + TAKES_FACES as usize);
 /// The faces' rooms, laid out at the open ([`ArenaPlan::holding_rooms`]), and their places, one
 /// for each set of face tables, where the arena lends them (`runtime-plan`); a region holds its
 /// one set's place otherwise.
@@ -547,9 +544,12 @@ const ROOM_ROWS: usize = 1 + cfg!(wz_lent) as usize;
 /// declarations' pools, and the interests' where the build keeps a peer's (`KEEPS_INTEREST_ROWS`).
 const PEER_ROWS: usize =
     cfg!(wz_lent) as usize * (1 + (3 + KEEPS_INTEREST_ROWS as usize) * SHARES_ROWS as usize);
-/// The tokens the faces that went still owe (`liveliness` with `listen` or `group`): put only for a
-/// session whose faces share their pools, so counted where a build shares them at all.
+/// The tokens the faces that went still owe (`liveliness` with `listen` or `group`), where the
+/// arena lends them: put only for a session whose faces share their pools, so counted where a build
+/// shares them at all. A session whose tables take their memory on use counts its relation of
+/// them instead.
 const OWED_ROWS: usize = (cfg!(all(
+    wz_lent,
     feature = "liveliness",
     any(feature = "listen", feature = "group")
 )) && SHARES_ROWS) as usize;
@@ -2271,8 +2271,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             FACE_SET_BYTES,
         );
         // Which face holds which set, a row for each set, in a build that takes faces beside its
-        // dial role's.
-        #[cfg(any(feature = "listen", feature = "group"))]
+        // dial role's; counted where the tables take their memory on use.
+        #[cfg(all(wz_lent, any(feature = "listen", feature = "group")))]
         self.put(
             ArenaPart::HeldFaces,
             self.session.peers.sets(),
@@ -2316,8 +2316,13 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             self.put(ArenaPart::PeerRowDirectory, 1, directory);
         }
         // The tokens the faces that went still owe, lent with the pools
-        // (`engine::registry::Registry::new`).
-        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        // (`engine::registry::Registry::new`); a relation counted where the tables take their memory
+        // on use (`engine::registry::owed`).
+        #[cfg(all(
+            wz_lent,
+            feature = "liveliness",
+            any(feature = "listen", feature = "group")
+        ))]
         if self.session.peers.owed_tokens() > 0 {
             self.put(
                 ArenaPart::OwedTokens,
@@ -3988,9 +3993,16 @@ impl SessionArena {
     }
 
     /// The arena, to lend from: by the open, where it lends the arena more than its lender's
-    /// tables (a session whose tables take their memory on use lends it none of those), and by
-    /// the tests that lend its rows.
-    #[cfg(any(not(wz_on_use), test))]
+    /// tables, and by the tests that lend its rows. A session whose tables take their memory on use
+    /// lends it none of those but the places of a session that listens: the read slots of the
+    /// faces past the dial role's, where each is read where it lies, and the admission of its
+    /// links (`link-admission`).
+    #[cfg(any(
+        not(wz_on_use),
+        test,
+        feature = "link-admission",
+        all(feature = "listen", not(wz_round))
+    ))]
     pub(crate) fn arena_mut(&mut self) -> &mut Arena {
         &mut self.arena
     }

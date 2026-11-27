@@ -1017,12 +1017,19 @@ tests::direct_receive::a_session_that_joined_no_group_hands_the_groups_no_leg"
     "wz-capi-coop|hook|tables-on-use|on_use"
     "wz-capi-coop|hook|liveliness,liveliness-get,local-queryable,query,queryable,tables-on-use|on_use"
     # A build that names both `tables-on-use` and `runtime-plan` takes its tables' memory on use,
-    # their counts laid out from its config (the crate's build script, `TablePolicy`), but where it
-    # takes faces beside its dial role's (`listen`, `group`, which `--all-features` names), whose
-    # sets its arena still lends: the test of that build that reads its row policy and its moment,
-    # and the on-use tests over the plan laid out from the config. Not measured on a build host yet.
+    # their counts laid out from its config (the crate's build script, `TablePolicy`), whatever
+    # faces it takes beside its dial role's: the test of that build that reads its row policy and its
+    # moment, and the on-use tests over the plan laid out from the config. Not measured on a build
+    # host yet.
     "wz-capi-coop|hook|runtime-plan,tables-on-use|form_precedence_tests::"
     "wz-capi-coop|hook|runtime-plan,tables-on-use|on_use"
+    # The same on-use tests in a session that takes faces beside its dial role's (`listen`, which
+    # turns `runtime-plan` on), with the liveliness that owes a departed face's tokens: the
+    # registry's faces added, removed and given back with their sets counted as each first comes,
+    # the tokens of the faces that went owed as a relation that bounds the faces admitted, and the
+    # plan that lays out no row of the faces' sets, their index or the tokens owed. Not measured on
+    # a build host yet.
+    "wz-capi-coop|hook|liveliness,listen,tables-on-use|on_use"
     # The crate's whole suite in the build form the C library ships: a domain of
     # `declaration-sync-pacing` without `on`, where a link is told the session's declarations in
     # one lap when it comes up and the engine holds no code of paced turns
