@@ -601,6 +601,12 @@ object-pool|files::ext_handles_across_threads::"
     # build opens each table at the preset's bound (`session::opening_limits_tests::`), each test
     # gated `not(feature = "config-limits")`. Two tests. NOT YET MEASURED.
     "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|without_the_limits_key"
+    # refused, the run of expiries being one of them (`config_limits::`).
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp|config_limits::tests::a_build_without_the_expiry_run_refuses_its_count"
+    # The advanced plane without the node clock its publisher stamps from (`advanced-node-clock`,
+    # off in the zenoh-pico preset), on the cooperative engine: the session holds no clock, so a
+    # sample takes the system clock's time. NOT YET MEASURED.
+    "wz-capi-pico|hook|-default,os-host,peer,multi-thread,link-udp,advanced|advanced_plane::no_node_clock_tests::"
     # Whether a reply of a replay reaches the receiving judge (`replay_admission`, behind `replay`):
     # its model tests on a synthetic profile, and the receiver's baseline CRC they read.
     "wz-app-frame|hook|replay|"

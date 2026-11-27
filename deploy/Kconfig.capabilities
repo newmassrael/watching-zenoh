@@ -120,6 +120,13 @@ config WZ_CAP_ADVANCED_SOURCE_RETENTION
 	  The advanced subscriber's sweep of its sources: every retention period a source not heard from and whose token is gone lets go of its row. Off, a source keeps its row until the subscriber goes or a new source takes the row met longest ago, as zenoh-pico's subscriber keeps its sources.
 	  Exported by: pico.
 
+config WZ_CAP_ADVANCED_NODE_CLOCK
+	bool "advanced-node-clock"
+	default y
+	help
+	  The node clock an advanced publisher stamps from: a hybrid logical clock under the clock-quality-stamping policy, whose trusted-only refuses a sample while the clock is not trusted. Off, a sample takes the system clock's time, ordered by the session's last time given, as zenoh-pico's publisher stamps with z_timestamp_new, and trusted-only refuses none.
+	  Exported by: pico.
+
 config WZ_CAP_CLOCK_SOURCE
 	bool "clock-source"
 	default n

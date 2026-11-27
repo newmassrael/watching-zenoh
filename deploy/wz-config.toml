@@ -1021,6 +1021,20 @@ abis = ["core", "pico"]
 implies = []
 help = "The advanced subscriber's sweep of its sources: every retention period a source not heard from and whose token is gone lets go of its row. Off, a source keeps its row until the subscriber goes or a new source takes the row met longest ago, as zenoh-pico's subscriber keeps its sources."
 
+# The node clock an advanced publisher stamps its samples from (upstream zenoh's HLC, under the
+# `clock-quality-stamping` policy). On in a build that names nothing, which has had it with
+# `advanced`, and off in the zenoh-pico preset: zenoh-pico's publisher stamps each sample with
+# `z_timestamp_new`, the system clock, and has no clock to hold back. A behaviour, not a door, so
+# it implies nothing. The tokio engine's runtime holds the clock whatever is named.
+[[capability]]
+id = "advanced-node-clock"
+kconfig = "WZ_CAP_ADVANCED_NODE_CLOCK"
+os_needs = []
+upstream_off = ["zenoh-pico"]
+abis = ["core", "pico"]
+implies = []
+help = "The node clock an advanced publisher stamps from: a hybrid logical clock under the clock-quality-stamping policy, whose trusted-only refuses a sample while the clock is not trusted. Off, a sample takes the system clock's time, ordered by the session's last time given, as zenoh-pico's publisher stamps with z_timestamp_new, and trusted-only refuses none."
+
 # A clock the application registers (the observation plane's time, a clock with a quality): a
 # hardware clock or a time
 # master the device has, which the node reads in place of the system clock. wz's own door, with no

@@ -119,6 +119,7 @@ default = [
     "multicast-locator-keys",
     "query-replies-with-final",
     "advanced-source-retention",
+    "advanced-node-clock",
 ]
 # The ENGINE that runs a session (`docs/capi-pico-on-coop-engine.md`, decisions D1 and D4).
 #
@@ -345,7 +346,6 @@ advanced = [
     "wz-ext-pubsub/pubsub-qos",
     "wz-ext-pubsub/pubsub-encoding",
     "wz-ext-pubsub/pubsub-attachment",
-    "wz-node-time/time-hlc",
     "wz-capi-core?/advanced",
     "wz-capi-coop?/ticker",
     # The advanced publishers and subscribers lie in places of the session's arena on the
@@ -711,6 +711,14 @@ advanced-source-retention = [
     "wz-capi-core?/advanced-source-retention",
     "wz-ext-pubsub?/advanced-retention",
 ]
+# `advanced-node-clock`: the node clock an advanced publisher stamps from, a hybrid logical clock
+# under the `clock-quality-stamping` policy, which zenoh-pico's publisher does not hold (it stamps
+# each sample with `z_timestamp_new`). On in a build that names nothing, which has had it with
+# `advanced`, and off in the zenoh-pico preset: there a session holds no clock, so a sample takes
+# the system clock's time ordered by the session's last time given, `trusted-only` withholds
+# nothing, and the library links neither the clock nor its standing. The tokio engine holds the
+# clock with `advanced` whatever is named; `clock-source` brings its own.
+advanced-node-clock = ["wz-capi-core?/advanced-node-clock", "wz-node-time?/time-hlc"]
 # `config-document`: `zext_config_document`, the door that hands a config the zenoh JSON5 document
 # the zenoh-c ABI reads, so one document states both ABIs' policies. Off by default: zenoh-pico's
 # config is a set of numbered keys and reads no document, and the door links a JSON5 reader a

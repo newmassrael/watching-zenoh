@@ -304,6 +304,40 @@ mod timer_tests {
     }
 }
 
+/// A library without the node clock (`advanced-node-clock`, off in the zenoh-pico preset) holds
+/// none for its sessions: an advanced publisher proposes the system clock's time, which the
+/// session's times then order, as zenoh-pico's publisher stamps with `z_timestamp_new`, and a
+/// `trusted-only` policy has no clock to hold back. The tokio engine holds the clock whatever is
+/// named, and a registrable clock brings its own, so the case is the cooperative engine's alone.
+#[cfg(all(
+    test,
+    not(feature = "advanced-node-clock"),
+    not(feature = "clock-source"),
+    not(feature = "engine-tokio")
+))]
+mod no_node_clock_tests {
+    use wz_node_time::node_clock::{DataStamp, NodeHlc, TimestampingEnabled};
+    use wz_session_core::policy::SessionPolicy;
+    use wz_session_core::WhatAmI;
+
+    /// The session's clock, as its open builds it, is no clock: it takes no memory, stamps
+    /// nothing, and tells the publisher to fall back to the system clock. Turned red by the node
+    /// clock left in `advanced` (the manifest's `wz-node-time/time-hlc`).
+    #[test]
+    fn a_session_without_the_node_clock_stamps_from_the_system_clock() {
+        let hlc = NodeHlc::for_node_by(
+            &[0x11; 16],
+            WhatAmI::Peer,
+            TimestampingEnabled::all(true),
+            &SessionPolicy::defaults(),
+            &wz_session_core::limits::RuntimeLimits::BUILD,
+        );
+        assert_eq!(core::mem::size_of::<NodeHlc>(), 0);
+        assert!(!hlc.is_stamping());
+        assert_eq!(hlc.data_stamp(), DataStamp::NoClock);
+    }
+}
+
 #[cfg(all(test, feature = "engine-tokio"))]
 mod tests {
     use super::*;
