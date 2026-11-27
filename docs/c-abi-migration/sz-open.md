@@ -1,7 +1,7 @@
 # Structural lane sz-open: the session's open, line by line
 
 Status: the reading and the design of the lane, with its steps carried in beside it as section 5
-onwards records them (O1, O2).
+onwards records them (O1, O2; O3 held, section 7).
 Nothing here was built or measured by this lane: every byte figure is either **read** (from the
 size ledger's explain document of the case, from the case's shipped library, or from a line table
 named below) or an **estimate** from the code, to be read on the explain document after the merge.
@@ -173,3 +173,31 @@ refusal. `a_vacant_span_holds_nothing_until_it_is_filled` (`placed.rs`) and
 
 What the main session reads to land it: the case's total and `assemble` in the explain document
 (4,598 before), the receive at arm W, which should not move.
+
+## 7. O3 held: the lent groups have more than one owner
+
+The step assumed that `Core` could hold the groups `lend_session` lends as those values. The code
+holds no such group whole after the open, so the step is not carried, and is written again once the
+owners below are one:
+
+- `TransportTables` is handed to three holders: the stack takes the links' buffers, the drivers'
+  cells and the ports' rows by value (`SessionLinks::lend_buffers`, `lend_cells`,
+  `lend_port_rows`); `Core`'s transport takes the endpoints' rows and the gate, action and halves
+  cells; the engine takes the handed table (`LentApart`). The reassembly cells are read by reference
+  (`SessionChains::over` in `lend_session`, `DirectFaces::taken_in`) and held by none of them.
+  Holding the group whole in `Core` would take the buffers back from the stack, whose links read
+  and encode in them.
+- The state's tables are not one group either: the registry, the keys, the planes, the gets and the
+  round are fields of `SessionState` beside values the open makes from the config and the policy
+  (the watchers, the key ids, the replay's pace), and `Core` already holds the step places and the
+  state's block whole (`_steps`, `_state`). A `SessionState` that held them as one lent value would
+  rename every reach of them through the session, and `docs/win-budget/rss.md` A2 found that
+  writing fields in place costs text: this is a design to measure, not a rename to make unread.
+- Writing `SessionLent` where its caller holds it, not through a `Result`, leaves the caller a place
+  it can only read fields out of by copy (`MaybeUninit::assume_init`) or by `ptr::read` of each
+  field, unchecked by the compiler; either keeps the copy the step was to remove, or trades it for
+  unchecked moves.
+
+What would carry it: a `Core` built where the engine lies (`engine_of` writes it there today, after
+`assemble` built it in the frame), each group written there once by its lender. That is the
+structure of the place the engine is written at, and it is read on the case before it is written.
