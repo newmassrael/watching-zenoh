@@ -1138,6 +1138,9 @@ fn declare_detection_token<E: EngineHolder>(
 /// runtime's own query, not an entity of the application), goes where the subscriber was told to,
 /// is bounded by the timeout so a get nobody answers ends, asks every queryable and not the best
 /// match, and takes every sample of a range and not the latest of each key.
+// Out of line, so the five gets of a subscriber share one body of the builder's stores and do not
+// each carry a copy of the chain, whose every step moves the whole options.
+#[inline(never)]
 fn get_options<'a, E: EngineHolder>(
     shared: &Shared<E>,
     parameters: &'a GetParameters,
