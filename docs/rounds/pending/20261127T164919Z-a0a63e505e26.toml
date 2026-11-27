@@ -1,0 +1,16 @@
+impact = ["watching-zenoh/build-and-verify", "rfc--sce-forge-extensions-for-wire-protocol-synthesis/5.j-codegen-backend-coverage"]
+decision = '''
+Move the capacity bounds (census S3 46) into SCE algorithms at no cost: the division rule, the liveness, service and lateness bounds and the calibrated emission, the constructors and constants kept by hand.
+'''
+changes = '''
+- sources/algorithms capacity_quotient (zero divisor gives the largest u64), capacity_liveness_bound, capacity_service_bound, capacity_lateness_limit, capacity_cost_with_margin, capacity_calibrated_emission.
+- crates/wz-session-core/src/capacity.rs calls them; RECORDED_HOST_MODEL, the constructors and admission stay by hand.
+- Two tests hold each generated function to the standard-library expression it replaces over every pair of eleven edge operands.
+'''
+verification = '''
+- libwz_capi_c.so release, before and after: .text 8757008 and .rodata 502944 both times, no symbol of capacity changed.
+- wz-session-core capacity tests 33 passed; clippy with all targets; verify-codegen of each document exits 0; Layer Bc 139 units, six recorded.
+'''
+carry = '''
+- S12 15 (the stray handshake judge) was written and held: its generated function is not inlined and grows libwz_capi_c .text by 64 B, and its policy enum would exist twice (wz_config and the SCE document). Held on branch k-core until SCE emits an inline hint for small algorithms.
+'''
