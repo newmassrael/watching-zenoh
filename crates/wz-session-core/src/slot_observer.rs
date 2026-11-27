@@ -1604,21 +1604,34 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
     where
         K::Tables<Lent>: LentTables,
     {
-        #[cfg(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        ))]
-        let watchers = Self::decl_watcher_rows(limits)?;
-        // A build that keeps no watcher list describes none, and lends none a row.
-        #[cfg(not(any(
-            feature = "declare-subscriber",
-            feature = "declare-queryable",
-            feature = "liveliness-token"
-        )))]
-        let watchers = 0;
-        let mut observer = Self {
-            tables: LentTables::lend(arena, keys, rows.tables)?,
+        let counts = Self::list_counts(limits, rows.local_tokens)?;
+        let mut observer = Self::over(LentTables::lend(arena, keys, rows.tables)?);
+        let mut lend = crate::bounded::TableLender::new(arena);
+        // SAFETY: the description is this type's: each line names a list of `observer`, which
+        // holds no value, and states the bytes of its rows (`SeqPlace::of`), and its key line the
+        // tokens' handle, which holds no key; `observer` is reached by nothing else during the
+        // call, and `keys` is the session's, which outlives it.
+        unsafe {
+            crate::key_arena::lend_region(
+                core::ptr::NonNull::from(&mut observer).cast::<u8>(),
+                keys,
+                &Self::LINES,
+                &counts,
+                &mut lend,
+            );
+        }
+        lend.finish()?;
+        observer.limit_to(limits);
+        Ok(observer)
+    }
+
+    /// An observer with nothing registered over `tables`, its declaration watchers' lists and the
+    /// session's own tokens lent no rows: what [`Self::lent`] lends those into, and what a walk
+    /// of a description that holds the observer's lines among others' lends them where it lies
+    /// ([`SlotObserverOf::places`], under [`Self::list_counts`]), the tables' lines with them.
+    pub fn over(tables: K::Tables<Lent>) -> Self {
+        Self {
+            tables,
             #[cfg(all(feature = "alloc", feature = "switchboard"))]
             switchboard: SwitchboardRegistry::new(),
             #[cfg(feature = "declare-subscriber")]
@@ -1631,24 +1644,33 @@ impl<K: ObserverSinks, M: MatchingReport> SlotObserverOf<K, Lent, M> {
             liveliness: LivelinessRegistry::default(),
             #[cfg(feature = "liveliness-token")]
             local_tokens: LocalTokenRegistry::default(),
-        };
-        let mut lend = crate::bounded::TableLender::new(arena);
-        // SAFETY: the description is this type's: each line names a list of `observer`, which
-        // holds no value, and states the bytes of its rows (`SeqPlace::of`), and its key line the
-        // tokens' handle, which holds no key; `observer` is reached by nothing else during the
-        // call, and `keys` is the session's, which outlives it.
-        unsafe {
-            crate::key_arena::lend_region(
-                core::ptr::NonNull::from(&mut observer).cast::<u8>(),
-                keys,
-                &Self::LINES,
-                &Self::counts(watchers, rows.local_tokens),
-                &mut lend,
-            );
         }
-        lend.finish()?;
-        observer.limit_to(limits);
-        Ok(observer)
+    }
+
+    /// The counts the lines of the observer's own lists are lent under `limits`: as many rows of
+    /// each declaration watcher list as `limits` admits watchers ([`Self::decl_watcher_rows`]),
+    /// and `local_tokens` of the session's own tokens. Refused when `limits` admits more watchers
+    /// than the build. A build that keeps no watcher list describes none, and lends none a row.
+    pub fn list_counts(
+        limits: &crate::limits::SessionLimits,
+        local_tokens: usize,
+    ) -> Result<crate::bounded::RowCounts, LendRefused> {
+        #[cfg(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        ))]
+        let watchers = Self::decl_watcher_rows(limits)?;
+        #[cfg(not(any(
+            feature = "declare-subscriber",
+            feature = "declare-queryable",
+            feature = "liveliness-token"
+        )))]
+        let watchers = {
+            let _ = limits;
+            0
+        };
+        Ok(Self::counts(watchers, local_tokens))
     }
 
     /// The counts the lines of the observer's description are lent: `watchers` rows of each

@@ -1773,11 +1773,17 @@ pub enum RowCount {
     ReplyBytes,
     /// `MAX_PENDING_FINALS` owed to one face's peer's queries.
     Finals,
+    /// The sets of face tables an engine holds, one for each face its config admits, and the rows
+    /// of its index of which face holds each.
+    FaceSets,
+    /// The tables of tokens the faces that went still owe the liveliness subscribers, one for each
+    /// row of the session's pool of its peers' tokens.
+    OwedTokens,
 }
 
 impl RowCount {
     /// The last count: a count added after it moves this.
-    const LAST: Self = Self::Finals;
+    const LAST: Self = Self::OwedTokens;
     /// The counts a plan states, `Bound`'s place among them unused.
     const SLOTS: usize = (Self::LAST as usize).wrapping_add(1);
 }
@@ -1798,6 +1804,21 @@ impl RowCounts {
     pub const fn with(mut self, count: RowCount, rows: usize) -> Self {
         if let Some((_, [slot, ..])) = self.rows.split_at_mut_checked(count as usize) {
             *slot = rows;
+        }
+        self
+    }
+
+    /// These counts and `other`'s, each the larger of the two: the counts of two parts, each
+    /// stating its own, joined for one description that holds the lines of both.
+    pub const fn and(mut self, other: &Self) -> Self {
+        let mut mine: &mut [usize] = &mut self.rows;
+        let mut theirs: &[usize] = &other.rows;
+        while let ([row, rest @ ..], [their, tail @ ..]) = (mine, theirs) {
+            if *their > *row {
+                *row = *their;
+            }
+            mine = rest;
+            theirs = tail;
         }
         self
     }
@@ -4455,6 +4476,34 @@ mod tests {
         assert_eq!(tables.names.free_slots(), 4);
         // SAFETY: the tables hold nothing that drops; the block goes back with its layout.
         unsafe { std::alloc::dealloc(block, layout) };
+    }
+
+    /// Two parts' counts joined state each count either part states: a line of either part is lent
+    /// its own count, a line of neither none, and a count both state is the larger. Turned red by a
+    /// join that keeps one side's count alone or adds the two.
+    #[test]
+    fn joined_counts_state_each_parts_count() {
+        let tables = RowCounts::NONE
+            .with(RowCount::Keyexprs, 3)
+            .with(RowCount::Queries, 1);
+        let sets = RowCounts::NONE
+            .with(RowCount::FaceSets, 4)
+            .with(RowCount::Queries, 2);
+        let joined = tables.and(&sets);
+        let line = |count| TWO_TABLES[0].counted(count);
+        assert_eq!(joined.of(&line(RowCount::Keyexprs)), 3);
+        assert_eq!(joined.of(&line(RowCount::FaceSets)), 4);
+        assert_eq!(
+            joined.of(&line(RowCount::Queries)),
+            2,
+            "the larger of the two"
+        );
+        assert_eq!(
+            joined.of(&line(RowCount::OwedTokens)),
+            0,
+            "stated by neither"
+        );
+        assert_eq!(sets.and(&tables), joined, "either order");
     }
 
     /// The plan's walk of the same description lends each table the rows its count states, at most

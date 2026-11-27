@@ -3979,13 +3979,19 @@ impl<F: RowCallbacks> SessionTables<F, Lent> {
     /// [`Self::lent`] lends and [`Self::arena_bytes`] counts, from the tables' start.
     const LINES: RegionLines<SESSION_TABLE_LINES> = Self::places(0, 0);
 
+    /// Tables of no rows and no key arena, each refusing what is asked of it until a walk of a
+    /// description that holds their lines ([`Self::lent`]'s, or one of what holds the tables) lends
+    /// them their rows where they lie. A table whose rows are lent at the open remembers no key:
+    /// each slot of the cache would be rows of its own, which only the arena could give it.
+    pub fn rowless() -> Self {
+        Self::of(LentKeys::default(), MatchMemo::new(0))
+    }
+
     /// The tables of a session, `rows` of each lent from `arena` in the order of their description
     /// ([`SessionTables::places`]), their keys kept in `keys`, the session's key arena, and each
     /// held to its rows. Refused past the build's bound of a table or past what the arena has left.
     pub fn lent(arena: &mut Arena, keys: KeySpace, rows: &TableRows) -> Result<Self, LendRefused> {
-        // A table whose rows are lent at open remembers no key: each slot of the cache would be
-        // rows of its own, which only the arena could give it.
-        let mut tables = Self::of(LentKeys::default(), MatchMemo::new(0));
+        let mut tables = Self::rowless();
         // Lent whole and given up whole: a refused table leaves the ones after it rowless, and
         // the set goes at once, not one table at a time behind each refusal.
         let mut lend = TableLender::new(arena);
