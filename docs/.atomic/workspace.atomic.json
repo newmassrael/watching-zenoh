@@ -9261,6 +9261,26 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4733": {
+      "decision_summary": "Repay the round-fed gates (pre-push gate 2z) that failed on origin/main: 16 of 18 now pass, each fixed at its cause rather than by moving a budget.",
+      "changes_bullets": [
+        "Gates: depth census pins, lane modules in the hook, REQUIRE whole-name match, host lock over both cooperative sets, cargo-word producers, narrow reads adjudicated.",
+        "session-core: an entity id and a sequence number past 32 bits are read as upstream reads them; own-space witnesses for the lent and pinned query planes.",
+        "Prose: build-script claims, fourteen self-report false positives, four bare upstream queries.rs citations rooted, group_locator anchor at the pin."
+      ],
+      "verification_bullets": [
+        "191 of 193 round-fed gates pass on the rebased tree; upstream citations resolve at the pin.",
+        "ext_admit tests 25 pass; Layer C1own's two legs run the four new witnesses.",
+        "clippy of wz-session-core tests, default and the C1own union, -D warnings."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "silent_skip: no lane builds wz-capi-pico with a narrowed policy domain.",
+        "debt-prepush-round-fed-gates-red-on-main stays open on that leg."
+      ]
     }
   },
   "inventory_entries": {
