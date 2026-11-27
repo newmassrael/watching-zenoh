@@ -127,6 +127,10 @@ UNRESOLVED_DECLARED: dict[tuple[str, str], str] = {
     ("scripts/lib/guarded_count_gate.py", "x"): (
         "the same fixture, second invented package (`other-crate`)"
     ),
+    ("scripts/lib/lane_digest.py", "x"): (
+        "a FIXTURE string in that script's `--selftest` that its cargo-call reader parses, naming "
+        "an invented package (`a`) and feature, its own test input rather than a command anyone runs"
+    ),
     ("scripts/lib/lane_feature_membership_gate.py", "harmless"): (
         "R2659 — the same shape as the two rows above: a FIXTURE string in that "
         "gate's `--selftest`, naming an invented package (`demo`) and an "

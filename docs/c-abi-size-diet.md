@@ -255,7 +255,7 @@ the toolchain switch the owner ruled out, not a stable way.
 flags takes their tables out at the source:
 
 ```
-cargo +nightly-<date> build -p wz-capi-pico --no-default-features --features os-posix,link-udp \
+cargo +nightly-<date> build -p wz-capi-pico-lib --no-default-features --features abi/os-host,abi/link-udp \
   --profile capi-nostd --config .cargo/capi-nostd.toml --target x86_64-unknown-linux-gnu \
   -Z build-std=core,alloc -Z build-std-features=panic_immediate_abort
 ```
@@ -640,7 +640,7 @@ Held by `lent_control::tests::the_lend_only_kinds_are_written_as_their_owned_bui
 up to `ExprId::MAX`, empty and long suffixes and every queryable info) and
 `a_lend_only_kind_refuses_and_names_as_its_builder_does`; the interest and the four existing kinds
 were already held there. The send paths themselves run under `tx-lend-only` in the C library's
-own tests (`cargo test -p wz-capi-pico --no-default-features --features engine-coop,...`, Layer
+own tests (`cargo test -p wz-capi-pico --no-default-features --features os-host,...`, Layer
 C1p32's pico-coop leg), which declare subscribers, retract them and ask interests against a peer.
 
 Items 1 and 6 of section 7 are expected to follow from this: with no client send owned, the owned
