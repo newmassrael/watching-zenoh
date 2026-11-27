@@ -61,6 +61,7 @@
   <sce:feature name="keyexpr-wildcard-single"/>
   <sce:feature name="lifecycle-contract"/>
   <sce:feature name="limits-lent-at-open"/>
+  <sce:feature name="link-wire-reports"/>
   <sce:feature name="liveliness-get" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-subscriber" requires="codec-declare rx-control"/>
   <sce:feature name="liveliness-token" requires="codec-declare declare-final rx-control"/>
