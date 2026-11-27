@@ -1584,9 +1584,15 @@ pub(super) struct DirectFace<L: CoopLinks + 'static, C: ClockSource + 'static> {
     /// as that face goes with its link. A read of many rows turns those alone, so a row no face
     /// holds costs it neither a take of the session nor a reading of the clock. The dial role's
     /// row holds its face for the table's life, so every walk reads every row alike. A group's row
-    /// is never marked: its session is stepped by the group's read (`CoopEngine::step_groups`).
+    /// is never marked so: it is a group's (`Self::holds_group`), stepped by the group's read.
     #[cfg(any(feature = "listen", feature = "group"))]
     holds_face: AtomicBool,
+    /// Whether the face table's row is a group's: marked at the open's join of the group whose
+    /// place it is (`DirectFaces::hold_group`), for the table's life, as a group keeps its place
+    /// across its joins. The group's read walks the rows so marked (`DirectFaces::group_rows`),
+    /// and reads no session's state to find them.
+    #[cfg(feature = "group")]
+    holds_group: AtomicBool,
     /// Whether the face has nothing a look would move: no pump, no dial and no opened link, a
     /// life idle or closed with no wake, and no chain in its Router, so a read passes it over
     /// while it turns another (`CoopEngine::read_faces`) and a publish's walk tries no leg on it.
@@ -1667,7 +1673,19 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFace<L, C> 
             }
             #[cfg(any(feature = "listen", feature = "group"))]
             addr_of_mut!((*at).holds_face).write(AtomicBool::new(row == 0));
+            #[cfg(feature = "group")]
+            addr_of_mut!((*at).holds_group).write(AtomicBool::new(false));
         }
+    }
+
+    /// Whether a walk of the rows reaches the row: it holds a face, or it is a group's.
+    #[cfg(feature = "listen")]
+    fn walked_to(&self) -> bool {
+        #[cfg(feature = "group")]
+        if self.holds_group.load(Ordering::Relaxed) {
+            return true;
+        }
+        self.holds_face.load(Ordering::Relaxed)
     }
 
     /// Show when the face is next due by `slot`, its read slot, held: written only when it
@@ -1727,8 +1745,9 @@ pub(super) type FaceSlots<L, C> = BoundedVec<DirectFace<L, C>, { usize::MAX }, L
 /// record of a face reaches its place by a handle.
 pub(super) struct DirectFaces<L: CoopLinks + 'static, C: ClockSource + 'static> {
     rows: FaceSlots<L, C>,
-    /// The rows up to the last that holds a face (`Self::hold_face`), the dial role's first: the
-    /// rows past it hold none, and a read walks the faces several times, so its walks end there.
+    /// The rows up to the last that holds a face (`Self::hold_face`) or is a group's
+    /// (`Self::hold_group`), the dial role's first: the rows past it hold none, and a read walks
+    /// the faces several times, so its walks end there.
     #[cfg(any(feature = "listen", feature = "group"))]
     held_rows: core::sync::atomic::AtomicUsize,
     /// The last mark an operation's hold of the faces was given (`Self::next_mark`).
@@ -1843,7 +1862,8 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     }
 
     /// The faces a read walks, in the order of the face table's rows: the dial role's, then each
-    /// row past it up to the last that holds a face (`Self::hold_face`), held or not.
+    /// row past it up to the last that holds a face (`Self::hold_face`) or is a group's
+    /// (`Self::hold_group`), held or not.
     #[inline(always)]
     pub(super) fn walked(&self) -> impl Iterator<Item = &DirectFace<L, C>> {
         #[cfg(any(feature = "listen", feature = "group"))]
@@ -1881,13 +1901,39 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
                 .load(Ordering::Relaxed)
                 .max(at.saturating_add(1))
         } else {
-            // The dial role's row is held, so the walk keeps it whatever goes.
+            // The dial role's row is held, so the walk keeps it whatever goes, and a group's row
+            // is the group's for the table's life.
             self.rows
                 .iter()
-                .rposition(|face| face.holds_face.load(Ordering::Relaxed))
+                .rposition(DirectFace::walked_to)
                 .map_or(1, |row| row.saturating_add(1))
         };
         self.held_rows.store(rows, Ordering::Release);
+    }
+
+    /// Mark the face table's row `at` the group's whose place it is, for the table's life, and
+    /// move the bound of the rows a walk reaches (`Self::walked`) to it. Called under the
+    /// session's lock, at the open's join of the groups, before any read walks the rows.
+    #[cfg(feature = "group")]
+    pub(super) fn hold_group(&self, at: usize) {
+        let Some(face) = self.rows.get(at) else {
+            return;
+        };
+        face.holds_group.store(true, Ordering::Release);
+        let rows = self
+            .held_rows
+            .load(Ordering::Relaxed)
+            .max(at.saturating_add(1));
+        self.held_rows.store(rows, Ordering::Release);
+    }
+
+    /// The rows of the groups the session joined, each with its place, in the order of the face
+    /// table (`Self::hold_group`).
+    #[cfg(feature = "group")]
+    pub(super) fn group_rows(&self) -> impl Iterator<Item = (usize, &DirectFace<L, C>)> {
+        self.walked()
+            .enumerate()
+            .filter(|(_, face)| face.holds_group.load(Ordering::Acquire))
     }
 
     /// A mark for an operation's hold of the faces (`FacesMark`), never `0`, which marks a face
@@ -1902,7 +1948,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> DirectFaces<L, C>
     }
 
     /// The face of the face table's row `at`; `None` past the rows the open made.
-    #[cfg(any(feature = "listen", feature = "group"))]
+    #[cfg(feature = "listen")]
     pub(super) fn face_at(&self, at: usize) -> Option<&DirectFace<L, C>> {
         self.rows.get(at)
     }
@@ -1970,6 +2016,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             let core = &mut core.0;
             core.transport.listen_on_config()?;
             core.join_groups()?;
+            // Each group's row is the group's from its join on, which its read walks to.
+            #[cfg(feature = "group")]
+            for group in &core.transport.groups {
+                self.direct.hold_group(group.at());
+            }
         }
         // Each group's first step sends its first JOIN, with the session let go of as a read
         // steps it; a group whose link did not open fails the open.
@@ -2520,8 +2571,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     }
 
     /// Step each group's session where it lies, in the row of the group's place in the read slots'
-    /// table: the row's slot taken by a try, after the session's lock was let go of, as every read
-    /// slot is taken before it, and passed over when another read holds it. The holder first pays
+    /// table, the rows the table marks the groups' (`DirectFaces::group_rows`) walked in its
+    /// order with nothing held: each row's slot taken by a try, before the session's lock as every
+    /// read slot is, and passed over when another read holds it. The holder first pays
     /// what the group's last join owed the row, under the session's lock: the join's session built
     /// in the row (`DirectSlot::seat_group`). Each record a step reads is dispatched under the
     /// session's lock, which is let go of before it is handed out (`DirectSink`), as a face's are.
@@ -2542,23 +2594,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// ([`super::group::read_awaited`]).
     #[cfg(feature = "group")]
     fn step_groups(&self, now_us: Option<u64>, mut awaited_us: Option<u64>) {
-        let mut next: usize = 0;
-        loop {
-            let at = next;
-            next = at.saturating_add(1);
-            // A group keeps its place across its joins.
-            let place = {
-                let Some(held) = self.live() else {
-                    return;
-                };
-                let Some(group) = held.0.transport.groups.get(at) else {
-                    return;
-                };
-                group.at()
-            };
-            let Some(row) = self.direct.face_at(place) else {
-                continue;
-            };
+        for (place, row) in self.direct.group_rows() {
             let Some(mut held_row) = <CoopForm as LockForm>::try_lock(&row.slot) else {
                 continue;
             };
@@ -2570,10 +2606,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     return;
                 }
                 let state = &mut held.0;
+                // A group keeps its place across its joins.
                 if let Some(seat) = state
                     .transport
                     .groups
-                    .get_mut(at)
+                    .iter_mut()
+                    .find(|group| group.at() == place)
                     .and_then(GroupFace::take_seat)
                 {
                     #[cfg(all(
@@ -3986,6 +4024,24 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .iter()
             .map(|face| face.rests.load(Ordering::Acquire))
             .collect()
+    }
+
+    /// The rows of the session's face table marked the groups' (`DirectFaces::group_rows`), and
+    /// the places of the session's groups in its face table, each in order.
+    #[cfg(all(
+        test,
+        feature = "std",
+        feature = "group",
+        feature = "app-transport",
+        feature = "threads"
+    ))]
+    pub(crate) fn group_rows_marked(&self) -> (Vec<usize>, Vec<usize>) {
+        let rows = self.direct.group_rows().map(|(at, _)| at).collect();
+        let places = self
+            .live()
+            .map(|held| held.0.transport.groups.iter().map(GroupFace::at).collect())
+            .unwrap_or_default();
+        (rows, places)
     }
 
     /// The rows of the read slots' table whose slot holds a group's session, and the places of the

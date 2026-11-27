@@ -553,6 +553,37 @@ fn every_row_past_the_dial_roles_rests_from_its_making_the_groups_among_them() {
     SessionDrive::close(&*first);
 }
 
+/// Each group's row is marked the group's at the open's join, and the group's read walks the rows
+/// so marked: a member's marked rows are its groups' places, the dial role's row none of them, and
+/// two members learn each other through their groups' reads, the marks standing after them. Turned
+/// red by an open that marks no row (`DirectFaces::hold_group` not called after the join) or
+/// another row than the group's place, or by a mark past the bound of the rows a walk reaches
+/// (`DirectFaces::walked`), where the group's read would find no row to step and the members
+/// would never meet.
+#[test]
+fn each_groups_row_is_marked_at_its_join_and_walked_by_the_groups_read() {
+    let network = Arc::new(Network::default());
+    let first = open_member(&network, 1, member_config(1, GROUP)).expect("the first joins");
+    let second = open_member(&network, 2, member_config(2, GROUP)).expect("the second joins");
+    let (rows, places) = first.group_rows_marked();
+    assert_eq!(places.len(), 1, "CONTROL: the member joined one group");
+    assert!(
+        places[0] > 0,
+        "CONTROL: the dial role's place is not the group's"
+    );
+    assert_eq!(rows, places, "the group's row is marked at the open");
+    SessionDrive::start_read_task(&*first).expect("the first's read task starts");
+    SessionDrive::start_read_task(&*second).expect("the second's read task starts");
+    until_members_know_each_other(&first, &second);
+    assert_eq!(
+        first.group_rows_marked(),
+        (rows.clone(), rows),
+        "the marks stand after the reads"
+    );
+    SessionDrive::close(&*second);
+    SessionDrive::close(&*first);
+}
+
 /// What a member's group received is in the session's message reading, and stays there when the
 /// group's join is replaced by a join again and when the session closes. Turned red by a reading of
 /// the links alone, or by a join replaced or let go of at the close with its count not retired
