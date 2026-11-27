@@ -1044,9 +1044,20 @@ each for a cause of its own:
   `tests::get::a_get_ends_with_its_link_where_the_session_dials_again` (the loss of a session
   that goes on, the session open after it).
 - `test(capi-coop): Count one callback for the listener's get of two legs`. The test counted two
-  callbacks dropped for a get of two legs, as each leg minted one before the switch; the switch
-  mints one for the get, so the count never reached two in any form. The test waits for the one
-  drop, after which both answers are asserted as before.
+  callbacks dropped for a get of two legs, as each leg minted one until H7b; since H7b
+  (`refactor(session-core): Mint a get's callback once for all its legs`, ahead of the switch,
+  which keeps it) the get mints one, so the count never reached two in any form. This is the
+  red bisected to the lane before the switch, not a fact of the switch. The test waits for the
+  one drop.
+- `test(capi-coop): Ask the listener's two clients on a key each`. The same test, once its count
+  was right, asserted both clients' answers on the one key `demo/g/a`. Since H7c1
+  (`fix(session-core): Consolidate and end a get once over all its legs`) a get consolidates over
+  every leg, and a get that names no consolidation resolves to `Latest` (zenoh's `Auto`), one
+  reply a key, so two answers on one key leave one, as zenoh hands them. The engine is right and
+  the test asked the wrong thing: each client now answers on a key of its own under
+  `demo/g/*`, and the test asserts both answers with their keys. Red if either leg's reply is
+  lost or a leg mints a callback of its own; the consolidation over the legs is held by
+  `tests::local_query::a_latest_get_of_two_legs_hands_one_reply_of_a_key_over_both`.
 
 Expected size and Ir: the hand-out takes the lock it took (`live`'s check of the closed word goes,
 `released` is read under the lock instead), so a get's end costs about the same; no Push path
