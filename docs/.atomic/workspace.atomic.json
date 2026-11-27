@@ -9034,6 +9034,23 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4720": {
+      "decision_summary": "Walk a query's queryables once for every face, so the loop is one body\nand not a copy per face kind (query lane, Q1).",
+      "changes_bullets": [
+        "capi-coop queries: call_queryables, not generic over the face.",
+        "docs/c-abi-migration/feat-query.md: the pairing with zenoh-pico, Q1-Q8."
+      ],
+      "verification_bullets": [
+        "size ledger pico-api-coop-nostd 930,535 -> 928,628 B (-1,907); client same.",
+        "capi-coop query,queryable tests 326 and group asked 2; clippy."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
