@@ -9485,6 +9485,21 @@
       "carry_forward_bullets": [
         "session-close-ingress stays PARTIAL: D12's heap commander is the owner's; no Zephyr image runs the passive hold."
       ]
+    },
+    "Round 4744": {
+      "decision_summary": "Record the owner's rulings of 2026-11-27: one reference monitor (D16), sealed commands (D17), witnesses on the shipped image (D18).",
+      "changes_bullets": [
+        "docs/session-lifecycle-intent.md section 5b states D16, D17 and D18 with their models and order."
+      ],
+      "verification_bullets": [
+        "The new section's upstream citation resolves at the pin."
+      ],
+      "impact_refs": [
+        "watching-zenoh/local-ci-gates"
+      ],
+      "carry_forward_bullets": [
+        "D16, D17 and D18 are built in three lanes; each lands with its own round."
+      ]
     }
   },
   "inventory_entries": {
