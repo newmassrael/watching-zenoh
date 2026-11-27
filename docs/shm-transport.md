@@ -276,8 +276,15 @@ The order, each step landing whole with its tests:
    top crate's, and a session not given a storage reads through the process's global one. The
    repairs the engine's reader had are made in `zenoh-shm`'s: the generation is checked before the
    header is touched, the reference is given back on every failure once it is the reader's, and a
-   release stops at zero. One is not: the reader keeps a data segment it mapped for the life of its
-   storage, as upstream's does, where the engine's let go of the segment of a provider that was gone.
+   release stops at zero. One was not at first: the reader kept a data segment it mapped for the life
+   of its storage, as upstream's does, where the engine's let go of the segment of a provider that was
+   gone. Paid on 2026-11-27, by ownership rather than by watching providers: a segment a reader maps,
+   data or metadata, is held by the buffers that point into it, the reader's table finds it by a
+   `Weak`, and the table keeps by itself only the last ones used, sixteen by default
+   (`crates/wz-zenoh-shm/src/segment_cache.rs`). Whether another process's provider lives is not
+   something a reader can observe without a liveness protocol the wire does not carry; whether a
+   buffer of the segment is held is, and a gone provider sends no new descriptor, so its segment goes
+   with the last buffer once readers of others have pushed it out of the recent set.
 3. The provider: the C ABI allocates from `ShmProvider`; `shm_provider`'s allocator, `shm_backend`,
    `shm_posix_backend` and `posix_shm` go.
    Landed: a `z_shm_provider_*` is `zenoh-shm`'s `ShmProvider` over the POSIX backend or over a C
