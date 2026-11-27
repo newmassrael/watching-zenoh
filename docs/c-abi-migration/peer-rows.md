@@ -849,7 +849,62 @@ R5a landed: section 7.7.
   walk's bound keeps `rests` false, as the group's place's row did before this step, so
   `CoopEngine::quiet_until` never finds every other face at rest and a session with groups never
   reads one face quietly. A row no face holds rests; marking it so at its making, with a test of
-  the quiet read beside a group, is the next step of this kind.
+  the quiet read beside a group, is the next step of this kind. (Read again in 7.8: the quiet read
+  is refused to a session with groups by its own rule; the walk of a publish was what it cost.)
+
+### 7.8 Rows past the dial role's at rest, and R3a, landed
+
+**Rows past the dial role's rest from their making** (`crates/wz-capi-coop/src/engine/direct.rs`
+@ `addr_of_mut!((*at).rests).write(AtomicBool::new(row != 0));`).
+
+- What 7.7 found holds in part. A group's row below the walk's bound read awake, so a publish's
+  walk of the faces tried a leg on it (`CoopEngine::on_face_legs`, its place's send part empty)
+  and `CoopEngine::quiet_until`'s look at the other faces found it awake. That the session never
+  read one face quietly because of it does not hold: `quiet_until` grants no quiet read to a
+  session that joins groups at all (`if self.joins_groups { return None; }`), as the group's
+  read is a part of every read. The mark is right whatever that rule: a row no face holds has
+  nothing a look would move, and a group's row is stepped by its group's read, never by a look.
+- A row is given a face only through `DirectFaces::hold_face` and `DirectSlot`'s placing of a
+  link, both of which end the rest, so no row past the dial role's is read at rest once a face
+  holds it; the dial role's row is still judged by the open.
+- **Held by:** `tests::group`'s
+  `every_row_past_the_dial_roles_rests_from_its_making_the_groups_among_them` (two members that
+  learnt each other: every row past the dial role's, the group's place's among them, rests; red if
+  `init_at` writes `rests` false past row 0, or a group's step wakes its row). The listener's
+  rows were held already (`tests::listen`'s `a_row_a_face_left_wakes_for_the_face_an_attach_gives_it`,
+  `a_lone_face_is_found_quiet_by_its_look_and_not_beside_another`), and pass as before.
+- **Bytes and Ir:** none; one constant at a row's making.
+
+**R3a, the holders as the table's mark** (`crates/wz-capi-coop/src/engine/registry/held.rs`).
+
+- `Holders`, `ManyHolders` and `OneHolder` are gone, and with them `RegistryOf<H>`: one
+  `Registry` body for every build. The registry's table of places (`HeldPlaces`) marks each place
+  with its face's id, free (`NO_FACE`) or kept for a tomb (`KEPT`). The dial role's place is its
+  face's for the table's life, as `DirectFaces::dial` and `hold_face` already read it, so its
+  mark is a constant and no row: the arena lends a mark for each place past it
+  (`ArenaPart::HeldFaces`, `sets - 1` rows), and a session of its dial role's face alone has
+  none, its table of one row a bound of the build (`[FaceId; 0]`), not a type.
+- The other faces a call's matching verdict counts are the table's rows but the caller's
+  (`HeldPlaces::split`): the dial role's set where the caller is another face, and the sets past
+  it on either side of the caller's, by their marks. A session of one face has no row but the
+  caller's, and its verdicts count no other (`NoOtherPeers`, the empty relation's type).
+- Not taken: the marks as a column of the read slots' table (`DirectFaces`). The registry is
+  read under the session's lock in every form, the round's among them, where no read slots' table
+  exists, and the places are chosen there (`add_face`, `keep_place`); the mark stays where the
+  place is chosen, and R3b moves it with the relations.
+- **Held by:** `registry::tests`'
+  `the_dial_roles_place_is_marked_for_the_tables_life_and_lent_no_row` (red if `HeldPlaces::lent`
+  lends a row for the dial role's place, or names a face no face took);
+  `the_other_faces_are_the_other_held_sets`, now with the dial role's call (red if the others
+  leave out the dial role's set or count the caller's or a free one);
+  `a_session_of_one_face_holds_its_dial_role_s_face_alone` over the table of one row (its call
+  counts no other); the kept and free places' tests over the marks; `tests::arena`'s plan tests
+  (the held faces' row `sets - 1`, none in the client's plan).
+- **Bytes, expected:** client none (its place test folds to `at == 0 && id == DIAL_FACE` as
+  `OneHolder`'s did, its split is `OneHolder`'s); peer and api within a few tens of bytes either
+  way (a first-place test in the lookup, a dial set's `Option` in the others) and one mark of
+  arena (8 B) less a session. Receive Ir: none; a Push's lookup reads one mark at its place, as
+  before.
 
 ## 8. Where the cases end
 
