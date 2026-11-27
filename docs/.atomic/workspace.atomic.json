@@ -9242,6 +9242,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4732": {
+      "decision_summary": "Land thirteen lanes as one integration, verified once: the SCE pin of one\nexit body; the open, put, send, driver and doors steps; zenoh-pico parity\nswitches; one row per session; group replies lent; query replies by layout.",
+      "changes_bullets": [
+        "SCE 2d736122d01; zid wire form; filter row once; lease borrowed; owner wait.",
+        "config-limits, multicast-locator-keys, query-replies-with-final switches.",
+        "session rows by storage policy; face watch order; Windows recvfrom wait."
+      ],
+      "verification_bullets": [
+        "size 203,025 -> 199,515 B (-3,510); W/P 0.7548 -> 0.7552 (noise).",
+        "api twin 1.989 -> 1.904; peer codec locked WIN; ledger and cost rc 0.",
+        "tests session-core, runtime-coop 329, capi-coop 413/497/305, pico 543."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
