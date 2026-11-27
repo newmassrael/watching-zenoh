@@ -344,6 +344,56 @@ start refused on quota leaves both slots as they were.
 
 **B4b** stands as 5.3 states it, after the corrected B4a.
 
+### 5.7 B4a and B4b as built (not built or run by this lane)
+
+**B4a**, "Answer a fragment's slot questions in one walk", as 5.6 corrects it. `census` walks the
+slots once and answers `SlotCensus { active, free, of_peer }`: the slot of the open chain on the
+fragment's channel, the first free slot and the peer's open chains (under `OnePeer` the open
+slots, `ChainKey::same_peer` being constant there). `ChainKey::matches` became `on_channel`, read
+only for a chain of the same peer. `judge` takes the census, `admit_chain_start` reads the quota
+and the slot from it, and `abort_channel` reads its `active`; `find_active` and the quota's count
+went (`peer_chain_count` stays for the tests, over the census).
+
+What `apply_chain_boundary_markers` asked: a `First` on a channel whose chain is open evicts that
+chain before the start is admitted, so the census taken before it is stale in two answers. The
+rules now take and give the census, and an eviction answers `SlotCensus::ended`: no chain on the
+channel, the evicted slot free if it is below the first free one, and one chain fewer the peer's,
+which is what a second walk would find, since `Slot::end` frees the slot whichever way the machine
+answers. Without that a restart in a full pool would be refused as one, and a restart at the quota
+on the quota.
+
+Tests (`one_peer_tests`): `one_walk_finds_a_continuations_chain_and_refuses_a_start_past_the_quota`
+(red if the walk answers the free slot as the chain's, or its count misses an open chain) and
+`a_restart_in_a_full_pool_at_the_quota_takes_the_slot_it_ended` (red if `ended` keeps the slot
+taken or the count). The quota, pool and marker tests of `reassembly_dispatch` hold the rest, and
+`peer_chain_count`'s callers now read the census's count. Expected as 5.6 says, -80 to -150 of
+the Router's 1,199; a first fragment walks the slots once instead of three times.
+
+**B4b, corrected: `Judged` stays.** The case's explain report (5.6) places the Router's lines
+inside `fragment_in_place`: `judge`, both admissions and the drive are inlined into the one body,
+and only `init_in`, `Slot::end` and `abort_rejected_channel` are out of line. Inlined, `Judged`
+and the admissions' answers are values the compiler keeps in registers, not hand-offs through
+memory, and `Judged` is what lets the five places a judgement ends a chain (the drop marker, the
+two aborts of a continuation, a machine that disagrees, a refused stage) share one call of
+`Slot::end`; ending each where it is judged would be five call sequences for one. So 5.3's
+"without the `Judged` and `admitted` hand-offs" is not a smaller form here. What was built,
+"Release a delivered chain's slot in one order":
+
+- `finish` delivers and then releases the slot, whichever hand it took: a kept or lent chain's
+  staging is taken out of the slot before the delivery as before, so the release after it only
+  turns the slot's machine, and the delivery holds the Router borrowed, so it cannot see the
+  order. The branch on `released_first` and the second call of `Slot::end` go.
+- Each admission answers only what it decides: `admit_continuation` `Result<(), Judged>` (its
+  slot is the one it was handed), `admit_chain_start` `Result<usize, IngestOutcome>`; `judge`
+  pairs the slot with whether the chain starts. Source only; no bytes expected.
+
+Expected -20 to -60 of the Router's 1,199 (one call of `Slot::end` with its slot's address and
+one branch), well under 5.3's -200 to -400, whose share was the hand-offs. Receive Ir: one branch
+fewer at a completed chain. Test: `a_kept_chain_holds_its_buffer_until_the_delivery_drops_it`
+now holds that a kept chain's slot machine is back at `Empty` after the ingest (red if the one
+release after the delivery is skipped for a kept chain, which `active_chains` alone cannot see,
+the chain having left the slot before the delivery).
+
 ## 6. The work steps as built
 
 Each work step follows the owner's ruling of section 3 and the shape of the send's four
