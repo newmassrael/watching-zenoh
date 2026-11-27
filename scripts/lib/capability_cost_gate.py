@@ -405,6 +405,10 @@ LOG_FACADE = r"(?<![\w])log::"
 # program ended where a refusing build answers the caller. One such allocation left anywhere in a
 # build links it.
 HEAP_ABORT = r"handle_alloc_error"
+# The one body every table of a session whose tables take their memory on use takes its rows
+# through (`wz_session_core::on_use::take_rows`, out of line by `#[inline(never)]`): a library of
+# that form links it, and one whose tables are laid out at the open calls it from nowhere.
+ON_USE_ROWS = r"wz_session_core::on_use::take_rows"
 # Forbidden patterns whose control build (one that must link the pattern) is not yet a case, each
 # with why: the selftest holds every other forbidden pattern to a case that requires it. A pattern
 # leaves this table in the commit that adds its control.
@@ -951,6 +955,21 @@ CASES: tuple[Case, ...] = (
               "every program of the library for that one name (docs/win-budget/rss.md, R4). "
               "No `critical-section` "
               "implementation: the locks are the host's own calls through `wz-host-sync`"),
+    # The same client in the form the zenoh-pico preset ships once its axis of the moment names
+    # on-use (`tables-on-use`): each table takes its memory at its first row and the open
+    # reserves no arena, the state its one block. Its package, profile, configuration files,
+    # exports and patterns are pico-client-coop-nostd's, and its features differ by the moment
+    # alone, so the size ledger steps from that case to this one by `tables-on-use`.
+    Case("pico-client-coop-nostd-on-use", "wz-capi-pico", "libwz_capi_pico.so",
+         "os-host,link-udp,tables-on-use", None,
+         forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
+         require=(UDP, SINGLE_THREADED, COOP_ENGINE, ON_USE_ROWS),
+         exports=443, **NOSTD_RELEASE_FORM,
+         note="pico-client-coop-nostd with its tables on use: each allocation of the form answers "
+              "a refusal as a value (the engine's claim, the state's block, the tables' first "
+              "rows, a key's), so the allocator's abort is forbidden as it is there. No budget "
+              "and no ceiling row until the first reading: --measure prints both"),
     # The cooperative client with the unstable API, which the reference pico of the test lanes is
     # built with (`-DZ_FEATURE_UNSTABLE_API`): entity global ids, source info, cancellation
     # tokens. Nothing of it is the engine's, so it costs the ABI's own code and no engine's.
