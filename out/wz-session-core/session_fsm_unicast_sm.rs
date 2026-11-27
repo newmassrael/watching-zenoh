@@ -1,5 +1,5 @@
 // SCE-GENERATED — DO NOT EDIT
-// source-hash: ddf88db59b1f31da7bf884fe79b35db2cde2ef8cbb4f181bab5c170dea2383d4
+// source-hash: 177bf99e2d59cb26f29dbd553de6961f9e74d511b3cf8f3b5c1c153a28e6a5a5
 // source: session_fsm_unicast.scxml
 
 
@@ -1608,5 +1608,7 @@ compile_error!("feature `transport-shm` requires `alloc`, which this build leave
 compile_error!("feature `transport-stats` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "tx-lend-only", not(feature = "transport-tx-lend")))]
 compile_error!("feature `tx-lend-only` requires `transport-tx-lend`, which this build leaves out (feature model `wz-session-core`)");
+#[cfg(all(feature = "tx-probe", not(feature = "alloc")))]
+compile_error!("feature `tx-probe` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
 #[cfg(all(feature = "wire-bincode", not(feature = "alloc")))]
 compile_error!("feature `wire-bincode` requires `alloc`, which this build leaves out (feature model `wz-session-core`)");
