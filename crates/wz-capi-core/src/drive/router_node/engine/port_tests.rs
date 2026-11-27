@@ -1198,7 +1198,7 @@ fn a_nodes_holder_keeps_nothing_outside_a_handler_and_refuses_once_closed() {
 /// The port's shared-memory publication, over links that negotiated shared memory.
 #[cfg(feature = "session-extshm")]
 mod shared_memory {
-    use wz_runtime_tokio::shm_provider::ShmBackedPayload;
+    use wz_runtime_tokio::shm_buffer::IssuedBuffer;
     use wz_session_core::sink::SampleView;
 
     use super::*;
@@ -1288,7 +1288,7 @@ mod shared_memory {
         let (on_plain, _) = subscribe(&plain.as_engine());
         let (on_node, _) = subscribe(&engine);
 
-        let mut chunk = ShmBackedPayload::alloc(BODY.len()).expect("a POSIX segment");
+        let mut chunk = IssuedBuffer::alloc(BODY.len()).expect("a POSIX segment");
         chunk.write(BODY);
         let chunk = Arc::new(chunk);
         // The clients' subscriptions reach the node over their links; until they have, a
@@ -1370,8 +1370,8 @@ mod shared_memory {
     }
 
     /// A chunk with [`BODY`] in it.
-    fn chunk() -> Arc<ShmBackedPayload> {
-        let mut chunk = ShmBackedPayload::alloc(BODY.len()).expect("a POSIX segment");
+    fn chunk() -> Arc<IssuedBuffer> {
+        let mut chunk = IssuedBuffer::alloc(BODY.len()).expect("a POSIX segment");
         chunk.write(BODY);
         Arc::new(chunk)
     }

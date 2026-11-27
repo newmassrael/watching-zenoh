@@ -2206,9 +2206,11 @@ pub struct PassiveSession {
     /// than a lookup.
     ///
     /// The chains stage into heap buffers in every build ([`PassiveRouter`]),
-    /// so the 64 KiB ceiling costs nothing until fragments actually arrive.
+    /// so the 64 KiB ceiling costs nothing until fragments actually arrive, and
+    /// the two routers themselves are made with the first fragment
+    /// ([`PassiveRouters`]): a flow that carries none holds none.
     #[cfg(feature = "reassembly")]
-    reasm: [PassiveRouter; 2],
+    reasm: PassiveRouters,
     /// R311y585 (A4) — the per-direction `id -> keyexpr` bindings, folded
     /// from every `Declare` this observer decodes.
     ///
@@ -2508,7 +2510,7 @@ impl core::fmt::Debug for PassiveSession {
         #[cfg(feature = "reassembly")]
         d.field(
             "open_chains",
-            &[self.reasm[0].active_chains(), self.reasm[1].active_chains()],
+            &[self.reasm.active_chains(0), self.reasm.active_chains(1)],
         );
         d.finish()
     }
@@ -2525,20 +2527,17 @@ impl Default for PassiveSession {
             b: DirectionStream::default(),
             #[cfg(all(feature = "dissect", feature = "codec-declare"))]
             keyexprs: crate::passive_keyexpr::KeyexprTables::new(),
+            // `u64::MAX` keeps the deadline unreachable for a caller that never
+            // advances the clock, which is every caller that has one stream of
+            // bytes and no time to attach to them. A caller that DOES have
+            // timestamps builds with `PassiveSession::with_reassembly_window`
+            // instead. Markers start off and are pushed in per frame from the
+            // negotiated patch level.
             #[cfg(feature = "reassembly")]
-            reasm: core::array::from_fn(|_| {
-                // `u64::MAX` keeps the deadline unreachable for a caller that
-                // never advances the clock, which is every caller that has one
-                // stream of bytes and no time to attach to them. A caller that
-                // DOES have timestamps builds with
-                // `PassiveSession::with_reassembly_window` instead. Markers
-                // start off and are pushed in per frame from the negotiated
-                // patch level.
-                ReassemblyDispatcher::new(
-                    ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX)
-                        .with_max_message_bytes(PASSIVE_CHAIN_DEFAULT_BYTES),
-                )
-            }),
+            reasm: PassiveRouters::new(
+                ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, u64::MAX)
+                    .with_max_message_bytes(PASSIVE_CHAIN_DEFAULT_BYTES),
+            ),
             observed_at_ns: None,
             lease_ms: [None; 2],
             initial_sn: [None; 2],
@@ -2613,6 +2612,48 @@ pub type PassiveRouter = ReassemblyDispatcher<
     crate::chain_staging::VecStaging<PASSIVE_CHAIN_SLOTS, PASSIVE_CHAIN_CAP>,
 >;
 
+/// The two directions' chain routers of an observer, made when the first fragment of the flow
+/// arrives. A router is a few KiB however few chains it holds (its slots, and the state machine
+/// that judges each chain, whose size the runtime's profile decides), and most flows carry no
+/// fragment, so an observer of many flows paid that for each of them; the routers of a flow with
+/// none are now absent, and a flow's state before its first fragment is what a router with no
+/// chain would answer: none open, none to sweep.
+#[cfg(feature = "reassembly")]
+struct PassiveRouters {
+    /// What each router is made with.
+    config: ReassemblyConfig,
+    /// Direction A's and B's routers, once a fragment arrived.
+    made: Option<alloc::boxed::Box<[PassiveRouter; 2]>>,
+}
+
+#[cfg(feature = "reassembly")]
+impl PassiveRouters {
+    /// No routers yet; each is made with `config`.
+    fn new(config: ReassemblyConfig) -> Self {
+        Self { config, made: None }
+    }
+
+    /// The routers, made now when no fragment came before.
+    fn make(&mut self) -> &mut [PassiveRouter; 2] {
+        let config = self.config;
+        self.made.get_or_insert_with(|| {
+            alloc::boxed::Box::new(core::array::from_fn(|_| ReassemblyDispatcher::new(config)))
+        })
+    }
+
+    /// The routers, when a fragment made them.
+    fn made_mut(&mut self) -> Option<&mut [PassiveRouter; 2]> {
+        self.made.as_deref_mut()
+    }
+
+    /// The chains open in direction `seat` (0 for A, 1 for B).
+    fn active_chains(&self, seat: usize) -> usize {
+        self.made
+            .as_deref()
+            .map_or(0, |routers| side(routers, seat).active_chains())
+    }
+}
+
 impl PassiveSession {
     /// A fresh observer with no bytes and no inferred context.
     ///
@@ -2673,7 +2714,7 @@ impl PassiveSession {
         let config = ReassemblyConfig::new(PASSIVE_CHAIN_QUOTA, window_ms.unwrap_or(u64::MAX))
             .with_max_message_bytes(chain_bytes.min(PASSIVE_CHAIN_CAP));
         Self {
-            reasm: core::array::from_fn(|_| ReassemblyDispatcher::new(config)),
+            reasm: PassiveRouters::new(config),
             ..Self::default()
         }
     }
@@ -2755,14 +2796,17 @@ impl PassiveSession {
     ) -> ChainLoss {
         #[cfg(feature = "reassembly")]
         {
-            let mut loss = self.reasm[0].sweep_reporting(sweep_ms, |reliable, priority| {
+            let Some(routers) = self.reasm.made_mut() else {
+                // No fragment arrived on this flow, so no chain is open to end.
+                return ChainLoss::default();
+            };
+            let [a, b] = routers;
+            let mut loss = a.sweep_reporting(sweep_ms, |reliable, priority| {
                 ended(Direction::A, reliable, priority)
             });
-            loss.absorb(
-                self.reasm[1].sweep_reporting(sweep_ms, |reliable, priority| {
-                    ended(Direction::B, reliable, priority)
-                }),
-            );
+            loss.absorb(b.sweep_reporting(sweep_ms, |reliable, priority| {
+                ended(Direction::B, reliable, priority)
+            }));
             loss
         }
         #[cfg(not(feature = "reassembly"))]
@@ -3760,7 +3804,7 @@ impl PassiveSession {
         // Read BEFORE the router is borrowed: the clock and the router are both
         // fields of `self`.
         let now_ms = self.now_ms();
-        let router = side_mut(&mut self.reasm, idx);
+        let router = side_mut(self.reasm.make(), idx);
         router.set_fragmentation_markers(markers_on);
         let mut joined: Option<Vec<u8>> = None;
         // The peer key is the DIRECTION, one byte, because an observer holds

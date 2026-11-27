@@ -59,152 +59,93 @@
 //!
 //! The object NAME is equally a wire format: zenoh calls
 //! `shm_open("{id}.zenoh", ..)` (`shm/unix.rs:256`), where `id` is the `u32`
-//! rendered in DECIMAL. On Linux that is the file `/dev/shm/{id}.zenoh`, which
-//! is what lets wz create and open one with ordinary file operations plus
-//! `mmap` — the same mechanism `shm_open` itself provides.
+//! rendered in DECIMAL. On Linux that is the file `/dev/shm/{id}.zenoh`.
 //!
-//! ## What is deliberately NOT mirrored
+//! ## The segment is `zenoh-shm`'s
 //!
-//! zenoh takes a SHARED advisory lock (`flock`) on the object and treats an
-//! exclusive lock elsewhere as an invalidated segment. wz takes the same shared
-//! lock so a zenoh peer's own locking is unaffected, but wz never takes the
-//! EXCLUSIVE lock upstream uses to invalidate — wz has no segment-recycling
-//! pool for it to guard, and taking a lock it never releases meaningfully would
-//! make wz's segments look invalid to a peer.
-
+//! The object is made and opened by `zenoh-shm`'s `StructInSHM`, the type upstream's own
+//! transport makes it with, so its name, its mode, the shared advisory lock every holder takes and
+//! the unlink by the last of them are upstream's and no copy of them lives in this crate
+//! (`docs/shm-transport.md`, section 6).
 use std::collections::VecDeque;
 use std::io;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use wz_session_core::extshm::{
-    decode_shm_descriptor, ShmAuthenticator, ShmHandoff, ShmHandoffRefused, ShmTxHandoff,
-    ShmTxTransaction, SHM_PRIORITY_BANDS,
+    decode_shm_descriptor, ShmAuthenticator, ShmDescriptor, ShmHandoff, ShmHandoffRefused,
+    ShmTxHandoff, ShmTxTransaction, SHM_PRIORITY_BANDS,
 };
+use zenoh_shm::metadata::descriptor::MetadataDescriptor;
+use zenoh_shm::posix_shm::struct_in_shm::StructInSHM;
+use zenoh_shm::version::SHM_VERSION;
+use zenoh_shm::{ShmBufHardRef, ShmBufInfo};
 
-use crate::shm_watchdog::Confirmed;
-
-/// zenoh `SHM_VERSION` (`commons/zenoh-shm/src/version.rs`, the `SHM_VERSION`
-/// constant). A peer whose segment carries a different value is treated as
-/// "no SHM". R2240 moved it 1 -> 2 with the rest of the layout below.
-const SHM_VERSION: u64 = 2;
 /// zenoh `POSIX_PROTOCOL_ID` (`api/protocol_implementations/posix/protocol_id.rs`,
 /// `pub const POSIX_PROTOCOL_ID: ProtocolID = 0`). `ProtocolID` is a `u32` in
 /// 1.10.0, which is why the protocol slots below are four bytes and not eight.
 const POSIX_PROTOCOL_ID: u32 = 0;
 
-/// `u64` slot indices for the three scalar fields, which sit at the same byte
-/// offsets in BOTH layouts — `id_count` 0, `challenge` 8, `version` 16.
-const LEN_INDEX: usize = 0;
-const CHALLENGE_INDEX: usize = 1;
-const VERSION_INDEX: usize = 2;
-
-/// Byte offset of `ShmTransportMetadata::protocols`, i.e. straight after the
-/// three `u64` scalars.
-const PROTOCOLS_OFFSET: usize = 3 * core::mem::size_of::<u64>();
 /// `protocols: [ProtocolID; 256]`.
 const PROTOCOL_SLOTS: usize = 256;
 /// `shm_counters: [AtomicU32; 762 + 2048]`, restated as upstream spells the sum
 /// so a reader can join the two halves to the declaration.
 const COUNTER_SLOTS: usize = 762 + 2048;
-/// Byte offset of `ShmTransportMetadata::shm_counters`: straight after the
-/// protocol array, 1048 (the table in the module docs).
-const COUNTERS_OFFSET: usize = PROTOCOLS_OFFSET + PROTOCOL_SLOTS * core::mem::size_of::<u32>();
 
-/// The one protocol the segment of wz's DEFAULT reader advertises (R3065: a reader built from a
-/// client storage lists that storage's protocols instead, see [`ShmAuthSegment::create_listing`]).
-/// Written into `protocols[0]` with
-/// `id_count = 1`; upstream's `PartnerShmConfig::supports_protocol`
-/// (`common/shm/interop.rs`, `link_partner_segment.protocols().contains`) reads
-/// it when it decides whether wz can be SENT an SHM buffer, so an empty list
-/// would establish and then never carry anything.
+/// The one protocol the segment of wz's DEFAULT reader advertises (a reader built from a client
+/// storage lists that storage's protocols instead, see [`ShmAuthSegment::create_listing`]).
+/// Upstream's `PartnerShmConfig::supports_protocol` (`common/shm/interop.rs`,
+/// `link_partner_segment.protocols().contains`) reads it when it decides whether wz can be SENT
+/// an SHM buffer, so an empty list would establish and then never carry anything.
 const WZ_PROTOCOLS: [u32; 1] = [POSIX_PROTOCOL_ID];
 
-/// `size_of::<ShmTransportMetadata>()`, derived from the field composition
-/// rather than transcribed: 3 x u64 + 256 x u32 + 2810 x AtomicU32 = 12288, and
-/// the struct is `#[repr(C)]` with an 8-byte alignment that the total already
-/// satisfies, so there is no tail padding to account for.
-const SEGMENT_BYTES: usize = PROTOCOLS_OFFSET
-    + PROTOCOL_SLOTS * core::mem::size_of::<u32>()
-    + COUNTER_SLOTS * core::mem::size_of::<u32>();
-
-// R2862 — the id derivation (and its R2201 injectivity rationale), the object
-// NAME, the mode and the shared advisory lock moved to `crate::posix_shm`, the
-// one implementation every segment kind is made through. The payload provider's
-// metadata and data segments share this namespace, so they share its counter.
-// The tests below open a segment as a FILE, by its `/dev/shm` path, so they exist where that is
-// what a segment is (`unix`); a Windows segment has no path to open.
-#[cfg(all(test, unix))]
-use crate::posix_shm::candidate_id;
-use crate::posix_shm::{next_candidate_id, OwnedSegment, PeerSegment, PeerSegmentRw};
-
-/// This segment kind's `/dev/shm` path, for the tests that open one by hand.
-#[cfg(all(test, unix))]
-fn auth_segment_path(segment_id: u32) -> std::path::PathBuf {
-    crate::posix_shm::segment_path(u64::from(segment_id))
-}
-
-fn read_u64(map: &[u8], index: usize) -> Option<u64> {
-    let start = index * core::mem::size_of::<u64>();
-    let bytes: [u8; 8] = map.get(start..start + 8)?.try_into().ok()?;
-    // Native endianness: the peer is on THIS host by construction (the whole
-    // point of shared memory), and zenoh writes through a native `*mut u64`.
-    Some(u64::from_ne_bytes(bytes))
-}
-
-fn write_u64(map: &mut [u8], index: usize, value: u64) {
-    let start = index * core::mem::size_of::<u64>();
-    map[start..start + 8].copy_from_slice(&value.to_ne_bytes());
-}
-
-/// Read one `ProtocolID` slot — a `u32` at a BYTE offset, because the protocol
-/// array no longer shares the `u64` grid the three scalars sit on.
-///
-/// The establishment path must NOT REJECT a peer over its protocol list, because upstream does
-/// not: `RXAuthSegment` is opened and its `challenge()` read with no validation at all, and the
-/// list is consulted later, at send time, by `PartnerShmConfig::supports_protocol`. A reader
-/// here that rejected a peer whose list it disliked would be stricter than the implementation it
-/// has to interoperate with. It was test-only (the layout assertion) until R3065, which reads the
-/// list the way upstream's sender does, to decide at send time whether a buffer goes out as its
-/// descriptor or as its bytes ([`open_peer_protocols`]); a peer is still never refused for it.
-fn read_u32_at(map: &[u8], offset: usize) -> Option<u32> {
-    let bytes: [u8; 4] = map.get(offset..offset + 4)?.try_into().ok()?;
-    Some(u32::from_ne_bytes(bytes))
-}
-
-fn write_u32_at(map: &mut [u8], offset: usize, value: u32) {
-    map[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
-}
-
-/// This node's own auth segment: created once at bring-up, unlinked on drop.
-///
-/// The [`OwnedSegment`] keeps the mapping and its shared lock alive and
-/// unlinks the object when this drops, which is what bounds the lifetime of an
-/// id a peer may still try to open (a peer that opens after the unlink gets
-/// `None`, i.e. "no SHM", which is the correct outcome).
-pub struct ShmAuthSegment {
-    segment: OwnedSegment,
+/// The segment's layout, field for field upstream's
+/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
+/// `struct ShmTransportMetadata {`): a foreign process dereferences the mapping as this type.
+#[repr(C)]
+struct ShmTransportMetadata {
+    id_count: u64,
     challenge: u64,
-    /// R3110 -- the counters of the segment nobody has leased, first in first out, as upstream's
+    version: u64,
+    protocols: [u32; PROTOCOL_SLOTS],
+    shm_counters: [AtomicU32; COUNTER_SLOTS],
+}
+
+/// 3 x u64 + 256 x u32 + 2810 x AtomicU32 = 12288, at an 8-byte alignment the total already
+/// satisfies: what a foreign reader maps.
+const SEGMENT_BYTES: usize = 12_288;
+const _: () = assert!(core::mem::size_of::<ShmTransportMetadata>() == SEGMENT_BYTES);
+
+/// The object, as both its maker and a peer that opens it hold it.
+type AuthObject = StructInSHM<u32, ShmTransportMetadata>;
+
+/// This node's own auth segment: created once at bring-up, unlinked by the last holder.
+///
+/// A peer that opens it after the unlink gets `None`, i.e. "no SHM", which is the correct
+/// outcome.
+pub struct ShmAuthSegment {
+    segment: AuthObject,
+    challenge: u64,
+    /// The counters of the segment nobody has leased, first in first out, as upstream's
     /// transmit segment keeps them (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
     /// `available_shm_counters: Arc<std::sync::Mutex<VecDeque<ShmCounterID>>>,`).
     free_counters: Mutex<VecDeque<u16>>,
 }
 
 impl ShmAuthSegment {
-    /// Create this node's segment with `challenge`, retrying on an id
-    /// collision. `challenge` is the caller's random u64; it is stored VERBATIM
-    /// per upstream — 1.5.0 negated it, 1.10.0 does not (R2240), and a peer
-    /// reading the negated form echoes a value that can never validate.
+    /// Create this node's segment with `challenge`. `challenge` is the caller's random u64; it
+    /// is stored VERBATIM per upstream -- 1.5.0 negated it, 1.10.0 does not, and a peer reading
+    /// the negated form echoes a value that can never validate.
     pub fn create(challenge: u64) -> io::Result<Self> {
         Self::create_listing(challenge, &WZ_PROTOCOLS)
     }
 
-    /// R3065 -- [`Self::create`] listing `protocols`, the ones this node's READER can resolve,
-    /// where `create` lists the one wz's default reader has (POSIX). The list is what a peer's
-    /// sender reads to decide whether this node can be sent a buffer's descriptor, so it must be
-    /// the reader's own and never a wider one: a protocol listed here that the reader cannot
-    /// resolve is a descriptor dropped on arrival.
+    /// [`Self::create`] listing `protocols`, the ones this node's READER can resolve, where
+    /// `create` lists the one wz's default reader has (POSIX). The list is what a peer's sender
+    /// reads to decide whether this node can be sent a buffer's descriptor, so it must be the
+    /// reader's own and never a wider one: a protocol listed here that the reader cannot resolve
+    /// is a descriptor dropped on arrival.
     ///
     /// `InvalidInput` when there are more ids than the segment has slots.
     pub fn create_listing(challenge: u64, protocols: &[u32]) -> io::Result<Self> {
@@ -217,18 +158,11 @@ impl ShmAuthSegment {
                 ),
             ));
         }
-        let mut segment = OwnedSegment::create(SEGMENT_BYTES, || u64::from(next_candidate_id()))?;
-        let map = segment.bytes_mut();
-        write_u64(map, LEN_INDEX, protocols.len() as u64);
-        // VERBATIM, per the module doc. 1.5.0 stored `!challenge` and 1.10.0
-        // does not; a peer reading the inverted form echoes a value that can
-        // never match.
-        write_u64(map, CHALLENGE_INDEX, challenge);
-        write_u64(map, VERSION_INDEX, SHM_VERSION);
-        for (i, p) in protocols.iter().enumerate() {
-            write_u32_at(map, PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>(), *p);
-        }
-        segment.flush()?;
+        let mut segment = AuthObject::create().map_err(|e| io::Error::other(e.to_string()))?;
+        segment.id_count = protocols.len() as u64;
+        segment.challenge = challenge;
+        segment.version = SHM_VERSION;
+        segment.protocols[..protocols.len()].copy_from_slice(protocols);
         Ok(Self {
             segment,
             challenge,
@@ -242,21 +176,7 @@ impl ShmAuthSegment {
     ///
     /// When `id` is past the array; an id comes only from [`Self::lease_counters`].
     fn counter(&self, id: u16) -> &AtomicU32 {
-        assert!(
-            usize::from(id) < COUNTER_SLOTS,
-            "counter {id} is past the {COUNTER_SLOTS} the segment holds"
-        );
-        // SAFETY: `id < COUNTER_SLOTS` and the mapping holds `SEGMENT_BYTES`, so the four bytes at
-        // `COUNTERS_OFFSET + 4 * id` are inside it; the offset is a multiple of four from a
-        // page-aligned base, so the pointer is aligned for an `AtomicU32`; and the mapping lives
-        // as long as `self.segment`, which the returned borrow cannot outlive.
-        unsafe {
-            &*self
-                .segment
-                .base()
-                .add(COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>())
-                .cast::<AtomicU32>()
-        }
+        &self.segment.shm_counters[usize::from(id)]
     }
 
     /// Lease one counter per priority band and zero them, as upstream's
@@ -286,10 +206,9 @@ impl ShmAuthSegment {
         }
     }
 
-    /// This segment's id — the value that goes on the wire. The auth id is a
-    /// `u32` on the wire, and `next_candidate_id` draws only `u32`s.
+    /// This segment's id -- the value that goes on the wire.
     pub fn id(&self) -> u32 {
-        u32::try_from(self.segment.id()).expect("auth segment ids are drawn as u32")
+        self.segment.id()
     }
 
     /// The challenge a peer must echo back to prove it mapped this segment.
@@ -298,103 +217,69 @@ impl ShmAuthSegment {
     }
 }
 
+/// A PEER's auth segment, opened as upstream opens it, when it carries the version this node
+/// speaks. `None` -- never an error -- when the object does not exist, is too small for the
+/// layout, or carries another `SHM_VERSION`.
+fn open_peer(segment_id: u32) -> Option<AuthObject> {
+    let segment = AuthObject::open(segment_id).ok()?;
+    (segment.version == SHM_VERSION).then_some(segment)
+}
+
 /// Open a PEER's auth segment by id and read its challenge.
 ///
-/// `None` — never an error — when the object does not exist, is too small, or
-/// carries a different `SHM_VERSION`. zenoh treats every one of those as "this
-/// peer does not do SHM with me" and continues the handshake
-/// (`recv_init_ack` returns `Ok(None)`), so surfacing them as failures would
-/// turn a benign mismatch into a dropped session.
+/// `None` when the object does not exist, is too small for the layout, or carries another
+/// `SHM_VERSION`. zenoh treats every one of those
+/// as "this peer does not do SHM with me" and continues the handshake (`recv_init_ack` returns
+/// `Ok(None)`), so surfacing them as failures would turn a benign mismatch into a dropped session.
 pub fn open_peer_challenge(segment_id: u32) -> Option<u64> {
-    let segment = PeerSegment::open(u64::from(segment_id)).ok()?;
-    // Every field read is an 8-byte native load; a torn value fails the
-    // comparison rather than being unsound.
-    let map = segment.bytes();
-    if map.len() < SEGMENT_BYTES {
-        return None;
-    }
-    if read_u64(map, VERSION_INDEX)? != SHM_VERSION {
-        return None;
-    }
     // Verbatim, the mirror of `create`.
-    read_u64(map, CHALLENGE_INDEX)
+    open_peer(segment_id).map(|segment| segment.challenge)
 }
 
-/// R3065 -- the protocol ids a PEER's auth segment lists: the shared-memory protocols its reader
-/// has a client for, which is what decides whether this node may send it a descriptor
-/// (upstream's `io/zenoh-transport/src/common/shm/interop.rs` @
-/// `link_partner_segment.protocols().contains`, which `supports_protocol` answers from).
+/// The protocol ids a PEER's auth segment lists: the shared-memory protocols its reader has a
+/// client for, which is what decides whether this node may send it a descriptor (upstream's
+/// `io/zenoh-transport/src/common/shm/interop.rs` @ `link_partner_segment.protocols().contains`,
+/// which `supports_protocol` answers from).
 ///
-/// `None`, like [`open_peer_challenge`], when the object does not exist, is too small or carries
-/// another `SHM_VERSION`, and also when the count it names is past the array: a list that cannot
-/// be trusted is an UNKNOWN list, which the sender does not act on, and not an empty one, which
-/// would withhold every descriptor from a peer that may take them.
+/// `None`, like [`open_peer_challenge`], when the segment cannot be opened, and also when the
+/// count it names is past the array: a list that cannot be trusted is an UNKNOWN list, which the
+/// sender does not act on, and not an empty one, which would withhold every descriptor from a
+/// peer that may take them. The establishment never refuses a peer for its list, because upstream
+/// does not: the list is consulted at send time.
 pub fn open_peer_protocols(segment_id: u32) -> Option<Vec<u32>> {
-    let segment = PeerSegment::open(u64::from(segment_id)).ok()?;
-    let map = segment.bytes();
-    if map.len() < SEGMENT_BYTES {
-        return None;
-    }
-    if read_u64(map, VERSION_INDEX)? != SHM_VERSION {
-        return None;
-    }
-    let count = usize::try_from(read_u64(map, LEN_INDEX)?).ok()?;
-    if count > PROTOCOL_SLOTS {
-        return None;
-    }
-    (0..count)
-        .map(|i| read_u32_at(map, PROTOCOLS_OFFSET + i * core::mem::size_of::<u32>()))
-        .collect()
+    let segment = open_peer(segment_id)?;
+    let count = usize::try_from(segment.id_count).ok()?;
+    (count <= PROTOCOL_SLOTS).then(|| segment.protocols[..count].to_vec())
 }
 
-/// R3040 -- a PEER's handoff counters, opened for writing: the means of telling a
-/// zenoh sender that a shared-memory slice it sent has arrived.
+/// A PEER's handoff counters, opened for writing: the means of telling a zenoh sender that a
+/// shared-memory slice it sent has arrived.
 ///
-/// The sender keeps a hard reference to every buffer it sends until the receiver
-/// lowers one of the counters in the sender's auth segment, one counter per
-/// priority, at the ids the sender named in its Open message
-/// (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
-/// `pub fn counter_decrease(&self) {`). This holds that segment mapped WRITABLE,
-/// where `open_peer_challenge` maps it read-only and lets it go, and the eight
-/// ids, and `ShmHandoff::on_rx` lowers the one named for a message's priority.
+/// The sender keeps a hard reference to every buffer it sends until the receiver lowers one of
+/// the counters in the sender's auth segment, one counter per priority, at the ids the sender
+/// named in its Open message (`io/zenoh-transport/src/unicast/establishment/ext/shm/segment.rs` @
+/// `pub fn counter_decrease(&self) {`). This holds that segment mapped and the eight ids, and
+/// `ShmHandoff::on_rx` lowers the one named for a message's priority.
 ///
-/// The decrement SATURATES at zero where upstream's wraps. A counter that was
-/// lowered below zero would read as four billion and be larger than the number of
-/// buffers the sender holds for ever, which is a sender that never lets go of
-/// anything again, so a mismatch between what was sent and what is acknowledged
-/// must cost a missed acknowledgement and not the whole channel.
+/// The decrement SATURATES at zero where upstream's wraps. A counter that was lowered below zero
+/// would read as four billion and be larger than the number of buffers the sender holds for ever,
+/// which is a sender that never lets go of anything again, so a mismatch between what was sent and
+/// what is acknowledged must cost a missed acknowledgement and not the whole channel.
 pub struct PeerHandoff {
-    segment: PeerSegmentRw,
+    segment: AuthObject,
     ids: [u16; SHM_PRIORITY_BANDS],
 }
 
 impl PeerHandoff {
-    /// Open the peer's auth segment `segment_id` for writing, with the counter
-    /// ids it named for each priority.
+    /// Open the peer's auth segment `segment_id` with the counter ids it named for each
+    /// priority.
     ///
-    /// `None` when the segment cannot be opened, is too small, carries another
-    /// `SHM_VERSION`, or when any id names a counter past the array: upstream
-    /// refuses such an id when it builds its channel
-    /// (`ShmRXCounterLease::new` @ `Invalid counter index`) and carries on without
-    /// a handoff, which is the same outcome here.
+    /// `None` when the segment cannot be opened or carries another `SHM_VERSION`, or when any id names a
+    /// counter past the array: upstream refuses such an id when it builds its channel
+    /// (`ShmRXCounterLease::new` @ `Invalid counter index`) and carries on without a handoff,
+    /// which is the same outcome here.
     pub fn open(segment_id: u32, ids: &[u16; SHM_PRIORITY_BANDS]) -> Option<Self> {
-        let segment = PeerSegmentRw::open(u64::from(segment_id)).ok()?;
-        if segment.len() < SEGMENT_BYTES {
-            return None;
-        }
-        // SAFETY: the mapping is at least `SEGMENT_BYTES` long, and `VERSION_INDEX`
-        // names an 8-byte-aligned `u64` inside it (a page-aligned base plus 16); it
-        // is read through an atomic load because the peer may write it.
-        let version = unsafe {
-            (*segment
-                .base()
-                .add(VERSION_INDEX * core::mem::size_of::<u64>())
-                .cast::<AtomicU64>())
-            .load(Ordering::Relaxed)
-        };
-        if version != SHM_VERSION {
-            return None;
-        }
+        let segment = open_peer(segment_id)?;
         if ids.iter().any(|&id| usize::from(id) >= COUNTER_SLOTS) {
             return None;
         }
@@ -403,18 +288,7 @@ impl PeerHandoff {
 
     /// The counter `id` names. `id` was checked against the array at `open`.
     fn counter(&self, id: u16) -> &AtomicU32 {
-        // SAFETY: `id < COUNTER_SLOTS` and the mapping holds `SEGMENT_BYTES`, so the
-        // four bytes at `COUNTERS_OFFSET + 4 * id` are inside it; the offset is a
-        // multiple of four from a page-aligned base, so the pointer is aligned for an
-        // `AtomicU32`; and the mapping lives as long as `self.segment`, which the
-        // returned borrow cannot outlive.
-        unsafe {
-            &*self
-                .segment
-                .base()
-                .add(COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>())
-                .cast::<AtomicU32>()
-        }
+        &self.segment.shm_counters[usize::from(id)]
     }
 }
 
@@ -432,8 +306,25 @@ impl ShmHandoff for PeerHandoff {
     }
 }
 
-/// What a node that SENDS shared memory keeps of one peer's counters (R3110), shared between the
-/// handoff the session sends through and the poll that lets chunks go.
+/// The hard reference of the chunk a sent descriptor names: what keeps the chunk confirmed until
+/// its receiver acknowledges it, as upstream's handoff keeps the `ShmBufHardRef` of each buffer
+/// it sends (`io/zenoh-transport/src/unicast/establishment/ext/shm/handoff.rs` @
+/// `handoffs: lockfree::queue::Queue<Option<ShmBufHardRef>>,`). `None` when the descriptor does
+/// not name a chunk this process can link, or one of another generation.
+fn hard_ref_of(descriptor: &ShmDescriptor) -> Option<ShmBufHardRef> {
+    let info = ShmBufInfo::new(
+        NonZeroUsize::new(descriptor.data_len as usize)?,
+        MetadataDescriptor {
+            id: descriptor.metadata_id,
+            index: descriptor.metadata_index,
+        },
+        descriptor.generation,
+    );
+    ShmBufHardRef::of_info(&info).ok()
+}
+
+/// What a node that SENDS shared memory keeps of one peer's counters, shared between the handoff
+/// the session sends through and the poll that lets chunks go.
 struct TxInner {
     segment: Arc<ShmAuthSegment>,
     /// The counter this node leased for each priority band, named in its Open messages.
@@ -441,7 +332,7 @@ struct TxInner {
     /// For each band, the chunks sent and not yet acknowledged, oldest first, each kept confirmed
     /// by its entry. An entry is `None` for a slice whose chunk this node could not keep
     /// confirmed: the slice was counted, because the peer will lower the counter for it.
-    queues: [Mutex<VecDeque<Option<Confirmed>>>; SHM_PRIORITY_BANDS],
+    queues: [Mutex<VecDeque<Option<ShmBufHardRef>>>; SHM_PRIORITY_BANDS],
 }
 
 impl TxInner {
@@ -453,7 +344,7 @@ impl TxInner {
     fn poll(&self) {
         for (band, queue) in self.queues.iter().enumerate() {
             let counter = self.segment.counter(self.ids[band]).load(Ordering::Relaxed) as usize;
-            // Dropping a `Confirmed` takes the confirmator's lock, so the entries are taken out
+            // Dropping a hard reference takes the confirmator's lock, so the entries are taken out
             // under the queue's lock and dropped after it.
             let acknowledged: Vec<_> = {
                 let mut queue = queue.lock().unwrap_or_else(|e| e.into_inner());
@@ -462,6 +353,21 @@ impl TxInner {
             };
             drop(acknowledged);
         }
+    }
+
+    /// How many sent chunks this handoff keeps confirmed.
+    fn holds(&self) -> usize {
+        self.queues
+            .iter()
+            .map(|queue| {
+                queue
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .iter()
+                    .filter(|entry| entry.is_some())
+                    .count()
+            })
+            .sum()
     }
 }
 
@@ -478,21 +384,33 @@ fn tx_registry() -> &'static Mutex<Vec<Weak<TxInner>>> {
     REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// One poll of every transmit handoff of the process: run by the watchdog thread on the validator's
-/// clock, which is the interval upstream's reactor sleeps.
+/// The transmit handoffs alive now.
+fn live_tx_handoffs() -> Vec<Arc<TxInner>> {
+    let mut registry = tx_registry().lock().unwrap_or_else(|e| e.into_inner());
+    registry.retain(|handoff| handoff.strong_count() > 0);
+    registry.iter().filter_map(Weak::upgrade).collect()
+}
+
+/// One poll of every transmit handoff of the process: run by the reactor of `crate::shm_buffer`
+/// on the validator's clock, which is the interval upstream's reactor sleeps.
 pub(crate) fn poll_tx_handoffs() {
-    let live: Vec<Arc<TxInner>> = {
-        let mut registry = tx_registry().lock().unwrap_or_else(|e| e.into_inner());
-        registry.retain(|handoff| handoff.strong_count() > 0);
-        registry.iter().filter_map(Weak::upgrade).collect()
-    };
-    for handoff in live {
+    for handoff in live_tx_handoffs() {
         handoff.poll();
     }
 }
 
+/// How many sent chunks the transmit handoffs of the process keep confirmed for receivers that
+/// have not yet acknowledged them. A diagnostic: the witness that what a sender kept for a
+/// receiver is let go of once the receiver acknowledges is this count returning to where it was.
+pub fn tx_handoff_holds() -> usize {
+    live_tx_handoffs()
+        .iter()
+        .map(|handoff| handoff.holds())
+        .sum()
+}
+
 /// This node's handoff as a SENDER: eight counters leased from its auth segment, one per priority
-/// band, and the chunks it keeps confirmed against them (R3110).
+/// band, and the chunks it keeps confirmed against them.
 pub struct PosixTxHandoff {
     inner: Arc<TxInner>,
 }
@@ -510,6 +428,7 @@ impl PosixTxHandoff {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(Arc::downgrade(&inner));
+        crate::shm_buffer::start_reactor();
         Some(Self { inner })
     }
 }
@@ -533,14 +452,13 @@ impl ShmTxHandoff for PosixTxHandoff {
 struct PosixTxTransaction {
     inner: Arc<TxInner>,
     band: usize,
-    held: Vec<Option<Confirmed>>,
+    held: Vec<Option<ShmBufHardRef>>,
     committed: bool,
 }
 
 impl ShmTxTransaction for PosixTxTransaction {
     fn on_tx(&mut self, descriptor: &[u8]) {
-        let confirmed = decode_shm_descriptor(descriptor)
-            .and_then(|descriptor| crate::shm_provider::confirm_sent_chunk(&descriptor));
+        let confirmed = decode_shm_descriptor(descriptor).and_then(|d| hard_ref_of(&d));
         self.inner
             .segment
             .counter(self.inner.ids[self.band])
@@ -642,65 +560,35 @@ impl ShmAuthenticator for PosixShmAuthenticator {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use memmap2::MmapOptions;
-    use std::fs::OpenOptions;
+    use zenoh_shm::posix_shm::segment::Segment;
 
-    /// How many consecutive counter values the injectivity witness walks.
-    ///
-    /// Not 2: the old form collided on every OTHER consecutive pair, so a
-    /// two-draw window lands on the surviving half half the time and reports
-    /// green on the defect. Any window of three already contains a colliding
-    /// pair; 64 is far enough past that to make the failure a landslide
-    /// (measured: 33 distinct of 64 for pid 17730) rather than an off-by-one a
-    /// reader has to squint at.
-    const ID_WALK: u32 = 64;
-
-    /// R2201 (open-debt item 559) — DISTINCT counter values give DISTINCT ids.
-    ///
-    /// Over `candidate_id` rather than over `next_candidate_id`, and that is
-    /// the whole design of this test. The atomic is process-global, so a test
-    /// that drew from it would be measuring whichever values the other tests in
-    /// this binary left it — under `--test-threads > 1` its draws are not
-    /// consecutive at all, and non-consecutive draws MISS the defect (the old
-    /// form separated `c` and `c + 2` perfectly well). A witness that a
-    /// scheduler can turn green is not a witness.
-    ///
-    /// So the counter values are supplied here, the walk is TOTAL over them,
-    /// and the verdict does not depend on what any other thread is doing.
-    #[test]
-    fn consecutive_counter_values_never_share_a_segment_id() {
-        // Several pids because the collision's position depends on the parity
-        // of `pid * K`: with one pid a reader cannot tell "injective" from
-        // "this pid happens to start on the lucky side".
-        for pid in [1u32, 2, 1234, 17730, 99999, u32::MAX] {
-            let ids: Vec<u32> = (1..=ID_WALK).map(|c| candidate_id(pid, c)).collect();
-            let distinct: std::collections::BTreeSet<u32> = ids.iter().copied().collect();
-            assert_eq!(
-                distinct.len(),
-                ids.len(),
-                "pid {pid}: {} of {} consecutive counter values share an id — \
-                 a draw that follows an unlinked segment then reopens it",
-                ids.len() - distinct.len(),
-                ids.len()
-            );
-            // Never 0, and structurally so: the id names the file
-            // `/dev/shm/<id>.zenoh`, and 0 is what an uninitialised value looks
-            // like on the wire. Asserted beside injectivity because the two are
-            // one rule here — the shift is what lets `| 1` buy "never 0"
-            // without buying a collision with it.
-            assert!(ids.iter().all(|&id| id != 0), "pid {pid}: an id was 0");
-        }
+    /// The bytes of auth segment `id` as a foreign reader maps them, before any layout is laid on
+    /// them.
+    fn raw_bytes(id: u32) -> Vec<u8> {
+        let segment = Segment::<u32>::open(id).expect("open the segment");
+        // SAFETY: the mapping is `len` bytes long and lives until `segment` drops, after the copy.
+        unsafe { std::slice::from_raw_parts(segment.as_ptr(), segment.len().get()) }.to_vec()
     }
 
-    /// The round trip through a REAL `/dev/shm` object: create, then re-open by
-    /// id through the same path a foreign peer would use and recover the
-    /// challenge. Real syscalls, not a mock — the layout only matters because a
-    /// foreign process reads it, so a test that never touches the filesystem
-    /// would pin nothing.
+    fn u64_at(raw: &[u8], offset: usize) -> u64 {
+        u64::from_ne_bytes(raw[offset..offset + 8].try_into().expect("eight bytes"))
+    }
+
+    fn u32_at(raw: &[u8], offset: usize) -> u32 {
+        u32::from_ne_bytes(raw[offset..offset + 4].try_into().expect("four bytes"))
+    }
+
+    /// A second mapping of auth segment `id`, through which a test writes what a peer's own process
+    /// would.
+    fn peer_mapping(id: u32) -> AuthObject {
+        AuthObject::open(id).expect("open the segment")
+    }
+
+    /// The round trip through a REAL shared-memory object: create, then re-open by id through the
+    /// path a foreign peer would use and recover the challenge.
     #[test]
     fn a_created_segment_is_reopenable_by_id_and_yields_its_challenge() {
         let seg = ShmAuthSegment::create(0xDEAD_BEEF_CAFE_F00D).expect("create");
-        assert!(auth_segment_path(seg.id()).is_file(), "lands in /dev/shm");
         assert_eq!(open_peer_challenge(seg.id()), Some(0xDEAD_BEEF_CAFE_F00D));
 
         let id = seg.id();
@@ -708,55 +596,51 @@ mod tests {
         assert_eq!(
             open_peer_challenge(id),
             None,
-            "the segment is unlinked on drop, so a later open reads as no-SHM"
+            "the last holder unlinks the segment, so a later open reads as no-SHM"
         );
     }
 
-    /// The challenge is stored VERBATIM, as 1.10.0 stores it. Asserted on the
-    /// RAW BYTES rather than through the accessor, because the accessor would
-    /// pass either way if writer and reader agreed on a negation — and it is
-    /// the raw bytes a zenohd reads.
-    ///
-    /// R2240 INVERTED this test rather than deleting it. Its old form asserted
-    /// `!challenge` and was right for 1.5.0; the negated form is now the defect,
-    /// and it is the one a zenohd cannot tell from a wrong peer.
+    /// The challenge is stored VERBATIM, as 1.10.0 stores it. Asserted on the RAW BYTES rather
+    /// than through the accessor, because the accessor would pass either way if writer and reader
+    /// agreed on a negation, and it is the raw bytes a zenohd reads.
     #[test]
     fn the_challenge_is_stored_verbatim_on_the_page() {
         let challenge = 0x0123_4567_89AB_CDEFu64;
         let seg = ShmAuthSegment::create(challenge).expect("create");
-        let raw = std::fs::read(auth_segment_path(seg.id())).expect("read back");
-        assert_eq!(raw.len(), SEGMENT_BYTES);
-        assert_eq!(read_u64(&raw, CHALLENGE_INDEX), Some(challenge));
+        let raw = raw_bytes(seg.id());
+        assert_eq!(u64_at(&raw, 8), challenge);
         assert_ne!(
-            read_u64(&raw, CHALLENGE_INDEX),
-            Some(!challenge),
+            u64_at(&raw, 8),
+            !challenge,
             "storing it inverted is the 1.5.0 shape, and the bug this pins"
         );
     }
 
-    /// The rest of the layout is what a foreign reader indexes into: the
-    /// protocol COUNT at byte 0, the VERSION at byte 16, `POSIX_PROTOCOL_ID` as
-    /// a `u32` at byte 24 — and the whole object exactly the size of upstream's
-    /// struct, since `StructInSHM::create` allocates `size_of::<Elem>()` and
-    /// dereferences the mapping as that type.
+    /// The rest of the layout is what a foreign reader indexes into: the protocol COUNT at byte 0,
+    /// the VERSION at byte 16, `POSIX_PROTOCOL_ID` as a `u32` at byte 24, and the whole object
+    /// exactly the size of upstream's struct.
     #[test]
     fn the_struct_layout_matches_what_a_foreign_reader_dereferences() {
         let seg = ShmAuthSegment::create(1).expect("create");
-        let raw = std::fs::read(auth_segment_path(seg.id())).expect("read back");
-        assert_eq!(raw.len(), 12_288, "size_of::<ShmTransportMetadata>()");
-        assert_eq!(raw.len(), SEGMENT_BYTES, "and the derivation agrees");
-        assert_eq!(read_u64(&raw, LEN_INDEX), Some(1), "one protocol");
-        assert_eq!(read_u64(&raw, VERSION_INDEX), Some(SHM_VERSION));
-        assert_eq!(read_u32_at(&raw, PROTOCOLS_OFFSET), Some(POSIX_PROTOCOL_ID));
-        // The slot AFTER the one wz declares must be zero, not a second id: a
-        // reader takes `protocols[..id_count]`, so a stray non-zero here would
-        // be invisible to us and meaningful to a peer that read a larger count.
-        assert_eq!(read_u32_at(&raw, PROTOCOLS_OFFSET + 4), Some(0));
+        let raw = raw_bytes(seg.id());
+        assert!(
+            raw.len() >= SEGMENT_BYTES,
+            "size_of::<ShmTransportMetadata>()"
+        );
+        assert_eq!(u64_at(&raw, 0), 1, "one protocol");
+        assert_eq!(u64_at(&raw, 16), SHM_VERSION);
+        assert_eq!(u32_at(&raw, 24), POSIX_PROTOCOL_ID);
+        // The slot AFTER the one wz declares must be zero, not a second id: a reader takes
+        // `protocols[..id_count]`, so a stray non-zero here would be invisible to us and
+        // meaningful to a peer that read a larger count.
+        assert_eq!(u32_at(&raw, 28), 0);
+        // The counters start at byte 1048, straight after the protocol array.
+        seg.counter(0).store(0xABCD, Ordering::SeqCst);
+        assert_eq!(u32_at(&raw_bytes(seg.id()), 1048), 0xABCD);
     }
 
-    /// R3065 -- a peer's list is read back as the protocols its segment advertises, which for a
-    /// segment this node made is the one protocol it declares. The read is of the OBJECT, the way
-    /// a peer process reads it, so a list written by another implementation reads the same.
+    /// A peer's list is read back as the protocols its segment advertises, which for a segment
+    /// this node made is the one protocol it declares.
     #[test]
     fn a_peers_protocol_list_is_read_back_from_its_segment() {
         let seg = ShmAuthSegment::create(7).expect("create");
@@ -767,9 +651,8 @@ mod tests {
         );
     }
 
-    /// R3065 -- a segment lists the protocols it was created with, which is how a node whose
-    /// reader has a client beyond POSIX is sent that protocol's descriptors, and refuses a list
-    /// longer than its slots rather than writing past them.
+    /// A segment lists the protocols it was created with, and refuses a list longer than its slots
+    /// rather than writing past them.
     #[test]
     fn a_segment_lists_the_protocols_it_was_created_with() {
         let seg = ShmAuthSegment::create_listing(9, &[POSIX_PROTOCOL_ID, 100500]).expect("create");
@@ -788,42 +671,20 @@ mod tests {
         );
     }
 
-    /// R3065 -- a list that cannot be trusted is UNKNOWN, not empty: a version this node does
-    /// not speak and a count past the array both read as `None`. An empty list would withhold
-    /// every descriptor from a peer that may take them, where an unknown one leaves the send as
-    /// it was.
+    /// A list that cannot be trusted is UNKNOWN, not empty: a version this node does not speak and
+    /// a count past the array both read as `None`.
     #[test]
     fn a_list_that_cannot_be_trusted_reads_as_unknown() {
         let seg = ShmAuthSegment::create(8).expect("create");
-        let path = auth_segment_path(seg.id());
-        {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            // SAFETY: same-process remap of a file this test owns.
-            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
-            write_u64(&mut map, LEN_INDEX, PROTOCOL_SLOTS as u64 + 1);
-            map.flush().unwrap();
-        }
+        let mut peer = peer_mapping(seg.id());
+        peer.id_count = PROTOCOL_SLOTS as u64 + 1;
         assert_eq!(
             open_peer_protocols(seg.id()),
             None,
             "a count past the array is a list this node does not read"
         );
-        {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            // SAFETY: as above.
-            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
-            write_u64(&mut map, LEN_INDEX, 1);
-            write_u64(&mut map, VERSION_INDEX, SHM_VERSION + 1);
-            map.flush().unwrap();
-        }
+        peer.id_count = 1;
+        peer.version = SHM_VERSION + 1;
         assert_eq!(
             open_peer_protocols(seg.id()),
             None,
@@ -836,23 +697,12 @@ mod tests {
         );
     }
 
-    /// A version mismatch reads as "no SHM", not as an error — the arm that
-    /// keeps a benign upgrade skew from dropping sessions.
+    /// A version mismatch reads as "no SHM", not as an error: the arm that keeps a benign upgrade
+    /// skew from dropping sessions.
     #[test]
     fn a_version_mismatch_reads_as_no_shm() {
         let seg = ShmAuthSegment::create(42).expect("create");
-        let path = auth_segment_path(seg.id());
-        {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&path)
-                .unwrap();
-            // SAFETY: same-process remap of a file this test owns.
-            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
-            write_u64(&mut map, VERSION_INDEX, SHM_VERSION + 1);
-            map.flush().unwrap();
-        }
+        peer_mapping(seg.id()).version = SHM_VERSION + 1;
         assert_eq!(open_peer_challenge(seg.id()), None);
     }
 
@@ -862,101 +712,75 @@ mod tests {
         assert_eq!(open_peer_challenge(0xFFFF_FFFE), None);
     }
 
-    /// One counter id per band, distinct, so a handoff that lowered the wrong
-    /// band's counter, or read the ids in the wrong order, cannot pass.
+    /// One counter id per band, distinct, so a handoff that lowered the wrong band's counter, or
+    /// read the ids in the wrong order, cannot pass.
     const BAND_IDS: [u16; SHM_PRIORITY_BANDS] = [40, 41, 42, 43, 44, 45, 46, 47];
 
-    /// Set a handoff counter of a segment this test owns, through the file, so
-    /// the write is what a peer's own process would have made.
-    fn set_counter(segment_id: u32, id: u16, value: u32) {
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(auth_segment_path(segment_id))
-            .unwrap();
-        // SAFETY: same-process remap of a file this test owns.
-        let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
-        write_u32_at(
-            &mut map,
-            COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>(),
-            value,
-        );
-        map.flush().unwrap();
-    }
-
-    /// Read a handoff counter of a segment, through the file and not through the
-    /// handoff under test, so the assertion is on the bytes a peer would read.
-    fn counter_of(segment_id: u32, id: u16) -> u32 {
-        let raw = std::fs::read(auth_segment_path(segment_id)).expect("read back");
-        read_u32_at(
-            &raw,
-            COUNTERS_OFFSET + usize::from(id) * core::mem::size_of::<u32>(),
-        )
-        .expect("inside the segment")
-    }
-
-    /// R3040 -- THE ACKNOWLEDGEMENT, on real shared-memory bytes: `on_rx(band)`
-    /// lowers exactly the counter the peer named for that band by one, and no
-    /// other. Every counter is set to 3, so a handoff that lowered a neighbour, or
-    /// the wrong band's, shows as a 2 where a 3 must stay.
+    /// THE ACKNOWLEDGEMENT, on real shared-memory bytes: `on_rx(band)` lowers exactly the counter
+    /// the peer named for that band by one, and no other.
     #[test]
     fn a_handoff_lowers_exactly_the_counter_named_for_the_band() {
         let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
         for id in BAND_IDS {
-            set_counter(peer.id(), id, 3);
+            peer.counter(id).store(3, Ordering::SeqCst);
         }
         let handoff = PeerHandoff::open(peer.id(), &BAND_IDS).expect("open the handoff");
 
         handoff.on_rx(5);
-        assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 2, "band 5's counter");
+        assert_eq!(
+            peer.counter(BAND_IDS[5]).load(Ordering::SeqCst),
+            2,
+            "band 5's counter"
+        );
         for (band, id) in BAND_IDS.into_iter().enumerate() {
             if band != 5 {
-                assert_eq!(counter_of(peer.id(), id), 3, "band {band} was not touched");
+                assert_eq!(
+                    peer.counter(id).load(Ordering::SeqCst),
+                    3,
+                    "band {band} was not touched"
+                );
             }
         }
         handoff.on_rx(2);
         handoff.on_rx(5);
-        assert_eq!(counter_of(peer.id(), BAND_IDS[2]), 2);
-        assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 1);
+        assert_eq!(peer.counter(BAND_IDS[2]).load(Ordering::SeqCst), 2);
+        assert_eq!(peer.counter(BAND_IDS[5]).load(Ordering::SeqCst), 1);
     }
 
-    /// R3040 -- a counter already at zero stays at zero. Upstream's decrement
-    /// wraps, and a wrapped counter reads as four billion, so the sender would
-    /// never again see fewer than it holds and would keep every buffer for ever.
+    /// A counter already at zero stays at zero. Upstream's decrement wraps, and a wrapped counter
+    /// reads as four billion, so the sender would keep every buffer for ever.
     #[test]
     fn a_counter_at_zero_stays_at_zero() {
         let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
-        set_counter(peer.id(), BAND_IDS[5], 1);
+        peer.counter(BAND_IDS[5]).store(1, Ordering::SeqCst);
         let handoff = PeerHandoff::open(peer.id(), &BAND_IDS).expect("open the handoff");
         for _ in 0..3 {
             handoff.on_rx(5);
         }
         assert_eq!(
-            counter_of(peer.id(), BAND_IDS[5]),
+            peer.counter(BAND_IDS[5]).load(Ordering::SeqCst),
             0,
             "one acknowledgement owed and three given: it stops at zero"
         );
     }
 
-    /// R3040 -- a band past the eight priorities holds no counter, and lowers
-    /// nothing, rather than indexing past the ids.
+    /// A band past the eight priorities holds no counter, and lowers nothing.
     #[test]
     fn a_band_past_the_priorities_lowers_nothing() {
         let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
         for id in BAND_IDS {
-            set_counter(peer.id(), id, 3);
+            peer.counter(id).store(3, Ordering::SeqCst);
         }
         let handoff = PeerHandoff::open(peer.id(), &BAND_IDS).expect("open the handoff");
         handoff.on_rx(SHM_PRIORITY_BANDS);
         handoff.on_rx(usize::MAX);
         for id in BAND_IDS {
-            assert_eq!(counter_of(peer.id(), id), 3);
+            assert_eq!(peer.counter(id).load(Ordering::SeqCst), 3);
         }
     }
 
-    /// R3040 -- a counter id past the array opens no handoff, as upstream's
-    /// `ShmRXCounterLease::new` refuses it: an id from a peer is an index into
-    /// memory this node writes, and one past the end is not written.
+    /// A counter id past the array opens no handoff, as upstream's `ShmRXCounterLease::new`
+    /// refuses it: an id from a peer is an index into memory this node writes.
     #[test]
     fn a_counter_id_past_the_array_opens_no_handoff() {
         let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
@@ -970,54 +794,42 @@ mod tests {
         );
     }
 
-    /// R3040 -- a peer segment that is missing, or carries another version, opens
-    /// no handoff: the same reading `open_peer_challenge` gives it, so a segment
-    /// refused for the challenge is not written for the counters.
+    /// A peer segment that is missing, or carries another version, opens no handoff: the same
+    /// reading `open_peer_challenge` gives it.
     #[test]
     fn a_missing_or_foreign_version_segment_opens_no_handoff() {
         assert!(PeerHandoff::open(0xFFFF_FFFE, &BAND_IDS).is_none());
 
         let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
-        {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(auth_segment_path(peer.id()))
-                .unwrap();
-            // SAFETY: same-process remap of a file this test owns.
-            let mut map = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
-            write_u64(&mut map, VERSION_INDEX, SHM_VERSION + 1);
-            map.flush().unwrap();
-        }
+        peer_mapping(peer.id()).version = SHM_VERSION + 1;
         assert!(PeerHandoff::open(peer.id(), &BAND_IDS).is_none());
     }
 
-    /// R3040 -- the authenticator the session is handed opens the handoff through
-    /// the trait the establishment calls, and the object it returns is the one
-    /// that lowers the counter.
+    /// The authenticator the session is handed opens the handoff through the trait the
+    /// establishment calls, and the object it returns is the one that lowers the counter.
     #[test]
     fn the_authenticator_opens_a_handoff_through_the_trait() {
         let peer = ShmAuthSegment::create(1).expect("create the peer's segment");
-        set_counter(peer.id(), BAND_IDS[5], 2);
+        peer.counter(BAND_IDS[5]).store(2, Ordering::SeqCst);
         let a = PosixShmAuthenticator::new().expect("authenticator");
         let handoff = a
             .open_peer_handoff(peer.id(), &BAND_IDS)
             .expect("the peer's counters are not refused")
             .expect("the peer's counters open");
         handoff.on_rx(5);
-        assert_eq!(counter_of(peer.id(), BAND_IDS[5]), 1);
+        assert_eq!(peer.counter(BAND_IDS[5]).load(Ordering::SeqCst), 1);
     }
 
-    /// zenoh 1.10.2 refuses the link on a `Handoff channel creation error`, so a segment this
-    /// node cannot map answers `Err` and not "no handoff".
+    /// zenoh 1.10.2 refuses the link on a `Handoff channel creation error`, so a segment this node
+    /// cannot map answers `Err` and not "no handoff".
     #[test]
     fn counters_in_a_segment_that_cannot_be_mapped_are_refused() {
         let a = PosixShmAuthenticator::new().expect("authenticator");
         assert!(a.open_peer_handoff(u32::MAX - 1, &BAND_IDS).is_err());
     }
 
-    /// The authenticator draws a challenge that is neither zero nor a counter
-    /// value, and exposes the same pair its own segment holds.
+    /// The authenticator draws a challenge that is neither shared nor derived, and exposes the same
+    /// pair its own segment holds.
     #[test]
     fn the_authenticator_publishes_its_own_segment() {
         let a = PosixShmAuthenticator::new().expect("authenticator");
@@ -1031,12 +843,12 @@ mod tests {
         assert_ne!(
             a.local_challenge(),
             b.local_challenge(),
-            "distinct challenges — a shared or counter-derived one would make \
-             the exchange decorative"
+            "distinct challenges: a shared or counter-derived one would make the exchange \
+             decorative"
         );
     }
 
-    // ---- the node as a SENDER (R3110) ------------------------------------------------------
+    // ---- the node as a SENDER ----------------------------------------------------------------
 
     /// A segment and a transmit handoff leased from it.
     fn a_handoff() -> (Arc<ShmAuthSegment>, PosixTxHandoff) {
@@ -1045,12 +857,12 @@ mod tests {
         (segment, tx)
     }
 
-    /// The serialized descriptor of a chunk a receiver is about to be sent: the reference is taken
+    /// The serialized descriptor of a buffer a receiver is about to be sent: the reference is taken
     /// for it, as production takes it when it serializes the descriptor.
     fn sent_descriptor(
-        payload: &crate::shm_provider::ShmBackedPayload,
+        buffer: &crate::shm_buffer::IssuedBuffer,
     ) -> (wz_session_core::extshm::ShmDescriptor, Vec<u8>) {
-        let wire = payload.wire_reference();
+        let wire = buffer.wire_reference();
         let descriptor = wire.descriptor();
         wire.commit();
         let bytes = wz_session_core::extshm::encode_shm_descriptor(&descriptor);
@@ -1091,8 +903,7 @@ mod tests {
     }
 
     /// The segment holds counters for 351 sessions of eight bands and no more: the 352nd is told
-    /// there are none, which declares the counter block `Disabled`, and a lease that is let go of
-    /// serves it.
+    /// there are none, and a lease that is let go of serves it.
     #[test]
     fn the_counters_serve_351_sessions_and_then_none() {
         let segment = Arc::new(ShmAuthSegment::create(7).expect("create a segment"));
@@ -1113,14 +924,13 @@ mod tests {
 
     /// EVERY slice of a message that left is counted against its band's counter, a chunk this node
     /// can keep confirmed and one it cannot alike, and a peer that lowers the counter once per
-    /// slice brings it back to zero: a slice that was sent and not counted would take a peer's
-    /// decrement below zero.
+    /// slice brings it back to zero.
     #[test]
     fn every_slice_is_counted_and_the_peers_acknowledgements_bring_it_back() {
         let (segment, tx) = a_handoff();
         let counter = segment.counter(tx.counters()[3]);
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
-        let (_, chunk) = sent_descriptor(&payload);
+        let buffer = crate::shm_buffer::IssuedBuffer::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&buffer);
 
         let mut transaction = tx.begin(3);
         transaction.on_tx(&chunk);
@@ -1138,6 +948,11 @@ mod tests {
             "committing counts nothing more"
         );
         assert_eq!(
+            tx.inner.holds(),
+            1,
+            "the chunk that parsed is kept confirmed, the one that did not keeps nothing"
+        );
+        assert_eq!(
             segment.counter(tx.counters()[2]).load(Ordering::SeqCst),
             0,
             "another band's counter is not touched"
@@ -1153,8 +968,8 @@ mod tests {
     fn a_message_that_did_not_leave_is_given_back() {
         let (segment, tx) = a_handoff();
         let counter = segment.counter(tx.counters()[0]);
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
-        let (_, chunk) = sent_descriptor(&payload);
+        let buffer = crate::shm_buffer::IssuedBuffer::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&buffer);
         {
             let mut transaction = tx.begin(0);
             transaction.on_tx(&chunk);
@@ -1172,16 +987,15 @@ mod tests {
         );
     }
 
-    /// R3122 -- a handoff belongs to a link, and a link that lets go of it (a later establishment
-    /// replaced it, or the link was dropped) lets go of every chunk it kept and returns its
-    /// counters to the segment: a count its peer never lowered cannot hold the chunks of a later
-    /// peer, whose lease starts at zero.
+    /// A handoff belongs to a link, and a link that lets go of it lets go of every chunk it kept
+    /// and returns its counters to the segment: a count its peer never lowered cannot hold the
+    /// chunks of a later peer, whose lease starts at zero.
     #[test]
     fn a_handoff_that_is_let_go_of_lets_go_of_what_it_kept_and_returns_its_counters() {
         let (segment, tx) = a_handoff();
         let ids = tx.counters();
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
-        let (_, chunk) = sent_descriptor(&payload);
+        let buffer = crate::shm_buffer::IssuedBuffer::alloc(16).expect("alloc");
+        let (_, chunk) = sent_descriptor(&buffer);
         let mut transaction = tx.begin(5);
         transaction.on_tx(&chunk);
         transaction.commit();
@@ -1275,7 +1089,7 @@ mod tests {
             .expect("the first link's Open declares the counters");
         let first = TokioRuntime::with_mutex_mut(&primary.link.shm_tx, |slot| slot.clone())
             .expect("the first link keeps the handoff its Open declared");
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let payload = crate::shm_buffer::IssuedBuffer::alloc(16).expect("alloc");
         let (_, chunk) = sent_descriptor(&payload);
         let mut transaction = first.begin(0);
         transaction.on_tx(&chunk);
@@ -1443,7 +1257,7 @@ mod tests {
 
         let observer = Arc::new(crate::sync::PlainMutex::new(ApplicationLayerObserver::new()));
         let session = TokioSession::new(stream.clone(), observer, Arc::new(TokioTime::new()));
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
+        let payload = crate::shm_buffer::IssuedBuffer::alloc(16).expect("alloc");
 
         session
             .publish_shm("home/stream", &payload, PublishOptions::default())
@@ -1473,23 +1287,37 @@ mod tests {
     }
 
     /// THE POINT, on a real chunk and the real validator. Its owner lets go the moment it is sent;
-    /// from then on only the sender's handoff keeps its watchdog bit confirmed. Four validator
-    /// windows later it is still valid, because nobody has acknowledged it; once the peer lowers
-    /// the counter and the poll runs it is let go of, and the validator invalidates it.
+    /// from then on only the sender's handoff keeps the chunk confirmed. Validator windows later it
+    /// is still valid, because nobody has acknowledged it; once the peer lowers the counter and the
+    /// poll runs it is let go of, and the validator invalidates it.
     #[test]
     fn a_chunk_stays_valid_until_the_peer_acknowledges_it_and_not_after() {
+        use zenoh_core::Wait;
+        use zenoh_shm::api::provider::shm_provider::ShmProviderBuilder;
+
         let (segment, tx) = a_handoff();
-        let payload = crate::shm_provider::ShmBackedPayload::alloc(16).expect("alloc");
-        let (descriptor, chunk) = sent_descriptor(&payload);
+        // The provider is the test's, so that the slot is not reclaimed and the invalidation can
+        // be read after the owner has gone.
+        let provider = Arc::new(
+            ShmProviderBuilder::default_backend(1usize << 16)
+                .wait()
+                .expect("a provider"),
+        );
+        let allocated = provider.alloc(16usize).wait().expect("a buffer");
+        let buffer = crate::shm_buffer::IssuedBuffer::new(
+            allocated.into_inner(),
+            Arc::clone(&provider) as Arc<dyn std::any::Any + Send + Sync>,
+        );
+        let (descriptor, chunk) = sent_descriptor(&buffer);
         let mut transaction = tx.begin(3);
         transaction.on_tx(&chunk);
         transaction.commit();
-        drop(payload);
+        drop(buffer);
 
         std::thread::sleep(std::time::Duration::from_millis(500));
         poll_tx_handoffs();
         assert_eq!(
-            crate::shm_provider::is_invalidated(&descriptor),
+            crate::shm_buffer::is_invalidated(&descriptor),
             Some(false),
             "the sender let a chunk lapse that its peer had not yet acknowledged"
         );
@@ -1498,9 +1326,10 @@ mod tests {
             .counter(tx.counters()[3])
             .fetch_sub(1, Ordering::SeqCst);
         poll_tx_handoffs();
+        assert_eq!(tx.inner.holds(), 0, "the acknowledged chunk is let go of");
         let mut invalidated = false;
         for _ in 0..40 {
-            if crate::shm_provider::is_invalidated(&descriptor) == Some(true) {
+            if crate::shm_buffer::is_invalidated(&descriptor) == Some(true) {
                 invalidated = true;
                 break;
             }

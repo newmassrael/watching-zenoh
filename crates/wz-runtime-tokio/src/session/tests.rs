@@ -919,7 +919,7 @@ fn a_session_resolves_an_shm_put_without_a_hand_installed_resolver() {
         got_cb.lock().unwrap().push(s.payload().to_vec());
     });
 
-    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(7).expect("alloc");
+    let mut payload = crate::shm_buffer::IssuedBuffer::alloc(7).expect("alloc");
     payload.write(b"off-shm");
     let push = wz_session_core::push_build::build_push_shm_literal(
         "demo/shm",
@@ -980,7 +980,7 @@ fn publish_shm_aliased_puts_the_descriptor_on_the_wire_under_the_declared_id() {
     session.actions().set_shm_offer(true);
     assert!(session.actions().is_shm(), "the fixture negotiated SHM");
 
-    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(11).expect("alloc");
+    let mut payload = crate::shm_buffer::IssuedBuffer::alloc(11).expect("alloc");
     payload.write(b"zero-copy!!");
     let opts = || PublishOptions::put().with_locality(Locality::Remote);
     let meta_opts = opts();
@@ -1055,7 +1055,7 @@ fn publish_shm_aliased_auto_resolves_the_declared_id_for_the_wire_and_the_loopba
             .unwrap()
             .push((s.keyexpr().to_string(), s.payload().to_vec()));
     });
-    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(4).expect("alloc");
+    let mut payload = crate::shm_buffer::IssuedBuffer::alloc(4).expect("alloc");
     payload.write(b"loop");
 
     // The subscriber's own declaration is a frame, so the count is read from here.
@@ -1125,7 +1125,7 @@ fn publish_shm_hands_a_same_session_subscriber_the_chunk_and_only_when_it_listen
             .unwrap()
             .push((is_chunk, s.payload().to_vec()));
     });
-    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+    let mut payload = crate::shm_buffer::IssuedBuffer::alloc(5).expect("alloc");
     payload.write(b"local");
 
     let delivered = session
@@ -1184,7 +1184,7 @@ fn a_chunk_handed_to_the_local_leg_is_the_subscribers_sole_holder_only_when_noth
         sole_cb.lock().unwrap().push(unique);
     });
     let make = || {
-        let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+        let mut payload = crate::shm_buffer::IssuedBuffer::alloc(5).expect("alloc");
         payload.write(b"local");
         payload
     };
@@ -1247,7 +1247,7 @@ fn query_shm_hands_a_same_session_queryable_the_chunk_and_only_when_it_listens()
             },
         )
         .expect("query-queryable is ON in this test build");
-    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+    let mut payload = crate::shm_buffer::IssuedBuffer::alloc(5).expect("alloc");
     payload.write(b"local");
     let payload = Arc::new(payload);
     let local = || QueryOptions::get().with_allowed_destination(Locality::SessionLocal);
@@ -1312,7 +1312,7 @@ fn publish_shm_aliased_without_negotiated_shm_sends_the_bytes_under_the_declared
         .actions()
         .send_declare_keyexpr(7, "home/temp")
         .expect("hardcoded canonical literal keyexpr");
-    let mut payload = crate::shm_provider::ShmBackedPayload::alloc(5).expect("alloc");
+    let mut payload = crate::shm_buffer::IssuedBuffer::alloc(5).expect("alloc");
     payload.write(b"bytes");
     let opts = PublishOptions::put().with_locality(Locality::Remote);
     let meta = opts.push_metadata();
@@ -1430,7 +1430,7 @@ fn a_session_acknowledges_the_shm_slices_it_receives_through_the_counters_its_pe
     // One shared-memory Put, sent as production sends it: a reference taken for the
     // receiver, and the descriptor built from that reference.
     let dispatch_one = |text: &[u8]| {
-        let mut payload = crate::shm_provider::ShmBackedPayload::alloc(text.len()).expect("alloc");
+        let mut payload = crate::shm_buffer::IssuedBuffer::alloc(text.len()).expect("alloc");
         payload.write(text);
         let wire = payload.wire_reference();
         let push = wz_session_core::push_build::build_push_shm_literal(

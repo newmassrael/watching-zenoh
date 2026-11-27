@@ -1523,7 +1523,16 @@ CASES: tuple[Case, ...] = (
     # this day says: -262,136 on one machine (11,506,377 -> 11,244,241). The hosted run of main
     # `634d1b7ba` read this case at 11,511,533, 2,889 over the budget; the budget is that reading less
     # this change, and 3,500, to the hundred.
-    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_252_900,
+    # 2026-11-27 -- hosted run 45798145950 read 11,348,893 at `72ce26dae` (95,993 over); a build
+    # host reads 11,332,677 on main `f5a045229` with S6 steps 3 to 5. Taken apart by symbol against
+    # `9eeb13832`, the commit that set the budget (11,247,697 there): wz-capi-core +76,869 (the
+    # faces' fan and undo, `fan_query`, `fan_undo::record`, the publish loops), wz-capi-c +35,161
+    # (the config ACL verdict door's document reader +30,142, the advanced subscriber's state
+    # +8,977), wz-runtime-tokio +30,863 and wz-session-core +22,440 (the direct delivery's
+    # dispatch and the reply stage moved out of the observer, the group send stage), and the
+    # proto schema's move from wz-app-frame to wz-app-schema -57,219 net. Chosen growth; the
+    # budget is that reading and 3,500, to the hundred.
+    Case("capic-default", "wz-capi-c", "libwz_capi_c.so", None, 11_336_200,
          require=(ROUTER_NODE, ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED,
                   MULTICAST, ACCEPT_HANDSHAKE, CONFIG_VERDICT),
          exports=838,
@@ -1616,7 +1625,11 @@ CASES: tuple[Case, ...] = (
          # case about 1 percent over that host, which put main at its budget and this batch 3,469 over.
          # 2026-11-22 -- the step 4b carry and run 44895098050's reading:
          # 9,691,657 hosted, +3,561 on one machine.
-         9_454_348,
+         # 2026-11-27 -- hosted run 45798145950 read 9,530,941 at `72ce26dae` (76,593 over); a
+         # build host reads 9,509,921 on main `f5a045229` with S6 steps 3 to 5. The growth is
+         # capic-default's of this day less the router node's share. Chosen; that reading and
+         # 3,500, to the hundred.
+         9_513_500,
          forbid=(ROUTER_NODE,),
          require=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, UDP, CLOCK, ADVANCED, MULTICAST),
          note="the default of the C ABI without the router node"),

@@ -82,7 +82,7 @@ pub(crate) enum Payload {
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
     ))]
-    Issued(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
+    Issued(std::sync::Arc<wz_runtime_tokio::shm_buffer::IssuedBuffer>),
 }
 
 /// A buffer a C program handed over with its deleter (`z_bytes_from_buf`, `z_bytes_from_str`).
@@ -544,7 +544,7 @@ pub(crate) enum Outbound {
         feature = "zenoh-c-shared-memory",
         not(feature = "zenoh-c-no-unstable-api")
     ))]
-    Chunk(std::sync::Arc<wz_runtime_tokio::shm_provider::ShmBackedPayload>),
+    Chunk(std::sync::Arc<wz_runtime_tokio::shm_buffer::IssuedBuffer>),
 }
 
 impl Outbound {

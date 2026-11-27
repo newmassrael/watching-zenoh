@@ -1365,15 +1365,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8ca58f447f06ed17d5fc4043ce1b10dd205e060fb3ce5b979b8ed8e59ff3f79"
 
 [[package]]
-name = "memmap2"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "memoffset"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3934,6 +3925,8 @@ dependencies = [
  "wz-runtime-tokio",
  "wz-runtime-tokio-test-support",
  "wz-session-core",
+ "zenoh-core",
+ "zenoh-shm",
 ]
 
 [[package]]
@@ -4481,7 +4474,6 @@ dependencies = [
  "libloading",
  "librocksdb-sys",
  "log",
- "memmap2",
  "mime_guess",
  "parking_lot",
  "portable-atomic",
@@ -4496,7 +4488,6 @@ dependencies = [
  "sce-rust-runtime",
  "serde_json",
  "socket2",
- "talc",
  "tempfile",
  "time",
  "tokio",
@@ -4533,6 +4524,7 @@ dependencies = [
  "wz-tls-pem",
  "wz-volume-abi",
  "x509-parser",
+ "zenoh-core",
  "zenoh-result",
  "zenoh-shm",
  "zeroize",

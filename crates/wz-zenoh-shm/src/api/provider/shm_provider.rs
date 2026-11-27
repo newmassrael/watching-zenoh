@@ -434,7 +434,10 @@ where
     ) -> ChunkAllocResult {
         loop {
             match self.inner_policy.alloc(layout, provider) {
-                Err(ZAllocError::NeedDefragment) | Err(ZAllocError::OutOfMemory) => {
+                result @ (Err(ZAllocError::NeedDefragment) | Err(ZAllocError::OutOfMemory)) => {
+                    if provider.holds_nothing() {
+                        return result;
+                    }
                     // NOTE (debt-910): implement provider's async signalling instead of this!
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
@@ -454,7 +457,10 @@ where
     fn alloc(&self, layout: &MemoryLayout, provider: &ShmProvider<Backend>) -> ChunkAllocResult {
         loop {
             match self.inner_policy.alloc(layout, provider) {
-                Err(ZAllocError::NeedDefragment) | Err(ZAllocError::OutOfMemory) => {
+                result @ (Err(ZAllocError::NeedDefragment) | Err(ZAllocError::OutOfMemory)) => {
+                    if provider.holds_nothing() {
+                        return result;
+                    }
                     // NOTE (debt-910): implement provider's async signalling instead of this!
                     std::thread::sleep(Duration::from_millis(1));
                 }
@@ -855,6 +861,12 @@ where
             return Err(ZAllocError::Other);
         }
 
+        // The chunk goes back to the backend when it is collected, and a backend handed a chunk it
+        // never issued corrupts itself; the original maps whatever it is given.
+        if !self.backend.accepts(&chunk) {
+            return Err(ZAllocError::Other);
+        }
+
         // allocate resources for SHM buffer
         let (allocated_metadata, confirmed_metadata) = Self::alloc_resources()?;
 
@@ -930,6 +942,12 @@ impl<Backend> ShmProvider<Backend> {
             backend,
             busy_list: Default::default(),
         }
+    }
+
+    /// Whether no chunk this provider issued is outstanding, so that no release can ever make room:
+    /// a blocking policy then reports the failure, where the original waits for ever.
+    fn holds_nothing(&self) -> bool {
+        zlock!(self.busy_list).is_empty()
     }
 }
 

@@ -8732,8 +8732,8 @@ layer_c1az_cargo_test_rest_sse() {
 # R311xn (R3a) + R311xo (R3b): the scoped same-host SHM transport -- the wz mirror
 # of zenoh's zero-copy SHM payload (a descriptor on the wire + an mmap'd /dev/shm
 # segment). R3a: the no_std core (extshm: ShmDescriptor + VLE codec, the 0x2
-# Put-body marker, the ShmResolver trait) + the AP provider (shm_provider: memmap2
-# ShmBackedPayload; the reader is zenoh-shm's, shm_reader). R3b: the live TX swap (build_push_shm_literal
+# Put-body marker, the ShmResolver trait) + the AP buffers (shm_buffer over zenoh-shm's
+# providers; the reader is zenoh-shm's, shm_reader). R3b: the live TX swap (build_push_shm_literal
 # emits the descriptor + marker), the RX un-swap (pubsub resolves via the
 # registry-stored resolver), the scoped Z_EXT_SHM 0x2 establishment negotiation (a
 # UNIT capability `&=`, NOT zenoh's challenge-response -- deferred), publish_shm +
@@ -8741,9 +8741,9 @@ layer_c1az_cargo_test_rest_sse() {
 # This lane:
 #   1. runs the session-core SHM unit tests (extshm descriptor/marker + the
 #      build_push_shm_literal TX-swap wire-form proof: payload=descriptor + 0x2);
-#   2. runs the shm_provider unit tests over REAL /dev/shm (a payload written to a
-#      fresh segment is read back byte-exact by the resolver opening it by
-#      descriptor; owner-drop unlinks; distinct ids) -- fully runnable, NO #[ignore]
+#   2. runs the shm_buffer unit tests over REAL /dev/shm (a payload written to a
+#      fresh segment is read back byte-exact by the reader opening it by
+#      descriptor; references and kept providers) -- fully runnable, NO #[ignore]
 #      (/dev/shm is present), like the QUIC lane closed vsock's gap;
 #   3. runs the shm_e2e integration tests (gated all(session-extshm,
 #      transport-unicast, transport-link-tcp)): wz<->wz negotiate SHM over real TCP
@@ -8970,16 +8970,14 @@ layer_c1af_cargo_test_shm() {
     # 43914611055 and pc5.
     # 45 -> 43 (2026-11-26, printed by guarded_count_gate.py --range 72ce26dae..HEAD): the two
     # tests of the engine's data segment cache went with the cache, zenoh-shm's reader reading now.
-    _runci_guarded_test C1af 43 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_provider --quiet \
-        || return 1
-    # R3106 -- the segment module's own tests (`posix_shm`), which no lane counted: the cleanup
-    # that removes a segment no one holds and keeps one a process holds, and whether a mapping may
-    # still be trusted while its name names its object, for the writable mapping of a metadata
-    # segment and for the read-only one of a data segment. THREE.
-    # 3 -> 17, printed on pc5: the module split by platform (606b15d758) and the name a mapped
-    # segment keeps under its provider's lock (90861c7923); `posix_shm::unix` holds 10 of them
-    # and `posix_shm::unix::lifetime` 7. Hosted stopped C1af at its first guard and read none.
-    _runci_guarded_test C1af 17 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib posix_shm --quiet \
+    # S6 step 3 (docs/shm-transport.md, section 6): the engine's provider, its backends and its
+    # segment module went for zenoh-shm's, and with them the `shm_provider` and `posix_shm`
+    # filters. What the engine keeps of a buffer is `shm_buffer`: the one send buffer, the owner
+    # of an issued buffer and the provider it keeps for a receiver, the transport's copy, and the
+    # two repairs of zenoh-shm a C program reaches (a blocking allocation with nothing
+    # outstanding, a chunk mapped into a pool that did not issue it). EIGHT, counted from the
+    # module (no other test of this crate has `shm_buffer` in its path); not yet printed by a run.
+    _runci_guarded_test C1af 8 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_buffer --quiet \
         || return 1
     # R3110 -- the auth segment's own tests (`shm_auth_segment`), which no lane counted: the
     # challenge, the protocol list and the receiver's handoff (16), and the node as a SENDER (6)
@@ -8990,14 +8988,18 @@ layer_c1af_cargo_test_shm() {
     # R3122 -- 23 -> 24, MEASURED by running this exact command: the test that a link which
     # opens again lets go of the handoff it kept (the test that a handoff let go of returns its
     # counters replaced one that forgot a previous peer's debt, and does not move the count).
-    _runci_guarded_test C1af 25 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
+    # S6 step 3 -- 25 -> 24, counted from the module: the auth segment is zenoh-shm's
+    # `StructInSHM`, which draws its ids at random, so the test of the engine's id counter went
+    # with the counter; not yet printed by a run.
+    _runci_guarded_test C1af 24 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib shm_auth_segment --quiet \
         || return 1
     # R3122 -- the same module WITH MULTILINK, which the leg above does not carry and so does not
     # select three tests: a second link of a session leases counters of its own and leaves the
     # first link's alone, the links of one session declare by their own reliability, and a
     # shared-memory publish is counted on the link it leaves on, read through the real publish.
     # TWENTY-SEVEN, MEASURED by running this exact command (the 24 above and the three).
-    _runci_guarded_test C1af 28 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
+    # S6 step 3 -- 28 -> 27, the id counter's test, as above.
+    _runci_guarded_test C1af 27 cargo test -p wz-runtime-tokio --features session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib shm_auth_segment --quiet \
         || return 1
     # R3123 -- the region-hat forwarder with a link joined to its first face, which compiles
     # only with the router hat, the extension, multilink and the push codec together and so is
@@ -9008,14 +9010,6 @@ layer_c1af_cargo_test_shm() {
     # establishment on a link withdraws that link's handoff and leaves the other's alone.
     # THREE, MEASURED by running this exact command.
     _runci_guarded_test C1af 3 cargo test -p wz-runtime-tokio --features routing-router-hat,session-extshm,transport-multilink,transport-unicast,transport-link-tcp,transport-qos,codec-push,codec-close --lib joined_link_tests --quiet \
-        || return 1
-    # R3056 -- the provider's two new modules, which the filter above does not select:
-    # `shm_backend` (the value types an allocation speaks in, 4 tests) and
-    # `shm_posix_backend` (the pool, 11 tests). Counted so a dropped or renamed test cannot
-    # select fewer and pass.
-    # R3058 -- 15 -> 16, MEASURED: the three claims a pool makes of a chunk before it takes
-    # it on, each checked on its own.
-    _runci_guarded_test C1af 16 cargo test -p wz-runtime-tokio --features session-extshm,transport-unicast,transport-link-tcp --lib --quiet -- shm_backend shm_posix_backend \
         || return 1
     # R3103 -- the relay a router holds a chunk with (`shm_relay`), which no lane counted: its
     # tests count the references of a REAL chunk through a routing pass, and a pass that never

@@ -64,6 +64,24 @@ impl PosixShmSegment {
     }
 }
 
+impl PosixShmSegment {
+    /// Whether `chunk` lies in this segment as its descriptor says: it names this segment, its
+    /// bytes are inside it, and its address is the segment's at the offset it names.
+    pub(crate) fn owns(&self, chunk: &AllocatedChunk) -> bool {
+        let descriptor = &chunk.descriptor;
+        let inside = usize::try_from(descriptor.chunk)
+            .ok()
+            .and_then(|offset| offset.checked_add(descriptor.len.get()))
+            .is_some_and(|end| end <= self.segment.elem_count().get());
+        if !inside || descriptor.segment != self.segment.id() {
+            return false;
+        }
+        // SAFETY: the chunk was checked to lie inside the segment just above.
+        let address = unsafe { self.segment.elem_mut(descriptor.chunk) };
+        address.cast_const() == chunk.data.ptr()
+    }
+}
+
 impl ShmSegment for PosixShmSegment {
     fn map(&self, chunk: ChunkID) -> ZResult<*mut u8> {
         // The chunk comes out of a descriptor that another process wrote, so it is checked against

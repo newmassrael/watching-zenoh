@@ -838,40 +838,25 @@ resource-snapshot = ["wz-session-core/resource-snapshot"]
 session-extcompression = ["wz-session-core/session-extcompression"]
 
 # transport-shm — the scoped same-host SHM data path: forwards the session-core
-# no_std machinery (descriptor + 0x2 marker + is_shm + ShmResolver trait) and
-# pulls memmap2 for the AP POSIX segment (shm_provider). AP-only (no MCU forward
-# -- pico has no SHM). R3a is the inert provider + codec; R3b adds the live swap +
-# the Z_EXT_SHM challenge handshake (session-extshm). The reader is `zenoh-shm`'s
-# (`shm_reader`), with `zenoh-result` for the error type its clients return.
+# no_std machinery (descriptor + 0x2 marker + is_shm + ShmResolver trait). AP-only (no MCU
+# forward -- pico has no SHM). The segments, the metadata, the watchdog, the providers, the
+# reader and the client storage are `zenoh-shm`'s, the one implementation of them in the process
+# (`docs/shm-transport.md`, section 6), with `zenoh-result` for the error type its clients return
+# and `zenoh-core` for the `Wait` its builders resolve by.
 transport-shm = [
     "wz-session-core/transport-shm",
     "wz-ext-pubsub/transport-shm",
-    "posix-shm-segment",
-    "dep:talc",
     "dep:zenoh-shm",
     "dep:zenoh-result",
+    "dep:zenoh-core",
 ]
-# R2954 — the POSIX shm SEGMENT protocol on its own (`posix_shm`: upstream's
-# `{id}.zenoh` naming, 0600 mode, shared advisory lock, and the orphan cleanup
-# that protocol defines), without the SHM transport. The zenoh-c ABI's SHM arm
-# needs the protocol — `zc_cleanup_orphaned_shm_segments` is upstream's cleanup
-# of exactly these segments — and must NOT turn on SHM transport negotiation
-# for its sessions, which is what `transport-shm` also means. It names `libc`
-# itself because the lock is `flock`. On Windows the segment is a named file mapping
-# (the one upstream makes on Windows), which takes `windows-sys` instead of `memmap2` and
-# `libc`; each of the three is a dependency of one platform's table, and a feature
-# may name a dependency its target does not have.
-posix-shm-segment = ["dep:memmap2", "dep:libc", "dep:windows-sys"]
 
-# session-extshm — the scoped Z_EXT_SHM establishment handshake (a UNIT capability
-# offer/`&=`, NOT zenoh's full challenge-response); forwards the session-core
-# negotiation + transport-shm (the data path it enables). AP-only.
-# R311y507 — `dep:libc` joins for the SHM AUTH SEGMENT's shared advisory
-# `flock`, which is the one part of zenoh's segment protocol memmap2 does not
-# cover. `getrandom` is already an unconditional dep (the handshake nonce
-# source), and the auth challenge draws from the same one deliberately: a
-# guessable challenge would make the whole exchange decorative.
-session-extshm = ["wz-session-core/session-extshm", "transport-shm", "dep:libc"]
+# session-extshm — the scoped Z_EXT_SHM establishment handshake; forwards the session-core
+# negotiation + transport-shm (the data path it enables). AP-only. The auth segment is
+# `zenoh-shm`'s `StructInSHM`, as upstream's transport makes it. `getrandom` is already an
+# unconditional dep (the handshake nonce source), and the auth challenge draws from the same one
+# deliberately: a guessable challenge would make the whole exchange decorative.
+session-extshm = ["wz-session-core/session-extshm", "transport-shm"]
 # R311h — codec-push forwards wz-codecs and pulls codec-frame as a
 # hard imply (Frame envelope is the wire carrier for every Push). When
 # the feature is off the wz-runtime-tokio Push import + N_MID_PUSH +
@@ -2037,21 +2022,14 @@ x509-parser = { version = "0.18", optional = true }
 # No feature knobs to choose: the crate declares no `[features]` at all and is
 # `#![no_std]` (`webpki-roots-1.0.9/src/lib.rs:25`) — it is one const table.
 webpki-roots = { version = "1", optional = true }
-# R3057 — talc is the allocator zenoh's default shared-memory backend carves chunks out
-# of a pool with (`commons/zenoh-shm/Cargo.toml` @ `talc = { workspace = true }`, pinned
-# at its workspace root `talc = { version = "4.4.3", default-features = false }`). wz
-# reuses it for the reason it reuses memmap2 and uhlc: what a pool can hold, and what is
-# the smallest pool that can be created, are the allocator's facts (it spends a header
-# per chunk and claims part of its arena for its own bins), and a program written
-# against zenoh-c observes both. `default-features = false` is upstream's choice and
-# leaves the crate with no dependencies at all. Behind `transport-shm`.
-talc = { version = "4.4.3", default-features = false, optional = true }
-# The shared-memory reader of the process: upstream's `ShmReader` over a `ShmClientStorage`, from
-# the family crate that carries upstream's name and surface, so the engine, the C ABI and the top
-# crate read a descriptor through one implementation (`docs/shm-transport.md`, section 6). A
-# client of a storage returns `zenoh-result`'s error. Both behind `transport-shm`.
+# The shared memory of the process: upstream's segments, metadata, watchdog, providers, reader and
+# client storage, from the family crate that carries upstream's name and surface, so the engine,
+# the C ABI and the top crate share one implementation of them (`docs/shm-transport.md`, section
+# 6). A client of a storage returns `zenoh-result`'s error, and a builder of the crate resolves by
+# `zenoh-core`'s `Wait`. All three behind `transport-shm`.
 zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
 zenoh-result = { path = "../wz-zenoh-result", optional = true }
+zenoh-core = { path = "../wz-zenoh-core", optional = true }
 # The node's time (the wall clock in NTP64, the node HLC, the fallback stamper) is `wz-node-time`'s,
 # which owns the `uhlc` dependency (zenoh's own Hybrid Logical Clock crate, at zenoh's pin); this
 # crate re-exports it at the paths it has always had and forwards the features below.
@@ -2371,21 +2349,9 @@ features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
-    # `posix_shm`'s Windows segment: `CreateFileMappingW`, `MapViewOfFile`, `VirtualQuery`,
-    # and the `SECURITY_ATTRIBUTES` type the first one names.
-    "Win32_System_Memory",
-    "Win32_Security",
 ]
 
 [target.'cfg(unix)'.dependencies]
-# transport-shm — the AP POSIX shared-memory provider (behind the optional
-# `transport-shm` feature). A /dev/shm tmpfs file mmap'd MAP_SHARED is exactly
-# POSIX shared memory for the same-host scoped proof; memmap2 is the stable,
-# version-steady mmap wrapper (vs nix's shifting mman API). The wire carries the
-# descriptor, not the local mmap mechanism, so this is faithful for same-host.
-# A Windows build maps a named file mapping with `windows-sys` instead, so this is a
-# Unix-only dependency.
-memmap2 = { version = "0.9", optional = true }
 # R311y10 — `libc` for the one `mkfifo` FFI call the unixpipe backend needs to
 # create the named-FIFO-pair rendezvous nodes (tokio's `pipe` module opens
 # existing FIFOs but does not create them). Optional, pulled by

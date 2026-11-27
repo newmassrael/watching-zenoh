@@ -56,13 +56,13 @@ impl From<LivelinessAliasError> for AdvancedPublisherError {
 }
 
 #[cfg(feature = "transport-shm")]
-impl ShmChunk for crate::shm_provider::ShmBackedPayload {
+impl ShmChunk for crate::shm_buffer::IssuedBuffer {
     fn bytes(&self) -> &[u8] {
-        crate::shm_provider::ShmBackedPayload::bytes(self)
+        crate::shm_buffer::IssuedBuffer::bytes(self)
     }
 
     fn send_handle(self: Arc<Self>) -> wz_session_core::extshm::ShmSendHandle {
-        crate::shm_provider::ShmBackedPayload::send_handle(&self)
+        crate::shm_buffer::IssuedBuffer::send_handle(&self)
     }
 
     fn into_any(self: Arc<Self>) -> Arc<dyn std::any::Any + Send + Sync> {
@@ -188,7 +188,7 @@ where
         // this plane cannot send a descriptor for, and goes as its bytes.
         match Arc::clone(payload)
             .into_any()
-            .downcast::<crate::shm_provider::ShmBackedPayload>()
+            .downcast::<crate::shm_buffer::IssuedBuffer>()
         {
             Ok(chunk) => self.session.publish_shm(keyexpr, &chunk, options),
             Err(_) => self.publish(publisher, keyexpr, payload.bytes(), options),
@@ -282,7 +282,7 @@ where
     #[cfg(feature = "transport-shm")]
     pub fn put_shm_with(
         &self,
-        payload: &Arc<crate::shm_provider::ShmBackedPayload>,
+        payload: &Arc<crate::shm_buffer::IssuedBuffer>,
         options: AdvancedPutOptions<'_>,
     ) -> Result<usize, PublishError> {
         let chunk: Arc<dyn ShmChunk> = Arc::clone(payload) as Arc<dyn ShmChunk>;

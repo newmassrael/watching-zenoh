@@ -14,10 +14,11 @@
 //! through [`ShmReaderResolver`], and a repair of the protocol is made once, in `zenoh-shm`
 //! (`docs/shm-transport.md`, section 6).
 //!
-//! What a received buffer becomes is one value, [`ReceivedBuffer`], whichever way the engine
-//! uses it: the bytes handed up to a receiver ([`ShmResolver::resolve_shared`]) and the chunk a
-//! forwarding node sends on ([`ShmResolver::hold`]). A host whose application holds the buffer
-//! itself (the top crate's `ZShm`) gets it back out of the bytes it was handed through
+//! What a received buffer becomes is the buffer `zenoh-shm` hands up, whichever way the engine uses
+//! it: the bytes handed up to a receiver are a [`ReceivedBuffer`] ([`ShmResolver::resolve_shared`]),
+//! and the chunk a forwarding node sends on is the engine's one send buffer over it
+//! ([`ShmResolver::hold`], [`ShmBuffer`]). A host whose application holds the buffer itself (the
+//! top crate's `ZShm`) gets it back out of the bytes it was handed through
 //! [`ReceivedBuffer::buffer`].
 //!
 //! ## The list a reader advertises is its storage's
@@ -27,16 +28,17 @@
 //! which [`ShmReaderResolver::protocols`] reads and from which the offer is built.
 
 use std::any::Any;
+use std::mem::ManuallyDrop;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
-use wz_session_core::extshm::{
-    ShmDescriptor, ShmReservation, ShmResolver, ShmSendBuffer, ShmSendHandle,
-};
+use wz_session_core::extshm::{ShmDescriptor, ShmResolver, ShmSendHandle};
 use wz_session_core::link::{RxBytes, RxStorage, ShmChunkView};
 use zenoh_shm::metadata::descriptor::MetadataDescriptor;
 use zenoh_shm::reader::ShmReader;
 use zenoh_shm::ShmBufInfo;
+
+use crate::shm_buffer::{ReceiverView, ShmBufHolder, ShmBuffer};
 
 pub use zenoh_result::ZResult;
 pub use zenoh_shm::api::client::shm_client::ShmClient;
@@ -141,23 +143,28 @@ impl ShmResolver for ShmReaderResolver {
     }
 
     /// The chunk held to be sent on: the reference the descriptor carried is the handle's and goes
-    /// back when the last clone of the handle drops; a reservation taken from it is one more.
+    /// back when the last clone of the handle drops; a reservation taken from it is one more. A
+    /// forwarder does not deliver the chunk to a subscriber of its own, so a receiver of the
+    /// handle is handed its bytes.
     fn hold(&self, descriptor: &ShmDescriptor) -> Option<ShmSendHandle> {
-        Some(ShmSendHandle::new(Arc::new(ReceivedBuffer::new(
-            self.read(descriptor)?,
-        ))))
+        let buffer: Arc<dyn ShmBufHolder> = self.read(descriptor)?;
+        Some(ShmBuffer::new(buffer, ReceiverView::Bytes).into_handle())
     }
 }
 
-/// A buffer this process received: the storage a received payload is a range of, and the chunk a
-/// forwarding node sends on.
+/// A buffer this process holds as a receiver: the storage a received payload is a range of, and
+/// the view a receiver of the session that sent a buffer holds of its own.
 pub struct ReceivedBuffer {
-    buffer: Arc<ShmBufInner>,
+    /// Let go of by hand in `Drop`, before the providers the process keeps are looked at: one kept
+    /// for this buffer can go only once this reference is given back.
+    buffer: ManuallyDrop<Arc<ShmBufInner>>,
 }
 
 impl ReceivedBuffer {
-    fn new(buffer: Arc<ShmBufInner>) -> Self {
-        Self { buffer }
+    pub(crate) fn new(buffer: Arc<ShmBufInner>) -> Self {
+        Self {
+            buffer: ManuallyDrop::new(buffer),
+        }
     }
 
     /// The buffer itself, for a host whose application holds it as its own type.
@@ -166,16 +173,24 @@ impl ReceivedBuffer {
     }
 
     /// The whole buffer as the bytes a receiver is handed.
-    fn view(self) -> Option<RxBytes> {
+    pub(crate) fn view(self) -> Option<RxBytes> {
         let len = self.as_slice().len();
         let storage: Arc<dyn RxStorage> = Arc::new(self);
         RxBytes::shared(storage, 0..len)
     }
 }
 
+impl Drop for ReceivedBuffer {
+    fn drop(&mut self) {
+        // SAFETY: dropped here, once, and not used after: `self` is being dropped.
+        unsafe { ManuallyDrop::drop(&mut self.buffer) };
+        crate::shm_buffer::sweep_orphans();
+    }
+}
+
 impl RxStorage for ReceivedBuffer {
     fn as_slice(&self) -> &[u8] {
-        AsRef::<[u8]>::as_ref(&*self.buffer)
+        AsRef::<[u8]>::as_ref(&**self.buffer)
     }
 
     fn shm_chunk(&self) -> Option<&dyn ShmChunkView> {
@@ -196,68 +211,6 @@ impl ShmChunkView for ReceivedBuffer {
 
     fn writable_ptr(&self) -> Option<*mut u8> {
         Some(self.buffer.data_ptr())
-    }
-}
-
-/// A chunk a peer sent, held to be sent on (see [`ShmResolver::hold`]): what a router keeps of a
-/// message while it routes it. A reservation is a reference taken on the chunk's header for one
-/// more receiver, on top of the reference the held buffer carries.
-impl ShmSendBuffer for ReceivedBuffer {
-    fn bytes(&self) -> &[u8] {
-        self.as_slice()
-    }
-
-    fn protocol(&self) -> u32 {
-        self.buffer.protocol()
-    }
-
-    /// `None`: a forwarder does not deliver the chunk to a subscriber of its own, and a view would
-    /// be a second hold on a chunk this value already holds.
-    fn receiver_view(&self) -> Option<RxBytes> {
-        None
-    }
-
-    fn reserve_for_receiver(self: Arc<Self>) -> Box<dyn ShmReservation> {
-        // SAFETY: the reference taken here is the receiver's, given back by that receiver when it
-        // lets go, or by the reservation when the frame is not sent.
-        unsafe { self.buffer.inc_ref_count() };
-        Box::new(Reservation {
-            buffer: Arc::clone(&self.buffer),
-            committed: false,
-        })
-    }
-}
-
-/// The reference `ReceivedBuffer::reserve_for_receiver` took for one more receiver, and the
-/// descriptor naming it: given back unless [`ShmReservation::commit`] says the frame left. It
-/// owns the buffer, so it may outlive the handle it was taken from.
-struct Reservation {
-    buffer: Arc<ShmBufInner>,
-    committed: bool,
-}
-
-impl ShmReservation for Reservation {
-    fn descriptor(&self) -> ShmDescriptor {
-        let info = &self.buffer.info;
-        ShmDescriptor {
-            data_len: u32::try_from(info.data_len.get()).unwrap_or(u32::MAX),
-            metadata_id: info.metadata.id,
-            metadata_index: info.metadata.index,
-            generation: info.generation,
-        }
-    }
-
-    fn commit(mut self: Box<Self>) {
-        self.committed = true;
-    }
-}
-
-impl Drop for Reservation {
-    fn drop(&mut self) {
-        if !self.committed {
-            // SAFETY: the reference this reservation took, and nobody was sent it.
-            unsafe { self.buffer.release_reference() };
-        }
     }
 }
 

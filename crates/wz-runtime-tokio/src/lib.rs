@@ -2089,42 +2089,22 @@ pub mod unixpipe_pipeline;
 #[cfg(feature = "transport-link-quic")]
 pub mod quic_config;
 
-/// R2862 — the one POSIX shared-memory segment implementation (upstream's
-/// naming, mode and advisory lock) every wz segment kind is made through.
-/// R2954 — gated on the segment protocol itself, which `transport-shm` implies
-/// and which the zenoh-c ABI's SHM arm enables without the transport.
-#[cfg(feature = "posix-shm-segment")]
-pub mod posix_shm;
-// R3056 -- `shm_backend` (the seam between a shared-memory provider and the memory it hands
-// out) and `shm_posix_backend` (the built-in pool) carry their docs INSIDE the module and
-// none here: an outer doc on the `mod` line would make the module's own `//!` resolve its
-// links in this file's scope, which is the break Layer C1bz's budget counts.
+// The engine's buffers of shared memory: the one send buffer over `zenoh-shm`'s `ShmBufInner`,
+// whoever holds it, and the owner of a buffer a provider of this process issued. Its docs are
+// inside the module and none here: an outer doc on the `mod` line would make the module's own
+// `//!` resolve its links in this file's scope, which is the break Layer C1bz's budget counts.
 #[cfg(feature = "transport-shm")]
-pub mod shm_backend;
-#[cfg(feature = "transport-shm")]
-pub mod shm_posix_backend;
-// transport-shm — the AP POSIX shared-memory provider (memmap2 over /dev/shm):
-// `ShmProvider` (a backend, a busy list, allocation policies) +
-// `ShmBackedPayload` (owner alloc/write). The std mmap half of the scoped
-// same-host SHM transport; the descriptor + 0x2 marker codec live in the no_std
-// core.
-#[cfg(feature = "transport-shm")]
-pub mod shm_provider;
+pub mod shm_buffer;
 // The reader of the process, `zenoh-shm`'s over a client storage, as the engine's
-// `ShmResolver`. Its docs are inside the module, for the reason the note on `shm_backend`
+// `ShmResolver`. Its docs are inside the module, for the reason the note on `shm_buffer`
 // gives.
 #[cfg(feature = "transport-shm")]
 pub mod shm_reader;
 // What a node that forwards a message holds while it routes it: the chunks of its
 // shared-memory slices. Its docs are inside the module, for the reason the note on
-// `shm_backend` gives.
+// `shm_buffer` gives.
 #[cfg(feature = "transport-shm")]
 pub mod shm_relay;
-/// R3039 -- the shared-memory watchdog: holders confirm a chunk's liveness
-/// bit and its provider validates it, upstream's two periodic halves. Gated
-/// with the provider it serves.
-#[cfg(feature = "transport-shm")]
-pub mod shm_watchdog;
 
 /// session-extshm (R311y507) — the POSIX AUTH SEGMENT behind zenoh's SHM
 /// establishment challenge-response: a `/dev/shm/{id}.zenoh` object holding a

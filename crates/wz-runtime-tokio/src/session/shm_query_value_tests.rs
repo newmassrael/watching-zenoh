@@ -15,7 +15,7 @@
 use super::*;
 use crate::observer::ApplicationLayerObserver;
 use crate::runtime_impl::TokioTime;
-use crate::shm_provider::ShmBackedPayload;
+use crate::shm_buffer::IssuedBuffer;
 use crate::test_fixtures::{recording_actions, RecordingLinkDriver};
 use wz_session_core::extshm::encode_shm_descriptor;
 
@@ -52,8 +52,8 @@ fn session(peer_offered: bool) -> (TokioSession, Arc<RecordingLinkDriver>) {
     (session, driver)
 }
 
-fn held_value() -> std::sync::Arc<ShmBackedPayload> {
-    let mut held = ShmBackedPayload::alloc(VALUE.len()).expect("alloc a value buffer");
+fn held_value() -> std::sync::Arc<IssuedBuffer> {
+    let mut held = IssuedBuffer::alloc(VALUE.len()).expect("alloc a value buffer");
     held.write(VALUE);
     std::sync::Arc::new(held)
 }
@@ -79,7 +79,7 @@ fn send(
     call: Call,
     session: &TokioSession,
     driver: &RecordingLinkDriver,
-    held: &std::sync::Arc<ShmBackedPayload>,
+    held: &std::sync::Arc<IssuedBuffer>,
 ) -> Vec<u8> {
     let options = QueryOptions::get();
     // The value as every query takes it: the engine-neutral handle to the chunk.

@@ -148,6 +148,16 @@ impl AsMut<[u8]> for ZShmMut {
     }
 }
 
+impl ZShmMut {
+    /// The buffer itself, for the crates of this repository, whose transport holds a buffer of a
+    /// provider as the `ShmBufInner` it sends. Hidden from the documentation for the reason
+    /// `ShmBufInner::release_reference` is.
+    #[doc(hidden)]
+    pub fn into_inner(self) -> ShmBufInner {
+        self.inner
+    }
+}
+
 impl From<ZShmMut> for ZShm {
     fn from(value: ZShmMut) -> Self {
         ZShm::new(value.inner)

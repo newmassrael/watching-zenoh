@@ -299,11 +299,13 @@ zenoh-c-no-unstable-api = []
 #
 # R2299 (open-debt item 607) — the SHM CLIENT registry's POSIX member ATTACHES to a
 # segment another process published. It first did so with `mmap` through `libc` of its
-# own; it now attaches through the runtime's `posix_shm`, the one implementation of
-# upstream's segment, which is a `/dev/shm` mapping on Unix and a named file mapping on
-# Windows. This arm therefore names no platform dependency, and builds on
-# `x86_64-pc-windows-msvc`, where the published zenoh-c archive carries this axis too.
-# R2954 — and the runtime's POSIX segment PROTOCOL: `zc_cleanup_orphaned_shm_segments`
+# own; it now attaches through `zenoh-shm`, the one implementation of upstream's segments,
+# providers and reader in the process (`docs/shm-transport.md`, section 6), which is a
+# `/dev/shm` mapping on Unix and a named file mapping on Windows. This arm therefore names no
+# platform dependency, and builds on `x86_64-pc-windows-msvc`, where the published zenoh-c
+# archive carries this axis too. The providers (`z_shm_provider_*`) are `zenoh-shm`'s
+# `ShmProvider`, as zenoh-c's are, and `zenoh-core` is the `Wait` its builders resolve by.
+# R2954 — and the POSIX segment PROTOCOL: `zc_cleanup_orphaned_shm_segments`
 # is that protocol's own orphan cleanup. R2954 and R2970 took it WITHOUT the SHM
 # transport, because a zenoh peer that agreed on SHM would have sent Puts laid out
 # as slices, which the generated Put codec could not read (item 823). That has not
@@ -314,7 +316,12 @@ zenoh-c-no-unstable-api = []
 # dependency below: the transport snapshot reads `is_shm` from the session's actions only
 # when it is built, so `z_transport_is_shm` read `false` for every session whatever it had
 # negotiated; and the model's SHM publish (`publish_shm_all`) exists only when it is.
-zenoh-c-shared-memory = ["wz-runtime-tokio/session-extshm", "wz-capi-core/session-extshm"]
+zenoh-c-shared-memory = [
+    "wz-runtime-tokio/session-extshm",
+    "wz-capi-core/session-extshm",
+    "dep:zenoh-shm",
+    "dep:zenoh-core",
+]
 # The sending side of an end-to-end protected message (`wz_capi_c_e2e_sender_*`, eight wz-own
 # doors with no upstream counterpart). On by default so the library exports what it did; a build
 # that only queries leaves it out, and with it the frame writer of `wz-capture` (212 KB of that
@@ -460,6 +467,11 @@ wz-capture = { path = "../wz-capture", default-features = false, features = ["re
 # The piece writer behind `segment_sender`, the sending side of a declared segment profile. At its
 # defaults (`alloc`), which the writer is behind. Optional, behind `segment-sender`.
 wz-app-frame = { path = "../wz-app-frame", optional = true }
+# The shared memory of the process, behind `zenoh-c-shared-memory`: the providers, the buffers
+# and the segments are `zenoh-shm`'s, as zenoh-c's are, and a builder of that crate resolves by
+# `zenoh-core`'s `Wait`.
+zenoh-shm = { path = "../wz-zenoh-shm", optional = true }
+zenoh-core = { path = "../wz-zenoh-core", optional = true }
 
 [dev-dependencies]
 # The joiner the segment sender's integration test reads its pieces back with

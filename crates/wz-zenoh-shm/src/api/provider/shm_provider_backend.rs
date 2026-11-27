@@ -16,7 +16,7 @@
 // src/api/provider/shm_provider_backend.rs (https://github.com/eclipse-zenoh/zenoh, tag 1.10.2).
 
 use super::{
-    chunk::ChunkDescriptor,
+    chunk::{AllocatedChunk, ChunkDescriptor},
     types::{ChunkAllocResult, ZLayoutError},
 };
 use crate::api::{common::with_id::WithProtocolID, provider::memory_layout::MemoryLayout};
@@ -56,4 +56,14 @@ pub trait ShmProviderBackend: WithProtocolID {
     /// - adopt the layout for backend capabilities
     #[zenoh_macros::unstable_doc]
     fn layout_for(&self, layout: MemoryLayout) -> Result<MemoryLayout, ZLayoutError>;
+
+    /// Whether `chunk`, handed to [`ShmProvider::map`](crate::api::provider::shm_provider::ShmProvider::map),
+    /// is one this backend could have issued, so that freeing it later is sound. A backend that
+    /// owns its memory (a pool knows its own segment) refuses what it cannot own; the default
+    /// accepts, for a backend whose memory is its host's and whose `free` is the host's to get
+    /// right. Hidden from the documentation: the original's trait has no such method.
+    #[doc(hidden)]
+    fn accepts(&self, _chunk: &AllocatedChunk) -> bool {
+        true
+    }
 }
