@@ -497,6 +497,7 @@ fn regen_codec_deployment(
 ///                      session_rx_pool_mcu_minimal,
 ///                      session_rx_pool_mcu_multicast,
 ///                      session_tx_pool_mcu, eth_rx_pool_mcu (buffer-pools)
+///   wz-runtime-tokio : also accept_window_after (algorithm)
 fn regen_statecharts_and_pools(root: &Path) {
     // `Codegen::from_manifest` derives the SCE workspace as
     // <manifest>/../../vendor/sce; any crates/* dir resolves to repo/vendor/sce.
@@ -644,6 +645,21 @@ fn regen_statecharts_and_pools(root: &Path) {
         let out = root.join("out").join(krate);
         mkdir(&out);
         codegen.emit_buffer_pool(stem, &network, &out);
+    }
+
+    // Algorithms a crate other than the two above holds a rule of, each emitted into that crate's
+    // own directory: (stem, consuming crate). Each is a pure function of scalars, so it names no
+    // runtime and adds no dependency to the crate that includes it.
+    let crate_algorithms: &[(&str, &str)] = &[
+        // The window an accepted link's session handshake is given: what the link's own
+        // handshake left of the accept's one bound, never nothing (wz-runtime-tokio
+        // `accept_bounds`).
+        ("accept_window_after", "wz-runtime-tokio"),
+    ];
+    for (stem, krate) in crate_algorithms {
+        let out = root.join("out").join(krate);
+        mkdir(&out);
+        codegen.emit_algorithm(stem, &algorithms, &out);
     }
 
     // sce-codegen drops a `sce_sourcemap.json` side-artifact into the

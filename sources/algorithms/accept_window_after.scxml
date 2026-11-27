@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LicenseRef-watching-zenoh-NonCommercial-1.0 OR LicenseRef-watching-zenoh-Commercial
+  SPDX-FileCopyrightText: Copyright (c) 2026 newmassrael
+-->
+<!--
+  The window an accepted link's session handshake is given, in milliseconds, when the link's own
+  handshake (the ws or tls server side) has already spent `spent_ms` of the accept's one bound
+  `timeout_ms`: what is left of the bound, and never nothing.
+
+  The bound is ONE over the whole accept, as upstream wraps its accept in a single timeout
+  (wz-runtime-tokio `accept_bounds`, upstream's `transport/unicast/accept_timeout`), so the session
+  handshake gets the rest. A link handshake that spent the whole bound, or more, leaves 1 and not
+  0: the drive then finds the deadline elapsed at its first look and closes the accept, where a
+  window of 0 would be read as no deadline and wait for ever. The subtraction saturates, so an
+  overrun is 0 before the floor, never a wrapped huge window. The predicate cannot fail.
+
+  The tokio accept loop (wz-runtime-tokio `accept_loop`) asks it once per accepted link, through
+  `AcceptBounds::timeouts_after`.
+-->
+<scxml xmlns="http://www.w3.org/2005/07/scxml"
+       xmlns:sce="http://sce.dev/ext"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://sce.dev/ext sce-forge.xsd"
+       sce:kind="algorithm"
+       name="accept_window_after"
+       version="1.0">
+  <sce:signature>
+    <sce:param name="timeout_ms" type="uint64"/>
+    <sce:param name="spent_ms" type="uint64"/>
+    <sce:return type="uint64"/>
+  </sce:signature>
+  <sce:body>
+    <sce:var name="left" type="uint64" init="saturatingSub(timeout_ms, spent_ms)"/>
+    <sce:if cond="left === 0">
+      <sce:return expr="1"/>
+    </sce:if>
+    <sce:return expr="left"/>
+  </sce:body>
+</scxml>
