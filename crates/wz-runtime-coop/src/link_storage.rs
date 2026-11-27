@@ -853,7 +853,8 @@ impl<T: TxStore> TxLender<T> {
         self.store.spare()
     }
 
-    /// Whether a grant would find a slot of the store now ([`TxStore::claimable`]).
+    /// Whether the store has the memory for a slot now ([`TxStore::claimable`]): a fact of a pool
+    /// alone, which storage of the link's own answers yes to whichever of its slots are out.
     pub fn claimable(&self) -> bool {
         self.store.claimable()
     }

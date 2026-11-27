@@ -1118,6 +1118,43 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         unixpipe,\
         ws\
         |"
+    # A stream link whose send writes each frame whole (`tx-stream-owed`, the crate's one default,
+    # left out, as the zenoh-pico preset builds the cooperative engine): the send waits for its
+    # stream until the frame is taken whole, the link has room while it has a slot and is never
+    # asked for the stream's, a failed write gives the frame's slot back, and a session over it
+    # writes a droppable or a blocking message on a full stream instead of dropping it or closing
+    # (`stream_link::tests` gated `not(feature = "tx-stream-owed")`). The row above without the
+    # crate's defaults, on its own module. NOT YET MEASURED.
+    "wz-runtime-coop|hook|\
+        -default,\
+        alloc,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        host-lock,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        keyexpr-wildcard-double,\
+        keyexpr-wildcard-single,\
+        listen,\
+        reassembly,\
+        resource-snapshot,\
+        rx-in-place,\
+        scouting-static,\
+        serial,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        switchboard,\
+        transport-batching,\
+        transport-keepalive,\
+        transport-qos,\
+        udp-listen,\
+        unixpipe,\
+        ws\
+        |stream_link::"
     # Fixed-memory step S6 -- the same crate under the SESSION-SLOT profile, a row of
     # its own because the selector swaps the task pool, the join handles, the local
     # set and the timer queue for their static forms (and drops the tests that build
@@ -1515,6 +1552,36 @@ pubsub-encoding,pubsub-attachment,ext-pubsub-sample-miss-detection|"
         transport-keepalive,\
         tx-lend-only\
         |tx_deadline::tests::without_the_probe_stage_every_deadline_waits"
+    # The same build has no `link-wire-reports` (a default left out with the four: no driver of
+    # the cooperative engine queues its writes or carries a class apart), so the line mark and the
+    # keepalive's deadline are the inline driver's alone, which this filter holds. NOT YET
+    # MEASURED.
+    "wz-session-core|hook|\
+        -default,\
+        alloc,\
+        keyexpr-wildcard-single,\
+        keyexpr-wildcard-double,\
+        keyexpr-dollar-star,\
+        keyexpr-includes,\
+        request-put-del,\
+        log,\
+        south-subregions,\
+        interest-answer,\
+        policy-selection,\
+        codec-close,\
+        codec-frame,\
+        codec-init-body,\
+        codec-keep-alive,\
+        codec-open-body,\
+        codec-push,\
+        pubsub-put,\
+        session-unicast,\
+        session-unicast-accept,\
+        session-unicast-open,\
+        transport-fragmentation,\
+        transport-keepalive,\
+        tx-lend-only\
+        |session_actions::bundle_tests::link_stamps::every_frame_handed_to_a_link_that_writes_inline_marks_its_line"
     # The COMPACT initial-sequence-number derivation, a row of its own because
     # `initial-sn-compact` is a selector, not an addition: it swaps the SHAKE
     # derivation for the FNV-1a and SplitMix64 one and compiles the tests of the

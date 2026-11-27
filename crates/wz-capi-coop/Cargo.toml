@@ -137,6 +137,7 @@ default = [
     "tx-expiry-run",
     "tx-fragment-credit",
     "tx-held-wait",
+    "tx-stream-owed",
 ]
 std = ["wz-capi-port/std", "wz-runtime-coop/host-lock"]
 # A read task beside the program's calls (pico's multi-threaded arm): the session is stepped by a
@@ -226,11 +227,14 @@ key-matching-listener = []
 # runtime's `udp-listen` too, which gives the host's links a `udp/` listener, one socket whose
 # peers each take a face of their own. A face dialled beside the dial role's (`attach_face`) is
 # this build's too: every build of more faces than one shares the faces' rows in the session's
-# pools (`peer-row-pools`), so a face that goes gives its set back at once.
+# pools (`peer-row-pools`), so a face that goes gives its set back at once. The open lends every
+# udp port the rows of its peers and the slots of its datagrams (`CoopEngine::assemble`), so the
+# runtime's ports are compiled in that form alone (`udp-port-lent-only`).
 listen = [
     "interest-answer",
     "runtime-plan",
     "wz-runtime-coop/listen",
+    "wz-runtime-coop/udp-port-lent-only",
     "wz-session-core/peer-row-pools",
 ]
 # The answering end of a peer's Interest (`wz-session-core`'s `interest-answer`): what the
@@ -259,6 +263,11 @@ tx-fragment-credit = ["wz-session-core/tx-fragment-credit"]
 # for room out of its own `wait_before_drop` under zenoh's queue profile. Without it every profile
 # answers as pico's: dropped at once behind a send, and no face asked.
 tx-held-wait = ["wz-session-core/tx-held-wait"]
+# `tx-stream-owed`: a stream link's send that never waits for its stream, the rest of a frame it
+# did not take owed and written by a later step, and a question of room that waits for the stream
+# within the message's wait. The runtime's feature of the same name. Without it each frame is
+# written whole by a send that waits for its stream, as zenoh-pico's link write does.
+tx-stream-owed = ["wz-runtime-coop/tx-stream-owed"]
 # A transport the program supplies: the session shell's links over the program's own network
 # stack (`wz_runtime_coop::app_link`), re-exported for the ABI that opens the engine over them.
 app-transport = ["wz-runtime-coop/app-link"]

@@ -24,11 +24,9 @@
 
 use wz_runtime_core::TimeSource;
 
-use crate::drive::{
-    deliver_session_event, judge_lease, lease_deadlines, lease_wake_deadline, SessionEngine,
-};
 #[cfg(feature = "transport-keepalive")]
 use crate::drive::{judge_keepalive, keepalive_deadlines, keepalive_wake_deadline};
+use crate::drive::{judge_lease, lease_deadlines, lease_wake_deadline, SessionEngine};
 use crate::driver_loop::{EventSink, IterationEvent};
 use crate::link::SessionRuntime;
 use crate::session_actions::SessionLinkActions;
@@ -202,7 +200,7 @@ impl TransportTimers {
         let handshake = match self.handshake.poll(engine.get_current_state(), now_ms) {
             Some((deadline_ms, event)) => {
                 if now_ms >= deadline_ms {
-                    deliver_session_event(engine, event);
+                    engine.process_event(event);
                 }
                 true
             }

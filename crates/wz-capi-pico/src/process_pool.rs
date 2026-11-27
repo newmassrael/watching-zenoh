@@ -70,10 +70,11 @@
 //! another kind of the same size has free. A slot is its object's own size, rounded up to the
 //! alignment of a slot: the size classes group the pools for the reports and size no slot. A pool
 //! with no free slot refuses the object: the
-//! call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having made, declared or opened nothing, and the
-//! refusal is counted. Nothing falls back to the heap: when the build's pools cannot be reserved
-//! either, the object is refused the same way. An object let go frees its slot for the next one,
-//! from any thread: every pool is reached under the port's lock.
+//! call answers `_Z_ERR_SYSTEM_OUT_OF_MEMORY` having made, declared or opened nothing, and where
+//! the doors that report the pools are (`object-pool`) the refusal is counted. Nothing falls back
+//! to the heap: when the build's pools cannot be reserved either, the object is refused the same
+//! way. An object let go frees its slot for the next one, from any thread: every pool is reached
+//! under the port's lock.
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
@@ -86,10 +87,13 @@ use wz_session_core::limits::SessionLimits;
 use crate::object_slot::Kind;
 
 /// How many slot sizes the pools are reported by, the smallest 16 bytes and each one twice the one
-/// before, up to 16 KiB.
+/// before, up to 16 KiB. The classes size no slot, so they are kept, as the counts are
+/// (`ClassCount`), only where the doors that report the pools read them (`object-pool`).
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const CLASSES: usize = 11;
 
 /// The slots of the smallest size, in bytes.
+#[cfg(any(test, feature = "object-pool"))]
 const SMALLEST_SLOT: usize = 16;
 
 /// The alignment of every slot: the most any object of this ABI asks for, which the build checks
@@ -429,12 +433,14 @@ impl Stage {
 }
 
 /// The bytes of each slot of size class `class`.
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const fn slot_bytes(class: usize) -> usize {
     SMALLEST_SLOT << class
 }
 
 /// The size class of an object of `size` bytes aligned to `align`: the smallest slot that holds
 /// it, or none.
+#[cfg(any(test, feature = "object-pool"))]
 pub(crate) const fn class_of(size: usize, align: usize) -> Option<usize> {
     if align > SLOT_ALIGN || size > slot_bytes(CLASSES - 1) {
         return None;
@@ -470,6 +476,7 @@ const fn slot_size<T>() -> usize {
 
 /// Where the pools of slots of `size` bytes are counted: their size class, or `CLASSES` for slots
 /// past the largest, which no class reports.
+#[cfg(any(test, feature = "object-pool"))]
 const fn count_of(size: usize) -> usize {
     match class_of(size, 1) {
         Some(class) => class,
@@ -1021,7 +1028,10 @@ impl Pool {
 }
 
 /// What the pools of one size class have done together; the pools past the largest class are
-/// counted after the last class.
+/// counted after the last class. Kept only where something reads it, the doors that report the
+/// pools (`object-pool`): a library without them would write it on every take and give-back and
+/// never read it.
+#[cfg(any(test, feature = "object-pool"))]
 #[derive(Clone, Copy, Debug, Default)]
 struct ClassCount {
     in_use: usize,
@@ -1053,6 +1063,7 @@ pub(crate) struct Pools {
     /// Where each pool ends, from `base`: the pools lie one after another, so the pool a place
     /// lies in is the first that ends past it.
     ends: [usize; POOLS],
+    #[cfg(any(test, feature = "object-pool"))]
     counts: [ClassCount; CLASSES + 1],
 }
 
@@ -1066,6 +1077,7 @@ impl Pools {
             origin,
             pools: *NO_POOLS,
             ends: [0; POOLS],
+            #[cfg(any(test, feature = "object-pool"))]
             counts: [ClassCount::default(); CLASSES + 1],
         }
     }
@@ -1108,10 +1120,11 @@ impl Pools {
         pools
     }
 
-    /// A free slot of the pool of `kind` for an object whose slot takes `size` bytes, or `None`,
-    /// counted, when it has none. Only that pool is asked: a slot of another kind's pool is never
-    /// taken, so each kind holds what was stated for it and no more. A slot given back is taken
-    /// before an untouched one, and the untouched ones go lowest first.
+    /// A free slot of the pool of `kind` for an object whose slot takes `size` bytes, or `None`
+    /// when it has none, either counted where the pools are reported ([`Self::counted`]). Only
+    /// that pool is asked: a slot of another kind's pool is never taken, so each kind holds what
+    /// was stated for it and no more. A slot given back is taken before an untouched one, and the
+    /// untouched ones go lowest first.
     fn take(&mut self, kind: Kind, size: usize) -> Option<NonNull<u8>> {
         let base = self.base;
         let pool = self.pools.get_mut(kind as usize)?;
@@ -1156,6 +1169,7 @@ impl Pools {
     /// Count a take from a pool of slots of `size` bytes in its class: one more in use, or one
     /// more refused for a `slot` of none. Out of line: an object's take and a payload's both end
     /// here.
+    #[cfg(any(test, feature = "object-pool"))]
     #[inline(never)]
     fn counted(&mut self, size: usize, slot: Option<NonNull<u8>>) -> Option<NonNull<u8>> {
         let count = self.counts.get_mut(count_of(size))?;
@@ -1166,6 +1180,14 @@ impl Pools {
             }
             None => count.refused = count.refused.saturating_add(1),
         }
+        slot
+    }
+
+    /// A take as it was made, in a library that keeps no count (`ClassCount`): the take and the
+    /// refusal write nothing more than the pool's own list.
+    #[cfg(not(any(test, feature = "object-pool")))]
+    #[inline(always)]
+    fn counted(&mut self, _size: usize, slot: Option<NonNull<u8>>) -> Option<NonNull<u8>> {
         slot
     }
 
@@ -1209,6 +1231,7 @@ impl Pools {
                 .write(pool.free)
         };
         pool.free = Some(place);
+        #[cfg(any(test, feature = "object-pool"))]
         if let Some(count) = self.counts.get_mut(count_of(pool.size)) {
             count.in_use = count.in_use.saturating_sub(1);
         }

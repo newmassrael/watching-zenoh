@@ -16,6 +16,7 @@ use wz_runtime_coop::ClockSource;
 use wz_runtime_posix::stream::PosixTcpDial;
 use wz_runtime_posix::{PosixClock, PosixEntropy};
 
+use super::sim::SetClock;
 use super::{config, CatchAll, Command, Router, LOOPBACK, ROUTER_ZID};
 use crate::EngineHold;
 use crate::{CoopConfig, CoopEngine};
@@ -23,16 +24,6 @@ use crate::{CoopConfig, CoopEngine};
 /// The session's lease, in milliseconds: short, so the wall clock passes it several times over
 /// in a test.
 const LEASE_MS: u64 = 500;
-
-/// A clock that reads what the test set, in microseconds, and moves only when the test moves it.
-#[derive(Clone)]
-struct SetClock(Arc<AtomicU64>);
-
-impl ClockSource for SetClock {
-    fn now_us(&self) -> u64 {
-        self.0.load(Ordering::SeqCst)
-    }
-}
 
 /// A session of [`LEASE_MS`] dialled to `router` on `clock`; it redials none, so it ends with
 /// its link.

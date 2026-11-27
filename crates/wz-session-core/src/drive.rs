@@ -24,7 +24,7 @@ use wz_runtime_core::TimeSource;
 
 use crate::driver_loop::DriverLoopOutcome;
 use crate::lease::LeaseCheckOutcome;
-#[cfg(feature = "transport-keepalive")]
+#[cfg(all(feature = "transport-keepalive", feature = "link-wire-reports"))]
 use crate::link::BoxedLinkDriver;
 #[cfg(feature = "alloc")]
 use crate::link::LinkEvent;
@@ -284,10 +284,7 @@ pub fn dispatch_link_lost<R: SessionRuntime, T: TimeSource>(
     engine: &mut SessionEngine<R, T>,
     cause: crate::link::LostCause,
 ) -> DriverLoopOutcome {
-    deliver_session_event(
-        engine,
-        crate::session_fsm_unicast::SessionFsmUnicastEvent::LinkLost,
-    );
+    engine.process_event(crate::session_fsm_unicast::SessionFsmUnicastEvent::LinkLost);
     DriverLoopOutcome::LinkLost(cause)
 }
 
@@ -321,7 +318,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     match event {
         LinkEvent::Ready => {
-            deliver_session_event(engine, E::LinkOpened);
+            engine.process_event(E::LinkOpened);
             DriverLoopOutcome::AdvancedFsm
         }
         LinkEvent::Lost { cause } => dispatch_link_lost(engine, cause),
@@ -360,7 +357,7 @@ pub fn dispatch_link_event<R: SessionRuntime, T: TimeSource>(
                 ) {
                     Some(b) => Some(b),
                     None => {
-                        deliver_session_event(engine, E::FramingError);
+                        engine.process_event(E::FramingError);
                         return DriverLoopOutcome::ParseError(
                             crate::parse_error::InboundParseError::CompressionFailed,
                         );
@@ -498,7 +495,7 @@ fn dispatch_unit_in<R: SessionRuntime, T: TimeSource>(
     // sent) is the deepest path the receive reaches, and the decoded message was a slot under it
     // that nothing read.
     if let Some(event) = decided {
-        deliver_session_event(engine, event);
+        engine.process_event(event);
     }
     outcome
 }
@@ -608,7 +605,7 @@ fn dispatch_lean_unit<R: SessionRuntime, T: TimeSource>(
                     }
                 }
                 Err(parse_err) => {
-                    deliver_session_event(engine, E::FramingError);
+                    engine.process_event(E::FramingError);
                     DriverLoopOutcome::ParseError(parse_err)
                 }
             });
@@ -1794,7 +1791,7 @@ fn admit_head_in_place<
         return HeadAdmission::Admitted;
     };
     if let Some(event) = to_engine {
-        deliver_session_event(engine, event);
+        engine.process_event(event);
     }
     on_event.event(crate::driver_loop::IterationEvent::Poll(&refused));
     if matches!(refused, DriverLoopOutcome::RxSnRejected { .. }) {
@@ -2558,7 +2555,7 @@ fn refused_data_unit<R: SessionRuntime, T: TimeSource>(
     };
     #[cfg(not(any(feature = "transport-stats", feature = "resource-snapshot")))]
     let _ = actions;
-    deliver_session_event(engine, E::FramingError);
+    engine.process_event(E::FramingError);
     Some(outcome)
 }
 
@@ -2584,7 +2581,7 @@ fn dispatch_control_in_place<R: SessionRuntime, T: TimeSource>(
 ) -> (DriverLoopOutcome, usize) {
     let (outcome, decided, used) = read_control_in_place(unit, actions, engine);
     if let Some(event) = decided {
-        deliver_session_event(engine, event);
+        engine.process_event(event);
     }
     (outcome, used)
 }
@@ -2739,7 +2736,7 @@ fn lean_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::EventS
         #[cfg(not(any(feature = "transport-stats", feature = "resource-snapshot")))]
         Ok(_) => {}
         Err(parse_err) => {
-            deliver_session_event(engine, E::FramingError);
+            engine.process_event(E::FramingError);
             on_event.event(crate::driver_loop::IterationEvent::Poll(
                 &DriverLoopOutcome::ParseError(parse_err),
             ));
@@ -2858,7 +2855,7 @@ fn frame_in_place<R: SessionRuntime, T: TimeSource, F: crate::driver_loop::Event
         // step reads from.
         Ok((read, stopped)) => (admitted, records_at.saturating_add(read), stopped),
         Err(parse_err) => {
-            deliver_session_event(engine, E::FramingError);
+            engine.process_event(E::FramingError);
             on_event.event(IterationEvent::Poll(&DriverLoopOutcome::ParseError(
                 parse_err,
             )));
@@ -3512,14 +3509,14 @@ pub(crate) fn judge_lease<R: SessionRuntime, T: TimeSource>(
         .is_some_and(|deadline_ms| now_ms >= deadline_ms)
         && actions.expire_declaration_watch() == crate::declaration_sync::WatchExpiry::LosesLink
     {
-        deliver_session_event(engine, E::LinkLost);
+        engine.process_event(E::LinkLost);
         return LeaseCheckOutcome::DeclarationsStalled;
     }
     // Only the watch asks the actions anything here.
     #[cfg(not(feature = "alloc"))]
     let _ = actions;
     if now_ms >= deadlines.expiry {
-        deliver_session_event(engine, E::LeaseExpired);
+        engine.process_event(E::LeaseExpired);
         LeaseCheckOutcome::Expired
     } else {
         LeaseCheckOutcome::WithinLease
@@ -3556,7 +3553,7 @@ pub fn check_requested_close<R: SessionRuntime, T: TimeSource>(
 ) -> bool {
     use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
     if actions.take_requested_close() {
-        deliver_session_event(engine, E::SessionClose);
+        engine.process_event(E::SessionClose);
         true
     } else {
         false
@@ -3590,7 +3587,7 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     // before and which, as zenoh 1.10.2 deletes the transport, sends no Close frame.
     if actions.take_congestion_close() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-        deliver_session_event(engine, E::TxCongestionExhaust);
+        engine.process_event(E::TxCongestionExhaust);
         return true;
     }
     // The peer deleted the transport on another link of this session: this link
@@ -3598,7 +3595,7 @@ pub fn check_out_of_band<R: SessionRuntime, T: TimeSource>(
     #[cfg(feature = "transport-multilink")]
     if actions.take_transport_deleted() {
         use crate::session_fsm_unicast::SessionFsmUnicastEvent as E;
-        deliver_session_event(engine, E::PeerClose);
+        engine.process_event(E::PeerClose);
         return true;
     }
     false
@@ -4134,8 +4131,8 @@ pub(crate) fn lease_deadlines<R: SessionRuntime, T: TimeSource>(
 /// session in `Closing` arms no keepalive wake on either drive loop and the
 /// tokio pacer ends.
 ///
-/// On a link that carries best-effort frames apart
-/// ([`BoxedLinkDriver::carries_apart`]), the earlier of the link's own deadline
+/// With `link-wire-reports`, on a link that carries best-effort frames apart
+/// (`BoxedLinkDriver::carries_apart`), the earlier of the link's own deadline
 /// and its companion's, each by its own clock.
 #[cfg(feature = "transport-keepalive")]
 pub fn keepalive_wake_deadline<R: SessionRuntime, T: TimeSource>(
@@ -4157,6 +4154,7 @@ pub(crate) struct KeepaliveDeadlines {
     /// The link's own: `None` before it has a baseline.
     link: Option<u64>,
     /// The companion's: `None` on a link without one.
+    #[cfg(feature = "link-wire-reports")]
     companion: Option<u64>,
     /// The start of the link's tick these deadlines were read in, which the judge that ends it
     /// finds unchanged: a second judge of the same tick finds it ended.
@@ -4167,10 +4165,11 @@ pub(crate) struct KeepaliveDeadlines {
 impl KeepaliveDeadlines {
     /// The earlier of the two: when a driver wakes for the keepalive.
     pub(crate) fn earliest(self) -> Option<u64> {
-        match (self.link, self.companion) {
-            (Some(link), Some(companion)) => Some(link.min(companion)),
-            (deadline, None) | (None, deadline) => deadline,
+        #[cfg(feature = "link-wire-reports")]
+        if let Some(companion) = self.companion {
+            return Some(self.link.map_or(companion, |link| link.min(companion)));
         }
+        self.link
     }
 }
 
@@ -4185,34 +4184,41 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
         keepalive_tick_at: tick,
         ..
     } = actions.link.stamps_while(&actions.link.keepalive_armed)?;
-    let now = actions.clock.now_monotonic_ms();
-    // A driver with a queue between hand-over and write reports when its writer last finished
-    // a write, and that is when the line spoke (its data frames never mark the tick,
-    // `emit_on_link`). Folded in as a stamp on the session's clock: the driver answers an
-    // elapsed time, so the two clocks need no common epoch.
-    let driver = actions.link.link_driver();
-    let written = if driver.reports_wire_writes() {
-        driver
-            .ms_since_wire_write()
-            .map(|ago| now.saturating_sub(ago))
-    } else {
-        None
-    };
     let interval = actions.keepalive_interval_ms();
-    let link = max_stamp(max_stamp(established, tick), written).map(|b| b.saturating_add(interval));
-    // The companion's line is its own last write and nothing the session marks: its frames
-    // never mark the link's tick (`emit_on_link`), and the link's never stand in for it.
-    let class = crate::reliability::Reliability::BestEffort;
-    let companion = if driver.carries_apart(class) {
-        let written = driver
-            .ms_since_wire_write_for(class)
-            .map(|ago| now.saturating_sub(ago));
-        max_stamp(established, written).map(|b| b.saturating_add(interval))
-    } else {
-        None
+    let line = max_stamp(established, tick);
+    // A driver whose hand-over is its write has every frame mark the tick (`emit_on_link`), so
+    // the establishment and the tick are all the speech its line has, and no clock is read.
+    #[cfg(not(feature = "link-wire-reports"))]
+    let link = line.map(|b| b.saturating_add(interval));
+    #[cfg(feature = "link-wire-reports")]
+    let (link, companion) = {
+        let now = actions.clock.now_monotonic_ms();
+        // A driver with a queue between hand-over and write reports when its writer last
+        // finished a write, and that is when the line spoke (its data frames never mark the
+        // tick, `emit_on_link`). Folded in as a stamp on the session's clock: the driver answers
+        // an elapsed time, so the two clocks need no common epoch.
+        let driver = actions.link.link_driver();
+        let written = if BoxedLinkDriver::reports_wire_writes(driver) {
+            BoxedLinkDriver::ms_since_wire_write(driver).map(|ago| now.saturating_sub(ago))
+        } else {
+            None
+        };
+        let link = max_stamp(line, written).map(|b| b.saturating_add(interval));
+        // The companion's line is its own last write and nothing the session marks: its frames
+        // never mark the link's tick (`emit_on_link`), and the link's never stand in for it.
+        let class = crate::reliability::Reliability::BestEffort;
+        let companion = if BoxedLinkDriver::carries_apart(driver, class) {
+            let written = BoxedLinkDriver::ms_since_wire_write_for(driver, class)
+                .map(|ago| now.saturating_sub(ago));
+            max_stamp(established, written).map(|b| b.saturating_add(interval))
+        } else {
+            None
+        };
+        (link, companion)
     };
     Some(KeepaliveDeadlines {
         link,
+        #[cfg(feature = "link-wire-reports")]
         companion,
         tick,
     })
@@ -4232,9 +4238,9 @@ pub(crate) fn keepalive_deadlines<R: SessionRuntime, T: TimeSource>(
 /// lwIP busy-poll compare), exactly as [`check_lease_deadline`] is. No
 /// FSM access — a KeepAlive emit is not a session-state trigger.
 ///
-/// On a link that carries best-effort frames apart, the companion's deadline
-/// is checked as well, and its KeepAlive goes on the companion alone
-/// ([`BoxedLinkDriver::carries_apart`]).
+/// With `link-wire-reports`, on a link that carries best-effort frames apart, the companion's
+/// deadline is checked as well, and its KeepAlive goes on the companion alone
+/// (`BoxedLinkDriver::carries_apart`).
 #[cfg(feature = "transport-keepalive")]
 pub fn check_keepalive_deadline<R: SessionRuntime, T: TimeSource>(
     actions: &SessionLinkActions<R, T>,
@@ -4279,6 +4285,7 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
     }
     // Each line by its own clock: the companion's keepalive goes when its own
     // deadline passes, whether or not the link's did.
+    #[cfg(feature = "link-wire-reports")]
     if due(deadlines.companion) {
         actions.send_keep_alive_apart(crate::reliability::Reliability::BestEffort);
         emitted = true;
@@ -4310,19 +4317,6 @@ pub(crate) fn judge_keepalive<R: SessionRuntime, T: TimeSource>(
 /// ([`SessionFsmUnicastActions`], which [`SessionActionsBinding`] implements) replaces this
 /// definition and the two constructors below, and nothing else.
 pub type SessionEngine<R, T> = Engine<SessionFsmUnicastPolicy<SessionActionsBinding<R, T>>>;
-
-/// Give the session machine `event` and run the turn it starts ([`Engine::process_event`]), in one
-/// body for every path that tells the machine something: the receive's refusals and decided
-/// handshake events, the timers, the link's loss and the requests from outside the loop. Inlined
-/// at each of them, the engine's queueing and its turn were a copy per caller; out of line, a
-/// caller's frame is also not under the turn's.
-#[inline(never)]
-pub fn deliver_session_event<R: SessionRuntime, T: TimeSource>(
-    engine: &mut SessionEngine<R, T>,
-    event: crate::session_fsm_unicast::SessionFsmUnicastEvent,
-) {
-    engine.process_event(event);
-}
 
 /// Build a session [`Engine`] over the generated engine-free
 /// [`SessionFsmUnicastPolicy`], parameterised over a [`SessionActionsBinding`]

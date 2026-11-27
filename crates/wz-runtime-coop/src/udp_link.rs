@@ -39,8 +39,14 @@ use alloc::vec::Vec;
 #[cfg(feature = "session-slot")]
 use core::marker::PhantomData;
 
+#[cfg(all(
+    feature = "udp-listen",
+    not(feature = "session-slot"),
+    not(feature = "udp-port-lent-only")
+))]
+use wz_session_core::bounded::Heap;
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
-use wz_session_core::bounded::{BoundedVec, Heap, Lent, Storage};
+use wz_session_core::bounded::{BoundedVec, Lent, Storage};
 use wz_session_core::byte_cells::ByteBuf;
 #[cfg(feature = "session-slot")]
 use wz_session_core::byte_cells::ByteSource;
@@ -1123,10 +1129,30 @@ pub(crate) struct PortBook<F: CellFlag = Cell<bool>> {
     next: u32,
 }
 
+/// The rows of a book: the stack's own on the heap, or the rows a session lent. A build whose
+/// ports keep only what their session lent (`udp-port-lent-only`) has the lent form alone, so
+/// every walk of the rows is compiled once.
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 enum BookRows<F: CellFlag> {
+    #[cfg(not(feature = "udp-port-lent-only"))]
     Own(PortRows<Heap, F>),
     Lent(PortRows<Lent, F>),
+}
+
+#[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+impl<F: CellFlag> BookRows<F> {
+    /// The rows of a stack lent none: rows of its own.
+    #[cfg(not(feature = "udp-port-lent-only"))]
+    fn unlent() -> Self {
+        BookRows::Own(PortRows::default())
+    }
+
+    /// The rows of a stack lent none where a port keeps only what its session lent: none, so a
+    /// port of the book takes no peer, as one whose rows are all held takes none.
+    #[cfg(feature = "udp-port-lent-only")]
+    fn unlent() -> Self {
+        BookRows::Lent(PortRows::default())
+    }
 }
 
 /// `$body` over the rows of `$book`, whichever they are.
@@ -1134,6 +1160,7 @@ enum BookRows<F: CellFlag> {
 macro_rules! with_rows {
     ($book:expr, |$rows:ident| $body:expr) => {
         match &mut $book.rows {
+            #[cfg(not(feature = "udp-port-lent-only"))]
             BookRows::Own($rows) => $body,
             BookRows::Lent($rows) => $body,
         }
@@ -1142,10 +1169,11 @@ macro_rules! with_rows {
 
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 impl<F: CellFlag> PortBook<F> {
-    /// A book over the rows a session lent, or rows of the stack's own.
+    /// A book over the rows a session lent, or the rows of a stack lent none
+    /// (`BookRows::unlent`).
     pub(crate) fn of(rows: Option<PortRows<Lent, F>>) -> Self {
         Self {
-            rows: rows.map_or_else(|| BookRows::Own(PortRows::default()), BookRows::Lent),
+            rows: rows.map_or_else(BookRows::unlent, BookRows::Lent),
             next: 0,
         }
     }
@@ -1175,13 +1203,15 @@ pub(crate) fn shared_book<N: CountKind>(
 }
 
 /// Where a [`UdpPort`] reads its datagrams and holds those it sorted for a peer: memory of its
-/// own, or slots of the table its session lent (`LinkTables::port_rx`).
+/// own, or slots of the table its session lent (`LinkTables::port_rx`); the slots alone in a
+/// build whose ports keep only what their session lent (`udp-port-lent-only`).
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 enum PortRx<F: CellFlag> {
     /// A read buffer of the port's own, and the buffers a peer's link gave back once it read the
     /// datagram held in them, which the next datagram sorted is held in: a port whose peers keep
     /// sending holds each datagram in a buffer it already has, and allocates only while its
     /// backlog grows past any it held.
+    #[cfg(not(feature = "udp-port-lent-only"))]
     Own { read: Vec<u8>, spare: Vec<Vec<u8>> },
     /// A slot of `table` read into. A datagram sorted for a peer keeps the slot it was read into,
     /// and the next read takes another; with none free the datagram is dropped and counted, as a
@@ -1196,6 +1226,7 @@ enum PortRx<F: CellFlag> {
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 enum Held<F: CellFlag> {
     /// In a buffer of the port's own, exactly as long as the datagram.
+    #[cfg(not(feature = "udp-port-lent-only"))]
     Own(Vec<u8>),
     /// The first `len` bytes of a slot the session lent.
     Lent(ByteBuf<F>, usize),
@@ -1206,6 +1237,7 @@ impl<F: CellFlag> Held<F> {
     /// The datagram's bytes.
     fn as_slice(&self) -> &[u8] {
         match self {
+            #[cfg(not(feature = "udp-port-lent-only"))]
             Held::Own(bytes) => bytes,
             Held::Lent(slot, len) => slot.as_slice().get(..*len).unwrap_or_default(),
         }
@@ -1217,6 +1249,7 @@ impl<F: CellFlag> PortRx<F> {
     /// What the next datagram is read into.
     fn read_into(&mut self) -> &mut [u8] {
         match self {
+            #[cfg(not(feature = "udp-port-lent-only"))]
             PortRx::Own { read, .. } => read,
             PortRx::Lent { read, .. } => read.as_mut_slice(),
         }
@@ -1225,6 +1258,7 @@ impl<F: CellFlag> PortRx<F> {
     /// The `len` bytes the last read reported, cut to what was read into.
     fn read(&self, len: usize) -> &[u8] {
         match self {
+            #[cfg(not(feature = "udp-port-lent-only"))]
             PortRx::Own { read, .. } => datagram_of(read, len),
             PortRx::Lent { read, .. } => datagram_of(read.as_slice(), len),
         }
@@ -1235,6 +1269,7 @@ impl<F: CellFlag> PortRx<F> {
     /// slot is free for that read: the datagram is dropped, and its slot read into again.
     fn keep(&mut self, len: usize) -> Option<Held<F>> {
         match self {
+            #[cfg(not(feature = "udp-port-lent-only"))]
             PortRx::Own { read, spare } => {
                 let mut held = spare.pop().unwrap_or_default();
                 held.clear();
@@ -1254,11 +1289,15 @@ impl<F: CellFlag> PortRx<F> {
     /// up to as many as one peer's backlog, so a burst that is over leaves no more buffers than a
     /// backlog holds; a slot goes back to its table as it is dropped.
     fn give_back(&mut self, held: Held<F>) {
+        #[cfg(not(feature = "udp-port-lent-only"))]
         if let (PortRx::Own { spare, .. }, Held::Own(buffer)) = (self, held) {
             if spare.len() < PORT_PEER_BACKLOG {
                 spare.push(buffer);
             }
         }
+        // Every datagram is held in a lent slot, which goes back to its table here.
+        #[cfg(feature = "udp-port-lent-only")]
+        drop(held);
     }
 }
 
@@ -1266,15 +1305,26 @@ impl<F: CellFlag> PortRx<F> {
 impl<S: DatagramSocket> UdpPort<S> {
     /// The port of `socket`, which reads each datagram into `rx_capacity` bytes of its own before
     /// it sorts it: the largest datagram a link of the port receives whole. `None` when the heap
-    /// has no room for the book the port keeps its peers in.
+    /// has no room for the book the port keeps its peers in, and always in a build whose ports
+    /// keep only what their session lent (`udp-port-lent-only`), which has no such port.
     pub fn new(socket: S, rx_capacity: usize) -> Option<Self> {
-        Some(Self::in_book(socket, rx_capacity, &shared_book(None).ok()?))
+        #[cfg(not(feature = "udp-port-lent-only"))]
+        {
+            Some(Self::in_book(socket, rx_capacity, &shared_book(None).ok()?))
+        }
+        #[cfg(feature = "udp-port-lent-only")]
+        {
+            drop(socket);
+            let _ = rx_capacity;
+            None
+        }
     }
 
     /// The port of `socket` over the slots of `table`, which its session lent: each datagram is
     /// read into one and held there for its peer, and the largest a link of the port receives
     /// whole is a slot. `None` when the heap has no room for the book the port keeps its peers
-    /// in, or the table no slot free to read into.
+    /// in, or the table no slot free to read into. Its book is a stack's lent no rows
+    /// (`PortBook::of`), which keeps no peer where a port keeps only what its session lent.
     pub fn lent(socket: S, table: LentByteCells) -> Option<Self> {
         Self::lent_in_book(socket, table, &shared_book(None).ok()?)
     }
@@ -1284,6 +1334,7 @@ impl<S: DatagramSocket> UdpPort<S> {
 impl<S: DatagramSocket, N: CountKind> UdpPort<S, N> {
     /// [`UdpPort::new`], keeping its peers and their datagrams in `book`, which the stack's ports
     /// share.
+    #[cfg(not(feature = "udp-port-lent-only"))]
     pub(crate) fn in_book(socket: S, rx_capacity: usize, book: &SharedBook<N>) -> Self {
         Self::over(
             socket,
@@ -1683,7 +1734,11 @@ mod tests {
     /// it, so a peer that keeps sending datagrams of one length is held in the same buffer each
     /// time and costs no allocation after its first. The datagram the listener's look takes off
     /// the socket waits there for the link, as it did before.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     #[test]
     fn a_port_holds_each_datagram_in_a_buffer_a_read_gave_back() {
         let port = shared(UdpPort::new(Loop::default(), 64).expect("the heap has room"));
@@ -1717,7 +1772,11 @@ mod tests {
     }
 
     /// The buffers of its own a port keeps for the next datagram, by where each lies.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     fn spare<S: DatagramSocket>(port: &UdpPort<S>) -> Vec<*const u8> {
         port.with_reads(|reads| match &reads.rx {
             PortRx::Own { spare, .. } => spare.iter().map(|buffer| buffer.as_ptr()).collect(),
@@ -1729,7 +1788,11 @@ mod tests {
     /// bytes of its cell, and a port of its own is none, and the program goes on. Turned red by a
     /// book made over a cell the heap cannot refuse, which ends the process, or by a refusal
     /// that names other bytes than the book's cell.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     #[test]
     fn a_book_the_heap_has_no_room_for_is_refused_and_named() {
         let refused = crate::table_tests::refused(|| shared_book::<OneTask>(None).err());
@@ -1771,7 +1834,11 @@ mod tests {
     /// peer's link, the next read taking another slot; with none free it drops the datagram and
     /// counts it, and reads into the same slot again. A slot the link read goes back to the table.
     /// The CONTROL is the same datagrams over memory of the port's own, which holds both.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     #[test]
     fn a_port_over_lent_slots_drops_a_datagram_it_has_no_slot_for() {
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
@@ -1841,7 +1908,11 @@ mod tests {
     /// A peer's row counts the datagrams that wait for it: each one queued, a peer the port took
     /// or not, and each one read, in the order they came; the reads and the backlog ask the row.
     /// Turned red by a count the queue does not move, or a read that takes another peer's.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     #[test]
     fn a_peers_row_counts_what_waits_for_it() {
         let other = SocketAddr::from(([192, 0, 2, 9], 7447));
@@ -1884,7 +1955,11 @@ mod tests {
     /// slot goes back to the table as the link reads it. The CONTROL is the same rounds over memory
     /// of the port's own, whose first round allocates while the peer's backlog grows past the one
     /// buffer the `InitSyn`'s read gave back, so the count sees what a port allocates.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     #[test]
     fn a_port_over_lent_memory_sorts_a_peers_datagrams_without_the_heap() {
         use crate::table_tests::allocations;
@@ -1957,7 +2032,11 @@ mod tests {
     /// one stack share them: a peer past the peers' rows is not taken and its `InitSyn` is counted
     /// as an overflow, and the row a peer held serves the next once its link goes. The CONTROL is
     /// a port over rows of its own, which takes that peer.
-    #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        not(feature = "udp-port-lent-only")
+    ))]
     #[test]
     fn ports_over_lent_rows_share_them_and_take_no_peer_past_them() {
         use wz_session_core::bounded::{Arena, ARENA_ALIGN};
@@ -2018,6 +2097,69 @@ mod tests {
                 .is_some(),
             "CONTROL: rows of its own take a second peer"
         );
+    }
+
+    /// A build whose ports keep only what their session lent makes no port of its own memory, and a
+    /// port over a book lent no rows takes no peer: its `InitSyn` is read into a lent slot, finds no
+    /// row, is counted as an overflow and its slot goes back. The CONTROL is a port over a book of
+    /// lent rows, which takes that peer and hands its link the datagram. Turned red by a port that
+    /// keeps a peer or a datagram in memory of its own.
+    #[cfg(all(
+        feature = "udp-listen",
+        not(feature = "session-slot"),
+        feature = "udp-port-lent-only"
+    ))]
+    #[test]
+    fn a_lent_only_port_keeps_what_its_session_lent_and_nothing_of_its_own() {
+        use wz_session_core::bounded::{Arena, ARENA_ALIGN};
+
+        #[derive(Clone, Copy)]
+        #[repr(C, align(16))]
+        struct Block([u8; ARENA_ALIGN]);
+
+        assert!(
+            UdpPort::new(Loop::default(), 64).is_none(),
+            "no port reads into memory of its own"
+        );
+
+        let bytes = Arena::byte_cells_bytes(64, 4)
+            .and_then(|cells| Arena::table_bytes::<PortPeerRow>(1).map(|peers| cells + peers))
+            .and_then(|lent| Arena::table_bytes::<QueuedDatagram>(2).map(|queue| lent + queue))
+            .expect("within the address space");
+        let region: &'static mut [Block] =
+            std::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
+        // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
+        // leaked, so nothing else uses it and it outlives every slot and row lent from it.
+        let mut arena =
+            unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
+        let table = arena.lend_byte_cells(64, 4).expect("the ports' table");
+        let mut buf = [0u8; 64];
+
+        let rowless = shared(UdpPort::lent(Loop::default(), table).expect("a slot to read into"));
+        queued(&rowless.socket, SYN);
+        assert!(
+            UdpPort::take_fresh(&rowless)
+                .expect("the socket reads")
+                .is_none(),
+            "no row to take the peer in"
+        );
+        assert_eq!(rowless.overflows(), 1);
+        assert_eq!(table.in_use(), 1, "only the slot the next read goes into");
+
+        let rows = PortRows::over(
+            arena.lend(1).expect("the peers' rows"),
+            arena.lend(2).expect("the queue's rows"),
+        );
+        let book = shared_book::<OneTask>(Some(rows)).expect("the heap has room");
+        let lent = shared(
+            UdpPort::lent_in_book(Loop::default(), table, &book).expect("a slot to read into"),
+        );
+        queued(&lent.socket, SYN);
+        let peer = UdpPort::take_fresh(&lent)
+            .expect("the socket reads")
+            .expect("CONTROL: the peer a lent row takes");
+        assert_eq!(peer.try_recv(&mut buf), Ok(Some((SYN.len(), PEER))));
+        assert_eq!(lent.overflows(), 0);
     }
 
     /// A datagram is the bytes the socket reported, cut to the buffer it was read into.

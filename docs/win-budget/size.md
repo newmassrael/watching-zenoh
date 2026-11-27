@@ -434,15 +434,22 @@ pico's handshake is `vendor/zenoh-pico/src/transport/unicast/transport.c` @
 
 ### 6.3 The wz step landed with this section: one body hands the session machine its events
 
-`wz_session_core::drive::deliver_session_event` is `Engine::process_event` out of line, and every
-path that tells the session machine something calls it: `dispatch_link_lost`,
-`dispatch_link_event`, `dispatch_unit_in`, `dispatch_lean_unit`, `admit_head_in_place`,
-`refused_data_unit`, `dispatch_control_in_place`, `lean_in_place`, `frame_in_place`,
-`judge_lease`, `check_requested_close`, `check_out_of_band`, `TransportTimers::fire_due`, and the
-coop pump's role activation (`LinkSession::init_in`, `open_step`). None of them is on a sample's
-path: each is a refusal, a decided handshake event, a timer that has fallen due or a request from
-outside the loop, so the receive's per-message instructions do not change; what goes is the inlined
-copy of the queue push and the turn's opening and closing in each of those bodies.
+`Engine::process_event` is out of line in the runtime (item 1 of section 6.4, at SCE
+`e90c0b6271b`), and every path that tells the session machine something calls it directly:
+`dispatch_link_lost`, `dispatch_link_event`, `dispatch_unit_in`, `dispatch_lean_unit`,
+`admit_head_in_place`, `refused_data_unit`, `dispatch_control_in_place`, `lean_in_place`,
+`frame_in_place`, `judge_lease`, `check_requested_close`, `check_out_of_band`,
+`TransportTimers::fire_due`, and the coop pump's role activation (`LinkSession::init_in`,
+`open_step`). None of them is on a sample's path: each is a refusal, a decided handshake event, a
+timer that has fallen due or a request from outside the loop, so the receive's per-message
+instructions do not change; what goes is the inlined copy of the queue push and the turn's opening
+and closing in each of those bodies.
+
+The body was first wz's own, `wz_session_core::drive::deliver_session_event`, a wrapper never
+inlined. Once the runtime's body was out of line the wrapper was read at 5 bytes, a tail call over
+the same call (164 before), and it is gone: each caller's call is the same size to the other
+target, and the image loses the wrapper's body and its alignment, expected about -16 of text per
+runtime and clock pair the session machine is built for (one on the case), no rodata.
 
 Expected on the case: of the 1,746 bytes above, one body of about 300 stays and each caller keeps a
 call: transport about -900 to -1,400 (`drive::dispatch_copied`, `dispatch_control_in_place`,
@@ -461,9 +468,9 @@ callgrind of one handshake and one fragmented message (cell M9 of `text.md`).
    the queue push and the turn's `begin_turn`/`end_turn` around the one `run_turn` call
    (`vendor/sce/backends/rust/runtime/src/engine.rs` @ `pub fn process_event(&mut self, event: P::Event) {`).
    `#[inline(never)]` there gives every host what section 6.3 gives the session machine of this
-   one, without a wrapper of its own; for this image, after 6.3, about -100 more (the link and slot
-   machines are reached from one body each already). Instructions: one call per event, which is per
-   transport event and never per sample.
+   one, without a wrapper of its own (landed at SCE `e90c0b6271b`); for this image, after 6.3,
+   about -100 more (the link and slot machines are reached from one body each already).
+   Instructions: one call per event, which is per transport event and never per sample.
 2. **Fold the machine-independent half of the per-machine monomorphs.** `run_turn` builds the
    machine's workspace and its `EngineHost` and hands `Turn::run` a `&mut dyn MainLoop`: the
    workspace split and the `Turn` construction do not depend on the policy beyond the workspace's

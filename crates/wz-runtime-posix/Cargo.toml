@@ -73,6 +73,11 @@ features = [
 # any object it takes, reached or not.
 [dev-dependencies]
 critical-section = { version = "1", features = ["std"] }
+# The stream links this crate's own tests drive (`stream.rs`) keep what the stream did not take,
+# as every build but the zenoh-pico preset's does (`wz-runtime-coop`'s `tx-stream-owed`). Named for
+# the tests alone: the library takes the runtime without its defaults, so a pico library over it
+# keeps its own switch.
+wz-runtime-coop = { path = "../wz-runtime-coop", default-features = false, features = ["tx-stream-owed"] }
 
 # The configurations this crate has, which Layers C1bf and C1bz build in place of
 # `--all-features` (`scripts/lib/doc_feature_sets.py`). `session-slot` names

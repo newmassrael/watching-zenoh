@@ -22,6 +22,15 @@
 //! That is [`LengthPrefix`]; a protocol that frames its messages itself (a WebSocket) runs the
 //! same driver under a [`StreamFraming`] of its own.
 //!
+//! ## What the stream does not take
+//!
+//! With `tx-stream-owed` (on in a build that names nothing) a send never waits for its stream:
+//! the part of a frame the stream did not take is owed in the frame's slot and written by the
+//! next step that finds the stream room, and a question of room waits for the stream within the
+//! message's own wait, as zenoh's queue does. Without it, the zenoh-pico preset's build, a send
+//! writes its frame whole, waiting for the stream whenever it takes nothing, as zenoh-pico's link
+//! write does, and the link has room whenever it has a slot.
+//!
 //! ## The end of the stream
 //!
 //! A datagram link has no connection to lose; this one does. A stream the peer closed, a read
@@ -101,8 +110,9 @@ pub trait StreamSocket: Sized {
     fn write(&self, bytes: &[u8]) -> Result<usize, Self::Error>;
 
     /// Write every byte of `bytes`, waiting for room whenever the stream takes none: for a writer
-    /// that has nowhere to keep what a write leaves (a secure channel's records over the stream).
-    /// A link keeps the rest of a frame itself and never waits here.
+    /// that has nowhere to keep what a write leaves (a secure channel's records over the stream),
+    /// and for each frame of a link built without `tx-stream-owed`. A link built with it keeps the
+    /// rest of a frame itself and never waits here.
     fn write_all(&self, bytes: &[u8]) -> Result<(), Self::Error> {
         let mut rest = bytes;
         while !rest.is_empty() {
@@ -709,6 +719,7 @@ impl StreamFraming for LengthPrefix {
 }
 
 /// The most frames a stream link owes its stream at once: one for each slot its book can lend.
+#[cfg(feature = "tx-stream-owed")]
 const OWED: usize = crate::link_storage::LENT_SLOTS;
 
 /// How long a service turn waits for room to write, in microseconds.
@@ -719,6 +730,7 @@ const SERVICE_WAIT_US: u64 = SERVICE_WAIT_MS as u64 * 1_000;
 /// handed over behind one ([`StreamDriver::write_owed`]). Every frame a stream link writes lies in
 /// a slot it lent, a frame handed over as bytes included (`copied_send`), so what it owes is never
 /// kept anywhere else, and only the oldest is ever written in part.
+#[cfg(feature = "tx-stream-owed")]
 #[derive(Clone, Copy)]
 struct Owed {
     slot: TxSlot,
@@ -730,12 +742,14 @@ struct Owed {
 /// places from `head` on hold a frame, each written by its push and read once by its pop, so the
 /// ring is made without writing a place: a link made in its cell writes none of them. Each frame
 /// holds a slot of its own, and a link lends at most [`OWED`], so the ring is never full.
+#[cfg(feature = "tx-stream-owed")]
 struct OwedQueue {
     places: [MaybeUninit<Owed>; OWED],
     head: usize,
     len: usize,
 }
 
+#[cfg(feature = "tx-stream-owed")]
 impl OwedQueue {
     const fn new() -> Self {
         Self {
@@ -892,10 +906,12 @@ use tx_half::{TxHalf, TxHold};
 /// The half of a [`StreamDriver`] a send reaches, apart in a module of its own so that what it
 /// keeps is reached only through a hold of it ([`TxHold`]).
 mod tx_half {
+    #[cfg(feature = "tx-stream-owed")]
     use core::cell::{Cell, RefCell};
 
     use wz_session_core::link::TxSlot;
 
+    #[cfg(feature = "tx-stream-owed")]
     use super::OwedQueue;
     use crate::atomic::{AtomicBool, Ordering};
     use crate::link_storage::{TxLender, TxStore};
@@ -904,8 +920,9 @@ mod tx_half {
     /// send, a question of room and a service's write reach it, and a receive reaches it to write
     /// what is owed before the peer's end. A session whose read steps its link on one thread while
     /// another sends on it reaches it from both, so each reach holds it first: the read only by a
-    /// try, which leaves what is owed to the send that holds it, and a send by waiting for a holder
-    /// that never waits inside its hold.
+    /// try, which leaves what is owed to the send that holds it, and a send by waiting for the
+    /// holder. With `tx-stream-owed` no holder waits inside its hold; without it a send holds it
+    /// while it writes its frame whole, as zenoh-pico's send holds its transmit lock.
     pub(super) struct TxHalf<T: TxStore> {
         /// Whether a [`TxHold`] of the half stands.
         held: AtomicBool,
@@ -915,11 +932,13 @@ mod tx_half {
         /// ([`super::StreamSocket::WRITES_NOW`]): the next frame is then not preceded by a
         /// question of its room, the write itself being the question. `false` before the first
         /// write and for a stream that cannot write without waiting, which is asked every time.
+        #[cfg(feature = "tx-stream-owed")]
         room_known: Cell<bool>,
         /// What the link owes the stream, oldest first: the rest of a frame the stream took in
         /// part, and the frames handed over behind it. Written by the next step that finds the
         /// stream room (a send, a question of room, the loop's service), never by waiting inside a
         /// call.
+        #[cfg(feature = "tx-stream-owed")]
         owed: RefCell<OwedQueue>,
     }
 
@@ -929,7 +948,9 @@ mod tx_half {
             Self {
                 held: AtomicBool::new(false),
                 lender: TxLender::new(tx),
+                #[cfg(feature = "tx-stream-owed")]
                 room_known: Cell::new(false),
+                #[cfg(feature = "tx-stream-owed")]
                 owed: RefCell::new(OwedQueue::new()),
             }
         }
@@ -942,9 +963,10 @@ mod tx_half {
                 .map(|_| TxHold { half: self })
         }
 
-        /// The half, held, once a holder that has it now lets go: no holder waits for its stream
-        /// while it holds the half, so this waits for writes that do not wait. No reach of the
-        /// half is made from inside another's hold on the same thread: each step under a hold is
+        /// The half, held, once a holder that has it now lets go: with `tx-stream-owed` no holder
+        /// waits for its stream while it holds the half, so this waits for writes that do not
+        /// wait; without it this waits for a send to write its frame whole. No reach of the half
+        /// is made from inside another's hold on the same thread: each step under a hold is
         /// handed that hold.
         pub(super) fn hold(&self) -> TxHold<'_, T> {
             loop {
@@ -981,7 +1003,9 @@ mod tx_half {
             self.lender.spare()
         }
 
-        /// Whether a grant would find a slot of the store now.
+        /// Whether the store has the memory for a slot now, as far as a pool goes
+        /// ([`TxLender::claimable`]).
+        #[cfg(any(feature = "tx-stream-owed", feature = "session-unicast-accept"))]
         pub(super) fn claimable(&self) -> bool {
             self.lender.claimable()
         }
@@ -1000,11 +1024,13 @@ mod tx_half {
         }
 
         /// Whether the stream took the last write whole without waiting.
+        #[cfg(feature = "tx-stream-owed")]
         pub(super) fn room_known(&self) -> &Cell<bool> {
             &self.half.room_known
         }
 
         /// What the link owes the stream.
+        #[cfg(feature = "tx-stream-owed")]
         pub(super) fn owed(&self) -> &RefCell<OwedQueue> {
             &self.half.owed
         }
@@ -1335,9 +1361,10 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         lent
     }
 
-    /// Whether the link owes the stream anything ([`Owed`], or a unit of the framing's own). A
-    /// send half another holder has now may be writing what is owed, and is answered as owing: a
-    /// question that waits for nothing never takes for paid a debt a send beside it is paying.
+    /// Whether the link owes the stream anything (a frame or the rest of one, or a unit of the
+    /// framing's own). A send half another holder has now may be writing what is owed, and is
+    /// answered as owing: a question that waits for nothing never takes for paid a debt a send
+    /// beside it is paying.
     fn owes(&self) -> bool {
         match self.tx.try_hold() {
             Some(tx) => self.owes_held(&tx),
@@ -1346,9 +1373,17 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     }
 
     /// [`Self::owes`], under `tx`, the hold of the send half.
+    #[cfg(feature = "tx-stream-owed")]
     fn owes_held(&self, tx: &TxHold<'_, T>) -> bool {
         // A queue being written owes what it held when the write began.
         !tx.owed().try_borrow().is_ok_and(|owed| owed.is_empty()) || self.framing.owes_control()
+    }
+
+    /// [`Self::owes`] of a link whose send writes each frame whole: it owes no frame between
+    /// calls, so what it owes is the framing's own units alone.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    fn owes_held(&self, _tx: &TxHold<'_, T>) -> bool {
+        self.framing.owes_control()
     }
 
     /// Write the framing's own units, once no frame is owed before them: `true` once nothing
@@ -1366,6 +1401,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     /// Write what the link owes the stream, oldest first, without waiting: `true` once nothing is
     /// owed (or the link has ended, which gives back whatever it held), `false` when the stream
     /// took less than all of it, the rest still owed for the next step that finds it room.
+    #[cfg(feature = "tx-stream-owed")]
     fn write_owed(&self, tx: &TxHold<'_, T>) -> bool {
         loop {
             if self.lost.get().is_some() {
@@ -1406,6 +1442,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     /// Give back everything the link holds for the stream: the link has ended, and nothing it
     /// owed will be written. Out of line: every way a link ends comes here, and the loop that
     /// gives back slots is one body for all of them.
+    #[cfg(feature = "tx-stream-owed")]
     #[inline(never)]
     fn drop_owed(&self, tx: &TxHold<'_, T>) {
         // No caller holds the queue across this call (`write_owed` lets it go before it fails),
@@ -1417,6 +1454,21 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         }
         tx.room_known().set(false);
     }
+
+    /// [`Self::write_owed`] of a link whose send writes each frame whole: the framing's own units
+    /// are all it can owe, written as far as the stream takes them without waiting.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    fn write_owed(&self, tx: &TxHold<'_, T>) -> bool {
+        if self.lost.get().is_some() {
+            return true;
+        }
+        self.write_control(tx)
+    }
+
+    /// [`Self::drop_owed`] of a link whose send writes each frame whole: it holds no frame for the
+    /// stream once a send returns, so an end has nothing to give back.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    fn drop_owed(&self, _tx: &TxHold<'_, T>) {}
 
     /// The stream failed a write with `error`: the link ends, REPORTED and not swallowed.
     fn fail(&self, tx: &TxHold<'_, T>, error: S::Error) {
@@ -1431,6 +1483,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     /// part or not at all, the rest is owed in the slot and the next frame asks the stream for
     /// room. Behind something already owed it is owed whole, so frames leave in the order they
     /// were handed over. Nothing waits here; a stream that cannot try is written by waiting.
+    #[cfg(feature = "tx-stream-owed")]
     fn send(&self, tx: &TxHold<'_, T>, slot: TxSlot, from: usize, end: usize) -> LinkSendOutcome {
         // Where the rest that is owed starts, and how much of the frame the stream took: the frame
         // is owed from one place, whether it waits whole or the stream took part of it.
@@ -1464,8 +1517,45 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
         self.owe(tx, Owed { slot, from, end }, taken)
     }
 
+    /// Write the frame `from .. end` of `slot`, which the session handed over, prefix included,
+    /// whole: the send waits for the stream whenever it takes nothing, as zenoh-pico's link write
+    /// waits in its socket's send (`vendor/zenoh-pico/src/link/link.c` @
+    /// `z_result_t _z_link_send_wbuf(`), and the slot goes back once the frame has left or the
+    /// stream has failed. A link that has ended writes nothing and gives the slot back.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    fn send(&self, tx: &TxHold<'_, T>, slot: TxSlot, from: usize, end: usize) -> LinkSendOutcome {
+        let written = if self.lost.get().is_some() {
+            None
+        } else {
+            // SAFETY: the session handed the slot over and the link holds it until the release
+            // below, after the last read of the frame: nothing writes it meanwhile.
+            let frame = unsafe { tx.lender().held(slot, from, end) };
+            Some(self.write_whole(frame))
+        };
+        tx.lender().release(slot);
+        match written {
+            Some(Ok(())) => LinkSendOutcome::Sent,
+            Some(Err(e)) => {
+                self.fail(tx, e);
+                LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+            }
+            None => LinkSendOutcome::Dropped(LinkDropCause::WriterGone),
+        }
+    }
+
+    /// Write what the framing owes and then `frame`, every byte, waiting for the stream whenever
+    /// it takes none: the framing's units go between frames, never inside one.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    fn write_whole(&self, frame: &[u8]) -> Result<(), S::Error> {
+        while !self.framing.write_control(&self.socket)? {
+            self.socket.wait_writable(SERVICE_WAIT_US);
+        }
+        self.socket.write_all(frame)
+    }
+
     /// Put `owed` behind what is owed already. `skip` is how much of its frame the stream has
     /// taken: none for a frame that waits whole behind another.
+    #[cfg(feature = "tx-stream-owed")]
     fn owe(&self, tx: &TxHold<'_, T>, owed: Owed, skip: usize) -> LinkSendOutcome {
         // A queue being written takes nothing more until the write ends: the frame is refused.
         let refused = match tx.owed().try_borrow_mut() {
@@ -1484,6 +1574,7 @@ impl<S: StreamSocket, B: RxStore, T: TxStore, F: StreamFraming> StreamDriver<S, 
     /// The link has nowhere to keep a frame it owes. One of which nothing was written is refused,
     /// as a frame the link lends no slot for is. One already begun on the stream cannot be: the
     /// stream's framing is lost with its rest, so the link ends.
+    #[cfg(feature = "tx-stream-owed")]
     fn cannot_owe(&self, tx: &TxHold<'_, T>, skip: usize) -> LinkSendOutcome {
         if skip == 0 {
             return LinkSendOutcome::Dropped(LinkDropCause::NoTxSlot);
@@ -1502,8 +1593,7 @@ where
     F: StreamFraming + 'static,
 {
     // The bytes are copied into a slot the link lends and sent as one, so a frame handed over as
-    // bytes takes the steps of a lent one, and what the stream does not take of it is owed in its
-    // slot as theirs is.
+    // bytes takes the steps of a lent one, and the stream's answer to it is a lent frame's.
     fn send_blocking(&self, bytes: &[u8], reliability: Reliability) -> LinkSendOutcome {
         let sent = crate::link_storage::copied_send(self, bytes, reliability, Priority::DEFAULT);
         // A link that owes its stream nothing has every slot out with the session, which holds one
@@ -1532,6 +1622,7 @@ where
     // written: the wait for the stream to take bytes is what lets it be, within the message's wait.
     // Out of line where the link is reached through its table, which the session asks through the
     // entry the trait derives from this one (`wait_for_room_for`): two entries, one body.
+    #[cfg(feature = "tx-stream-owed")]
     #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
     fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
         let wait_us = wait.wait_us();
@@ -1582,6 +1673,7 @@ where
     // whenever a message follows it (a Close after the drain of the open batch); so a link with no
     // slot free writes what it owes first, as far as the stream takes it without waiting, and lends
     // the slot that frees. One the stream frees none for is refused, as before.
+    #[cfg(feature = "tx-stream-owed")]
     fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
         let tx = self.tx.hold();
         if let Some(grant) = tx.lender().acquire(F::HEADROOM) {
@@ -1591,6 +1683,44 @@ where
             return tx.lender().acquire(F::HEADROOM);
         }
         None
+    }
+
+    // A link whose send writes each frame whole waits for its stream inside the send, as
+    // zenoh-pico's does, so the stream is not asked here. What keeps a message from the link is
+    // the send half another send holds while it writes, as zenoh-pico's transmit lock is: a
+    // droppable message only tries it and is congested at once while it is held
+    // (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+    // `return _z_mutex_try_lock(&ztc->_mutex_tx);`), and one that may not be dropped waits for it
+    // (`vendor/zenoh-pico/include/zenoh-pico/transport/transport.h` @
+    // `_z_mutex_lock(&ztc->_mutex_tx);`). A slot the session holds does not: its open batch takes
+    // the message, or is sent first and the slot lent again, as zenoh-pico's one write buffer
+    // held by a batch takes the next message or is flushed for it. So the link has room while its
+    // store has the memory for a slot (`claimable`), and is congested at once only while a pool
+    // its session's links share has none. A link that has ended answers room, so the send that
+    // follows reports the end.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[cfg_attr(all(feature = "alloc", not(feature = "session-slot")), inline(never))]
+    fn wait_for_room(&self, _priority: Priority, wait: RoomWait) -> RoomAnswer {
+        if self.lost.get().is_some() {
+            return RoomAnswer::at_once(LinkRoom::Free);
+        }
+        let tx = if wait.is_droppable() {
+            self.tx.try_hold()
+        } else {
+            Some(self.tx.hold())
+        };
+        if tx.is_some_and(|held| held.lender().claimable()) {
+            RoomAnswer::at_once(LinkRoom::Free)
+        } else {
+            RoomAnswer::at_once(LinkRoom::Congested)
+        }
+    }
+
+    // The link keeps no slot past the send that wrote its frame, so one that finds none free has
+    // every slot with the session, and no write of its own here would give one back.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    fn tx_slot_acquire(&self, _want: usize, _priority: Priority) -> Option<TxSlotGrant> {
+        self.tx.hold().lender().acquire(F::HEADROOM)
     }
 
     fn tx_slot_storage(&self, slot: TxSlot) -> (*mut u8, usize) {
@@ -1879,6 +2009,7 @@ mod tests {
     /// The ring of what a link owes keeps its frames oldest first across its end, refuses one past
     /// its places and hands it back, and lends its oldest where it lies. Turned red by a ring that
     /// reads a place no push wrote, or loses the order once it wraps.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn the_owed_ring_keeps_its_frames_in_order_across_its_end() {
         let owed = |n: u32| Owed {
@@ -2680,6 +2811,7 @@ mod tests {
     /// writes it. Turned red by a service that writes what is owed without holding the half
     /// (`StreamDriver::service` past a `TxHalf::try_hold` that found it held), or by `owes`
     /// reading the queue another holder has.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_service_beside_a_held_send_half_writes_nothing_of_what_is_owed() {
         let link = trying();
@@ -2841,6 +2973,7 @@ mod tests {
     /// The stream is the link's room: one that takes bytes within the wait has room, one that
     /// does not has none, asked for exactly the message's wait, and a link that has ended has
     /// room at once, so the send that follows reports the end.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_stream_that_takes_no_bytes_within_the_wait_has_no_room() {
         let link = link();
@@ -2879,6 +3012,7 @@ mod tests {
     /// The time a question of room reports is the time the stream's wait measured, room or none:
     /// a sender that keeps one deadline across several questions spends what was spent, not the
     /// whole wait nor none of it.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_question_of_room_reports_the_wait_the_stream_measured() {
         let link = link();
@@ -2906,6 +3040,7 @@ mod tests {
     /// A stream that writes without waiting is asked for room before the first frame only, while it
     /// takes each write whole: the write is the question, as a non-blocking write is. CONTROL: a
     /// stream that cannot write without waiting is asked before every frame.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_stream_that_takes_each_write_whole_is_asked_for_room_once() {
         fn frames<const TRIES: bool>(link: &StreamDriver<Pipe<TRIES>, [u8; 34], Slots>) {
@@ -2947,6 +3082,7 @@ mod tests {
     /// question of room says there is none while the rest is owed. A frame handed over meanwhile
     /// waits behind it. The next step that finds the stream room writes the rest, then that frame,
     /// in order; a write taken whole after that makes the question of room unneeded again.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_frame_taken_half_is_finished_by_the_next_step_before_any_new_frame() {
         let link = trying();
@@ -3017,6 +3153,7 @@ mod tests {
     /// A lent frame the stream takes only in part keeps its slot out of the pool until the rest is
     /// written, so the session cannot be lent it again and write over the bytes still owed; once
     /// the stream has taken them the slot is back.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_lent_frame_keeps_its_slot_until_the_stream_has_taken_it_all() {
         let link = trying();
@@ -3128,6 +3265,7 @@ mod tests {
     /// links go on meanwhile through the slots left, each frame written whole, and once the slow
     /// stream takes the rest the slot is back.
     #[cfg(feature = "session-unicast-accept")]
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_slow_stream_keeps_its_slot_and_the_other_links_go_on() {
         let (tables, links) = pooled_tx_links(3, 2);
@@ -3164,6 +3302,7 @@ mod tests {
     /// step that frees the slot is the other link's. Once that link's stream takes the rest, the
     /// link has room and sends.
     #[cfg(feature = "session-unicast-accept")]
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_link_that_finds_every_slot_held_is_congested_at_once_and_waits_for_none() {
         let (tables, links) = pooled_tx_links(2, 1);
@@ -3223,6 +3362,7 @@ mod tests {
     /// writes what it owes when it is asked for a slot and lends the one that frees, with no step
     /// between: one slot serves the frame after a batch the stream has not finished. While the
     /// stream takes nothing, nothing is freed and the ask is refused.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_slot_asked_while_a_frame_is_owed_is_lent_once_the_stream_takes_it() {
         let link = trying();
@@ -3304,6 +3444,7 @@ mod tests {
     /// A stream that fails a write while the link owes it two frames ends the link with the
     /// failure kept, and every slot those frames held goes back. Turned red by a failed write that
     /// leaves the owed frames' slots held (`drop_owed` not reached from `fail`).
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_failed_write_ends_the_link_and_gives_back_every_slot_it_owed() {
         let link = trying();
@@ -3337,6 +3478,7 @@ mod tests {
     /// writes as much as the stream takes then, in order, and gives back the slots of what the
     /// stream did not take. Turned red by a close that waits for the stream, writes the second
     /// frame ahead of the rest of the first, or keeps a slot held.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_link_closed_while_it_owes_writes_what_the_stream_takes_and_gives_back_the_rest() {
         let link = trying();
@@ -3367,6 +3509,7 @@ mod tests {
     /// the slot that frees is lent to the next frame of bytes, written behind the rest. Turned red
     /// by a frame of bytes kept anywhere but a slot, written ahead of the rest owed, or refused in a
     /// way that ends the link.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_frame_handed_as_bytes_is_sent_from_a_slot_or_refused_when_none_is_free() {
         let link = trying();
@@ -3408,8 +3551,10 @@ mod tests {
     }
 
     /// [`OWED`] slots of 32 bytes: as many as a link's book lends.
+    #[cfg(feature = "tx-stream-owed")]
     struct EverySlot(UnsafeCell<[u8; OWED * 32]>);
 
+    #[cfg(feature = "tx-stream-owed")]
     impl TxStore for EverySlot {
         fn slots(&self) -> usize {
             OWED
@@ -3428,6 +3573,7 @@ mod tests {
     /// frame handed over as bytes is refused as one it lends no slot for, the link goes on, and it
     /// writes the frames it owes in the order they came. Turned red by a ring shorter than the
     /// slots a link lends, by a refusal that ends the link, or by owed frames written out of order.
+    #[cfg(feature = "tx-stream-owed")]
     #[test]
     fn a_link_whose_every_slot_is_owed_refuses_the_next_frame_and_goes_on() {
         let link = StreamDriver::over(
@@ -3460,6 +3606,219 @@ mod tests {
             expected.extend_from_slice(&batch(frame));
         }
         assert_eq!(link.socket.writes.borrow().concat(), expected);
+    }
+
+    /// Without `tx-stream-owed` a send writes its frame whole before it returns: a stream that
+    /// takes part of it and then nothing is waited on until it takes the rest, nothing is owed
+    /// once the call returns, and the frame's slot is back. Turned red by a send that leaves the
+    /// rest owed (the owed form's `send`), or keeps the slot past the write.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_send_without_owed_frames_waits_until_the_stream_took_the_whole_frame() {
+        let link = trying();
+        link.socket.room_after_wait.set(Some(64));
+        assert_eq!(send_lent(&link, b"slow!", Some(3)), LinkSendOutcome::Sent);
+        let frame = batch(b"slow!");
+        assert_eq!(
+            *link.socket.writes.borrow(),
+            [frame[..3].to_vec(), frame[3..].to_vec()],
+            "the part the stream took, then the rest once it had room"
+        );
+        assert_eq!(
+            *link.socket.room_waits.borrow(),
+            [SERVICE_WAIT_US],
+            "one wait, when the stream took nothing"
+        );
+        assert!(!link.owes(), "nothing is owed once the send returns");
+        let one = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the frame's slot is back");
+        let two = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("and the other");
+        link.tx_slot_abort(one.slot);
+        link.tx_slot_abort(two.slot);
+    }
+
+    /// Without `tx-stream-owed` the stream is not asked for room: a link has room at once however
+    /// full its stream is, also while every slot is with the session, whose open batches take the
+    /// message or are sent first and the slot lent again, and has room once it has ended, so the
+    /// send that follows reports the end. Turned red by a question of room that waits for the
+    /// stream (the owed form's `wait_for_room`), or one that counts the slots the session holds
+    /// (the book read in place of `claimable`), which answers congested below.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_link_without_owed_frames_has_room_whatever_slots_its_session_holds() {
+        let link = trying();
+        link.socket.full.set(true);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free)
+        );
+        let one = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("a free slot");
+        let two = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the other");
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 5_000_000 }),
+            RoomAnswer::at_once(LinkRoom::Free),
+            "every slot is with the session, which settles its own"
+        );
+        link.end(LostCause::PeerClosed);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free),
+            "an ended link has room, for its send to report the end"
+        );
+        assert!(
+            link.socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
+        link.tx_slot_abort(one.slot);
+        link.tx_slot_abort(two.slot);
+    }
+
+    /// Without `tx-stream-owed` a droppable message does not wait for a send that holds the send
+    /// half while it writes its frame whole: it is congested at once, the stream not asked, and
+    /// has room once that send lets go. Turned red by a question that answers without trying the
+    /// half (the store's `claimable` alone answers room here); one that waits for the half
+    /// whatever its message (`hold` in place of `try_hold`) never returns here.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_droppable_question_without_owed_frames_does_not_wait_for_a_send_under_way() {
+        let link = trying();
+        let under_way = link.tx.hold();
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Congested),
+            "a send holds the half"
+        );
+        drop(under_way);
+        assert_eq!(
+            link.wait_for_room(Priority::DEFAULT, RoomWait::Drop { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free),
+            "the send let go"
+        );
+        assert!(
+            link.socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
+    }
+
+    /// Without `tx-stream-owed` a link lent one slot, as the pico ABI lends its links one
+    /// (`LINK_TX_SLOTS`), has room while its session's open batch holds that slot: the message
+    /// joins the batch, or sends it and takes the slot again, as zenoh-pico appends to the batch
+    /// its one write buffer holds or flushes it first. Turned red by a question that counts the
+    /// slot the session holds (the book read in place of `claimable`), which answers congested
+    /// and has the session drop a blocking message and settle its expiry.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_link_whose_one_slot_holds_its_sessions_open_batch_has_room_without_owed_frames() {
+        struct OneSlot(UnsafeCell<[u8; 32]>);
+
+        impl TxStore for OneSlot {
+            fn slots(&self) -> usize {
+                1
+            }
+
+            fn slot_len(&self) -> usize {
+                32
+            }
+
+            fn slot_base(&self, _slot: usize) -> *mut u8 {
+                self.0.get().cast::<u8>()
+            }
+        }
+
+        let link: StreamDriver<Pipe<true>, [u8; 34], OneSlot> = StreamDriver::over(
+            Pipe::default(),
+            [0u8; 34],
+            OneSlot(UnsafeCell::new([0; 32])),
+        );
+        let open = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the one slot, for the session's open batch");
+        assert!(
+            link.tx_slot_acquire(16, Priority::DEFAULT).is_none(),
+            "CONTROL: the open batch holds the link's one slot"
+        );
+        for wait in [
+            RoomWait::Block { wait_us: 5_000_000 },
+            RoomWait::Drop { wait_us: 1_000 },
+        ] {
+            assert_eq!(
+                link.wait_for_room(Priority::DEFAULT, wait),
+                RoomAnswer::at_once(LinkRoom::Free),
+                "{wait:?}"
+            );
+        }
+        assert!(
+            link.socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
+        link.tx_slot_abort(open.slot);
+    }
+
+    /// Without `tx-stream-owed` a link of a pool whose one slot another link holds is congested at
+    /// once, whatever the message may wait, and has room once the slot is back: the pool is the
+    /// session's other links', which no step of this one frees. Turned red by a question that does
+    /// not ask its store (`claimable`) under the hold, which answers room below.
+    #[cfg(feature = "session-unicast-accept")]
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_link_of_a_pool_with_no_slot_left_is_congested_at_once_without_owed_frames() {
+        let (tables, links) = pooled_tx_links(2, 1);
+        let held = links[0]
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the pool's one slot");
+        assert_eq!(tables.tx_in_use(), 1);
+        for wait in [
+            RoomWait::Drop { wait_us: 1_000 },
+            RoomWait::Block { wait_us: 1_000_000 },
+        ] {
+            assert_eq!(
+                links[1].wait_for_room(Priority::DEFAULT, wait),
+                RoomAnswer::at_once(LinkRoom::Congested),
+                "{wait:?}"
+            );
+        }
+        links[0].tx_slot_abort(held.slot);
+        assert_eq!(
+            links[1].wait_for_room(Priority::DEFAULT, RoomWait::Block { wait_us: 1_000 }),
+            RoomAnswer::at_once(LinkRoom::Free),
+            "the slot is back in the pool"
+        );
+        assert!(
+            links[1].socket.room_waits.borrow().is_empty(),
+            "the stream was never asked"
+        );
+    }
+
+    /// Without `tx-stream-owed` a write the stream fails ends the link with the failure kept, and
+    /// the frame's slot goes back with it. Turned red by a failed write that keeps the slot (the
+    /// release skipped on the error), or that is not reported.
+    #[cfg(not(feature = "tx-stream-owed"))]
+    #[test]
+    fn a_failed_write_without_owed_frames_ends_the_link_and_gives_back_its_slot() {
+        let link = trying();
+        link.socket.write_fails.set(true);
+        assert_eq!(
+            send_lent(&link, b"lost", None),
+            LinkSendOutcome::Dropped(LinkDropCause::WriterGone)
+        );
+        assert_eq!(link.lost(), Some(LostCause::OsError));
+        assert_eq!(link.error(), Some(Broken));
+        assert!(link.socket.writes.borrow().is_empty(), "nothing written");
+        let one = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("the frame's slot is back");
+        let two = link
+            .tx_slot_acquire(16, Priority::DEFAULT)
+            .expect("and the other");
+        link.tx_slot_abort(one.slot);
+        link.tx_slot_abort(two.slot);
     }
 
     /// A session of this engine over the stream link, and what a droppable and a blocking message
@@ -3559,6 +3918,7 @@ mod tests {
         /// A droppable message on a stream that takes no more bytes waits its
         /// `wait_before_drop` for them, is dropped, closes nothing and reaches nothing; once the
         /// stream takes bytes again the next message is written.
+        #[cfg(feature = "tx-stream-owed")]
         #[test]
         fn a_droppable_message_on_a_full_stream_is_dropped_within_its_own_wait() {
             let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
@@ -3598,6 +3958,7 @@ mod tests {
         /// without `pubsub-qos` writes no QoS on the Pushes it publishes, every one of which is
         /// then droppable, but it still honours the QoS of a Push that carries one; asking for
         /// `Block` through the publish metadata would hold this test to that feature.
+        #[cfg(feature = "tx-stream-owed")]
         #[test]
         fn a_blocking_message_on_a_full_stream_closes_the_session_after_its_wait() {
             let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
@@ -3633,6 +3994,75 @@ mod tests {
                 actions.take_congestion_close(),
                 "the session's close is staged for its loop"
             );
+        }
+
+        /// Without `tx-stream-owed` a droppable message is not dropped for want of room on its
+        /// stream: the stream is not asked for room, and the message is written by a send that
+        /// waits for the stream, as zenoh-pico's dropping send writes once it holds its transmit
+        /// lock. Nothing closes. Turned red by a session whose link asks the stream for room (the
+        /// owed form's question), or that drops the message.
+        #[cfg(not(feature = "tx-stream-owed"))]
+        #[test]
+        fn a_droppable_message_on_a_full_stream_is_written_by_a_send_that_waits() {
+            let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
+            let link = link();
+            let sink = link.clone().into_sink();
+            let actions = established(sink, &runtime);
+            link.socket.full.set(true);
+            actions
+                .send_push_literal_qos("home/drop", b"D", true, Priority::DEFAULT)
+                .expect("the message is sent");
+            assert!(
+                link.socket.room_waits.borrow().is_empty(),
+                "the stream was not asked for room"
+            );
+            assert_eq!(
+                link.socket.writes.borrow().len(),
+                1,
+                "the message reached the stream"
+            );
+            assert!(!actions.take_congestion_close(), "nothing closes");
+        }
+
+        /// Without `tx-stream-owed` a blocking message waits for its stream in the send and never
+        /// finds the link without room, so its session is not closed for congestion. Turned red by
+        /// a link that answers a question of room from the stream (the owed form's), which closes
+        /// the session after the message's wait.
+        #[cfg(not(feature = "tx-stream-owed"))]
+        #[test]
+        fn a_blocking_message_on_a_full_stream_is_written_and_closes_nothing() {
+            let runtime = CoopRuntime::try_new(Stopped).expect("the heap has room");
+            let link = link();
+            let sink = link.clone().into_sink();
+            let actions = established(sink, &runtime);
+            link.socket.full.set(true);
+            let mut push = wz_session_core::push_build::build_push_literal("home/block", b"B")
+                .expect("a literal Put encodes");
+            wz_session_core::declare_ext_qos::set_push_qos(
+                &mut push,
+                QosLevel::DEFAULT.with_congestion(CongestionControl::Block),
+            )
+            .expect("a message's extension chain takes its QoS");
+            actions
+                .send_network_message_qos(
+                    wz_session_core::network_message::NetworkMessage::Push(alloc::boxed::Box::new(
+                        push,
+                    )),
+                    true,
+                    false,
+                    Priority::DEFAULT,
+                )
+                .expect("the message is sent");
+            assert!(
+                link.socket.room_waits.borrow().is_empty(),
+                "the stream was not asked for room"
+            );
+            assert_eq!(
+                link.socket.writes.borrow().len(),
+                1,
+                "the message reached the stream"
+            );
+            assert!(!actions.take_congestion_close(), "nothing closes");
         }
 
         /// Two conduits alternate reliable messages in one window over a stream link that holds

@@ -893,7 +893,7 @@ pub trait BoxedLinkDriver {
 
     /// [`Self::wait_for_room`] for a frame of one reliability class: the room of
     /// the queue that frame leaves by. A link that carries best-effort frames
-    /// apart ([`Self::carries_apart`]) answers for that carriage and not for its
+    /// apart (`Self::carries_apart`) answers for that carriage and not for its
     /// streams' queue, as upstream's companion link has a transmission pipeline
     /// of its own (`io/zenoh-transport/src/unicast/universal/transport.rs` @
     /// `associated_link.map(|l| TransportLinkUnicastUniversal::new(self, l, &self.priority_tx));`).
@@ -1083,7 +1083,7 @@ pub trait BoxedLinkDriver {
     /// Only for a message that may overtake queued frames: a Frame or Fragment carries a
     /// sequence number the receiver checks, and reordering one is a lost message.
     ///
-    /// On a link that carries a class apart ([`Self::carries_apart`]), `reliability` names the
+    /// On a link that carries a class apart (`Self::carries_apart`), `reliability` names the
     /// carriage the message goes on: the keepalive of that carriage is sent with its class.
     ///
     /// The default is the driver with no queue to pass, where this is the send it always was.
@@ -1096,6 +1096,12 @@ pub trait BoxedLinkDriver {
     /// apart. Constant for the life of the driver, and cheap: the session asks it on every send.
     ///
     /// The default is the driver that writes inline, whose hand-over IS the write.
+    ///
+    /// This and the three methods after it exist with `link-wire-reports` alone: only a
+    /// runtime whose drivers queue their writes or carry a class apart answers them otherwise,
+    /// and without the feature the session asks none of them, so a driver of a build without
+    /// it cannot answer one the session would not read.
+    #[cfg(feature = "link-wire-reports")]
     fn reports_wire_writes(&self) -> bool {
         false
     }
@@ -1117,6 +1123,7 @@ pub trait BoxedLinkDriver {
     ///
     /// A driver that WRAPS another must forward both methods, or the session behind it keeps
     /// marking the hand-over, which overstates the line's activity.
+    #[cfg(feature = "link-wire-reports")]
     fn ms_since_wire_write(&self) -> Option<u64> {
         None
     }
@@ -1135,6 +1142,7 @@ pub trait BoxedLinkDriver {
     /// keepalive through [`Self::send_urgent`] with `class`, and does not count
     /// its frames as the link's own line activity. The default is a link with one
     /// carriage. A driver that WRAPS another must forward this.
+    #[cfg(feature = "link-wire-reports")]
     fn carries_apart(&self, class: Reliability) -> bool {
         let _ = class;
         false
@@ -1145,6 +1153,7 @@ pub trait BoxedLinkDriver {
     /// how long ago that carriage last wrote, `None` before its first write.
     /// The default is the link with one carriage. A driver that WRAPS another
     /// must forward this.
+    #[cfg(feature = "link-wire-reports")]
     fn ms_since_wire_write_for(&self, class: Reliability) -> Option<u64> {
         let _ = class;
         self.ms_since_wire_write()

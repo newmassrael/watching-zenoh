@@ -62,6 +62,7 @@ tx-probe = ["wz-capi-pico/tx-probe"]
 tx-expiry-run = ["wz-capi-pico/tx-expiry-run"]
 tx-fragment-credit = ["wz-capi-pico/tx-fragment-credit"]
 tx-held-wait = ["wz-capi-pico/tx-held-wait"]
+tx-stream-owed = ["wz-capi-pico/tx-stream-owed"]
 
 [dependencies]
 libfuzzer-sys = "0.4.10"

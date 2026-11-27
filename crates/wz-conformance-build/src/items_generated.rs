@@ -87,6 +87,7 @@ pub const CAPABILITIES: &[(&str, &[&str])] = &[
     ("tx-expiry-run", &["core", "pico"]),
     ("tx-fragment-credit", &["core", "pico"]),
     ("tx-held-wait", &["core", "pico"]),
+    ("tx-stream-owed", &["core", "pico"]),
     ("transport_compression", &["core", "c"]),
     ("auth_usrpwd", &["core", "c"]),
     ("interceptors", &["core", "c"]),

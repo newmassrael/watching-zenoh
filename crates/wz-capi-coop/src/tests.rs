@@ -4099,9 +4099,15 @@ mod runtime_tables;
     feature = "threads"
 ))]
 mod shared_key_ids;
+// The simulated world the unit tests of a session step through: an in-memory network, a clock
+// the test moves and a router stand-in on the test's own thread.
+mod sim;
 #[cfg(feature = "liveliness-get")]
 mod snapshot;
 mod step;
+// Two threads of the host step one session at once.
+#[cfg(feature = "threads")]
+mod step_host;
 #[cfg(feature = "ticker")]
 mod ticker;
 mod timestamps;

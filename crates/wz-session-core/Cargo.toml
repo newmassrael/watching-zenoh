@@ -98,6 +98,7 @@ default = [
     "tx-expiry-run",
     "tx-fragment-credit",
     "tx-held-wait",
+    "link-wire-reports",
 ]
 
 # `log`: the session core's diagnostics (`diag`), the warnings an operator reads when a peer sends
@@ -1331,6 +1332,18 @@ tx-fragment-credit = []
 # message is dropped at once and the sender told (`HeldDrop::DropAtOnce`), whatever the queue
 # profile, as zenoh-pico's dropping send fails on a transmit lock another send holds.
 tx-held-wait = []
+
+# `link-wire-reports`: a link driver that reports its own wire writes, by the four methods of
+# `link::BoxedLinkDriver` it adds (whether it reports them, how long ago it last wrote, whether it
+# carries a class apart, and that carriage's last write): a driver with a queue between the
+# hand-over of a frame and its write, or with a companion carriage the peer leases on its own.
+# The keepalive then counts the line from the driver's last write, a data frame handed to such a
+# link does not mark the line, and a companion has a keepalive of its own. Only the tokio
+# runtime's drivers have such a queue or carriage, and it names the feature. Without it the trait
+# has none of the four, so no driver of the build can report a write the session would not read:
+# every frame handed over marks the line, as zenoh-pico's transmitted flag is set by every write,
+# and the keepalive reads no clock and asks the driver nothing. On by default.
+link-wire-reports = []
 
 # session-slot — fixed-memory step S5: a session's per-session state lives in
 # storage of fixed size, and nothing it holds is behind a pointer to the heap.
