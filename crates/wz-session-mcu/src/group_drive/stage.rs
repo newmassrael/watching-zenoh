@@ -1106,13 +1106,13 @@ impl GroupTxStage {
     /// The conduits as written: what the JOIN advertises. A member re-seeds what it expects from
     /// every JOIN, so a JOIN that advertised a sequence number minted and not yet written would
     /// have the member drop that datagram as stale when it came.
-    pub(super) fn on_wire(&self) -> Ref<'_, MulticastTxConduits> {
+    pub fn on_wire(&self) -> Ref<'_, MulticastTxConduits> {
         Ref::map(self.inner.writer.borrow(), |writer| &writer.on_wire)
     }
 
     /// Offer the socket the datagram it had no room for at an earlier write: whether it still has
     /// none.
-    pub(super) fn offer_held<T: GroupTransport + ?Sized>(&self, transport: &mut T) -> bool {
+    pub fn offer_held<T: GroupTransport + ?Sized>(&self, transport: &mut T) -> bool {
         let held = self.inner.writer.borrow_mut().held.take();
         match held {
             Some(datagram) => self.offer(transport, datagram),
@@ -1122,7 +1122,7 @@ impl GroupTxStage {
 
     /// Take what the lanes hold and offer it to the socket, until the lanes are empty or the
     /// socket has no room.
-    pub(super) fn write<T: GroupTransport + ?Sized>(&self, transport: &mut T) {
+    pub fn write<T: GroupTransport + ?Sized>(&self, transport: &mut T) {
         while !self.holds() {
             let Some(taken) = self.take_front() else {
                 return;
