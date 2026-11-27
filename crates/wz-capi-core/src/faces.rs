@@ -11973,7 +11973,7 @@ mod sink_release_tests {
         entered: &Arc<AtomicBool>,
         go: &Arc<AtomicBool>,
         dropped: &Arc<AtomicBool>,
-    ) -> SubId {
+    ) -> wz_capi_port::EntityRow {
         use wz_capi_port::SessionEngine;
 
         let held = Dropped(Arc::clone(dropped));

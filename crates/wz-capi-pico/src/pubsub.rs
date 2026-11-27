@@ -61,7 +61,7 @@ use crate::write_filter::{FilteredKey, PicoSession, WriteFilter};
 // tokio engine is a trait object, whose methods need no import.
 #[cfg(not(feature = "engine-tokio"))]
 use wz_capi_port::SessionEngine as _;
-use wz_capi_port::{FanoutError, FilterPlane, FilteredPut, SubId, SubscriberSink, WireKey};
+use wz_capi_port::{EntityRow, FanoutError, FilterPlane, FilteredPut, SubscriberSink, WireKey};
 
 /// What a put, a delete or a publisher's put answers its caller for what the engine did with it:
 /// a publication its queue profile dropped behind a held conduit is pico's failed send
@@ -1829,15 +1829,15 @@ pub(crate) struct SubscriberState {
     pub(crate) loaned_keyexpr: z_loaned_keyexpr_t,
 }
 
-/// A subscriber's declaration: its id in the session, whose record of the subscription keeps its
-/// key.
+/// A subscriber's declaration: its row in the session ([`wz_capi_port::EntityRow`]), whose record
+/// of the subscription keeps its key and its entity id.
 ///
 /// The declaration pico makes for the subscription's own key (the non-wild prefix for an
 /// ordinary subscriber, the whole key for a liveliness one) is held by the session's record of
 /// the subscription from its declaration on, and let go of after the subscription is retracted,
 /// which is upstream's order; the door keeps no copy of the key.
 pub(crate) struct DeclaredSubscriber {
-    id: SubId,
+    row: EntityRow,
     /// The session and the declaration the record holds that the key begins with, as the
     /// declaration lent it ([`wz_capi_port::Declared::key`]): what the loan of the key names, and
     /// what a key made of the loan holds.
@@ -1845,10 +1845,10 @@ pub(crate) struct DeclaredSubscriber {
 }
 
 impl DeclaredSubscriber {
-    /// Subscription `id`, its key not lent yet (`bind_subscriber`).
-    pub(crate) fn new(id: SubId) -> Self {
+    /// The subscription `row` names, its key not lent yet (`bind_subscriber`).
+    pub(crate) fn new(row: EntityRow) -> Self {
         Self {
-            id,
+            row,
             record: crate::keyexpr::RecordKey::UNLENT,
         }
     }
@@ -1925,9 +1925,9 @@ pub(crate) unsafe fn subscriber_at(
 }
 
 impl SubscriberState {
-    /// The subscription's id, once declared.
-    pub(crate) fn id(&self) -> Option<SubId> {
-        self.declared.as_ref().map(|declared| declared.id)
+    /// The subscription's row, once declared.
+    pub(crate) fn row(&self) -> Option<EntityRow> {
+        self.declared.as_ref().map(|declared| declared.row)
     }
 }
 
@@ -1954,7 +1954,7 @@ pub(crate) fn fill_subscriber_place(
 /// `state` is a live subscriber [`fill_subscriber_place`] filled, whose owner holds it.
 pub(crate) unsafe fn settle_subscriber(
     state: *mut SubscriberState,
-    declared: Result<wz_capi_port::Declared<SubId>, ZResult>,
+    declared: Result<wz_capi_port::Declared<EntityRow>, ZResult>,
 ) -> Result<*mut SubscriberState, ZResult> {
     match declared {
         Ok(declared) => {
@@ -2024,8 +2024,8 @@ unsafe fn free_publisher(h: *mut c_void) {
 /// `h` must be a live `SubscriberState` handle, let go of once.
 unsafe fn free_subscriber(h: *mut c_void) {
     let state = h as *mut SubscriberState;
-    if let Some(id) = (*state).id() {
-        subscriber_engine(state).undeclare_subscriber(id);
+    if let Some(row) = (*state).row() {
+        subscriber_engine(state).undeclare_subscriber(row);
     }
     crate::object_slot::release_entity(state);
 }
@@ -3918,7 +3918,7 @@ unsafe fn declare_subscriber_in(
     ke: &str,
     options: *const crate::session::z_subscriber_options_t,
     sink: SubscriberSink,
-) -> Result<wz_capi_port::Declared<SubId>, ZResult> {
+) -> Result<wz_capi_port::Declared<EntityRow>, ZResult> {
     // pico's two keys for one subscriber, which are NOT the same one. The subscription's own
     // key gets its NON-WILD PREFIX declared, and that declaration goes on the wire FIRST
     // (`vendor/zenoh-pico/src/net/primitives.c` @

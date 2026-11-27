@@ -12,8 +12,8 @@
 //! ## What lives here
 //!
 //! A type belongs here when an ABI and an engine both have to name it and nothing in it is a
-//! particular engine's. The ids an ABI's handles carry ([`SubId`], [`MatchId`], [`FilterId`],
-//! [`TokenId`]), the callbacks and callback factories an ABI hands an engine
+//! particular engine's. What an ABI's handles carry ([`EntityRow`], [`MatchId`], [`FilterId`])
+//! and the entity ids the wire names ([`SubId`], [`TokenId`]), the callbacks and callback factories an ABI hands an engine
 //! ([`SubscriberSink`], [`MatchingSink`], [`LivelinessSink`]), the
 //! form a key takes on the wire ([`WireKey`]), what a write filter counts ([`FilterPlane`]) and
 //! what a filtered put did ([`FilteredPut`], [`FanoutError`]). They lived in `wz-capi-core`'s
@@ -155,13 +155,10 @@ pub use query::{
 pub use refusal::Refusal;
 pub use scout_ask::ScoutAsk;
 
-/// A C-level subscription id — what a `z_owned_subscriber_t` handle carries. It keys whatever an
-/// engine holds for the one C subscription (the per-face subscribers it spawned, on an engine
-/// with faces).
-///
-/// It is the entity id the declaration carries on the wire, so it has upstream's width
-/// (`EntityId`, `u32`), and an engine that has handed out every one refuses the declaration
-/// ([`SessionEngine::next_entity_id`]).
+/// The entity id a subscription is declared under on the wire, of upstream's width (`EntityId`,
+/// `u32`): an engine that has handed out every one refuses the declaration
+/// ([`SessionEngine::next_entity_id`]). What an ABI's object of the subscription keeps is its row
+/// ([`EntityRow`]), the id being read off it ([`SessionEngine::entity_id_of`]).
 pub type SubId = wz_session_core::wire_id::EntityId;
 
 /// A C-level matching-listener id, keying what an engine holds for one C declaration. Every value
@@ -453,8 +450,8 @@ impl SubscriberSink {
     }
 }
 
-/// A C-level liveliness token id — what a `z_owned_liveliness_token_t` handle carries: the
-/// entity id the token is declared under, of the width [`SubId`] has for the same reason.
+/// The entity id a liveliness token is declared under on the wire, of the width [`SubId`] has for
+/// the same reason; what an ABI's object of the token keeps is its row ([`EntityRow`]).
 pub type TokenId = wz_session_core::wire_id::EntityId;
 
 /// The id of one periodic job an engine runs ([`Tickers::start_ticker`]).
@@ -1302,15 +1299,62 @@ impl KeyView {
     }
 }
 
-/// What a declaration of the port answers: the id the entity is retracted by, and its key as the
+/// What a declaration of the port answers: what the entity is retracted by (its row,
+/// [`EntityRow`], for every kind of the session's tables of declarations), and its key as the
 /// engine's record of the entity keeps it ([`KeyView`]), valid until the entity is retracted. The
-/// door keeps the key from here on, so it asks the engine for it again nowhere.
+/// door keeps both from here on, so it asks the engine for neither again.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Declared<Id> {
-    /// The id the entity is retracted by.
+    /// What the entity is retracted by.
     pub id: Id,
     /// The entity's key, where the engine's record of it keeps it.
     pub key: KeyView,
+}
+
+impl Declared<wz_session_core::wire_id::EntityId> {
+    /// The declaration of an engine that names its entities by their ids, as the port answers it:
+    /// its row is its id ([`EntityRow::by_id`]).
+    pub fn by_id(self) -> Declared<EntityRow> {
+        Declared {
+            id: EntityRow::by_id(self.id),
+            key: self.key,
+        }
+    }
+}
+
+/// Which entity of a session's a declaration made, as the engine that made it finds its record
+/// again: what the ABI's object of the entity keeps from the declaration on, and hands back to
+/// retract it (principle P10 of `docs/c-abi-architecture.md`). Its bits are the engine's alone.
+/// The cooperative engine's are the row's word in its tables (`DeclaredRow::to_bits`): its table
+/// and its handle, generation and all, so a row given back and taken by another entity is not
+/// named by the first one's, and a row of one table names nothing in another. An engine that keeps
+/// no rows names an entity by the id the wire names it by ([`Self::by_id`]). The id is read off
+/// the engine where the wire or an ABI's identity of the entity names it
+/// ([`SessionEngine::entity_id_of`]), not kept beside the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntityRow(u64);
+
+impl EntityRow {
+    /// The row an engine's word names, as the engine wrote it.
+    pub const fn from_bits(bits: u64) -> Self {
+        Self(bits)
+    }
+
+    /// The engine's word.
+    pub const fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// The row of the entity `id` names, on an engine that names its entities by their ids.
+    pub fn by_id(id: wz_session_core::wire_id::EntityId) -> Self {
+        Self(u64::from(id))
+    }
+
+    /// The id of an engine that names its entities by their ids ([`Self::by_id`]); `None` for a
+    /// word no id makes.
+    pub fn as_id(self) -> Option<wz_session_core::wire_id::EntityId> {
+        wz_session_core::wire_id::EntityId::try_from(self.0).ok()
+    }
 }
 
 /// The declaration an engine's record of an entity holds for the entity's key ([`KeyView`]): the

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use wz_capi_port::lodge::Kept;
 use wz_capi_port::sync::SessionHeld;
-use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+use wz_capi_port::{EntityRow, LivelinessSink, SessionDrive, SessionEngine, WireKey};
 use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 use wz_session_core::declare_form::RetractionKey;
 
@@ -20,9 +20,9 @@ use crate::CoopConfig;
 /// What a liveliness subscriber heard: each sample as its kind and key.
 type Heard = Arc<Mutex<Vec<(LivelinessSampleKind, String)>>>;
 
-/// Subscribe to the tokens on `keyexpr`, with `history` as given: the subscriber's id and what it
-/// hears.
-fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
+/// Subscribe to the tokens on `keyexpr`, with `history` as given: the subscriber's row and what
+/// it hears.
+fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (EntityRow, Heard) {
     let heard: Heard = Arc::default();
     let into = heard.clone();
     let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {
@@ -35,6 +35,11 @@ fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
         .expect("the engine has liveliness")
         .id;
     (id, heard)
+}
+
+/// The id the wire names the entity `row` names by, at the router's width: read off its row.
+fn on_wire(engine: &Engine, row: EntityRow) -> u64 {
+    u64::from(engine.entity_id_of(row).expect("the row stands"))
 }
 
 fn put(key: &str) -> (LivelinessSampleKind, String) {
@@ -64,7 +69,7 @@ fn a_token_reaches_the_router_and_goes_when_retracted() {
         .expect("the engine has liveliness");
     // The session hands out its entity ids in a u32 space; the router reads a declared id at
     // wire width, so the comparison widens what the session handed out.
-    let (named_on_wire, bare_on_wire) = (u64::from(named), u64::from(bare));
+    let (named_on_wire, bare_on_wire) = (on_wire(&engine, named), on_wire(&engine, bare));
     until(&engine, "the router to hold both tokens", || {
         router.seen(|s| {
             s.tokens
@@ -116,9 +121,9 @@ fn a_tokens_kept_name_is_let_go_of_by_its_declaration_with_no_lock_held() {
         Some(false),
         "the declaration let the name go, with no session lock held"
     );
-    let on_wire = u64::from(token);
+    let id = on_wire(&engine, token);
     until(&engine, "the router to hold the token", || {
-        router.seen(|s| s.tokens == [(on_wire, "demo/alive/kept".to_owned())])
+        router.seen(|s| s.tokens == [(id, "demo/alive/kept".to_owned())])
     });
 
     SessionDrive::close(&*engine);
@@ -157,9 +162,9 @@ fn a_token_holds_the_declaration_its_key_is_named_by() {
             Some(RetractionKey::declared(prefix, "/x")),
         )
         .expect("the engine has liveliness");
-    let on_wire = u64::from(token);
+    let id = on_wire(&engine, token);
     until(&engine, "the router to hold the token", || {
-        router.seen(|s| s.tokens == [(on_wire, "demo/alive/x".to_owned())])
+        router.seen(|s| s.tokens == [(id, "demo/alive/x".to_owned())])
     });
     held.release(&*engine);
     assert_eq!(
@@ -272,24 +277,36 @@ fn a_history_subscriber_undeclared_from_its_history_is_let_go_of_before_its_decl
     until(&engine, "the probe to hear the router's token", || {
         *heard.lock().unwrap() == [put("demo/held")]
     });
-    let me: SubId = probe + 1;
+    // The ids are handed out in order, so the next subscriber is numbered past the probe; its
+    // callback finds its row by that id, the declaration not having answered it yet.
+    let me = engine.entity_id_of(probe).expect("the probe stands") + 1;
+    let undeclared = Arc::new(Mutex::new(None));
     let dropped = Arc::new(AtomicBool::new(false));
     let called = Arc::new(AtomicUsize::new(0));
     let sink = {
         let guard = Dropped(dropped.clone());
         let called = called.clone();
+        let undeclared = undeclared.clone();
         let undeclaring = engine.clone();
         LivelinessSink::shared(move |_sample: LivelinessSample<'_>| {
             let _held = &guard;
             called.fetch_add(1, Ordering::SeqCst);
-            undeclaring.undeclare_subscriber(me);
+            let row = undeclaring
+                .liveliness_subscriber_numbered(me)
+                .expect("the subscriber stands while its history is handed");
+            *undeclared.lock().unwrap() = Some(row);
+            undeclaring.undeclare_subscriber(row);
         })
     };
     let id = engine
         .declare_liveliness_subscriber_on_wire("demo/**", WireKey::literal(), true, sink)
         .expect("the engine has liveliness")
         .id;
-    assert_eq!(id, me, "the callback undeclared its own subscriber");
+    assert_eq!(
+        *undeclared.lock().unwrap(),
+        Some(id),
+        "the callback undeclared its own subscriber"
+    );
     assert_eq!(
         called.load(Ordering::SeqCst),
         1,
@@ -318,7 +335,7 @@ fn a_lost_link_takes_the_routers_tokens_and_a_new_one_is_told_the_sessions() {
     let token = engine
         .declare_liveliness_token_on_wire("demo/mine", WireKey::literal(), None)
         .expect("the engine has liveliness");
-    let token = u64::from(token);
+    let token = on_wire(&engine, token);
     router.send(Command::DeclareToken(6, "demo/theirs"));
     until(&engine, "the router's token to be heard", || {
         *heard.lock().unwrap() == [put("demo/theirs")]

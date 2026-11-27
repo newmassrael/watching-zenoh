@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wz_capi_port::{
-    FilterPlane, HeldQueryId, MatchingSink, QblId, QueryHolder, QueryableSink, Refusal,
+    EntityRow, FilterPlane, HeldQueryId, MatchingSink, QueryHolder, QueryableSink, Refusal,
     ReplyCallback, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
@@ -43,7 +43,7 @@ fn declare(
     keyexpr: &str,
     origin: Locality,
     answer: impl Fn(&dyn QueryHolder, &dyn QueryView, &mut dyn ReplyOut) + Send + Sync + 'static,
-) -> QblId {
+) -> EntityRow {
     engine
         .declare_queryable_on_wire(
             keyexpr,
@@ -58,7 +58,12 @@ fn declare(
 }
 
 /// A queryable that answers each query with `payload`, on the query's own key.
-fn answering(engine: &Engine, keyexpr: &str, origin: Locality, payload: &'static [u8]) -> QblId {
+fn answering(
+    engine: &Engine,
+    keyexpr: &str,
+    origin: Locality,
+    payload: &'static [u8],
+) -> EntityRow {
     declare(engine, keyexpr, origin, move |_, query, out| {
         out.reply_keyed(query.keyexpr(), payload)
             .expect("a reply on the query's own key");
@@ -690,7 +695,7 @@ fn a_queryable_that_undeclares_itself_inside_an_own_get_is_let_go_of_before_the_
     let engine = open(&router);
     settle(&router, &engine, Command::Silence);
     let dropped = Arc::new(AtomicUsize::new(0));
-    let own: Arc<Mutex<Option<QblId>>> = Arc::default();
+    let own: Arc<Mutex<Option<EntityRow>>> = Arc::default();
     let guard = Dropped(dropped.clone());
     let session = EngineHold::downgrade(&engine);
     let id = declare(&engine, "demo/lq/self/**", Locality::Any, {

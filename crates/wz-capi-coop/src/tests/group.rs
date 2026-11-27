@@ -922,7 +922,7 @@ mod watched {
 mod alive {
     use std::sync::{Arc, Mutex};
 
-    use wz_capi_port::{LivelinessSink, SessionDrive, SessionEngine, SubId, WireKey};
+    use wz_capi_port::{EntityRow, LivelinessSink, SessionDrive, SessionEngine, WireKey};
     use wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind};
 
     use super::{
@@ -934,7 +934,7 @@ mod alive {
     type Heard = Arc<Mutex<Vec<(LivelinessSampleKind, String)>>>;
 
     /// Subscribe to the tokens on `keyexpr` of `engine`, with `history`.
-    fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (SubId, Heard) {
+    fn subscribe(engine: &Engine, keyexpr: &str, history: bool) -> (EntityRow, Heard) {
         let heard: Heard = Arc::default();
         let into = heard.clone();
         let sink = LivelinessSink::shared(move |sample: LivelinessSample<'_>| {

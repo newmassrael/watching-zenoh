@@ -138,22 +138,39 @@ pub type PendingGetHandle = Handle<kind::PendingGet>;
 
 /// The tables of the declarations a session tells its peers, each named apart from its rows'
 /// type: what a walk of them in one order reads through [`SessionTables::slots_of`], and what a
-/// row of any of them is named by as data ([`DeclaredRow`]).
+/// row of any of them is named by as data ([`DeclaredRow`]). Its value is the code a row's word
+/// names its table by ([`DeclaredRow::to_bits`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum DeclaredTable {
     /// The key expression declarations.
-    Keyexprs,
+    Keyexprs = 0,
     /// The subscribers.
-    Subscribers,
+    Subscribers = 1,
     /// The write filters, each told as the Interest it holds open; one that holds none has
     /// nothing to tell.
-    Interests,
+    Interests = 2,
     /// The queryables.
-    Queryables,
+    Queryables = 3,
     /// The liveliness tokens.
-    Tokens,
+    Tokens = 4,
     /// The liveliness subscribers.
-    LivelinessSubscribers,
+    LivelinessSubscribers = 5,
+}
+
+impl DeclaredTable {
+    /// The table whose code is `code` (its value), or `None` for a code no table has.
+    fn of_code(code: u64) -> Option<Self> {
+        Some(match code {
+            0 => Self::Keyexprs,
+            1 => Self::Subscribers,
+            2 => Self::Interests,
+            3 => Self::Queryables,
+            4 => Self::Tokens,
+            5 => Self::LivelinessSubscribers,
+            _ => return None,
+        })
+    }
 }
 
 /// A kind of row kept in one of the tables of declarations ([`DeclaredTable`]).
@@ -205,6 +222,32 @@ impl DeclaredRow {
             table: K::TABLE,
             row: handle.to_bits(),
         }
+    }
+
+    /// The row as one word, for an object outside the tables to keep: its table's code in the
+    /// high half, its handle's bits in the low half. Two tables number their rows apart, so a
+    /// handle's bits alone may name a row of each; the table's code tells them apart. Never zero.
+    pub fn to_bits(self) -> u64 {
+        (u64::from(self.table as u8) << 32) | u64::from(self.row.get())
+    }
+
+    /// The row a word of [`Self::to_bits`] names; `None` for a word whose table's code no table
+    /// has, or whose handle's half is zero, neither of which a row writes.
+    pub fn from_bits(bits: u64) -> Option<Self> {
+        let table = DeclaredTable::of_code(bits >> 32)?;
+        // The low half is the handle's bits.
+        let row = core::num::NonZeroU32::new(bits as u32)?;
+        Some(Self { table, row })
+    }
+
+    /// The handle of the row, when it is a row of the table whose kind is `K`: `None` for a row
+    /// of another table, whatever its handle's bits. Whether the row still stands is the table's
+    /// to say, by the handle's generation.
+    pub fn handle<K: DeclaredKind>(self) -> Option<Handle<K>> {
+        if self.table != K::TABLE {
+            return None;
+        }
+        Handle::from_bits(self.row)
     }
 }
 

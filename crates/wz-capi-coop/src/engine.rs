@@ -101,9 +101,9 @@ use wz_session_core::row_callback::{RowCallback, ThreadForm};
 use wz_session_core::session_state::LocalRequests;
 use wz_session_core::session_state::{MatchingRead, SessionParts};
 use wz_session_core::session_tables::{
-    kind, DeclaredRow, DeclaredTable, FilterInterest, InterestKind, InterestName, KeyexprHandle,
-    KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks, RowKey,
-    SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
+    kind, DeclaredKind, DeclaredRow, DeclaredTable, FilterInterest, InterestKind, InterestName,
+    KeyexprHandle, KeyexprRef, MatchingListenerHandle, Plane, Refused, Retraction, RowCallbacks,
+    RowKey, SessionTables, SubscriberHandle, Watching, WriteFilterHandle,
 };
 use wz_session_core::slot_map::Handle;
 
@@ -114,6 +114,7 @@ use crate::admission_gate::AdmissionGate;
 use wz_capi_port::os::{self, Mutex, MutexGuard};
 #[cfg(feature = "threads")]
 use wz_capi_port::os::{JoinHandle, ThreadId};
+use wz_capi_port::EntityRow;
 use wz_capi_port::{
     BatchStep, CalledFromReadTask, Declared, EngineDeliveries, FanoutError, FilterId, FilterPlane,
     FilteredPut, HoldRefused, KeyAnchor, KeyHold, KeyView, MatchId, MatchingSink, PeerIdentity,
@@ -222,7 +223,7 @@ use wz_session_core::WhatAmI;
 #[cfg(feature = "queryable")]
 use {
     query::{CoopHolder, Onward, QueryPlane, QueryableRow},
-    wz_capi_port::{QblId, QueryableSink},
+    wz_capi_port::QueryableSink,
     wz_session_core::query::QueryResponder,
     wz_session_core::query_sink::ReplyError,
     wz_session_core::query_sink::{ProvenQuery, QueryView},
@@ -426,7 +427,7 @@ pub(crate) use liveliness::{LivelinessCall, LivelinessRow};
 #[cfg(feature = "liveliness")]
 use {
     registry::HistoryCursor,
-    wz_capi_port::{LivelinessSink, TokenId},
+    wz_capi_port::LivelinessSink,
     wz_session_core::declare::liveliness_sample::{LivelinessSample, LivelinessSampleKind},
     wz_session_core::session_tables::LivelinessSubscriberHandle,
 };
@@ -2747,6 +2748,18 @@ fn row_id<K>(handle: Handle<K>) -> u64 {
 /// The row `id` names, as [`row_id`] made it; `None` for an id no handle is made of.
 fn row_of<K>(id: u64) -> Option<Handle<K>> {
     Handle::from_bits(NonZeroU32::new(u32::try_from(id).ok()?)?)
+}
+
+/// The row the port names an entity of the session's tables of declarations by: the row's word,
+/// its table and its handle, generation and all ([`DeclaredRow::to_bits`]).
+fn entity_row<K: DeclaredKind>(handle: Handle<K>) -> EntityRow {
+    EntityRow::from_bits(DeclaredRow::of(handle).to_bits())
+}
+
+/// The row of kind `K` that `row` names, as [`entity_row`] made it: `None` for a row of another
+/// table, or a word no row writes. Whether it still stands is its table's to say.
+fn entity_handle<K: DeclaredKind>(row: EntityRow) -> Option<Handle<K>> {
+    DeclaredRow::from_bits(row.bits())?.handle()
 }
 
 /// What a write filter or a matching listener on `plane` counts, as the session's tables name it.
@@ -9908,6 +9921,57 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         );
     }
 
+    /// Undeclare liveliness subscriber `handle`, which the port retracts as a subscriber
+    /// ([`SessionEngine::undeclare_subscriber`]): its row goes and its Interest ends, and its row
+    /// is let go of as a subscriber's is.
+    #[cfg(feature = "liveliness")]
+    fn undeclare_liveliness_subscriber(&self, handle: LivelinessSubscriberHandle) {
+        let undeclared = self
+            .live_on_link(|core, tx| {
+                // A row of an earlier generation stands in no slot, and is retracted by nothing.
+                let standing = tables(&core.session.registry)
+                    .liveliness_subscribers()
+                    .get(handle)?;
+                let (id, prefix) = (standing.id(), standing.key().prefix());
+                // The links are asked while the rows stand, which are their places in the replay's
+                // order: the subscriber's, then the declaration's its key is named by.
+                let place = core.place_of(DeclaredRow::of(handle));
+                let keyexpr_place = core.prefix_retraction(prefix);
+                // The groups asked for it are told the asking ended.
+                #[cfg(feature = "group")]
+                for group in &core.transport.groups {
+                    group.end_liveliness_ask(id);
+                }
+                let undeclared = tables_mut(&mut core.session.registry)
+                    .undeclare_liveliness_subscriber(handle)?;
+                // The rows went before the links are told: a send never finds the tables borrowed.
+                core.retract_at(place, Some(Retract::Interest(u64::from(id))), tx);
+                core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
+                Some(undeclared.taken)
+            })
+            .flatten();
+        // The row, and its callback with it, is let go of here with no lock held; one a call of
+        // which runs is let go of by the call that ends last.
+        match undeclared {
+            Some(Some(taken)) => drop(taken),
+            Some(None) => self.wait_for_liveliness_release(handle),
+            None => {}
+        }
+    }
+
+    /// The row of the liveliness subscriber the wire numbers `id`, for a test whose callback
+    /// retracts its own subscriber before the declaration has answered its row.
+    #[cfg(all(test, feature = "liveliness", not(wz_round)))]
+    pub(crate) fn liveliness_subscriber_numbered(&self, id: EntityId) -> Option<EntityRow> {
+        let guard = self.live()?;
+        let found = tables(&guard.0.session.registry)
+            .liveliness_subscribers()
+            .iter()
+            .find(|(_, row)| row.id() == id)
+            .map(|(handle, _)| handle);
+        found.map(entity_row)
+    }
+
     /// [`Self::wait_for_release`] for queryable `handle`: a query queued for it holds a call of it
     /// until a delivery hands the query out, which hands the undeclared queryable nothing.
     #[cfg(feature = "queryable")]
@@ -11655,7 +11719,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: SubscriberSink,
-    ) -> Result<Declared<SubId>, Declined> {
+    ) -> Result<Declared<EntityRow>, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare. The
         // subscriber is one row of the session's tables, numbered by the id they hand out next: a
         // full table, a key the session cannot hold or no id left refuses it before anything is
@@ -11700,9 +11764,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            // The id the tables numbered the row by: they mint it, after the room and the key, so
-            // a declaration is refused in their one order.
-            let id = declared.id;
             // The key as the tables read it off the row they put it in: its text is the row's own,
             // which does not move while the row stands.
             let lent = lent_key(tables(&core.session.registry), declared.key);
@@ -11717,7 +11778,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     let retraction = tables.retraction_of(row.key());
                     core.transport.announce_to_groups(GroupEntity {
                         what: GroupDeclaration::Subscriber,
-                        entity: id,
+                        entity: declared.id,
                         keyexpr: row.key().as_str(),
                         wire: &wire,
                         retraction: retraction.as_ref(),
@@ -11732,7 +11793,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // told, outside the lock.
             #[cfg(feature = "local-subscriber")]
             self.read_matching(core);
-            Ok(Declared { id, key: lent })
+            Ok(Declared {
+                id: entity_row(declared.handle),
+                key: lent,
+            })
         });
         drop(refused_row);
         match declared {
@@ -11747,69 +11811,38 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     #[inline(never)]
-    fn undeclare_subscriber(&self, id: SubId) {
-        // The session is held once, whichever table the id's row is in, after the faces' places
-        // as every operation that tells the links takes them. A liveliness subscriber's id is one
-        // of these too (the port's one id space): its row goes and its Interest ends, and what it
-        // took is carried out of the hold here.
+    fn undeclare_subscriber(&self, row: EntityRow) {
+        // The row names its table: a liveliness subscriber's names its own, whose row goes and
+        // whose Interest ends.
         #[cfg(feature = "liveliness")]
-        let mut live = None;
+        if let Some(handle) = entity_handle::<kind::LivelinessSubscriber>(row) {
+            self.undeclare_liveliness_subscriber(handle);
+            return;
+        }
+        let Some(handle) = entity_handle::<kind::Subscriber>(row) else {
+            return;
+        };
         // The row is taken out of the tables under the lock and let go of after it: what its key
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which runs is
         // let go of once that call ends (`Self::wait_for_release`).
         let undeclared = self
             .live_on_link(|core, tx| {
-                #[cfg(feature = "liveliness")]
-                {
-                    let found = tables(&core.session.registry)
-                        .liveliness_subscribers()
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (_, row))| row.id() == id)
-                        .map(|(rank, (handle, row))| (rank, handle, row.key().prefix()));
-                    if let Some((rank, handle, prefix)) = found {
-                        // The links are asked while the rows stand, which are their places in the
-                        // replay's order: the subscriber's, ranked by the walk that found it, then
-                        // the declaration's its key is named by.
-                        let place = core.place(DeclaredTable::LivelinessSubscribers, rank);
-                        let keyexpr_place = core.prefix_retraction(prefix);
-                        // The groups asked for it are told the asking ended.
-                        #[cfg(feature = "group")]
-                        for group in &core.transport.groups {
-                            group.end_liveliness_ask(id);
-                        }
-                        if let Some(undeclared) = tables_mut(&mut core.session.registry)
-                            .undeclare_liveliness_subscriber(handle)
-                        {
-                            // The rows went before the links are told: a send never finds the
-                            // tables borrowed.
-                            core.retract_at(place, Some(Retract::Interest(u64::from(id))), tx);
-                            core.retract_keyexpr(keyexpr_place, undeclared.keyexpr, tx);
-                            live = Some((handle, undeclared.taken));
-                            return None;
-                        }
-                    }
-                }
                 // The declaration its key is named by goes with it when it is the last that holds
-                // it; what the links are told is read while the row stands.
-                let found = tables(&core.session.registry)
-                    .subscribers()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (_, row))| row.id() == id)
-                    .map(|(rank, (handle, row))| (rank, handle, row.key().holds()));
-                let (rank, handle, (prefix, named)) = found?;
+                // it; what the links are told is read while the row stands. A row of an earlier
+                // generation stands in no slot, and is retracted by nothing.
+                let standing = tables(&core.session.registry).subscribers().get(handle)?;
+                let (id, (prefix, named)) = (standing.id(), standing.key().holds());
                 // The links are asked while the rows stand, which are their places in the
-                // replay's order: the subscriber's, ranked by the walk that found it, then the
-                // declaration's, which comes before every subscriber.
-                let place = core.place(DeclaredTable::Subscribers, rank);
+                // replay's order: the subscriber's, then the declaration's, which comes before
+                // every subscriber.
+                let place = core.place_of(DeclaredRow::of(handle));
                 let keyexpr_place = core.prefix_retraction(prefix);
                 let named_place = core.prefix_retraction(named);
                 #[cfg(feature = "group")]
                 core.transport.retract_from_groups(id);
                 let undeclared =
                     tables_mut(&mut core.session.registry).undeclare_subscriber(handle)?;
-                let row = undeclared.taken;
+                let taken = undeclared.taken;
                 // The rows went before the links are told: a send never finds the tables borrowed.
                 // The retraction names the key as the row named it, holding the key past the row.
                 let names = undeclared
@@ -11825,26 +11858,45 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // One that counted it may now match no more.
                 #[cfg(feature = "local-subscriber")]
                 self.read_matching(core);
-                Some((handle, row))
+                Some(taken)
             })
             .flatten();
         // The row, and its callback with it, is let go of here with no lock held; one a call of
         // which runs is let go of by the call that ends last.
-        #[cfg(feature = "liveliness")]
-        if let Some(undeclared) = live {
-            match undeclared {
-                (_, Some(row)) => drop(row),
-                (handle, None) => self.wait_for_liveliness_release(handle),
-            }
-            return;
-        }
         match undeclared {
-            Some((_, Some(row))) => drop(row),
-            Some((handle, None)) => self.wait_for_release(handle),
+            Some(Some(taken)) => drop(taken),
+            Some(None) => self.wait_for_release(handle),
             None => {}
         }
         #[cfg(feature = "local-subscriber")]
         self.deliver();
+    }
+
+    fn entity_id_of(&self, row: EntityRow) -> Option<EntityId> {
+        // Read off the row where it stands: a closed session's rows are gone, as zenoh-pico
+        // answers its entities' ids with the null id.
+        let declared = DeclaredRow::from_bits(row.bits())?;
+        let guard = self.live()?;
+        let tables = tables(&guard.0.session.registry);
+        match declared.table {
+            DeclaredTable::Subscribers => tables
+                .subscribers()
+                .get(declared.handle()?)
+                .map(|row| row.id()),
+            #[cfg(feature = "queryable")]
+            DeclaredTable::Queryables => tables
+                .queryables()
+                .get(declared.handle()?)
+                .map(|row| row.id()),
+            #[cfg(feature = "liveliness")]
+            DeclaredTable::Tokens => tables.tokens().get(declared.handle()?).map(|row| row.id()),
+            #[cfg(feature = "liveliness")]
+            DeclaredTable::LivelinessSubscribers => tables
+                .liveliness_subscribers()
+                .get(declared.handle()?)
+                .map(|row| row.id()),
+            _ => None,
+        }
     }
 
     #[inline(never)]
@@ -12227,7 +12279,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         allowed_origin: Locality,
         retraction: Option<RetractionKey>,
         sink: QueryableSink,
-    ) -> Result<Declared<QblId>, Declined> {
+    ) -> Result<Declared<EntityRow>, Declined> {
         // Taken by the declaration into the row it offers the tables; let go of, with the session
         // and the link's place, after it, whether it was declared or not.
         let mut unmade = Some((wire, sink));
@@ -12269,9 +12321,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            // The id the tables numbered the row by: they mint it, after the room and the key, so
-            // a declaration is refused in their one order.
-            let id = declared.id;
             // The key as the tables read it off the row they put it in: its text is the row's own,
             // which does not move while the row stands.
             let lent = lent_key(tables(&core.session.registry), declared.key);
@@ -12288,7 +12337,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                         what: GroupDeclaration::Queryable {
                             complete: row.complete(),
                         },
-                        entity: id,
+                        entity: declared.id,
                         keyexpr: row.key().as_str(),
                         wire: &wire,
                         retraction: retraction.as_ref(),
@@ -12300,7 +12349,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
             // told, outside the lock.
             #[cfg(feature = "local-queryable")]
             self.read_matching(core);
-            Ok(Declared { id, key: lent })
+            Ok(Declared {
+                id: entity_row(declared.handle),
+                key: lent,
+            })
         });
         drop(refused_row);
         match declared {
@@ -12357,7 +12409,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         self.answer(id.generation, id.rid, query::Release::Kept, false);
     }
     #[cfg(feature = "queryable")]
-    fn undeclare_queryable(&self, id: QblId) {
+    fn undeclare_queryable(&self, row: EntityRow) {
+        let Some(handle) = entity_handle::<kind::Queryable>(row) else {
+            return;
+        };
         // The row is taken out of the tables under the lock and let go of after it: what its key
         // kept may reach the session as it goes (`KeyAnchor`). One a call of which is owed,
         // a query queued for it or handed to its callback now, is let go of once that call ends
@@ -12365,25 +12420,21 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         let undeclared = self
             .live_on_link(|core, tx| {
                 // The declaration its key is named by goes with it when it is the last that holds
-                // it; what the links are told is read while the row stands.
-                let found = tables(&core.session.registry)
-                    .queryables()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, (_, row))| row.id() == id)
-                    .map(|(rank, (handle, row))| (rank, handle, row.key().holds()));
-                let (rank, handle, (prefix, named)) = found?;
+                // it; what the links are told is read while the row stands. A row of an earlier
+                // generation stands in no slot, and is retracted by nothing.
+                let standing = tables(&core.session.registry).queryables().get(handle)?;
+                let (id, (prefix, named)) = (standing.id(), standing.key().holds());
                 // The links are asked while the rows stand, which are their places in the replay's
-                // order: the queryable's, ranked by the walk that found it, then the declaration's,
-                // which comes before every queryable.
-                let place = core.place(DeclaredTable::Queryables, rank);
+                // order: the queryable's, then the declaration's, which comes before every
+                // queryable.
+                let place = core.place_of(DeclaredRow::of(handle));
                 let keyexpr_place = core.prefix_retraction(prefix);
                 let named_place = core.prefix_retraction(named);
                 #[cfg(feature = "group")]
                 core.transport.retract_from_groups(id);
                 let undeclared =
                     tables_mut(&mut core.session.registry).undeclare_queryable(handle)?;
-                let row = undeclared.taken;
+                let taken = undeclared.taken;
                 // The rows went before the links are told: a send never finds the tables borrowed.
                 // The retraction names the key as the row named it, holding the key past the row.
                 let names = undeclared
@@ -12396,14 +12447,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // One that counted it may now match no more.
                 #[cfg(feature = "local-queryable")]
                 self.read_matching(core);
-                Some((handle, row))
+                Some(taken)
             })
             .flatten();
         // The row, and its callback with it, is let go of here, with no lock held; one a call of
         // which is owed is let go of by the call that ends last.
         match undeclared {
-            Some((_, Some(row))) => drop(row),
-            Some((handle, None)) => self.wait_for_queryable_release(handle),
+            Some(Some(taken)) => drop(taken),
+            Some(None) => self.wait_for_queryable_release(handle),
             None => {}
         }
         #[cfg(feature = "local-queryable")]
@@ -12416,11 +12467,11 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         keyexpr: &str,
         wire: WireKey,
         retraction: Option<RetractionKey>,
-    ) -> Result<TokenId, Declined> {
+    ) -> Result<EntityRow, Declined> {
         // zenoh-pico's token takes the session's next entity id
         // (`vendor/zenoh-pico/src/net/liveliness.c` @ `uint32_t id = _z_get_entity_id(_Z_RC_IN_VAL(zn));`).
         let declared = self
-            .live_on_link(|core, tx| -> Result<TokenId, Declined> {
+            .live_on_link(|core, tx| -> Result<EntityRow, Declined> {
                 // The token is a row of the session's tables, which takes its id: a full table, a
                 // key the session cannot hold or no id left refuses it before anything is
                 // registered or sent. It holds the key expression declaration its key is named by
@@ -12444,7 +12495,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                 // the announcement finds it held: the tokio engine's group holds it the same way.
                 #[cfg(feature = "group")]
                 core.announce_token_to_groups(declared.handle);
-                Ok(declared.id)
+                Ok(entity_row(declared.handle))
             })
             .unwrap_or(Err(Declined::Closed));
         // The row holds the declaration its key is named by, so the key the ABI named it by is
@@ -12454,16 +12505,16 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
     }
 
     #[cfg(feature = "liveliness")]
-    fn undeclare_liveliness_token(&self, id: TokenId) {
+    fn undeclare_liveliness_token(&self, row: EntityRow) {
+        let Some(handle) = entity_handle::<kind::Token>(row) else {
+            return;
+        };
         let _ = self.live_on_link(|core, tx| {
-            let found = tables(&core.session.registry)
-                .tokens()
-                .iter()
-                .find(|(_, row)| row.id() == id)
-                .map(|(handle, row)| (handle, row.key().prefix()));
-            let Some((handle, prefix)) = found else {
+            // A row of an earlier generation stands in no slot, and is retracted by nothing.
+            let Some(standing) = tables(&core.session.registry).tokens().get(handle) else {
                 return;
             };
+            let (id, prefix) = (standing.id(), standing.key().prefix());
             // The links are asked while the rows stand, which are their places in the replay's
             // order: the token's, then the declaration's, which comes before every token.
             let token_place = core.place_of(DeclaredRow::of(handle));
@@ -12492,7 +12543,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         wire: WireKey,
         history: bool,
         sink: LivelinessSink,
-    ) -> Result<Declared<SubId>, Declined> {
+    ) -> Result<Declared<EntityRow>, Declined> {
         // A closed session declares nothing, and takes no id for what it does not declare; what
         // the key holds goes back with the refusal, let go of, with the session and the link's
         // place, after the declaration.
@@ -12528,17 +12579,14 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
                     return Err(Declined::from(refused.why));
                 }
             };
-            // The id the tables numbered the row by, after the room and the key: the one its
-            // Interest carries.
-            let id = declared.id;
             // One with no history asks the links as it is declared.
             if !history {
                 core.ask_liveliness_subscriber(declared.handle, tx);
             }
-            Ok((id, declared.handle))
+            Ok(declared.handle)
         });
         drop(refused_row);
-        let (id, handle) = match declared {
+        let handle = match declared {
             Some(Ok(declared)) => declared,
             Some(Err(why)) => return Err(why),
             None => return Err(Declined::Closed),
@@ -12565,7 +12613,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> SessionEngine for
         });
         self.deliver();
         Ok(Declared {
-            id,
+            id: entity_row(handle),
             key: lent.unwrap_or(KeyView::ABSENT),
         })
     }

@@ -36,7 +36,7 @@ use core::ffi::c_void;
 use wz_capi_port::cancellation::CancellationToken;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::lodge::Strong;
-use wz_capi_port::TokenId;
+use wz_capi_port::EntityRow;
 #[cfg(feature = "liveliness-get")]
 use wz_capi_port::WireKey;
 use wz_session_core::declare::liveliness_sample::LivelinessSampleKind;
@@ -118,7 +118,7 @@ impl z_owned_liveliness_token_t {
 /// token is retracted, so its retraction follows the token's; the door keeps no copy of the key.
 pub(crate) struct TokenState {
     shared: EngineHold,
-    id: TokenId,
+    row: EntityRow,
 }
 
 impl TokenState {
@@ -139,7 +139,7 @@ impl TokenState {
         existing: Option<&DeclaredKeyexpr>,
     ) -> Result<Self, ZResult> {
         let key = EntityKey::whole(&session.engine, keyexpr, existing)?;
-        let id = session
+        let row = session
             .engine
             .declare_liveliness_token_on_wire(keyexpr, key.wire(), Some(key.retraction_key()))
             .map_err(|refused| refusal_code(refused, Door::Token))?;
@@ -147,14 +147,14 @@ impl TokenState {
         drop(key);
         Ok(Self {
             shared: session.engine.clone(),
-            id,
+            row,
         })
     }
 }
 
 impl Drop for TokenState {
     fn drop(&mut self) {
-        self.shared.undeclare_liveliness_token(self.id);
+        self.shared.undeclare_liveliness_token(self.row);
     }
 }
 

@@ -1799,7 +1799,7 @@ fn a_subscriber_undeclared_inside_its_callback_is_handed_nothing_more() {
     let engine = open(&router);
     let received = Arc::new(AtomicUsize::new(0));
     let count = received.clone();
-    let own: Arc<Mutex<Option<wz_capi_port::SubId>>> = Arc::new(Mutex::new(None));
+    let own: Arc<Mutex<Option<wz_capi_port::EntityRow>>> = Arc::new(Mutex::new(None));
     let own_id = own.clone();
     let session = EngineHold::downgrade(&engine);
     let declares_before = router.seen(|s| s.declares);

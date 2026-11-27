@@ -3829,6 +3829,48 @@ fn each_table_of_declarations_is_read_through_its_own_slots() {
     );
 }
 
+/// A row's word names its table and its handle, and names that handle back only as a row of its
+/// own table: the first subscriber and the first liveliness subscriber hold the same handle's bits
+/// (the CONTROL), and each one's word names no row of the other's table. A word that names no
+/// table, or no handle, names no row. Turned red by a word that leaves out its table, or a
+/// handle read off a row of another table.
+#[test]
+fn a_rows_word_names_its_handle_in_its_own_table_alone() {
+    let mut tables = Tables::new();
+    let subscriber = tables
+        .declare_subscriber("s", Locality::Any, KeyForm::default(), 1)
+        .unwrap()
+        .handle;
+    let live = tables
+        .declare_liveliness_subscriber("l", false, KeyForm::default(), 2)
+        .unwrap()
+        .handle;
+    assert_eq!(
+        DeclaredRow::of(subscriber).row,
+        DeclaredRow::of(live).row,
+        "CONTROL: the two tables' first rows hold the same handle's bits"
+    );
+    let word = DeclaredRow::of(subscriber).to_bits();
+    assert_ne!(
+        word,
+        DeclaredRow::of(live).to_bits(),
+        "the table tells them apart"
+    );
+    let read = DeclaredRow::from_bits(word).expect("a row's word names a row");
+    assert_eq!(read, DeclaredRow::of(subscriber));
+    assert_eq!(read.handle::<kind::Subscriber>(), Some(subscriber));
+    assert_eq!(read.handle::<kind::LivelinessSubscriber>(), None);
+    let read = DeclaredRow::from_bits(DeclaredRow::of(live).to_bits()).expect("a row's word");
+    assert_eq!(read.handle::<kind::LivelinessSubscriber>(), Some(live));
+    assert_eq!(read.handle::<kind::Subscriber>(), None);
+    assert_eq!(DeclaredRow::from_bits(0), None, "no handle's bits");
+    assert_eq!(
+        DeclaredRow::from_bits((6 << 32) | u64::from(DeclaredRow::of(subscriber).row.get())),
+        None,
+        "a code past the last table's"
+    );
+}
+
 /// A write filter that asks nothing holds a place among the Interests' slots, its row read there
 /// with no Interest, so a filter declared after it has the rank the filters' walk gives it. Turned
 /// red by Interests read through slots other than the filters', or a quiet filter's row that
