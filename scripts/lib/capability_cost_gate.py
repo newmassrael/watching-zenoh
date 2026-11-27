@@ -283,6 +283,11 @@ DISCARD_UNWIND_LINK = f"-Wl,-T,{DISCARD_UNWIND_SCRIPT}"
 RUN_TEXT_CONFIG = ".cargo/capi-run-text.toml"
 RUN_TEXT_SCRIPT = "wz-capi-pico/link/run-text.ld"
 RUN_TEXT_LINK = f"-Wl,-T,{RUN_TEXT_SCRIPT}"
+# The output section the script lays the run's code in, and a line of its list, one a function
+# (`run_text_lines`): a library linked with a list that places functions and holding no such
+# section placed none of them (`link_findings`).
+RUN_TEXT_SECTION = ".text.run"
+RUN_TEXT_LIST_LINE = re.compile(r"^    \*\(.+\)$", re.MULTILINE)
 # The C compiler's like of `-C force-unwind-tables=no`: code with no unwind tables, the
 # asynchronous ones GCC writes by default on x86_64 included.
 NO_UNWIND_CFLAGS = ("-fno-asynchronous-unwind-tables", "-fno-unwind-tables")
@@ -1710,6 +1715,9 @@ class Measured:
     # The executable sections the file measured does not hold as its build does
     # (`wz_package.strip_debug`).
     code_moved: tuple[str, ...] = ()
+    # Whether the library holds the section a run-text list lays a run's code out in
+    # (`RUN_TEXT_SECTION`).
+    run_text: bool = False
 
 
 # The conformance digest as the library stores it: a C string, so the NUL is part of the match and
@@ -2172,15 +2180,29 @@ def has_unwind_tables(data: bytes) -> bool:
     return bool({s.name for s in elf_facts.sections(data)} & {".eh_frame", ".eh_frame_hdr"})
 
 
+def has_run_text(data: bytes) -> bool:
+    """Whether an ELF file has the section a run-text list lays a run's code out in."""
+    return any(s.name == RUN_TEXT_SECTION for s in elf_facts.sections(data))
+
+
+def run_text_lines(script: str) -> int:
+    """The functions a run-text script's list places: the lines of its SECTIONS statement, one a
+    function, as `perf_matrix.py run-text` writes them; a line of the head comment is not one."""
+    found = re.search(r"^SECTIONS$", script, re.MULTILINE)
+    return 0 if found is None else len(RUN_TEXT_LIST_LINE.findall(script, found.end()))
+
+
 def discards_unwind_tables(link: tuple[str, ...]) -> bool:
     """Whether linker arguments name the script that discards the unwind tables, by its path from
     `crates/` (a wz library) or by its absolute path (a reference)."""
     return any(a.startswith("-Wl,-T,") and a.endswith(DISCARD_UNWIND_SCRIPT) for a in link)
 
 
-def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
+def link_findings(subject: str, lib: Measured | Reference,
+                  run_text_listed: int | None = None) -> list[str]:
     """What is wrong with how a library was linked, against the linker arguments it was linked
-    with; empty when it was linked as asked."""
+    with; empty when it was linked as asked. `run_text_listed` is the number of functions the
+    run-text list places, the committed script's (`run_text_lines`) when not given."""
     findings: list[str] = []
     if lib.code_moved:
         findings.append(f"{subject}: taking its debug information off changed its executable "
@@ -2196,6 +2218,16 @@ def link_findings(subject: str, lib: Measured | Reference) -> list[str]:
                         f"still has an `.eh_frame`: the linker ({lib.linker}) kept them, so its "
                         f"text is that of the form with tables. GNU ld honours the script's "
                         f"discard; lld keeps .eh_frame under it and mold refuses it.")
+    if RUN_TEXT_LINK in lib.link_args and not lib.run_text:
+        listed = (run_text_lines((CRATES / RUN_TEXT_SCRIPT).read_text(encoding="utf-8"))
+                  if run_text_listed is None else run_text_listed)
+        if listed:
+            findings.append(f"{subject}: linked with the run-text script, whose list places "
+                            f"{listed} function(s), and holds no `{RUN_TEXT_SECTION}`: no function "
+                            f"of this build matched a line of the list, so the list names another "
+                            f"build's functions (make it again: scripts/pico-compare.sh run-text) "
+                            f"or the linker ({lib.linker}) did not apply the script, and its text "
+                            f"lies in the linker's own order.")
     if PACKED_RELOCS_LINK not in lib.link_args:
         return findings
     if not lib.relr:
@@ -2377,7 +2409,8 @@ def build(case: Case, env: Mapping[str, str], prefixes: build_normalization.Pref
                     needed=needed, linker=linker_of(lib), link_args=plan.link_args,
                     relr=any("(RELR)" in line for line in dynamic_section),
                     relr_need=RELR_VERSION_NEED in elf_facts.version_tags(data),
-                    eh_frame=has_unwind_tables(data), code_moved=tuple(moved))
+                    eh_frame=has_unwind_tables(data), code_moved=tuple(moved),
+                    run_text=has_run_text(data))
 
 
 @dataclass(frozen=True)
@@ -2400,8 +2433,9 @@ class Reference:
     eh_frame: bool = False
     # The C compiler flags it was built with beyond the rule's (`reference_build`).
     cflags: tuple[str, ...] = ()
-    # What `Measured` holds of the strip.
+    # What `Measured` holds of the strip, and of the run's laid-out code.
     code_moved: tuple[str, ...] = ()
+    run_text: bool = False
 
 
 @functools.cache
@@ -2994,6 +3028,24 @@ def cmd_selftest() -> int:
            and config_rustflags(run_text, "x86_64-pc-windows-msvc", windows_msvc) == []
            and (CRATES / RUN_TEXT_SCRIPT).is_file()
            and RUN_TEXT_LINK.split(",")[-1] == RUN_TEXT_SCRIPT)
+    expect("a library linked with a run-text list that places functions and holding no laid-out "
+           "run is a finding; one that holds it, an empty list and a library linked without the "
+           "script are not",
+           len(found := link_findings("t", Measured(900, [], 3, link_args=(RUN_TEXT_LINK,),
+                                                    linker="GNU ld 2.42"),
+                                      run_text_listed=4)) == 1
+           and RUN_TEXT_SECTION in found[0] and "4 function(s)" in found[0]
+           and link_findings("t", Measured(900, [], 3, link_args=(RUN_TEXT_LINK,), run_text=True),
+                             run_text_listed=4) == []
+           and link_findings("t", Measured(900, [], 3, link_args=(RUN_TEXT_LINK,)),
+                             run_text_listed=0) == []
+           and link_findings("t", Measured(900, [], 3), run_text_listed=4) == [])
+    expect("a run-text list is counted by the lines of its statement and not of its head",
+           run_text_lines("/*\n    *(.text.head)\n */\nSECTIONS\n{\n  .text.run :\n  {\n"
+                          "    *(.text.a .text.unlikely.a)\n    *(.text.b .text.unlikely.b)\n"
+                          "  }\n}\nINSERT BEFORE .text;\n") == 2
+           and run_text_lines("SECTIONS\n{\n  .text.run :\n  {\n  }\n}\nINSERT BEFORE .text;\n") == 0
+           and run_text_lines("") == 0)
     expect("only the library without std, which never unwinds, discards the unwind tables",
            all(c.profile == "capi-nostd" and NOSTD_CONFIG in c.cargo_configs
                for c in CASES if DISCARD_UNWIND_CONFIG in c.cargo_configs)

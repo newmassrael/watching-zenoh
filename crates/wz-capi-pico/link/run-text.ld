@@ -8,13 +8,16 @@
  * run whose functions are spread over the text holds it resident whole however few bytes it runs;
  * with them together, the windows of the rest are never faulted.
  *
- * Everything below this comment is written by
- * `scripts/host-bench/perf_matrix.py run-text <lib-W> crates/wz-capi-pico/link/run-text.ld <profiles>`
- * from the callgrind profiles of a run with `--trace-text`: one line a function, its own section and
- * the one the compiler gives a function it judged cold, a Rust name's hash matched by any characters
- * so a line holds while the function's path does. A function no line names keeps the linker's own
- * order, and with no line the output section is empty and is not written, so the order changes where
- * the code lies and never what it is.
+ * Everything below this comment is written by `bash scripts/pico-compare.sh run-text`, which runs
+ * every tcp, udp and multicast cell of the perf matrix once under callgrind and hands the profiles to
+ * `scripts/host-bench/perf_matrix.py run-text`: one line a function, its own section and the one the
+ * compiler gives a function it judged cold, a Rust name's hash matched by any characters so a line
+ * holds while the function's path does. A function no line names keeps the linker's own order, and
+ * with no line the output section is empty and is not written, so the order changes where the code
+ * lies and never what it is. A stale list is caught twice: the size gate refuses a library linked
+ * by a list that names functions and holding no `.text.run` (no line matched this build), and
+ * `perf_matrix.py resident-text` exits 1 when a run held code of the library past it (a function
+ * no line places ran).
  *
  * INSERT keeps the linker's own script and puts this statement before `.text`, so these input
  * sections are matched here first and land in the same executable segment. GNU ld and lld take it;
