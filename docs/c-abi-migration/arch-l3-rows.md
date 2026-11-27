@@ -777,6 +777,26 @@ So the switch lands as three commits, each built whole:
 3. The plane deleted (`get_plane.rs`, `engine/get.rs`, the plane's places and arena parts,
    `LegHolders`), and the face's `Gets` the legs alone.
 
+Decided after: the snapshot moves in the same commit as the queries, so no call type is ever
+written for the plane only to be taken out, and the session's own queryables' leg is a `GetLegs`
+answering `LOCAL_QUERY`, found by the one look every leg is. The plane's session-core half
+(`get_plane.rs`, `LegHolders`, `Round::calls_legs_of`, `PlaneCalls::Captures`) cannot outlive
+the round's change to a call, so it goes in that one commit too; what is left for a commit after
+it is only what the engine no longer reaches.
+
+**The tables' walks the switch reads, landed ahead of it** (`wz-session-core/src/session_tables.rs`).
+A get retired while a call of it ran (a reply the round of deliveries holds, or one the read
+handed past the lock) is let go of by the session's walk once its last call ended
+(`release_drained_get`, as `release_drained_subscriber` is for a subscriber; the walk is the one
+`release_drained` keeps, over a row that is not a declared entity), and a cancellation or the
+close finds every get its asker's fan names, standing or ended, in one walk of the table
+(`next_get_of`), where today it walks every face's table for an entry of the fan. Size: 0 in
+every case (the engine's `GetPresence` is still `Absent`). Receive: 0. Tests:
+`session_tables::tests::a_get_retired_while_its_call_ran_is_let_go_by_the_walk_once_the_call_ended`
+(red if the walk takes a get whose call still runs, takes one twice, or leaves its slot held) and
+`a_walk_finds_each_get_its_pick_names_standing_or_ended` (red if the walk skips an ended get,
+finds one of another fan, or finds a retired get again).
+
 ## 7. The receive
 
 None of D1 to D6, D3q and D3t is on the receive or the put; their receive instructions a message
