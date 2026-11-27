@@ -36,8 +36,8 @@ use crate::ClockSource;
 mod state;
 #[cfg(feature = "reassembly")]
 pub use state::{
-    FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, TransportFaces, TransportRouter,
-    TransportState, WireMaking,
+    ActionsCell, FaceStep, LinkPump, OpenedAs, PlacedWire, PumpPlace, RouterOf, TransportFaces,
+    TransportRouter, TransportState, WireMaking,
 };
 
 /// An endpoint a session could not use, at its open or at a later dial: the endpoint as it was

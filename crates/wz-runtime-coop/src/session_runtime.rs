@@ -95,12 +95,16 @@ impl<U> core::ops::Deref for NoShared<U> {
 /// shape (see module doc).
 // The slot profile has no pointer to share a value behind (its `Shared` has no value): the
 // bundle owns its kernel and its link, so the profile shares nothing and does not implement this.
+// Nor does a lock kind whose halves lie beside their actions (`PlacedHalves`): their handles are
+// made where the halves are written, never of a value.
 #[cfg(not(feature = "session-slot"))]
 impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> ShareValues
     for CoopRuntime<C, D, K>
+where
+    K::Halves: crate::link_cells::HeapHalves,
 {
     fn share<U>(value: U) -> Result<Self::Shared<U>, HeapRefused> {
-        crate::link_cells::CellRc::try_on_heap(value).ok_or(HeapRefused)
+        <K::Halves as crate::link_cells::HeapHalves>::on_heap(value).ok_or(HeapRefused)
     }
 }
 
@@ -124,13 +128,12 @@ impl<C: ClockSource, D: BoxedLinkDriver + ?Sized + 'static, K: LockKind> Session
     #[cfg(feature = "session-slot")]
     type LinkSink = SlotSink<D>;
 
-    // The shareable pointer is a cell handle, counted as an `Rc` is and not atomically: the
-    // single-task drive loop shares the kernel and the link only within its own task, and
-    // ARMv6-M has no atomic pointer. A cell handle, so an engine that reserved a table of cells
-    // writes a link's halves in one of them (`CellRc::halves_in`), and the same type names halves
-    // on the heap (`ShareValues::share`).
+    // The halves of a link's actions are held as the lock kind says (`LockKind::Halves`): beside
+    // the actions in their cell, reached by a reference that counts nothing, where an engine
+    // places each link's actions in a cell of its own; a cell handle on the heap counted as an
+    // `Rc` is, and not atomically, where the session shares them as values (`ShareValues::share`).
     #[cfg(not(feature = "session-slot"))]
-    type Shared<U> = crate::link_cells::CellRc<U, K::LinkCount>;
+    type Shared<U> = <K::Halves as crate::link_cells::HalvesForm>::Held<U>;
 
     // Fixed-memory step S9c -- the slot profile holds no shared pointer: the bundle
     // is one value in its slot, with its kernel and its link as its own fields

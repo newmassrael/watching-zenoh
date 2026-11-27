@@ -297,8 +297,6 @@ pub enum ArenaPart {
     LinkGates,
     LinkActionsFlags,
     LinkActions,
-    LinkHalvesFlags,
-    LinkHalves,
     SessionHandleFlag,
     SessionHandle,
     PublisherPlaceFlags,
@@ -410,8 +408,6 @@ impl ArenaPart {
             Self::LinkGates => ("link gates", LINK_BASIS),
             Self::LinkActionsFlags => ("link actions flags", LINK_BASIS),
             Self::LinkActions => ("link actions", LINK_BASIS),
-            Self::LinkHalvesFlags => ("link halves flags", LINK_BASIS),
-            Self::LinkHalves => ("link halves", LINK_BASIS),
             Self::SessionHandleFlag => ("session handle flag", ""),
             Self::SessionHandle => ("session handle", ""),
             Self::PublisherPlaceFlags => ("publisher place flags", "MAX_PUBLISHERS"),
@@ -558,9 +554,9 @@ const OWED_ROWS: usize = (cfg!(all(
 /// The session's declarations, the session's one table set and the key arena, where the arena
 /// lends them (`runtime-plan`; `ArenaPlan::put_entities`).
 const ENTITY_ROWS: usize = 2 * cfg!(feature = "runtime-plan") as usize;
-/// The links' cells, their gates', their sessions' actions' and the halves those hold, each a
-/// table of flags and cells ([`ArenaPlan::holding_cells`]).
-const CELL_ROWS: usize = 8;
+/// The links' cells, their gates' and their sessions' actions', with the halves those hold beside
+/// them, each a table of flags and cells ([`ArenaPlan::holding_cells`]).
+const CELL_ROWS: usize = 6;
 /// The ABI's handle's flag and place ([`ArenaPlan::holding`]).
 const HANDLE_ROWS: usize = 2;
 /// The flags and the places the ABI keeps its objects of the session's entities in, of each kind
@@ -1271,9 +1267,9 @@ impl EntityRows {
     }
 }
 
-/// One of each table of a cell for each link: the link's driver's, its gates', its session's
-/// actions' and the two halves those actions hold. A plan holds each table's cell bytes
-/// ([`ArenaPlan::holding_cells`]); an open, the tables the session's arena lends it
+/// One of each table of a cell for each link: the link's driver's, its gates' and its session's
+/// actions', with the two halves those actions hold beside them. A plan holds each table's cell
+/// bytes ([`ArenaPlan::holding_cells`]); an open, the tables the session's arena lends it
 /// (`TransportRows::lent_from`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LinkCells<T> {
@@ -1281,38 +1277,34 @@ pub struct LinkCells<T> {
     pub driver: T,
     /// The cells of the gates each link's pump runs behind.
     pub gate: T,
-    /// The cells of the bundle of each link's session actions.
+    /// The cells of the bundle of each link's session actions, and beside them in each the two
+    /// halves they hold: the link's own state and the session's kernel.
     pub actions: T,
-    /// The cells of the two halves each link's actions hold, together: the link's own state and
-    /// the session's kernel.
-    pub halves: T,
 }
 
 impl<T> LinkCells<T> {
-    /// The four in the order their tables are laid out and lent: the driver's, the gate's, the
-    /// actions', the halves'.
-    pub fn into_array(self) -> [T; 4] {
-        [self.driver, self.gate, self.actions, self.halves]
+    /// The three in the order their tables are laid out and lent: the driver's, the gate's, the
+    /// actions'.
+    pub fn into_array(self) -> [T; 3] {
+        [self.driver, self.gate, self.actions]
     }
 
-    /// The four from [`Self::into_array`]'s order.
-    pub fn from_array([driver, gate, actions, halves]: [T; 4]) -> Self {
+    /// The three from [`Self::into_array`]'s order.
+    pub fn from_array([driver, gate, actions]: [T; 3]) -> Self {
         Self {
             driver,
             gate,
             actions,
-            halves,
         }
     }
 }
 
 /// The parts of the two rows of each table of [`LinkCells`], in [`LinkCells::into_array`]'s
 /// order: its flags, then its cells.
-const CELL_PARTS: [[ArenaPart; 2]; 4] = [
+const CELL_PARTS: [[ArenaPart; 2]; 3] = [
     [ArenaPart::LinkCellFlags, ArenaPart::LinkCells],
     [ArenaPart::LinkGateFlags, ArenaPart::LinkGates],
     [ArenaPart::LinkActionsFlags, ArenaPart::LinkActions],
-    [ArenaPart::LinkHalvesFlags, ArenaPart::LinkHalves],
 ];
 
 /// The limits a table of a row for each link is sized by.
@@ -1433,14 +1425,14 @@ impl TransportRows {
         }
     }
 
-    /// The cells of the links' drivers, their gates, their actions and their halves, lent by
+    /// The cells of the links' drivers, their gates and their actions, lent by
     /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
     fn cells_from(
         &self,
         lend: &mut TableLender<'_>,
     ) -> LinkCells<Option<LentByteCells<LinkCellFlag>>> {
         let sizes = self.cell_bytes.into_array();
-        let mut cells = [None, None, None, None];
+        let mut cells = [None, None, None];
         for at in self.cells_held.places() {
             if let (Some(lent), Some(&bytes)) = (cells.get_mut(at), sizes.get(at)) {
                 *lent = Some(lend.byte_cells_of::<LinkCellFlag>(bytes, self.links));
@@ -2687,12 +2679,11 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
     /// order.
     pub(crate) const fn lay_cells(&mut self, bytes: LinkCells<usize>) {
         let laid = self.transport.cell_bytes;
-        let [driver, gate, actions, halves] = CELL_PARTS;
+        let [driver, gate, actions] = CELL_PARTS;
         self.transport.cell_bytes = LinkCells {
             driver: self.lay_cell_table(0, driver, laid.driver, bytes.driver),
             gate: self.lay_cell_table(1, gate, laid.gate, bytes.gate),
             actions: self.lay_cell_table(2, actions, laid.actions, bytes.actions),
-            halves: self.lay_cell_table(3, halves, laid.halves, bytes.halves),
         };
     }
 
@@ -3594,7 +3585,6 @@ const NO_CELLS: LinkCells<usize> = LinkCells {
     driver: 0,
     gate: 0,
     actions: 0,
-    halves: 0,
 };
 
 /// What a face's peer is owed, no row of it: a plan's before it is laid out, or after a refusal.
@@ -4410,8 +4400,7 @@ mod tests {
         let asked = LinkCells {
             driver: 40,
             gate: 0,
-            actions: 24,
-            halves: 56,
+            actions: 56,
         };
         plan.holding_cells(asked).expect("the cells fit");
         plan.holding_cells(asked).expect("held already");
@@ -4422,29 +4411,26 @@ mod tests {
                 "link cell flags",
                 "link cells",
                 "link actions flags",
-                "link actions",
-                "link halves flags",
-                "link halves"
+                "link actions"
             ]
         );
         assert_eq!(plan.rows().nth(1).map(|row| row.entry_bytes), Some(40));
+        assert_eq!(plan.rows().nth(1).map(|row| row.count), Some(3));
+        assert_eq!(plan.rows().nth(3).map(|row| row.entry_bytes), Some(56));
         assert_eq!(plan.rows().nth(3).map(|row| row.count), Some(3));
-        assert_eq!(plan.rows().nth(5).map(|row| row.entry_bytes), Some(56));
-        assert_eq!(plan.rows().nth(5).map(|row| row.count), Some(3));
     }
 
     /// The tables of cells are lent for each kind of cell the plan holds and for no other, past a
     /// kind with none and up to the last, a cell of its size for each link. Turned red by a walk
-    /// of the kinds that stops at the first with none, or never reaches the halves'.
+    /// of the kinds that stops at the first with none, or never reaches the actions'.
     #[test]
     fn the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none() {
         let mut plan = empty_plan();
         plan.transport.links = 3;
         let asked = LinkCells {
-            driver: 0,
-            gate: 48,
-            actions: 0,
-            halves: 64,
+            driver: 48,
+            gate: 0,
+            actions: 64,
         };
         plan.holding_cells(asked).expect("the cells fit");
         let mut arena = SessionArena::reserve(&plan, &AllocatorMemory).expect("an arena");
@@ -4454,7 +4440,7 @@ mod tests {
             .iter()
             .map(|cells| cells.as_ref().map(|cells| (cells.size(), cells.capacity())))
             .collect();
-        assert_eq!(held, [None, Some((48, 3)), None, Some((64, 3))]);
+        assert_eq!(held, [Some((48, 3)), None, Some((64, 3))]);
     }
 
     /// A mask walks the places set in it once each, the lowest first, the first bit and the last

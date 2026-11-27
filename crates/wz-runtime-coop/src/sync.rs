@@ -148,6 +148,13 @@ pub trait LockKind: 'static {
     type SharedCount: crate::link_cells::CountKind<Flag = Self::Flag>
         + crate::session_runtime::EntropyCount;
 
+    /// How the actions of a link of a session of this kind hold its two halves, the link's state
+    /// and the session's kernel (`SessionRuntime::Shared`): beside them in their own cell,
+    /// reached by references that count nothing, where an engine places each link's actions in a
+    /// cell of its own; each in a counted cell of the heap where the session shares them as values.
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type Halves: crate::link_cells::HalvesForm;
+
     /// A flag the session's holders write without a lock, and the flag of a table's cell
     /// (`SessionRuntime::Flag`): a cell where one task holds them, an atomic where threads do.
     #[cfg(feature = "session-unicast")]
@@ -270,6 +277,11 @@ impl LockKind for Shared {
 
     #[cfg(feature = "session-unicast")]
     one_task_holders!();
+
+    // A runtime of this kind shares a link's halves as values on the heap (`ShareValues`), each
+    // kept by its handles' count.
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type Halves = crate::link_cells::CountedHalves<crate::link_cells::OneTask>;
 }
 
 /// The owner of every value a runtime of [`Confined<Self>`](Confined) lends: an engine that
@@ -326,6 +338,11 @@ impl<O: ConfinedOwner> LockKind for Confined<O> {
 
     #[cfg(feature = "session-unicast")]
     one_task_holders!();
+
+    // The engine that owns the values places each link's actions in a cell of its own, and the
+    // halves beside them there.
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type Halves = crate::link_cells::PlacedHalves;
 }
 
 /// A kind whose hold of a value can be a value of its own, let go of as it drops, beside the
@@ -405,6 +422,8 @@ impl LockKind for ManyThreads {
     type LinkCount = crate::link_cells::OneFace;
     #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
     type SharedCount = crate::link_cells::Atomic;
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    type Halves = crate::link_cells::PlacedHalves;
     #[cfg(feature = "session-unicast")]
     type Flag = core::sync::atomic::AtomicBool;
     #[cfg(feature = "session-unicast")]
@@ -948,6 +967,36 @@ pub(crate) mod tests {
         );
     }
 
+    /// A runtime whose values an engine confines to its lock reaches a link's halves by
+    /// references that count nothing, the halves lying beside the actions in their cell, while the
+    /// runtime of the heap profile's kind counts each half in a cell of its own, which it can make
+    /// of a value. Turned red by a confined runtime whose `SessionRuntime::Shared` counts, or a
+    /// heap runtime whose halves are not counted.
+    #[cfg(all(feature = "session-unicast", not(feature = "session-slot")))]
+    #[test]
+    fn a_confined_runtime_places_a_links_halves_and_the_heap_profile_counts_them() {
+        use crate::link_cells::{CellRc, OneTask};
+        use wz_session_core::link::{BoxedLinkDriver, SessionRuntime, ShareValues};
+        use wz_session_core::placed::PlacedRef;
+
+        struct Still;
+
+        impl crate::ClockSource for Still {
+            fn now_us(&self) -> u64 {
+                0
+            }
+        }
+
+        type Placing = crate::CoopRuntime<Still, dyn BoxedLinkDriver, Held>;
+        type Counting = crate::CoopRuntime<Still, dyn BoxedLinkDriver, super::Shared>;
+        let _: core::marker::PhantomData<PlacedRef<u32>> =
+            core::marker::PhantomData::<<Placing as SessionRuntime>::Shared<u32>>;
+        let shared: CellRc<u32, OneTask> =
+            <Counting as ShareValues>::share(7).expect("the heap has room");
+        let other = shared.clone();
+        assert_eq!((*other, CellRc::handles(&shared)), (7, 2));
+    }
+
     /// A debug build fails a value taken inside its own hold, where a lock would wait on itself.
     #[cfg(debug_assertions)]
     #[test]
@@ -1037,15 +1086,18 @@ mod many_threads_tests {
 
     /// What a session runtime of several threads shares between a link's parts is a handle of
     /// the link's face, held with the face's parts and moved with them whole, so the parts' clones
-    /// keep one count; the session's entropy, which every face draws from, is counted as an
-    /// `Arc`'s is. Turned red by a runtime whose `SessionRuntime::Shared` is not counted as
-    /// [`LockKind::LinkCount`], or whose entropy is not counted across threads (`session_runtime`).
+    /// keep one count; a link's actions reach their halves by references that count nothing, the
+    /// halves lying beside them; the session's entropy, which every face draws from, is counted as
+    /// an `Arc`'s is. Turned red by a link's handles not counted as [`LockKind::LinkCount`], by a
+    /// runtime whose `SessionRuntime::Shared` counts, or whose entropy is not counted across
+    /// threads (`session_runtime`).
     #[cfg(not(feature = "session-slot"))]
     #[test]
     fn a_runtime_of_several_threads_shares_a_links_parts_within_its_face() {
         extern crate std;
         use crate::link_cells::{Atomic, CellRc, FaceHeld, FaceParts, OneFace};
-        use wz_session_core::link::{BoxedLinkDriver, SessionRuntime, ShareValues};
+        use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
+        use wz_session_core::placed::PlacedRef;
 
         struct Still;
 
@@ -1063,8 +1115,8 @@ mod many_threads_tests {
 
         type Runtime = crate::CoopRuntime<Still, dyn BoxedLinkDriver, Kind>;
         let mut face = FaceHeld::gather(|| {
-            let shared: CellRc<u32, OneFace> =
-                <Runtime as ShareValues>::share(7).expect("the heap has room");
+            let shared: CellRc<u32, <Kind as LockKind>::LinkCount> =
+                CellRc::<u32, OneFace>::try_on_heap(7).expect("the heap has room");
             Halves(shared.clone(), shared)
         });
         let read = std::thread::spawn(move || {
@@ -1079,6 +1131,8 @@ mod many_threads_tests {
         crosses::<<Runtime as SessionRuntime>::EntropyDraw>();
         let _: core::marker::PhantomData<crate::session_runtime::SessionEntropy<Atomic>> =
             core::marker::PhantomData::<<Runtime as SessionRuntime>::EntropyDraw>;
+        let _: core::marker::PhantomData<PlacedRef<u32>> =
+            core::marker::PhantomData::<<Runtime as SessionRuntime>::Shared<u32>>;
     }
 }
 

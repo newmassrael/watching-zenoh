@@ -868,7 +868,7 @@ pub(super) struct DirectParts<L: CoopLinks + 'static, C: ClockSource + 'static> 
 // slot held, and dropped by the read with its slot held too (`DirectSlot::drop_link`): the
 // session's record of the face holds a handle on the place, none on the parts, and a send reaches
 // the wire only through a hold of the place; the one handle the record keeps on a cell of the link
-// (`resource-snapshot`, the kernel's, `KernelCount`) is made and dropped under the session's lock.
+// (`resource-snapshot`, the actions', `KernelCount`) is made and dropped under the session's lock.
 // The receive part's handles on the same cells (the pump's link, the records' actions) are made
 // and dropped by the read alone, under its slot; the cells they share are reached through the
 // link's own cells, of the session's lock kind. Nothing of the parts is bound to a thread, and
@@ -905,21 +905,20 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> WireParts for DirectParts
 }
 
 /// `resource-snapshot` — what the session's record of the one link keeps of what the link's
-/// receive path counts: a handle on the link's kernel, whose meter that path counts into, apart
-/// from the place of the link's parts, so the record reads and retires the link with no lend of
-/// that place.
+/// receive path counts: a handle on the link's actions, whose kernel, beside them in their cell,
+/// holds the meter that path counts into, apart from the place of the link's parts, so the record
+/// reads and retires the link with no lend of that place.
 /// Made with the link's wire, before the wire goes into its place, and dropped with the record's
-/// handle on the place, both under the session's lock; the kernel's cell is given back once the
-/// parts' handles go too.
+/// handle on the place, both under the session's lock; the record's life follows no rule of the
+/// read's slot, so the handle counts, and the actions' cell is given back once the parts' handles
+/// go too.
 #[cfg(feature = "resource-snapshot")]
-pub(super) struct KernelCount<C: ClockSource + 'static>(
-    CellRc<SessionCore<LinkRuntime<C>, CoopTime<C>>, LinkCount>,
-);
+pub(super) struct KernelCount<C: ClockSource + 'static>(LinkHandle<C>);
 
 #[cfg(feature = "resource-snapshot")]
 impl<C: ClockSource + 'static> MessageCount for KernelCount<C> {
     fn reading(&self) -> wz_session_core::resource_snapshot::BuildMessageReading {
-        self.0.rx_intervals.reading()
+        self.0.core.rx_intervals.reading()
     }
 }
 
@@ -3031,7 +3030,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // The face's record holds the wire's waits, read once here, and no handle.
         let (input, room) = (wire.input_wait(), wire.room_wait());
         #[cfg(feature = "resource-snapshot")]
-        let count = KernelCount(CellRc::clone(&wire.actions.core));
+        let count = KernelCount(CellRc::clone(&wire.actions));
         // The place held no parts from the drop of the last link; the wire goes in whole, as the
         // parts' making takes it, and what was owed to the last link is let go of
         // (`FaceSite::hold`).

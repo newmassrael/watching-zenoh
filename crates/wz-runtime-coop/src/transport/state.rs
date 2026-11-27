@@ -17,19 +17,20 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 use core::ops::Deref;
+use core::ptr::NonNull;
 
+use wz_runtime_core::TimeSource;
 use wz_session_core::byte_cells::LentByteCells;
 use wz_session_core::driver_loop::{DriverOutcome, EventSink};
 #[cfg(feature = "group")]
 use wz_session_core::group_locator::parse_group_locator;
-use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::link::{BoxedLinkDriver, SessionRuntime};
 #[cfg(feature = "link-admission")]
 use wz_session_core::link_admission::LinkAdmission;
-#[cfg(feature = "link-admission")]
 use wz_session_core::placed::PlacedRef;
 #[cfg(all(feature = "queryable", feature = "group"))]
 use wz_session_core::response_sink::ResponseSink;
-use wz_session_core::session_actions::{HalvesMaking, LinkState, SessionCore, SessionLinkActions};
+use wz_session_core::session_actions::{LinkState, SessionCore, SessionLinkActions};
 use wz_session_core::session_init_params::SessionInitParams;
 use wz_session_core::session_timeouts::SessionTimeouts;
 use wz_session_core::session_zid::SessionZid;
@@ -51,7 +52,7 @@ use crate::faces::{
 };
 #[cfg(feature = "group")]
 use crate::group_transport::GroupTransport;
-use crate::link_cells::{CellRc, CountKind, OneTask};
+use crate::link_cells::{CellRc, CountKind, OneTask, PlacedHalves};
 #[cfg(feature = "listen")]
 use crate::locator_text::parse_listen_locator;
 use crate::reassembly_rx::SessionReassembly;
@@ -93,14 +94,18 @@ type LinkHandle<T> =
 /// The session's clock over the transport of `T`.
 type LinkTime<T> = CoopTime<<T as TransportFaces>::Clock>;
 
-/// The two halves of the actions of a link over the transport of `T`, not yet made.
-type LinkHalves<T> = HalvesMaking<LinkRuntime<T>, LinkTime<T>>;
+/// What the cell of the actions of a link over the transport of `T` holds.
+type ActionsCellOf<T> = ActionsCell<LinkRuntime<T>, LinkTime<T>>;
 
-/// A handle on each half of the actions of a link over the transport of `T`, as they hold them.
-type HalvesHeld<T> = (
-    CellRc<LinkState<LinkRuntime<T>>, CountOf<T>>,
-    CellRc<SessionCore<LinkRuntime<T>, LinkTime<T>>, CountOf<T>>,
-);
+/// What the cell of a link's actions holds: the actions, and beside them the two halves they hold,
+/// the link's own state and the session's kernel, which the actions reach by references that
+/// count nothing ([`TransportState::place_actions`]). The last handle on the actions drops the
+/// three in the order they are declared, the actions first, whose drop reaches no half.
+pub struct ActionsCell<R: SessionRuntime, T: TimeSource> {
+    actions: SessionLinkActions<R, T>,
+    link: LinkState<R>,
+    core: SessionCore<R, T>,
+}
 
 /// How the handles on the parts of a link over the transport of `T` are counted: as the lock kind
 /// of the values its session is lent counts them (`LockKind::LinkCount`).
@@ -120,8 +125,9 @@ type LinkOf<T> = CellRc<dyn SessionDatagramLink, CountOf<T>>;
 pub trait TransportFaces {
     /// The clock the session's links run on.
     type Clock: ClockSource + 'static;
-    /// How the session's runtime locks the values it lends each link's session.
-    type Lock: LockKind;
+    /// How the session's runtime locks the values it lends each link's session; the actions of
+    /// each link hold their halves beside them, in their own cell (`PlacedHalves`).
+    type Lock: LockKind<Halves = PlacedHalves>;
     /// The network the session's links, ports and groups are opened on.
     type Links: SessionLinks<<Self::Lock as LockKind>::LinkCount> + 'static;
     /// The session's half of one link.
@@ -226,13 +232,10 @@ pub struct TransportState<T: TransportFaces> {
     /// The cells each link's gates are placed in when the session makes the link, where they hold
     /// the link back (`LinkCalls::gate`), lent from the arena; none for a plan that laid out none.
     pub gate_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
-    /// The cells each link's actions are placed in when the session makes the link, lent from the
-    /// arena; none for a plan that laid out none.
+    /// The cells each link's actions are placed in when the session makes the link, with the two
+    /// halves they hold beside them (its own state and the session's kernel, [`ActionsCell`]),
+    /// lent from the arena; none for a plan that laid out none, whose cells lie on the heap.
     pub actions_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
-    /// The cells the two halves of each link's actions are placed in together when the session
-    /// makes the link (its own state and the session's kernel, `place_halves`), lent from the
-    /// arena; none for a plan that laid out none, whose halves lie on the heap.
-    pub halves_cells: Option<LentByteCells<<CountOf<T> as CountKind>::Flag>>,
     /// The key-wire form of each link the session opens: the session's, and the one stated for an
     /// endpoint apart from it (`shared-key-ids`).
     #[cfg(feature = "shared-key-ids")]
@@ -424,8 +427,12 @@ impl<T: TransportFaces> TransportState<T> {
         ))
     }
 
-    /// The actions of a link the session makes, placed in their cell of the session's table: a
-    /// link past the cells is refused as one past the stack's buffers is. With `link-admission`
+    /// The actions of a link the session makes over `sink`, opened with `params` on `clock`, and
+    /// the two halves they hold (its own state and the session's kernel), written together in their
+    /// cell of the session's table, where they stay ([`ActionsCell`]): the actions reach the halves
+    /// by references that count nothing, and neither half is a value of a frame on the way to the
+    /// cell. A link past the cells is refused as one past the stack's buffers is, nothing of it
+    /// made. With `link-admission`
     /// the link has its place in the session's admission before its handshake runs, which asks it
     /// once the remote's zid is known: a second link to a node the session holds is refused there,
     /// with nothing declared over it by either end, and not closed after it came up. Without it no
@@ -434,41 +441,52 @@ impl<T: TransportFaces> TransportState<T> {
     #[inline(always)]
     pub fn place_actions(
         &self,
-        actions: SessionLinkActions<LinkRuntime<T>, LinkTime<T>>,
+        sink: <LinkRuntime<T> as SessionRuntime>::LinkSink,
+        params: SessionInitParams,
+        clock: LinkTime<T>,
         role: SessionRole,
         endpoint: Option<&DialEndpoint>,
     ) -> Result<LinkHandle<T>, TransportRefusal> {
-        let actions: LinkHandle<T> =
-            CellRc::<_, CountOf<T>>::in_cells_of(self.actions_cells.as_ref(), actions)
-                .map_err(|_| self.cells_exhausted(endpoint))?;
+        let write = |at: *mut ActionsCellOf<T>| {
+            // SAFETY: `at` is the place of a whole cell's value, aligned and holding nothing, so
+            // its three fields are places of their types, apart and holding nothing. The halves
+            // are written whole before the handles on them are made, the handles are kept by the
+            // actions alone, and the cell neither moves nor drops the halves while a handle on the
+            // actions lives, the actions dropped before them (`ActionsCell`).
+            unsafe {
+                let link = core::ptr::addr_of_mut!((*at).link);
+                let kernel = core::ptr::addr_of_mut!((*at).core);
+                let Ok(actions) = SessionLinkActions::<LinkRuntime<T>, LinkTime<T>>::build_held(
+                    sink,
+                    params,
+                    clock,
+                    |halves| {
+                        halves.write(link, kernel);
+                        Ok::<_, core::convert::Infallible>((
+                            PlacedRef::of_place(NonNull::new_unchecked(link)),
+                            PlacedRef::of_place(NonNull::new_unchecked(kernel)),
+                        ))
+                    },
+                );
+                core::ptr::addr_of_mut!((*at).actions).write(actions);
+            }
+        };
+        // SAFETY: `write` leaves a whole cell's value at its place, and the part is the actions'
+        // field of the value it is handed, which lives as long as the value does.
+        let actions: LinkHandle<T> = unsafe {
+            CellRc::<ActionsCellOf<T>, CountOf<T>>::part_in_of(
+                self.actions_cells.as_ref(),
+                write,
+                |whole| NonNull::new_unchecked(core::ptr::addr_of_mut!((*whole.as_ptr()).actions)),
+            )
+        }
+        .ok_or_else(|| self.cells_exhausted(endpoint))?;
         #[cfg(feature = "link-admission")]
         actions
             .install_placed_link_admission(self.admission, matches!(role, SessionRole::Initiator));
         #[cfg(not(feature = "link-admission"))]
         let _ = role;
         Ok(actions)
-    }
-
-    /// The two halves of the actions of a link the session makes, its own state and the session's
-    /// kernel, written together in their cell of the session's table, where they stay: a handle on
-    /// each, as the actions hold them. Neither half is a value of a frame on the way to the cell.
-    /// A link past the cells is refused as one past the stack's buffers is, its halves never made.
-    // Always inlined, as the other steps of its one caller, `make_wire`, are.
-    #[inline(always)]
-    pub fn place_halves(
-        &self,
-        halves: LinkHalves<T>,
-        endpoint: Option<&DialEndpoint>,
-    ) -> Result<HalvesHeld<T>, TransportRefusal> {
-        let write = |link: *mut LinkState<LinkRuntime<T>>,
-                     kernel: *mut SessionCore<LinkRuntime<T>, LinkTime<T>>| {
-            // SAFETY: `halves_in` hands the two fields of the pair its cell holds: each of its
-            // half's type, apart from the other and holding nothing yet.
-            unsafe { halves.write(link, kernel) }
-        };
-        // SAFETY: `HalvesMaking::write` leaves a whole value at each place when it returns.
-        unsafe { CellRc::<_, CountOf<T>>::halves_in_of(self.halves_cells.as_ref(), write) }
-            .ok_or_else(|| self.cells_exhausted(endpoint))
     }
 
     /// The key-wire form of a link dialled to or taken on `endpoint`: the one stated for the
@@ -664,7 +682,7 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// The session of the link `opened` as face `face`, in `role`, dialled to or taken on
-    /// `endpoint` and opened with `making`'s parameters: its actions and their halves placed in their cells, its
+    /// `endpoint` and opened with `making`'s parameters: its actions placed with their halves in their cell, its
     /// pump behind the gates the session puts it behind (`calls`), placed in theirs, and its task
     /// spawned. What the session's tables keep of the link is the session's to do (`LinkCalls`).
     /// [`TransportRefusal::EntropyUnavailable`] when an acceptor's source is dry, since its
@@ -736,7 +754,7 @@ impl<T: TransportFaces> TransportState<T> {
     }
 
     /// What [`Self::make_wire`] and [`Self::place_wire`] share: the link's actions and their
-    /// halves placed in their cells, the session's tables told of the link, its pump behind the
+    /// halves placed in their cell, the session's tables told of the link, its pump behind the
     /// gates, placed in theirs, and the parts the session's pump is built of.
     #[inline(always)]
     fn build_wire<K: LinkCalls<T::Clock, T::Lock>>(
@@ -756,15 +774,9 @@ impl<T: TransportFaces> TransportState<T> {
             clock,
             timeouts,
         } = making;
-        // The link's halves lie in its cell of the session's table, as its actions do: a link made
+        // The link's actions and their halves lie in one cell of the session's table: a link made
         // after the open takes no memory of the heap for them.
-        let actions = SessionLinkActions::<LinkRuntime<T>, LinkTime<T>>::build_held(
-            sink,
-            params,
-            clock.clone(),
-            |halves| self.place_halves(halves, endpoint),
-        )?;
-        let actions = self.place_actions(actions, role, endpoint)?;
+        let actions = self.place_actions(sink, params, clock.clone(), role, endpoint)?;
         // An acceptor mints a cookie at each InitAck from a nonce its binding draws from the
         // session's source, and one whose source is dry refuses every handshake (fail closed): a
         // source that is dry now is not a link to accept. One that holds each accept itself

@@ -157,10 +157,10 @@ use wz_runtime_coop::session_drive::{LinkWaits, WaitOn};
 use wz_runtime_coop::session_drive::{OpenedLink, SessionDatagramLink, SessionLinks, SessionRole};
 use wz_runtime_coop::session_runtime::{SessionEntropy, SessionHandle};
 use wz_runtime_coop::sync::Lend;
-pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::transport::{
-    LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
+    ActionsCell, LinkCalls, TransportFaces, TransportRefusal, TransportSession, WireMaking,
 };
+pub use wz_runtime_coop::transport::{EndpointRefusal, Refusal};
 use wz_runtime_coop::{
     ClockSource, CoopLocalSet, CoopRuntime, CoopTime, RuntimeForm, RuntimePlace, RuntimeRows,
 };
@@ -198,7 +198,7 @@ use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 #[cfg(all(feature = "listen", feature = "tx-probe"))]
 use wz_session_core::session_actions::Probed;
-use wz_session_core::session_actions::{LinkState, SessionCore, SessionLinkActions};
+use wz_session_core::session_actions::SessionLinkActions;
 use wz_session_core::session_init_params::{
     CookieKey, HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
     ZidError, ZID_MAX,
@@ -4697,17 +4697,9 @@ type GateCells = wz_session_core::byte_cells::LentByteCells<
     <LinkCount as wz_runtime_coop::link_cells::CountKind>::Flag,
 >;
 
-/// The two halves the actions of a link of a session on the clock `C` hold, which the session
-/// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
-/// own state and the session's kernel.
-type LinkHalves<C> = (
-    LinkState<LinkRuntime<C>>,
-    SessionCore<LinkRuntime<C>, CoopTime<C>>,
-);
-
 /// The bytes of each link's cells a session over `links` on the clock `C` lays out: a cell for
-/// each link's driver as large as the largest the links open, one for its gates, one for its
-/// actions and one for the two halves they hold.
+/// each link's driver as large as the largest the links open, one for its gates, and one for its
+/// actions with the two halves they hold beside them (`ActionsCell`).
 pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl CoopLinks) -> LinkCells<usize> {
     cells_of::<C>(links.link_cell_bytes())
 }
@@ -4719,8 +4711,7 @@ pub(crate) const fn cells_of<C: ClockSource + 'static>(driver: usize) -> LinkCel
     LinkCells {
         driver,
         gate: CellRc::<LinkGate<C>>::cell_bytes(),
-        actions: CellRc::<LinkActions<C>>::cell_bytes(),
-        halves: CellRc::<LinkHalves<C>>::cell_bytes(),
+        actions: CellRc::<ActionsCell<LinkRuntime<C>, CoopTime<C>>>::cell_bytes(),
     }
 }
 
@@ -7199,7 +7190,6 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 wire_zid: wire,
                 gate_cells: lent.transport.cells.gate,
                 actions_cells: lent.transport.cells.actions,
-                halves_cells: lent.transport.cells.halves,
                 #[cfg(feature = "shared-key-ids")]
                 key_forms,
                 #[cfg(wz_round)]
@@ -7664,15 +7654,15 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             .map(LentByteCells::in_use)
     }
 
-    /// How many cells of the session's table of links' halves hold a link's halves now: `None`
-    /// for a session whose plan laid out no such table.
+    /// How many cells of the session's table of links' actions hold a link's actions, and the
+    /// halves beside them, now: `None` for a session whose plan laid out no such table.
     #[cfg(all(test, feature = "std"))]
-    pub(crate) fn link_halves_in_use(&self) -> Option<usize> {
+    pub(crate) fn link_actions_in_use(&self) -> Option<usize> {
         self.core
             .lock()
             .0
             .transport
-            .halves_cells
+            .actions_cells
             .as_ref()
             .map(LentByteCells::in_use)
     }

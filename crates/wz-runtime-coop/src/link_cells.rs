@@ -35,6 +35,7 @@ use portable_atomic::AtomicUsize as CountWord;
 use wz_session_core::bounded::ARENA_ALIGN;
 use wz_session_core::byte_cells::{ByteBuf, CellFlag, LentByteCells};
 use wz_session_core::link::BoxedLinkDriver;
+use wz_session_core::placed::PlacedRef;
 
 use crate::session_drive::SessionDatagramLink;
 
@@ -246,6 +247,43 @@ impl CountKind for OneFace {
     #[inline]
     fn try_with_local<T, U>(local: &Self::Local<T>, f: impl FnOnce(&mut T) -> U) -> Option<U> {
         OneTask::try_with_local(local, f)
+    }
+}
+
+/// How the actions of a link hold their two halves, the link's own state and the session's kernel
+/// (`SessionRuntime::Shared`): a counted handle each, or a reference that counts nothing. A lock
+/// kind names its form (`crate::sync::LockKind::Halves`).
+pub trait HalvesForm: 'static {
+    /// A handle on a half, as the actions hold it.
+    type Held<U>: Clone + Deref<Target = U>;
+}
+
+/// Each half in a cell of its own counted by `N`: what a session whose halves are shared through
+/// the heap holds (`ShareValues`), with no cell of the session to own them.
+pub struct CountedHalves<N: CountKind>(PhantomData<fn() -> N>);
+
+impl<N: CountKind> HalvesForm for CountedHalves<N> {
+    type Held<U> = CellRc<U, N>;
+}
+
+/// The halves in the actions' own cell, beside them, reached by references that count nothing
+/// (`PlacedRef`): the last handle on the actions drops the three.
+pub enum PlacedHalves {}
+
+impl HalvesForm for PlacedHalves {
+    type Held<U> = PlacedRef<U>;
+}
+
+/// A form whose handle on a half can be made of the half as a value, in a cell of the heap.
+pub trait HeapHalves: HalvesForm {
+    /// `value` in a cell of its own on the heap; `None`, with `value` let go of, when the heap
+    /// refuses the cell.
+    fn on_heap<U>(value: U) -> Option<Self::Held<U>>;
+}
+
+impl<N: CountKind> HeapHalves for CountedHalves<N> {
+    fn on_heap<U>(value: U) -> Option<CellRc<U, N>> {
+        CellRc::try_on_heap(value)
     }
 }
 
@@ -734,6 +772,48 @@ impl<A, B, N: CountKind> CellRc<(A, B), N> {
                 }),
             )
         }
+    }
+}
+
+impl<K, N: CountKind> CellRc<K, N> {
+    /// A value `write` writes in one cell of `cells` ([`Self::in_cells_of`], or one of the heap
+    /// when no table is lent), where it stays, and a handle on the part of it `as_part` answers:
+    /// the parts of the value that the part reaches lie beside it and are dropped with it, by the
+    /// last handle, whatever part it names. `None` when no cell takes the value or the heap
+    /// refuses one, `write` not called and let go of with what it holds.
+    ///
+    /// # Safety
+    /// `write` leaves a whole `K` at the place it is handed when it returns; one that unwinds
+    /// keeps the cell, which is then never given back. `as_part` answers a pointer to a value
+    /// that lives as long as the value it is handed.
+    pub unsafe fn part_in_of<P>(
+        cells: Option<&LentByteCells<N::Flag>>,
+        write: impl FnOnce(*mut K),
+        as_part: impl FnOnce(NonNull<K>) -> NonNull<P>,
+    ) -> Option<CellRc<P, N>> {
+        let head = head_in(
+            cells,
+            Layout::new::<Slot<K, N::Flag>>(),
+            Slot::<K, N::Flag>::WHOLE,
+            Slot::<K, N::Flag>::PLACE,
+        )?;
+        let slot = head.cast::<Slot<K, N::Flag>>().as_ptr();
+        // SAFETY: the head heads a cell of `Slot<K>`'s layout, written with one handle and named
+        // by none, whose value is not written: its place is aligned for `K` and this call's
+        // alone, which `write` leaves whole (the caller's contract), so the value is whole when
+        // the handle names it.
+        let whole = unsafe {
+            let at = core::ptr::addr_of_mut!((*slot).value);
+            write(at);
+            Self {
+                head,
+                value: NonNull::new_unchecked(at),
+                _owns: PhantomData,
+                _count: PhantomData,
+            }
+        };
+        // SAFETY: the caller's contract on `as_part`; the cell's `whole` drops the value placed.
+        Some(unsafe { whole.part(as_part) })
     }
 }
 
@@ -1553,6 +1633,102 @@ mod tests {
             .ok()
             .expect("the heap when no table is lent");
         assert_eq!((*boxed, cells.in_use()), (8, 0), "the heap's takes no cell");
+    }
+
+    /// A value written in place and named by a handle on a part of it: the handle names the part
+    /// of the place the writer wrote, the cell keeps the whole value until the last handle on the
+    /// part goes, which drops the whole and gives the cell back, and a lent table's cell takes no
+    /// memory of the heap. With every cell taken the writer is not called. Turned red by a last
+    /// handle that drops its part alone, by a cell given back while a handle on the part lives, or
+    /// by a writer called with no cell to write in.
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn a_handle_on_a_part_keeps_the_whole_value_written_in_place() {
+        type Pair = (u32, Counted);
+        fn first(whole: core::ptr::NonNull<Pair>) -> core::ptr::NonNull<u32> {
+            // SAFETY: the first field of a live pair, whose place is never null.
+            unsafe {
+                core::ptr::NonNull::new_unchecked(core::ptr::addr_of_mut!((*whole.as_ptr()).0))
+            }
+        }
+        let cells = table(CellRc::<Pair>::cell_bytes());
+        let drops = Rc::new(Cell::new(0));
+        let mut written = core::ptr::null_mut::<Pair>();
+        let counted = Counted(drops.clone());
+        let (placed, made) = crate::table_tests::allocations(|| {
+            // SAFETY: the writer writes a whole pair, and the part is its first field.
+            unsafe {
+                CellRc::<Pair>::part_in_of(
+                    Some(&cells),
+                    |at: *mut Pair| {
+                        at.write((7, counted));
+                        written = at;
+                    },
+                    first,
+                )
+            }
+        });
+        let part = placed.expect("a cell");
+        assert_eq!(
+            made, 0,
+            "a value written in a lent table takes no memory of the heap"
+        );
+        assert_eq!(
+            CellRc::as_ptr(&part),
+            // SAFETY: the place the writer wrote, which the cell still holds.
+            unsafe { core::ptr::addr_of!((*written).0) },
+            "the handle names the part of the place the writer wrote"
+        );
+        let other = part.clone();
+        drop(part);
+        assert_eq!(
+            (*other, drops.get(), cells.in_use()),
+            (7, 0, 1),
+            "a handle on the part keeps the whole value and its cell"
+        );
+        drop(other);
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (1, 0),
+            "the last handle drops the whole value and gives the cell back"
+        );
+        let take = |value: u32| {
+            let counted = Counted(drops.clone());
+            // SAFETY: as above.
+            unsafe {
+                CellRc::<Pair>::part_in_of(
+                    Some(&cells),
+                    |at: *mut Pair| at.write((value, counted)),
+                    first,
+                )
+            }
+        };
+        let both = (take(8), take(9));
+        let mut called = false;
+        // SAFETY: as above.
+        let refused = unsafe {
+            CellRc::<Pair>::part_in_of(
+                Some(&cells),
+                |at: *mut Pair| {
+                    called = true;
+                    at.write((10, Counted(drops.clone())));
+                },
+                first,
+            )
+        };
+        assert!(
+            refused.is_none() && !called,
+            "no cell left, the writer is not called"
+        );
+        assert_eq!(
+            (both.0.map(|part| *part), both.1.map(|part| *part)),
+            (Some(8), Some(9))
+        );
+        assert_eq!(
+            (drops.get(), cells.in_use()),
+            (3, 0),
+            "each value written is dropped once, and the refused writer wrote none"
+        );
     }
 
     /// Halves written in place lie where their writer wrote them: the places it is handed are the
