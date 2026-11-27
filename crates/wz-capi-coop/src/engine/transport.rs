@@ -12,6 +12,13 @@ use super::*;
 /// receives are handed, over this engine's faces and groups.
 pub(super) type TransportState<L, C> = wz_runtime_coop::transport::TransportState<Face<C, L>>;
 
+/// Where the places of the session's table of faces lie: reserved at the open where the build
+/// takes faces beside its dial role's, the one place inline where it takes none.
+#[cfg(any(feature = "listen", feature = "group"))]
+type FacePlaceRows<F, D> = wz_runtime_coop::faces::ReservedRows<F, D>;
+#[cfg(not(any(feature = "listen", feature = "group")))]
+type FacePlaceRows<F, D> = wz_runtime_coop::faces::OneRow<F, D>;
+
 /// A face of this engine names the transport's types: its clock, its network, its link's session
 /// and the group a session joins (`group`).
 impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C, L> {
@@ -21,12 +28,10 @@ impl<C: ClockSource + 'static, L: CoopLinks + 'static> TransportFaces for Face<C
     type Session = LinkSession<C>;
     type Wire = FaceLink<C, L>;
     type Face = Self;
-    // A build that takes no face beside its dial role's holds that one alone, so its walks over
-    // the faces are one face and no place is looked up (`crate::arena::TAKES_FACES`).
-    #[cfg(any(feature = "listen", feature = "group"))]
-    type Places = wz_runtime_coop::faces::ManyFaces<Self, L::Dial>;
-    #[cfg(not(any(feature = "listen", feature = "group")))]
-    type Places = wz_runtime_coop::faces::OneFace<Self, L::Dial>;
+    // One table of the faces in every build, its places where the build keeps them: one place
+    // inline where the build takes no face beside its dial role's, so its walks over the faces
+    // are one face and every place a constant (`crate::arena::TAKES_FACES`).
+    type Places = wz_runtime_coop::faces::FaceRows<FacePlaceRows<Self, L::Dial>>;
     #[cfg(feature = "group")]
     type Group = GroupFace<L::Waits>;
     type Peers = RouterPeers;

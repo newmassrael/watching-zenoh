@@ -3303,7 +3303,7 @@ pub const fn admitted_faces(limits: &SessionLimits) -> Result<usize, ArenaRefuse
 
 /// Whether the build takes faces beside its dial role's: the links a listener accepts and the
 /// faces it attaches (`listen`), and the groups it joins (`group`). A build of neither holds
-/// its dial role's face alone (`wz_runtime_coop::faces::OneFace`).
+/// its dial role's face alone, in a table of one place (`wz_runtime_coop::faces::OneRow`).
 pub(crate) const TAKES_FACES: bool = cfg!(any(feature = "listen", feature = "group"));
 
 /// The faces of the face table's `sets` places that are read where they lie, each with a read
