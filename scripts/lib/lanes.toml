@@ -71,7 +71,7 @@ id = "Bc"
 fn = "layer_bc_c11_freestanding"
 class = "E"
 reason = "it compiles with the Arm GNU Toolchain release SCE pins and runs vectors with the machine's cc, which the key does not hold"
-decl = ["sources/codecs/*.scxml", "sources/algorithms/*.scxml", "deploy/codec_node.yaml", "deploy/c11/*.tsv"]
+decl = ["sources/*/*.scxml", "deploy/codec_node.yaml", "deploy/c11/*.tsv"]
 
 [[lane]]
 id = "C0"

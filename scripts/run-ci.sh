@@ -2206,10 +2206,10 @@ layer_b2_regen_diff() {
 
 # ─── Layer Bc — the C11 emission compiled with no C library ─────────
 # The C11 half of "one source set, Rust and C11" (docs/zenoh-logic-as-sce-kinds.md,
-# section 5 items 1 and 5, section 9): every document of sources/codecs and
-# sources/algorithms generated as one C11 set, each unit compiled for a Cortex-M4 with
-# SCE ADR 0110 D3's flags and no C library, its undefined symbols held to the four
-# memory functions and libgcc, its sections held to deploy/c11/footprint.tsv, and the
+# section 5 items 1 and 5, section 9): every document of sources/ generated as one
+# C11 set, each unit compiled for a Cortex-M4 with SCE ADR 0110 D3's flags and no C
+# library, its undefined symbols held to the four memory functions, libgcc and the
+# seams SCE's board defines, its sections held to deploy/c11/footprint.tsv, and the
 # vectors its document states run on the host. scripts/c11-lane.sh is the lane's body
 # and says why each step is what it is; this function maps its "could not run" (3) to a
 # skip, or to a failure where the job provisions the tools (WZ_BC_REQUIRE).

@@ -15,18 +15,34 @@
 # ran it (section 9 of that document). The structure is SCE's own C11 gate (SCE ADR
 # 0110, vendor/sce/scripts/gates/c11-mcu.sh) applied to wz's documents:
 #
-#   1. GENERATE. Every document under sources/codecs and sources/algorithms, with the
-#      standard documents they import, as ONE set: `sce-codegen orchestrate -l c11
-#      --deploy deploy/codec_node.yaml`. A deployment is a property of the set (SCE
-#      refuses `generate --with-imports --deploy` for that reason), and C11 holds every
-#      list in an array of the capacity the deployment gives it.
-#   2. COMPILE. Each unit's header alone, as its own translation unit, with SCE ADR
-#      0110 D3's flags (Cortex-M4, -ffreestanding -nostdlib -Werror) and every inline
-#      function kept (-fkeep-inline-functions -fkeep-static-functions): the units are
-#      header-only, so without them a unit compiles to nothing and nothing is judged.
+#   1. GENERATE. Every document under sources/ (codecs, algorithms, statecharts, buffer
+#      pools, event schemas, links, the feature model), with the standard documents
+#      they import, as ONE set: `sce-codegen orchestrate -l c11 --deploy
+#      deploy/codec_node.yaml`. One set because a node is built from one source set
+#      under one deployment: a deployment is a property of the set (SCE refuses
+#      `generate --with-imports --deploy` for that reason), its cross-document
+#      validators (links, reassembly) judge the set together, and C11 holds every list
+#      in an array of the capacity the deployment gives it. The generator refuses the
+#      whole set when it refuses one document, so a document deploy/c11/refusals.tsv
+#      declares refused by the generator is left out of the set and generated alone,
+#      with the same arguments, where it must be refused with the declared words.
+#   2. COMPILE. A unit with a translation unit of its own (`<unit>.c`, a statechart's
+#      machine) is compiled as SCE's own gate compiles a machine: that file, with SCE
+#      ADR 0110 D3's flags exactly (Cortex-M4, -ffreestanding -nostdlib -Werror); its
+#      functions have external linkage, so every one is compiled and judged. The
+#      saved-state unit (`*_saved`) is not: a deployment that does not persist does
+#      not link it, and it is the one unit that may use the hosted library (D2). A
+#      header-only unit (a codec, an algorithm, a schema, a pool) is its header alone,
+#      as its own translation unit, with D3's flags and every inline function kept
+#      (-fkeep-inline-functions -fkeep-static-functions): without them it compiles to
+#      nothing and nothing is judged.
 #   3. FREESTANDING. A unit's object may leave undefined only the four memory
-#      functions every C environment supplies (SCE ADR 0110 D1) and what libgcc of the
-#      same multilib defines. Any other undefined symbol is a call into a hosted
+#      functions every C environment supplies (SCE ADR 0110 D1), what libgcc of the
+#      same multilib defines, and the seams: the functions SCE's runtime headers
+#      declare for a core to call and a deployment to define (D2), read as the SCE
+#      gate links them, from SCE's MCU board (backends/c/mcu/seams.c): what that file
+#      defines that a header of SCE's runtime declares, as the compiler's own
+#      -aux-info reads both. Any other undefined symbol is a call into a hosted
 #      library and fails, named.
 #   4. WEIGH. .text, .rodata, .data and .bss of each unit's object (the unit and what
 #      it includes; the runtime is header-only too) against deploy/c11/footprint.tsv,
@@ -37,9 +53,10 @@
 #      rows the sidecar runs must be the number the document states, so a sidecar that
 #      runs nothing is not a pass.
 #
-# A unit that does not compile is a failure unless deploy/c11/refusals.tsv names it
-# with the error it gives. A named unit that compiles, or fails with other words,
-# fails too: the table only shrinks by the fix it waits for.
+# A document the generator refuses, a unit that does not compile and a unit that calls
+# something hosted are each a failure unless deploy/c11/refusals.tsv names it with what
+# it gives. A named one that passes, or fails with other words, fails too: the table
+# only shrinks by the fix it waits for.
 #
 # The compiler is Arm's build of the release SCE pins
 # (vendor/sce/scripts/install_arm_gnu_toolchain.sh, ARM_GNU_TOOLCHAIN_REV), installed by
@@ -106,20 +123,38 @@ case "$rc" in
 esac
 CODEGEN="$(sce_codegen_binary "$WZ_SCE_DIR")"
 
-# SCE ADR 0110 D3's flags, and every inline function kept (see the header).
+# SCE ADR 0110 D3's flags, exactly; a header-only unit adds every inline function kept
+# (see the header).
 TARGET_FLAGS=(-mcpu=cortex-m4 -mthumb -mfloat-abi=hard -mfpu=fpv4-sp-d16)
-CFLAGS=("${TARGET_FLAGS[@]}" -std=c11 -ffreestanding -nostdlib -Os -ffunction-sections -fdata-sections
-        -Wall -Wextra -Wpedantic -Werror -fkeep-inline-functions -fkeep-static-functions)
+D3_FLAGS=("${TARGET_FLAGS[@]}" -std=c11 -ffreestanding -nostdlib -Os -ffunction-sections -fdata-sections
+          -Wall -Wextra -Wpedantic -Werror)
+KEEP_FLAGS=(-fkeep-inline-functions -fkeep-static-functions)
 INCLUDES=(-I "$SCE/backends/c/runtime/include" -I "$SCE/backends/c/forge-runtime/include" -I "$GEN")
 
 rm -rf "$OUT"
-mkdir -p "$GEN" "$OBJ" "$HOST"
+mkdir -p "$GEN" "$OBJ" "$HOST" "$OUT/refused"
 
-# ── 1. generate the set ─────────────────────────────────────────────────────────
-mapfile -t DOCUMENTS < <(LC_ALL=C ls sources/codecs/*.scxml sources/algorithms/*.scxml)
-(( ${#DOCUMENTS[@]} > 0 )) || fail "no document under sources/codecs or sources/algorithms"
-# The standard documents the set imports, read from the documents' own imports.
-mapfile -t STANDARD < <(python3 - "${DOCUMENTS[@]}" <<'PY'
+FAILURES=()
+MEASURED=()
+OUT_OF_BAND=()
+UNMEASURED=()
+COMPILED=0
+REFUSED_AS_DECLARED=0
+CALLS_AS_DECLARED=0
+GENERATION_REFUSED=0
+
+# ── the declared refusals ───────────────────────────────────────────────────────
+# Keyed by a unit, or by a document's path for one the generator refuses.
+declare -A REFUSED_WHERE REFUSED_WORDS
+while IFS=$'\t' read -r unit where words _cause; do
+    [[ -z "$unit" || "$unit" == \#* ]] && continue
+    REFUSED_WHERE["$unit"]="$where"
+    REFUSED_WORDS["$unit"]="$words"
+done < "$REFUSALS"
+
+# The standard documents the documents given import, read from their own imports.
+standard_imports() {
+    python3 - "$@" <<'PY'
 import sys
 import xml.etree.ElementTree as ET
 seen = set()
@@ -130,15 +165,67 @@ for path in sys.argv[1:]:
             seen.add(src)
 print("\n".join(sorted(seen)))
 PY
-)
-ARGS=()
-for doc in "${DOCUMENTS[@]}" "${STANDARD[@]}"; do
-    [[ -n "$doc" ]] && ARGS+=(--document "$doc")
+}
+
+# The words of the generator's first error, without the file and position it names,
+# which move with the tree's layout and say nothing of the fault.
+generator_error() {
+    sed -n 's|^[^ :]*\(:[0-9][0-9]*\)*: \(.*[Ee]rror: .*\)$|\2|p' "$1" | sed -n '1p'
+}
+
+# Generate the documents given as one set, with the standard documents they import, into
+# the directory $1, its standard error into the file $2. Returns the generator's status.
+generate_set() {
+    local into="$1" errf="$2" doc
+    shift 2
+    local args=() standard=()
+    mapfile -t standard < <(standard_imports "$@")
+    for doc in "$@" "${standard[@]}"; do
+        [[ -n "$doc" ]] && args+=(--document "$doc")
+    done
+    sce_codegen_spawn "$CODEGEN" "$WZ_SCE_DIR" "$errf" \
+        orchestrate -l c11 --deploy "$DEPLOY" --input-root sources --output-dir "$into" "${args[@]}"
+}
+
+# ── 1. generate the set ─────────────────────────────────────────────────────────
+mapfile -t SOURCES < <(LC_ALL=C ls sources/*/*.scxml)
+(( ${#SOURCES[@]} > 0 )) || fail "no document under sources/"
+declare -A IS_SOURCE
+DOCUMENTS=()
+for doc in "${SOURCES[@]}"; do
+    IS_SOURCE["$doc"]=1
+    if [[ "${REFUSED_WHERE[$doc]:-}" != generate ]]; then
+        DOCUMENTS+=("$doc")
+        continue
+    fi
+    # Declared refused by the generator: generated alone, with the arguments the set takes.
+    alone="$OUT/refused/$(basename "$doc" .scxml)"
+    mkdir -p "$alone"
+    rc=0
+    generate_set "$alone" "$alone.stderr" "$doc" >"$alone.stdout" || rc=$?
+    case "$rc" in
+        0)
+            FAILURES+=("$doc: generates, and $REFUSALS still names it as refused by the generator; remove its row so it joins the set")
+            ;;
+        125 | 126)
+            cat "$alone.stderr" >&2
+            fail "the generation of $doc could not be judged (sce_codegen_spawn returned $rc)"
+            ;;
+        *)
+            got="$(generator_error "$alone.stderr")"
+            if [[ "$got" == "${REFUSED_WORDS[$doc]}" ]]; then
+                GENERATION_REFUSED=$((GENERATION_REFUSED + 1))
+            else
+                cat "$alone.stderr" >&2
+                FAILURES+=("$doc: refused by the generator with other words than $REFUSALS declares: got '$got', declared '${REFUSED_WORDS[$doc]}'")
+            fi
+            ;;
+    esac
 done
+(( ${#DOCUMENTS[@]} > 0 )) || fail "every document under sources/ is declared refused"
+mapfile -t STANDARD < <(standard_imports "${DOCUMENTS[@]}")
 rc=0
-sce_codegen_spawn "$CODEGEN" "$WZ_SCE_DIR" "$OUT/generate.stderr" \
-    orchestrate -l c11 --deploy "$DEPLOY" --input-root sources --output-dir "$GEN" "${ARGS[@]}" \
-    >"$OUT/generate.stdout" || rc=$?
+generate_set "$GEN" "$OUT/generate.stderr" "${DOCUMENTS[@]}" >"$OUT/generate.stdout" || rc=$?
 if (( rc != 0 )); then
     cat "$OUT/generate.stderr" >&2
     fail "the C11 generation of the set exited $rc"
@@ -147,11 +234,21 @@ fi
 UNITS=()
 declare -A IS_UNIT
 for header in "$GEN"/*.h; do
-    [[ -e "$header" && "$header" != *_test.h ]] || continue
-    UNITS+=("$(basename "$header" .h)")
-    IS_UNIT["$(basename "$header" .h)"]=1
+    [[ -e "$header" ]] || continue
+    unit="$(basename "$header" .h)"
+    case "$unit" in *_test | *_saved) continue ;; esac
+    UNITS+=("$unit")
+    IS_UNIT["$unit"]=1
 done
 (( ${#UNITS[@]} > 0 )) || fail "the generation wrote no header into $GEN"
+# Every translation unit the generator wrote is a unit's, but the saved-state one (D2).
+for source in "$GEN"/*.c; do
+    [[ -e "$source" ]] || continue
+    unit="$(basename "$source" .c)"
+    case "$unit" in *_saved) continue ;; esac
+    [[ -n "${IS_UNIT[$unit]+x}" ]] \
+        || FAILURES+=("$(basename "$source"): a translation unit with no header of its name, which no unit compiles")
+done
 
 # ── what may stay undefined in a freestanding object ────────────────────────────
 LIBGCC="$("$GCC" "${TARGET_FLAGS[@]}" -print-libgcc-file-name)"
@@ -160,15 +257,44 @@ declare -A ALLOWED=([memcpy]=1 [memset]=1 [memmove]=1 [memcmp]=1)
 while read -r sym; do
     ALLOWED["$sym"]=1
 done < <("$NM" -g --defined-only "$LIBGCC" 2>/dev/null | awk 'NF == 3 { print $3 }')
+# The seams: what SCE's board defines (the definitions its gate links a machine with)
+# that a header of SCE's runtime declares, each as the compiler read it.
+BOARD_SEAMS="$SCE/backends/c/mcu/seams.c"
+[[ -f "$BOARD_SEAMS" ]] || fail "vendor/sce holds no backends/c/mcu/seams.c, the seams SCE's gate links a machine with"
+"$GCC" "${D3_FLAGS[@]}" "${INCLUDES[@]}" -I "$SCE/backends/c/mcu" -fsyntax-only -aux-info "$OBJ/seams.aux" \
+    "$BOARD_SEAMS" >"$OBJ/seams.log" 2>&1 \
+    || { cat "$OBJ/seams.log" >&2; fail "SCE's board seams ($BOARD_SEAMS) do not compile with D3's flags"; }
+mapfile -t SEAMS < <(python3 - "$OBJ/seams.aux" "$BOARD_SEAMS" \
+    "$SCE/backends/c/runtime/include" "$SCE/backends/c/forge-runtime/include" <<'PY'
+import os
+import re
+import sys
+aux, board, *roots = sys.argv[1:]
+board = os.path.realpath(board)
+roots = [os.path.realpath(r) + os.sep for r in roots]
+# "/* <file>:<line>:<N|O><C|F> */ <declaration>": C a declaration, F a definition.
+line_re = re.compile(r"^/\* (.+):\d+:[NO]([CF]) \*/ (.*?)\b([A-Za-z_]\w*) \(")
+declared, defined = set(), set()
+with open(aux, encoding="utf-8") as f:
+    for line in f:
+        m = line_re.match(line)
+        if not m or "static" in m.group(3).split():
+            continue
+        path, kind, name = os.path.realpath(m.group(1)), m.group(2), m.group(4)
+        if kind == "F" and path == board:
+            defined.add(name)
+        elif kind == "C" and any(path.startswith(r) for r in roots):
+            declared.add(name)
+print("\n".join(sorted(defined & declared)))
+PY
+)
+[[ ${#SEAMS[@]} -gt 0 && -n "${SEAMS[0]}" ]] \
+    || fail "$BOARD_SEAMS defines no function a header of SCE's runtime declares; the seams could not be read"
+for sym in "${SEAMS[@]}"; do
+    ALLOWED["$sym"]=1
+done
 
-# ── the declared refusals and the budget ────────────────────────────────────────
-declare -A REFUSED_HEADER REFUSED_MESSAGE
-while IFS=$'\t' read -r unit header message _cause; do
-    [[ -z "$unit" || "$unit" == \#* ]] && continue
-    REFUSED_HEADER["$unit"]="$header"
-    REFUSED_MESSAGE["$unit"]="$message"
-done < "$REFUSALS"
-
+# ── the budget ──────────────────────────────────────────────────────────────────
 TOLERANCE="$(sed -n 's/^# tolerance: \([0-9][0-9]*\)$/\1/p' "$BUDGET")"
 MEASURED_WITH="$(sed -n 's/^# measured-with: \(.*\)$/\1/p' "$BUDGET")"
 [[ -n "$TOLERANCE" ]] || fail "$BUDGET states no '# tolerance: <bytes>' line"
@@ -177,13 +303,6 @@ while IFS=$'\t' read -r unit text rodata data bss; do
     [[ -z "$unit" || "$unit" == \#* ]] && continue
     WANT["$unit"]="$text $rodata $data $bss"
 done < "$BUDGET"
-
-FAILURES=()
-MEASURED=()
-OUT_OF_BAND=()
-UNMEASURED=()
-COMPILED=0
-REFUSED_AS_DECLARED=0
 
 # The first error a compile log names: the header it is in and its words, without the
 # path and position, which move with the generator's layout and say nothing of the fault.
@@ -194,24 +313,34 @@ first_error() {
 {
     printf '# Layer Bc: the C11 emission of the SCE sources\n\n'
     printf -- '- Compiler: %s\n' "$GCC_VERSION"
-    printf -- "- Flags: \`%s\`\n" "${CFLAGS[*]}"
-    printf -- "- Set: %d documents and %d standard document(s), deployment \`%s\`\n\n" "${#DOCUMENTS[@]}" "${#STANDARD[@]}" "$DEPLOY"
+    printf -- "- Flags: \`%s\`; a header-only unit adds \`%s\`\n" "${D3_FLAGS[*]}" "${KEEP_FLAGS[*]}"
+    printf -- "- Set: %d documents and %d standard document(s), deployment \`%s\`; %d document(s) left out as refused by the generator\n" \
+        "${#DOCUMENTS[@]}" "${#STANDARD[@]}" "$DEPLOY" "$(( ${#SOURCES[@]} - ${#DOCUMENTS[@]} ))"
+    printf -- "- Seams a unit may leave undefined (\`%s\` defines, SCE's runtime declares): %s\n\n" \
+        "${BOARD_SEAMS#"$ROOT"/}" "${SEAMS[*]}"
     printf '| Unit | .text | .rodata | .data | .bss | verdict |\n|---|---|---|---|---|---|\n'
 } > "$REPORT"
 
 for unit in "${UNITS[@]}"; do
-    src="$OBJ/$unit.c"
     obj="$OBJ/$unit.o"
     log="$OBJ/$unit.log"
-    printf '#include "%s.h"\n' "$unit" > "$src"
+    if [[ -f "$GEN/$unit.c" ]]; then
+        src="$GEN/$unit.c"
+        flags=("${D3_FLAGS[@]}")
+    else
+        src="$OBJ/$unit.c"
+        printf '#include "%s.h"\n' "$unit" > "$src"
+        flags=("${D3_FLAGS[@]}" "${KEEP_FLAGS[@]}")
+    fi
+    declared_where="${REFUSED_WHERE[$unit]:-}"
     rc=0
-    "$GCC" "${CFLAGS[@]}" "${INCLUDES[@]}" -c "$src" -o "$obj" >"$log" 2>&1 || rc=$?
+    "$GCC" "${flags[@]}" "${INCLUDES[@]}" -c "$src" -o "$obj" >"$log" 2>&1 || rc=$?
 
     # ── 2. a unit that does not compile ──
     if (( rc != 0 )); then
         got="$(first_error "$log")"
-        if [[ -n "${REFUSED_HEADER[$unit]+x}" ]]; then
-            want="${REFUSED_HEADER[$unit]}"$'\t'"${REFUSED_MESSAGE[$unit]}"
+        if [[ -n "$declared_where" ]]; then
+            want="$declared_where"$'\t'"${REFUSED_WORDS[$unit]}"
             if [[ "$got" == "$want" ]]; then
                 REFUSED_AS_DECLARED=$((REFUSED_AS_DECLARED + 1))
                 printf '| %s | | | | | refused as declared |\n' "$unit" >> "$REPORT"
@@ -225,7 +354,7 @@ for unit in "${UNITS[@]}"; do
         printf '| %s | | | | | does not compile |\n' "$unit" >> "$REPORT"
         continue
     fi
-    if [[ -n "${REFUSED_HEADER[$unit]+x}" ]]; then
+    if [[ -n "$declared_where" && "$declared_where" != undefined ]]; then
         FAILURES+=("$unit: compiles, and $REFUSALS still names it as refused; remove its row")
     fi
     COMPILED=$((COMPILED + 1))
@@ -234,9 +363,19 @@ for unit in "${UNITS[@]}"; do
     hosted=()
     while read -r sym; do
         [[ -z "${ALLOWED[$sym]+x}" ]] && hosted+=("$sym")
-    done < <("$NM" -u "$obj" | awk '{ print $NF }')
+    done < <("$NM" -u "$obj" | awk '{ print $NF }' | LC_ALL=C sort -u)
+    calls=""
     if (( ${#hosted[@]} > 0 )); then
-        FAILURES+=("$unit: calls what no freestanding image has: ${hosted[*]}")
+        if [[ "$declared_where" == undefined && "${hosted[*]}" == "${REFUSED_WORDS[$unit]}" ]]; then
+            CALLS_AS_DECLARED=$((CALLS_AS_DECLARED + 1))
+            calls="; calls ${hosted[*]} as declared"
+        elif [[ "$declared_where" == undefined ]]; then
+            FAILURES+=("$unit: calls other hosted symbols than $REFUSALS declares: got '${hosted[*]}', declared '${REFUSED_WORDS[$unit]}'")
+        else
+            FAILURES+=("$unit: calls what no freestanding image has: ${hosted[*]}")
+        fi
+    elif [[ "$declared_where" == undefined ]]; then
+        FAILURES+=("$unit: calls nothing hosted, and $REFUSALS still names it as calling '${REFUSED_WORDS[$unit]}'; remove its row")
     fi
 
     # ── 4. weigh ──
@@ -259,7 +398,7 @@ for unit in "${UNITS[@]}"; do
             fi
         done
     fi
-    printf '| %s | %d | %d | %d | %d | %s |\n' "$unit" "$text" "$rodata" "$data" "$bss" "$verdict" >> "$REPORT"
+    printf '| %s | %d | %d | %d | %d | %s%s |\n' "$unit" "$text" "$rodata" "$data" "$bss" "$verdict" "$calls" >> "$REPORT"
 done
 
 # A budget row or a refusal whose unit the set no longer has names nothing. Membership is
@@ -269,9 +408,14 @@ for unit in "${!WANT[@]}"; do
     [[ -n "${IS_UNIT[$unit]+x}" ]] \
         || FAILURES+=("$BUDGET holds a row for '$unit', which the set does not generate")
 done
-for unit in "${!REFUSED_HEADER[@]}"; do
-    [[ -n "${IS_UNIT[$unit]+x}" ]] \
-        || FAILURES+=("$REFUSALS names '$unit', which the set does not generate")
+for unit in "${!REFUSED_WHERE[@]}"; do
+    if [[ "${REFUSED_WHERE[$unit]}" == generate ]]; then
+        [[ -n "${IS_SOURCE[$unit]+x}" ]] \
+            || FAILURES+=("$REFUSALS names the document '$unit', which is not under sources/")
+    else
+        [[ -n "${IS_UNIT[$unit]+x}" ]] \
+            || FAILURES+=("$REFUSALS names '$unit', which the set does not generate")
+    fi
 done
 
 # ── 5. the document vectors, on the host ────────────────────────────────────────
@@ -311,7 +455,8 @@ for sidecar in "$GEN"/*_test.h; do
 done
 
 {
-    printf "\n- Compiled freestanding: %d; refused as \`%s\` declares: %d\n" "$COMPILED" "$REFUSALS" "$REFUSED_AS_DECLARED"
+    printf "\n- Compiled freestanding: %d, of which %d call what \`%s\` declares; refused as it declares: %d unit(s), %d document(s) by the generator\n" \
+        "$COMPILED" "$CALLS_AS_DECLARED" "$REFUSALS" "$REFUSED_AS_DECLARED" "$GENERATION_REFUSED"
     printf -- '- Document vectors held on the host: %d row(s) of %d document(s)\n' "$VECTOR_ROWS" "$VECTOR_UNITS"
 } >> "$REPORT"
 
@@ -338,4 +483,4 @@ if (( ! RECORD )); then
         fail "a unit's cost on the target is outside its budget; re-record with --record if the change is meant"
     fi
 fi
-echo "Bc: $COMPILED unit(s) compiled with no C library and weighed, $REFUSED_AS_DECLARED refused as declared, $VECTOR_ROWS document vector(s) of $VECTOR_UNITS document(s) held"
+echo "Bc: $COMPILED unit(s) compiled with no C library and weighed, $CALLS_AS_DECLARED calling what is declared, $REFUSED_AS_DECLARED refused as declared, $GENERATION_REFUSED document(s) refused by the generator as declared, $VECTOR_ROWS document vector(s) of $VECTOR_UNITS document(s) held"

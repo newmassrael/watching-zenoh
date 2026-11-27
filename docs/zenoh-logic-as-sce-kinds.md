@@ -705,3 +705,25 @@ succeeded. `out/` holds Rust only (117 files). The zenoh-pico preset's C ABI
 its protocol behaviour runs through a C11 emission. The freestanding gate of
 section 5, step 3, is what turns the second column into a claim about a C
 build.
+
+### What Layer Bc judges (2026-11-27)
+
+`scripts/c11-lane.sh` (Layer Bc) generates every document under `sources/` as one
+C11 set under `deploy/codec_node.yaml`, at the SCE pin `2d736122d0`, compiles
+each unit for a Cortex-M4 with no C library and weighs it. A document the
+generator refuses is left out of the set, and `deploy/c11/refusals.tsv` states
+the words it is refused with. The sources number 136:
+
+| Sources | Count | Layer Bc |
+|---|---|---|
+| Codecs (`sources/codecs/`) | 65 | Each header compiled alone, weighed, its vectors run on the host; the units that include a codec imported under an alias are refused (an SCE defect) |
+| Algorithms (`sources/algorithms/`) | 41 | As the codecs |
+| Statecharts (`sources/session/` 12, `reassembly_slot`) | 13 | 11 compiled as SCE's gate compiles a machine, its `.c` with D3's flags; each leaves undefined only memory functions and libgcc. `clock_quality` and `session_fsm_unicast` are refused by the generator: they carry feature conditions, C11 generates one variant at a time, and `orchestrate` takes no `--features` |
+| Buffer pools (`sources/network/*_pool_*`) | 13 | Each header compiles and calls `__assert_func`: `sce/sample.h` traps with `assert` |
+| Links (`sources/links/`) | 2 | Refused by the generator: the codec deployment declares no machine to hold a link (W5) |
+| Event schema (`hello_received_schema`) | 1 | Compiled alone and weighed. `fragment_chunk_schema` left `sources/` with `efae340bfb` |
+| Feature model (`sources/features/`) | 1 | In the set; a feature model emits no C11 |
+
+No statechart runs on the target yet. SCE's gate runs a machine on QEMU's
+`mps2-an386` from a replay scenario, which `sce-codegen scenario-table` turns
+into a C table, and no statechart of `sources/` has a scenario.

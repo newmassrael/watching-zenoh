@@ -1,19 +1,28 @@
-# The units of Layer Bc (scripts/c11-lane.sh) that do not compile, each with the first
-# error its compile gives, as <header><TAB><words>, without path or position.
+# What Layer Bc (scripts/c11-lane.sh) does not pass, each with what it gives, in one of
+# three forms by the second column:
 #
-# Columns: unit, header, the error's words, why.
+#   <header>    a unit that does not compile: the first error its compile gives, as the
+#               header the error is in and its words, without path or position.
+#   undefined   a unit that compiles and leaves undefined what no freestanding image
+#               has: those symbols, sorted, separated by one space. The unit is weighed.
+#   generate    a document of sources/ the generator refuses, keyed by its path: the
+#               words of the generator's first error, without the file and position it
+#               names. The document is left out of the set and generated alone, with the
+#               arguments the set takes, where it must be refused with these words.
 #
-# A unit named here and refused with these words is not a failure. A unit named here
-# that compiles, or that is refused with other words, is: the row is removed or
-# corrected in the commit that changes it, so the table only shrinks by the fix it
-# waits for, and a second fault cannot hide behind the first.
+# Columns: unit or document, form, words, why.
 #
-# Every row below waits for one defect of SCE's C11 generator, found by this lane at the
-# pin it was written with (vendor/sce e90c0b6271b): a codec document that imports
-# another codec under an alias other than the imported codec's own name (wz's documents
-# import ext_unit.scxml as codec_zenoh_ext_unit, the name SCE's fixture of it has) is
-# emitted with the imported type named by the name (ext_unit_t) and its decode called
-# by the alias (codec_zenoh_ext_unit_decode), which no header declares. The Rust
+# A unit or document named here and failing with these words is not a failure. One named
+# here that passes, or fails with other words, is: the row is removed or corrected in the
+# commit that changes it, so the table only shrinks by the fix it waits for, and a second
+# fault cannot hide behind the first.
+#
+# The rows of the form <header> wait for one defect of SCE's C11 generator, found by this
+# lane at the pin it was written with (vendor/sce e90c0b6271b): a codec document that
+# imports another codec under an alias other than the imported codec's own name (wz's
+# documents import ext_unit.scxml as codec_zenoh_ext_unit, the name SCE's fixture of it
+# has) is emitted with the imported type named by the name (ext_unit_t) and its decode
+# called by the alias (codec_zenoh_ext_unit_decode), which no header declares. The Rust
 # emission of the same documents resolves the alias. A unit is listed when its header
 # includes one such codec, itself or through what it imports.
 decl_final	ext_entry.h	implicit declaration of function 'codec_zenoh_ext_unit_decode' [-Werror=implicit-function-declaration]	SCE C11 at the pin: a codec imported under an alias other than its name is called by the alias (<alias>_decode) while its type is named by the name (<name>_t); reported to SCE 2026-11-27
@@ -55,3 +64,27 @@ undecl_kexpr	ext_entry.h	implicit declaration of function 'codec_zenoh_ext_unit_
 undecl_queryable	ext_entry.h	implicit declaration of function 'codec_zenoh_ext_unit_decode' [-Werror=implicit-function-declaration]	SCE C11 at the pin: a codec imported under an alias other than its name is called by the alias (<alias>_decode) while its type is named by the name (<name>_t); reported to SCE 2026-11-27
 undecl_subscriber	ext_entry.h	implicit declaration of function 'codec_zenoh_ext_unit_decode' [-Werror=implicit-function-declaration]	SCE C11 at the pin: a codec imported under an alias other than its name is called by the alias (<alias>_decode) while its type is named by the name (<name>_t); reported to SCE 2026-11-27
 undecl_token	ext_entry.h	implicit declaration of function 'codec_zenoh_ext_unit_decode' [-Werror=implicit-function-declaration]	SCE C11 at the pin: a codec imported under an alias other than its name is called by the alias (<alias>_decode) while its type is named by the name (<name>_t); reported to SCE 2026-11-27
+#
+# The buffer pools: each compiles and calls the C library's assertion. The trap is a macro a
+# deployment may define (sce/sample.h), which is the preprocessor switch SCE ADR 0110 D2
+# rejects for a core; this lane judges the emission as SCE's gate compiles it, with D3's
+# flags and no definition of its own.
+eth_rx_pool_mcu	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+reassembly_pool_ap	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+reassembly_pool_mcu	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+scout_rx_pool_mcu	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_rx_pool_ap	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_rx_pool_ap_small	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_rx_pool_mcu	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_rx_pool_mcu_minimal	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_rx_pool_mcu_multicast	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_slot_pool_mcu	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_tx_pool_ap	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_tx_pool_ap_small	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+session_tx_pool_mcu	undefined	__assert_func	SCE at the pin: sce/sample.h, which every buffer-pool header includes, includes <assert.h>, <stdlib.h> and <string.h> and makes SCE_OWNERSHIP_TRAP assert(), abort() under NDEBUG, a hosted call where SCE ADR 0110 D2 has a core call a seam; found by this lane 2026-11-27
+#
+# The documents the generator refuses.
+sources/links/lwip_udp_scout.scxml	generate	Forge codegen error: forge `<sce:link name="lwip_udp_scout">` declared but no `deploy.yaml::machines.<n>.links.lwip_udp_scout` entry exists. Cross-doc validator (`deploy/link-not-declared-in-deploy`). Repair: add the deploy entry under one of [<none>] or another machine, or remove the forge link doc.	wz: deploy/codec_node.yaml deploys the codec set and declares no machine, so no machine holds this link; the links wait for the deployment of wz's lwIP link (W5 of docs/zenoh-logic-as-sce-kinds.md; their Rust form is not generated either)
+sources/links/lwip_udp_session.scxml	generate	Forge codegen error: forge `<sce:link name="lwip_udp_session">` declared but no `deploy.yaml::machines.<n>.links.lwip_udp_session` entry exists. Cross-doc validator (`deploy/link-not-declared-in-deploy`). Repair: add the deploy entry under one of [<none>] or another machine, or remove the forge link doc.	wz: deploy/codec_node.yaml deploys the codec set and declares no machine, so no machine holds this link; the links wait for the deployment of wz's lwIP link (W5 of docs/zenoh-logic-as-sce-kinds.md; their Rust form is not generated either)
+sources/session/clock_quality.scxml	generate	Forge codegen error: Transition #1 in state 'Synchronized' (event 'sync.lost') is shadowed by an earlier unconditional transition #0 with the same event descriptor. The shadowed transition can never fire. Reorder the transitions, add a guard to the shadowing transition, or remove the shadowed transition.	SCE at the pin: the C11 backend generates one variant of a document with feature conditions, and orchestrate, the one route that generates a set under its deployment, takes no --features; generate --with-imports --features holds the selection to the imported feature model and refuses it (generate without --with-imports takes it); before that refusal orchestrate lints the document as the variant with every feature on, where the ungated sync.lost transition after the one gated on clock-source never fires; found by this lane 2026-11-27
+sources/session/session_fsm_unicast.scxml	generate	Forge codegen error: this statechart is written against the feature model 'wz-session-core' and carries feature conditions, and the c11 backend generates one variant of it at a time: name the variant with --features	SCE at the pin: the C11 backend generates one variant of a document with feature conditions, and orchestrate, the one route that generates a set under its deployment, takes no --features; generate --with-imports --features holds the selection to the imported feature model and refuses it (generate without --with-imports takes it); found by this lane 2026-11-27
