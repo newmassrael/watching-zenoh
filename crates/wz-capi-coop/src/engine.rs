@@ -906,7 +906,10 @@ fn lend_session(
             lay_out_open(&mut plan, holds)?;
         }
     }
-    let places = from.places();
+    let OpenPlaces {
+        runtime: runtime_bytes,
+        engine: engine_bytes,
+    } = from.places();
     #[cfg(feature = "runtime-plan")]
     let mut arena = SessionArena::reserve(&plan, memory)?;
     // The registry and the key arena lie in the region the build lays out, the head of the one
@@ -1122,10 +1125,10 @@ fn lend_session(
     }
     .map_err(ArenaRefused::Lend)?;
     let runtime = arena
-        .runtime_place(places.runtime)
+        .runtime_place(runtime_bytes)
         .map_err(ArenaRefused::Lend)?;
     let engine = arena
-        .engine_place(places.engine)
+        .engine_place(engine_bytes)
         .map_err(ArenaRefused::Lend)?;
     // SAFETY: the span was lent above to the lodging places alone, and `engine.memory` is the count
     // of the memory it lies in, held by the session's engine for as long as the engine lends from
