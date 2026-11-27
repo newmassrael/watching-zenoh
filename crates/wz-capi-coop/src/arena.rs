@@ -915,6 +915,7 @@ impl OpenRegion {
     }
 
     /// The bytes of each link's cells the region laid out, `0` for a table it holds none of.
+    #[cfg(not(wz_on_use))]
     pub(crate) const fn cell_bytes(&self) -> LinkCells<usize> {
         self.rows.plan.transport.cell_bytes
     }
@@ -1377,7 +1378,9 @@ pub(crate) struct TransportTables {
     pub(crate) links: LinkTables<LinkCellFlag>,
     /// The cells of the links' drivers, their gates and their actions, each `None` for a plan
     /// with no such table: each cell's flag the one the session's lock kind counts a link's
-    /// handles by, so a handle let go of on any thread that may hold it gives its cell back.
+    /// handles by, so a handle let go of on any thread that may hold it gives its cell back. None
+    /// where the tables take their memory on use, whose links' parts are made on the heap.
+    #[cfg(not(wz_on_use))]
     pub(crate) cells: LinkCells<Option<LentByteCells<LinkCellFlag>>>,
     /// The reassembly buffers the links share.
     pub(crate) reassembly: LentByteCells,
@@ -1422,6 +1425,7 @@ impl TransportRows {
         let (dials, listens) = self.endpoint_rows;
         TransportTables {
             links: self.links_from(lend),
+            #[cfg(not(wz_on_use))]
             cells: self.cells_from(lend),
             // A chain's buffer is claimed when its first fragment arrives and given back when it
             // ends; the session holds the table for its life.
@@ -1440,6 +1444,7 @@ impl TransportRows {
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
     /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
+    #[cfg(not(wz_on_use))]
     fn cells_from(
         &self,
         lend: &mut TableLender<'_>,
@@ -4450,6 +4455,7 @@ mod tests {
     /// The tables of cells are lent for each kind of cell the plan holds and for no other, past a
     /// kind with none and up to the last, a cell of its size for each link. Turned red by a walk
     /// of the kinds that stops at the first with none, or never reaches the halves'.
+    #[cfg(not(wz_on_use))]
     #[test]
     fn the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none() {
         let mut plan = empty_plan();

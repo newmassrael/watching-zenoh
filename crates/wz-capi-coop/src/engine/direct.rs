@@ -549,7 +549,7 @@ type DirectLock = SessionLock;
 // Such a read reaches a face's values with no session's lock held, which only a lock of each
 // value's own keeps to one thread at a time: a form with none keeps the round (`build.rs`).
 #[cfg(feature = "threads")]
-const _: fn(PhantomData<SessionLock>) -> PhantomData<wz_runtime_coop::sync::ManyThreads> =
+const _: fn(PhantomData<crate::form::FormLock>) -> PhantomData<wz_runtime_coop::sync::ManyThreads> =
     core::convert::identity;
 
 /// The link the session's record of the face holds while it is up or in its handshake: a handle
@@ -918,7 +918,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> WireParts for DirectParts
 /// parts' handles go too.
 #[cfg(feature = "resource-snapshot")]
 pub(super) struct KernelCount<C: ClockSource + 'static>(
-    CellRc<SessionCore<LinkRuntime<C>, CoopTime<C>>, LinkCount>,
+    CellRc<wz_session_core::session_actions::SessionCore<LinkRuntime<C>, CoopTime<C>>, LinkCount>,
 );
 
 #[cfg(feature = "resource-snapshot")]

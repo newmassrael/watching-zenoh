@@ -243,6 +243,7 @@ fn held_plan(
 ) -> Result<ArenaPlan, ArenaRefused> {
     let mut plan = ArenaPlan::vacant();
     plan.count(config, &config.limits)?;
+    #[cfg(not(wz_on_use))]
     let links = host_links(super::LOOPBACK, PosixTcpDial);
     #[cfg(not(wz_on_use))]
     let runtime = runtime_tables(config)
@@ -251,6 +252,7 @@ fn held_plan(
     crate::engine::lay_out_open(
         &mut plan,
         &crate::engine::OpenHolds {
+            #[cfg(not(wz_on_use))]
             cells: crate::engine::link_cells::<PosixClock>(&links),
             #[cfg(not(wz_on_use))]
             rooms: crate::engine::link_rooms_bytes::<crate::tests::PosixLinks>(),
@@ -2261,7 +2263,9 @@ fn a_redial_takes_the_buffers_the_lost_link_held() {
 /// again after the first is lost holds one, the lost link's given back first, so a link made
 /// after the open takes no memory of the heap for them. The arena holds one link, so a lost link
 /// whose cell is not given back leaves the next dial no cell. Turned red by halves held on the
-/// heap (`McuActions::build` in `start_wire`), which take no cell of the table.
+/// heap (`McuActions::build` in `start_wire`), which take no cell of the table. A session whose
+/// tables take their memory on use lends its links no table (`tests::on_use`).
+#[cfg(not(wz_on_use))]
 #[test]
 #[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
 fn a_links_halves_lie_in_its_cell_across_a_redial() {

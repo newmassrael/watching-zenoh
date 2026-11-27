@@ -217,11 +217,19 @@ mod form;
 /// of its own; one face's where several threads drive the session's faces, each face's link
 /// handles moved between threads with the face whole. The terms are the form's
 /// (`wz_value_locks`, the build script's), whose lock kind counts a link's parts so.
-#[cfg(all(feature = "threads", wz_value_locks))]
+#[cfg(all(feature = "threads", wz_value_locks, not(wz_on_use)))]
 pub type LinkCount = wz_runtime_coop::link_cells::OneFace;
 /// How the handles on the parts of one link of the engine's sessions are counted: one task's.
-#[cfg(not(all(feature = "threads", wz_value_locks)))]
+#[cfg(all(not(all(feature = "threads", wz_value_locks)), not(wz_on_use)))]
 pub type LinkCount = wz_runtime_coop::link_cells::OneTask;
+/// How the handles on the parts of one link of the engine's sessions are counted where the tables
+/// take their memory on use: one face's, each part made on the heap as its link opens, so no stack
+/// and no transport of the session names a table of cells.
+#[cfg(all(feature = "threads", wz_value_locks, wz_on_use))]
+pub type LinkCount = wz_runtime_coop::link_cells::OnHeap<wz_runtime_coop::link_cells::OneFace>;
+/// One task's, each part made on the heap as its link opens.
+#[cfg(all(not(all(feature = "threads", wz_value_locks)), wz_on_use))]
+pub type LinkCount = wz_runtime_coop::link_cells::OnHeap<wz_runtime_coop::link_cells::OneTask>;
 #[cfg(feature = "group-host")]
 pub mod host_group;
 // What an open reads its session's config from, and how the endpoints' texts reach its rows.

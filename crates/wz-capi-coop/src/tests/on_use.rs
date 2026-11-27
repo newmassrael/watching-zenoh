@@ -204,7 +204,8 @@ fn an_on_use_sessions_link_admission_lies_apart_from_its_arena() {
 }
 
 /// The plan of a session whose tables take their memory on use lays out no place for its engine,
-/// its faces' rooms or its runtime, which lie in allocations of their own, while the CONTROL row,
+/// its faces' rooms or its runtime, which lie in allocations of their own, and no table of its
+/// links' cells, whose parts are made on the heap as each link opens, while the CONTROL row,
 /// the count the arena is kept by, is laid out as the D12 plan lays it beside the runtime's span.
 /// Turned red by `lay_out_open` laying the engine's place (`ArenaPlan::lay_engine`), a place of
 /// the rooms (`ArenaPlan::lay_rooms`, of any bytes) or the runtime's span
@@ -212,7 +213,7 @@ fn an_on_use_sessions_link_admission_lies_apart_from_its_arena() {
 /// that leaves the count out with the span (`ArenaPlan::lay_keep`).
 #[test]
 fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
-    use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, LinkCells, PlanShape};
+    use crate::arena::{ArenaPart, ArenaPlan, HeldPlaces, PlanShape};
     let mut plan = ArenaPlan::planned(
         PlanShape::dial_only(1, 1024, &wz_session_core::policy::SessionPolicy::defaults()),
         &SessionLimits::BUILD,
@@ -221,12 +222,6 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
     crate::engine::lay_out_open(
         &mut plan,
         &crate::engine::OpenHolds {
-            cells: LinkCells {
-                driver: 64,
-                gate: 64,
-                actions: 64,
-                halves: 64,
-            },
             held: &HeldPlaces::NONE,
             engine: 64,
             planes: crate::engine::SessionPlanes::OF_BUILD,
@@ -241,6 +236,39 @@ fn an_on_use_plan_lays_out_no_place_for_the_engine_the_rooms_or_the_runtime() {
     assert!(!laid(ArenaPart::RuntimeState), "the runtime lies apart");
     assert!(!laid(ArenaPart::EngineState), "the engine lies apart");
     assert!(!laid(ArenaPart::LinkRooms), "the rooms lie apart");
+    for cells in [
+        ArenaPart::LinkCells,
+        ArenaPart::LinkGates,
+        ArenaPart::LinkActions,
+        ArenaPart::LinkHalves,
+    ] {
+        assert!(!laid(cells), "a link's parts lie on the heap");
+    }
+}
+
+/// A session whose tables take their memory on use makes each part of a link on the heap as the
+/// link opens: with its link up, neither its gates nor its actions' halves lie in a cell of a
+/// table; the CONTROL is the face, up. Turned red by an open that lends its transport a table of
+/// cells on use (`cells` in `CoopEngine::assemble`), which its links' kind would then have to
+/// name.
+#[test]
+#[cfg_attr(miri, ignore = "the interpreter has no host sockets")]
+fn an_on_use_sessions_link_parts_lie_on_the_heap() {
+    let router = Router::start(CatchAll::None);
+    let engine = open(&router);
+    until(&engine, "CONTROL: the face to be up", || {
+        engine.faces_up() == 1
+    });
+    assert_eq!(
+        engine.link_halves_in_use(),
+        None,
+        "the actions' halves lie on the heap"
+    );
+    assert_eq!(
+        engine.link_gates_in_use(),
+        None,
+        "no table of gates is lent"
+    );
 }
 
 /// A session whose tables take their memory on use lays out no row of the tables it counts in the

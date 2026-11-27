@@ -198,7 +198,9 @@ use wz_session_core::sample::{QosLevel, SampleKind};
 use wz_session_core::send_wire_error::SendWireError;
 #[cfg(all(feature = "listen", feature = "tx-probe"))]
 use wz_session_core::session_actions::Probed;
-use wz_session_core::session_actions::{LinkState, SessionCore, SessionLinkActions};
+use wz_session_core::session_actions::SessionLinkActions;
+#[cfg(not(wz_on_use))]
+use wz_session_core::session_actions::{LinkState, SessionCore};
 use wz_session_core::session_init_params::{
     CookieKey, HeldDrop, KeepAliveConf, LinkRxConf, SessionInitParams, SessionZid, TxQueueConf,
     ZidError, ZID_MAX,
@@ -4780,7 +4782,8 @@ type GateCells = <LinkCount as wz_runtime_coop::link_cells::CountKind>::Cells;
 
 /// The two halves the actions of a link of a session on the clock `C` hold, which the session
 /// places together in the link's cell of its table (`TransportState::halves_cells`): the link's
-/// own state and the session's kernel.
+/// own state and the session's kernel. Laid out where the arena holds a table of them.
+#[cfg(not(wz_on_use))]
 type LinkHalves<C> = (
     LinkState<LinkRuntime<C>>,
     SessionCore<LinkRuntime<C>, CoopTime<C>>,
@@ -4788,7 +4791,9 @@ type LinkHalves<C> = (
 
 /// The bytes of each link's cells a session over `links` on the clock `C` lays out: a cell for
 /// each link's driver as large as the largest the links open, one for its gates, one for its
-/// actions and one for the two halves they hold.
+/// actions and one for the two halves they hold. None where the tables take their memory on use,
+/// whose links' parts are made on the heap ([`LinkCount`]).
+#[cfg(not(wz_on_use))]
 pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl CoopLinks) -> LinkCells<usize> {
     cells_of::<C>(links.link_cell_bytes())
 }
@@ -4796,6 +4801,7 @@ pub(crate) fn link_cells<C: ClockSource + 'static>(links: &impl CoopLinks) -> Li
 /// The bytes of each link's cells a session on the clock `C` lays out, a cell of `driver` bytes
 /// for each link's driver among them: a `const fn`, as a region laid out when the build is
 /// compiled reads them off the links' type (`SessionLinks::LINK_CELL_BYTES`).
+#[cfg(not(wz_on_use))]
 pub(crate) const fn cells_of<C: ClockSource + 'static>(driver: usize) -> LinkCells<usize> {
     LinkCells {
         driver,
@@ -4808,7 +4814,9 @@ pub(crate) const fn cells_of<C: ClockSource + 'static>(driver: usize) -> LinkCel
 /// What an open lays out after the rows its limits size ([`lay_out_open`]), which the session's
 /// config does not count: what its links and its runtime are made of, and the places the ABI holds.
 pub(crate) struct OpenHolds<'h> {
-    /// The bytes of each link's cells.
+    /// The bytes of each link's cells, where the arena holds them: a session whose tables take
+    /// their memory on use makes each link's parts on the heap, and its plan lays out no cell.
+    #[cfg(not(wz_on_use))]
     pub(crate) cells: LinkCells<usize>,
     /// The bytes of the faces' rooms, where the arena holds them: a session whose tables take their
     /// memory on use holds them in an allocation of their own, and its plan lays out no place.
@@ -4915,6 +4923,7 @@ pub(crate) const fn lay_out_open<const ROWS: usize>(
     plan: &mut ArenaPlan<ROWS>,
     holds: &OpenHolds<'_>,
 ) -> Result<(), ArenaRefused> {
+    #[cfg(not(wz_on_use))]
     plan.lay_cells(holds.cells);
     // The rooms of a session whose tables take their memory on use lie in an allocation of their
     // own (`state_places::RoomsPlace`) and take no place of the arena.
@@ -6985,6 +6994,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         rows: ArenaRegion,
         held: HeldPlaces,
     ) -> Result<OpenRegion, ArenaRefused> {
+        #[cfg(not(wz_on_use))]
         let driver = <S as SessionLinks<LinkCount>>::LINK_CELL_BYTES;
         #[cfg(all(wz_round, not(wz_on_use)))]
         let tables = RuntimeTables::of_shape::<C>(rows.shape());
@@ -6997,7 +7007,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         #[cfg(not(wz_on_use))]
         let holds = Self::open_holds(driver, &held, runtime);
         #[cfg(wz_on_use)]
-        let holds = Self::open_holds(driver, &held);
+        let holds = Self::open_holds(&held);
         OpenRegion::laid(rows, &holds)
     }
 
@@ -7006,11 +7016,12 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// the runtime's span of `runtime` bytes where the arena holds it, the engine's own place and
     /// its planes'.
     const fn open_holds(
-        driver: usize,
+        #[cfg(not(wz_on_use))] driver: usize,
         held: &HeldPlaces,
         #[cfg(not(wz_on_use))] runtime: usize,
     ) -> OpenHolds<'_> {
         OpenHolds {
+            #[cfg(not(wz_on_use))]
             cells: cells_of::<C>(driver),
             #[cfg(not(wz_on_use))]
             rooms: link_rooms_bytes::<L>(),
@@ -7133,6 +7144,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
             PlanFrom::Region(region) => {
                 // Laid out with the places of this engine over the links its maker named
                 // (`Self::open_region_over`): those this open is handed.
+                #[cfg(not(wz_on_use))]
                 debug_assert_eq!(region.cell_bytes(), link_cells::<C>(&links));
                 debug_assert_eq!(region.places().engine, Shared::<Self>::layout().size());
                 OpenFrom::Region(region)
@@ -7146,9 +7158,7 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                     .ok_or(OpenError::Arena(ArenaRefused::TooLarge))?,
             )),
             #[cfg(all(any(feature = "runtime-plan", test), wz_on_use))]
-            PlanFrom::Config(held) => {
-                OpenFrom::Config(Self::open_holds(links.link_cell_bytes(), held))
-            }
+            PlanFrom::Config(held) => OpenFrom::Config(Self::open_holds(held)),
         };
         #[cfg(not(wz_on_use))]
         let runtime_bytes = from.places().runtime;
@@ -7290,7 +7300,18 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         links
             .lend_port_rows(lent.transport.port_rows)
             .map_err(heap_refused)?;
-        links.lend_cells(lent.transport.cells.driver);
+        // Where the tables take their memory on use, every part of a link is made on the heap as
+        // the link opens: the plan laid out no table of cells, and the links' kind names none.
+        #[cfg(not(wz_on_use))]
+        let cells = lent.transport.cells;
+        #[cfg(wz_on_use)]
+        let cells = LinkCells {
+            driver: wz_runtime_coop::link_cells::HeapCells,
+            gate: wz_runtime_coop::link_cells::HeapCells,
+            actions: wz_runtime_coop::link_cells::HeapCells,
+            halves: wz_runtime_coop::link_cells::HeapCells,
+        };
+        links.lend_cells(cells.driver);
         let (waits, room_places) = (links.waits(), lent.room_places);
         // SAFETY: the place reserved above, the arena's or the allocation of its own, was lent for
         // the rooms alone, aligned for them and valid for writes of them, where they stay.
@@ -7333,9 +7354,9 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
                 #[cfg(feature = "link-admission")]
                 admission: link_admission,
                 wire_zid: wire,
-                gate_cells: lent.transport.cells.gate,
-                actions_cells: lent.transport.cells.actions,
-                halves_cells: lent.transport.cells.halves,
+                gate_cells: cells.gate,
+                actions_cells: cells.actions,
+                halves_cells: cells.halves,
                 #[cfg(feature = "shared-key-ids")]
                 key_forms,
                 #[cfg(wz_round)]
@@ -7793,26 +7814,22 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
     /// a session whose plan laid out no such table.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_gates_in_use(&self) -> Option<usize> {
-        self.core
-            .lock()
-            .0
-            .transport
-            .gate_cells
-            .as_ref()
-            .map(LentByteCells::in_use)
+        use wz_runtime_coop::link_cells::{CellSource, CountKind};
+        <GateCells as CellSource<<LinkCount as CountKind>::Flag>>::table(
+            &self.core.lock().0.transport.gate_cells,
+        )
+        .map(LentByteCells::in_use)
     }
 
     /// How many cells of the session's table of links' halves hold a link's halves now: `None`
     /// for a session whose plan laid out no such table.
     #[cfg(all(test, feature = "std"))]
     pub(crate) fn link_halves_in_use(&self) -> Option<usize> {
-        self.core
-            .lock()
-            .0
-            .transport
-            .halves_cells
-            .as_ref()
-            .map(LentByteCells::in_use)
+        use wz_runtime_coop::link_cells::{CellSource, CountKind};
+        <GateCells as CellSource<<LinkCount as CountKind>::Flag>>::table(
+            &self.core.lock().0.transport.halves_cells,
+        )
+        .map(LentByteCells::in_use)
     }
 
     /// The plane the session's faces are told through, for a test that tells it rows itself.
