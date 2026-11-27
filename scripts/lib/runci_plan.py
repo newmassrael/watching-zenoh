@@ -242,6 +242,9 @@ JOB_ARMED_COMMANDS: dict[str, list[str]] = {"C1cc": ["valgrind"], "C1p32": ["cc"
 #         `_qa_zenohd_prereqs` asks qemu-system-arm
 #   Qz, Qza, Qzp: `_qz_toolchain ... qemu` -> "qemu-system-arm not on PATH" (Qzb and Qzk build
 #         images and boot none, so they ask the Zephyr SDK of `[tools.zephyr-sdk]` and no qemu)
+#   Bc:   "no host C compiler 'cc' to run the document vectors with" (`scripts/c11-lane.sh`); its
+#         cross compiler is Arm's build of the release SCE pins, `[tools.arm-gnu-toolchain]` in
+#         bx.toml, which a program name on PATH cannot tell from a distribution's build
 #   C1st: `facility_trace.py` refuses a machine without strace or bwrap (`missing_tools`)
 #   C1ob: "bwrap is not on PATH; the offline build is measured in a bwrap sandbox", and
 #         "the declared tool 'cc' (...) has no 'as' on PATH" for each command of the tools
@@ -263,6 +266,7 @@ LANE_COMMANDS: dict[str, list[str]] = {
     "Qz": ["qemu-system-arm"],
     "Qza": ["qemu-system-arm"],
     "Qzp": ["qemu-system-arm"],
+    "Bc": ["cc", "python3"],
     "C1st": ["bwrap", "strace"],
     "C1ob": ["ar", "as", "bwrap", "c++", "cc", "ld"],
     "Cmut": ["cargo-mutants"],

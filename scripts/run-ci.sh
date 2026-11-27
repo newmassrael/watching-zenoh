@@ -48,6 +48,9 @@
 #              every cargo-feature CI lane and validate-workspace both
 #              miss because neither knows about the other world)
 #   Layer B  — verify-codegen.sh per codec (L1+L2+L3)
+#   Layer Bc — scripts/c11-lane.sh: the C11 emission of sources/ compiled for a
+#              Cortex-M4 with no C library, weighed against deploy/c11/, and the
+#              vectors its documents state run on the host
 #   Layer C0 — binary-dep test #[ignore] discipline pre-flight
 #              (R235-hotfix; rejects new e2e tests that would panic
 #              Layer C1 on fresh CI checkouts)
@@ -2199,6 +2202,58 @@ layer_b2_regen_diff() {
     fi
     echo "Layer B2 pass (committed out/** == regenerated, no absolute source path)"
     return 0
+}
+
+# ─── Layer Bc — the C11 emission compiled with no C library ─────────
+# The C11 half of "one source set, Rust and C11" (docs/zenoh-logic-as-sce-kinds.md,
+# section 5 items 1 and 5, section 9): every document of sources/codecs and
+# sources/algorithms generated as one C11 set, each unit compiled for a Cortex-M4 with
+# SCE ADR 0110 D3's flags and no C library, its undefined symbols held to the four
+# memory functions and libgcc, its sections held to deploy/c11/footprint.tsv, and the
+# vectors its document states run on the host. scripts/c11-lane.sh is the lane's body
+# and says why each step is what it is; this function maps its "could not run" (3) to a
+# skip, or to a failure where the job provisions the tools (WZ_BC_REQUIRE).
+_bc_unavailable() {
+    if [[ -n "${WZ_BC_REQUIRE:-}" ]]; then
+        echo "Layer Bc FAIL — required (WZ_BC_REQUIRE set) but $1 (provisioning regression)" >&2
+        return 1
+    fi
+    echo "Layer Bc SKIP ($1)"
+    return 0
+}
+
+layer_bc_c11_freestanding() {
+    if [[ $SKIP_CODEGEN -eq 1 ]]; then
+        _bc_unavailable "--skip-codegen" || return 1
+        return 0
+    fi
+    local log rc=0
+    log="${RUNCI_LOG_DIR:-$WZ_ARTIFACTS/crates/target/run-ci-logs}/layer-bc.log"
+    mkdir -p "$(dirname "$log")"
+    bash scripts/c11-lane.sh >"$log" 2>&1 || rc=$?
+    case "$rc" in
+        0)
+            local verdict
+            verdict="$(sed -n 's/^Bc: \([0-9][0-9]*\) unit(s) compiled with no C library and weighed, \(.*\)$/\1 \2/p' "$log")"
+            if [[ -z "$verdict" ]]; then
+                cat "$log" >&2
+                echo "Layer Bc FAIL: scripts/c11-lane.sh exited 0 and printed no verdict line" >&2
+                return 1
+            fi
+            _runci_lane_did Bc "${verdict%% *}" "unit(s) compiled with no C library and weighed; ${verdict#* }"
+            return 0
+            ;;
+        3)
+            cat "$log"
+            _bc_unavailable "$(sed -n 's/^c11-lane: could not run: //p' "$log" | sed -n '1p')" || return 1
+            return 0
+            ;;
+        *)
+            cat "$log" >&2
+            echo "Layer Bc FAIL (scripts/c11-lane.sh exited $rc; its report: target/c11-lane/report.md)" >&2
+            return 1
+            ;;
+    esac
 }
 
 # ─── Layer C0 — binary-dep test discipline pre-flight ───────────────
@@ -30115,6 +30170,7 @@ run_layer A4 layer_a4_audit_crossimpl_proof || overall=1
 run_layer A5 layer_a5_apfull_membership || overall=1
 run_layer B layer_b_verify_codegen || overall=1
 run_layer B2 layer_b2_regen_diff || overall=1
+run_layer Bc layer_bc_c11_freestanding || overall=1
 run_layer C0 layer_c0_test_discipline || overall=1
 run_layer C0mut layer_c0mut_verdict_legs || overall=1
 run_layer Cmut layer_cmut_code_mutation || overall=1

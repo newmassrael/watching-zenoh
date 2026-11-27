@@ -1,0 +1,87 @@
+# What each C11 unit of wz's SCE sources costs a Cortex-M4 object, in bytes, and how far
+# each figure may drift (Layer Bc, scripts/c11-lane.sh, step 4).
+#
+# Columns: unit, .text, .rodata, .data, .bss of the object the unit's header compiles to
+# alone with SCE ADR 0110 D3's flags and every inline function kept: the unit and what
+# it includes (the codecs it imports and the header-only runtime), so a figure is what
+# the unit can cost an image that uses all of it, not what one image pays.
+#
+# Every figure is MEASURED by `bash scripts/c11-lane.sh --record`, with the compiler
+# named on the measured-with line, never estimated. A figure moves only by a commit
+# that re-records it and says what the bytes bought; the lane fails on a figure outside
+# its band in either direction, since a figure that falls without a reason means the
+# instrument stopped seeing.
+#
+# The band is the one SCE's own C11 budget uses (vendor/sce/backends/c/mcu/footprint.budget):
+# 64 bytes, 16 to 32 Thumb-2 instructions, so a runtime header change of a few
+# instructions does not re-record every unit while a new function does speak.
+# tolerance: 64
+# measured-with: arm-none-eabi-gcc (Arm GNU Toolchain 13.2.rel1 (Build arm-13.7)) 13.2.1 20231009
+close	3086	21	0	0
+cobs_decode	116	0	0	0
+cobs_encode	152	0	0	0
+compressed_batch	3330	25	0	0
+crc16_ccitt	62	0	0	0
+crc32	60	0	0	0
+declaration_stall_deadline	7258	102	0	0
+declare_sub_mid_v1_valid	24	0	0	0
+drop_report_due	6092	102	0	0
+e2e_counter_step	6050	102	0	0
+e2e_counter_verdict	26	0	0	0
+encoding	3704	157	0	0
+ext_unit	3002	18	0	0
+ext_zbuf	3206	21	0	0
+ext_zint	3078	21	0	0
+extension_v1_dispatch	34	0	0	0
+fragment	3240	25	0	0
+frame	3240	25	0	0
+init_body	4238	169	0	0
+join	3790	45	0	0
+keep_alive	3002	18	0	0
+key_facts	118	0	0	0
+key_facts_schema	0	0	0	0
+keyexpr_chunk_end	36	0	0	0
+keyexpr_chunk_includes	548	0	0	0
+keyexpr_chunk_intersects	926	0	0	0
+keyexpr_chunk_kind	68	0	0	0
+keyexpr_chunk_matches	514	0	0	0
+keyexpr_dsl_matches	262	0	0	0
+keyexpr_has_dsl	54	0	0	0
+keyexpr_matches	2316	0	0	0
+keyexpr_range_equal	66	0	0	0
+keyexpr_relation	3190	0	0	0
+keyexpr_relation_dp	1860	0	0	0
+keyexpr_shape	154	0	0	0
+keyexpr_shape_schema	0	0	0	0
+keyexpr_walk	2024	0	0	0
+linkstate_link	3078	21	0	0
+linkstate_weight	3078	21	0	0
+locator	3276	21	0	0
+network_mid_v1_valid	16	0	0	0
+open_body	3738	161	0	0
+payload_ext_id_v1_valid	56	0	0	0
+payload_z_mid_v1_valid	16	0	0	0
+put_outcome	42	35	0	0
+replay_reply_admission	6080	102	0	0
+reset_peer_schema	0	0	0	0
+scout	3762	49	0	0
+scouting_mid_v1_valid	16	0	0	0
+serial_envelope	3366	29	0	0
+session_mid_v1_valid	12	0	0	0
+stream_deadline	7244	102	0	0
+stream_envelope	3202	21	0	0
+take_generation	9430	173	0	0
+take_generation_duplicate	0	0	0	0
+take_generation_kind	42	36	0	0
+take_generation_result	970	53	0	0
+tick_elapsed	6046	102	0	0
+tick_until_due	6048	102	0	0
+timestamp	3240	25	0	0
+transport_ext_id_v1_valid	38	0	0	0
+vle_byte_length	6190	102	0	0
+vle_u64_decode	6232	102	0	0
+whatami_v1_valid	14	0	0	0
+wireexpr	4792	169	0	0
+wireexpr_local	3756	157	0	0
+wireexpr_nonlocal	3756	157	0	0
+zbuf_slice	3266	25	0	0

@@ -1157,7 +1157,7 @@ jobs:
   # `sce_codegen_ensure` is called from those two layers and from no other. Each
   # job's cold run is measured by the first run that follows this change.
   codegen-verify:
-    name: codegen verify (Layers B + B2)
+    name: codegen verify (Layers B + B2 + Bc)
     runs-on: ubuntu-22.04
     outputs:
       cache_spec: ${{ steps.cache-series.outputs.spec }}
@@ -1246,6 +1246,20 @@ jobs:
         env:
           WZ_SCE_ORACLE_REQUIRE: "1"
         run: bash scripts/run-ci.sh --layer B2
+
+      - name: Install the Arm GNU Toolchain SCE pins (Layer Bc's compiler)
+        # Arm's tarball of the release vendor/sce pins, checked against its SHA-256: the
+        # figures of deploy/c11/footprint.tsv are that build's, and the distribution's
+        # gcc-arm-none-eabi on this runner is 10.3, another build.
+        run: bash scripts/install-arm-gnu-toolchain.sh
+
+      - name: Layer Bc — the C11 emission compiled with no C library, weighed, vectors run
+        # WZ_BC_REQUIRE=1: this job provisions the compiler and sce-codegen, so a
+        # "could not run" here is a provisioning regression, not a skip.
+        env:
+          WZ_SCE_ORACLE_REQUIRE: "1"
+          WZ_BC_REQUIRE: "1"
+        run: bash scripts/run-ci.sh --layer Bc
 
   # ─────────────────────────────────────────────────────────────────
   # R311y791 — the VERDICT-LEG MUTATION job. Layer C0mut ran as step 11 of the
