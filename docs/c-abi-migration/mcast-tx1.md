@@ -994,3 +994,42 @@ count per conduit and the replies' drop count:
 
 Next: the stage of 20.1 with the pump's object and the engine in one change, then the D2
 capability rows, T3c with the gate widening of 17.1, F8b.
+
+### 20.2 The reply sent at once, read before the switch: a premise that does not hold
+
+20.1 sends a reply with `send_at_once` from where it is admitted. Read in the code, a reply is
+admitted from inside the read that delivered what it answers, and in two of the engine's forms
+that read holds the cell the driver sends through:
+
+- The pump dispatches each datagram inside `GroupTransport::recv_with`'s callback
+  (`group_drive.rs`, the receive loop of `MulticastPump::step_reading`), and the engine answers
+  a member's ask there: `engine/group.rs` @ `fn answer_asks(` puts the keyexpr answers on the
+  group (`enqueue_declaration_reply`) before the event is dispatched, and the dispatch hands
+  the replies sink to what it answers.
+- In the round form the session's transport is the face's `GroupLink<Watched>` itself
+  (`type SessionLink = GroupLink<Watched>;`), whose `recv_with` holds the shared cell's
+  `RefCell` borrowed for the callback; without the round form a transport that splits no
+  receive half reads through the same cell (`ThroughCell`).
+- The driver sends through its own clone of that cell (`GroupLink::send_now`), which answers
+  `None` while the cell is borrowed, and the driver drops such a frame as one on a link not
+  open (`LinkDropCause::NoTxSlot`), uncounted.
+
+So every reply answered inside a read of those forms would be lost, where today's stage puts it
+on a lane its writer takes after the read. The switch is not written on that premise. Two
+structures answer it, and the choice is the main session's:
+
+- **The receive apart from the send** (zenoh-pico's: its read task holds the receive lock and a
+  reply's send takes the transmit lock, `vendor/zenoh-pico/src/transport/common/tx.c` @
+  `static z_result_t _z_transport_tx_send_n_msg_inner(`): the cell's send and receive borrowed
+  apart, which every `GroupTransport` would split (`split_receive` for every stack, the round
+  form reading its half as the other form does), so a reply sent at once reaches the socket from
+  inside the read. It touches each stack's transport and the round form's `Watched`.
+- **A reply queue the step sends after its reads**: the reply admitted by the quota is encoded
+  into bounded storage (what `Staged` is now: the bodies in one ring, the framing beside them)
+  and sent with `send_at_once` by the pump after the read loop and by the holder after its call;
+  the lanes, `LaneRing` as lanes, `Record`, `next_out`, `StageQueue` and the stage's writer
+  still go. It keeps one owned store the first structure removes, and leaves the stacks alone.
+
+Expected of either: the switch's bytes as 20.1 states them, less the reply queue's code in the
+second. Until the ruling the stage stays as it is, and the steps after it that read the switch
+(the D2 rows, F8b) wait with it.
