@@ -46,7 +46,6 @@ crates/wz-capi-coop/src/tests/runtime_tables.rs	pending	clock	names the host clo
 crates/wz-capi-coop/src/tests/shared_key_ids.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; names the host clock; draws the host entropy; takes host_links, Engine, Router of the test root and eventually, Stepped of tests::listen
 crates/wz-capi-coop/src/tests/snapshot.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Engine of the test root
 crates/wz-capi-coop/src/tests/step_host.rs	system	clock,socket,thread,random	two threads of the host step one session at once: every interleaving the host scheduler may choose is its subject
-crates/wz-capi-coop/src/tests/ticker.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; waits on or reads the wall clock; takes open, until, Router of the test root
 crates/wz-capi-coop/src/tests/timestamps.rs	pending	clock,socket,thread,random	starts the router stand-in on the host; opens its session on the host links; names the host clock; draws the host entropy; takes host_links, config, until of the test root and settle of tests::get
 crates/wz-capi-coop/src/tests/tx_pool.rs	system	clock,socket,thread,random	a slow reader over the host stream sockets: the kernel stream buffers are its subject
 crates/wz-capi-coop/tests/engine_rows.rs	pending	clock,socket,random	opens its session on the host links; names the host clock; draws the host entropy

@@ -5,16 +5,31 @@
 //! from the call that steps the session once its time has come and not before, a period after
 //! its last run ended, never alongside itself, outside the session's lock, and ends when it says
 //! so or is stopped.
+//!
+//! Each test runs in the simulated world (`tests::sim`): the session's clock moves only when the
+//! test moves it, so a job comes due at the reading the script brings the clock to, and the step
+//! that runs it is a step the script makes.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use wz_capi_port::{SessionDrive, SessionEngine, Tick, Tickers, WireKey};
 use wz_session_core::publish_options::PublishOptions;
 
-use super::{open, until, CatchAll, Router};
+use super::sim::{Sim, SimEngine};
+use super::CatchAll;
 use crate::EngineHold;
+
+/// The seed every test here runs on: the session's and the stand-in's entropy.
+const SEED: u64 = 0x5eed_71c4;
+
+/// The steps that bring a session just opened to rest: past the first, which moves the links
+/// once, every one of them finds the links settled.
+const QUIET_STEPS: usize = 4;
+
+/// The most steps a test makes on a clock it moves a millisecond a step: a bound against a job
+/// that never comes due, which no run a test waits for comes near.
+const MOST_STEPS: u64 = 1_000;
 
 /// A job that counts its runs and goes on.
 fn counting(runs: &Arc<AtomicUsize>) -> Tick {
@@ -25,37 +40,51 @@ fn counting(runs: &Arc<AtomicUsize>) -> Tick {
     })
 }
 
-/// The clock reads whole milliseconds, so a time measured on this thread's can be one short of
-/// the period the engine counted on its own.
-const READING: Duration = Duration::from_millis(1);
+/// Step `engine` and turn the world until the links are settled and nothing waits at the
+/// session's end, the clock standing still: what a test counts after it is the test's own doing.
+fn rest(sim: &Sim, engine: &SimEngine) {
+    for _ in 0..QUIET_STEPS {
+        SessionDrive::step_once(engine, 0).expect("a session without its read task steps");
+        sim.turn();
+    }
+    sim.steps_until(engine, 0, "the session to rest", || {
+        sim.waiting_for_the_session() == 0
+    });
+}
 
-/// A job does not run before its time and does not run unless the session is stepped: the
-/// control is the wait with no step, which leaves the count where it was, and the run after it
-/// comes from the first step and not a period after the start.
+/// A job does not run before its time and does not run unless the session is stepped: a read a
+/// millisecond before its time runs nothing, the clock moved past its time with no step runs
+/// nothing (the CONTROL), and the first read after that runs it once.
 #[test]
 fn a_job_runs_from_the_step_after_its_time_and_not_before() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    const PERIOD_MS: u64 = 60;
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     let runs = Arc::new(AtomicUsize::new(0));
-    let period = Duration::from_millis(60);
-
-    let started = Instant::now();
     let id = engine
-        .start_ticker(60, counting(&runs))
+        .start_ticker(PERIOD_MS, counting(&runs))
         .expect("the engine runs periodic jobs");
-    std::thread::sleep(period + Duration::from_millis(20));
+
+    sim.advance_ms(PERIOD_MS - 1);
+    SessionDrive::read(&*engine, false).expect("the session is open");
     assert_eq!(
         runs.load(Ordering::SeqCst),
         0,
-        "no step was made, so nothing ran, though its time had come"
+        "a read a millisecond before its time runs nothing"
     );
 
-    until(&engine, "the first run", || {
-        runs.load(Ordering::SeqCst) == 1
-    });
-    assert!(
-        started.elapsed() + READING >= period,
-        "it ran no sooner than one period after it was started"
+    sim.advance_ms(PERIOD_MS);
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        0,
+        "CONTROL: no step was made, so nothing ran, though its time had come"
+    );
+    SessionDrive::read(&*engine, false).expect("the session is open");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "the first read after its time runs it, once"
     );
     engine.stop_ticker(id);
 }
@@ -66,20 +95,22 @@ fn a_job_runs_from_the_step_after_its_time_and_not_before() {
 /// job and one to put it back and look for the next.
 #[test]
 fn a_read_with_no_job_due_takes_the_session_for_its_wait_and_its_step_alone() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
+    rest(&sim, &engine);
     let takes = || engine.takes.core.load(Ordering::SeqCst);
     let before = takes();
-    let _ = SessionDrive::read(&*engine, false);
+    SessionDrive::read(&*engine, false).expect("the session is open");
     assert_eq!(takes() - before, 2, "the wait and the step");
 
     let runs = Arc::new(AtomicUsize::new(0));
     let id = engine
         .start_ticker(20, counting(&runs))
         .expect("the engine runs periodic jobs");
-    std::thread::sleep(Duration::from_millis(40));
+    sim.advance_ms(40);
     let before = takes();
-    let _ = SessionDrive::read(&*engine, false);
+    SessionDrive::read(&*engine, false).expect("the session is open");
     assert_eq!(runs.load(Ordering::SeqCst), 1, "the job was due and ran");
     assert_eq!(
         takes() - before,
@@ -90,31 +121,44 @@ fn a_read_with_no_job_due_takes_the_session_for_its_wait_and_its_step_alone() {
 }
 
 /// A run is due a period after the PREVIOUS run ended, so a job is not run again to catch up,
-/// and the gaps between runs are no shorter than the period.
+/// and the gaps between runs are no shorter than the period. Each run records the reading of the
+/// clock it ran at, kept beside the clock by the test that moves it.
 #[test]
 fn a_job_is_due_a_period_after_its_last_run_ended() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
-    let at = Arc::new(Mutex::new(Vec::<Instant>::new()));
-    let log = at.clone();
+    const PERIOD_MS: u64 = 25;
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
+    let now_ms = Arc::new(AtomicU64::new(0));
+    let at = Arc::new(Mutex::new(Vec::<u64>::new()));
+    let (log, clock) = (at.clone(), now_ms.clone());
     let id = engine
         .start_ticker(
-            25,
+            PERIOD_MS,
             Arc::new(move || {
-                log.lock().unwrap().push(Instant::now());
+                log.lock().unwrap().push(clock.load(Ordering::SeqCst));
                 true
             }),
         )
         .expect("the engine runs periodic jobs");
 
-    until(&engine, "four runs", || at.lock().unwrap().len() >= 4);
+    while at.lock().unwrap().len() < 4 {
+        assert!(
+            now_ms.load(Ordering::SeqCst) < MOST_STEPS,
+            "four runs did not come within {MOST_STEPS} ms of the session's clock"
+        );
+        SessionDrive::read(&*engine, false).expect("the session is open");
+        sim.advance_ms(1);
+        now_ms.fetch_add(1, Ordering::SeqCst);
+    }
     engine.stop_ticker(id);
 
     let at = at.lock().unwrap();
+    assert!(at[0] >= PERIOD_MS, "the first run came at {} ms", at[0]);
     for pair in at.windows(2) {
         assert!(
-            pair[1] - pair[0] + READING >= Duration::from_millis(25),
-            "two runs {:?} apart, under the 25 ms period",
+            pair[1] - pair[0] >= PERIOD_MS,
+            "two runs {} ms apart, under the {PERIOD_MS} ms period",
             pair[1] - pair[0]
         );
     }
@@ -124,8 +168,9 @@ fn a_job_is_due_a_period_after_its_last_run_ended() {
 /// answers `true` beside it, which keeps running while the first one is silent.
 #[test]
 fn a_job_that_answers_false_is_ended() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     let once = Arc::new(AtomicUsize::new(0));
     let goes_on = Arc::new(AtomicUsize::new(0));
     let ones = once.clone();
@@ -142,7 +187,7 @@ fn a_job_that_answers_false_is_ended() {
         .start_ticker(10, counting(&goes_on))
         .expect("the engine runs periodic jobs");
 
-    until(&engine, "the control to run five times", || {
+    sim.steps_with_time(&engine, 1, "the control to run five times", || {
         goes_on.load(Ordering::SeqCst) >= 5
     });
     assert_eq!(once.load(Ordering::SeqCst), 1, "it ran once and no more");
@@ -150,16 +195,21 @@ fn a_job_that_answers_false_is_ended() {
 }
 
 /// A stopped job does not run again, and stopping one that is already stopped, or never was
-/// started, changes nothing.
+/// started, changes nothing. The CONTROL is a job started beside it, which the same steps run.
 #[test]
 fn a_stopped_job_does_not_run_again() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     let runs = Arc::new(AtomicUsize::new(0));
+    let beside = Arc::new(AtomicUsize::new(0));
     let id = engine
         .start_ticker(10, counting(&runs))
         .expect("the engine runs periodic jobs");
-    until(&engine, "the first run", || {
+    let control = engine
+        .start_ticker(10, counting(&beside))
+        .expect("the engine runs periodic jobs");
+    sim.steps_with_time(&engine, 1, "the first run", || {
         runs.load(Ordering::SeqCst) >= 1
     });
 
@@ -167,23 +217,30 @@ fn a_stopped_job_does_not_run_again() {
     engine.stop_ticker(id);
     engine.stop_ticker(u64::MAX);
     let after = runs.load(Ordering::SeqCst);
-    let until_then = Instant::now() + Duration::from_millis(80);
-    while Instant::now() < until_then {
-        let _ = SessionDrive::read(&*engine, false);
+    let beside_after = beside.load(Ordering::SeqCst);
+    for _ in 0..80 {
+        SessionDrive::read(&*engine, false).expect("the session is open");
+        sim.advance_ms(1);
     }
     assert_eq!(
         runs.load(Ordering::SeqCst),
         after,
         "eight periods of steps ran nothing"
     );
+    assert!(
+        beside.load(Ordering::SeqCst) > beside_after,
+        "CONTROL: the same steps ran the job beside it"
+    );
+    engine.stop_ticker(control);
 }
 
 /// A job runs outside the session's lock: what it does, a publish here, takes that lock and
 /// goes out on the link.
 #[test]
 fn a_job_may_publish_on_the_session_it_runs_on() {
-    let router = Router::start(CatchAll::Held);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let router = sim.stand_in(CatchAll::Held);
+    let engine = sim.open(sim.config());
     let on = EngineHold::downgrade(&engine);
     let id = engine
         .start_ticker(
@@ -204,35 +261,37 @@ fn a_job_may_publish_on_the_session_it_runs_on() {
         )
         .expect("the engine runs periodic jobs");
 
-    until(&engine, "the router to hear a tick", || {
+    sim.steps_with_time(&engine, 1, "the stand-in to hear a tick", || {
         router.seen(|seen| seen.samples.iter().any(|(key, _)| key == "demo/tick"))
     });
     engine.stop_ticker(id);
 }
 
 /// A job slower than its period runs once for each step that finds it due, and does not hold the
-/// caller to run again until it has caught up: one step, one run.
+/// caller to run again until it has caught up: one step, one run. Each run takes ten of the
+/// session's milliseconds, five periods.
 #[test]
 fn a_job_slower_than_its_period_runs_once_a_step() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Arc::new(Sim::new(SEED));
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     let runs = Arc::new(AtomicUsize::new(0));
-    let count = runs.clone();
+    let (count, world) = (runs.clone(), sim.clone());
     let id = engine
         .start_ticker(
             2,
             Arc::new(move || {
                 count.fetch_add(1, Ordering::SeqCst);
-                std::thread::sleep(Duration::from_millis(10));
+                world.advance_ms(10);
                 true
             }),
         )
         .expect("the engine runs periodic jobs");
 
-    until(&engine, "the first run", || {
+    sim.steps_with_time(&engine, 1, "the first run", || {
         runs.load(Ordering::SeqCst) >= 1
     });
-    std::thread::sleep(Duration::from_millis(20));
+    sim.advance_ms(20);
     let before = runs.load(Ordering::SeqCst);
     SessionDrive::read(&*engine, false).expect("the session is open");
     assert_eq!(
@@ -246,8 +305,9 @@ fn a_job_slower_than_its_period_runs_once_a_step() {
 /// A closed session starts no job.
 #[test]
 fn a_closed_session_starts_no_job() {
-    let router = Router::start(CatchAll::None);
-    let engine = open(&router);
+    let sim = Sim::new(SEED);
+    let _router = sim.stand_in(CatchAll::None);
+    let engine = sim.open(sim.config());
     SessionDrive::close(&*engine);
     assert_eq!(
         engine.start_ticker(10, Arc::new(|| true)),
