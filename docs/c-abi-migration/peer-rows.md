@@ -649,6 +649,51 @@ another thread finds is what it finds today. Each decision is written before its
   alone; in the peer and api cases, `DirectFaces` a handle and a bound in the engine's place and
   one more row in the arena, and no `once(dial).chain(..)` in the walks.
 
+### 7.5 R4, landed
+
+- **The halves beside the actions** (`crates/wz-runtime-coop/src/transport/state.rs` @
+  `pub struct ActionsCell<R: SessionRuntime, T: TimeSource> {`): a link's actions and the two
+  halves they hold are written in place in one cell of the session's actions table
+  (`TransportState::place_actions`, through `CellRc::part_in_of`, which writes a whole value and
+  hands a counted handle on its actions' field); the actions reach the halves by `PlacedRef`s
+  made where the halves were written, and the last handle on the actions drops the three, the
+  actions first. `place_halves`, `TransportState::halves_cells`, the pair's cell and the plan's
+  halves table (`LinkCells::halves`, the arena parts `link halves flags` and `link halves`) are
+  gone; the actions' cell is laid for `ActionsCell`. The round's `make_wire` and the direct
+  `place_wire` build through the one `build_wire`, so both forms make a link's session so.
+- **The form is the lock kind's** (`crates/wz-runtime-coop/src/sync.rs` @
+  `type Halves: crate::link_cells::HalvesForm;`): `Confined` and `ManyThreads` name
+  `PlacedHalves` (`SessionRuntime::Shared` is `PlacedRef`), `sync::Shared` names
+  `CountedHalves<OneTask>` (`CellRc`, as before), and only a counting form shares a value on the
+  heap (`ShareValues` asks `HeapHalves`). `TransportFaces::Lock` asks `PlacedHalves`, so an
+  engine whose lock kind counted its halves does not compile.
+- **The snapshot's count** (`crates/wz-capi-coop/src/engine/direct.rs` @
+  `pub(super) struct KernelCount<C: ClockSource + 'static>(LinkHandle<C>);`): a handle on the
+  actions, which reads the kernel beside them; one count, as the kernel's handle was.
+- **Held by:** `link_cells`'s `a_handle_on_a_part_keeps_the_whole_value_written_in_place` (red if
+  the last handle drops its part alone, if the cell goes back while a handle on the part lives,
+  or if a writer is called with no cell); `sync`'s
+  `a_confined_runtime_places_a_links_halves_and_the_heap_profile_counts_them` and
+  `a_runtime_of_several_threads_shares_a_links_parts_within_its_face` (red if a confined or
+  many-thread runtime's `Shared` counts, or the heap profile's does not);
+  `tests::arena`'s `a_links_actions_and_halves_lie_in_its_cell_across_a_redial` (one cell of the
+  actions table a link, given back with the lost link, across a redial in an arena of one link:
+  red if the cell is laid too small for the halves, which refuses the link, or not given back
+  with the lost link); the plan's `a_plan_lays_out_each_table_of_cells_once_in_order` and
+  `the_cells_of_each_kind_held_are_lent_past_the_kinds_with_none` over three tables; and the
+  handshake, lease and close tests over several faces (`tests::listen`), every link's session
+  now made so.
+- **Not added: the cost gate's entry.** The step's guard would forbid a kernel behind a counted
+  handle of its own in every coop case (`REMOVED`); its pattern is to be read off an explain
+  report of the case before the step (the drop and the give-back of the pair's handles), which
+  nothing built here gives. It lands with the reading.
+- **What the explain reports should read:** no body of the pair's cell (`CellRc<(A,B),N>`'s
+  making and `into_halves`'s clone) in the coop cases, two handle drops fewer per link, each
+  actions' cell larger by the halves and the halves' table gone (a link's cells one head, one
+  flag and their padding fewer), and `SessionLinkActions`
+  two words smaller (a `PlacedRef` is one word, a `CellRc` two). Receive Ir: unchanged, a
+  half being reached through one load either way.
+
 ## 8. Where the cases end
 
 ### 8.1 The step, read two ways (diagnosis)
