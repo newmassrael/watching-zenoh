@@ -975,7 +975,10 @@ impl<L: CoopLinks + 'static, C: ClockSource + 'static> DirectSlot<L, C> {
     }
 
     /// Drop the link whole, as the session's record of the link goes: its pump, then its wire in
-    /// `site`. Never inside a lend of the place.
+    /// `site`. Never inside a lend of the place. Never inlined: a link goes at its handshake's
+    /// end, at its loss and before the next is placed, and each of those carries a call to one
+    /// body rather than a copy of the drop of the pump's and the wire's parts.
+    #[inline(never)]
     fn drop_link(&mut self, site: &DirectSite<L, C>) {
         self.drop_pump();
         self.empty_site(site);
