@@ -366,8 +366,15 @@
       }
     },
     "pico-api-windows-x64-with-time-base": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 2.7284,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-27",
+        "wz_text": 1113549,
+        "pico_text": 408138,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x64; cmake version 4.5.0; generator Visual Studio 18 2026 x64; linker LLD 22.1.6 (https://github.com/rust-lang/llvm-project.git 08c84e69a84d95936296dfcab0e38b34100725d5)"
+      }
     },
     "pico-api-windows-x86-with-app-transport": {
       "ratio_at_most": 3.3057,
@@ -535,8 +542,15 @@
       }
     },
     "pico-api-windows-x86-with-time-base": {
-      "ratio_at_most": null,
-      "debt": "debt-pico-host-size-ceiling"
+      "ratio_at_most": 3.238,
+      "debt": "debt-pico-host-size-ceiling",
+      "reading": {
+        "date": "2026-11-27",
+        "wz_text": 1026452,
+        "pico_text": 317011,
+        "pico_pin": "6a881c21dad1",
+        "toolchain": "Microsoft (R) C/C++ Optimizing Compiler Version 19.52.37029 for x86; cmake version 4.5.0; generator Visual Studio 18 2026 Win32; linker LLD 22.1.6 (https://github.com/rust-lang/llvm-project.git 08c84e69a84d95936296dfcab0e38b34100725d5)"
+      }
     }
   }
 }
