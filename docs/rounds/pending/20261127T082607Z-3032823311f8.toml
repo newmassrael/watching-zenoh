@@ -1,0 +1,20 @@
+impact = ["watching-zenoh/local-ci-gates", "feature-inventory--composable-framework-atomic--preset-catalog/5-atomic-feature-catalog/5-27-api-compat"]
+decision = '''
+Pay three hosted reds, each to its cause: C1d's own-space alias test was given a Put in the leg built with pubsub-delete alone; the Windows shm pool test held the Unix refusal of a small pool where a Windows segment is page-rounded; and the macOS pico programs linked a preset library against the default header arm, because --bench-cargo-args became a bench's preset build. --build-cargo-args restores the default build on an engine under its own name.
+'''
+changes = '''
+- wz-session-core session_tables tests: a Del body without pubsub-put.
+- wz-capi-c shm pool test: Windows makes a 1 to 1000 byte pool.
+- wz_config.py --build-cargo-args; pico-c-program.sh, run-ci.sh, hints.
+- hosted-red-acks row c1d-cabi-reds-repay.
+'''
+verification = '''
+- C1d layer pass; the test fails 0/1 before and passes after, per leg.
+- wz-capi-c shm pool tests 4 pass on Linux; Windows is the hosted judge.
+- C1pc, C1bm, C1co pass; pico_host_layer links and runs under clang.
+- wz_config selftest 570/570; gate bundle and citations equal to main.
+'''
+carry = '''
+- Windows shm pool test unmeasured off hosted: pc3-win has no checkout.
+- 19 static gates and one citation fail on main itself, not this item.
+'''

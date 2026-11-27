@@ -91,7 +91,7 @@ wz-conformance-build = { path = "../wz-conformance-build" }
 # E1 and P1): every capability of pico's default build, and the wz-own planes the preset turns on,
 # over `os-host`. The tokio engine is built by naming it without the default features
 # (`--no-default-features --features engine-tokio,serial-drive-own-thread,rx-busy-poll,...`,
-# `wz_config.py --bench-cargo-args tokio` prints the list), until phase P5 takes it out of the C
+# `wz_config.py --build-cargo-args tokio` prints the list), until phase P5 takes it out of the C
 # library. `gossip` is off in the preset (decision Q7): it runs only on the tokio engine today.
 default = [
     "os-host",

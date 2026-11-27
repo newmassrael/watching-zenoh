@@ -177,7 +177,7 @@ fi
 
 # The crate's default build is the cooperative engine (docs/c-abi-engine-and-memory.md, P1). The
 # tokio engine is that build's list with `os-host` replaced by the tokio option's features
-# (`wz_config.py --bench-cargo-args tokio`), without the default features, and the program's
+# (`wz_config.py --build-cargo-args tokio`), without the default features, and the program's
 # capabilities; its header is the default build's, as the capabilities are. The cooperative engine
 # here is `os-host` in front of the program's capabilities alone, built without `std` (below), and
 # the header renderer is told that engine.
@@ -195,7 +195,7 @@ else
         list_py="$(command -v python3 || command -v python || true)"
     fi
     if [ -z "$list_py" ] || ! tokio_words="$("$list_py" scripts/lib/wz_config.py \
-            --bench-cargo-args tokio "$features")"; then
+            --build-cargo-args tokio "$features")"; then
         say "pico-program-probe on ${os}: the tokio engine's feature list did not resolve NOT-MEASURED"
         exit 1
     fi

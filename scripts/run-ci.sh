@@ -10982,13 +10982,13 @@ layer_c1bl_cargo_test_router_failfast() {
 # evidence line moves the moment either binary stops selecting its case.
 # The cargo words of a wz-capi-pico build on the tokio engine with the features `$1` (a comma
 # list, optional): the crate's default list with `os-host` replaced by the tokio option's
-# features of deploy/wz-config.toml, as `wz_config.py --bench-cargo-args tokio` prints them. The
+# features of deploy/wz-config.toml, as `wz_config.py --build-cargo-args tokio` prints them. The
 # crate's default is the cooperative engine (docs/c-abi-engine-and-memory.md, P1); a leg that grades
 # the tokio engine, or a link only it runs, names it through this. Removed in phase P5 with the
 # tokio engine's place in the C library.
 pico_tokio_args() {
     local words
-    words="$(python3 scripts/lib/wz_config.py --bench-cargo-args tokio "${1:-}")" || return 1
+    words="$(python3 scripts/lib/wz_config.py --build-cargo-args tokio "${1:-}")" || return 1
     # The words name each feature through the C library's dependency on the ABI crate (`abi/`);
     # a leg that builds or tests the ABI crate itself names them as its own.
     echo "${words//abi\//}"
@@ -11013,9 +11013,9 @@ pico_lib_args() {
 }
 
 # The cargo words of the tokio engine's pico C library with the features `$1` (a comma list,
-# optional), as `wz_config.py --bench-cargo-args tokio` prints them, through `abi/`.
+# optional), as `wz_config.py --build-cargo-args tokio` prints them, through `abi/`.
 pico_lib_tokio_args() {
-    python3 scripts/lib/wz_config.py --bench-cargo-args tokio "${1:-}"
+    python3 scripts/lib/wz_config.py --build-cargo-args tokio "${1:-}"
 }
 
 # The cargo words that build the cooperative engine's pico C library, which has no `std` form

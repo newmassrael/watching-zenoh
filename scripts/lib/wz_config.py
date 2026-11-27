@@ -62,6 +62,12 @@ itself (their Kconfig symbol, default and help). This tool is everything that de
                                   as `#define WZ_FEATURE_<ID> 0|1`. A C program compiled against
                                   it allocates the structs that build's library writes and sees
                                   the declarations of the doors that build has
+    --build-cargo-args ENGINE [FEATURES]
+                                  the cargo words of wz-capi-pico's DEFAULT build on ENGINE with
+                                  FEATURES (a comma list) over its default capabilities: the
+                                  library a program compiled against `--pico-config-h FEATURES`
+                                  links on that engine (a bench against zenoh-pico builds the
+                                  preset instead, `--bench-cargo-args`)
     --bench-engine [ENGINE]       the engine a host bench builds the pico ABI on: ENGINE (tokio or
                                   coop) when given, else the one the package's profile
                                   (configs/profiles/host-peer-ext.conf) chooses (kconfiglib)
@@ -204,6 +210,7 @@ Usage:
     wz_config.py --original-conformance-statement zenoh-pico|zenoh-c|zenoh
     wz_config.py --pico-config-h [--engine coop] FEATURES
     wz_config.py --print-preset-features tokio|coop [FEATURES]
+    wz_config.py --build-cargo-args tokio|coop [FEATURES]
     wz_config.py --features pico|c|core CONFIG
         CONFIG is a Kconfig `.config` (CONFIG_WZ_CAP_X=y) or a pico header of
         `#define Z_FEATURE_X 0|1` and `#define WZ_FEATURE_X 0|1` lines; a capability the
@@ -2635,6 +2642,40 @@ def pico_build_features(engine: str, asked: list[str], table: dict) -> set[str]:
     if engine == "tokio":
         return enabled_features(table, tokio_features(list(table["default"]), tokio_switches()) + asked)
     return enabled_features(table, [BASE_ENGINE_FEATURE] + asked)
+
+
+def build_named_features(engine: str, asked: list[str], table: dict) -> list[str]:
+    """The features a cargo build of wz-capi-pico names, without the default features, for the
+    crate's DEFAULT build on `engine` and `asked` over it, `table` the crate's feature table: on the
+    tokio engine the default list with the base's engine feature replaced by the tokio option's
+    features (`tokio_features`), and `asked`; on the cooperative one the default list with what
+    selects the tokio engine left out (`coop_features`), as the package's profile resolves its own,
+    and `asked`. It is the library the default header arm (`--pico-config-h`) describes, so a
+    program compiled against that header links it; a bench against zenoh-pico builds the preset
+    instead (`preset_named_features`). A capability asked that the cooperative engine does not run
+    is refused by name rather than built into a library on the tokio engine."""
+    asked = [f for f in asked if f]
+    engine_stdlib(engine)
+    if engine == "tokio":
+        named = tokio_features(list(table["default"]), tokio_switches())
+        return named + [f for f in asked if f not in named]
+    named = coop_features(list(table["default"]) + asked, table)
+    lost = [f for f in asked if f not in named]
+    if lost:
+        raise PresetError(f"the cooperative engine does not run {', '.join(lost)}: build "
+                          f"{'it' if len(lost) == 1 else 'them'} on the tokio engine")
+    return named
+
+
+def build_cargo_args(engine: str, asked: list[str], table: dict) -> str:
+    """The cargo words of the default build of the C library on `engine` (`build_named_features`),
+    `-p wz-capi-pico-lib`, each feature named through its dependency on the ABI crate (`abi`), so the
+    same words build it beside another package (`-p zenoh-pico-sys -p wz-capi-pico-lib`)."""
+    named = [f"{PICO_ARTIFACT_DEP}/{f}" for f in build_named_features(engine, asked, table)]
+    words = ["--no-default-features"]
+    if named:
+        words.append("--features " + ",".join(named))
+    return " ".join(words)
 
 
 # -- the engine a host bench measures -------------------------------------------------------------------
@@ -6059,6 +6100,25 @@ def cmd_selftest() -> int:
            pico_build_features("default", [], good) == enabled_features(good, ["default"])
            and "os-host" in pico_build_features("default", [], good)
            and "engine-tokio" not in pico_build_features("default", [], good))
+    expect("the default build on the tokio engine is the default list with that engine under it",
+           enabled_features(good, build_named_features("tokio", [], good))
+           == pico_build_features("tokio", [], good)
+           and "engine-tokio" in build_named_features("tokio", [], good)
+           and "os-host" not in build_named_features("tokio", [], good)
+           and build_cargo_args("tokio", [], good).startswith(
+               "--no-default-features --features abi/engine-tokio,")
+           and build_cargo_args("tokio", ["app-transport"], good).endswith(",abi/app-transport"))
+    on_coop = enabled_features(good, build_named_features("coop", [], good))
+    expect("the default build on the cooperative engine is the default capabilities that engine runs",
+           "os-host" in on_coop and "engine-tokio" not in on_coop
+           and not {"serial-drive-own-thread", "rx-busy-poll"} & on_coop
+           and set(coop_features(list(good["default"]), good)) <= on_coop
+           and build_cargo_args("coop", [], good).startswith(
+               "--no-default-features --features abi/os-host,"))
+    expect("a capability asked of the cooperative engine's default build that only the tokio engine "
+           "runs is refused by name",
+           "gossip" in refusal_text(lambda: build_named_features("coop", ["gossip"], good))
+           and "fast" in refusal_text(lambda: build_named_features("fast", [], good)))
     expect("the pico C library takes the ABI crate by the dependency its features are named through",
            f'{PICO_ARTIFACT_DEP} = {{ package = "wz-capi-pico"'
            in (ROOT / "crates" / PICO_ARTIFACT / "Cargo.toml").read_text(encoding="utf-8"))
@@ -8234,6 +8294,17 @@ def main(argv: list[str]) -> int:
         try:
             print(preset_feature_list(argv[2], argv[3].split(",") if len(argv) == 4 else [],
                                       manifest_features(MANIFESTS["pico"])))
+        except KeyError as exc:
+            print(f"  wz-config FAIL: {exc.args[0]}", file=sys.stderr)
+            return 1
+        except (ValueError, OSError) as exc:
+            print(f"  wz-config FAIL: {exc}", file=sys.stderr)
+            return 1
+        return 0
+    if argv[1:2] == ["--build-cargo-args"] and len(argv) in (3, 4):
+        asked = argv[3].split(",") if len(argv) == 4 else []
+        try:
+            print(build_cargo_args(argv[2], asked, manifest_features(MANIFESTS["pico"])))
         except KeyError as exc:
             print(f"  wz-config FAIL: {exc.args[0]}", file=sys.stderr)
             return 1

@@ -321,7 +321,7 @@ compile_error!(
      cooperative one (`os-host` or `os-zephyr`): the default \
      features name `os-host`, so build the tokio engine's library with \
      `--no-default-features` and `engine-tokio` with its features (`wz_config.py \
-     --bench-cargo-args tokio` prints them), or the cooperative one without the tokio engine"
+     --build-cargo-args tokio` prints them), or the cooperative one without the tokio engine"
 );
 
 // A library is for one system: `os-host` a POSIX host's or Windows', `os-zephyr` a Zephyr
