@@ -8860,6 +8860,25 @@
       "carry_forward_bullets": [
         "none for this lane."
       ]
+    },
+    "Round 4710": {
+      "decision_summary": "Keep sce-codegen in the machine's oracle store, keyed by the source state\nit was built from, the build recipe and the toolchain, so every checkout\nand action copy of a machine takes one build instead of building its own.",
+      "changes_bullets": [
+        "build-sce.sh and sce-codegen-oracle.sh: store lookup, flock, atomic publish.",
+        "wz-codegen-build: consumers read the store first; provenance unchanged.",
+        "regen prints cargo progress; bx.toml shares the store path."
+      ],
+      "verification_bullets": [
+        "wz-codegen-build provenance 16/16; shellcheck -x clean on four scripts.",
+        "build-sce twice: the second run builds nothing.",
+        "spawn, artifact-root, build-evidence lints and census coverage pass."
+      ],
+      "impact_refs": [
+        "feature-inventory--composable-framework-atomic--preset-catalog/3-three-test-definitions/3-1-footprint"
+      ],
+      "carry_forward_bullets": [
+        "none for this lane."
+      ]
     }
   },
   "inventory_entries": {
