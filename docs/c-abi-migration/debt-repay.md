@@ -71,6 +71,15 @@ The debt names three sites, each read on main `df994d7913`:
    `tests/lent_control_alloc.rs` was gated on the codecs of the writers it counts and not on
    `alloc`, while its control, the owned builders (`declare_build`, `response_final_build`,
    `interest_build::build_interest_*`), compiles only with it. Five resolution errors.
+9. `cargo test --lib` of the slot profile with `liveliness-token`, alone and with
+   `session-unicast`, with D11 in: every test of the lib runs (1209 and 1288), and one fails in
+   both,
+   `reply_acceptance::tests::a_get_admits_a_reply_keyed_with_its_own_text_before_the_walk`, on
+   `reply_key_admitted("a/*", "a/b")`. Site 7's premise again: `*` as a chunk is the matcher's
+   other optional dialect (`keyexpr-wildcard-single`, a default feature the slot builds leave
+   off), and without it `a/*` is a literal key that `a/b` does not intersect
+   (`keyexpr_match::tests::single_wildcard_off_degrades_to_literal`). The gate is right; the test
+   claimed a wildcard where the build has none.
 
 No leg built any of these: Layer C1h builds the heap's forms or no session, and the slot profile
 is clippied only in its largest set (every feature beside it).
@@ -111,6 +120,7 @@ of it twice.
 | D9 | `bf9b5f6516` | the three test modules of site 6 are gated on `alloc` |
 | D10 | `c9567ce5d7` | `local_token`'s tests that expect a match use a literal key or match-all, so they hold the staging in every dialect (site 7) |
 | D11 | `a8ab51d4b6` | `tests/lent_control_alloc.rs` is gated on `alloc` beside its codecs (site 8) |
+| D12 | `d41ade75f4` | the reply gate's test keeps the own-text and refused-key cases, which hold in every dialect; the walk case moves to a test gated on `keyexpr-wildcard-single` (site 9) |
 
 ### 2.1 Why D1 is the structure and not a marker on the lifetime
 
@@ -243,6 +253,27 @@ D11 is the test target's gate. Every build that compiled it has `alloc` (its own
 need it), so it runs where it ran; a build without `alloc` compiles it as an empty target. Its
 one test is unchanged.
 
+### 4.6 D12
+
+Unlike D10, D12 gates a claim, because here the wildcard IS the claim: the walk case holds that
+`reply_key_admitted` goes on to the walk when the texts differ, and only a wildcard get admits a
+key other than its own text. Without `keyexpr-wildcard-single` a literal get intersects only its
+own text, so the walk and the text comparison agree on every pair and no fixture could tell them
+apart; a literal key in place of `a/*` would assert nothing the refused cases do not. So the
+test is split, as `a_literal_query_intersects_only_its_own_key` and
+`a_pattern_query_intersects_a_concrete_reply` already split the walk itself:
+
+- `a_get_admits_a_reply_keyed_with_its_own_text_before_the_walk`, every build: `a/b` and
+  `demo/**` are admitted with no walk counted, and `a/c`, `a` and `a/b/c` are refused under
+  `a/b`; red if the text shortcut is left out (in the default build the own `**` text is
+  walked), or if it compares
+  the shorter length only (`a` or `a/b/c` admitted);
+- `a_reply_keyed_otherwise_goes_on_to_the_walk`, with `keyexpr-wildcard-single` (a default
+  feature): `a/b` admitted and `b/b` refused under `a/*`; red if the gate stops at the text
+  comparison (`a/b` refused) or admits what the walk refuses (`b/b` admitted).
+
+The default build runs both, one test more than before D12; the slot builds run the first.
+
 ## 5. What the main session runs
 
 Per commit, each a single command from the workspace root:
@@ -274,6 +305,10 @@ Per commit, each a single command from the workspace root:
   `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --all-targets -- -D warnings`.
 - D11: `cargo clippy --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,session-unicast,liveliness-token,codec-push,rx-push,codec-response,codec-response-final,rx-response,codec-request --all-targets -- -D warnings`;
   `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --all-features --test lent_control_alloc` (1 test; the default features leave out the codecs it counts, so there it is 0).
+- D12: the two runs of site 9 again, each with no failure and the same count as there (1209 and
+  1288: the new test is not compiled without the wildcard), the first being
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --no-default-features --features session-slot,liveliness-token --lib`;
+  `cargo test --manifest-path crates/Cargo.toml -p wz-session-core --lib reply_acceptance::` (the default build, one test more than before D12).
 
 ## 6. Left open
 
@@ -283,8 +318,9 @@ Per commit, each a single command from the workspace root:
   D1 removed it. That record is the codec-scale lane's and is left as written.
 - Arm 22 stays `--lib`: its `--all-targets` form is sites 6 and 8, and an arm is added after
   the command it runs has been seen green.
-- Arm 22's features under `cargo test --lib` have not been run; other modules' tests may assume
-  the wildcard dialect as site 7's did.
+- The two `cargo test --lib` runs of site 9 are the only slot-profile test runs of the whole
+  lib so far; site 9 was their one failure. No `--all-targets` test run of the slot profile has
+  been made, and its integration tests may assume a dialect as sites 7 and 9 did.
 - `pubsub::decode_isolation_tests` has site 6's shape (gated on `storage-profile`, reads the
   owned Push and the heap registry); no build of this lane reached it, so it is left as read.
 - The ledger keeps wz-runtime-coop's two `session_drive.rs` findings (a redundant explicit link
