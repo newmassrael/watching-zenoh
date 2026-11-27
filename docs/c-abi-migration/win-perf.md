@@ -3,9 +3,10 @@
 Status: design of the Windows performance lane (branch `win-perf-design`). Nothing here was built,
 run or measured by this lane. The figures of section 1 are those of the run it names; every other
 figure is derived from them or read from the code, and says so. A cell with no reading says
-**measure**, and section 7 names the command that fills it. Step S1 of section 5 is on this branch;
-the rest is design. It extends `docs/coop-engine-cpu-cost.md` (the engine's own work a message),
-`docs/windows-multicast-rtt.md` (the group put written by the putting thread) and
+**measure**, and section 7 names the command that fills it. Step S1 of section 5 is on main; S2 is
+on the branch `win-s2` (section 6b); S2b needs no code of its own, the engine's read making it
+already (section 6b); the rest is design. It extends `docs/coop-engine-cpu-cost.md` (the engine's
+own work a message), `docs/windows-multicast-rtt.md` (the group put written by the putting thread) and
 `docs/c-abi-migration/base-rss.md` (the resident set on Linux, part by part); it changes none of them.
 
 ## 1. The reading
@@ -61,7 +62,7 @@ section 2), and the same two threads in each process.
 | wait for input | one `WSAPoll` over the session's links (`WindowsWaits::wait_ready`, `poll_on`, `crates/wz-runtime-posix/src/windows/mod.rs:604`) | tcp peer: `select` over the peers (`vendor/zenoh-pico/src/system/windows/network.c` @ `int result = select(0, &read_fds, NULL, NULL, &timeout);`); a group: none, its read is the wait |
 | stream read | one `recv` of a non-blocking socket, `WSAEWOULDBLOCK` nothing (`WindowsTcpSocket::try_read`, `crates/wz-runtime-posix/src/windows/stream.rs:395`) | `recv` of a blocking socket after `select` said it has input (`vendor/zenoh-pico/src/link/transport/tcp/tcp_windows.c` @ `int rb = recv(sock._sock._fd, (char *)ptr, (int)len, 0);`) |
 | a group's datagram read | the group's sockets are non-blocking (`bind_joined`, `bind_sender`, `crates/wz-runtime-posix/src/multicast.rs:632`, `:674`); a read that must not wait (`WindowsUdpSocket::try_recv`, `crates/wz-runtime-posix/src/windows/net.rs`) was `WSAPoll(0)` and `recvfrom` before S1, `recvfrom` alone after | one `recvfrom` on a blocking socket with `SO_RCVTIMEO`, its own datagrams read and passed over in the same call (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_windows.c` @ `rb = recvfrom(sock._sock._fd, (char *)ptr, (int)len, 0, (SOCKADDR *)&raddr, (int *)&replen);`) |
-| a group's read that waits in its receive | not on Windows: `MulticastSocket::make_receive_wait` is the provided `false` there (`crates/wz-runtime-posix/src/group.rs:73`), so the split receive does not `awaits_input` (`crates/wz-runtime-posix/src/multicast.rs:1019`) and the lone group's read (`crates/wz-capi-coop/src/engine/group.rs:2299`) waits in `WSAPoll`; a POSIX host makes it (`crates/wz-runtime-posix/src/net.rs:1107`) and reads a group with one call a datagram and one that finds it empty | the read is the wait |
+| a group's read that waits in its receive | before S2 not on Windows: `MulticastSocket::make_receive_wait` was the provided `false` there (`crates/wz-runtime-posix/src/group.rs:73`), so the split receive did not `awaits_input` (`crates/wz-runtime-posix/src/multicast.rs:1019`), the lone group's read (`read_awaited`, `crates/wz-capi-coop/src/engine/group.rs:2291`) was not taken and the read waited in `WSAPoll`. A POSIX host makes it (`crates/wz-runtime-posix/src/net.rs:1107`) and reads a group with one call a datagram: `read_awaited` steps the datagram the wait kept alone and goes back to the receive, so no read that finds the queue empty follows it (D10 of `docs/win-budget/ir-multicast.md`, section 7.9). After S2 Windows reads the same way: `make_receive_wait` arms `SO_RCVTIMEO` and the first receive that waits turns the joined socket to blocking (section 6b) | the read is the wait |
 | stream write | one `WSASend` of the non-blocking socket (`stream.rs:326`); on `WSAEWOULDBLOCK` a `WSAPoll` for room (`poll_writable`, `mod.rs:338`) and again | a blocking `send` (`tcp_windows.c` @ `int wb = send(sock._sock._fd, (const char *)ptr, (int)len, 0);`) |
 | datagram write | `sendto` of the non-blocking sender (`WindowsUdpSocket::send_to`); no room is `found_no_room` | a blocking `sendto` |
 | clock | `QueryPerformanceCounter`, `QueryPerformanceFrequency` and two 64-bit divisions a reading (`WindowsClock::now_us`, `mod.rs:66`, `windows_arith::ticks_to_us`; `monotonic_ns`, `crates/wz-host-sync/src/windows.rs:75`) | `QueryPerformanceCounter` a reading (`vendor/zenoh-pico/src/system/windows/system.c` @ `z_clock_t z_clock_now(void) {`); `QueryPerformanceFrequency` and a division in each elapsed |
@@ -85,6 +86,13 @@ libraries pass over it in their read.
 | tcp pong, a round trip | 3 (`select`, `recv`, `send`) | 3 or 4 (`WSAPoll`, `recv`, `WSASend`, and a `recv` answering `WSAEWOULDBLOCK` when the turn reads the link again before its next wait: **measure**) | the same | the same | 3 |
 | tcp subscriber, a wake | 2 (`select`, `recv`) | 2 or 3, as the pong | the same | the same | 2 |
 | tcp publisher, a put | 1 (`send`, which waits for room inside) | 1 (`WSASend`); 3 when the stream is full (`WSAEWOULDBLOCK`, `WSAPoll`, `WSASend`) | the same | the same | the same |
+
+S2b is that `read_awaited`, on main before the package of section 1 was built: on Windows it was
+never reached, since no group's receive half waited. S2 alone so moves the multicast rows from the
+column after S1 to the column after S2 and S2b. What S2 adds a datagram beside the `recvfrom` is a
+`setsockopt` of the receive's timeout whenever the whole milliseconds left of the read's deadline
+change (`HostGroupReceive::await_member`, as on Linux): at 5,000 datagrams a second about one in
+five datagrams (S2c).
 
 Clock readings a message: W reads the clock at least once in each read step and once in each wait it
 works out (`crates/wz-capi-coop/src/engine/direct.rs`, the quiet face's loop; `pump.now_us`), each
@@ -121,9 +129,10 @@ step lands only when its rows fall (M0) and the Linux receive's Ir does not grow
 
 | step | what | where | expected | state |
 |---|---|---|---|---|
-| S1 | A socket made non-blocking is read with no poll before the read: `WSAEWOULDBLOCK` is nothing queued, as the stream seam already reads (`stream.rs:395`). A socket that blocks is still asked first, so a read that must not wait does not | `crates/wz-runtime-posix/src/windows/net.rs` (`try_recv`, `make_nonblocking`), Windows only | one call less for each datagram a group reads, its own included: the multicast subscriber -1.0 to -1.6 us of its +3.0 to +4.8, the publisher the same for its own datagram, pong -2 to -3 us a round trip; multicast `cpu_ns_per_msg` from 1.075 to 1.084 to about 1.06 to 1.07; no tcp row moves | this branch |
-| S2 | A group's receive waits in its `recvfrom` on Windows too: `make_receive_wait` turns the socket back to blocking, `set_receive_timeout` sets `SO_RCVTIMEO` on a socket that waits (today it only bounds the poll it emulates), and `recv_waiting` of such a socket is the one `recvfrom` (`WSAETIMEDOUT` is already nothing, `receive`); the mark S1 keeps is cleared, so a read that must not wait polls that socket again. The lone group's read then waits there, as on Linux. Every socket is opened with `WSA_FLAG_OVERLAPPED` (`open_socket`), which the option needs on a `WSASocketW` socket | `net.rs`, `group.rs` (`MulticastSocket for WindowsUdpSocket`), Windows only | per datagram the wait's `WSAPoll` goes: the subscriber from 3 calls to 2, the publisher's own datagram the same, pong from 5 to 7 to 3 to 5 | design |
-| S2b | After a datagram a waiting receive took, the lone group's read goes back to that receive and makes no read that does not wait: the read that finds the queue empty goes. Linux saves its `EAGAIN` read too | `crates/wz-capi-coop/src/engine/group.rs` (the lone read at `:2299`), every host | the subscriber to 1 call a datagram, zenoh-pico's; S1 to S2b together -3 calls: the subscriber's +3.0 to +4.8 us to about 0, the publisher's +9 to +12 us to about +4 to +7, pong to about P's | design |
+| S1 | A socket made non-blocking is read with no poll before the read: `WSAEWOULDBLOCK` is nothing queued, as the stream seam already reads (`stream.rs:395`). A socket that blocks is still asked first, so a read that must not wait does not | `crates/wz-runtime-posix/src/windows/net.rs` (`try_recv`, `make_nonblocking`), Windows only | one call less for each datagram a group reads, its own included: the multicast subscriber -1.0 to -1.6 us of its +3.0 to +4.8, the publisher the same for its own datagram, pong -2 to -3 us a round trip; multicast `cpu_ns_per_msg` from 1.075 to 1.084 to about 1.06 to 1.07; no tcp row moves | on main |
+| S2 | A group's receive waits in its `recvfrom` on Windows too: `make_receive_wait` arms `SO_RCVTIMEO` at the socket's wait and marks the socket as one whose receive waits; `set_receive_timeout` arms the option on such a socket as well; `recv_waiting` of it turns the socket back to blocking at its first call (the mark S1 keeps is cleared then) and is the one `recvfrom` (`WSAETIMEDOUT` is already nothing, `receive`); a read that must not wait polls a socket that blocks first, as before S1. The turn waits for the first receive that waits, so a group read beside other links, which waits in `WSAPoll` and never in its receive, keeps S1's one call. Every socket is opened with `WSA_FLAG_OVERLAPPED` (`open_socket`), which the option needs on a `WSASocketW` socket | `windows/net.rs`, `windows/group.rs` (`MulticastSocket for WindowsUdpSocket`), Windows only | the lone group's read is taken (S2b): per datagram the wait's `WSAPoll` and the read that finds the queue empty go, the subscriber from 3 calls to 1, the publisher's own datagram the same, pong from 5 to 7 to 3; the subscriber's +3.0 to +4.8 us to about 0, the publisher's +9 to +12 us to about +4 to +7, pong to about P's; no tcp row moves | branch `win-s2` |
+| S2b | After a datagram a waiting receive took, the lone group's read goes back to that receive and makes no read that does not wait: the read that finds the queue empty goes | `read_awaited`, `crates/wz-capi-coop/src/engine/group.rs:2291`, every host: it steps the datagram the wait kept alone (a step of one, `NonZeroUsize::MIN`) and waits in the receive again | with S2, as there | on main (D10 of `docs/win-budget/ir-multicast.md`); no code: on Windows it is reached once S2 makes the receive half wait |
+| S2c | The receive's timeout armed again only when the time left of the read's deadline is shorter than the armed one by more than the host's timer can tell apart, in place of whenever its whole milliseconds change | `HostGroupReceive::await_member` (`crates/wz-runtime-posix/src/multicast.rs`), every host | about one `setsockopt` in five datagrams less at 5,000 a second (section 3.2) | design, after M1 counts it |
 | S3 | A short stream read means the stream is drained: the link answers nothing to the next read until a wait reports input, instead of a `recv` that answers `WSAEWOULDBLOCK`. The poll is level-triggered, so what came after the short read ends the next wait at once, and a peer's close is input too | `crates/wz-runtime-coop/src/stream_link.rs` (the receive's read of the part of a batch), every host | if M1 finds that read: -1 call a wake, tcp pong -1.0 to -1.6 us of +2.2 to +3.5, the tcp subscriber the same a wake | design, after M1 |
 | S4 | The clock: the frequency read once (it is fixed at boot), and a reading at 10 MHz one multiplication by a constant's reciprocal; one body for `WindowsClock` and `monotonic_ns` | `mod.rs`, `windows_arith.rs`, `crates/wz-host-sync/src/windows.rs` and `counter.rs`, Windows only | a call and two divisions less a reading, some 10 to 30 ns (an estimate); worth a row only at 20 or more readings a message (M1b) | design, after M1b |
 | S5 | The putting thread and the read task: a publisher's own datagram is read under the session's hold, and a put that finds it held spins (`live_to_publish`, `coop-engine-cpu-cost.md` row 7); the publisher's +4 to +6 us of user time a put that S1 to S2b do not explain | `crates/wz-capi-coop/src/engine.rs` | **measure** (M2) first | design, after M2 |
@@ -136,7 +145,7 @@ step lands only when its rows fall (M0) and the Linux receive's Ir does not grow
 **S1 alone.** It is the step no measurement needs: a non-blocking socket answers `WSAEWOULDBLOCK`
 when nothing is queued, which `receive` already reads as nothing, so the poll before it said nothing
 the read does not. It removes about a third of the gap the multicast rows show and none of the tcp
-gap; S2 and S2b carry the rest of the multicast rows, S3 the tcp ones.
+gap; S2 carries the rest of the multicast rows (with S2b, already there), S3 the tcp ones.
 
 ## 6. S1, and why Linux does not see it
 
@@ -151,6 +160,43 @@ gap; S2 and S2b carry the rest of the multicast rows, S3 the tcp ones.
 - **Tests** (`windows/net.rs`, run on a Windows host): `a_socket_made_non_blocking_is_read_with_no_poll_before_it`
   (counts the polls of the thread, as the stream seam's `a_read_asks_the_stream_with_no_poll_before_it`
   does) and `a_blocking_socket_is_asked_before_a_read_that_must_not_wait`.
+
+## 6b. S2, and why Linux does not see it
+
+- **Windows only.** The files S2 changes are `crates/wz-runtime-posix/src/windows/net.rs`,
+  `windows/group.rs` and the module text of `windows/mod.rs`, all under
+  `#[cfg(windows)] pub mod windows;` (`crates/wz-runtime-posix/src/lib.rs:203`). No file a Linux
+  build compiles changed: the bytes of every case of `scripts/lib/size_ledger_gate.py`
+  (`pico-client-coop-nostd`, `pico-peer-coop`, `pico-api-coop-nostd`) and the receive's Ir
+  (W over P 0.757, `docs/win-budget/ir-receive.md`) are what they were. The shared code S2 lets
+  Windows reach (`HostGroupTransport::split_receive`, `HostGroupReceive::await_member`,
+  `read_awaited`) is unchanged.
+- **Why the turn to blocking waits for a receive that waits.** Winsock has no flag that keeps one
+  read from waiting (`MSG_DONTWAIT`), so a socket reads at once in one call or waits in one call,
+  never both. The engine waits in a group's receive only where the group is the one input of the
+  read (`link_wait`, `GroupPump::awaits`); a session with a link beside its group waits in
+  `WSAPoll` and reads the group with reads that must not wait, which a non-blocking socket makes in
+  one call each. Turning the socket at the split, as a POSIX host does, would give that session a
+  poll before each read.
+- **What it costs.** On Windows the DLL's text grows by the option's arm and the turn: an estimate
+  of 0.1 to 0.3 KB, **measure** on the package's release DLL (`pico_windows_package.py
+  --size-judge` over what `size_ceiling.ps1` leaves). A joined socket turned blocking stays so: a
+  session whose group read waited in its receive and that later reads beside a link polls before
+  each read of the group, one call more a datagram, as before S1. Winsock leaves a socket's state indeterminate after a receive timed out and names the
+  loss of data for TCP; zenoh-pico reads its Windows group socket under the same option on every
+  receive (`vendor/zenoh-pico/src/link/transport/udp/udp_multicast_windows.c` @
+  `SOL_SOCKET, SO_RCVTIMEO, (char *)&tv, sizeof(tv)`), and the tests below read a datagram on a
+  socket whose receive timed out before.
+- **Tests** (run on a Windows host with `host-multicast`), each with the line that turns it red:
+  `windows/net.rs` `a_receive_made_to_wait_is_one_recvfrom_bounded_by_its_timeout` (a
+  `recv_waiting` that polls, or that reads the socket while it still returns at once: the
+  `waits_in_receive()` test of `recv_waiting`; a `set_receive_timeout` that leaves the option
+  unarmed), `a_read_that_must_not_wait_asks_a_socket_turned_blocking_first` (the
+  `self.nonblocking.store(false, ..)` of `waits_in_receive`),
+  `a_receive_not_made_to_wait_waits_in_a_poll` (the `receive_waits` test of
+  `set_receive_timeout` and of `waits_in_receive`); `windows/group.rs`
+  `a_groups_receive_half_waits_in_its_receive_past_its_own_datagrams` (the override of
+  `make_receive_wait` in `MulticastSocket for WindowsUdpSocket`).
 
 ## 7. Measurements for the main session
 
@@ -167,6 +213,37 @@ ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_
 
 Expected after S1: the multicast subscriber's `cpu_ns_per_msg_sub` with batching off down by 1.0 to
 1.6 us a message, `multicast/*/thr/*/cpu_ns_per_msg` near 1.06 to 1.07; tcp unchanged.
+
+**M0 for S2.** First the build of the branch, from `crates/` on Linux, each command one crate and
+one target (the Windows standard library of the pinned toolchain installed with
+`rustup target add x86_64-pc-windows-msvc`):
+
+```sh
+cargo clippy -p wz-runtime-posix --target x86_64-pc-windows-msvc --lib --tests --features host-multicast -- -D warnings
+cargo clippy -p wz-runtime-posix --target x86_64-pc-windows-msvc --lib --tests -- -D warnings
+cargo clippy -p wz-runtime-posix --target x86_64-pc-windows-msvc --lib --no-default-features --features session-slot -- -D warnings
+```
+
+Then the unit tests on the Windows host, in a checkout of the branch there (`windows/net.rs` and
+`windows/group.rs` of section 6b among them; without `host-multicast` none of the four is built):
+
+```sh
+ssh pc3-win "cd <checkout>\crates && cargo test -p wz-runtime-posix --lib --features host-multicast windows::"
+```
+
+Then the multicast cells, with the preset package of the commit that holds S2 and its plan made as
+`docs/pico-perf-matrix.md` section 6 makes them (`-PicoSource` beside `<run-args>`, which
+`-Mode all` builds arm P from):
+
+```sh
+ssh pc3-win "powershell -NoProfile -ExecutionPolicy Bypass -File C:\wzperf\perf_matrix.ps1 -Mode all -PicoSource C:\wzperf\zenoh-pico.zip <run-args> -Transports multicast -Reps 3 > C:\wzperf\run-mc-s2.log 2>&1"
+```
+
+Expected after S2: the multicast subscriber's `cpu_ns_per_msg_sub` with batching off down by a
+further 2.0 to 3.2 us a message (the wait's `WSAPoll` and the read that finds the queue empty),
+`multicast/*/thr/*/cpu_ns_per_msg` near or under 1.0, pong's `pong_cpu_ns_per_rtt` down by 2 to 4
+calls' worth; tcp unchanged. M1 on the same cell counts one `recvfrom` a datagram on the
+subscriber and no `WSAPoll` a datagram, and the `setsockopt` S2c is about.
 
 **M1, the calls a message.** Winsock's driver logs each operation to the
 `Microsoft-Windows-Winsock-AFD` provider; `logman` and `tracerpt` are in every Windows. One cell of
