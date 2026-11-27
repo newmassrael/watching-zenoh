@@ -1381,7 +1381,47 @@ pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops 
   `group-host`, E0599). A build that only dials counts its links by its transmit rows
   (`laid_link_places`), as before; a listening build reads the count, and in D12 asserts the row.
 
+### 7.27 3d, step 1: the endpoints' texts through the state's policy
+
+- `5b46c5a67b`: `EndpointTexts<P: Storage = Lent>` (`crates/wz-runtime-coop/src/faces.rs`) takes the
+  storage of the session's own state, which the transport names (`TransportFaces::Policy`,
+  `transport/state.rs`; the engine's `crate::StatePolicy`, now stated for every build, since the
+  transport reads it in each). `EndpointTexts::<OnUse>::counted(dials, listens)` counts each role's
+  table to the endpoints the config names, held to `ENDPOINT_TEXT_ROWS`, and takes no memory before
+  the role's first text; `write` answers `Full` where no row is free and `NoMemory { bytes }` where
+  a free row's memory the allocator refused, which the open answers as
+  `ArenaRefused::NoMemory` (`open_source.rs` `unwritten`). The plan lays the endpoint row out in
+  D12 alone (`ENDPOINT_ROWS`, the put in `lay_out`); `TransportRows::lent_from` makes the counted
+  texts on use. Every reader (`DialEndpoint::text`, the transport's dials and ports, the zid's
+  derivation) is generic over the policy or names the engine's.
+- Tests: wz-runtime-coop `faces`
+  `on_use_texts_take_their_rows_at_the_first_written_and_no_more` (new; red if the rows are taken
+  when the texts are made or by the other role's text, a text is written past the count, or a
+  refused text takes the rows). wz-capi-coop `open_source::tests` run over the rows of the build's
+  policy (`session_rows`: lent in D12, counted on use), so the on-use legs run the six of them on
+  the counted rows. `tests::on_use::an_on_use_plan_from_the_config_lays_out_no_row_of_the_tables_it_counts`
+  asserts no endpoint row on use (red if the plan lays one out), its CONTROL now the reassembly
+  buffers. The heap's refusal (`NoMemory`) has no test: no allocator of the tests refuses a table
+  of at most `ENDPOINT_TEXT_ROWS` texts.
+- What the on-use arena still lays out after this step: the reassembly flags and buffers, the
+  links' cells where the plan holds them (none on use), the ABI's handle, entity places and
+  lodgings, the advanced cache's ring, and the count the engine keeps the arena by. The next steps
+  of 3d take them in that order; the arena leaves with the last.
+
 ## 8. What the main session runs
+
+- 3d, step 1, the endpoints' texts (`5b46c5a67b`), not built or run by this lane. `cargo test
+  --manifest-path crates/Cargo.toml -p wz-runtime-coop --features alloc,session-unicast --lib
+  faces` (one more), `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --lib
+  open_source` and `--features tables-on-use --lib open_source` (counts unchanged),
+  `--features tables-on-use --lib tests::on_use` and `--features listen,tables-on-use --lib
+  tests::arena` (counts unchanged). Clippy of wz-runtime-coop (`--features alloc,session-unicast`)
+  and of wz-capi-coop in its default set, `--features tables-on-use`, `--features
+  udp-listen,tables-on-use` and `--features group-host`. Size: D12 a few bytes more in
+  `EndpointTexts::write` (one read of the free rows before the push); the on-use client smaller by
+  the endpoint row's lay-out and lend, larger by the counted table's first-row take (`FirstUse`'s
+  out-of-line body, already linked). Receive Ir: unchanged (the texts are read at a dial and an
+  accept, never on the receive).
 
 - The reds of hn15 (`e480c04fd2`, `52368494dd`; `749284f74f` for the pico peer's test), not built
   or run by this lane. `cargo test --manifest-path crates/Cargo.toml -p wz-capi-coop --features
@@ -1957,7 +1997,9 @@ The order that builds at each step:
    `TableLender` and the lend bodies of `arena.rs` (`TransportRows::lent_from`,
    `PlaceRows::lent_from`, `SessionRows::lent_from`) are not compiled in it; the counts the plan
    reads off the limits (`ArenaPlan::count`, `tables`, `peers`, `gets`, `session`) stay, the
-   on-use constructors' only input. The size case reads group A's figure here.
+   on-use constructors' only input. The size case reads group A's figure here. Written, step 1
+   (7.27): the endpoints' texts by the state's policy, counted on use; the reassembly chains, the
+   ABI's places, the cache's ring and the arena's count are next.
 6. The zenoh-pico preset's own library on use (11.1, R1 to R4), and N5 once R1 builds (11.2).
 
 The pushes of the tables step 2's second half counts, and of the tables beside them in the same
