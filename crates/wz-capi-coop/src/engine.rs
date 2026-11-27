@@ -7296,9 +7296,13 @@ impl<L: CoopLinks + 'static, C: ClockSource + Clone + 'static> CoopEngine<L, C> 
         // build whose udp ports share their peers' rows can still be refused, by the heap that
         // holds the ports' book.
         links.lend_buffers(lent.transport.links);
+        #[cfg(feature = "group")]
+        if let Some(groups) = lent.transport.group_rx {
+            links.lend_group_rx(groups);
+        }
         #[cfg(feature = "udp-listen")]
         links
-            .lend_port_rows(lent.transport.port_rows)
+            .lend_port_rows(lent.transport.port_rows, lent.transport.port_slots)
             .map_err(heap_refused)?;
         // Where the tables take their memory on use, every part of a link is made on the heap as
         // the link opens: the plan laid out no table of cells, and the links' kind names none.

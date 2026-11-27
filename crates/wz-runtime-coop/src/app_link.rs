@@ -1101,7 +1101,7 @@ impl AppGroupTransport {
 
     /// [`Self::join`] whose open waits on `bound`, a sleep of the session's clock, when there is
     /// one ([`AppLinks::with_open_bound`]), receiving into `rx` when the session lent a buffer
-    /// (`LinkTables::group_rx`).
+    /// (`SessionLinks::lend_group_rx`).
     pub fn join_bounded(
         transport: &SessionTransport,
         waits: &AppWaits,
@@ -1301,6 +1301,9 @@ pub struct AppLinks<N: CountKind = OneTask> {
     /// Where every link is placed ([`SessionLinks::lend_cells`]): in a cell of the session's
     /// table when it lent the links one, and none on the heap; on the heap otherwise.
     cells: N::Cells,
+    /// The receive buffers of the groups the links join, when the session lent some
+    /// ([`SessionLinks::lend_group_rx`]); a group of links lent none has a buffer of its own.
+    group_rx: Option<wz_session_core::byte_cells::LentByteCells>,
 }
 
 /// Whether the links of an [`AppLinks`] are waited on by their owner
@@ -1379,6 +1382,7 @@ impl AppLinks {
             lent: None,
             owner_waits: OwnerWaits(false),
             cells: None,
+            group_rx: None,
         }
     }
 }
@@ -1400,6 +1404,7 @@ impl<N: CountKind> AppLinks<N> {
             lent: None,
             owner_waits: self.owner_waits,
             cells: Default::default(),
+            group_rx: self.group_rx,
         }
     }
 
@@ -1570,6 +1575,11 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
         self.cells = cells;
     }
 
+    /// Every group the links join from now on claims its receive buffer from `buffers`.
+    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
+        self.group_rx = Some(buffers);
+    }
+
     // A group the program joins names the interface it is joined on, as a listen on a group's
     // address that names none is a datagram listen (`kind_for_locator`).
     fn open_group(
@@ -1582,7 +1592,7 @@ impl<N: CountKind> SessionLinks<N> for AppLinks<N> {
         }
         // A session that lent a table of group buffers gives the group one of them, and a group
         // that finds every one held is not joined; without the table the group makes its own.
-        let rx = match self.lent.and_then(|tables| tables.group_rx()) {
+        let rx = match self.group_rx {
             Some(table) => Some(table.claim().ok_or(LinkOpenError::Exhausted)?),
             None => None,
         };
@@ -2506,28 +2516,21 @@ mod tests {
         #[repr(C, align(16))]
         struct Block([u8; ARENA_ALIGN]);
 
-        let (rx_len, slot_len, group_len) = (66, 34, 48);
-        let bytes = Arena::byte_cells_bytes(rx_len, 1)
-            .and_then(|rx| Arena::byte_cells_bytes(2 * slot_len, 1).map(|tx| rx + tx))
-            .and_then(|both| Arena::byte_cells_bytes(group_len, 1).map(|group| both + group))
-            .expect("within the address space");
+        let group_len = 48;
+        let bytes = Arena::byte_cells_bytes(group_len, 1).expect("within the address space");
         let region: &'static mut [Block] =
             alloc::vec![Block([0; ARENA_ALIGN]); bytes.div_ceil(ARENA_ALIGN)].leak();
         // SAFETY: the region is aligned to `ARENA_ALIGN`, holds at least `bytes` bytes, and is
         // leaked, so nothing else uses it and it outlives every buffer claimed from it.
         let mut arena =
             unsafe { Arena::over(core::ptr::NonNull::from(region).cast::<u8>(), bytes) };
-        let rx = arena.lend_byte_cells(rx_len, 1).expect("the receive table");
-        let tx = arena
-            .lend_byte_cells(2 * slot_len, 1)
-            .expect("the outbound table");
         let groups = arena
             .lend_byte_cells(group_len, 1)
             .expect("the group table");
 
         let (script, transport) = transport();
         let mut links = AppLinks::new(session(&transport, 64));
-        links.lend_buffers(LinkTables::new(rx, tx, slot_len).with_group_rx(groups));
+        links.lend_group_rx(groups);
         let group = group_of(GROUP);
         let mut first = links
             .open_group(GROUP, &group)

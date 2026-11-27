@@ -1167,17 +1167,31 @@ pub trait SessionLinks<N: crate::link_cells::CountKind = crate::link_cells::OneT
     }
 
     /// The rows every udp port the stack opens from now on keeps its peers and the datagrams it
-    /// sorted for them in, for the session the ports serve: a peer or a datagram the rows have no
-    /// room for is dropped and counted, and none is kept on the heap. The bytes the heap refused
-    /// when the stack cannot hold the rows, which refuses the session's open. The default ignores
-    /// them, as a stack that opens no udp port does.
+    /// sorted for them in, and the slots it reads those datagrams into and holds them in until the
+    /// links of their peers take them, for the session the ports serve: a peer or a datagram the
+    /// rows have no room for is dropped and counted, and none is kept on the heap; a port that
+    /// finds no slot free to read into is not opened. `slots` is `None` for a session that lent
+    /// none, whose ports read into memory of their own. The bytes the heap refused when the stack
+    /// cannot hold the rows, which refuses the session's open. The default ignores them, as a
+    /// stack that opens no udp port does.
     #[cfg(feature = "udp-listen")]
     fn lend_port_rows(
         &mut self,
         rows: crate::udp_link::PortRows<wz_session_core::bounded::Lent, N::Flag>,
+        slots: Option<wz_session_core::byte_cells::LentByteCells<N::Flag>>,
     ) -> Result<(), usize> {
-        let _ = rows;
+        let _ = (rows, slots);
         Ok(())
+    }
+
+    /// The receive buffers of the multicast groups the stack joins from now on, for the session
+    /// the groups serve, one for each group it may join: a group joined claims one and gives it
+    /// back when it is left, and a group that finds every one held is
+    /// [`LinkOpenError::Exhausted`]. Flagged as cells whatever `N` is: a group is held by the one
+    /// task that drives it. The default ignores them, as a stack that joins no group does; a
+    /// stack never lent them gives a joined group a buffer of its own.
+    fn lend_group_rx(&mut self, buffers: wz_session_core::byte_cells::LentByteCells) {
+        let _ = buffers;
     }
 
     /// [`Self::open_initiator`], begun without waiting for the link's connection to be made: the

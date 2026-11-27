@@ -465,9 +465,7 @@ impl<F: CellFlag> TxStore for PooledTx<F> {
 /// arena, which is given back once every link of the session is gone.
 ///
 /// `F` is the form of the flags of the links' tables, the one the session counts its links'
-/// handles by: a link's buffers then move with the link to whichever thread holds it. A group's
-/// receive buffers are flagged as cells whatever `F` is: a group is held by the one task that
-/// drives it.
+/// handles by: a link's buffers then move with the link to whichever thread holds it.
 #[derive(Debug)]
 pub struct LinkTables<F: CellFlag = Cell<bool>> {
     rx: LentByteCells<F>,
@@ -476,15 +474,6 @@ pub struct LinkTables<F: CellFlag = Cell<bool>> {
     /// buffer for each link.
     places: Option<LentByteCells<F>>,
     slot_len: usize,
-    /// The receive buffers of the multicast groups the session may join, one for each, which a
-    /// group claims when it is joined; `None` when the session lent none, and a group's stack
-    /// then gives it a buffer of its own.
-    group_rx: Option<LentByteCells>,
-    /// The slots the session's udp ports read their datagrams into and hold them in until the
-    /// links of their peers take them, which the ports share; `None` when the session lent none,
-    /// and a port's stack then gives it memory of its own. Flagged as the links' tables are: a
-    /// datagram a port holds moves with the link of its peer.
-    port_rx: Option<LentByteCells<F>>,
 }
 
 // Not derived: a derive would ask `F: Copy`, and an atomic flag is not; the tables hold handles
@@ -506,8 +495,6 @@ impl<F: CellFlag> LinkTables<F> {
             tx,
             places: None,
             slot_len,
-            group_rx: None,
-            port_rx: None,
         }
     }
 
@@ -523,44 +510,7 @@ impl<F: CellFlag> LinkTables<F> {
             tx,
             places: Some(places),
             slot_len: tx.size(),
-            group_rx: None,
-            port_rx: None,
         }
-    }
-
-    /// These tables with `group_rx`, a receive buffer for each multicast group the session may
-    /// join: a group joined claims one, and gives it back when it is left.
-    #[must_use]
-    pub const fn with_group_rx(self, group_rx: LentByteCells) -> Self {
-        Self {
-            group_rx: Some(group_rx),
-            ..self
-        }
-    }
-
-    /// These tables with `port_rx`, the slots the session's udp ports share for their datagrams:
-    /// a port claims one to read a datagram into, holds it while the datagram waits for its peer's
-    /// link, and gives it back once the link took it.
-    #[must_use]
-    pub const fn with_port_rx(self, port_rx: LentByteCells<F>) -> Self {
-        Self {
-            port_rx: Some(port_rx),
-            ..self
-        }
-    }
-
-    /// The table the session's udp ports claim their datagrams' slots from: `None` when the
-    /// session lent none, and a port's stack gives it memory of its own. A datagram that finds
-    /// every slot of a lent table held is dropped and counted, as a full socket buffer drops one.
-    pub const fn port_rx(&self) -> Option<LentByteCells<F>> {
-        self.port_rx
-    }
-
-    /// The table a group the session joins claims its receive buffer from: `None` when the
-    /// session lent none, and a joined group's stack gives it a buffer of its own. A group that
-    /// finds every buffer of a lent table held is refused, as a link that finds no storage is.
-    pub const fn group_rx(&self) -> Option<LentByteCells> {
-        self.group_rx
     }
 
     /// The receive and the outbound storage of one link ([`LinkRx`], [`LinkTxStore`]), or `None`
@@ -1292,27 +1242,6 @@ mod tests {
         let only = HeapTx::try_for_link(0, 8, 0).expect("allocated");
         assert_eq!((only.slots(), only.slot_len()), (SESSION_TX_SLOTS, 8));
         assert!(crate::table_tests::refused(|| HeapTx::try_for_link(0, 8, 0)).is_none());
-    }
-
-    /// Tables lent a group receive table hand it on, each buffer claimed once until given back,
-    /// and tables lent none have none. Turned red by a table the tables lose, or one they hand
-    /// out to a group past its buffers.
-    #[test]
-    fn the_group_receive_table_is_the_one_the_tables_were_lent() {
-        let plain = tables(1, 16, 1, 1, 16);
-        assert!(plain.group_rx().is_none(), "tables lent no group table");
-        let mut arena = arena_of(Arena::byte_cells_bytes(32, 1).expect("fits"));
-        let groups = arena.lend_byte_cells(32, 1).expect("the group table");
-        let lent = plain.with_group_rx(groups);
-        let table = lent.group_rx().expect("the group table");
-        assert_eq!(table.size(), 32);
-        let held = table.claim().expect("the one buffer");
-        assert!(table.claim().is_none(), "a second group finds none");
-        drop(held);
-        assert!(
-            table.claim().is_some(),
-            "the buffer given back is claimed again"
-        );
     }
 
     /// Tables whose flags are atomics lend a link storage that moves with the link to another

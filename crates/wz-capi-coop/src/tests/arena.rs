@@ -572,7 +572,7 @@ fn the_faces_a_config_opens_with_fit_the_sets_the_arena_lends() {
 }
 
 /// A session that listens is lent the slots its udp ports share for their datagrams, each a
-/// link's batch long, with the links' tables; one that listens on nothing is lent none. Turned
+/// link's batch long, with the ports' rows; one that listens on nothing is lent none. Turned
 /// red by slots of anything but the links' batch, or slots reserved for a session with no port.
 #[cfg(feature = "udp-listen")]
 #[test]
@@ -597,9 +597,10 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&listening, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    let tables = listening.transport().links_from(&mut lend);
+    let _links = listening.transport().links_from(&mut lend);
+    let slots = listening.transport().port_slots_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
-    let table = tables.port_rx().expect("a table for the ports");
+    let table = slots.expect("a table for the ports");
     assert_eq!(
         (table.capacity(), table.size()),
         (caps::UDP_PORT_SLOTS, batch)
@@ -628,10 +629,11 @@ fn a_listening_session_is_lent_slots_for_its_ports_datagrams() {
     let mut session =
         SessionArena::reserve(&dialling, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    let tables = dialling.transport().links_from(&mut lend);
+    let _links = dialling.transport().links_from(&mut lend);
+    let slots = dialling.transport().port_slots_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
     assert!(
-        tables.port_rx().is_none(),
+        slots.is_none(),
         "a session that listens on nothing is lent no table for ports"
     );
 }
@@ -801,7 +803,7 @@ const PORT_PARTS: [&str; 4] = [
 ];
 
 /// A session that joins groups is lent a receive buffer for each group it may join, of the largest
-/// batch a group it names sends, under the build's multicast batch, with the links' tables: the
+/// batch a group it names sends, under the build's multicast batch, after the links' tables: the
 /// stack claims one when a group is joined. Turned red by a buffer for each group asked past the
 /// task cells, or one shorter than the largest group's batch.
 #[cfg(feature = "group")]
@@ -843,9 +845,10 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&plan, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    let tables = plan.transport().links_from(&mut lend);
+    let _links = plan.transport().links_from(&mut lend);
+    let groups = plan.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
-    let table = tables.group_rx().expect("a table for the groups");
+    let table = groups.expect("a table for the groups");
     assert_eq!((table.capacity(), table.size()), (asked, bytes));
 
     let none = ArenaPlan::of(&client_config(), &SessionLimits::defaults()).expect("a plan");
@@ -857,9 +860,10 @@ fn a_session_that_joins_groups_is_lent_a_receive_buffer_for_each() {
     let mut session =
         SessionArena::reserve(&none, &AllocatorMemory).expect("the host has the memory");
     let mut lend = session.lender();
-    let tables = none.transport().links_from(&mut lend);
+    let _links = none.transport().links_from(&mut lend);
+    let groups = none.transport().group_rx_from(&mut lend);
     lend.finish().expect("the plan lays the links out");
-    assert!(tables.group_rx().is_none(), "and lends none");
+    assert!(groups.is_none(), "and lends none");
 }
 
 /// The tokens of faces that went before each was retracted are owed apart from the sets those

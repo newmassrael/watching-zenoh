@@ -48,11 +48,12 @@
 //!   the rows lent when the session opens, first;
 //! - with `group`, a receive buffer for each group the session may join, of the largest batch a
 //!   group it names sends under the build's `PICO_MULTICAST_BATCH_BYTES`, which a group claims
-//!   when it is joined, lent with the links' tables (`TransportRows::links_from`);
+//!   when it is joined, lent after the links' tables (`TransportRows::group_rx_from`);
 //! - with `udp-listen`, for a session that listens on a `udp/` endpoint, the slots its udp ports
 //!   read their datagrams into and hold them in until the links of their peers take them
 //!   (`UDP_PORT_SLOTS`, under the build's), each a link's batch long, which the ports share, lent
-//!   with the links' tables; one that listens on `tcp/` alone binds no port and holds none;
+//!   with the ports' rows (`TransportRows::port_slots_from`); one that listens on `tcp/` alone
+//!   binds no port and holds none;
 //! - the buffers the links of the session stage the chains of their fragmented messages in, one
 //!   table for the session, as many as its `REASSEMBLY_CHAINS` for each face read where it lies
 //!   (under the build's; by default one for each reliability a peer has a chain open in and one for
@@ -1376,6 +1377,16 @@ type LinkCellFlag = <SessionLock as wz_runtime_coop::sync::LockKind>::Flag;
 pub(crate) struct TransportTables {
     /// The links' buffers and, where the links share pools, their places.
     pub(crate) links: LinkTables<LinkCellFlag>,
+    /// The receive buffers of the groups the session may join, one for each; none for a plan
+    /// that counts no group.
+    #[cfg(feature = "group")]
+    pub(crate) group_rx: Option<LentByteCells>,
+    /// The slots the session's udp ports read their datagrams into and hold them in until the
+    /// links of their peers take them, which the ports share; none for a plan that listens on no
+    /// `udp/` endpoint. Flagged as the links' tables are: a datagram a port holds moves with the
+    /// link of its peer.
+    #[cfg(feature = "udp-listen")]
+    pub(crate) port_slots: Option<LentByteCells<LinkCellFlag>>,
     /// The cells of the links' drivers, their gates and their actions, each `None` for a plan
     /// with no such table: each cell's flag the one the session's lock kind counts a link's
     /// handles by, so a handle let go of on any thread that may hold it gives its cell back. None
@@ -1425,6 +1436,10 @@ impl TransportRows {
         let (dials, listens) = self.endpoint_rows;
         TransportTables {
             links: self.links_from(lend),
+            #[cfg(feature = "group")]
+            group_rx: self.group_rx_from(lend),
+            #[cfg(feature = "udp-listen")]
+            port_slots: self.port_slots_from(lend),
             #[cfg(not(wz_on_use))]
             cells: self.cells_from(lend),
             // A chain's buffer is claimed when its first fragment arrives and given back when it
@@ -1443,7 +1458,8 @@ impl TransportRows {
     }
 
     /// The cells of the links' drivers, their gates, their actions and their halves, lent by
-    /// `lend` after the links' buffers: `None` for a table the plan holds no cells for.
+    /// `lend` after the links' buffers, the groups' and the ports' slots: `None` for a table the
+    /// plan holds no cells for.
     #[cfg(not(wz_on_use))]
     fn cells_from(
         &self,
@@ -1468,66 +1484,36 @@ impl TransportRows {
         let rx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.rx_buffers);
         let tx = lend.byte_cells_of::<LinkCellFlag>(self.link_bytes, self.tx_slots);
         #[cfg(feature = "listen")]
-        let tables = LinkTables::pooled(rx, tx, lend.byte_cells_of(0, self.links));
+        {
+            LinkTables::pooled(rx, tx, lend.byte_cells_of(0, self.links))
+        }
         #[cfg(not(feature = "listen"))]
-        let tables = LinkTables::new(rx, tx, self.link_bytes);
-        let tables = self.group_rx_from(tables, lend);
-        self.port_rx_from(tables, lend)
-    }
-
-    /// `tables` with the slots the session's udp ports read their datagrams into and hold them in
-    /// until the links of their peers take them, lent by `lend` after the groups' buffers: the
-    /// ports share them, a slot of the links' batch each.
-    #[cfg(feature = "udp-listen")]
-    fn port_rx_from(
-        &self,
-        tables: LinkTables<LinkCellFlag>,
-        lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
-        let (slots, bytes) = self.port_rx;
-        // A plan that listens on nothing laid no table of them out.
-        if slots == 0 {
-            return tables;
+        {
+            LinkTables::new(rx, tx, self.link_bytes)
         }
-        tables.with_port_rx(lend.byte_cells_of(bytes, slots))
     }
 
-    /// A build that binds no udp port lends no port a slot.
-    #[cfg(not(feature = "udp-listen"))]
-    fn port_rx_from(
-        &self,
-        tables: LinkTables<LinkCellFlag>,
-        _lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
-        tables
-    }
-
-    /// `tables` with the receive buffers of the groups the session may join, lent by `lend`
-    /// after the links' own: a buffer of the groups' batch for each group the plan counts, which a
-    /// group claims when it is joined, so a joined group's datagram is read where the session's
-    /// memory holds it.
+    /// The receive buffers of the groups the session may join, lent by `lend` after the links'
+    /// tables: a buffer of the groups' batch for each group the plan counts, which a group claims
+    /// when it is joined, so a joined group's datagram is read where the session's memory holds
+    /// it. `None` for a plan that counts no group, which laid no table of them out.
     #[cfg(feature = "group")]
-    fn group_rx_from(
-        &self,
-        tables: LinkTables<LinkCellFlag>,
-        lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
+    pub(crate) fn group_rx_from(&self, lend: &mut TableLender<'_>) -> Option<LentByteCells> {
         let (buffers, bytes) = self.group_rx;
-        // A plan that counts no group laid no table of them out.
-        if buffers == 0 {
-            return tables;
-        }
-        tables.with_group_rx(lend.byte_cells(bytes, buffers))
+        (buffers > 0).then(|| lend.byte_cells(bytes, buffers))
     }
 
-    /// A build that joins no group lends no group a buffer.
-    #[cfg(not(feature = "group"))]
-    fn group_rx_from(
+    /// The slots the session's udp ports read their datagrams into and hold them in until the
+    /// links of their peers take them, lent by `lend` after the groups' buffers: the ports share
+    /// them, a slot of the links' batch each. `None` for a plan that listens on no `udp/`
+    /// endpoint, which laid no table of them out.
+    #[cfg(feature = "udp-listen")]
+    pub(crate) fn port_slots_from(
         &self,
-        tables: LinkTables<LinkCellFlag>,
-        _lend: &mut TableLender<'_>,
-    ) -> LinkTables<LinkCellFlag> {
-        tables
+        lend: &mut TableLender<'_>,
+    ) -> Option<LentByteCells<LinkCellFlag>> {
+        let (slots, bytes) = self.port_rx;
+        (slots > 0).then(|| lend.byte_cells_of(bytes, slots))
     }
 }
 
@@ -2032,8 +2018,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
         // the flags of a table of buffers of no bytes.
         #[cfg(feature = "listen")]
         self.put(ArenaPart::LinkPlaces, links, LentByteCells::FLAG_BYTES);
-        // A receive buffer for each group the session may join, lent with the links' tables
-        // (`TransportRows::links_from`): as many as the plan counts groups, each of the largest
+        // A receive buffer for each group the session may join, lent after the links' tables
+        // (`TransportRows::group_rx_from`): as many as the plan counts groups, each of the largest
         // batch a group the config names sends, held to the build's multicast batch. A group's
         // datagram longer than it is dropped and counted by its transport. A config that names no
         // group has no table of them in its plan.
@@ -2052,8 +2038,8 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             );
         }
         // The slots the udp ports of a session that listens read their datagrams into and hold
-        // them in until the links of their peers take them, lent with the links' tables
-        // (`TransportRows::links_from`): the ports share them, each a link's batch long. A
+        // them in until the links of their peers take them, lent after the groups' buffers
+        // (`TransportRows::port_slots_from`): the ports share them, each a link's batch long. A
         // session that listens on no `udp/` endpoint binds no port and holds none, nor does a
         // build without the udp listener (`udp-listen`), whose links refuse such an endpoint.
         #[cfg(feature = "udp-listen")]
@@ -2064,7 +2050,7 @@ impl<const ROWS: usize> ArenaPlan<ROWS> {
             );
             // A plan of a session with no udp port lays none of the ports' rows out, as one that
             // names no group lays out no group's: their tables are lent no rows and take no byte
-            // of the arena (`TransportRows::links_from`, `TransportRows::lent_from`).
+            // of the arena (`TransportRows::port_slots_from`, `TransportRows::lent_from`).
             if shape.udp_listens > 0 {
                 self.transport.port_rx = (slots, link_bytes);
                 self.put_table(

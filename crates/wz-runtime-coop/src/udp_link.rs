@@ -1291,8 +1291,8 @@ pub(crate) fn shared_book<N: CountKind>(
 }
 
 /// Where a [`UdpPort`] reads its datagrams and holds those it sorted for a peer: memory of its
-/// own, or slots of the table its session lent (`LinkTables::port_rx`); the slots alone in a
-/// build whose ports keep only what their session lent (`udp-port-lent-only`).
+/// own, or slots of the table its session lent (`SessionLinks::lend_port_rows`); the slots alone
+/// in a build whose ports keep only what their session lent (`udp-port-lent-only`).
 #[cfg(all(feature = "udp-listen", not(feature = "session-slot")))]
 enum PortRx<F: CellFlag> {
     /// A read buffer of the port's own, and the buffers a peer's link gave back once it read the
