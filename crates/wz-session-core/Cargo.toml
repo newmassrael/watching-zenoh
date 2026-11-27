@@ -864,9 +864,11 @@ secure-channel = []
 # sealed-commands -- a lifecycle query may carry a command sealed by its commander's key in its
 # attachment (decision D17 of docs/session-lifecycle-intent.md, docs/command-seal.md): the node
 # verifies it with `wz-command-seal` and judges the commander the key proves, whatever link the
-# query came over (`sealed_command`). Without it the crate is not linked and a query that carries
-# an attachment is refused by name, never judged as the link's commander.
-sealed-commands = ["dep:wz-command-seal"]
+# query came over (`sealed_command`). The command travels in the query's attachment, so the node
+# reads a query's attachment (`query-attachment`); a build that read none would judge every sealed
+# command as the link's commander. Without it the crate is not linked and a query that carries an
+# attachment is refused by name, never judged as the link's commander.
+sealed-commands = ["dep:wz-command-seal", "query-attachment"]
 
 # session-extauth — the Z_EXT_AUTH establishment extension (catalog
 # §5.4 session, zenoh init.rs:156 / open.rs:121 `zextzbuf!(0x3, false)`).
