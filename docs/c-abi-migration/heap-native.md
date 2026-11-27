@@ -1,10 +1,17 @@
 # Migration lane heap-native: the storage policy is the storage shape
 
-Status: design of the lane, with its first step (N0, one table contract held on every policy)
-landed beside it. Nothing here was built or measured by this lane: a byte figure is either **read**
-from the size ledger's explain document or from `nm -S` of the case's library named below, or an
-**estimate** read off the code; a count of instructions is a reading of the code, not a run. Line
-references are to the tree this lane branched from (`568c90f500`).
+Status: design of the lane and its first steps. Landed on the lane's branch: N0 (one table
+contract held on every policy), N1 (where a policy's rows lie and when its tables take their
+memory are facts of `Storage`), N2 (the policy `OnUse`, its column `FirstUse` and its keys
+`HeapKey` over a `KeyBudget`, held to the same contract) and N3a (the session's tables made
+counted on `OnUse`). The owner's ruling of 2026-11-27 chose the form of section 6 (c), per
+preset: the cooperative engine's on-use form (N3b to N3e), the doors' (N4) and the switch with its
+guards (section 9) are designed here and not written yet, because the engine has no form on
+`OnUse` to select and a switch that cannot be built is not declared. Nothing here was built or
+measured by this lane: a byte figure is either **read** from the size ledger's explain document or
+from `nm -S` of the case's library named below, or an **estimate** read off the code; a count of
+instructions is a reading of the code, not a run. Line references are to the tree this lane
+branched from (`568c90f500`).
 
 ## 1. The reading
 
@@ -80,7 +87,7 @@ build, and its associated types are the shape that answer gives each table:
 | `Static` | none | at build | the build, inline | inline array of `N` | inline buffer of `MAX_KEYEXPR_BYTES` | `FixedIdMap`, a scan | an image without an allocator |
 | `Region` | an image's region or the allocator | at open | the build (`StateRegion`) | a span beside the table | a block of the key arena | `FixedIdMap` | the cooperative engine |
 | `Lent` | the allocator | at open | the open's plan | a span of the arena | a block of the key arena | `PooledIdMap` or `FixedIdMap` | the cooperative engine, `runtime-plan` |
-| **`OnUse`** (new) | the allocator | at a table's first row, a key's making, an object's making | the table | its count's rows in one allocation at its first row, never moved | one allocation of its own, counted against the session's key budget | `FixedIdMap` | the cooperative engine, `alloc-on-use` |
+| **`OnUse`** (N2) | the allocator | at a table's first row, a key's making, an object's making | the table | its count's rows in one allocation at its first row, never moved | one allocation of its own, counted against the session's key budget | `FixedIdMap` | the cooperative engine of a preset whose `table-memory` is `on-use` (section 9) |
 | `Heap` | the allocator | as it grows | the table | `Chunked`, 32 rows at a time | `String` | `GrowableIdMap` (`hashbrown`) | the AP side (the tokio engine, `std`) |
 
 `OnUse` and `Heap` take the same memory and are two shapes because they serve two scales. The
@@ -92,20 +99,26 @@ the receive a chunk step per row reached and `hashbrown` costs a few kilobytes o
 type (3.3, 3.4).
 
 The cooperative engine's `RowPolicy` becomes the resolution of those facts and not of
-`runtime-plan` alone: with an allocator and `alloc-on-use`, `OnUse`; otherwise `Region` or
-`Lent` as today; `alloc-on-use` without an allocator is refused by name (`compile_error!`). The
-moment the memory is taken is an axis of its own, apart from `Profile`, as `session-row.md`
-section 2 keeps where an engine row comes from apart from where a session lays its tables.
+`runtime-plan` alone: with `tables-on-use` (the `on-use` value of the `table-memory` axis,
+section 9), `OnUse`; otherwise `Region` or `Lent` as today. The moment the memory is taken is
+an axis of its own, apart from `Profile`, as `session-row.md` section 2 keeps where an engine row
+comes from apart from where a session lays its tables. N1 states it as a fact of every policy,
+`Storage::TAKEN` (`Taken::AtBuild`, `AtOpen`, `AtFirstUse`, `AsItGrows`), and the engine holds
+its `RowPolicy` to the moment it lays its tables out at by a compile-time assertion
+(`crates/wz-capi-coop/src/lib.rs`, after `RowPolicy`): today `AtOpen`, which every build of it is.
+`OnUse` exists only where `alloc` does, so no build names it without an allocator; the
+cooperative engine links one in every form (`extern crate alloc`), and needs no refusal of its own.
 
 ### 2.2 `OnUse`, type by type
 
 | associated item | `OnUse` | why |
 |-----------------|---------|-----|
 | `ENFORCES_CAPACITY` | `true` | the counts bind, as on `Region` and `Lent` |
-| `LENT_AT_OPEN` | `false`; its one use, `row_may_lie_in` (`session_tables.rs:4085`), reads a fact of its own instead (N1): a row lies apart from the table and never moves while it stands, true of `Region`, `Lent` and `OnUse` | the constant answers two questions today |
-| `Seq<T, N>`, `Rows<T, N>` | `FirstUse<T>`: a column made with its count and no memory, which takes all its count's rows in one allocation at its first push, by one untyped body for every row type (as `add_free_lent_slot` is), and never grows; a push past the count, or one the allocator refuses, is `CapacityFull` with the value handed back | the rows never move, so every holder of a row's place (`KeyexprHead`, a pinned row read in place) is sound as on `Lent`; a table never used takes nothing |
+| `LENT_AT_OPEN` | `false`; `row_may_lie_in` and the engine's assertion of where its rows lie read a fact of their own instead (N1, `Storage::ROWS_STAY_APART`): a row lies apart from the table and never moves while it stands, true of `Region`, `Lent` and `OnUse`; `LENT_AT_OPEN` keeps its other question, whether a table made by `Default` has no rows (the match memory's `memo_slots`) | the constant answered two questions |
+| `ROWS_STAY_APART`, `TAKEN` | `true`, `Taken::AtFirstUse` | N1's facts |
+| `Seq<T, N>`, `Rows<T, N>` | `FirstUse<T, N>` (`crates/wz-session-core/src/on_use.rs`; `Rows` is `BoundedVec<T, N, OnUse>` over it): a column made with its count and no memory (`BoundedVec::counted`, `SlotMap::counted`; `Default` makes one of `N`), which takes all its count's rows in one allocation at its first push, by one untyped body for every row type (as `add_free_lent_slot` is), and never grows; a push past the count, or one the allocator refuses, is `CapacityFull` with the value handed back | the rows never move, so every holder of a row's place (`KeyexprHead`, a pinned row read in place) is sound as on `Lent`; a table never used takes nothing |
 | `Text<N>` | `heapless::String<N>` | a working text is on the stack, as on `Lent` |
-| `Key`, `Keys` | `HeapKey`: one allocation holding the count of its holders, its length and its bytes; `KeyBudget`: the bytes the session's key budget has left and the bound on a key's length | a key is never cut short; a key past the bound is `TooLong`, one past the budget or refused by the allocator `NoRoom`, nothing taken, as today; a clone is one more holder and never fails |
+| `Key`, `Keys` | `HeapKey`: one allocation holding the count of its holders, its length, the budget it is counted against and its bytes; `BudgetKeys`: the handle a table holds on the session's `KeyBudget` (the bytes its keys may take together, `KEY_ARENA_BYTES`, and the bound on a key's length, `MAX_KEYEXPR_BYTES`), a key counted as the block the key arena would give it (`key_arena::block_bytes`) | a key is never cut short; a key past the bound is `TooLong`, one past the budget or refused by the allocator `NoRoom`, nothing taken, as today; a clone is one more holder and never fails |
 | `KeyLen`, `Offset` | `caps::KeyLen`, `u32` | as `Lent` |
 | `Ids<V, N>` | `FixedIdMap<V, N>` | a scan of a few rows, inline in the state (3.4) |
 | `Pooled<T, N>` | `BoundedVec<T, N, Static>` | as `Region` |
@@ -134,7 +147,9 @@ N0 lands 1 to 5 as one body generic over the policy, run on `Static`, `Lent`, `R
 `Heap` held to a count, and 6 on `Heap` beside the `Lent` and `Static` cases there were (section
 7). `OnUse` joins the same bodies in N2, with the key contract beside them: a key reads back whole;
 one past the length bound is `TooLong`; one past the budget is `NoRoom` and takes nothing; a shared
-key lives until its last holder, and its bytes go back to the budget then.
+key lives until its last holder, and its bytes go back to the budget then. N3a runs the session's
+tables on it: a declaration past a table's count and a key past the budget are refused as a full
+table, and a row a call reads in place is let go of by the call's end, as on `Lent`.
 
 ## 3. Table by table
 
@@ -238,15 +253,21 @@ session takes its row at its open, as every policy's does.
 ## 4. Steps
 
 | step | what | where | bytes, the case (estimate) | receive Ir | resident memory |
+| step | what | where | bytes, the case (estimate) | receive Ir | resident memory |
 |------|------|-------|---------------------------:|-----------|-----------------|
-| **N0 (landed with this note)** | the table contract of 2.3 as one body run on every policy | `crates/wz-session-core/src/slot_map/tests.rs` | 0 | 0 | 0 |
-| N1 | the fact "a row lies apart and never moves" in `Storage`, read by `row_may_lie_in`; `RowPolicy` resolved from the allocator, the moment and `runtime-plan`, `alloc-on-use` refused without an allocator | `bounded.rs`, `session_tables.rs`, `crates/wz-capi-coop/src/lib.rs`, its `Cargo.toml` | 0 | 0 | 0 |
-| N2 | `OnUse`, `FirstUse`, `HeapKey`, `KeyBudget`; the N0 bodies and the key contract run on it | `bounded.rs`, `slot_map.rs`, `key_arena.rs` or a module beside it | 0 (nothing in the case names it) | 0 | 0 |
-| N3 | the cooperative engine on `OnUse` under `alloc-on-use`: 3.1, 3.2, 3.3, 3.5, 3.6 | `crates/wz-capi-coop` (`engine.rs`, `registry.rs`; `arena.rs` and `region.rs` not compiled in the form), `crates/wz-runtime-coop` (`link_cells.rs`, `kept.rs`, `link_storage.rs`) | -5,500 to -10,200 | 0 to -36 (3.2, 3.6); +3 at worst (3.5) | section 5 |
+| **N0 (landed, `73d15f135e`)** | the table contract of 2.3 as one body run on every policy | `crates/wz-session-core/src/slot_map/tests.rs` | 0 | 0 | 0 |
+| **N1 (landed, `5acca4fdfd`)** | `Storage::ROWS_STAY_APART` ("a row lies apart and never moves") read by `row_may_lie_in` and by the engine's assertion of where its rows lie; `Storage::TAKEN` (`Taken`) states when each policy's tables take their memory, and the engine asserts its `RowPolicy` takes it at open | `bounded.rs`, `session_tables.rs`, `crates/wz-capi-coop/src/lib.rs`, `engine.rs` | 0 (constants and a compile-time assertion) | 0 | 0 |
+| **N2 (landed, `64609f48a3`)** | `OnUse`, `FirstUse`, `HeapKey`, `KeyBudget` and its handle `BudgetKeys`; `SeqBacking::make_room`, so a table that grows two columns as one makes both their rooms before it pushes to either; the N0 bodies, the sequence bodies of `bounded.rs` and the key contract run on it | `bounded.rs`, `slot_map.rs`, `on_use.rs` (new) | 0 (nothing in a case names it) | 0 | 0 |
+| **N3a (landed, `1243d2623f`)** | the session's tables made counted on `OnUse` (`SessionTables::counted`, `Presence::counted`, `CountedTable`, `HeldReplies::counted`) | `session_tables.rs`, `reply_hold.rs` | 0 (no engine makes them yet) | 0 | 0 |
+| N3b | the session core's other tables a face holds, counted on `OnUse`: `PeerTables::<OnUse>`, the observer (`SlotObserverOf`), the gets (`Requesters`), `LentRoom`, `ReplyStage`, `PeerTokens`, each a constructor as N3a's from the limits the open resolved | `peer_tables.rs`, `slot_observer.rs`, `pubsub.rs`, `reply_stage.rs`, `declare/liveliness_subscriber.rs` | 0 | 0 | 0 |
+| N3c | the cooperative engine on `OnUse` under `tables-on-use`: `RowPolicy = OnUse`, the registry made by value (a third form beside `RegistryRegion` and the arena's), the open with no plan, no region and no lender (3.1), the session's `KeyBudget` in the boxed engine state (3.2); the moment assertion of N1 reads `AtFirstUse` in that form | `crates/wz-capi-coop` (`lib.rs`, `engine.rs` `lend_session` and `assemble`, `engine/registry.rs`, `registry/placed.rs`; `arena.rs` and `region.rs` not compiled in the form) | -3,500 to -7,800 (3.1, 3.2, 3.3, 3.5) | 0 to -6 (3.2); +3 at worst (3.5) | section 5 |
+| N3d | link memory on the heap arm alone (3.6) | `crates/wz-runtime-coop` (`link_cells.rs` `heap_head`, `kept.rs`, `link_storage.rs`) | -1,000 to -2,000 | 0 to -30 | section 5 |
+| N3e | a key held apart from every row (an object outside the lock: `KeyRef::hold_apart`, `KeysLocked::adopt`, `SampleView::keyexpr_held`) as a `HeapKey` clone taken and let go of under the lock, read by its text outside it | `key_arena.rs` beside `on_use.rs`, `sink.rs`, the engine's object paths | -200 to +200 | 0 | 0 |
 | N4 | the doors: 3.7 | `crates/wz-capi-pico` (`process_pool.rs`, `object_slot.rs`, `bytes.rs`) | -2,000 to -3,000 | 0; the put's to be read | -0 to -8 KiB a pair |
-| N5 | the preset's choice: a policy key for the moment (`open` or `first-use`) and the ratchet's reading of each form | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `deploy/no_heap_ratchet.json` | 0 | 0 | 0 |
+| N5 | the switch and its guards (section 9): the `table-memory` axis, the zenoh-pico defconfig's `on-use`, the release profiles' `at-open`, the size cases of both forms (section 10) and C1nh's second reading | `deploy/wz-config.toml` and what it generates, `configs/zenoh-pico_defconfig`, `configs/profiles/host-peer-ext.conf`, `host-peer.conf`, `scripts/lib/capability_cost_gate.py`, `deploy/size_ledger.json`, `deploy/pico_host_ceiling.json`, `scripts/run-ci.sh` (C1nh) | 0 for the release form; the on-use case reads N3 and N4's figures | 0 | 0 |
 
-N3 and N4 together: **about -7,500 to -13,200**, against a gap of 32,525 (the case at 203,025)
+N3c to N4 together (N3 of the first reading, split by where the code lies): **about -7,500 to
+-13,200** in the on-use case (section 10), against a gap of 32,525 (the case at 203,025)
 or 35,421 (the explain document's 205,921): between a quarter and two fifths of it, the largest
 single lever read so far, and not the whole. The largest unknown is how much of `assemble`'s 4,598 bytes the
 region's placement is; `objdump -d -l --inlines` on the case reads it before N3 is written, as
@@ -282,9 +303,15 @@ zenoh-pico's do. So the choice for the zenoh-pico preset is one of:
   declaration allocating as zenoh-pico's does;
 - (c) state `first-use` for the zenoh-pico preset, as zenoh-pico allocates on use.
 
-The ruling of 2026-11-23 (win in the form with no allocation after open first) is (a) until the
-owner says otherwise. N0 to N2 are the same under all three; N3 and N4 build the form; N5 is where
-the choice is written.
+The owner's ruling of 2026-11-27 (delegated) is (c), stated per preset: the storage policy is an
+axis apart from the API, and a preset chooses it. The release of 12-01 (no `std`, no heap after
+open) keeps D12: its profiles (`configs/profiles/host-peer-ext.conf`, the Windows package's, and
+`host-peer.conf`, its like-for-like) state `at-open`, and Layer C1nh, which reads
+`host-peer-ext.conf`, holds its families at 0 against `deploy/no_heap_ratchet.json` unchanged. The
+zenoh-pico preset follows zenoh-pico's own contract, a declaration allocating: its defconfig states
+`on-use`. The table abstraction stays one, `bounded::Storage`, and every policy is held to the
+same contract bodies (2.3). N0 to N3a are the same under every choice; N3b to N4 build the on-use
+form; N5 writes the choice and its guards (section 9).
 
 ### 6.2 Each table allocated at open (weighed, not chosen)
 
@@ -294,7 +321,7 @@ refusal arm for each, while the counts the plan resolves stay; the region alread
 planning out of the registry's lay-out. Expected -500 to +500 bytes, the same resident memory as
 `base-rss.md` L3: not a lever.
 
-## 7. What N0 tests, and what turns each red
+## 7. What the landed steps test, and what turns each red
 
 In `crates/wz-session-core/src/slot_map/tests.rs`, `keeps_the_table_contract`, one body over
 `P: Storage` for a table made to hold 40 rows (past one chunk of `Chunked`'s 32), run by
@@ -318,12 +345,218 @@ In `crates/wz-session-core/src/slot_map/tests.rs`, `keeps_the_table_contract`, o
 body there was for `Lent` and `Static` on `Heap`: three rows, one removed, one retired while
 pinned, each dropped once. Red if `Chunked`'s drop skips a written row or drops one twice.
 
+### 7.1 N1
+
+- `bounded::tests::each_policy_states_when_its_tables_take_their_memory`: `Static` at build and
+  inline, `Lent` and `Region` at open and apart, `Heap` as it grows and not apart, `OnUse` at
+  first use, apart and bounded. Red if a policy's `const TAKEN` or `const ROWS_STAY_APART` line
+  in `bounded.rs` answers another policy's fact.
+- At the build, not as a test: `row_may_lie_in` (`session_tables.rs`) reads
+  `P::ROWS_STAY_APART` in the `const` assertions of every `begin_*` that hands a call a row read in
+  place, the engine asserts the same of its `RowPolicy` (`crates/wz-capi-coop/src/engine.rs`, the
+  `const _` on `ROWS_STAY_APART`), and `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen`. A
+  `RowPolicy` that keeps its rows inline, or that takes its memory at another moment, does not
+  build.
+
+### 7.2 N2
+
+- `bounded::tests::on_first_use::*`: the seven sequence bodies every policy runs (fill to `N`
+  and one more, free slots, order and the take-out scan, removal by place, the byte filler, the
+  text, `Default`) on `OnUse`. Red if `FirstUse::room_for` admits a value past `count`, or a bulk
+  form (`resize`, `extend_from_slice`) writes before its room is made.
+- `bounded::tests::an_on_use_table_takes_its_rows_at_its_first_value_and_holds_its_count`. Red if
+  `FirstUse::counted` ignores its `rows`, or a table takes its memory when it is made.
+- `on_use::tests` (ten): the column takes its rows at its first value and never moves them
+  (red if `take_memory` is reached before a value asks, or takes one row at a time); its count is
+  held to `N` and a column of no rows takes nothing (red if `counted` does not clamp); order is kept
+  and a bulk form is refused whole; every value is dropped once, by a truncation, the drop and the
+  iterator (red if `FirstUse::drop` or `FirstUseIntoIter::drop` skips or repeats a row); rows past
+  the address space or of no bytes are not taken (red if `rows_layout` wraps); a key reads back
+  whole and is counted as its arena block (red if `HeapKey::make` charges other bytes than
+  `block_bytes`); a key past the bound is `TooLong` and past the budget `NoRoom`, counted, taking
+  nothing, and the bytes a key gave back are taken again (red if `KeyBudget::refund` is not
+  reached from the last holder's drop); the bound a budget was made with, lowered under the build's,
+  holds; a shared key lives until its last holder (red if `Clone` copies, or `Drop` gives back
+  while `holders > 1`); the empty key takes nothing and a table with no budget keeps nothing.
+- `slot_map::tests::an_on_use_table_keeps_the_table_contract`: the N0 body. Red if the on-use
+  column moves a row when it is written, or a count does not bound it.
+- `slot_map::tests::an_on_use_table_takes_its_rows_at_its_first_insert_and_holds_its_count`. Red
+  if `SlotMap::counted` makes its core or its columns of `N` rather than `rows`, or a lookup, a
+  walk or `is_full` takes memory.
+- `slot_map::tests::dropping_an_on_use_table_drops_its_live_and_retired_rows_once`. Red if a row
+  of the on-use column is dropped twice or not at all.
+
+### 7.3 N3a
+
+- `session_tables::tests::on_use_tables_hold_the_rows_their_counts_give_them`: two subscribers
+  of a count of two, the third refused as a full table with its callback back, each key counted
+  against the budget, nothing held before the first declaration. Red if
+  `SessionTables::counted` makes a table of the build's bound (`SlotMap::new` in place of
+  `SlotMap::counted`), or the tables are handed a `BudgetKeys` of no budget.
+- `session_tables::tests::a_key_the_budget_has_no_room_for_is_refused_as_a_full_table`. Red if a
+  refused key is counted against the budget, or the refusal is answered as anything but a full
+  table.
+- `session_tables::tests::an_on_use_subscriber_undeclared_while_its_callback_runs_is_let_go_by_the_last_call`:
+  a row whose call reads it in place (`CClosure`), retired while the call runs and let go of by its
+  end. Red at the build if `OnUse::ROWS_STAY_APART` is `false` (the `const` assertion of
+  `begin_subscriber`), and at the run if a retired row leaves its slot before its last call ends.
+
 ## 8. What the main session runs
 
-- N0: `cargo test -p wz-session-core --lib slot_map::tests`: 46 tests with the crate's default
-  features, 41 before; a build of the crate without `alloc` compiles neither `Heap` test.
-- For N3 and N4, on each step: the size ledger's explain document of `pico-client-coop-nostd`
-  (the total and the sessions, doors and driver areas against section 4), the perf matrix's arm W
-  receive Ir (about 3,066) and put Ir, `base-rss.md` M1 on the pubsub pair (the anonymous, `[heap]`
-  and `[stack]` rows of section 5), and Layer C1nh's reading under `alloc-on-use` (which families
-  read above 0, against 6.1).
+Nothing of N1, N2 or N3a was built or run by this lane.
+
+- `cargo test -p wz-session-core --lib slot_map::tests`: 49 tests with the crate's default
+  features (46 after N0, three added by N2).
+- `cargo test -p wz-session-core --lib on_use::tests`: 10.
+- `cargo test -p wz-session-core --lib bounded::tests`: nine more than before N1 (one N1, eight N2:
+  the seven of `on_first_use` and one more).
+- `cargo test -p wz-session-core --lib session_tables::tests`: three more than before.
+- A build of `wz-session-core` without `alloc` (`--no-default-features`, and the slot profile's
+  `--no-default-features --features session-slot`) compiles neither `OnUse` nor `on_use`, and
+  `each_policy_states_when_its_tables_take_their_memory` there checks the three policies it has.
+- `cargo clippy -p wz-session-core --all-targets -- -D warnings` and the same of `wz-capi-coop`
+  (N1's assertions); a build of `wz-capi-pico` in both of its forms
+  (`--no-default-features --features os-host,link-udp`, `Region`, and `...,peer`, `Lent`)
+  confirms the moment assertion holds in each.
+- `python3 scripts/lib/logic_census_coverage_gate.py`: `on_use.rs` has its row in `files.md` and
+  is cited by row 61 of `S3.md`.
+- Size: no landed step changes a case's bytes (constants, an assertion, a provided method whose
+  answer is the check it replaced, and code no case instantiates). C1cs's reading of
+  `pico-client-coop-nostd` and of `pico-api-coop-nostd` should be unchanged; a move there is a
+  finding.
+- For N3b to N4, on each step: the size ledger's explain document of
+  `pico-client-coop-nostd-on-use` against `pico-client-coop-nostd` (section 10, `--per-feature`),
+  the perf matrix's arm W receive Ir (about 3,066) and put Ir in the on-use form, `base-rss.md` M1
+  on the pubsub pair (the anonymous, `[heap]` and `[stack]` rows of section 5), and C1nh's two
+  readings: the release form's, unchanged at 0, and the on-use form's against its own table
+  (section 9.2).
+
+## 9. The switch and its guards
+
+### 9.1 The axis
+
+The moment is a choice of form, not a capability: no plane comes or goes with it, and a case that
+differs from another only by it is divided by the same zenoh-pico, as a profile twin is. So it is a
+global axis of `deploy/wz-config.toml`, as `engine` is, declared in N5 with the form it selects
+(the file's own rule: an option that cannot be built is not declared):
+
+```toml
+[[axis]]
+id = "table-memory"
+kconfig = "WZ_TABLE_MEMORY"
+prompt = "When a session of the cooperative engine takes the memory of its tables"
+default = "at-open"
+
+[[axis_option]]
+id = "at-open"
+axis = "table-memory"
+kconfig = "WZ_TABLE_MEMORY_AT_OPEN"
+prompt = "At the open, from the configured limits, and nothing after (D12)"
+
+[[axis_option]]
+id = "on-use"
+axis = "table-memory"
+kconfig = "WZ_TABLE_MEMORY_ON_USE"
+prompt = "At each table's first row and each declaration's key, as zenoh-pico allocates"
+requires = "WZ_ENGINE_COOP"
+upstream_on = ["zenoh-pico"]
+features = ["tables-on-use"]
+```
+
+- The default is `at-open`: every build that states nothing (the crates' own tests, a lane that
+  resolves no preset) keeps D12.
+- `upstream_on = ["zenoh-pico"]` writes `CONFIG_WZ_TABLE_MEMORY_ON_USE=y` into
+  `configs/zenoh-pico_defconfig` when it is generated (`wz_config.py --emit defconfig:zenoh-pico`),
+  as the role axis writes `CONFIG_WZ_ROLE_CLIENT=y` there.
+- `configs/profiles/host-peer-ext.conf` and `host-peer.conf` state `CONFIG_WZ_TABLE_MEMORY_AT_OPEN=y`
+  with the reason (the release keeps D12, the owner's ruling of 2026-11-27): their base is the
+  zenoh-pico defconfig, which would otherwise hand them `on-use`.
+- The resolver adds an option's `features` to the base list as it does for the engine axis
+  (`wz_config.py` `engine_features`), and `wz_config.pico_reference` leaves `tables-on-use` out of
+  the reference's switches as it leaves `os-host` out.
+- Cargo: `wz-capi-pico` `tables-on-use = ["wz-capi-coop?/tables-on-use"]`, `wz-capi-coop`
+  `tables-on-use = []`, which makes `RowPolicy` `OnUse` and compiles the on-use open (N3c). Unified
+  into a graph it changes the moment of every session there, so the C library, a cdylib built by
+  itself, is the only graph that names it, and the guards below read what it resolved to.
+
+### 9.2 What keeps the release at D12
+
+1. At the build: `crates/wz-capi-coop/src/lib.rs` asserts `RowPolicy::TAKEN` is `AtOpen` (N1,
+   landed); N3c puts it under `#[cfg(not(feature = "tables-on-use"))]` beside its `AtFirstUse`
+   twin, so no form builds whose policy disagrees with its moment.
+2. At the resolution: `layer_c1nh_no_heap_after_open` (`scripts/run-ci.sh`) resolves
+   `configs/profiles/host-peer-ext.conf` and, before it builds, fails by name when the resolved
+   arguments name `tables-on-use` ("the release form resolved to on-use"), so a profile that lost
+   its `at-open` line fails the lane rather than reading the on-use form's allocations against the
+   D12 table. `wz_config.py --selftest` holds the same of both release profiles, and the reverse of
+   the zenoh-pico defconfig.
+3. The table: `deploy/no_heap_ratchet.json` and `no_heap_ratchet_gate.py` are not touched; the
+   release's families stay locked at 0. The on-use form is a second reading (a leg
+   `measure_on_use` of C1nh, the client built from the zenoh-pico defconfig) judged against a
+   table of its own (`deploy/no_heap_on_use.json`, the same schema with a `form` key): its steady
+   families (put, receive, delete) locked at 0 once their first use is past, its declaration
+   families held to their allocations a round as a ratchet (6.1).
+4. In the binary: the size cases of section 10.2 forbid in the D12 form a body only the on-use form
+   links and require it in the on-use one, and the reverse for the open's lay-out.
+
+### 9.3 The receive keeps its array
+
+`OnUse`'s `Rows` is a flat `BoundedVec` over `FirstUse` (`RowsAt::flat`: a row reached by one
+multiply-add, as on `Region`), and its `Ids` is `FixedIdMap` (a scan of an inline array): the
+receive's lookups keep the shape of tables C and D (3.3, 3.4), and neither `Chunked` nor
+`hashbrown` is in the on-use form. A push into an untaken column is one compare inlined and a call
+of the out-of-line `take_memory` at the column's first value only (3.5).
+
+## 10. The size cases and the storage policy each is built with
+
+### 10.1 Today
+
+`case_build` (`scripts/lib/capability_cost_gate.py`) builds a case with `--no-default-features
+--features <its list>` (`None`: the crate's defaults; `pico-api-coop-nostd` reads the
+`host-peer` profile's, `features_from`), under the limits and policies of its ABI's own preset as
+environment (`case_limits`, `original_limits`: the original's defconfig, for the pico cases
+zenoh-pico's). The policy follows from the features: `os-host` is the cooperative engine with
+`wz-session-core/limits-lent-at-open` (`crates/wz-capi-pico/Cargo.toml`), whose tables are `Region`
+unless a feature brings `wz-capi-coop/runtime-plan` (`peer`, `multicast-transport` through
+`group-host`, `config-policy`), which makes them `Lent`; `wz-capi-c` runs the tokio engine
+(`wz-capi-core`), whose session tables are the AP side's `Heap`.
+
+| case | features | engine | policy | memory taken |
+|------|----------|--------|--------|--------------|
+| `pico-client`, `pico-client-small`, `pico-client-udp` | `PICO_BASE` (`os-host`), `+link-udp` | cooperative | `Region` | at open (D12) |
+| `pico-client-coop-nostd` and its `-unstable`, `-local`, `-connectivity`, `-admin-space`, `-query`, `-local-queryable`, `-scout` | `os-host,link-udp` and the one capability each names | cooperative | `Region` | at open (D12) |
+| `pico-peer-coop` | `os-host,link-udp,peer` | cooperative | `Lent` | at open (D12) |
+| `pico-peer` | `PICO_BASE,peer` | cooperative | `Lent` | at open (D12) |
+| `pico-default` | the crate's defaults (`peer`, `multicast-transport`, `config-policy`, ...) | cooperative | `Lent` | at open (D12) |
+| `pico-api-coop-nostd` | the `host-peer` profile's (the peer role, zenoh-pico's multicast transport, the advanced plane, the unstable API, connectivity) | cooperative | `Lent` | at open (D12) |
+| `capic-client` to `capic-default-lean` | `wz-capi-c`'s lists and defaults | tokio | `Heap` | as it grows, each limit bound at open (`binding_heap = "open"`) |
+
+Every pico case is the D12 form, and so is every case of the size ledger (C1cs:
+`pico-client-coop-nostd` its `base_case`, `pico-peer-coop`, `pico-api-coop-nostd`).
+
+### 10.2 Both forms in the ledger
+
+- Every case above stays as it is: the D12 form, the release's, its budget, ceiling row and history
+  valid as they are; `pico-api-coop-nostd` is the release library's own like-for-like.
+- One case is added with N3c, `pico-client-coop-nostd-on-use`: `pico-client-coop-nostd`'s package,
+  profile, configuration files and pins, its features `os-host,link-udp,tables-on-use`. It is the
+  zenoh-pico preset's client in the form that preset ships, divided by the same zenoh-pico reference
+  as its D12 twin (the moment is no capability). It has no budget until its first reading, which the
+  gate's own rule fails `--check` with and `--measure` prints, and its row of
+  `deploy/pico_host_ceiling.json` is set from that reading.
+- Presence and absence: a body only the on-use form links (`wz_session_core::on_use::take_rows`,
+  out of line by `#[inline(never)]`) is REQUIRED of the on-use case and FORBIDDEN in every D12 pico
+  case; a body of the D12 open's lay-out (`wz_capi_coop::region::StateRegion::place` for the
+  client form) is REQUIRED of `pico-client-coop-nostd` and FORBIDDEN in the on-use case. Each is the
+  other's live control, as the gate's PRESENCE rule asks.
+- The size ledger: the on-use case joins `cases` with a row for each area, `base_case` staying
+  `pico-client-coop-nostd`, so `--per-feature` steps from the D12 client to the on-use one by the
+  one feature `tables-on-use` and prints what the moment costs each area on each side, the measured
+  form of section 4's estimates. The gate's selftest names its set of cases
+  (`size_ledger_gate.py`, the assertion on `{"pico-client-coop-nostd", "pico-peer-coop",
+  "pico-api-coop-nostd"}`) and moves with it.
+- The statement: a library states the form it is, so `wz_config.conformance_statement` includes
+  the axis's value, and the statement case of the pico ABI gains its on-use twin.
+- A peer twin (`pico-peer-coop-on-use`) waits for N3c to cover `runtime-plan`, where a listening
+  session's faces come and go: on `OnUse` each face's tables are counted at its attach (N3b's
+  constructors), with no pool lent at open.
