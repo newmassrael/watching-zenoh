@@ -86,6 +86,14 @@ replay = ["alloc"]
 name = "e2e_receiver_cost"
 harness = false
 
+# What the end-to-end stream sender costs per protected frame and what the segment sender costs per
+# message it splits, each under a rule that rolls its number over inside the measured loop and one
+# that never reaches it (benches/sender_cost.rs): the instrument the move of the two senders'
+# rollover rule into one SCE algorithm is held to, built against the tree before the move and after.
+[[bench]]
+name = "sender_cost"
+harness = false
+
 [dependencies]
 # Every build links it: the message catalog's static tables, which an image with no allocator links,
 # are its, and its readers come in with `alloc`.
