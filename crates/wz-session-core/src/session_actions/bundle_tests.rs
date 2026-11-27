@@ -346,6 +346,45 @@ fn a_datagram_dropped_before_the_session_read_it_is_a_receive_drop() {
     assert_eq!(report.tx.n_dropped, 0, "nothing sent was dropped");
 }
 
+/// A link compresses its batches from its establishment, and only when the session negotiated
+/// compression: its handshake leaves bare, a link established over a session whose peer offered
+/// none compresses nothing, and a reopen writes the next handshake bare again. Turned red by
+/// `enter_established` settling the link's choice from anything but the negotiated capability,
+/// by a link that compresses before it is established, or by a reopen that leaves it compressing.
+#[cfg(feature = "session-extcompression")]
+#[test]
+fn a_link_compresses_from_its_establishment_what_its_session_negotiated() {
+    let (actions, _link) = bundle();
+    actions.set_compression_offer(true);
+    actions.negotiate_compression_against_peer(true);
+    assert!(
+        !actions.compresses_batches(),
+        "the handshake is written bare"
+    );
+    actions.enter_established();
+    assert!(
+        actions.compresses_batches(),
+        "an established link of a session that negotiated compression compresses"
+    );
+    #[cfg(feature = "session-reconnect")]
+    {
+        actions.reset_for_reopen();
+        assert!(
+            !actions.compresses_batches(),
+            "the reopen's handshake is written bare"
+        );
+    }
+
+    let (refused, _link) = bundle();
+    refused.set_compression_offer(true);
+    refused.negotiate_compression_against_peer(false);
+    refused.enter_established();
+    assert!(
+        !refused.compresses_batches(),
+        "a link whose peer offered no compression compresses nothing"
+    );
+}
+
 /// [`bundle`] with its link established ([`SessionLinkActions::enter_established`]): the
 /// bundle a data or reply send is made on, since the data-send gate opens only there. A test of
 /// what a send does is made on this one; a test of the gate itself starts from [`bundle`].

@@ -3102,6 +3102,14 @@ pub struct LinkState<R: SessionRuntime> {
     /// writes one word and reads no clock.
     #[cfg(feature = "transport-keepalive")]
     pub spoke: core::sync::atomic::AtomicBool,
+    /// Whether this link's batches leave compressed and are read so: settled where the link is
+    /// established, from the capability its session negotiated, and withdrawn by a reopen
+    /// ([`SessionLinkActions::compresses_batches`]). The link's and not the session's, as
+    /// upstream's batch configuration is a link's: a link that joins an aggregate writes its
+    /// handshake bare while another link of the session compresses, and a frame is written as
+    /// the link it leaves by compresses.
+    #[cfg(feature = "transport-compression")]
+    compresses: R::Flag,
     /// Whether this link's lease monitor runs: set by the FSM's
     /// `start_lease_monitor` on `Established` entry and cleared by
     /// `stop_lease_monitor` on its exit (and by
@@ -3600,6 +3608,25 @@ impl<R: SessionRuntime> LinkState<R> {
         crate::runtime_cell::WordCell::store(
             &self.stamps.last_inbound_at,
             stamp_word(Some(now_ms)),
+            core::sync::atomic::Ordering::Release,
+        );
+    }
+
+    /// Whether this link's batches are compressed (its `compresses`).
+    #[cfg(feature = "transport-compression")]
+    #[inline]
+    pub(crate) fn compresses_batches(&self) -> bool {
+        crate::runtime_cell::FlagCell::load(&self.compresses, core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Settle whether this link's batches are compressed: at its establishment, and bare again
+    /// at a reopen.
+    #[cfg(feature = "transport-compression")]
+    #[inline]
+    fn settle_compression(&self, compresses: bool) {
+        crate::runtime_cell::FlagCell::store(
+            &self.compresses,
+            compresses,
             core::sync::atomic::Ordering::Release,
         );
     }
@@ -5288,6 +5315,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
                 keepalive_armed: core::sync::atomic::AtomicBool::new(false),
                 #[cfg(feature = "transport-keepalive")]
                 spoke: core::sync::atomic::AtomicBool::new(false),
+                #[cfg(feature = "transport-compression")]
+                compresses: <R::Flag as crate::runtime_cell::FlagCell>::new(false),
                 lease_armed: core::sync::atomic::AtomicBool::new(false),
                 close_reason: R::new_mutex(None),
                 #[cfg(feature = "transport-multilink")]
@@ -7243,12 +7272,12 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // does not negotiate compression; this arm is what keeps a build that
         // has both honest about it.
         #[cfg(all(feature = "transport-compression", feature = "tx-lend-only"))]
-        if self.compresses_batches() {
+        if link.compresses_batches() {
             let _ = self.refuse_tx(crate::link::LinkDropCause::NoTxSlot);
             return;
         }
         #[cfg(all(feature = "transport-compression", not(feature = "tx-lend-only")))]
-        if self.compresses_batches() {
+        if link.compresses_batches() {
             // A lent slot is NOT sent here: the wire bytes are the compressed
             // copy, so the slot goes back to its link before the copy is
             // handed over, which a link that copies bytes into a slot of its
@@ -7941,6 +7970,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         // The shared monotonic clock, the scale the lease comparator reads its stamps on.
         let now = self.clock.now_monotonic_ms();
         self.link.fact_established_at(|slot| *slot = Some(now));
+        // Before the limits: the envelope of a compressing link holds the batch header.
+        #[cfg(feature = "transport-compression")]
+        self.link
+            .settle_compression(self.negotiated_batch_compression());
         // After the stamp: the envelope of an established lowlatency link is its own.
         #[cfg(any(
             feature = "codec-push",
@@ -10775,22 +10808,27 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         self.fact_is_compression(|s| *s)
     }
 
-    /// transport-compression (R311y434) — SSOT for "is the lz4 batch wrap ACTIVE
-    /// on this session right now?". The single predicate BOTH the TX wrap
-    /// (`Self::emit_on_link`) and the RX un-wrap
-    /// ([`crate::drive::dispatch_link_event`]) consult, so the two cannot drift
-    /// apart and leave one side wrapping what the other does not un-wrap — a
-    /// hand-maintained pair of conditions is exactly how that breaks.
+    /// transport-compression (R311y434) — whether the lz4 batch wrap is ACTIVE on this
+    /// session's link right now: the one answer BOTH the TX wrap (`Self::emit_on_link`, which
+    /// reads the link it writes on) and the RX un-wrap ([`crate::drive::dispatch_link_event`])
+    /// read, so the two cannot drift apart and leave one side wrapping what the other does not
+    /// un-wrap. The link keeps it, settled at its establishment from
+    /// `negotiated_batch_compression` and withdrawn by a reopen, so before the link is
+    /// established nothing is wrapped: zenoh drives Init/Open on a link whose `is_compression`
+    /// is false (`establishment/open.rs:572`) and then explicitly ships the OpenAck raw through
+    /// a named workaround (`unicast/link.rs:288-296`).
     ///
-    /// Distinct from [`Self::is_compression`], which reports the NEGOTIATED
-    /// capability. Three conjuncts, each mirroring zenoh:
+    /// Distinct from [`Self::is_compression`], which reports the NEGOTIATED capability.
+    #[cfg(feature = "transport-compression")]
+    pub fn compresses_batches(&self) -> bool {
+        self.link.compresses_batches()
+    }
+
+    /// Whether a link established now compresses its batches. Two conjuncts, each mirroring
+    /// zenoh:
     ///
     /// 1. the 0x6 ext negotiated on both sides (the `&=` merge);
-    /// 2. post-establishment only. zenoh drives Init/Open on a link whose
-    ///    `is_compression` is false (`establishment/open.rs:572`) and then
-    ///    explicitly ships the OpenAck raw through a named workaround
-    ///    (`unicast/link.rs:288-296`);
-    /// 3. NOT lowlatency. This one is a CORRECTION, not a mirror of structure:
+    /// 2. NOT lowlatency. This one is a CORRECTION, not a mirror of structure:
     ///    zenoh sets `is_compression` on a lowlatency link's `BatchConfig` too
     ///    (`open.rs:701` is independent of `:689`), but its lean tx serializes
     ///    straight to the link behind a 4-byte length prefix and never touches
@@ -10800,8 +10838,8 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
     ///    emitted a wire no zenoh peer can read — self-consistent wz<->wz and
     ///    wire-incompatible with the reference impl.
     #[cfg(feature = "transport-compression")]
-    pub fn compresses_batches(&self) -> bool {
-        if !self.is_compression() || !self.is_established() {
+    fn negotiated_batch_compression(&self) -> bool {
+        if !self.is_compression() {
             return false;
         }
         #[cfg(feature = "transport-lowlatency")]
@@ -10810,7 +10848,7 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
         }
         #[cfg(not(feature = "transport-lowlatency"))]
         {
-            // No lean transport exists in this build, so conjunct 3 holds trivially.
+            // No lean transport exists in this build, so conjunct 2 holds trivially.
             true
         }
     }
@@ -19255,6 +19293,10 @@ impl<R: SessionRuntime, T: TimeSource> SessionLinkActions<R, T> {
             // that read them are lowered (`StampWords`).
             self.link.stamps.clear();
             self.link.note_deadlines_moved();
+            // The replacement's handshake is written bare, and its establishment settles the
+            // compression anew from what that handshake negotiates.
+            #[cfg(feature = "transport-compression")]
+            self.link.settle_compression(false);
             // The close reason is the closed transport's; the replacement
             // has staged none.
             R::with_mutex_mut(&self.link.close_reason, |reason| *reason = None);
