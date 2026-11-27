@@ -101,8 +101,8 @@ read in the pinned zenoh-pico tree (`vendor/zenoh-pico`), and K3's was corrected
 
 | row | behaviour | evidence in zenoh-pico | off, it loses | estimate (bytes) | proposed switch | defaults |
 |-----|-----------|------------------------|---------------|-----------------:|-----------------|----------|
-| K1 `scout-group-socket` | a window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on | `src/session/scout.c` @ `return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`: a scout opens per-interface unicast links alone and fails with none; no link of it is joined to the group | a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody (its window has no member and ends at once, as zenoh-pico's fails) | 800 to 1,500 (`bind_scout_group`, `joined_on`'s join and the group's bind, the group member's arm of `ScoutMembers::from_parts`) | `CONFIG_WZ_CAP_SCOUT_GROUP_SOCKET`, cargo feature `scout-group-socket` of `wz-runtime-posix` and `wz-capi-coop` | on (Kconfig `default y`); `n` in `configs/zenoh-pico_defconfig`; implies `scout` |
-| K2 `scout-rx-verdicts` | a datagram a window does not take is classified (self echo, another node's Scout, a locator-less Hello, an unknown MID, undecodable), counted by verdict (`IgnoredCounts`) and logged at the verdict's severity | `src/session/scout.c` @ `ret = _Z_ERR_MESSAGE_UNEXPECTED;` in `_z_scout_recv`, and `_z_scout_read`'s `_Z_ERROR("Failed to receive scouting message from link %zu: %d", i, ret);`: one error code, one line, no count | the counts and the per-verdict lines; a datagram not taken is still dropped and still does not advance the window (`hello_advances_window` is the window's rule, not the verdict's) | 600 to 1,200 (`classify_ignored_scout_rx`, `ScoutingActions::record_ignored`'s arms, `IgnoredCounts`) | `CONFIG_WZ_CAP_SCOUT_RX_VERDICTS`, cargo feature `scout-rx-verdicts` of `wz-session-core` | on; `n` in the zenoh-pico defconfig; implies `scout` |
+| K1 `scout-group-socket` | a window also reads on a socket joined to the scouting group, and asks on it when no interface can be asked on | `src/session/scout.c` @ `return _z_scout_links_size(&scout->_links) > 0 ? _Z_RES_OK : _Z_ERR_TRANSPORT_OPEN_FAILED;`: a scout opens per-interface unicast links alone and fails with none; no link of it is joined to the group | a Hello sent to the group rather than to the asker is not heard, and a host that lists no interface finds nobody (its window has no member and ends at once, as zenoh-pico's fails) | 800 to 1,500 (`bind_scout_group`, `joined_on`'s join and the group's bind, the group member's arm of `ScoutMembers::from_parts`) | `CONFIG_WZ_CAP_SCOUT_GROUP_SOCKET`, cargo feature `scout-group-socket` of `wz-runtime-posix` and `wz-capi-coop` | on (Kconfig `default y`); `n` in `configs/zenoh-pico_defconfig`; implies nothing |
+| K2 `scout-rx-verdicts` | a datagram a window does not take is classified (self echo, another node's Scout, a locator-less Hello, an unknown MID, undecodable), counted by verdict (`IgnoredCounts`) and logged at the verdict's severity | `src/session/scout.c` @ `ret = _Z_ERR_MESSAGE_UNEXPECTED;` in `_z_scout_recv`, and `_z_scout_read`'s `_Z_ERROR("Failed to receive scouting message from link %zu: %d", i, ret);`: one error code, one line, no count | the counts and the per-verdict lines; a datagram not taken is still dropped and still does not advance the window (`hello_advances_window` is the window's rule, not the verdict's) | 600 to 1,200 (`classify_ignored_scout_rx`, `ScoutingActions::record_ignored`'s arms, `IgnoredCounts`) | `CONFIG_WZ_CAP_SCOUT_RX_VERDICTS`, cargo feature `scout-rx-verdicts` of `wz-session-core`, `wz-capi-coop`, `wz-capi-pico` and `wz-capi-core` | on; `n` in the zenoh-pico defconfig; implies nothing |
 | K3 `connectivity-unlocked-replay` | a listener's history replay holds no lock of the session's faces, so a callback in it may read the faces (`z_info_transports`, `z_info_links`); what arrives meanwhile is told after it, folded by row (`Pending`) | `src/api/connectivity.c` @ `_z_connectivity_replay_transport_history`: the replay calls the closure under `_z_transport_peer_mutex_lock(transport_common);`, and the listener is inserted only after it (`id = session->_connectivity_next_listener_id++;` under `_z_session_mutex_lock_if_open`) | the queue: the replay runs under the face table's read, as zenoh-pico's runs under its peer lock, so an arrival waits for it rather than queueing; a callback of the replay that reads the faces waits on itself, as in zenoh-pico | 1,500 to 2,500 (`Pending`, `end_replay`, `finish_replay`'s fold) | `CONFIG_WZ_CAP_CONNECTIVITY_UNLOCKED_REPLAY`, cargo feature `connectivity-unlocked-replay` of `wz-capi-pico` | on; `n` in a preset based on zenoh-pico that turns `connectivity` on (the zenoh-pico defconfig has `CONFIG_WZ_CAP_CONNECTIVITY=n`, so it names nothing of it); implies `connectivity` |
 
 K3 corrected: the lane's first reading said zenoh-pico dispatches an arrival and a departure under
@@ -117,7 +117,8 @@ zenoh-pico lacks (no code of the plane's own).
 
 What each switch needs to land, none of which this lane can run: a `[[capability]]` of
 `deploy/wz-config.toml` with the id, `kconfig`, `upstream_off = ["zenoh-pico"]`, `abis`
-(`["core", "pico"]` for K1 and K2, `["pico"]` for K3) and `implies` above, and
+`["core", "pico"]` (every capability is in `core`, `wz_config.py`'s `validate_caps`, so K3's is
+too, its core feature carrying the name alone) and `implies = []`, and
 `scripts/lib/wz_config.py` run to emit `deploy/Kconfig.capabilities`, the defconfigs and the
 generated limits it writes (its `--check` fails on a hand-edited one); then the cargo feature at
 every use, with the build without it compiling: K1 gates `bind_scout_group` and the group member
@@ -127,6 +128,13 @@ count of datagrams not taken (the conservation the window's tests read: taken or
 `Pending` and the replay's fold, the off form holding the face table's read across the replay.
 The census (`upstream_feature_census.py`), the prose-name and the no-allocator gates read a new
 capability name, so the main session runs them with the generator.
+
+None of the three implies its plane, as landed: a switch on by default whose Kconfig entry
+selected `scout` or `connectivity` would turn the plane back on in a build that turned it off and
+left the behaviour at its default. Each is a behaviour of a plane, as `advanced-source-retention`
+is of `advanced`, so it implies nothing and its cargo feature forwards weakly: without the plane
+there is no window, or no hub, for it to change. The first reading of this section had each imply
+its plane.
 
 ## 6. Measurement cells
 
@@ -146,19 +154,15 @@ capability name, so the main session runs them with the generator.
 | SC3 | `refactor(runtime-posix): Ask a scout's interfaces of the host's list` | as planned; `InterfaceTable::read` reads through the same walk, an interface's index asked by its name's bytes | the rule over made rows (one address an interface, IPv6, joined groups, loopback, down and carrier-less interfaces left out); the walk and the owned table list the same entries; each index is the one its name finds |
 | SC2 | `refactor(session-core): Name a scout window's record and holding` | as planned, as two pairs of types. The record: `ScoutingActions<R, K>` over `K: HelloRecord<R>`, the heap collection `HelloList` (the tokio engine's, the default `K`) or the lent table `LentTable` (the C library's), each with the reads of its own form (`scouted_hellos` and `ignored_datagrams` of the list, `hellos_refused` of the table); the count of datagrams not taken stays every window's. The holding: `ScoutWindow<S: WindowHolding>`, `SharedWindowState` (an `Arc`) or `LentWindowState` (held in the window's place), the machine reaching it through `ActionsReach` (the `Arc`, or `PlacedActions`, a pointer). The actions' bodies are the state's own methods, so the binding is four calls. `ScoutingActions::over_table`'s `Arc` form had no caller and is gone | the window's tests over both forms, unchanged in what they assert (the collection has no bound, a lent table counts past its rows, a window built in its place is the window built by value); `a_window_over_a_lent_table_holds_its_state_in_its_place` now reads the lent record as a pointer that owns nothing it would drop (red if it grows a list, a string or an `Arc`), records its answer in the table, and holds a shared window's `Arc` at two (the window and its machine) |
 | SC5 (the set) | `refactor(runtime-posix): Make a scout window's wait set with its members` | the half of SC5 that needs no new limit: `ReadableAmong`, a socket's poll entry (`pollfd`, `WSAPOLLFD`) made once as a member joins the window, kept in the members' order and dropped with each lost member; `ScoutMembers::wait` hands the set as it stands, so neither collect is made at a wait (`wait_readable_any` is gone from `MulticastSocket`) | `a_member_whose_read_fails_is_dropped_and_the_rest_keep_their_order` reads the set against the members after every drain (red if the set leaves their order or keeps a lost member's entry); the real wait test is unchanged |
+| K1 | `feat(runtime-posix): Switch a scout window's group socket by capability` | the capability `scout-group-socket` (section 5's row, implying nothing), the cargo feature of `wz-runtime-posix`, `wz-capi-coop`, `wz-capi-pico` and `wz-capi-core` (its name alone there), on in each default list and off in the zenoh-pico preset. A window is made of its ask members (`ScoutMembers::asking`); with the switch the group socket joins after them (`listening_on_group`) and asks only when none does, so the fallback is decided where the group member is taken. Off, `bind_scout_group` and its plan (`Plan::unpinned`) are not compiled, and a window given no address has no member | with the switch: the group socket asks alone and listens beside an ask member; without it: a window opened on no address is empty and one on the loopback holds that ask socket alone (red if the group is joined without the switch); in either build a window of no member asks nobody; the ask plan is the IPv4 plan pinned to its address |
+| SC5 (the rows) | `refactor(runtime-posix): Hold a scout window's members in fixed rows` | the members and the wait set in `BoundedVec` rows of the static policy, `MAX_SCOUT_INTERFACES` (default 10, zenoh-pico's `Z_MAX_NUM_SCOUT_INTERFACES`, a capacity of the runtime bound at the build) plus one for the group's socket with K1; an address past the bound opens no socket and is counted (`left_out`, a warning, as zenoh-pico warns); a lost member is dropped by moving the kept ones forward and popping the rest. The window asks the interfaces by a walk of the host's list where the system holds it (`walk_multicast_interface_addresses`, `FirstIpv4OfEach`), so it collects no addresses; the owned forms read through the same walk | a window of one more member than the bound keeps the first `MAX_SCOUT_INTERFACES` in order with their entries and counts one (red if a member past the bound is kept or not counted); a window opened on two addresses past the bound binds the bound's sockets and counts two (red if a socket it cannot keep is opened); the walk of the host's list answers what the owned table does |
+| K2 | `feat(session-core): Switch a scout window's verdicts by capability` | the capability `scout-rx-verdicts` (implying nothing), the cargo feature of `wz-session-core`, `wz-capi-coop`, `wz-capi-pico` and `wz-capi-core`; `wz-runtime-tokio`'s `scouting-active` selects it, as the tokio engine lists and reads the verdicts. With it, unchanged. Without it `ScoutRxIgnored`, `classify_ignored_scout_rx`, the heap record's list and the per-verdict logs are not compiled, and `IgnoredCounts` is one count of the datagrams not taken, read by `total` as before | the window's conservation, each datagram not taken counted once, holds in both builds (`a_datagram_that_is_not_an_answer_is_named_and_the_window_goes_on` reads the total, the verdicts under the switch); the counts by verdict and their sum with it, one count without it; the window's rule `hello_advances_window` tested apart from the verdicts |
 
 ## 8. What waits, and why
 
-- **SC5, the members' fixed storage.** The members in a table of the scout's interface bound needs a
-  limit the build states (zenoh-pico's `Z_MAX_NUM_SCOUT_INTERFACES`, 10 in `config.h.in`, 0 with
-  scouting off). A limit is a `deploy/wz-config.toml` entry whose `caps_generated.rs`,
-  `caps_binding_generated.rs`, `limits_generated.rs` and conformance vectors
-  `scripts/lib/wz_config.py` emits; this lane cannot run it, and a number written in
-  `wz-runtime-posix` would be a second home of the fact. Next: `MAX_SCOUT_INTERFACES` (default 10,
-  the zenoh-pico preset's 10) in the toml, emitted; `ScoutMembers` over two arrays of that many
-  rows plus the group member (`members`, `readable`), an ask address past the bound skipped and
-  counted, as zenoh-pico warns `Scouting link limit reached, ignoring interface`; the test a window
-  of one more interface than the bound keeps the bound and counts one.
+- **SC5, the members' fixed storage**, landed (section 7): `MAX_SCOUT_INTERFACES` is a limit of
+  `deploy/wz-config.toml`, its generated outputs written by `scripts/lib/wz_config.py --write`,
+  which this lane does not run.
 - **SC7: its premise is false on the measured cases.** `z_hello_clone` boxes a `HelloState` with a
   `StringArrayState` of `String`s only in a library without the process pools, which is the tokio
   engine's without `object-pool` (`crates/wz-capi-pico/build.rs`). Every cooperative library has
@@ -183,5 +187,16 @@ capability name, so the main session runs them with the generator.
   CN2 goes with CN1, which changes the face row. CN3 (one table over an event naming its plane)
   and CN4 (no queue between the face watch and the hub) keep their plan and their order: CN3, then
   CN1 with CN2, then CN4.
-- **K1 to K3** are not implemented: section 5 states what each needs, and the capability catalog
-  is generated by a tool this lane does not run.
+- **K1 and K2** landed (section 7). **K3 waits on CN4: its off form's premise is false while the
+  hub is handed queued rows.** Section 5 says the off form holds the face table's read across the
+  replay, so that an arrival waits for it rather than queueing. It does not wait: the rows reach the
+  hub from the face watch's queue (`MAX_FACE_WATCH_ROWS`) through `Connectivity::on_face_row`,
+  outside every lock of the engine, so a read of the face table held by the replaying thread stops
+  no row already queued, and a row the replay's walk found standing may also wait in the queue, to
+  be told again when it is handed out. A lock of the hub's own around the replay and the hand-out
+  would serialize them, and then a callback that declares a listener with history from inside a
+  delivery would wait on itself, which zenoh-pico's delivery, outside every lock, does not. What
+  the off form needs is the hand-out CN4 makes: the hub told as the face changes, in the order the
+  face table changes, so that one lock orders the change, its telling and a replay's walk. K3's
+  capability, its features and its off form land with or after CN4; no capability is declared
+  before the code it switches.
