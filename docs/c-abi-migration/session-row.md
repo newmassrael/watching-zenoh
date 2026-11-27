@@ -65,12 +65,13 @@ that is a count of the pools' room, not a count of sessions open.
 ### 1.4 zenoh-pico (read at 1.10.2, the submodule's `6a881c21da`)
 
 `_z_session_rc_init` allocates each session on the heap at its open
-(`vendor/zenoh-pico/src/api/api.c:896`, `z_malloc(sizeof(_z_session_t))`) and wraps it in a
-counted handle (`api.c:908`, `_z_session_rc_new`): no table, no bound but the heap. Its entities
-keep a weak handle of the session (`_z_session_weak_t _zn` in
-`vendor/zenoh-pico/include/zenoh-pico/net/publish.h:33`, `subscribe.h:32`, `query.h:38`, and
-`session/keyexpr.h:31`) and reach it with `_z_session_weak_upgrade_if_open`
-(`vendor/zenoh-pico/src/net/session.c:708-714`), which answers none once the session is closed.
+(`vendor/zenoh-pico/src/api/api.c` @ `z_malloc(sizeof(_z_session_t))`) and wraps it in a counted
+handle (`vendor/zenoh-pico/src/api/api.c` @ `_z_session_rc_new`): no table, no bound but the heap.
+Its entities keep a weak handle of the session, the field
+`vendor/zenoh-pico/include/zenoh-pico/net/publish.h` @ `_z_session_weak_t _zn;` and the same field
+of the subscriber, the queryable and the key expression, and reach it with
+`vendor/zenoh-pico/src/net/session.c` @ `_z_session_weak_upgrade_if_open`, which answers none once
+the session is closed.
 
 ## 2. The target
 
