@@ -11,7 +11,7 @@ use wz_capi_port::{
     FilterId, FilterPlane, FilteredPut, KeyHold, PeerLists, SessionDrive, SessionEngine, WireKey,
 };
 use wz_session_core::declare_form::InterestAsk;
-use wz_session_core::publish_options::PublishOptions;
+use wz_session_core::publish_options::{PlainPutParams, PublishOptions};
 use wz_session_core::reliability::Reliability;
 
 use super::{config, open, open_with, until, CatchAll, Command, Engine, Router};
@@ -550,6 +550,23 @@ fn namings(engine: &Engine) -> usize {
 /// A publisher's way on the declared key `key` under `demo/`, its filter opened by the router's
 /// subscriber: the declaration's hold, the filter and the key as the publisher names it.
 fn way_on(engine: &Engine, router: &Router, key: &str) -> (KeyHold, FilterId, WireKey) {
+    let params = PublishOptions::put()
+        .plain_put_params()
+        .expect("a plain put");
+    way_with(engine, router, key, params)
+}
+
+/// `way_on` whose bare put is sent from `params`. The router declares the subscriber that opens
+/// the filter whether or not it holds a catch-all, which it tells a session only in answer to an
+/// Interest, and its session answers one only with `interest-answer` (`CatchAll`). Where it does,
+/// the filter opens at the first of the two declarations; the other moves the send epoch only at
+/// the step that reads it, so the puts made between two steps share one epoch.
+fn way_with(
+    engine: &Engine,
+    router: &Router,
+    key: &str,
+    params: PlainPutParams,
+) -> (KeyHold, FilterId, WireKey) {
     let hold = engine
         .acquire_keyexpr(key)
         .expect("a session with ids left declares");
@@ -562,9 +579,6 @@ fn way_on(engine: &Engine, router: &Router, key: &str) -> (KeyHold, FilterId, Wi
     until(engine, "the filter to open", || {
         !engine.write_filter_active(filter)
     });
-    let params = PublishOptions::put()
-        .plain_put_params()
-        .expect("a plain put");
     engine.keep_write_filter_plain(filter, Some((params, wire.declared())));
     (hold, filter, wire)
 }
@@ -700,26 +714,15 @@ fn a_put_looks_its_write_filters_row_up_once() {
 
 /// A bare put plans its publisher's way by the key its leg named, the one it is sent on: a
 /// publisher whose filter is on `demo/x` that puts on `demo/z`, under the declaration of
-/// `demo/x`, plans nothing, and each of those puts reaches the router on `demo/z`. CONTROL: its
-/// puts on its own key are written from the plan after the first. Turned red by a plan made of
-/// the filter's key in place of the key the put's leg named, whose planned put is written on the
-/// filter's key.
+/// `demo/x`, plans nothing, and each of those puts reaches the router on `demo/z`, as the
+/// router's catch-all records them. CONTROL: its puts on its own key are written from the plan
+/// after the first. Turned red by a plan made of the filter's key in place of the key the put's
+/// leg named, whose planned put is written on the filter's key.
 #[test]
 fn a_put_plans_its_way_by_the_key_its_leg_named() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let hold = engine
-        .acquire_keyexpr("demo/x")
-        .expect("a session with ids left declares");
-    let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
-    let filter = filter_on(&engine, "demo/x");
-    until(&engine, "the router's catch-all to open the filter", || {
-        !engine.write_filter_active(filter)
-    });
-    let params = PublishOptions::put()
-        .plain_put_params()
-        .expect("a plain put");
-    engine.keep_write_filter_plain(filter, Some((params, wire.declared())));
+    let (_hold, filter, wire) = way_on(&engine, &router, "demo/x");
 
     let before = plans(&engine);
     for _ in 0..2 {
@@ -753,7 +756,6 @@ fn a_put_plans_its_way_by_the_key_its_leg_named() {
         (2, 2),
         "each put reaches the router on the key it was made on"
     );
-    drop(hold);
 }
 
 /// How often the session's send epoch was read since the open.
@@ -862,26 +864,19 @@ fn a_plan_asks_the_links_only_where_they_name_keys_their_own_way() {
 
 /// A bare put of a publisher's best-effort way rides as the way says whether its key is named or
 /// its plan writes it: the first at a send epoch and the planned one after it both reach the
-/// router on the best-effort channel. CONTROL: the second was written from the plan. Turned red by
-/// a plain put sent by facts other than its way's in either arm.
+/// router on the best-effort channel, as the router's catch-all records the frame each came in.
+/// CONTROL: the second was written from the plan. Turned red by a plain put sent by facts other
+/// than its way's in either arm.
 #[test]
 fn a_bare_put_rides_as_its_way_says_named_or_planned() {
     let router = Router::start(CatchAll::Held);
     let engine = open(&router);
-    let hold = engine
-        .acquire_keyexpr("demo/x")
-        .expect("a session with ids left declares");
-    let wire = WireKey::aliased(hold.mapping_id(), None).at_row(hold.row());
-    let filter = filter_on(&engine, "demo/x");
-    until(&engine, "the router's catch-all to open the filter", || {
-        !engine.write_filter_active(filter)
-    });
     let params = PublishOptions::put()
         .with_reliability(Reliability::BestEffort)
         .plain_put_params()
         .expect("a plain put");
     assert!(!params.reliable, "the premise: a best-effort way");
-    engine.keep_write_filter_plain(filter, Some((params, wire.declared())));
+    let (_hold, filter, wire) = way_with(&engine, &router, "demo/x", params);
 
     let before = plans(&engine);
     for _ in 0..2 {
@@ -903,7 +898,6 @@ fn a_bare_put_rides_as_its_way_says_named_or_planned() {
         [Reliability::BestEffort; 2],
         "the named put and the planned one ride as the way says"
     );
-    drop(hold);
 }
 
 /// A plan stands at its send epoch alone: once the router retracts the subscriber that opened the

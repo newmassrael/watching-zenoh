@@ -323,9 +323,11 @@ struct Seen {
     held: usize,
 }
 
-/// Whether the router holds a catch-all subscriber. It is a subscriber like any other: the router
-/// declares it in answer to an Interest, so a test of what a session learns from declarations
-/// starts without it.
+/// Whether the router holds a catch-all subscriber, which records what reaches it. It is a
+/// subscriber like any other: the router declares it in answer to an Interest, which its session
+/// answers only with `interest-answer`, so a test of what a session learns from declarations
+/// starts without it, and a test that needs a filter opened in every build has the router declare
+/// a subscriber (`Command::DeclareSubscriber`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CatchAll {
     Held,
