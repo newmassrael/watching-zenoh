@@ -88,6 +88,14 @@ fixtures = ["alloc"]
 # frames they cut. The replay cache's subscriber turns it on; off, a receiver keeps no CRC.
 replay = ["alloc"]
 
+# What the end-to-end receiver costs per frame under sender keying and what naming a slot's sender
+# costs (benches/e2e_receiver_cost.rs): the instrument a move of its logic into SCE documents is
+# held to, built against the tree before the move and after it. `harness = false` because the
+# libtest bench harness is nightly-only and this toolchain is pinned stable.
+[[bench]]
+name = "e2e_receiver_cost"
+harness = false
+
 [dependencies]
 # Every build links it: the message catalog's static tables, which an image with no allocator links,
 # are its, and its readers come in with `alloc`.
