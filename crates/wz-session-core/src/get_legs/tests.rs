@@ -109,6 +109,67 @@ fn a_table_lent_one_row_refuses_a_second_leg_until_the_first_ends() {
     assert!(legs.hold(request_id_at(2, 0), 2), "the row is free again");
 }
 
+/// A leg owing a Final of each of a group's members ends at the last of them, handed back once,
+/// and a Final past the last finds nothing; a leg owing none is not held. Turned red by a leg that
+/// ends at its first Final (`end_leg` not counting), or by one held owing none.
+#[test]
+fn a_leg_owing_several_finals_ends_at_its_last() {
+    let mut legs = GetLegs::<u8>::default();
+    let id = request_id_at(1, legs.next_row());
+    assert!(legs.hold_owing(id, 5, 3));
+    assert_eq!(legs.end_leg(id), None, "two Finals are still owed");
+    assert_eq!(legs.reply_to(&reply(id, "demo/a", ReplyKind::Put)), Some(5));
+    assert_eq!(legs.end_leg(id), None, "one Final is still owed");
+    assert_eq!(legs.end_leg(id), Some(5), "the last Final ends the leg");
+    assert_eq!(
+        legs.end_leg(id),
+        None,
+        "a Final past the last finds nothing"
+    );
+    assert!(legs.is_empty());
+    assert!(
+        !legs.hold_owing(request_id_at(2, 0), 6, 0),
+        "a leg owing none"
+    );
+    assert!(legs.is_empty());
+}
+
+/// A table counted one row holds one leg and refuses the next, which takes the row once it is
+/// free. Turned red by a counted table that holds past its count.
+#[cfg(feature = "alloc")]
+#[test]
+fn a_table_counted_one_row_refuses_a_second_leg_until_the_first_ends() {
+    let mut legs = GetLegs::<u8, crate::bounded::OnUse>::counted(1);
+    assert!(legs.hold(request_id_at(1, 0), 1));
+    assert!(!legs.hold(request_id_at(1, 1), 2), "past the count");
+    assert_eq!(legs.end_leg(request_id_at(1, 0)), Some(1));
+    assert!(legs.hold(request_id_at(2, 0), 2), "the row is free again");
+}
+
+/// The description of a table of the region policy names its legs' rows at the build's bound,
+/// the table inside itself and the rows inside the rows laid out for them, and no handle to the
+/// key arena. Turned red by a line of the wrong bound or rows placed outside `GetLegsRows`.
+#[test]
+fn region_legs_describe_their_rows_inside_their_rows() {
+    use crate::bounded::Region;
+    const AT: usize = 64;
+    const ROWS: usize = AT + core::mem::size_of::<GetLegs<u8, Region>>();
+    let lines = GetLegs::<u8, Region>::places(AT, ROWS);
+    let seqs = lines.seq_lines();
+    assert_eq!(seqs.len(), super::GET_LEGS_LINES);
+    assert_eq!(seqs[0].room as usize, crate::caps::MAX_PENDING_QUERIES);
+    assert_eq!(lines.key_lines().len(), 0, "a leg keeps no key");
+    let end = ROWS + core::mem::size_of::<super::GetLegsRows<u8>>();
+    assert!(
+        (AT..ROWS).contains(&seqs[0].seq),
+        "the table lies in itself"
+    );
+    assert!(
+        (ROWS..end).contains(&seqs[0].rows),
+        "its rows lie in their rows"
+    );
+}
+
 /// A face whose key set is closed hands a get no reply its peer sent on a key outside the set,
 /// counted, though the leg is held; an Err, which names no key, is handed on. Turned red by a
 /// reply that skips the face's key gate.
