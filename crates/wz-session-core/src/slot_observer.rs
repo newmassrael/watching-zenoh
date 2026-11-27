@@ -2223,13 +2223,14 @@ impl<K: ObserverSinks, P: Storage, M: MatchingReport> SlotObserverOf<K, P, M> {
         self.flush_tokens_on_link_loss_while(cx, &mut peers.tokens, room)
     }
 
-    /// [`Self::flush_liveliness_on_link_loss_while`] of the tokens of a peer whose tables were let
-    /// go of, held apart from them (`PeerTokens::split_off`): what a face that went still owes.
+    /// [`Self::flush_liveliness_on_link_loss_while`] of tokens held apart from the tables of the
+    /// peer that declared them: a table split off them (`PeerTokens::split_off`) or the relation
+    /// of the tokens of the faces that went (`OwedTokens`), what a face that went still owes.
     /// Whether none is left.
-    pub fn flush_tokens_on_link_loss_while<T: Storage>(
+    pub fn flush_tokens_on_link_loss_while<T: crate::declare::liveliness_subscriber::LostTokens>(
         &mut self,
         cx: &mut K::Delivery,
-        tokens: &mut crate::declare::liveliness_subscriber::PeerTokens<T>,
+        tokens: &mut T,
         room: &mut dyn FnMut() -> bool,
     ) -> bool {
         #[cfg(feature = "liveliness-subscriber")]
