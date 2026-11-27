@@ -356,9 +356,118 @@ constant.
 | R7 | sinks and crates as data: `arch-mono.md`'s M3 to M5 (a counted message counted by the encoder that writes it, an instance compiled in its owner, the wait of an undeclaration over one enum of rows) | 0 / 0 to -500 / -5,000 to -9,000 | `arch-mono.md` section 5, read on `pico-default`; the api twin's 11,663 bytes of `write_wire` to be read by body before it is promised | none on the read or the put | `arch-mono.md` section 5's tests |
 | R8 | the walks of rows for the driving: the read of many rows (`peer-proportion.md`'s F5, section 8.14's Q5) and the lease and keep-alive dues read by one walk, as zenoh-pico's tasks walk their list | counted in `peer-proportion.md` F5 | | as Q5 | section 8.14.7's tests |
 
-Order: R1 first (one choice, one assertion, no other lane's file); R2 and R4 next, as R3 and R5
-write into the table they make; R6 with `peer-proportion.md`'s F2; R5 after `feat-mcast.md`'s F4,
-which makes the group face R5 puts in the table; S1 whenever SCE lands it, after R4.
+Order: R1a, then R1 (section 7.1: R1a makes the premise R1 rests on true in every build); R2
+and R4 next, as R3 and R5 write into the table they make; R6 with `peer-proportion.md`'s F2; R5
+after `feat-mcast.md`'s F4, which makes the group face R5 puts in the table; S1 whenever SCE
+lands it, after R4.
+
+### 7.1 R1's premises, read in the code, and the step before it
+
+**Each face's Router holds that face's chains alone: true of the Routers, not of where they were
+lent.** The Routers are the faces' own values: the dial role's is lent apart from the session's
+state (`crates/wz-capi-coop/src/engine.rs` @ `struct LentApart {`) and each face
+past it is made with one of its own (`crates/wz-capi-coop/src/engine/direct.rs` @
+`let router: SessionReassembly =`). The place a pump looked for its Router in was not the face's:
+every face was handed the session's one cell (`StepPlaces::router`), the dial role's through the
+transport's lend and the others through `DirectFaces::taken_in`, and every pump was handed the
+transport's (`TransportState::place_link` lent `self.lend`). Without `threads` one read steps one
+pump at a time, so each pump found its own face's Router. With `threads` and a lock for each value
+(the direct form of the host's default build with `listen`), the read task's lone read of a quiet
+face (`CoopEngine::read_quiet`) and a program's read (`CoopEngine::read_faces`, which takes each
+face's slot by a try) step two faces' pumps at once: two `lend_for`s on one `Cell` from two
+threads, a data race, and a pump that may take the other face's Router and stage its fragments
+among that face's chains. Keyed by peer, those chains did not splice; keyed by channel, as R1 keys
+them, they would. R1 as drafted was so unsound in that build, and the step before it, **R1a**, makes
+the premise true by construction: each face lends its Router in a cell of its own, a field of the
+face (`crates/wz-capi-coop/src/engine/direct.rs` @ `router_cell: RouterCell,`), and each pump
+is handed the cell of its face (`crates/wz-runtime-coop/src/transport/state.rs` @
+`pub lend: RouterLend<RouterOf<T>, T::RouterPlace>,`, the field of `PumpPlace`). The cell is
+reached only with its face's read slot held, which is what its `Sync` rests on; the handle that
+counts nothing on a field kept in place is `PlacedRef::of_place`
+(`crates/wz-session-core/src/placed.rs`).
+
+**Under `OldestWins`, a row's quota is at most its slots: true, and now asserted for every
+build.** Each Router has `SESSION_REASSEMBLY_SLOTS` slots, which is `LENT_CHAINS`, which is the
+pool's `PER_PEER_QUOTA`; its quota is that same constant (`mcu_reassembly_config`), and nothing
+else writes the quota of these Routers. A start is refused on the quota before a free slot is
+looked for (`crates/wz-session-core/src/reassembly_dispatch.rs` @
+`// §5.M quota-first: the per-peer cap is checked before slot`), so a pool full of one peer's
+chains refuses on the quota and `make_room`, the one place a policy ends a chain for another, is
+never asked: `OnePeer` and `ManyPeers` answer one peer's fragments alike under every policy. The
+assertion was the client's alone (`not(listen)`); it holds for every Router a session builds now
+(`crates/wz-runtime-coop/src/reassembly_rx.rs` @
+`assert!(crate::reassembly_pool_mcu::PER_PEER_QUOTA as usize <= SESSION_REASSEMBLY_SLOTS);`).
+
+**A lost link's chains.** The direct read ends them by the lost peer's zid
+(`crates/wz-capi-coop/src/engine/direct.rs` @ `let _ended = slot.router.abort_peer(zid.as_slice());`):
+under `ManyPeers` the chains of that zid, under `OnePeer` every chain of the face's Router. A face's
+Router serves one link at a time, so they are the same chains whenever the face's record names its
+peer, which it does from the link's bring-up on; a loss with no peer named ends no chain under
+either, as the client's direct build already does.
+
+**The choice** (`crates/wz-capi-coop/src/engine.rs` @ `type RouterPeers = OnePeer;`): chains are
+keyed by peer exactly where several faces' links share one Router, the round form of a listening
+build (`all(wz_round, feature = "listen")`); the round form without `listen` keeps `OnePeer` as it
+did, and a group's chains lie in the group's own Router, never in these. The runtime no longer
+chooses (`SessionPeers` by `listen` is gone): its Router is generic in its peers
+(`SessionReassembly<P>`), and the engine, which composes the links with their Routers, names the
+peers through `TransportFaces::Peers`. A direct build whose Router is keyed fails to compile
+(`crates/wz-capi-coop/src/engine.rs` @ `const _: () = assert!(!<RouterPeers as ChainPeers>::KEYED);`).
+
+**Receive Ir.** The client case's is unchanged: its Router was `OnePeer` already, the same type and
+so the same code; R1a changes which cell a handle names, not the instructions that use it
+(`StepLend::lend_for` and `StepLend::with` load the handle from the slot and from the pump as
+before, and neither cell's address was a constant the compiler could fold before or is now). The
+peer and api cases' fragments no longer copy or compare a peer key (`PeerKey::new`,
+`PeerKey::is`); a message that is not fragmented never reaches a Router.
+
+**Memory.** Each face grows by one cell, a pointer (8 B on a 64-bit host, 4 B on a 32-bit MCU). The
+session's cell (`StepPlaces::router`) is lent in by the round's tasks alone now; the direct form
+still places it and the transport still holds its handle, unused. That residue goes with the round's
+lend (R4, or the round's end).
+
+**Tests.** `tests::face_routers` is compiled in every build of the direct form that listens
+(`all(not(wz_round), feature = "listen")`):
+`a_faces_router_is_lent_where_its_own_pump_alone_looks` lends each row's Router and counts the other
+rows whose place finds one lent (red with one place for every face, as before R1a), and
+`each_faces_router_keys_its_chains_by_channel_and_ends_them_alone` continues a face's chain with a
+fragment naming another peer, keeps the same channel's chain of another face apart, and ends every
+chain of one face by a peer key none of them named (red with `ManyPeers` in that build). In
+`wz-runtime-coop`, `the_links_of_a_session_share_one_router_keyed_by_peer` and
+`the_router_of_one_link_keys_its_chains_by_channel` now name their Router's peers and are compiled
+in every build with `alloc` and `session-unicast`, not one of them a build; `wz-session-core`'s
+`a_handle_of_a_value_held_in_place_reads_it_where_it_lies` holds `PlacedRef::of_place`.
+
+### 7.2 Why R2 and R4 wait for R1 to be built
+
+Both are wider than one crate's feature matrix can be written for without a compiler in the loop,
+and each holds a decision the code does not settle yet.
+
+- **R2's table of one row.** `ManyFaces` keeps its places in a `Vec`
+  (`crates/wz-runtime-coop/src/faces.rs` @ `faces: Vec<TablePlace<F, D>>,`) and the client's
+  `OneFace` holds its face inline; one form bounded by the build is a new table, inline in the
+  engine's place for a bound of 1 and lent from the region or arena past it. Inline is what the
+  fold asks: with the bound a constant 1, a walk `for row in 0..N` is one turn and a row's index a
+  constant, but a row's address is a constant offset from the engine only if the table lies in the
+  engine's place, as `DirectFaces::dial` does now; a lent table adds a load of its base to every
+  reach of row 0, which the client's receive Ir would count.
+- **R2's one read body.** `read_dial` takes the one slot once and holds it across the wait;
+  `read_faces` takes every slot by a try to see that none is held, lets them go, waits, and takes
+  each again to turn it. With one row the second does not fold into the first: it is two takes of
+  the slot a read where the client makes one, more instructions on every read. One body that keeps
+  the client's count holds the slots it turns across the wait, which for several rows changes what
+  a read on another thread finds (`CoopEngine::held_elsewhere`, the quiet read): a decision about
+  section 8's reads, not a fold.
+- **R2's plan.** The dial role's face lies in the engine's place and the plan lays rows for the
+  faces past it alone (`ArenaPlan::lay_direct_faces`; `tests::arena`'s
+  `each_face_read_where_it_lies_is_lent_a_share_of_chain_buffers_of_its_own` asserts it); row 0 in
+  the table moves a region's layout and the cost gate's lists (`link_turn`, `OneFace`).
+- **R4** puts the kernel and the link state in the row by value, where the binding reaches them by
+  shared handles today (`crates/wz-session-core/src/session_actions.rs` @
+  `pub core: R::Shared<SessionCore<R, T>>,`), held besides by the place's halves
+  (`TransportState::place_halves`), the gates, and `resource-snapshot`'s count of the face
+  (`crates/wz-capi-coop/src/engine/direct.rs` @ `let count = KernelCount(CellRc::clone(&wire.actions.core));`):
+  three crates and every feature that reaches a kernel.
 
 ## 8. Where the cases end
 
