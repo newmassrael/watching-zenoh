@@ -5262,13 +5262,13 @@ struct SessionEnds;
 /// leaves. One value, so what a step read is carried through the arms of its life's effects
 /// (`Core::carry_out`) whole; a step that read no dial carries [`Self::none`].
 #[cfg(wz_round)]
-struct ReadDial<P> {
+struct ReadDial<P: SharedPump<LinkCount>> {
     answer: DialAnswer<P, LinkCount>,
     dialled: Option<DialEndpoint>,
 }
 
 #[cfg(wz_round)]
-impl<P> ReadDial<P> {
+impl<P: SharedPump<LinkCount>> ReadDial<P> {
     /// No dial read: no answer and no endpoint.
     fn none() -> Self {
         Self {
