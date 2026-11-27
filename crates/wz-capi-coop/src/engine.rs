@@ -241,7 +241,7 @@ mod hold;
 pub use hold::{EngineHandle, EngineHold};
 mod reach;
 use reach::ReachEngine;
-pub use reach::RowClaim;
+pub use reach::{RowClaim, RowsRefused};
 
 mod ledger;
 use ledger::{Due, Ledger, Seen};
@@ -652,8 +652,9 @@ pub enum OpenError {
     SnResolution(OutsideDomain<SnResolution>),
     /// No row of the process's table of engines was left for the session's engine ([`RowClaim`]):
     /// on the fixed storage policy every row (the build's `ENGINE_ROWS`) holds the engine of a
-    /// session open now, and on the heap policy the heap had no room for one more row. Nothing was
-    /// reserved, bound, joined or dialled.
+    /// session open now, on the heap policy the heap had no room for one more row, and on either
+    /// the table is held to a count of sessions every one of which is open
+    /// ([`RowClaim::hold_to`]). Nothing was reserved, bound, joined or dialled.
     NoEngineRow,
     /// The heap had no room for a link's shared handle. Nothing of the link stays.
     HeapRefused,

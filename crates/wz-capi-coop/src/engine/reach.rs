@@ -26,9 +26,16 @@
 //! on either policy, so a reach names its row by where it lies, and the row stands for as long as
 //! the process.
 //!
+//! The sessions a program states through an ABI's doors that reserve its pools are a count of
+//! this table's ([`RowClaim::hold_to`]): the table is held to that many rows, those past them
+//! withheld from the opens and, on the heap policy, none taken of the heap past them, so the open
+//! of one more session is refused by its claim, until the count is let go of with the pools. The
+//! count is no second table: a session takes its row and nothing else.
+//!
 //! The table is this engine's: a reach is of the type the engine was put in as, and reaching it is
 //! a count of that type's `Shared` taken where it lies, so no table of operations stands between a
-//! reach and its engine.
+//! reach and its engine. What takes the rows' lock and is asked of more than one place (a claim, a
+//! claim let go of unfilled, a close) is one body out of line, so the lock is laid out once for it.
 
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
@@ -51,13 +58,17 @@ const CLAIMED: u32 = 1;
 /// engine still in the row: reached as before, but no longer current ([`ReachEngine::end`]).
 const ENDED: u32 = 2;
 
-/// What a row's mark moves on by at a close: one generation, in the bits above [`CLAIMED`] and
-/// [`ENDED`].
-const GENERATION_STEP: u32 = 4;
+/// The bit of a row's mark that says no open takes the row: the table is held to a count of
+/// sessions that leaves the row out ([`RowClaim::hold_to`]), until the count is let go of.
+const WITHHELD: u32 = 4;
+
+/// What a row's mark moves on by at a close: one generation, in the bits above [`CLAIMED`],
+/// [`ENDED`] and [`WITHHELD`].
+const GENERATION_STEP: u32 = 8;
 
 /// The generation a row's mark is at.
 const fn generation(mark: u32) -> u32 {
-    mark & !(CLAIMED | ENDED)
+    mark & !(CLAIMED | ENDED | WITHHELD)
 }
 
 /// What the rows' lock lends while it is held, and nothing else makes: the one way to a word that
@@ -74,7 +85,7 @@ struct UnderLock<T>(UnsafeCell<T>);
 
 // SAFETY: the word is reached only through `get` and `set`, which take what the rows' one lock
 // lends while it is held, so no two threads reach it at once; the words kept so are the place of an
-// engine that is `Send + Sync` (`RowClaim::fill`) and rows of the heap, which are `Sync`.
+// engine that is `Send + Sync` (`RowClaim::fill`), rows of the heap, which are `Sync`, and a flag.
 unsafe impl<T: Copy> Sync for UnderLock<T> {}
 
 impl<T: Copy> UnderLock<T> {
@@ -97,8 +108,8 @@ impl<T: Copy> UnderLock<T> {
 }
 
 /// One row: the control block of one session's engine. Its mark (the generation it is at, whether
-/// an open claimed it, whether its session ended) is one word a reach reads with no lock; where the
-/// engine it holds lies is a word under the rows' lock.
+/// an open claimed it, whether its session ended, whether a count of sessions withholds it) is one
+/// word a reach reads with no lock; where the engine it holds lies is a word under the rows' lock.
 struct Row {
     /// Written only under the rows' lock, each change one store; read under it, and without it by
     /// [`ReachEngine::is_current`].
@@ -126,9 +137,16 @@ impl Row {
         self.mark.store(value, Ordering::Release);
     }
 
-    /// Whether the row holds no engine and no open has claimed it.
+    /// Whether an open may take the row: it holds no engine, no open has claimed it and no count of
+    /// sessions withholds it.
     fn is_vacant(&self, locked: &Locked) -> bool {
-        self.engine.get(locked).is_none() && self.mark() & CLAIMED == 0
+        self.engine.get(locked).is_none() && self.mark() & (CLAIMED | WITHHELD) == 0
+    }
+
+    /// Whether a session holds the row: its engine is in it, or an open claimed it for the engine
+    /// it is making.
+    fn is_open(&self, locked: &Locked) -> bool {
+        self.engine.get(locked).is_some() || self.mark() & CLAIMED != 0
     }
 
     /// Where the row lies: what a reach names it by.
@@ -145,9 +163,37 @@ struct GrownRow {
 }
 
 impl GrownRow {
-    /// A row of the heap, claimed for the open that asked for it, at its first generation; `None`
-    /// when the heap has no room for it.
-    fn claimed() -> Option<&'static Self> {
+    /// `count` vacant rows of the heap at their first generation, in one block, each linked before
+    /// the next and the last before `next`: the first of them, or `None`, nothing taken, when the
+    /// heap has no room for the block. Never given back, as a row taken for an open is not.
+    fn vacant_block(count: usize, next: Option<&'static GrownRow>) -> Option<&'static Self> {
+        let layout = Layout::array::<Self>(count).ok()?;
+        if layout.size() == 0 {
+            return None;
+        }
+        // SAFETY: the layout is not of zero bytes.
+        let place = NonNull::new(unsafe { alloc::alloc::alloc(layout) })?.cast::<Self>();
+        let mut first = next;
+        for at in (0..count).rev() {
+            // SAFETY: the heap gave `place` for `count` rows, each aligned for a `GrownRow`, and
+            // `at` is one of them; each is written once here and never given back, so the row it
+            // lends stands for as long as the process.
+            let row = unsafe {
+                let row = place.as_ptr().add(at);
+                row.write(Self {
+                    row: Row::marked(0),
+                    next: UnderLock::new(first),
+                });
+                &*row
+            };
+            first = Some(row);
+        }
+        first
+    }
+
+    /// A row of the heap claimed for the open that asked for it, at its first generation, linked
+    /// before `next`; `None` when the heap has no room for it.
+    fn claimed(next: Option<&'static GrownRow>) -> Option<&'static Self> {
         // SAFETY: a grown row is not of zero bytes.
         let place = NonNull::new(unsafe { alloc::alloc::alloc(Layout::new::<Self>()) })?;
         let place = place.cast::<Self>();
@@ -156,7 +202,7 @@ impl GrownRow {
         unsafe {
             place.as_ptr().write(Self {
                 row: Row::marked(CLAIMED),
-                next: UnderLock::new(None),
+                next: UnderLock::new(next),
             });
             Some(place.as_ref())
         }
@@ -170,47 +216,94 @@ impl GrownRow {
 struct EngineRows<const FIXED: usize, const GROWS: bool> {
     fixed: [Row; FIXED],
     grown: UnderLock<Option<&'static GrownRow>>,
+    /// The table is held to a count of sessions ([`RowClaim::hold_to`]): on the heap policy it
+    /// takes no row of the heap until the count is let go of.
+    held: UnderLock<bool>,
 }
 
 impl<const FIXED: usize, const GROWS: bool> EngineRows<FIXED, GROWS> {
-    /// A table that holds no engine.
+    /// A table that holds no engine and is held to no count.
     const fn new() -> Self {
         Self {
             fixed: [const { Row::marked(0) }; FIXED],
             grown: UnderLock::new(None),
+            held: UnderLock::new(false),
         }
     }
 
+    /// Every row of the table: its static rows, then those it took of the heap, newest first.
+    fn rows<'a>(&'static self, locked: &'a Locked) -> impl Iterator<Item = &'static Row> + 'a {
+        let first = if GROWS { self.grown.get(locked) } else { None };
+        let grown = core::iter::successors(first, move |kept| kept.next.get(locked));
+        self.fixed.iter().chain(grown.map(|kept| &kept.row))
+    }
+
     /// Take a vacant row for an engine an open is about to make: a row of the table that holds no
-    /// engine and that no open took, and past them on the heap policy one more row of the heap,
-    /// kept by the table from then on. `None` when every row of a fixed table holds an engine or
-    /// is taken, or the heap has no room for one more row.
+    /// engine, that no open took and that no count withholds, and past them on the heap policy one
+    /// more row of the heap, kept by the table from then on. `None` when every row of a fixed table
+    /// is held, taken or withheld, when the table is held to a count every row of which is open, or
+    /// when the heap has no room for one more row. The one body every open calls, out of line.
+    #[inline(never)]
     fn claim(&'static self) -> Option<RowClaim> {
-        let kept = ROWS_LOCK.with(|locked| {
-            let locked: &Locked = locked;
-            let first = if GROWS { self.grown.get(locked) } else { None };
-            let grown = core::iter::successors(first, |kept| kept.next.get(locked));
-            let row = self
-                .fixed
-                .iter()
-                .chain(grown.map(|kept| &kept.row))
-                .find(|row| row.is_vacant(locked))?;
-            row.set_mark(row.mark() | CLAIMED);
-            Some(row)
-        });
-        if let Some(row) = kept {
-            return Some(RowClaim { row });
-        }
-        if !GROWS {
-            return None;
-        }
-        // Taken of the heap with the lock let go of, so no other claim waits on the allocator.
-        let grown = GrownRow::claimed()?;
         ROWS_LOCK.with(|locked| {
-            grown.next.set(locked, self.grown.get(locked));
+            let locked: &Locked = locked;
+            if let Some(row) = self.rows(locked).find(|row| row.is_vacant(locked)) {
+                row.set_mark(row.mark() | CLAIMED);
+                return Some(RowClaim { row });
+            }
+            if !GROWS || self.held.get(locked) {
+                return None;
+            }
+            // Taken of the heap with the lock held: the allocator takes no lock of the rows, and a
+            // claim is one taking of the lock, whichever row it finds.
+            let grown = GrownRow::claimed(self.grown.get(locked))?;
             self.grown.set(locked, Some(grown));
-        });
-        Some(RowClaim { row: &grown.row })
+            Some(RowClaim { row: &grown.row })
+        })
+    }
+
+    /// Hold the table to `sessions` rows ([`RowClaim::hold_to`]): on the heap policy the rows it
+    /// lacks are taken of the heap now, in one block, and the table takes none after; the rows past
+    /// the count are withheld from the opens. Refused while a session holds a row, and when the
+    /// heap has no room for the block; either way the table is as it was.
+    fn hold_to(&'static self, sessions: usize) -> Result<(), RowsRefused> {
+        ROWS_LOCK.with(|locked| {
+            let locked: &Locked = locked;
+            if self.rows(locked).any(|row| row.is_open(locked)) {
+                return Err(RowsRefused::Open);
+            }
+            if GROWS {
+                let rows = self.rows(locked).count();
+                if let Some(lacking) = sessions.checked_sub(rows).filter(|&lacking| lacking > 0) {
+                    let first = GrownRow::vacant_block(lacking, self.grown.get(locked))
+                        .ok_or(RowsRefused::NoMemory)?;
+                    self.grown.set(locked, Some(first));
+                }
+                self.held.set(locked, true);
+            }
+            for (at, row) in self.rows(locked).enumerate() {
+                let mark = row.mark() & !WITHHELD;
+                row.set_mark(if at < sessions { mark } else { mark | WITHHELD });
+            }
+            Ok(())
+        })
+    }
+
+    /// Let go of the count the table is held to: every row may be taken again and, on the heap
+    /// policy, the table takes rows of the heap again. `false`, the count kept, while a session
+    /// holds a row.
+    fn let_go_of_count(&'static self) -> bool {
+        ROWS_LOCK.with(|locked| {
+            let locked: &Locked = locked;
+            if self.rows(locked).any(|row| row.is_open(locked)) {
+                return false;
+            }
+            for row in self.rows(locked) {
+                row.set_mark(row.mark() & !WITHHELD);
+            }
+            self.held.set(locked, false);
+            true
+        })
     }
 }
 
@@ -287,16 +380,7 @@ impl<E> ReachEngine<E> {
     /// then on, and the row is vacant for the next open. A count taken before is kept until it is
     /// given back. A reach whose row moved on already takes nothing out.
     pub(crate) fn clear(&self) {
-        let Some(row) = self.row() else {
-            return;
-        };
-        ROWS_LOCK.with(|locked| {
-            let mark = row.mark();
-            if generation(mark) == self.at.generation && row.engine.get(locked).is_some() {
-                row.engine.set(locked, None);
-                row.set_mark(generation(mark).wrapping_add(GENERATION_STEP));
-            }
-        });
+        clear_row(self.row(), self.at.generation);
     }
 
     /// Mark the engine's session as ended on its own, its engine kept in its row: what a session
@@ -343,6 +427,23 @@ impl<E> ReachEngine<E> {
     }
 }
 
+/// Take the engine out of `row`, the row of a reach that names the generation `named`, unless the
+/// row moved on from it or holds no engine: [`ReachEngine::clear`], of no engine's type, so the
+/// session's close and its engine's last drop call one body.
+#[inline(never)]
+fn clear_row(row: Option<&'static Row>, named: u32) {
+    let Some(row) = row else {
+        return;
+    };
+    ROWS_LOCK.with(|locked| {
+        let mark = row.mark();
+        if generation(mark) == named && row.engine.get(locked).is_some() {
+            row.engine.set(locked, None);
+            row.set_mark(generation(mark).wrapping_add(GENERATION_STEP));
+        }
+    });
+}
+
 #[cfg(feature = "query")]
 impl<E: FanCanceller> ReachEngine<E> {
     /// What ends the legs of a get's fan this engine issued, reached through its row: nothing of
@@ -363,6 +464,17 @@ impl<E: FanCanceller> ReachEngine<E> {
     }
 }
 
+/// Why the process's table of engines was not held to a count of sessions
+/// ([`RowClaim::hold_to`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowsRefused {
+    /// A session holds a row of the table, or an open has claimed one: the count would leave it
+    /// out while it is open.
+    Open,
+    /// The heap had no room for the rows the count asks.
+    NoMemory,
+}
+
 /// A row taken for an engine an open is making ([`Self::take`]): no other open takes it, and no
 /// reach reaches anything through it, until it is filled; let go of unfilled, it is vacant again.
 pub struct RowClaim {
@@ -373,10 +485,30 @@ impl RowClaim {
     /// Take a row of the process's table for an engine an open is about to make, before it
     /// reserves anything for it, where the build's storage policy says: a vacant row of the
     /// table, or on the heap policy one more row of the heap. `None` when a fixed table has every
-    /// row held or taken, or the heap has no room for a row, which refuses the open of one more
-    /// session.
+    /// row held or taken, when the table is held to a count of sessions all open
+    /// ([`Self::hold_to`]), or when the heap has no room for a row, which refuses the open of one
+    /// more session.
     pub fn take() -> Option<Self> {
         ENGINES.claim()
+    }
+
+    /// Hold the process's table to `sessions` rows: the count of sessions open at once a program
+    /// states through the doors that reserve an ABI's pools. An open past them is refused by its
+    /// claim ([`Self::take`]) until the count is let go of ([`Self::let_go_of_count`]). On the heap
+    /// policy the table takes the rows it lacks of the heap now, and none after; on the fixed
+    /// policy a count past the table's rows is held to them. Refused while a session holds a row
+    /// or an open has claimed one ([`RowsRefused::Open`]), and when the heap has no room for the
+    /// rows ([`RowsRefused::NoMemory`]): either way the table, and the heap, are as they were.
+    pub fn hold_to(sessions: usize) -> Result<(), RowsRefused> {
+        ENGINES.hold_to(sessions)
+    }
+
+    /// Let go of the count of sessions the process's table is held to ([`Self::hold_to`]), so the
+    /// opens take rows as the storage policy says again: what the doors that give an ABI's pools
+    /// up ask. `false`, and the count kept, while a session holds a row or an open has claimed one;
+    /// `true` too when the table is held to no count.
+    pub fn let_go_of_count() -> bool {
+        ENGINES.let_go_of_count()
     }
 
     /// Put `engine` in the row and answer the reach of it there.
@@ -401,9 +533,15 @@ impl RowClaim {
 
 impl Drop for RowClaim {
     fn drop(&mut self) {
-        let row = self.row;
-        ROWS_LOCK.with(|_| row.set_mark(row.mark() & !CLAIMED));
+        let_go_unfilled(self.row);
     }
+}
+
+/// Let go of `row`, claimed and never filled, so the next open may take it: the drop of a
+/// [`RowClaim`], one body for every way an open fails after its claim.
+#[inline(never)]
+fn let_go_unfilled(row: &'static Row) {
+    ROWS_LOCK.with(|_| row.set_mark(row.mark() & !CLAIMED));
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -609,9 +747,10 @@ mod tests {
 
     /// A row is the place of its engine and a mark of 32 bits beside it, under no lock of its own;
     /// a reach is where the row lies and its generation. The heap policy's table holds no row in
-    /// static memory, only the word that keeps its rows of the heap, and the fixed policy's holds
-    /// the build's rows; the process's table is the build's policy's. Turned red by a row that holds
-    /// a lock or a table of operations, or a policy that names the other's table.
+    /// static memory, only the word that keeps its rows of the heap and the flag of its count, and
+    /// the fixed policy's holds the build's rows beside the same; the process's table is the
+    /// build's policy's. Turned red by a row that holds a lock or a table of operations, or a
+    /// policy that names the other's table.
     #[test]
     fn a_policy_names_its_table_and_a_row_is_its_engine_and_its_mark() {
         let word = core::mem::size_of::<usize>();
@@ -620,18 +759,187 @@ mod tests {
             core::mem::size_of::<ReachEngine<u32>>(),
             core::mem::size_of::<EngineAt>()
         );
-        assert_eq!(core::mem::size_of::<<Heap as RowSource>::Rows>(), word);
+        let heap = core::mem::size_of::<<Heap as RowSource>::Rows>();
+        assert!(heap <= 2 * word, "no row of the heap policy's is static");
         let fixed = core::mem::size_of::<<Static as RowSource>::Rows>();
         assert_eq!(
             fixed,
-            caps::ENGINE_ROWS * core::mem::size_of::<Row>() + word
+            caps::ENGINE_ROWS * core::mem::size_of::<Row>() + heap
         );
         let built = if wz_session_core::bounded::ENFORCES_CAPACITY {
             fixed
         } else {
-            word
+            heap
         };
         assert_eq!(core::mem::size_of_val(&ENGINES), built);
+    }
+
+    /// Whether the next open of `table` is refused, the claim it took, if any, let go of at once.
+    fn refuses<const FIXED: usize, const GROWS: bool>(
+        table: &'static EngineRows<FIXED, GROWS>,
+    ) -> bool {
+        table.claim().is_none()
+    }
+
+    /// A fixed table held to two of its three rows lets two sessions open and refuses the third,
+    /// keeps the count while a session holds a row, and once the count is let go of every row is
+    /// taken again; a reach kept past its close reaches nothing throughout. Turned red by a claim
+    /// that takes a withheld row (`WITHHELD` in `is_vacant`), a count that withholds nothing past
+    /// it, or a count let go of while a session is open (`is_open` in `let_go_of_count`).
+    #[test]
+    fn a_fixed_table_held_to_a_count_refuses_the_open_past_it_until_the_count_is_let_go_of() {
+        static TABLE: EngineRows<3, false> = EngineRows::new();
+        assert_eq!(TABLE.hold_to(2), Ok(()));
+        let engines: Vec<Shared<u32>> = (0..3).map(|_| engine()).collect();
+        let first = put(&TABLE, &engines[0]).expect("a row within the count");
+        let second = put(&TABLE, &engines[1]).expect("a row within the count");
+        assert!(refuses(&TABLE), "the open past the count is refused");
+        assert!(!TABLE.let_go_of_count(), "kept while a session holds a row");
+        assert!(refuses(&TABLE), "and still held to it");
+        first.clear();
+        let third = put(&TABLE, &engines[2]).expect("the row the close vacated");
+        assert!(refuses(&TABLE), "the count is two sessions open at once");
+        second.clear();
+        third.clear();
+        assert!(TABLE.let_go_of_count(), "let go of with no session open");
+        let reaches: Vec<ReachEngine<u32>> = engines
+            .iter()
+            .map(|held| put(&TABLE, held).expect("every row is taken again"))
+            .collect();
+        assert!(refuses(&TABLE), "the table's own rows still bound it");
+        assert!(first.reach().is_none() && !first.is_current());
+        for reach in &reaches {
+            reach.clear();
+        }
+    }
+
+    /// A heap table held to a count takes the rows it lacks of the heap at once, lets that many
+    /// sessions open, refuses the next without taking a row of the heap for it, and once the count
+    /// is let go of takes rows of the heap for the opens again. Turned red by a claim that grows a
+    /// held table (`self.held` in `claim`), or a count that takes no row of the heap.
+    #[test]
+    fn a_heap_table_held_to_a_count_takes_its_rows_at_once_and_none_past_them() {
+        static TABLE: EngineRows<0, true> = EngineRows::new();
+        assert_eq!(TABLE.hold_to(2), Ok(()));
+        assert_eq!(grown(&TABLE), 2, "the count's rows, taken before any open");
+        let engines: Vec<Shared<u32>> = (0..3).map(|_| engine()).collect();
+        let reaches: Vec<ReachEngine<u32>> = engines[..2]
+            .iter()
+            .map(|held| put(&TABLE, held).expect("a row of the count"))
+            .collect();
+        assert!(refuses(&TABLE), "the open past the count is refused");
+        assert_eq!(grown(&TABLE), 2, "and took no row of the heap");
+        assert!(!TABLE.let_go_of_count(), "kept while a session holds a row");
+        for reach in &reaches {
+            reach.clear();
+        }
+        assert!(TABLE.let_go_of_count());
+        let more: Vec<ReachEngine<u32>> = engines
+            .iter()
+            .map(|held| put(&TABLE, held).expect("the heap gives a row again"))
+            .collect();
+        assert_eq!(grown(&TABLE), 3, "one more row of the heap for the third");
+        for reach in &more {
+            reach.clear();
+        }
+    }
+
+    /// A heap table that kept more rows from earlier opens than the count it is held to withholds
+    /// those past the count: one session opens, the second is refused though a kept row is vacant.
+    /// Turned red by a count that withholds only rows it took itself.
+    #[test]
+    fn a_count_withholds_the_kept_rows_past_it() {
+        static TABLE: EngineRows<0, true> = EngineRows::new();
+        let engines: Vec<Shared<u32>> = (0..3).map(|_| engine()).collect();
+        let earlier: Vec<ReachEngine<u32>> = engines
+            .iter()
+            .map(|held| put(&TABLE, held).expect("a row of the heap"))
+            .collect();
+        for reach in &earlier {
+            reach.clear();
+        }
+        assert_eq!(TABLE.hold_to(1), Ok(()));
+        assert_eq!(grown(&TABLE), 3, "no row is given back");
+        let open = put(&TABLE, &engines[0]).expect("the one row of the count");
+        assert!(refuses(&TABLE), "a kept row past the count is withheld");
+        assert!(
+            earlier.iter().all(|reach| reach.reach().is_none()),
+            "a reach kept past its close reaches nothing"
+        );
+        open.clear();
+        assert!(TABLE.let_go_of_count());
+    }
+
+    /// A count the heap cannot give rows for is refused and leaves the table as it was: held to no
+    /// count, it takes a row of the heap for the next open. Turned red by a refused count that
+    /// holds the table all the same (`held` set before the block is taken).
+    #[test]
+    fn a_count_the_heap_cannot_give_rows_for_is_refused_and_holds_nothing() {
+        static TABLE: EngineRows<0, true> = EngineRows::new();
+        assert_eq!(TABLE.hold_to(usize::MAX), Err(RowsRefused::NoMemory));
+        assert_eq!(grown(&TABLE), 0, "nothing was taken of the heap");
+        assert!(!refuses(&TABLE), "the table is held to no count");
+    }
+
+    /// A count asked while a session holds a row, or while an open has claimed one, is refused,
+    /// and nothing is withheld: the next open is taken as before. Turned red by a count that
+    /// withholds an open session's row (`is_open` in `hold_to`).
+    #[test]
+    fn a_count_asked_while_a_session_is_open_is_refused_and_withholds_nothing() {
+        static TABLE: EngineRows<2, false> = EngineRows::new();
+        let held = engine();
+        let claim = TABLE.claim().expect("a vacant row");
+        assert_eq!(
+            TABLE.hold_to(0),
+            Err(RowsRefused::Open),
+            "an open claimed a row"
+        );
+        // SAFETY: the engine is cleared out of its row before it goes, below.
+        let reach = unsafe { claim.fill(Shared::as_ptr(&held)) };
+        assert_eq!(
+            TABLE.hold_to(0),
+            Err(RowsRefused::Open),
+            "a session holds one"
+        );
+        let other = engine();
+        let next = put(&TABLE, &other).expect("nothing was withheld");
+        reach.clear();
+        next.clear();
+    }
+
+    /// A count past a fixed table's rows is held to them, and a count of none refuses every open
+    /// on either policy, the heap taking nothing for it; let go of, the opens are taken again.
+    /// Turned red by a fixed table that grows past its rows for a count, or a count of none that
+    /// lets an open take a row.
+    #[test]
+    fn a_count_past_a_fixed_tables_rows_is_held_to_them_and_a_count_of_none_refuses_every_open() {
+        static FIXED: EngineRows<2, false> = EngineRows::new();
+        static GROWN: EngineRows<0, true> = EngineRows::new();
+        assert_eq!(FIXED.hold_to(5), Ok(()));
+        let engines: Vec<Shared<u32>> = (0..2).map(|_| engine()).collect();
+        let reaches: Vec<ReachEngine<u32>> = engines
+            .iter()
+            .map(|held| put(&FIXED, held).expect("a row of the table"))
+            .collect();
+        assert!(
+            refuses(&FIXED),
+            "the table's two rows bound the count of five"
+        );
+        assert_eq!(grown(&FIXED), 0);
+        for reach in &reaches {
+            reach.clear();
+        }
+        assert!(FIXED.let_go_of_count());
+
+        assert_eq!(FIXED.hold_to(0), Ok(()));
+        assert_eq!(GROWN.hold_to(0), Ok(()));
+        assert!(refuses(&FIXED) && refuses(&GROWN), "no session opens");
+        assert_eq!(grown(&GROWN), 0, "nothing was taken of the heap");
+        assert!(FIXED.let_go_of_count() && GROWN.let_go_of_count());
+        assert!(
+            !refuses(&FIXED) && !refuses(&GROWN),
+            "the opens are taken again"
+        );
     }
 
     /// An open engine's reach is current. Once its session ends on its own the reach is no longer
