@@ -40,7 +40,9 @@ their own, graded on fact 5 alone, on each ABI, and the shared-memory arm of the
 
 PRESENCE is what makes ABSENCE mean something. A forbidden pattern that no build can match is a
 check that cannot fail (`--selftest` pins the matcher, and the full builds here are the live
-control: every pattern a client build is forbidden is REQUIRED of a build that has the plane).
+control: every pattern a client build is forbidden is REQUIRED of a build that has the plane). A
+name removed from the source is the one forbidden pattern no build has: it stays forbidden in
+every build of its engine, so a second body that returns is refused (`REMOVED`).
 
 ## What a budget is, and is not
 
@@ -406,9 +408,25 @@ LOG_FACADE = r"(?<![\w])log::"
 # build links it.
 HEAP_ABORT = r"handle_alloc_error"
 # Forbidden patterns whose control build (one that must link the pattern) is not yet a case, each
-# with why: the selftest holds every other forbidden pattern to a case that requires it. A pattern
-# leaves this table in the commit that adds its control.
+# with why: the selftest holds every other forbidden pattern to a case that requires it, or to the
+# case it was removed from (`REMOVED`). A pattern leaves this table in the commit that adds its
+# control.
 CONTROL_PENDING: dict[str, str] = {}
+# The cooperative engine's second bodies that a step made one (docs/c-abi-migration/peer-rows.md,
+# R2): the turn of the one face of a build that takes no other, which every face now takes through
+# the engine's one turn body, and the face table of that one face, which is now the one table with
+# its place inline. No build links either, so none can be required.
+LINK_TURN = r"wz_capi_coop::.*::link_turn\b"
+ONE_FACE = r"wz_runtime_coop::faces::OneFace\b"
+# Names removed from the source, each forbidden for good in every case that builds the cooperative
+# engine, as the guard that turns red if the second body returns. No build can be their control,
+# so each names the case whose reading of the body its step counted, which the selftest holds to
+# forbid it; a pattern here is never pending (`CONTROL_PENDING` waits for a control to come).
+REMOVED: Mapping[str, str] = types.MappingProxyType({
+    LINK_TURN: "pico-client-coop-nostd",
+    ONE_FACE: "pico-client-coop-nostd",
+})
+COOP_REMOVED = tuple(REMOVED)
 # The engine a pico build runs its sessions on (`engine-tokio` / `os-host`,
 # docs/capi-pico-on-coop-engine.md): a build of one links none of the other.
 TOKIO_ENGINE = r"wz_capi_core::|wz_runtime_tokio::"
@@ -743,7 +761,8 @@ CASES: tuple[Case, ...] = (
          # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
          # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK, STD_RUNTIME),
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK, STD_RUNTIME,
+                 *COOP_REMOVED),
          require=(SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="a single-threaded pub/sub client that dials TCP: no listener, no scouting, "
@@ -777,7 +796,8 @@ CASES: tuple[Case, ...] = (
          # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
          # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED,
-                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK),
+                 CONNECTIVITY, MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK,
+                 *COOP_REMOVED),
          require=(SINGLE_THREADED, COOP_ENGINE), profile="capi-small",
          note="the pico-client build with panics aborting: the like-for-like of zenoh-pico's C. "
               "1,468,134 measured against pico-client's 1,790,361 (-18.0%). Read 1,498,558 on "
@@ -812,7 +832,8 @@ CASES: tuple[Case, ...] = (
          # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
          # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK, STD_RUNTIME),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, KECCAK, STD_RUNTIME,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="1,894,361 on hosted CI on 2026-10-26, 1,889,713 before the key set's gate: the "
@@ -930,7 +951,8 @@ CASES: tuple[Case, ...] = (
     Case("pico-client-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", "os-host,link-udp",
          1_049_200,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN, STD_RUNTIME, KECCAK, LOG_FACADE, HEAP_ABORT,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          # 443 exports: `zext_callbacks_refused` (d80d315d1).
          exports=443, **NOSTD_RELEASE_FORM,
@@ -964,7 +986,8 @@ CASES: tuple[Case, ...] = (
          # 1,159,413 hosted, +9,488 on one machine.
          "os-host,link-udp,unstable-api", 1_172_500,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the unstable API: 894,893 measured against its "
@@ -987,7 +1010,8 @@ CASES: tuple[Case, ...] = (
          # 1,054,174 hosted, +9,592 on one machine.
          "os-host,link-udp,local-subscriber", 1_067_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build that delivers a put to its own subscribers: 898,019 "
@@ -1009,7 +1033,8 @@ CASES: tuple[Case, ...] = (
          # 1,229,265 hosted, +9,580 on one machine.
          "os-host,link-udp,unstable-api,connectivity", 1_242_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, MULTICAST,
-                 TOKIO_ENGINE, COOP_LISTEN),
+                 TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, CONNECTIVITY),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the unstable API and the connectivity plane: "
@@ -1032,7 +1057,8 @@ CASES: tuple[Case, ...] = (
          # 1,420,192 hosted, +10,054 on one machine.
          "os-host,link-udp,admin-space", 1_433_800,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the answering end, the unstable API and the "
@@ -1071,7 +1097,8 @@ CASES: tuple[Case, ...] = (
          # 1,373,248 hosted, +10,300 on one machine.
          "os-host,link-udp,query,queryable", 1_387_100,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the requesting and answering ends of a query: "
@@ -1100,7 +1127,8 @@ CASES: tuple[Case, ...] = (
          # 1,389,476 hosted, +10,324 on one machine.
          "os-host,link-udp,query,queryable,local-queryable", 1_403_300,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop-query build with the get delivered to the session's own "
@@ -1126,7 +1154,8 @@ CASES: tuple[Case, ...] = (
          # 1,131,749 hosted, +9,444 on one machine.
          "os-host,link-udp,scout", 1_144_700,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN),
+                 MULTICAST, TOKIO_ENGINE, COOP_LISTEN,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop build with the scouting window: 961,479 measured against "
@@ -1154,7 +1183,8 @@ CASES: tuple[Case, ...] = (
          # 1,195,275 hosted, +9,544 on one machine.
          "os-host,link-udp,peer", 1_208_400,
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE),
+                 MULTICAST, TOKIO_ENGINE,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="the pico-client-coop-scout build with the listening role, which `peer` brings "
@@ -1177,7 +1207,8 @@ CASES: tuple[Case, ...] = (
     # pico-default's are.
     Case("pico-api-coop-nostd", "wz-capi-pico", "libwz_capi_pico.so", None, 1_056_200,
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
-                 STD_RUNTIME),
+                 STD_RUNTIME,
+                 *COOP_REMOVED),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          **NOSTD_RELEASE_FORM, features_from=pico_windows_package.LIKE_PROFILE,
          note="pico-client-coop-nostd's form (NOSTD_RELEASE_FORM: the profile, the configuration "
@@ -1221,7 +1252,8 @@ CASES: tuple[Case, ...] = (
          # docs/c-abi-engine-and-memory.md): this case builds on it, and its budget and row are the
          # tokio engine's until the first reading on it moves them.
          forbid=(ACCEPT, RESPONDER, SCOUTING, GOSSIP, CLOCK, ADVANCED, THREADED, CONNECTIVITY,
-                 MULTICAST, TOKIO_ENGINE, KECCAK),
+                 MULTICAST, TOKIO_ENGINE, KECCAK,
+                 *COOP_REMOVED),
          require=(UDP, SINGLE_THREADED, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          note="peer implies scout and with it the UDP group"),
@@ -1268,7 +1300,8 @@ CASES: tuple[Case, ...] = (
          # Gossip is off in the preset (decision Q7), and the tokio engine's own planes (its
          # accept loop, responder and scouting glue) are not linked.
          forbid=(SINGLE_THREADED, ACCEPT, RESPONDER, SCOUTING, GOSSIP, TOKIO_ENGINE, KECCAK,
-                 STD_RUNTIME),
+                 STD_RUNTIME,
+                 *COOP_REMOVED),
          require=(UDP, THREADED, CONNECTIVITY, COOP_ENGINE, COOP_SCOUT, COOP_LISTEN),
          profile="capi-nostd", cargo_configs=(NOSTD_CONFIG,),
          # 814 exports: `zext_session_step`, the step of a session opened without its read task,
@@ -3516,11 +3549,21 @@ def cmd_selftest() -> int:
     # case in the table, so a forbidden pattern that no build can match cannot stay unnoticed.
     required = {p for c in CASES for p in c.require}
     forbidden = {p for c in CASES for p in c.forbid}
-    expect("every forbidden pattern is required of a build that has the plane, or names why "
-           "its control is not yet in the table",
-           forbidden <= required | set(CONTROL_PENDING))
+    expect("every forbidden pattern is required of a build that has the plane, names why "
+           "its control is not yet in the table, or was removed from the source",
+           forbidden <= required | set(CONTROL_PENDING) | set(REMOVED))
     expect("a pattern whose control is in the table no longer waits for one",
            not (set(CONTROL_PENDING) & required))
+    # A name removed from the source has no control: it is forbidden in every build of the engine
+    # it was removed from, the case its step was counted in among them, and required of none.
+    by_id = {c.id: c for c in CASES}
+    expect("every removed name is forbidden in the case its step was counted in",
+           all(case in by_id and pattern in by_id[case].forbid
+               for pattern, case in REMOVED.items()))
+    expect("every removed name is forbidden in every case that builds the cooperative engine",
+           all(set(REMOVED) <= set(c.forbid) for c in CASES if COOP_ENGINE in c.require))
+    expect("a removed name is required of no case and waits for no control",
+           not (set(REMOVED) & (required | set(CONTROL_PENDING))))
     expect("case ids are unique", len({c.id for c in CASES}) == len(CASES))
     expect("a patterned plane's own symbol matches its pattern",
            all(re.search(p, s) for p, s in (
@@ -3539,7 +3582,20 @@ def cmd_selftest() -> int:
                (CONFIG_VERDICT, "wz_capi_c_config_device_requires"),
                (LOG_FACADE, "<log::__private_api::GlobalLogger as log::Log>::log"),
                (LOG_FACADE, "log::__private_api::log_impl"),
-               (HEAP_ABORT, "alloc::alloc::handle_alloc_error"))))
+               (HEAP_ABORT, "alloc::alloc::handle_alloc_error"),
+               (LINK_TURN, "wz_capi_coop::engine::direct::<impl wz_capi_coop::engine::"
+                           "CoopEngine<L,C>>::link_turn"),
+               (ONE_FACE, "<wz_runtime_coop::faces::OneFace<F,D> as wz_runtime_coop::faces::"
+                          "FacePlaces<F>>::get"))))
+    expect("a removed name matches neither the body that replaced it nor a namesake",
+           not any(re.search(p, s) for p, s in (
+               (LINK_TURN, "wz_capi_coop::engine::direct::<impl wz_capi_coop::engine::"
+                           "CoopEngine<L,C>>::face_turn"),
+               (LINK_TURN, "core::ptr::drop_in_place<wz_capi_coop::engine::direct::LinkTurn>"),
+               (ONE_FACE, "<wz_runtime_coop::link_cells::OneFace as "
+                          "wz_runtime_coop::link_cells::CountKind>::count"),
+               (ONE_FACE, "<wz_runtime_coop::faces::FaceRows<wz_runtime_coop::faces::OneRow<F,D>> "
+                          "as wz_runtime_coop::faces::FacePlaces<F>>::get"))))
     expect("a module whose name ends in log is not the log facade",
            not any(re.search(LOG_FACADE, s) for s in (
                "wz_capi_pico::event_log::zext_event_emit",
