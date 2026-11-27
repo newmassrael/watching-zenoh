@@ -712,11 +712,12 @@ build.
 C11 set under `deploy/codec_node.yaml`, at the SCE pin `2d736122d0`, compiles
 each unit for a Cortex-M4 with no C library and weighs it. A document the
 generator refuses is left out of the set, and `deploy/c11/refusals.tsv` states
-the words it is refused with. The sources number 136:
+the words it is refused with. At the SCE pin `66e9b2b9536` (the fix of the alias
+defect below) every codec and algorithm unit compiles. The sources number 136:
 
 | Sources | Count | Layer Bc |
 |---|---|---|
-| Codecs (`sources/codecs/`) | 65 | Each header compiled alone, weighed, its vectors run on the host; the units that include a codec imported under an alias are refused (an SCE defect) |
+| Codecs (`sources/codecs/`) | 65 | Each header compiled alone, weighed, its vectors run on the host and, for the codecs, on the Rust emission too. Until `66e9b2b9536` the 39 units that include a codec imported under an alias were refused: SCE called it by the alias |
 | Algorithms (`sources/algorithms/`) | 41 | As the codecs |
 | Statecharts (`sources/session/` 12, `reassembly_slot`) | 13 | 11 compiled as SCE's gate compiles a machine, its `.c` with D3's flags; each leaves undefined only memory functions and libgcc. `clock_quality` and `session_fsm_unicast` are refused by the generator: they carry feature conditions, C11 generates one variant at a time, and `orchestrate` takes no `--features` |
 | Buffer pools (`sources/network/*_pool_*`) | 13 | Each header compiles and calls `__assert_func`: `sce/sample.h` traps with `assert` |
