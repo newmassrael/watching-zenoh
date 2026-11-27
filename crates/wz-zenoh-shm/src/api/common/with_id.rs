@@ -22,3 +22,11 @@ use crate::api::common::types::ProtocolID;
 pub trait WithProtocolID {
     fn id(&self) -> ProtocolID;
 }
+
+/// The protocol of what a box holds (see `ShmProviderBackend`'s implementation for a box).
+#[doc(hidden)]
+impl<T: WithProtocolID + ?Sized> WithProtocolID for Box<T> {
+    fn id(&self) -> ProtocolID {
+        (**self).id()
+    }
+}
