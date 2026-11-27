@@ -313,9 +313,8 @@ impl<P: Storage> Default for RemoteSubscriberPeer<P> {
 unsafe impl crate::bounded::ZeroEmpty for RemoteSubscriberPeer<crate::bounded::Region> {}
 
 #[cfg(feature = "storage-profile")]
-impl RemoteSubscriberPeer<crate::bounded::Region> {
-    /// Where a table of the region policy at `at` in a region keeps its handle to the region's key
-    /// arena: the line of a region's description
+impl<P: crate::bounded::LaidOut> RemoteSubscriberPeer<P> {
+    /// Where a table at `at` keeps its handle to the key arena: the key line of a description
     /// ([`place_region`](crate::key_arena::place_region)) that hands it the arena.
     pub const fn key_line(at: usize) -> usize {
         at.wrapping_add(core::mem::offset_of!(Self, keys))

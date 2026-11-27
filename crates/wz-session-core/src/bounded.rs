@@ -1765,11 +1765,19 @@ pub enum RowCount {
     DeclWatchers,
     /// `MAX_LOCAL_TOKENS` of the registry of the session's own tokens beside its tables.
     LocalTokens,
+    /// `MAX_PENDING_DECLARES` of each staging of the answers to one face's peer's interests.
+    PendingDeclares,
+    /// `MAX_PENDING_REPLIES` staged for one face's peer's queries.
+    Replies,
+    /// The bytes the replies staged for one face's peer lie in, a line of rows of one byte.
+    ReplyBytes,
+    /// `MAX_PENDING_FINALS` owed to one face's peer's queries.
+    Finals,
 }
 
 impl RowCount {
     /// The last count: a count added after it moves this.
-    const LAST: Self = Self::LocalTokens;
+    const LAST: Self = Self::Finals;
     /// The counts a plan states, `Bound`'s place among them unused.
     const SLOTS: usize = (Self::LAST as usize).wrapping_add(1);
 }
