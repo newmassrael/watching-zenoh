@@ -114,11 +114,6 @@ pub(super) type FaceId = u64;
 /// beneath it.
 pub(super) const DIAL_FACE: FaceId = 1 << 62;
 
-/// The tokens a face that went still owes the liveliness subscribers, held apart from the set it
-/// gave back, their rows in the session's pool (`Registry::owed`).
-#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-type OwedTokens = wz_session_core::declare::liveliness_subscriber::PeerTokens<RowPolicy>;
-
 /// The session's own pending gets on one face: a query's sink consolidates what its leg is
 /// handed. The rows are lent from the session's arena at its open, one table for each face the
 /// session may hold at once (`crate::arena::GetTables`).
@@ -311,6 +306,9 @@ fn names_face(holder: FaceId) -> bool {
 mod adding;
 mod held;
 use held::Holders;
+// What the faces that went owe the liveliness subscribers, kept by a build that adds faces.
+#[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+mod owed;
 // The registry made by value, its tables counted at the open, where they take their memory at
 // their first row.
 #[cfg(wz_on_use)]
@@ -590,14 +588,11 @@ pub(super) struct RegistryOf<H: Holders> {
     /// open lends a row for each face the config admits, most of them free at any time, and every
     /// row past the sets built is free or kept.
     holders: H,
-    /// The tokens of faces that went before each was retracted, in the order the faces went: each
-    /// the token table the face's set held, its rows still in the session's pool, the set given
-    /// back as the face went. Lent at the open, a row for each row of the session's token pool,
-    /// as a table owed holds one of them at least (`FacePeers::owed_tokens`); none for a session
-    /// of one face, whose one face never goes. A session of no face besides the dial role's (a
-    /// build without `listen` and `group`) removes none, and keeps no table of them.
+    /// The tokens of faces that went before each was retracted, in the order the faces went, the
+    /// set each face held given back as it went (`owed::Owed`). A session of no face besides the
+    /// dial role's (a build without `listen` and `group`) removes none, and keeps none of them.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    owed: BoundedVec<OwedTokens, { wz_session_core::caps::SESSION_MAX_REMOTE_DECLS }, RowPolicy>,
+    owed: owed::Owed,
     /// The aliases one face's peer may hold (`MAX_PEER_KEYEXPR_ALIASES`), which a set a group's face
     /// held, at the group's own quota (`Self::hold_member_aliases`), is held to again when it is
     /// given back for the next face.
@@ -798,7 +793,7 @@ impl<H: Holders> RegistryOf<H> {
         let app = App::lent(arena, keys, rows, limits)?;
         let mut pools = PeerPools::lent(arena, keys, peers.pools)?;
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        let owed = arena.lend(peers.owed_tokens())?;
+        let owed = owed::Owed::lent(arena, &peers)?;
         // One face's own spans are handed to that face's tables alone, so a plan that lends them
         // lends one set; a build without pools keeps each set's rows inline.
         debug_assert!(!SHARES_ROWS || pools.is_shared() || peers.tables <= 1);
@@ -1214,7 +1209,7 @@ impl<H: Holders> RegistryOf<H> {
         }
         // Only a build that adds faces removes one, and only its sets keep tokens owed apart.
         #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-        self.owe_tokens_of(at);
+        self.owe_tokens_of(at, face.id);
         if let Some(set) = self.sets.get_mut(at) {
             set.give_back();
             #[cfg(feature = "multicast-declarations")]
@@ -2001,11 +1996,8 @@ impl<H: Holders> RegistryOf<H> {
         }
         // The faces that went, in the order they went.
         #[cfg(any(feature = "listen", feature = "group"))]
-        while let Some(tokens) = owed.first_mut() {
-            if !app.flush_tokens_on_link_loss_while(delivery, tokens, room) {
-                return false;
-            }
-            owed.remove(0);
+        if !owed.retract_while(app, delivery, room) {
+            return false;
         }
         true
     }
@@ -2043,14 +2035,8 @@ impl<H: Holders> RegistryOf<H> {
             set.retracting = false;
         }
         #[cfg(any(feature = "listen", feature = "group"))]
-        while !taken {
-            let Some(tokens) = self.owed.first_mut() else {
-                break;
-            };
-            taken = tokens.take_lost(news);
-            if !taken {
-                self.owed.remove(0);
-            }
+        if !taken {
+            taken = self.owed.take_lost(news);
         }
         if taken {
             self.writing();
@@ -2121,26 +2107,18 @@ impl<H: Holders> RegistryOf<H> {
             .take_token(&declare.body, spaces, declare.interest_id.is_some(), news)
     }
 
-    /// Keep apart what the set at `at` still owes the liveliness subscribers as its face goes:
-    /// the tokens of a lost link not retracted yet, which [`Self::retract_owed`] hands after those
-    /// owed before them. The set is given back all the same, its token table left empty and taking
-    /// rows of the session's pool.
+    /// Keep apart what the set at `at` still owes the liveliness subscribers as its face `face`
+    /// goes: the tokens of a lost link not retracted yet, which [`Self::retract_owed`] hands after
+    /// those owed before them. The set is given back all the same, its token table left empty.
     #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
-    fn owe_tokens_of(&mut self, at: usize) {
+    fn owe_tokens_of(&mut self, at: usize, face: FaceId) {
         let Some(set) = self.sets.get_mut(at) else {
             return;
         };
         if !core::mem::take(&mut set.retracting) {
             return;
         }
-        if let Some(tokens) = set.peer.tokens.split_off() {
-            if tokens.count() > 0 {
-                // A table owed holds a row of the session's token pool at least, and the open lent
-                // a row of this table for each row of the pool.
-                let kept = self.owed.push(tokens).is_ok();
-                debug_assert!(kept, "the tokens owed fit the rows of the pool they hold");
-            }
-        }
+        self.owed.owe(face, &mut set.peer.tokens);
     }
 
     /// The token liveliness subscriber `id` is owed next by its history, from where `cursor`

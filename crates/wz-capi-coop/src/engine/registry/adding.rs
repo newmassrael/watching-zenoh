@@ -108,6 +108,12 @@ impl RegistryOf<ManyHolders> {
             .iter()
             .position(|holder| *holder == NO_FACE)
             .ok_or(FacesFull)?;
+        // A face whose tokens would find no row to be owed in as it goes is refused here, before
+        // anything is built for it.
+        #[cfg(all(feature = "liveliness", any(feature = "listen", feature = "group")))]
+        if !self.owed.admits_face(self.holders.rows()) {
+            return Err(FacesFull);
+        }
         self.build_to(at).map_err(|_| FacesFull)?;
         let holder = self.holders.rows_mut().get_mut(at).ok_or(FacesFull)?;
         *holder = id;
